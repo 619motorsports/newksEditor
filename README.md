@@ -1,9 +1,9 @@
 # Apex Editor
 
 Apex Editor is an early cross-platform replacement for Assetto Corsa's Windows-only
-ksEditor. It reads KN5 files directly in the browser, preserves the scene hierarchy
-and material model, and renders static and animated skinned car and track meshes with
-a WebGL 2 preview.
+ksEditor. It reads KN5 files and imports FBX source scenes directly in the browser.
+It preserves the scene hierarchy and material model. It renders static and skinned
+car and track meshes with a WebGL 2 preview.
 
 ## Run
 
@@ -19,8 +19,8 @@ Start the browser version.
 npm start
 ```
 
-Open <http://127.0.0.1:4173>, choose one or more `.kn5` files, and optionally open a
-CSP `.ini` configuration. Use **Open asset folder** to discover track `models*.ini`
+Open <http://127.0.0.1:4173>, then choose one or more `.kn5` or `.fbx` files.
+You can also open a CSP `.ini` configuration. Use **Open asset folder** to discover track `models*.ini`
 layouts or a car's unpacked `data/lods.ini` or packed `data.acd`. Apex assembles static track models with
 their positions and rotations, or the car's contiguous LOD set with its exact distance
 bands. The car preview can follow camera distance or force an individual LOD. Use
@@ -57,6 +57,12 @@ npm test
 
 ## Current scope
 
+- Binary or ASCII FBX import through the portable Three.js loader. The importer
+  triangulates geometry and splits meshes by material. It preserves node transforms,
+  UV seams, normals, skin weights, bone inverse-bind matrices, and animation metadata.
+  It flips the UV V coordinate to match ksEditor. It also limits each KN5 mesh to
+  65,535 vertices. Imported material colors become embedded one-pixel DDS textures.
+  Source texture extraction and FBX animation export remain incomplete.
 - KN5 v5/v6 headers, embedded texture, material, hierarchy, static and skinned-mesh
   parsing, including recognition of appended CSP KN5ENC v1 protected payloads
 - Stock shader parameters, texture-resource inspection, embedded BC1/2/3,
@@ -255,7 +261,8 @@ wet cubemap reflection and negative-wetness snow response,
 transparent-layer feedback,
 general CSP template/include expansion,
 randomized dynamic-object motion, subtractive procedural-emissive
-composition, new-geometry/FBX import and writing, full local-light photometric fidelity,
+composition, FBX source-texture extraction, FBX animation export, direct hierarchy and
+geometry editing, full local-light photometric fidelity,
 Yebis star, ghost, light-shaft, non-default max-61 Gaussian passes, controlled pixel matching,
 cloud billboards, and the remaining post-processing stack, VAO split-animation blending, normal overrides, dynamic
 extra samples, and tree samples remain on the implementation roadmap. CSP's exact

@@ -1904,6 +1904,39 @@ errors. The Nissan frame also proves that the correction does not invert the car
 The browser smoke check now waits for folder input and manifest discovery separately.
 This sequence removes a clean-session race that occurred before the renderer existed.
 
+## FBX import behavior
+
+The installed `ksNet.pdb` identifies `FBXImporter::loadNode` at `0x10005880`.
+The matching code calls `FbxGeometryConverter::TriangulateInPlace` before it reads
+the mesh. It reads polygon-corner normals and UVs after triangulation.
+
+The native importer changes the sign of the V coordinate. It also reads the polygon
+material index and sends the corners to one `MeshBuilder` for each material.
+Ordinary nodes use `EvaluateLocalTransform` with the source pivot. The geometry path
+also applies the geometric translation, rotation, and scale matrix.
+
+The skin path reads the first skin deformer. It imports every cluster link, inverse
+bind matrix, control-point index, and weight. This path matches the 19-float KN5
+vertex layout and its four weight and index fields.
+
+Apex uses the [Three.js FBXLoader](https://threejs.org/docs/pages/FBXLoader.html) for
+portable FBX decoding. The adapter applies the recovered ksEditor rules after the
+loader triangulates the scene. It expands triangle corners to preserve UV and normal
+seams. It splits each output mesh before the 16-bit KN5 index limit.
+
+The official SDK sphere imports as one mesh with 224 triangles. The official animated
+GT40 suspension scene imports as 42 meshes with 16,514 triangles. Four spring meshes
+retain their skin data. The import also records one animation clip.
+
+Both scenes serialize to KN5 v6 and parse again. A live Electron run loaded all
+generated DDS textures and returned WebGL error zero. The packaged Linux application
+also imported the sphere with no JavaScript or browser-log errors.
+
+FBX texture filenames are not yet mapped to KN5 resources. Apex embeds the FBX
+material color as a one-pixel DDS and reports each texture assignment that needs work.
+The importer records animation metadata, but it does not export FBX animation to
+KSANIM.
+
 ## Desktop packaging evidence
 
 The desktop shell uses Electron 43.4.1 and serves the existing application from an

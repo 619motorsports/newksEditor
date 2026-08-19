@@ -5,15 +5,21 @@ import { fileURLToPath } from "node:url";
 
 const publicRoot = fileURLToPath(new URL("../public/", import.meta.url));
 const sourceRoot = fileURLToPath(new URL("./", import.meta.url));
+const threeBuildRoot = fileURLToPath(new URL("../node_modules/three/build/", import.meta.url));
+const developmentThreeAddonsRoot = fileURLToPath(new URL("../node_modules/three/examples/jsm/", import.meta.url));
+const packagedThreeAddonsRoot = process.resourcesPath ? join(process.resourcesPath, "three-addons") : "";
+const threeAddonsRoot = packagedThreeAddonsRoot && existsSync(packagedThreeAddonsRoot) ? packagedThreeAddonsRoot : developmentThreeAddonsRoot;
 const sourceFiles = new Set([
   "acd.js", "asset-files.js", "car-validation.js", "csp-config.js",
   "csp-noise.js", "csp-occlusion.js", "csp-wind.js", "custom-emissive.js",
-  "dds.js", "driver-workspace.js", "editor-project.js", "grass-fx.js",
+  "dds.js", "driver-workspace.js", "editor-project.js", "fbx-import.js", "grass-fx.js",
   "kn5-bake.js", "kn5-workspace.js", "kn5-write.js", "kn5.js", "knh.js",
   "ksanim.js", "lighting.js", "rain-fx.js", "reflections.js", "seasons.js",
   "shader-profiles.js", "shadows.js", "skinning.js", "track-cameras.js",
   "track-validation.js", "vao-patch.js"
 ]);
+const threeBuildFiles = new Set(["three.core.js", "three.module.js"]);
+const threeAddonFiles = new Set(["curves/NURBSCurve.js", "curves/NURBSUtils.js", "libs/fflate.module.js", "loaders/FBXLoader.js"]);
 const mime = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
@@ -24,7 +30,7 @@ const mime = {
 };
 const contentSecurityPolicy = [
   "default-src 'self'",
-  "script-src 'self'",
+  "script-src 'self' 'sha256-tEXe25dtif2LwpNJCTLnEVIg3DbNBDfAjN7yOdhyZdA='",
   "style-src 'self'",
   "img-src 'self' blob: data:",
   "connect-src 'self'",
@@ -45,6 +51,14 @@ function safePublicPath(pathname) {
 }
 
 function routePath(pathname) {
+  if (pathname.startsWith("/vendor/three-addons/")) {
+    const name = pathname.slice(21);
+    return threeAddonFiles.has(name) ? join(threeAddonsRoot, name) : "";
+  }
+  if (pathname.startsWith("/vendor/")) {
+    const name = pathname.slice(8);
+    return threeBuildFiles.has(name) ? join(threeBuildRoot, name) : "";
+  }
   if (pathname.startsWith("/src/")) {
     const name = pathname.slice(5);
     return sourceFiles.has(name) ? join(sourceRoot, name) : "";

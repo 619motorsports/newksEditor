@@ -25,6 +25,7 @@ import { adjustCspSeasonColor, analyzeCspSeasonalOverrides } from "/src/seasons.
 import { auditMaterialShaderProfiles, resolveMaterialRenderProfile } from "/src/shader-profiles.js";
 import { KS_EDITOR_CUBEMAP, WEBGL_CUBEMAP_FACES, reflectionBlurFromExponent, selectReflectionCaptureItems } from "/src/reflections.js";
 import { createCspWindParticles, CSP_WIND_MAP_FORMAT, CSP_WIND_MAP_SIZE, CSP_WIND_PARTICLE_COUNT, updateCspWindParticles } from "/src/csp-wind.js";
+import { parseFbx } from "/src/fbx-import.js";
 
 const $ = (selector) => document.querySelector(selector);
 const fileInput = $("#file");
@@ -216,7 +217,7 @@ window.__apexAppReady=true;
 async function load(files, workspaceOptions = {}) {
   const descriptors = (Array.isArray(files) ? files : [files]).filter(Boolean).map((entry) => entry.file ? entry : { file: entry });
   if (!descriptors.length) return;
-  const displayName = workspaceOptions.name || (descriptors.length === 1 ? descriptors[0].file.name : `${descriptors[0].file.name.replace(/\.kn5$/i, "")} workspace`);
+  const displayName = workspaceOptions.name || (descriptors.length === 1 ? descriptors[0].file.name : `${descriptors[0].file.name.replace(/\.(?:kn5|fbx)$/i, "")} workspace`);
   loading.hidden = false;
   status.textContent = `Loading ${displayName}…`;
   await new Promise((resolve) => requestAnimationFrame(resolve));
@@ -227,7 +228,7 @@ async function load(files, workspaceOptions = {}) {
       status.textContent = `Loading ${file.name} · ${index + 1}/${descriptors.length}…`;
       await new Promise((resolve) => requestAnimationFrame(resolve));
       let parsed = parsedByFile.get(file);
-      if (!parsed) { parsed = parseKn5(await file.arrayBuffer());if(descriptor.driverPose){sharedDriverPoseResult=applyDriverBasePose(parsed,descriptor.driverPose);parsed=sharedDriverPoseResult.model;}if(descriptor.auxiliary==="driver")sharedDriverHideAudit=auditDriverHiddenObjects(parsed,driverConfig?.hideObjects||[]);parsedByFile.set(file, parsed); }
+      if (!parsed) { const bytes=await file.arrayBuffer();parsed=/\.fbx$/i.test(file.name)?parseFbx(bytes,file.name):parseKn5(bytes);if(descriptor.driverPose){sharedDriverPoseResult=applyDriverBasePose(parsed,descriptor.driverPose);parsed=sharedDriverPoseResult.model;}if(descriptor.auxiliary==="driver")sharedDriverHideAudit=auditDriverHiddenObjects(parsed,driverConfig?.hideObjects||[]);parsedByFile.set(file, parsed); }
       entries.push({ name: descriptor.name || file.name, size: file.size, model: parsed, position: descriptor.position, rotation: descriptor.rotation, lod: descriptor.lod, auxiliary:descriptor.auxiliary, dynamic: descriptor.dynamic });
     }
     const forceWorkspace = workspaceOptions.forceWorkspace || entries.length > 1 || entries.some((entry) => [...(entry.position || []), ...(entry.rotation || [])].some((value) => Number(value) !== 0));
@@ -245,7 +246,7 @@ async function load(files, workspaceOptions = {}) {
     sceneVisibility = computeKn5Visibility(model.root);
     const previewMeshes = meshes.filter(({ node }) => sceneVisibility.get(node));
     const triangles = meshes.reduce((sum, { node }) => sum + node.indices.length / 3, 0);
-    modelSummary = { nodes, meshes, previewMeshes, triangles };
+    modelSummary = { nodes, meshes, previewMeshes, triangles };window.__apexFbx=model.fbx||null;
     trackAudit = model.workspace?.kind === "track" ? auditTrackModel(model, trackSurfaceConfig) : null;trackSurfaceBindings=trackAudit?new Map(meshes.map(({node})=>[node,resolveTrackSurface(node.name,trackSurfaceConfig)])):new Map();window.__apexTrackAudit=trackAudit;carHierarchyAudit=model.workspace?.kind==="carLods"?auditCarHierarchy(model):null;window.__apexCarHierarchyAudit=carHierarchyAudit;refreshCarColliderAudit();
     initializeEditorProject(modelFile);
     $("#welcome").hidden = true;
@@ -266,7 +267,7 @@ async function load(files, workspaceOptions = {}) {
   } catch (error) {
     console.error(error);
     status.textContent = `Could not open ${displayName}`;
-    inspector.innerHTML = `<div class="empty"><strong>KN5 read error</strong><br>${escapeHtml(error.message)}</div>`;
+    inspector.innerHTML = `<div class="empty"><strong>Model read error</strong><br>${escapeHtml(error.message)}</div>`;
   } finally { loading.hidden = true; }
 }
 
@@ -565,12 +566,12 @@ function updateEditorButtons() {
   $("#open-project").disabled = !available;
   $("#export-csp").disabled = !available || !edits;
   $("#export-csp").textContent = edits ? `Export CSP (${edits})` : "Export CSP";
-  const kn5Blocked=model?.encryption?"CSP-protected KN5 files cannot be safely rewritten":model?.workspace?"Export each source KN5 separately; assembled workspaces are not a single source asset":"Export a game-compatible KN5 copy with compatible authored edits baked in";
-  $("#export-kn5").disabled=!available||Boolean(model?.encryption)||Boolean(model?.workspace);$("#export-kn5").title=kn5Blocked;$("#export-kn5").textContent=edits?`Export KN5 (${edits})`:"Export KN5 copy";
+  const kn5Blocked=model?.encryption?"CSP-protected KN5 files cannot be safely rewritten":model?.workspace?"Export each source model separately; assembled workspaces are not a single source asset":model?.fbx?"Export the imported FBX scene as a game-compatible KN5":"Export a game-compatible KN5 copy with compatible authored edits baked in";
+  $("#export-kn5").disabled=!available||Boolean(model?.encryption)||Boolean(model?.workspace);$("#export-kn5").title=kn5Blocked;$("#export-kn5").textContent=edits?`Export KN5 (${edits})`:model?.fbx?"Export KN5":"Export KN5 copy";
 }
 
 function projectBaseName() {
-  return (modelFile?.name || "asset").replace(/\.kn5$/i, "").replace(/[^a-z0-9._-]+/gi, "_");
+  return (modelFile?.name || "asset").replace(/\.(?:kn5|fbx)$/i, "").replace(/[^a-z0-9._-]+/gi, "_");
 }
 
 function downloadText(name, text, type) {
@@ -642,7 +643,7 @@ function configureVaoButton(){const button=$("#vao-toggle"),fileButton=$("#vao-f
 
 function modelStatusText() {
   if (!model || !modelFile) return "No model loaded";
-  const workspace = model.workspace, format = workspace ? `${workspace.files.length} KN5 files · v${workspace.versions.join("/")}` : `KN5 v${model.version}`;
+  const workspace = model.workspace, format = workspace ? `${workspace.files.length} model files · KN5 v${workspace.versions.join("/")}` : model.fbx ? `FBX ${model.fbx.version} ${model.fbx.format} → KN5 v${model.version}` : `KN5 v${model.version}`;
   const protectedTextures = model.encryption?.protectedTextures.length || workspace?.protectedFiles.reduce((sum, entry) => sum + (entry.encryption.protectedTextures?.length || 0), 0) || 0;
   const edits = editorProjectEditCount(editorProject);
   return `${modelFile.name} · ${format} · ${(modelFile.size / 1048576).toFixed(1)} MB${assetSkinName ? ` · skin ${assetSkinName}` : ""}${activeAnimationName ? ` · animation ${activeAnimationName} @ ${animationPosition.toFixed(3)}` : ""}${trackAudit ? ` · track audit ${trackAudit.errors} errors / ${trackAudit.warnings} warnings` : ""}${carHierarchyAudit ? ` · hierarchy ${carHierarchyAudit.errors} errors / ${carHierarchyAudit.warnings} warnings` : ""}${carColliderAudit ? ` · collider ${carColliderAudit.errors} errors / ${carColliderAudit.warnings} warnings` : ""}${driverAudit ? ` · driver ${driverAudit.errors} errors / ${driverAudit.warnings} warnings` : ""}${protectedTextures ? ` · CSP protected (${protectedTextures} textures)` : ""}${cspConfig ? ` · ${cspFileName}` : ""}${vaoBinding?` · VAO ${vaoBinding.matchedMeshes} meshes`:vaoError?" · VAO error":""}${edits ? ` · ${edits} authored edit${edits === 1 ? "" : "s"}` : ""}`;
@@ -696,7 +697,7 @@ function renderModelInspector(file, nodes, triangles) {
   inspector.className = "inspector";
   const protection = model.encryption ? `<div class="section"><h3>CSP-protected payload</h3>${kv("Format", model.encryption.format)}${kv("Payload", `${(model.encryption.payloadBytes / 1048576).toFixed(2)} MB`)}${kv("Records", model.encryption.recordCount.toLocaleString())}${kv("Protected textures", model.encryption.protectedTextures.length)}${kv("Protected meshes", model.encryption.protectedMeshes.length)}${kv("Structure", model.encryption.valid ? "Recognized" : `Invalid: ${model.encryption.error}`)}<span class="empty">The public KN5 scene is available. Protected geometry and textures remain placeholders until a compatible payload decoder is available.</span></div>` : "";
   inspector.innerHTML = `<div class="section"><h3>Model</h3>${kv("File", file.name)}${kv("Format", `KN5 v${model.version}`)}${kv("Size", `${(file.size / 1048576).toFixed(2)} MB`)}${kv("Nodes", nodes.length.toLocaleString())}${kv("Triangles", Math.round(triangles).toLocaleString())}${kv("Textures", model.textures.length)}${kv("Parsed", model.bytesRead === model.byteLength ? "Complete" : model.encryption?.valid ? "Public scene + protected payload" : `${model.bytesRead} / ${model.byteLength}`)}${kv("Authored edits", editorProjectEditCount(editorProject))}</div>${protection}${cspEvaluation ? `<div class="section"><h3>CSP configuration</h3>${kv("File", cspConfig ? cspFileName : "Apex authored edits")}${kv("Sections", activeCspConfig?.sections.length || 0)}${kv("Expanded templates", cspConfig?.expandedTemplates?.length || 0)}${kv("Matched override sections", cspEvaluation.matchedSections)}${kv("Overridden meshes", cspEvaluation.nodeOverrides.size)}${kv("Custom-emissive meshes", cspEvaluation.customEmissiveMeshes)}${kv("Matched light sections", cspEvaluation.matchedLightSections)}${kv("Light instances", cspEvaluation.lights.length)}${kv("Active light instances", cspEvaluation.lights.filter((light) => Math.max(...light.color.map(Math.abs)) > 1e-5).length)}${kv("Track light occluders", cspEvaluation.trackOccluders?.length || 0)}${kv("Unresolved includes", cspEvaluation.unresolvedIncludes.length)}${cspEvaluation.unresolvedIncludes.map((name) => `<div class="resource"><span>${escapeHtml(name)}</span></div>`).join("")}</div>${cspEvaluation.usedConditions.size ? `<div class="section"><h3>Condition preview</h3>${[...cspEvaluation.usedConditions].sort().map((name) => conditionHtml(name, cspEvaluation.conditions.get(name) ?? 0)).join("")}</div>` : ""}${cspEvaluation.usedInputs.size ? `<div class="section"><h3>Input preview</h3>${[...cspEvaluation.usedInputs].sort(([a], [b]) => a.localeCompare(b)).map(([name, input]) => inputHtml(name, input)).join("")}</div>` : ""}${cspEvaluation.lights.length ? `<div class="section"><h3>CSP lights</h3>${cspEvaluation.lights.slice(0, 16).map(lightHtml).join("")}${cspEvaluation.lights.length > 16 ? `<span class="empty">${(cspEvaluation.lights.length - 16).toLocaleString()} more light instances</span>` : ""}</div>` : ""}` : ""}<div class="section"><h3>Materials</h3>${model.materials.map((m, i) => `<div class="resource material-link" data-material="${i}"><strong>${escapeHtml(m.name)}</strong><span>${escapeHtml(m.shader)}</span></div>`).join("")}</div>`;
-  const supplementalHtml = workspaceInspectorHtml() + packedDataInspectorHtml() + carHierarchyInspectorHtml() + carColliderInspectorHtml() + driverInspectorHtml() + trackCameraInspectorHtml() + trackValidationInspectorHtml() + shaderProfilesInspectorHtml() + vaoInspectorHtml() + seasonalInspectorHtml() + weatherLightingInspectorHtml() + reflectionCaptureInspectorHtml() + lightingInspectorHtml() + grassFxInspectorHtml() + rainFxInspectorHtml() + animationInspectorHtml() + skinTextureInspectorHtml() + externalTextureInspectorHtml(), materialSection = inspector.querySelector(".section:last-child");
+  const supplementalHtml = fbxImportInspectorHtml() + workspaceInspectorHtml() + packedDataInspectorHtml() + carHierarchyInspectorHtml() + carColliderInspectorHtml() + driverInspectorHtml() + trackCameraInspectorHtml() + trackValidationInspectorHtml() + shaderProfilesInspectorHtml() + vaoInspectorHtml() + seasonalInspectorHtml() + weatherLightingInspectorHtml() + reflectionCaptureInspectorHtml() + lightingInspectorHtml() + grassFxInspectorHtml() + rainFxInspectorHtml() + animationInspectorHtml() + skinTextureInspectorHtml() + externalTextureInspectorHtml(), materialSection = inspector.querySelector(".section:last-child");
   if (supplementalHtml && materialSection) materialSection.insertAdjacentHTML("beforebegin", supplementalHtml);
   inspector.querySelectorAll("[data-material]").forEach((el) => el.addEventListener("click", () => renderMaterialInspector(model.materials[Number(el.dataset.material)])));
   inspector.querySelectorAll("[data-condition]").forEach((input) => input.addEventListener("input", () => {
@@ -725,10 +726,16 @@ function renderMaterialInspector(material) {
   bindMaterialEditors(material);
 }
 
+function fbxImportInspectorHtml() {
+  if (!model?.fbx) return "";
+  const source = model.fbx;
+  return `<div class="section"><h3>FBX import</h3>${kv("Source", `${source.format} ${source.version}`)}${kv("KN5 target", `v${model.version}`)}${kv("Animations", source.animations.length)}${kv("Generated materials", source.materials)}${kv("Warnings", source.warnings.length)}${source.animations.map((clip) => `<div class="resource"><strong>${escapeHtml(clip.name)}</strong><span>${format(clip.duration)} s · ${clip.tracks} tracks</span></div>`).join("")}${source.warnings.map((warning) => `<div class="resource validation-warning"><strong>Material action</strong><span>${escapeHtml(warning)}</span></div>`).join("")}</div>`;
+}
+
 function pipelineLabel() {
   const external = renderer?.externalTextureStatus, texturePart = external?.requested ? ` · ${external.ready}/${external.requested} external textures` : "";
-  const source = model?.workspace?.kind === "carLods" ? "Car LOD workspace" : model?.workspace ? "KN5 workspace" : "KN5";
-  const stock = model?.workspace?.kind === "carLods" ? "Stock car LOD pipeline" : model?.workspace ? "Stock multi-KN5 pipeline" : "Stock KN5 pipeline", skinPart = assetSkinName ? ` · skin ${assetSkinName}` : "", animationPart = activeAnimationName ? ` · ${renderer?.animationStatus.matchedNodes || 0} animated nodes` : "",vaoPart=vaoBinding?.matchedMeshes?` · VAO ${vaoBinding.matchedMeshes.toLocaleString()} meshes`:"";
+  const source = model?.workspace?.kind === "carLods" ? "Car LOD workspace" : model?.workspace ? "Model workspace" : model?.fbx ? "FBX authoring" : "KN5";
+  const stock = model?.workspace?.kind === "carLods" ? "Stock car LOD pipeline" : model?.workspace ? "Multi-model pipeline" : model?.fbx ? "FBX → KN5 authoring pipeline" : "Stock KN5 pipeline", skinPart = assetSkinName ? ` · skin ${assetSkinName}` : "", animationPart = activeAnimationName ? ` · ${renderer?.animationStatus.matchedNodes || 0} animated nodes` : "",vaoPart=vaoBinding?.matchedMeshes?` · VAO ${vaoBinding.matchedMeshes.toLocaleString()} meshes`:"";
   return cspEvaluation ? `${source} + CSP${skinPart}${animationPart}${vaoPart} · ${cspEvaluation.nodeOverrides.size.toLocaleString()} meshes · ${cspEvaluation.customEmissiveMeshes.toLocaleString()} emissive · ${cspEvaluation.lights.length.toLocaleString()} lights${texturePart}` : `${stock}${skinPart}${animationPart}${vaoPart}`;
 }
 

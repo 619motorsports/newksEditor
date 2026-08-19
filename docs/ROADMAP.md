@@ -31,10 +31,14 @@ vertical slice is only the foundation.
   reflection-glass alpha, and `ksBrokenGlass` damage-mask/additive behavior. CSP
   refraction reads a mipmapped opaque HDR scene resolve with the recovered projected-
   normal offset. It does not yet feed earlier transparent layers back into later ones.
-- Parse FBX input or integrate a cross-platform importer. The KN5 v5/v6 writer now
-  round-trips real static, textured, and skinned assets byte-for-byte and can bake
-  compatible authored edits into an unprotected single-file copy; new geometry,
-  hierarchy authoring, protected-payload preservation, and in-game output validation remain.
+- The portable FBX importer now reads binary and ASCII FBX scenes through Three.js.
+  It imports static and skinned geometry, material groups, transforms, normals, UVs,
+  skin weights, bone inverse-bind matrices, and animation metadata. It applies the
+  recovered ksEditor V-coordinate sign change and writes a KN5 v6 file. Generated
+  one-pixel DDS textures preserve FBX material colors. Source texture extraction,
+  animation export, direct geometry and hierarchy editing, protected-payload
+  preservation, and in-game output validation remain. The KN5 v5/v6 writer also
+  round-trips real static, textured, and skinned assets byte-for-byte.
 - Complete driver texture export/reload/review and hierarchy-edit workflows. Native
   KSANIM v1/v2 transform tracks now parse,
   bind to every matching hierarchy node, and preview with the game's normalized

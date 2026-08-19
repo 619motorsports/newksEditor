@@ -38,6 +38,12 @@
       "src/**/*",
       "package.json"
     ],
+    "extraResources": [
+      { "from": "node_modules/three/examples/jsm/curves/NURBSCurve.js", "to": "three-addons/curves/NURBSCurve.js" },
+      { "from": "node_modules/three/examples/jsm/curves/NURBSUtils.js", "to": "three-addons/curves/NURBSUtils.js" },
+      { "from": "node_modules/three/examples/jsm/libs/fflate.module.js", "to": "three-addons/libs/fflate.module.js" },
+      { "from": "node_modules/three/examples/jsm/loaders/FBXLoader.js", "to": "three-addons/loaders/FBXLoader.js" }
+    ],
     "icon": "build/icon.png",
     "linux": {
       "category": "Graphics",
@@ -60,5 +66,8 @@
         "portable"
       ]
     }
+  },
+  "dependencies": {
+    "three": "^0.185.1"
   }
 }

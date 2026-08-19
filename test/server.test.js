@@ -18,12 +18,18 @@ test("serves the desktop application and its explicitly allowed modules", async 
     assert.equal(module.status, 200);
     assert.match(module.headers.get("content-type"), /text\/javascript/);
     assert.match(await module.text(), /parseKn5/);
+    const importer = await fetch(`${url}/src/fbx-import.js`);
+    assert.equal(importer.status, 200);
+    assert.match(await importer.text(), /parseFbx/);
+    assert.equal((await fetch(`${url}/vendor/three.module.js`)).status, 200);
+    assert.equal((await fetch(`${url}/vendor/three-addons/loaders/FBXLoader.js`)).status, 200);
   });
 });
 
 test("rejects traversal, unknown source modules, and state-changing methods", async () => {
   await withServer(async (url) => {
     assert.equal((await fetch(`${url}/src/server.js`)).status, 404);
+    assert.equal((await fetch(`${url}/vendor/three-addons/loaders/GLTFLoader.js`)).status, 404);
     assert.equal((await fetch(`${url}/%2e%2e/package.json`)).status, 404);
     assert.equal((await fetch(url, { method: "POST" })).status, 405);
     const head = await fetch(`${url}/app.css`, { method: "HEAD" });
