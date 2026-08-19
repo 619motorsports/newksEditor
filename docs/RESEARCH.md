@@ -1919,6 +1919,17 @@ The skin path reads the first skin deformer. It imports every cluster link, inve
 bind matrix, control-point index, and weight. This path matches the 19-float KN5
 vertex layout and its four weight and index fields.
 
+The PDB identifies `FBXImporter::loadAnimation` at `0x100071a0` and
+`FBXImporter::loadAnimationNode` at `0x10007550`. The node walk accepts FBX mesh,
+skeleton, and null attributes. It evaluates each accepted node in local space.
+
+The native sample step is one percent of the selected animation time span. The loop
+stops before the end time. As a result, each nonempty animation contains 100 frames.
+
+`Animation::save` at `0x10043dd0` writes version 2, the track count, and each UTF-8
+track name. It then writes the frame count and 40 bytes for each frame. A frame contains
+one quaternion, one position, and one scale.
+
 Apex uses the [Three.js FBXLoader](https://threejs.org/docs/pages/FBXLoader.html) for
 portable FBX decoding. The adapter applies the recovered ksEditor rules after the
 loader triangulates the scene. It expands triangle corners to preserve UV and normal
@@ -1926,7 +1937,8 @@ seams. It splits each output mesh before the 16-bit KN5 index limit.
 
 The official SDK sphere imports as one mesh with 224 triangles. The official animated
 GT40 suspension scene imports as 42 meshes with 16,514 triangles. Four spring meshes
-retain their skin data. The import also records one animation clip.
+retain their skin data. Its clip contains 104 source curves. Apex exports 112 object
+tracks with 100 frames, which matches the native object-selection rule.
 
 Both scenes serialize to KN5 v6 and parse again. A live Electron run loaded all
 generated DDS textures and returned WebGL error zero. The packaged Linux application
@@ -1946,8 +1958,16 @@ The inspector shows the state and output name for each diffuse reference.
 The official GT40 FBX contains `Grey.dds` and `exterior_engine_diffuse.dds`
 references. A selected source folder resolved `Grey.dds` by suffix. The exported KN5
 retained the DDS bytes and the `txDiffuse` name after a write/read round trip. The
-second missing reference kept its generated DDS. The importer records animation
-metadata, but it does not export FBX animation to KSANIM.
+second missing reference kept its generated DDS.
+
+The animation adapter preserves `userData.originalName` because Three.js removes
+colons from binding names. This rule preserves names such as `DRIVER:RIG_HAND_L` in
+the exported file. A production driver FBX and its KSANIM file both contain 59 named
+tracks, 100 frames, and 38 animated tracks.
+
+The live browser preview selected the GT40 clip and moved its timeline to 0.500. The
+renderer matched 42 animated nodes. The export action reported 112 tracks and 100
+frames. The browser log contained no errors.
 
 A Blender-generated binary FBX embedded the SDK `Arrows.png` image. The browser
 imported the image as `base_color_texture.png` without a source folder. WebGL loaded

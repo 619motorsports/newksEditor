@@ -33,13 +33,15 @@ vertical slice is only the foundation.
   normal offset. It does not yet feed earlier transparent layers back into later ones.
 - The portable FBX importer now reads binary and ASCII FBX scenes through Three.js.
   It imports static and skinned geometry, material groups, transforms, normals, UVs,
-  skin weights, bone inverse-bind matrices, and animation metadata. It applies the
+  skin weights, bone inverse-bind matrices, original names, and animation clips. It applies the
   recovered ksEditor V-coordinate sign change and writes a KN5 v6 file. Generated
   one-pixel DDS textures preserve FBX material colors. The importer now captures
   external diffuse references and preserves supported DDS, PNG, JPEG, or WebP files
   that resolve uniquely in a selected source folder. It also preserves supported
   embedded images. Missing, ambiguous, and unsupported references keep the generated
-  color texture. Additional material-map slots, animation export, direct geometry and
+  color texture. The importer samples each clip into 100 local-transform frames.
+  The editor previews these frames and exports the native KSANIM v2 layout.
+  Additional material-map slots, direct geometry and
   hierarchy editing, protected-payload preservation, and in-game output validation
   remain. The KN5 v5/v6 writer also round-trips real static, textured, and skinned
   assets byte-for-byte.

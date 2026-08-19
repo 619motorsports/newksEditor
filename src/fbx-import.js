@@ -1,4 +1,4 @@
-import { LoadingManager, Texture } from "three";
+import { AnimationMixer, LoadingManager, LoopOnce, Texture } from "three";
 import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
 import { createAssetFileIndex, normalizeAssetPath, resolveAssetFile } from "./asset-files.js";
 
@@ -35,6 +35,10 @@ function property(name, value) {
 function safeName(value, fallback) {
   const name = String(value || "").trim();
   return (name || fallback).slice(0, 1024);
+}
+
+function fbxObjectName(object, fallback) {
+  return safeName(object?.userData?.originalName || object?.name, fallback);
 }
 
 function textureName(materialName, index) {
@@ -258,10 +262,62 @@ function meshParts(object, materialIds, warnings) {
 
 function convertObject(object, materialIds, warnings) {
   object.updateMatrix?.();
-  const name = safeName(object.name, object.isBone ? "Bone" : object.type || "Node"), node = { type: 1, kind: "node", name, children: [], active: object.visible !== false, transform: object.matrix?.toArray?.() || [...IDENTITY] };
+  const name = fbxObjectName(object, object.isBone ? "Bone" : object.type || "Node"), node = { type: 1, kind: "node", name, children: [], active: object.visible !== false, transform: object.matrix?.toArray?.() || [...IDENTITY] };
   if (object.isMesh) node.children.push(...meshParts(object, materialIds, warnings));
   for (const child of object.children || []) node.children.push(convertObject(child, materialIds, warnings));
   return node;
+}
+
+function animationObjects(scene) {
+  const objects = [];
+  scene.traverse((object) => {
+    if ((object !== scene || object.name) && (object.isBone || object.isMesh || object.type === "Group")) objects.push(object);
+  });
+  return objects;
+}
+
+function animationFrame(object) {
+  return {
+    quaternion: object.quaternion.toArray().map(Math.fround),
+    position: object.position.toArray().map(Math.fround),
+    scale: object.scale.toArray().map(Math.fround)
+  };
+}
+
+function animationFrameChanged(first, candidate) {
+  return ["quaternion", "position", "scale"].some((name) => first[name].some((value, index) => !Object.is(value, candidate[name][index])));
+}
+
+/** Sample Three.js FBX clips with the 100-frame local-transform rule used by ksEditor. */
+export function convertFbxAnimations(scene, sourceName = "scene.fbx") {
+  const objects = animationObjects(scene), snapshots = objects.map((object) => ({ object, position: object.position.clone(), quaternion: object.quaternion.clone(), scale: object.scale.clone() }));
+  const animations = [];
+  try {
+    for (const clip of scene.animations || []) {
+      const duration = Math.max(0, Number(clip.duration) || 0), frameCount = duration > 0 ? 100 : 0;
+      const tracks = objects.map((object) => ({ name: fbxObjectName(object, object.isBone ? "Bone" : object.type || "Node"), frames: [] }));
+      const mixer = new AnimationMixer(scene), action = mixer.clipAction(clip);
+      action.setLoop(LoopOnce, 1); action.clampWhenFinished = true; action.play();
+      for (let frameIndex = 0; frameIndex < frameCount; frameIndex++) {
+        mixer.setTime(duration * frameIndex / frameCount);
+        objects.forEach((object, objectIndex) => tracks[objectIndex].frames.push(animationFrame(object)));
+      }
+      action.stop(); mixer.uncacheClip(clip); mixer.uncacheRoot(scene);
+      for (const track of tracks) track.animated = track.frames.length > 1 && track.frames.slice(1).some((frame) => animationFrameChanged(track.frames[0], frame));
+      animations.push({
+        source: `${sourceName}:${safeName(clip.name, "Animation")}`, name: safeName(clip.name, "Animation"), version: 2,
+        duration, frameCount, tracks, sourceTrackCount: clip.tracks?.length || 0, bytesRead: 0, byteLength: 0,
+        warnings: duration > 0 ? [] : [`${safeName(clip.name, "Animation")} has no duration and contains no sampled frames`]
+      });
+    }
+  } finally {
+    for (const snapshot of snapshots) {
+      snapshot.object.position.copy(snapshot.position); snapshot.object.quaternion.copy(snapshot.quaternion); snapshot.object.scale.copy(snapshot.scale);
+      snapshot.object.updateMatrix();
+    }
+    scene.updateMatrixWorld(true);
+  }
+  return animations;
 }
 
 /** Convert a Three.js FBX scene into the same model shape used by the KN5 reader/writer. */
@@ -283,8 +339,9 @@ export function convertFbxScene(scene, sourceName = "scene.fbx", inputBytes = 0,
     if (converted.textureReference) textureReferences.push(converted.textureReference);
   });
   for (const [source, canonical] of canonicalByObject) materialIds.set(source, materialIds.get(canonical));
-  const root = { type: 1, kind: "node", name: `FBX: ${safeName(sourceName, "scene.fbx")}`, children: (scene.children || []).map((child) => convertObject(child, materialIds, warnings)), active: true, transform: [...IDENTITY] };
-  const animations = (scene.animations || []).map((clip) => ({ name: safeName(clip.name, "Animation"), duration: Number(clip.duration) || 0, tracks: clip.tracks?.length || 0 }));
+  const rootObjects = scene.name ? [scene] : (scene.children || []);
+  const root = { type: 1, kind: "node", name: `FBX: ${safeName(sourceName, "scene.fbx")}`, children: rootObjects.map((child) => convertObject(child, materialIds, warnings)), active: true, transform: [...IDENTITY] };
+  const animations = convertFbxAnimations(scene, sourceName);
   const model = { magic: "sc6969", version: 6, source: 0, textures, materials, root, bytesRead: inputBytes, byteLength: inputBytes, fbx: { sourceName, format: header.format, version: header.version, materials: materials.length, animations, geometryWarnings: [...warnings], textureReferences, warnings: [] } };
   updateTextureReferenceSummary(model);
   return model;

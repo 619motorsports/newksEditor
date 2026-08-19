@@ -1,4 +1,5 @@
 const decoder = new TextDecoder("utf-8", { fatal: true });
+const encoder = new TextEncoder();
 
 export class KsAnimationError extends Error {
   constructor(message, offset) {
@@ -106,6 +107,52 @@ export function parseKsAnimation(input, source = "animation.ksanim") {
   }
   if (reader.offset !== reader.bytes.byteLength) throw new KsAnimationError(`${reader.bytes.byteLength - reader.offset} trailing bytes after KSANIM data`, reader.offset);
   return { source, version, tracks, frameCount: frameCount || 0, bytesRead: reader.offset, byteLength: reader.bytes.byteLength, warnings };
+}
+
+function finiteFrameValues(frame, trackName, frameIndex) {
+  const groups = [["quaternion", 4], ["position", 3], ["scale", 3]], values = [];
+  for (const [name, count] of groups) {
+    const data = frame?.[name];
+    if ((!Array.isArray(data) && !ArrayBuffer.isView(data)) || data.length !== count) {
+      throw new TypeError(`${trackName} frame ${frameIndex} must contain ${count} ${name} values`);
+    }
+    for (const value of data) {
+      if (!Number.isFinite(value)) throw new TypeError(`${trackName} frame ${frameIndex} contains a non-finite ${name} value`);
+      values.push(value);
+    }
+  }
+  return values;
+}
+
+/** Serialize animation tracks with the KSANIM v2 quatpos layout used by ksEditor. */
+export function serializeKsAnimation(animation) {
+  const tracks = animation?.tracks;
+  if (!Array.isArray(tracks)) throw new TypeError("KSANIM tracks must be an array");
+  if (tracks.length > 1_000_000) throw new RangeError(`KSANIM has too many tracks: ${tracks.length}`);
+  const prepared = [];
+  let byteLength = 8;
+  for (let trackIndex = 0; trackIndex < tracks.length; trackIndex++) {
+    const track = tracks[trackIndex], name = String(track?.name || ""), nameBytes = encoder.encode(name), frames = track?.frames;
+    if (!name) throw new TypeError(`KSANIM track ${trackIndex} has no name`);
+    if (nameBytes.byteLength > 1024 * 1024) throw new RangeError(`KSANIM track name is too long: ${name}`);
+    if (!Array.isArray(frames)) throw new TypeError(`${name} frames must be an array`);
+    if (frames.length > 10_000_000) throw new RangeError(`${name} has too many frames: ${frames.length}`);
+    const values = frames.map((frame, frameIndex) => finiteFrameValues(frame, name, frameIndex));
+    byteLength += 8 + nameBytes.byteLength + frames.length * 40;
+    if (!Number.isSafeInteger(byteLength) || byteLength > 0xffffffff) throw new RangeError("KSANIM output is too large");
+    prepared.push({ nameBytes, values });
+  }
+  const bytes = new Uint8Array(byteLength), view = new DataView(bytes.buffer);
+  let offset = 0;
+  const u32 = (value) => { view.setUint32(offset, value, true); offset += 4; };
+  const f32 = (value) => { view.setFloat32(offset, value, true); offset += 4; };
+  u32(2); u32(prepared.length);
+  for (const track of prepared) {
+    u32(track.nameBytes.byteLength); bytes.set(track.nameBytes, offset); offset += track.nameBytes.byteLength;
+    u32(track.values.length);
+    for (const frame of track.values) for (const value of frame) f32(value);
+  }
+  return bytes;
 }
 
 function slerpQuaternion(from, to, amount) {

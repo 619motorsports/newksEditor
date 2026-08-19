@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { ksAnimationMatrix, parseKsAnimation, sampleKsAnimationTrack } from "../src/ksanim.js";
+import { ksAnimationMatrix, parseKsAnimation, sampleKsAnimationTrack, serializeKsAnimation } from "../src/ksanim.js";
 
 const priusAnimations = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/cars/traffic_toyota_prius/animations";
 const legacyAnimation = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/cars/619_gen6_fusion13_nsc/animations/gascap.ksanim";
@@ -30,6 +30,22 @@ test("uses the game's byte-exact v2 animated-track test", () => {
   const animation = parseKsAnimation(version2([{ name: "SIGNED_ZERO", frames: [frame([0, 0, 0]), frame([-0, 0, 0])] }]));
   assert.equal(animation.tracks[0].animated, true);
   assert.ok(Object.is(animation.tracks[0].frames[1].position[0], -0));
+});
+
+test("serializes the native version 2 quatpos layout", () => {
+  const expected = version2([{ name: "DÖÖR_L", frames: [frame([0, 0, 0]), frame([1, 2, 3], [0, 0, 1, 0], [2, 3, 4])] }]);
+  const bytes = serializeKsAnimation({ tracks: [{ name: "DÖÖR_L", frames: [frame([0, 0, 0]), frame([1, 2, 3], [0, 0, 1, 0], [2, 3, 4])] }] });
+  assert.deepEqual(Buffer.from(bytes), expected);
+  const parsed = parseKsAnimation(bytes);
+  assert.equal(parsed.version, 2);
+  assert.equal(parsed.tracks[0].name, "DÖÖR_L");
+  assert.deepEqual(parsed.tracks[0].frames[1].position, [1, 2, 3]);
+});
+
+test("rejects invalid version 2 export values", () => {
+  assert.throws(() => serializeKsAnimation({}), /tracks must be an array/);
+  assert.throws(() => serializeKsAnimation({ tracks: [{ name: "", frames: [] }] }), /has no name/);
+  assert.throws(() => serializeKsAnimation({ tracks: [{ name: "NODE", frames: [frame([NaN, 0, 0])] }] }), /non-finite position/);
 });
 
 test("samples with the game's frameCount times normalized-position rule", () => {

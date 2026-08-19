@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { BufferGeometry, Float32BufferAttribute, Group, Mesh, MeshPhongMaterial, Texture } from "three";
+import { AnimationClip, BufferGeometry, Float32BufferAttribute, Group, Mesh, MeshPhongMaterial, NumberKeyframeTrack, QuaternionKeyframeTrack, Texture, VectorKeyframeTrack } from "three";
 import { decodeDdsRgba, inspectDds } from "../src/dds.js";
-import { convertFbxScene, inspectFbxHeader, parseFbx, parseFbxWithTextures, resolveFbxTextures } from "../src/fbx-import.js";
+import { convertFbxAnimations, convertFbxScene, inspectFbxHeader, parseFbx, parseFbxWithTextures, resolveFbxTextures } from "../src/fbx-import.js";
+import { parseKsAnimation, serializeKsAnimation } from "../src/ksanim.js";
 import { parseKn5, walkNodes } from "../src/kn5.js";
 import { serializeKn5 } from "../src/kn5-write.js";
 
@@ -16,6 +17,28 @@ test("recognizes binary and ASCII FBX headers", () => {
   assert.deepEqual(inspectFbxHeader(binary), { format: "binary", version: 7400 });
   assert.deepEqual(inspectFbxHeader(new TextEncoder().encode("; FBX 7.4.0 project file\nFBXVersion: 7400\n")), { format: "ascii", version: 7400 });
   assert.throws(() => inspectFbxHeader(new Uint8Array(32)), /recognized FBX header/);
+});
+
+test("samples FBX clips into native 100-frame local-transform tracks", () => {
+  const scene = new Group(), pivot = new Group(), mesh = new Mesh(triangleGeometry(3), new MeshPhongMaterial());
+  scene.name = "DRIVERROOT"; scene.userData.originalName = "DRIVER:ROOT";
+  pivot.name = "PIVOT"; mesh.name = "BODY"; pivot.add(mesh); scene.add(pivot);
+  scene.animations = [new AnimationClip("Open", 2, [
+    new VectorKeyframeTrack("PIVOT.position", [0, 2], [0, 0, 0, 10, 0, 0]),
+    new QuaternionKeyframeTrack("PIVOT.quaternion", [0, 2], [0, 0, 0, 1, 0, 0, 1, 0]),
+    new NumberKeyframeTrack("BODY.visible", [0, 2], [1, 0])
+  ])];
+  const animations = convertFbxAnimations(scene, "door.fbx"), animation = animations[0];
+  assert.deepEqual([animation.name, animation.version, animation.duration, animation.frameCount, animation.sourceTrackCount], ["Open", 2, 2, 100, 3]);
+  assert.deepEqual(animation.tracks.map((track) => track.name), ["DRIVER:ROOT", "PIVOT", "BODY"]);
+  assert.equal(animation.tracks[1].frames[50].position[0], 5);
+  assert.equal(animation.tracks[0].animated, false);
+  assert.equal(animation.tracks[1].animated, true);
+  assert.equal(animation.tracks[2].animated, false);
+  assert.deepEqual(pivot.position.toArray(), [0, 0, 0]);
+  const reparsed = parseKsAnimation(serializeKsAnimation(animation));
+  assert.deepEqual([reparsed.version, reparsed.tracks.length, reparsed.frameCount], [2, 3, 100]);
+  assert.equal(convertFbxScene(scene).root.children[0].name, "DRIVER:ROOT");
 });
 
 function triangleGeometry(vertexCount) {
@@ -107,6 +130,10 @@ test("imports static and skinned geometry from the official GT40 FBX", async (t)
   catch { t.skip("Assetto Corsa SDK GT40 fixture is not installed"); return; }
   const model = parseFbx(bytes, "GT40_animated_suspension_example_fbx.FBX"), meshes = walkNodes(model.root).map(({ node }) => node).filter((node) => node.kind === "mesh" || node.kind === "skinnedMesh");
   assert.equal(model.fbx.version, 7300); assert.equal(model.fbx.animations.length, 1); assert.equal(meshes.length, 42); assert.equal(meshes.filter((node) => node.kind === "skinnedMesh").length, 4);
+  assert.deepEqual([model.fbx.animations[0].sourceTrackCount, model.fbx.animations[0].tracks.length, model.fbx.animations[0].frameCount], [104, 112, 100]);
+  assert.ok(model.fbx.animations[0].tracks.some((track) => track.animated));
+  const exportedAnimation = parseKsAnimation(serializeKsAnimation(model.fbx.animations[0]));
+  assert.deepEqual([exportedAnimation.version, exportedAnimation.tracks.length, exportedAnimation.frameCount], [2, 112, 100]);
   assert.equal(meshes.reduce((sum, node) => sum + node.indices.length / 3, 0), 16514);
   const reparsed = parseKn5(serializeKn5(model)), reparsedMeshes = walkNodes(reparsed.root).map(({ node }) => node).filter((node) => node.kind === "mesh" || node.kind === "skinnedMesh");
   assert.equal(reparsedMeshes.length, 42); assert.equal(reparsedMeshes.filter((node) => node.kind === "skinnedMesh").length, 4);

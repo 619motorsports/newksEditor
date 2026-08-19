@@ -5,7 +5,7 @@ import { cloneEditorProject, createEditorProject, editorProjectEditCount, format
 import { decodeDdsRgba, inspectDds } from "/src/dds.js";
 import { createAssetFileIndex, discoverAssetAnimations, discoverAssetSkins, externalResourcePaths, matchSkinTextures, normalizeAssetPath, resolveAssetFile } from "/src/asset-files.js";
 import { carLodDistance, carLodVisible, mergeKn5Models, parseCarLodsIni, parseModelsIni } from "/src/kn5-workspace.js";
-import { parseKsAnimation, sampleKsAnimation } from "/src/ksanim.js";
+import { parseKsAnimation, sampleKsAnimation, serializeKsAnimation } from "/src/ksanim.js";
 import { bakeEditorProjectIntoKn5 } from "/src/kn5-bake.js";
 import { serializeKn5 } from "/src/kn5-write.js";
 import { auditTrackModel, parseSurfacesIni, resolveTrackSurface } from "/src/track-validation.js";
@@ -68,6 +68,7 @@ let assetSkinName = "";
 let assetAnimations = [];
 let activeAnimation = null;
 let activeAnimationName = "";
+let activeFbxAnimationIndex = -1;
 let animationPosition = 0;
 let assetSurfaceEntries = [];
 let trackSurfaceConfig = null;
@@ -140,6 +141,7 @@ $("#asset-folder").addEventListener("change", async (event) => {
   await Promise.all([renderer?.setExternalFiles([...assetFolderFiles,...cspTextureFolderFiles]), renderer?.setSkinFiles([], "")]);
   refreshCarColliderAudit();
   updateExternalTextureUi();
+  if (modelFile) status.textContent = modelStatusText();
   if (model && !selectedNode) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
 });
 $("#csp-texture-folder").addEventListener("change",async(event)=>{cspTextureFolderFiles=[...event.target.files];cspTextureFolderName=cspTextureFolderFiles[0]?.webkitRelativePath?.split("/")[0]||(cspTextureFolderFiles.length?`${cspTextureFolderFiles.length} selected files`:"");await renderer?.setExternalFiles([...assetFolderFiles,...cspTextureFolderFiles]);updateExternalTextureUi();if(model&&!selectedNode)renderModelInspector(modelFile,modelSummary.nodes,modelSummary.triangles);});
@@ -154,6 +156,7 @@ $("#skin-select").addEventListener("change", async (event) => {
   if (model && !selectedNode) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
 });
 $("#animation-select").addEventListener("change", loadSelectedAnimation);
+$("#export-ksanim").addEventListener("click", exportFbxAnimation);
 $("#animation-position").addEventListener("input", (event) => {
   animationPosition = Number(event.target.value);
   $("#animation-position-output").value = animationPosition.toFixed(3);
@@ -262,6 +265,7 @@ async function load(files, workspaceOptions = {}) {
     $("#search").disabled = false;
     $("#frame").disabled = !renderer;
     $("#wireframe").disabled = !renderer;
+    configureAnimationChoices();
     status.textContent = modelStatusText();
     renderTree();
     renderer?.setModel(model);configureReflectionCaptureChoices();applyVaoPatch();renderer?.setSurfaceBindings(trackSurfaceBindings);configureSurfaceOverlay();
@@ -318,13 +322,23 @@ function configureSkinChoices() {
 
 function configureAnimationChoices() {
   assetAnimations = discoverAssetAnimations(assetFileIndex);
-  activeAnimation = null; activeAnimationName = ""; animationPosition = 0;
+  activeAnimation = null; activeAnimationName = ""; activeFbxAnimationIndex = -1; animationPosition = 0;
   const select = $("#animation-select"), control = $("#animation-position-control"), slider = $("#animation-position");
-  select.replaceChildren(new Option("Bind pose", ""), ...assetAnimations.map((entry) => new Option(`Anim · ${entry.relativePath}`, entry.path)));
-  select.hidden = !assetAnimations.length; select.value = "";
-  select.title = assetAnimations.length ? `${assetAnimations.length} KSANIM files discovered` : "No KSANIM files discovered";
+  const imported = model?.fbx?.animations || [];
+  select.replaceChildren(new Option("Bind pose", ""), ...imported.map((clip, index) => new Option(`FBX · ${clip.name}`, `fbx:${index}`)), ...assetAnimations.map((entry) => new Option(`Anim · ${entry.relativePath}`, entry.path)));
+  select.hidden = !assetAnimations.length && !imported.length; select.value = "";
+  select.title = imported.length || assetAnimations.length ? `${imported.length} FBX clips · ${assetAnimations.length} KSANIM files` : "No animation clips discovered";
   control.hidden = true; slider.value = "0"; $("#animation-position-output").value = "0.000";
+  configureKsAnimationExport();
   renderer?.setAnimation(null, 0, "");
+}
+
+function configureKsAnimationExport() {
+  const button = $("#export-ksanim"), clip = activeFbxAnimationIndex >= 0 ? model?.fbx?.animations?.[activeFbxAnimationIndex] : null;
+  button.hidden = !model?.fbx?.animations?.length;
+  button.disabled = !clip || !clip.frameCount;
+  button.textContent = clip ? `Export ${clip.name}` : "Export KSANIM";
+  button.title = clip ? "Export this FBX clip in the game-compatible KSANIM v2 format" : "Select an imported FBX clip to export it";
 }
 
 function popupAnimationSelected() {
@@ -396,10 +410,22 @@ async function selectTrackSurfaceConfig(manifestEntry) {
 
 async function loadSelectedAnimation(event) {
   const entry = assetAnimations.find((candidate) => candidate.path === event.target.value);
-  activeAnimation = null; activeAnimationName = ""; animationPosition = 0;
+  const importedMatch = event.target.value.match(/^fbx:(\d+)$/), importedIndex = importedMatch ? Number(importedMatch[1]) : -1, imported = model?.fbx?.animations?.[importedIndex];
+  activeAnimation = null; activeAnimationName = ""; activeFbxAnimationIndex = -1; animationPosition = 0;
   $("#animation-position").value = "0"; $("#animation-position-output").value = "0.000";
+  if (imported) {
+    activeAnimation = imported; activeAnimationName = `${model.fbx.sourceName} · ${imported.name}`; activeFbxAnimationIndex = importedIndex;
+    $("#animation-position-control").hidden = !imported.frameCount;
+    configureKsAnimationExport();
+    renderer?.setAnimation(activeAnimation, 0, activeAnimationName);
+    if (activeCspConfig) applyCspConfig();
+    if (modelFile) status.textContent = modelStatusText();
+    if (model && !selectedNode) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
+    return;
+  }
   if (!entry) {
     $("#animation-position-control").hidden = true;
+    configureKsAnimationExport();
     renderer?.setAnimation(null, 0, "");
     if (activeCspConfig) applyCspConfig();
     if (modelFile) status.textContent = modelStatusText();
@@ -410,6 +436,7 @@ async function loadSelectedAnimation(event) {
   try {
     activeAnimation = parseKsAnimation(await entry.file.arrayBuffer(), entry.relativePath);
     activeAnimationName = entry.relativePath;
+    configureKsAnimationExport();
     $("#animation-position-control").hidden = false;
     renderer?.setAnimation(activeAnimation, 0, activeAnimationName);
     if (activeCspConfig) applyCspConfig();
@@ -418,6 +445,7 @@ async function loadSelectedAnimation(event) {
   } catch (error) {
     console.error(error); status.textContent = `Could not open animation: ${error.message}`;
     event.target.value = ""; $("#animation-position-control").hidden = true;
+    configureKsAnimationExport();
     renderer?.setAnimation(null, 0, "");
     if (activeCspConfig) applyCspConfig();
   }
@@ -586,6 +614,18 @@ function downloadText(name, text, type) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+function exportFbxAnimation() {
+  const clip = activeFbxAnimationIndex >= 0 ? model?.fbx?.animations?.[activeFbxAnimationIndex] : null;
+  if (!clip?.frameCount) return;
+  try {
+    const bytes = serializeKsAnimation(clip), clipName = clip.name.replace(/[^a-z0-9._-]+/gi, "_").replace(/^_+|_+$/g, "") || "animation";
+    const name = `${projectBaseName()}_${clipName}.ksanim`, url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" })), anchor = document.createElement("a");
+    anchor.href = url; anchor.download = name; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    window.__apexLastKsAnimationExport = { name, bytes: bytes.byteLength, version: 2, tracks: clip.tracks.length, frames: clip.frameCount };
+    status.textContent = `Exported game-compatible KSANIM v2 · ${clip.tracks.length} tracks · ${clip.frameCount} frames`;
+  } catch (error) { console.error(error); status.textContent = `Could not export KSANIM: ${error.message}`; }
+}
+
 function saveEditorProject() {
   if (editorProject) downloadText(`${projectBaseName()}.apex.json`, serializeEditorProject(editorProject), "application/json");
 }
@@ -735,7 +775,7 @@ function renderMaterialInspector(material) {
 function fbxImportInspectorHtml() {
   if (!model?.fbx) return "";
   const source = model.fbx, textures = source.textureSummary || {};
-  return `<div class="section"><h3>FBX import</h3>${kv("Source", `${source.format} ${source.version}`)}${kv("KN5 target", `v${model.version}`)}${kv("Animations", source.animations.length)}${kv("Materials", source.materials)}${kv("Texture references", textures.referenced || 0)}${kv("Source textures", (textures.resolved || 0) + (textures.embedded || 0))}${textures.embedded ? kv("Embedded textures", textures.embedded) : ""}${textures.missing ? kv("Missing textures", textures.missing) : ""}${textures.ambiguous ? kv("Ambiguous textures", textures.ambiguous) : ""}${textures.unsupported ? kv("Unsupported textures", textures.unsupported) : ""}${kv("Warnings", source.warnings.length)}${source.textureReferences.map((reference) => `<div class="resource"><strong>${escapeHtml(reference.material)}</strong><span>${escapeHtml(reference.source)} · ${escapeHtml(reference.status)}${reference.output ? ` → ${escapeHtml(reference.output)}` : ""}</span></div>`).join("")}${source.animations.map((clip) => `<div class="resource"><strong>${escapeHtml(clip.name)}</strong><span>${format(clip.duration)} s · ${clip.tracks} tracks</span></div>`).join("")}${source.warnings.map((warning) => `<div class="resource validation-warning"><strong>Import action</strong><span>${escapeHtml(warning)}</span></div>`).join("")}</div>`;
+  return `<div class="section"><h3>FBX import</h3>${kv("Source", `${source.format} ${source.version}`)}${kv("KN5 target", `v${model.version}`)}${kv("Animations", source.animations.length)}${kv("Materials", source.materials)}${kv("Texture references", textures.referenced || 0)}${kv("Source textures", (textures.resolved || 0) + (textures.embedded || 0))}${textures.embedded ? kv("Embedded textures", textures.embedded) : ""}${textures.missing ? kv("Missing textures", textures.missing) : ""}${textures.ambiguous ? kv("Ambiguous textures", textures.ambiguous) : ""}${textures.unsupported ? kv("Unsupported textures", textures.unsupported) : ""}${kv("Warnings", source.warnings.length)}${source.textureReferences.map((reference) => `<div class="resource"><strong>${escapeHtml(reference.material)}</strong><span>${escapeHtml(reference.source)} · ${escapeHtml(reference.status)}${reference.output ? ` → ${escapeHtml(reference.output)}` : ""}</span></div>`).join("")}${source.animations.map((clip) => `<div class="resource"><strong>${escapeHtml(clip.name)}</strong><span>${format(clip.duration)} s · ${clip.tracks.length} object tracks · ${clip.sourceTrackCount} source curves · ${clip.frameCount} frames</span></div>`).join("")}${source.warnings.map((warning) => `<div class="resource validation-warning"><strong>Import action</strong><span>${escapeHtml(warning)}</span></div>`).join("")}</div>`;
 }
 
 function pipelineLabel() {
@@ -780,14 +820,14 @@ function skinTextureInspectorHtml() {
 function updateAnimationUi(value) {
   const select = $("#animation-select");
   if (!select || !value) return;
-  select.title = value.name ? `${value.matchedTracks}/${value.animatedTracks} animated tracks matched ${value.matchedNodes} KN5 nodes` : `${assetAnimations.length} KSANIM files discovered`;
+  select.title = value.name ? `${value.matchedTracks}/${value.animatedTracks} animated tracks matched ${value.matchedNodes} KN5 nodes` : `${model?.fbx?.animations?.length || 0} FBX clips · ${assetAnimations.length} KSANIM files`;
   $("#pipeline").textContent = pipelineLabel();
 }
 
 function animationInspectorHtml() {
   const animation = renderer?.animationStatus;
-  if (!assetAnimations.length && !animation?.name) return "";
-  return `<div class="section"><h3>KSANIM preview</h3>${kv("Discovered files", assetAnimations.length)}${kv("Selected", animation?.name || "Bind pose")}${animation?.name ? `${kv("Format", `KSANIM v${animation.version}`)}${kv("Position", animation.position.toFixed(3))}${kv("Frames", animation.frameCount)}${kv("Tracks", animation.tracks)}${kv("Animated tracks", animation.animatedTracks)}${kv("Matched tracks", animation.matchedTracks)}${kv("Matched KN5 nodes", animation.matchedNodes)}${kv("Skinned meshes", animation.skinnedMeshes)}${kv("Maximum skin displacement", `${format(animation.maxSkinnedDisplacement)} m`)}${kv("Unmatched tracks", animation.unmatchedTracks.length)}${animation.unmatchedTracks.slice(0,12).map((name)=>`<div class="resource"><span>${escapeHtml(name)}</span></div>`).join("")}${animation.unmatchedTracks.length>12?`<span class="empty">${animation.unmatchedTracks.length-12} more unmatched tracks</span>`:""}${(activeAnimation?.warnings||[]).map((warning)=>`<div class="resource"><span>${escapeHtml(warning)}</span></div>`).join("")}` : ""}</div>`;
+  if (!assetAnimations.length && !model?.fbx?.animations?.length && !animation?.name) return "";
+  return `<div class="section"><h3>KSANIM preview</h3>${kv("Imported FBX clips", model?.fbx?.animations?.length || 0)}${kv("Discovered files", assetAnimations.length)}${kv("Selected", animation?.name || "Bind pose")}${animation?.name ? `${kv("Format", `KSANIM v${animation.version}`)}${kv("Position", animation.position.toFixed(3))}${kv("Frames", animation.frameCount)}${kv("Tracks", animation.tracks)}${kv("Animated tracks", animation.animatedTracks)}${kv("Matched tracks", animation.matchedTracks)}${kv("Matched KN5 nodes", animation.matchedNodes)}${kv("Skinned meshes", animation.skinnedMeshes)}${kv("Maximum skin displacement", `${format(animation.maxSkinnedDisplacement)} m`)}${kv("Unmatched tracks", animation.unmatchedTracks.length)}${animation.unmatchedTracks.slice(0,12).map((name)=>`<div class="resource"><span>${escapeHtml(name)}</span></div>`).join("")}${animation.unmatchedTracks.length>12?`<span class="empty">${animation.unmatchedTracks.length-12} more unmatched tracks</span>`:""}${(activeAnimation?.warnings||[]).map((warning)=>`<div class="resource"><span>${escapeHtml(warning)}</span></div>`).join("")}` : ""}</div>`;
 }
 
 function workspaceInspectorHtml() {

@@ -30,7 +30,8 @@ selector can instead supply any single named scene subtree, matching ksEditor.
 Discovered
 `skins/<name>` folders can replace matching KN5 texture basenames just as they do in
 the game. Discovered `.ksanim` files can be sampled on a normalized timeline with
-their matching KN5 hierarchy transforms applied live. The same asset folder
+their matching KN5 hierarchy transforms applied live. Imported FBX clips use the
+same timeline. You can export a selected clip as a KSANIM v2 file. The same asset folder
 resolves case-insensitive external CSP texture paths and reports missing or ambiguous
 files. For FBX import, select the source folder before or after you open the FBX.
 Apex embeds each resolved supported diffuse texture in the exported KN5. Files stay
@@ -61,13 +62,14 @@ npm test
 
 - Binary or ASCII FBX import through the portable Three.js loader. The importer
   triangulates geometry and splits meshes by material. It preserves node transforms,
-  UV seams, normals, skin weights, bone inverse-bind matrices, and animation metadata.
+  original object names, UV seams, normals, skin weights, and bone inverse-bind matrices.
   It flips the UV V coordinate to match ksEditor. It also limits each KN5 mesh to
   65,535 vertices. The importer preserves supported embedded PNG, JPEG, and WebP
   diffuse textures. It also resolves external DDS, PNG, JPEG, and WebP textures.
   A relative path, suffix, or basename must resolve to one file. Missing, ambiguous,
-  and unsupported textures use an embedded one-pixel DDS color. FBX animation export
-  remains incomplete.
+  and unsupported textures use an embedded one-pixel DDS color. Each FBX animation
+  clip is sampled into 100 local-transform frames. The timeline previews the result,
+  and the export action writes the native KSANIM v2 layout.
 - KN5 v5/v6 headers, embedded texture, material, hierarchy, static and skinned-mesh
   parsing, including recognition of appended CSP KN5ENC v1 protected payloads
 - Stock shader parameters, texture-resource inspection, embedded BC1/2/3,
@@ -111,7 +113,8 @@ npm test
 - Car and track skin discovery with live selection, case-insensitive KN5-basename
   replacement, sparse inheritance, per-LOD texture scoping, and ambiguity/load diagnostics
 - KSANIM v1 matrix and v2 quaternion/position/scale parsing, exact runtime frame
-  sampling, hierarchical node binding, live timeline preview, and match diagnostics
+  sampling, v2 serialization, hierarchical node binding, live timeline preview,
+  and match diagnostics
 - Recursive `driver_base_pos.knh` parsing plus packed `driver3d.ini` inspection,
   steering/shift timing, shared-driver reference, hidden-object metadata, and exact
   KSANIM-to-base-rig coverage diagnostics; a selected shared driver KN5 is posed from
@@ -266,7 +269,7 @@ wet cubemap reflection and negative-wetness snow response,
 transparent-layer feedback,
 general CSP template/include expansion,
 randomized dynamic-object motion, subtractive procedural-emissive
-composition, FBX source-texture extraction, FBX animation export, direct hierarchy and
+composition, additional FBX material maps, direct hierarchy and
 geometry editing, full local-light photometric fidelity,
 Yebis star, ghost, light-shaft, non-default max-61 Gaussian passes, controlled pixel matching,
 cloud billboards, and the remaining post-processing stack, VAO split-animation blending, normal overrides, dynamic
