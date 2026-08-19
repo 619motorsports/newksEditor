@@ -3,9 +3,10 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { AnimationClip, BufferGeometry, Float32BufferAttribute, Group, Mesh, MeshPhongMaterial, NumberKeyframeTrack, QuaternionKeyframeTrack, Texture, VectorKeyframeTrack } from "three";
 import { decodeDdsRgba, inspectDds } from "../src/dds.js";
-import { convertFbxAnimations, convertFbxScene, FbxImportError, inspectFbxHeader, parseFbx, parseFbxWithTextures, resolveFbxModelTextures, resolveFbxTextures } from "../src/fbx-import.js";
+import { collectFbxAnimations, convertFbxAnimations, convertFbxScene, createColorDds, FbxImportError, inspectFbxHeader, parseFbx, parseFbxWithTextures, resolveFbxModelTextures, resolveFbxTextures } from "../src/fbx-import.js";
 import { parseKsAnimation, serializeKsAnimation } from "../src/ksanim.js";
 import { parseKn5, walkNodes } from "../src/kn5.js";
+import { mergeKn5Models } from "../src/kn5-workspace.js";
 import { serializeKn5 } from "../src/kn5-write.js";
 
 const sdk = "/mnt/D/SteamLibrary/steamapps/common/assettocorsa/sdk";
@@ -119,12 +120,12 @@ test("resolves FBX diffuse textures after a source folder is selected", async ()
 
   await resolveFbxTextures(model, [sourceFile("paint.png", "source/textures/paint.png", onePixelPng)]);
   assert.deepEqual(model.fbx.textureSummary, { referenced: 1, resolved: 1, embedded: 0, missing: 0, ambiguous: 0, unsupported: 0, error: 0 });
-  assert.equal(model.textures[0].name, "APEX_FBX_000_txDiffuse_paint.png");
-  assert.equal(model.materials[0].resources[0].texture, "APEX_FBX_000_txDiffuse_paint.png");
+  assert.match(model.textures[0].name, /^APEX_FBX_scene_[a-z0-9]{7}_000_txDiffuse_paint\.png$/);
+  assert.equal(model.materials[0].resources[0].texture, model.textures[0].name);
   assert.deepEqual(model.textures[0].data, onePixelPng);
 
   const reparsed = parseKn5(serializeKn5(model));
-  assert.equal(reparsed.materials[0].resources[0].texture, "APEX_FBX_000_txDiffuse_paint.png");
+  assert.equal(reparsed.materials[0].resources[0].texture, model.textures[0].name);
   assert.deepEqual(reparsed.textures[0].data, onePixelPng);
 
   await resolveFbxTextures(model, [sourceFile("paint.png", "source/a/paint.png", onePixelPng), sourceFile("paint.png", "source/b/paint.png", onePixelPng)]);
@@ -140,7 +141,7 @@ test("disambiguates equal texture basenames by material binding", async () => {
   const secondPng = onePixelPng.slice(); secondPng[secondPng.length - 1] ^= 1;
   const model = convertFbxScene(scene);
   await resolveFbxTextures(model, [sourceFile("a.png", "source/body/a.png", onePixelPng), sourceFile("a.png", "source/trim/a.png", secondPng)]);
-  assert.deepEqual(model.materials.map((material) => material.resources[0].texture), ["APEX_FBX_000_txDiffuse_a.png", "APEX_FBX_001_txDiffuse_a.png"]);
+  assert.deepEqual(model.materials.map((material) => material.resources[0].texture), model.textures.map((texture) => texture.name));
   assert.equal(new Set(model.textures.map((texture) => texture.name.toLowerCase())).size, 2);
   assert.notDeepEqual(model.textures[0].data, model.textures[1].data);
 });
@@ -157,12 +158,48 @@ test("resolves retained textures for every FBX model in a workspace", async () =
   assert.equal(trim.fbx.textureSummary.resolved, 1);
 });
 
+test("scopes resolved texture names to each FBX source file", async () => {
+  const importedModel = (sourceName, source) => {
+    const scene = new Group(), material = new MeshPhongMaterial({ name: "Paint" }), map = new Texture();
+    map.userData.apexFbxSource = source; material.map = map; scene.add(new Mesh(triangleGeometry(3), material));
+    return convertFbxScene(scene, sourceName);
+  };
+  const first = importedModel("first.fbx", "first/a.dds"), second = importedModel("second.fbx", "second/a.dds");
+  const red = createColorDds([1, 0, 0]), blue = createColorDds([0, 0, 1]);
+  await resolveFbxModelTextures([first, second], [sourceFile("a.dds", "source/first/a.dds", red), sourceFile("a.dds", "source/second/a.dds", blue)]);
+  const names = [first.textures[0].name, second.textures[0].name];
+  assert.equal(new Set(names.map((name) => name.toLowerCase())).size, 2);
+  assert.ok(names.every((name) => name.endsWith("_000_txDiffuse_a.dds")));
+  const workspace = mergeKn5Models([{ name: "first.fbx", model: first }, { name: "second.fbx", model: second }]);
+  assert.equal(workspace.textures.length, 2);
+  assert.deepEqual(workspace.materials.map((material) => material.resources[0].texture), names);
+  assert.deepEqual(workspace.workspace.textureCollisions, []);
+});
+
 test("diagnoses authored opacity that an encoded diffuse image cannot preserve", async () => {
   const scene = new Group(), material = new MeshPhongMaterial({ name: "Glass", opacity: 0.35, transparent: true }), map = new Texture();
   map.userData.apexFbxSource = "textures/glass.png"; material.map = map; scene.add(new Mesh(triangleGeometry(3), material));
   const model = convertFbxScene(scene);
   await resolveFbxTextures(model, [sourceFile("glass.png", "source/textures/glass.png", onePixelPng)]);
   assert.ok(model.fbx.warnings.some((warning) => warning.includes("cannot multiply the authored opacity 0.35")));
+});
+
+test("diagnoses an authored material tint that an encoded diffuse image cannot preserve", async () => {
+  const scene = new Group(), material = new MeshPhongMaterial({ name: "Tinted" }), map = new Texture();
+  material.color.setRGB(0.5, 0.25, 1); map.userData.apexFbxSource = "textures/tinted.png"; material.map = map;
+  scene.add(new Mesh(triangleGeometry(3), material));
+  const model = convertFbxScene(scene, "tinted.fbx");
+  await resolveFbxTextures(model, [sourceFile("tinted.png", "source/textures/tinted.png", onePixelPng)]);
+  assert.ok(model.fbx.warnings.some((warning) => warning.includes("authored material color (0.5, 0.25, 1)")));
+});
+
+test("collects animation clips from every retained FBX model", () => {
+  const firstClip = { name: "Open" }, secondClip = { name: "Close" };
+  const first = { fbx: { sourceName: "first.fbx", animations: [firstClip] } }, second = { fbx: { sourceName: "second.fbx", animations: [secondClip] } };
+  const choices = collectFbxAnimations([first, second, first, {}]);
+  assert.deepEqual(choices.map((entry) => [entry.sourceName, entry.clip.name, entry.modelIndex, entry.clipIndex]), [["first.fbx", "Open", 0, 0], ["second.fbx", "Close", 1, 0]]);
+  assert.equal(choices[0].model, first);
+  assert.equal(choices[1].clip, secondClip);
 });
 
 test("preserves a static FBX normal map with the stock normal shader", async () => {
@@ -180,10 +217,10 @@ test("preserves a static FBX normal map with the stock normal shader", async () 
 
   await resolveFbxTextures(model, [sourceFile("paint.png", "source/textures/paint.png", onePixelPng), sourceFile("paint_n.png", "source/textures/paint_n.png", onePixelPng)]);
   assert.equal(model.fbx.textureSummary.resolved, 2);
-  assert.deepEqual(converted.resources.map((resource) => resource.texture), ["APEX_FBX_000_txDiffuse_paint.png", "APEX_FBX_000_txNormal_paint_n.png"]);
+  assert.deepEqual(converted.resources.map((resource) => resource.texture), model.textures.map((texture) => texture.name));
   const reparsed = parseKn5(serializeKn5(model));
   assert.equal(reparsed.materials[0].shader, "ksPerPixelNM");
-  assert.deepEqual(reparsed.materials[0].resources.map((resource) => [resource.slot, resource.texture]), [["txDiffuse", "APEX_FBX_000_txDiffuse_paint.png"], ["txNormal", "APEX_FBX_000_txNormal_paint_n.png"]]);
+  assert.deepEqual(reparsed.materials[0].resources.map((resource) => [resource.slot, resource.texture]), [["txDiffuse", model.textures[0].name], ["txNormal", model.textures[1].name]]);
 });
 
 test("reports FBX maps that have no safe stock KN5 binding", () => {
@@ -211,9 +248,9 @@ test("preserves a supported embedded FBX diffuse image", () => {
   const mesh = new Mesh(triangleGeometry(3), material); mesh.name = "EmbeddedCube"; scene.add(mesh);
   const model = convertFbxScene(scene), reparsed = parseKn5(serializeKn5(model));
   assert.deepEqual(model.fbx.textureSummary, { referenced: 1, resolved: 0, embedded: 1, missing: 0, ambiguous: 0, unsupported: 0, error: 0 });
-  assert.equal(model.textures[0].name, "APEX_FBX_000_txDiffuse_base_color_texture.png");
+  assert.match(model.textures[0].name, /^APEX_FBX_scene_[a-z0-9]{7}_000_txDiffuse_base_color_texture\.png$/);
   assert.deepEqual(model.textures[0].data, onePixelPng);
-  assert.equal(reparsed.materials[0].resources[0].texture, "APEX_FBX_000_txDiffuse_base_color_texture.png");
+  assert.equal(reparsed.materials[0].resources[0].texture, model.textures[0].name);
   assert.deepEqual(reparsed.textures[0].data, onePixelPng);
 });
 

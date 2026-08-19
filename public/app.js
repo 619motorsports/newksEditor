@@ -28,7 +28,7 @@ import { adjustCspSeasonColor, analyzeCspSeasonalOverrides } from "/src/seasons.
 import { auditMaterialShaderProfiles, resolveMaterialRenderProfile } from "/src/shader-profiles.js";
 import { KS_EDITOR_CUBEMAP, WEBGL_CUBEMAP_FACES, reflectionBlurFromExponent, selectReflectionCaptureItems } from "/src/reflections.js";
 import { createCspWindParticles, CSP_WIND_MAP_FORMAT, CSP_WIND_MAP_SIZE, CSP_WIND_PARTICLE_COUNT, updateCspWindParticles } from "/src/csp-wind.js";
-import { parseFbxWithTextures, resolveFbxModelTextures } from "/src/fbx-import.js";
+import { collectFbxAnimations, parseFbxWithTextures, resolveFbxModelTextures } from "/src/fbx-import.js";
 import { applyNodeEdits, composeNodeTransform, decomposeNodeTransform, nodePathEntries } from "/src/node-authoring.js";
 
 const $ = (selector) => document.querySelector(selector);
@@ -70,6 +70,7 @@ let cspTextureFolderFiles = [];
 let assetSkins = [];
 let assetSkinName = "";
 let assetAnimations = [];
+let importedFbxAnimations = [];
 let activeAnimation = null;
 let activeAnimationName = "";
 let activeFbxAnimationIndex = -1;
@@ -247,7 +248,7 @@ async function load(files, workspaceOptions = {}) {
       status.textContent = `Loading ${file.name} · ${index + 1}/${descriptors.length}…`;
       await new Promise((resolve) => requestAnimationFrame(resolve));
       let parsed = descriptor.model || parsedByFile.get(file);
-      if (!parsed) { const bytes=await file.arrayBuffer();parsed=/\.fbx$/i.test(file.name)?await parseFbxWithTextures(bytes,file.name,assetFileIndex):parseKn5(bytes);if(descriptor.driverPose){sharedDriverPoseResult=applyDriverBasePose(parsed,descriptor.driverPose);parsed=sharedDriverPoseResult.model;}if(descriptor.auxiliary==="driver")sharedDriverHideAudit=auditDriverHiddenObjects(parsed,driverConfig?.hideObjects||[]);parsedByFile.set(file, parsed); }
+      if (!parsed) { const bytes=await file.arrayBuffer();parsed=/\.fbx$/i.test(file.name)?await parseFbxWithTextures(bytes,file.webkitRelativePath||file.name,assetFileIndex):parseKn5(bytes);if(descriptor.driverPose){sharedDriverPoseResult=applyDriverBasePose(parsed,descriptor.driverPose);parsed=sharedDriverPoseResult.model;}if(descriptor.auxiliary==="driver")sharedDriverHideAudit=auditDriverHiddenObjects(parsed,driverConfig?.hideObjects||[]);parsedByFile.set(file, parsed); }
       entries.push({ name: descriptor.name || file.name, size: file.size, model: parsed, position: descriptor.position, rotation: descriptor.rotation, lod: descriptor.lod, manifestIndex: descriptor.manifestIndex, auxiliary:descriptor.auxiliary, dynamic: descriptor.dynamic });
     }
     const forceWorkspace = workspaceOptions.forceWorkspace || entries.length > 1 || entries.some((entry) => [...(entry.position || []), ...(entry.rotation || [])].some((value) => Number(value) !== 0));
@@ -338,18 +339,18 @@ function configureAnimationChoices() {
   assetAnimations = discoverAssetAnimations(assetFileIndex);
   activeAnimation = null; activeAnimationName = ""; activeFbxAnimationIndex = -1; animationPosition = 0;
   const select = $("#animation-select"), control = $("#animation-position-control"), slider = $("#animation-position");
-  const imported = model?.fbx?.animations || [];
-  select.replaceChildren(new Option("Bind pose", ""), ...imported.map((clip, index) => new Option(`FBX · ${clip.name}`, `fbx:${index}`)), ...assetAnimations.map((entry) => new Option(`Anim · ${entry.relativePath}`, entry.path)));
-  select.hidden = !assetAnimations.length && !imported.length; select.value = "";
-  select.title = imported.length || assetAnimations.length ? `${imported.length} FBX clips · ${assetAnimations.length} KSANIM files` : "No animation clips discovered";
+  importedFbxAnimations = collectFbxAnimations(loadedModelDescriptors.map((descriptor) => descriptor.model));
+  select.replaceChildren(new Option("Bind pose", ""), ...importedFbxAnimations.map((entry, index) => new Option(`FBX · ${entry.sourceName} · ${entry.clip.name}`, `fbx:${index}`)), ...assetAnimations.map((entry) => new Option(`Anim · ${entry.relativePath}`, entry.path)));
+  select.hidden = !assetAnimations.length && !importedFbxAnimations.length; select.value = "";
+  select.title = importedFbxAnimations.length || assetAnimations.length ? `${importedFbxAnimations.length} FBX clips · ${assetAnimations.length} KSANIM files` : "No animation clips discovered";
   control.hidden = true; slider.value = "0"; $("#animation-position-output").value = "0.000";
   configureKsAnimationExport();
   renderer?.setAnimation(null, 0, "");
 }
 
 function configureKsAnimationExport() {
-  const button = $("#export-ksanim"), clip = activeFbxAnimationIndex >= 0 ? model?.fbx?.animations?.[activeFbxAnimationIndex] : null;
-  button.hidden = !model?.fbx?.animations?.length;
+  const button = $("#export-ksanim"), clip = activeFbxAnimationIndex >= 0 ? importedFbxAnimations[activeFbxAnimationIndex]?.clip : null;
+  button.hidden = !importedFbxAnimations.length;
   button.disabled = !clip || !clip.frameCount;
   button.textContent = clip ? `Export ${clip.name}` : "Export KSANIM";
   button.title = clip ? "Export this FBX clip in the game-compatible KSANIM v2 format" : "Select an imported FBX clip to export it";
@@ -424,12 +425,12 @@ async function selectTrackSurfaceConfig(manifestEntry) {
 
 async function loadSelectedAnimation(event) {
   const entry = assetAnimations.find((candidate) => candidate.path === event.target.value);
-  const importedMatch = event.target.value.match(/^fbx:(\d+)$/), importedIndex = importedMatch ? Number(importedMatch[1]) : -1, imported = model?.fbx?.animations?.[importedIndex];
+  const importedMatch = event.target.value.match(/^fbx:(\d+)$/), importedIndex = importedMatch ? Number(importedMatch[1]) : -1, imported = importedFbxAnimations[importedIndex];
   activeAnimation = null; activeAnimationName = ""; activeFbxAnimationIndex = -1; animationPosition = 0;
   $("#animation-position").value = "0"; $("#animation-position-output").value = "0.000";
   if (imported) {
-    activeAnimation = imported; activeAnimationName = `${model.fbx.sourceName} · ${imported.name}`; activeFbxAnimationIndex = importedIndex;
-    $("#animation-position-control").hidden = !imported.frameCount;
+    activeAnimation = imported.clip; activeAnimationName = `${imported.sourceName} · ${imported.clip.name}`; activeFbxAnimationIndex = importedIndex;
+    $("#animation-position-control").hidden = !imported.clip.frameCount;
     configureKsAnimationExport();
     renderer?.setAnimation(activeAnimation, 0, activeAnimationName);
     if (activeCspConfig) applyCspConfig();
@@ -732,7 +733,7 @@ function downloadText(name, text, type) {
 }
 
 function exportFbxAnimation() {
-  const clip = activeFbxAnimationIndex >= 0 ? model?.fbx?.animations?.[activeFbxAnimationIndex] : null;
+  const clip = activeFbxAnimationIndex >= 0 ? importedFbxAnimations[activeFbxAnimationIndex]?.clip : null;
   if (!clip?.frameCount) return;
   try {
     const bytes = serializeKsAnimation(clip), clipName = clip.name.replace(/[^a-z0-9._-]+/gi, "_").replace(/^_+|_+$/g, "") || "animation";
@@ -944,14 +945,14 @@ function skinTextureInspectorHtml() {
 function updateAnimationUi(value) {
   const select = $("#animation-select");
   if (!select || !value) return;
-  select.title = value.name ? `${value.matchedTracks}/${value.animatedTracks} animated tracks matched ${value.matchedNodes} KN5 nodes` : `${model?.fbx?.animations?.length || 0} FBX clips · ${assetAnimations.length} KSANIM files`;
+  select.title = value.name ? `${value.matchedTracks}/${value.animatedTracks} animated tracks matched ${value.matchedNodes} KN5 nodes` : `${importedFbxAnimations.length} FBX clips · ${assetAnimations.length} KSANIM files`;
   $("#pipeline").textContent = pipelineLabel();
 }
 
 function animationInspectorHtml() {
   const animation = renderer?.animationStatus;
-  if (!assetAnimations.length && !model?.fbx?.animations?.length && !animation?.name) return "";
-  return `<div class="section"><h3>KSANIM preview</h3>${kv("Imported FBX clips", model?.fbx?.animations?.length || 0)}${kv("Discovered files", assetAnimations.length)}${kv("Selected", animation?.name || "Bind pose")}${animation?.name ? `${kv("Format", `KSANIM v${animation.version}`)}${kv("Position", animation.position.toFixed(3))}${kv("Frames", animation.frameCount)}${kv("Tracks", animation.tracks)}${kv("Animated tracks", animation.animatedTracks)}${kv("Matched tracks", animation.matchedTracks)}${kv("Matched KN5 nodes", animation.matchedNodes)}${kv("Skinned meshes", animation.skinnedMeshes)}${kv("Maximum skin displacement", `${format(animation.maxSkinnedDisplacement)} m`)}${kv("Unmatched tracks", animation.unmatchedTracks.length)}${animation.unmatchedTracks.slice(0,12).map((name)=>`<div class="resource"><span>${escapeHtml(name)}</span></div>`).join("")}${animation.unmatchedTracks.length>12?`<span class="empty">${animation.unmatchedTracks.length-12} more unmatched tracks</span>`:""}${(activeAnimation?.warnings||[]).map((warning)=>`<div class="resource"><span>${escapeHtml(warning)}</span></div>`).join("")}` : ""}</div>`;
+  if (!assetAnimations.length && !importedFbxAnimations.length && !animation?.name) return "";
+  return `<div class="section"><h3>KSANIM preview</h3>${kv("Imported FBX clips", importedFbxAnimations.length)}${kv("Discovered files", assetAnimations.length)}${kv("Selected", animation?.name || "Bind pose")}${animation?.name ? `${kv("Format", `KSANIM v${animation.version}`)}${kv("Position", animation.position.toFixed(3))}${kv("Frames", animation.frameCount)}${kv("Tracks", animation.tracks)}${kv("Animated tracks", animation.animatedTracks)}${kv("Matched tracks", animation.matchedTracks)}${kv("Matched KN5 nodes", animation.matchedNodes)}${kv("Skinned meshes", animation.skinnedMeshes)}${kv("Maximum skin displacement", `${format(animation.maxSkinnedDisplacement)} m`)}${kv("Unmatched tracks", animation.unmatchedTracks.length)}${animation.unmatchedTracks.slice(0,12).map((name)=>`<div class="resource"><span>${escapeHtml(name)}</span></div>`).join("")}${animation.unmatchedTracks.length>12?`<span class="empty">${animation.unmatchedTracks.length-12} more unmatched tracks</span>`:""}${(activeAnimation?.warnings||[]).map((warning)=>`<div class="resource"><span>${escapeHtml(warning)}</span></div>`).join("")}` : ""}</div>`;
 }
 
 function workspaceEditCount() {
