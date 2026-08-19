@@ -230,7 +230,8 @@ npm test
   RGB × intensity / 255 conversion and sun-angle interpolation, authorable sun
   heading/height, HDR sky and sun, distance fog, an RGBA16F composition target with
   supported MSAA, full-frame automatic or manual exposure, and the recovered embedded
-  Yebis default display curve, reciprocal gamma, and pre-curve saturation
+  Yebis default display curve, reciprocal gamma, pre-curve saturation, quality-3
+  threshold bright pass, five-level bloom core, screen composition, and output dither
 - Decoded Kunos/CSP smooth-capped Fresnel response, native gloss-to-reflection-mip
   heuristic, a ksEditor-shaped 512² runtime scene cubemap with six-face initialization
   and one-face-per-draw refresh, explicit single-subtree selection, separately loaded
@@ -254,8 +255,8 @@ transparent-layer feedback,
 general CSP template/include expansion,
 randomized dynamic-object motion, subtractive procedural-emissive
 composition, new-geometry/FBX import and writing, full local-light photometric fidelity,
-Yebis glare/bright-pass/dither stages, controlled pixel matching, cloud billboards, and the
-remaining post-processing stack, VAO split-animation blending, normal overrides, dynamic
+Yebis star, ghost, light-shaft, and exact max-61 Gaussian passes, controlled pixel matching,
+cloud billboards, and the remaining post-processing stack, VAO split-animation blending, normal overrides, dynamic
 extra samples, and tree samples remain on the implementation roadmap. CSP's exact
 tree-season variation noise texture is represented by deterministic world-space preview
 noise; the recovered color transform and all non-tree fixed-variation paths are exact. See

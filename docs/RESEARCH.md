@@ -1709,10 +1709,36 @@ is the linear interpolation of the binary's 21-value, 0.05-step normalization ta
 `p`, yielding `0.6653175950`. Those initialized coefficients, rather than the reflected
 `(1, 1)`, are the default values uploaded for the active editor display pass.
 
+The same pass includes the default glare result and output dither. Program 2095 samples
+the glare texture after it evaluates the display curve. It clamps glare to one and uses
+`curve + (1 - curve) × glare`, then applies reciprocal gamma. Finally, it adds a sampled
+dither value with scale `1/255` and offset `-0.5/255`.
+
+The default filter sets glare quality 3, luminance 1.6, threshold 5, bright-pass mode 0,
+and `BLOOM_NUM_LEVELS=0`. `CPostEffect::EndPostEffectScene_InternalProcess` at
+`0x100846c0` maps mode 0 to Yebis bright-pass type 1. Embedded program 493,
+`tech_BrightPassT1_THRESHOLD_S1`, computes
+`clamp(max(source × exposure - threshold, 0) × remap, 0, 64000)`. The shipped remap is
+one. Automatic exposure reads the original HDR scene before this pass, so glare does not
+change the exposure measurement.
+
+`CPostEffect::Initialize` selects the quality table entry `(0.25, 5)` for quality 3.
+Thus, the glare source uses one quarter of the viewport dimensions and the default bloom
+uses five levels. `CRenderGlare::GenerateGlare_Bloom_CompositeSubLevels` at `0x100dbdd0`
+and embedded program 407, `tech_MadT5`, prove an equal RGB weight for all five float-HDR
+levels. `GetBloomCompositeLuminanceScale` at `0x100e14f0` calculates each weight as
+`1 × 0.035 × 5 × 1.6 × 0.038 = 0.01064` for the installed custom shape.
+
+Apex now reproduces the recovered source scale, level count, bright-pass equation,
+composite weights, screen blend, and dither scale. It uses a portable nine-tap separable
+Gaussian at each level. Yebis uses its `GaussianFilterMax61x61_2Pass` implementation, so
+exact kernel width and sampling remain a pixel-matching gate. The star, ghost, and
+light-shaft branches also remain outside this bloom-core increment.
+
 The same binary preserves distinct linear, linear-saturated, Reinhard, luminance,
 logarithmic, and pre-map shader variants. The default post filter sets adaptation delay
 to zero, so Apex's immediate event-driven exposure is consistent with this shipped
-editor configuration; Yebis glare/bright-pass composition, dither, non-default curves,
+editor configuration. Yebis star, ghost, light-shaft, exact Gaussian, non-default curves,
 and controlled editor/game pixel matching remain fidelity work. The legacy non-Yebis
 SDK shaders separately expose a temporal adaptation rate, but that dormant path is not
 substituted for the active default.

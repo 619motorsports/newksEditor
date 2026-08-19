@@ -8,6 +8,25 @@ export const KS_EDITOR_TONEMAP = Object.freeze({
   inputFloor: 1 / 16384,
   outputEpsilon: 1 / 4194304
 });
+export const KS_EDITOR_GLARE = Object.freeze({
+  enabled: true,
+  quality: 3,
+  sourceScale: 0.25,
+  levels: 5,
+  luminance: 1.6,
+  threshold: 5,
+  brightPassType: 1,
+  brightPassRemap: 1,
+  bloomFilterThreshold: 0.002,
+  bloomGaussianRadiusScale: 0.95,
+  bloomLuminanceGamma: 2,
+  generationRangeScale: 1,
+  shapeLuminance: 5,
+  shapeBloomLuminance: 0.038,
+  compositeBase: 0.035,
+  ditherScale: 1 / 255,
+  ditherOffset: -0.5 / 255
+});
 export const CSP_LIGHT_FADE_AT_DEFAULT = 200;
 export const CSP_LIGHT_FADE_SMOOTH_DEFAULT = 80;
 export const CSP_SPOT_DEGREES_TO_RADIANS = 0.017453294;
@@ -33,6 +52,17 @@ export function ksEditorYebisToneMap(rgb, exposure = 1, { gamma = KS_EDITOR_EXPO
     const curve = Math.max(0, Math.min(1, (1 - decay) * shoulder * shoulder));
     return Math.pow(Math.min(1, curve + KS_EDITOR_TONEMAP.outputEpsilon), exponent);
   });
+}
+
+export function ksEditorGlareBrightPass(rgb, exposure = 1, threshold = KS_EDITOR_GLARE.threshold, remap = KS_EDITOR_GLARE.brightPassRemap) {
+  const source = Array.isArray(rgb) ? rgb.slice(0, 3).map((value) => Math.max(0, Number(value) || 0)) : [0, 0, 0];
+  while (source.length < 3) source.push(0);
+  const gain = Math.max(0, Number(exposure) || 0), cutoff = Math.max(0, Number(threshold) || 0), scale = Math.max(0, Number(remap) || 0);
+  return source.map((value) => Math.min(64000, Math.max(0, value * gain - cutoff) * scale));
+}
+
+export function ksEditorBloomCompositeScale({ range = KS_EDITOR_GLARE.generationRangeScale, glareLuminance = KS_EDITOR_GLARE.luminance, shapeLuminance = KS_EDITOR_GLARE.shapeLuminance, bloomLuminance = KS_EDITOR_GLARE.shapeBloomLuminance } = {}) {
+  return Math.max(0, Number(range) || 0) * KS_EDITOR_GLARE.compositeBase * Math.max(0, Number(shapeLuminance) || 0) * Math.max(0, Number(glareLuminance) || 0) * Math.max(0, Number(bloomLuminance) || 0);
 }
 
 export function cspLineClosestPoint(from, to, position) {

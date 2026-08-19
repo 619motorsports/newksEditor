@@ -197,7 +197,10 @@ vertical slice is only the foundation.
   transparent layers. Grass blades share HDR weather/fog lighting, receive the same
   cascades, and use their tapered instanced geometry in viewport and probe shadow maps;
   reflection sampling and refraction are disabled during capture
-  to avoid recursive feedback. Yebis glare, bright-pass and dither composition,
+  to avoid recursive feedback. The default Yebis path now uses its recovered quality-3
+  quarter-resolution source, five bloom levels, threshold bright pass, equal native
+  composite weights, screen blend, and output-dither scale. Its portable separable Gaussian
+  approximates Yebis's max-61 filter. Yebis star, ghost, light-shaft, exact Gaussian,
   non-default tone functions, cloud billboards, exact local-shadow filtering/scheduling, and controlled
   game-image matching remain. GrassFX full-density GPU dispatch, moving-vehicle
   air/deformation stamps, CSP's exact local-shadow Gaussian filter, wet cubemap

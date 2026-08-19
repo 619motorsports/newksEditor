@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { cspLightDistanceFade, cspLightReceiverVisible, cspLineClosestPoint, cspLineLightSample, cspSecondarySpotAttenuation, cspSecondarySpotPacking, cspSpotConeFactor, cspSpotConePacking, cspSpotEdgeFactors, cspSpotEdgePacking, CSP_SPOT_HALF_ANGLE_MAX, CSP_SPOT_SHARPNESS_MAX, evaluateKsLighting, ksEditorAutoExposure, ksEditorYebisToneMap, KS_EDITOR_DEFAULT_WEATHER, KS_EDITOR_TONEMAP, parseKsWeatherLighting, STOCK_WEATHER_PRESETS, sunDirectionFromAngles } from "../src/lighting.js";
+import { cspLightDistanceFade, cspLightReceiverVisible, cspLineClosestPoint, cspLineLightSample, cspSecondarySpotAttenuation, cspSecondarySpotPacking, cspSpotConeFactor, cspSpotConePacking, cspSpotEdgeFactors, cspSpotEdgePacking, CSP_SPOT_HALF_ANGLE_MAX, CSP_SPOT_SHARPNESS_MAX, evaluateKsLighting, ksEditorAutoExposure, ksEditorBloomCompositeScale, ksEditorGlareBrightPass, ksEditorYebisToneMap, KS_EDITOR_DEFAULT_WEATHER, KS_EDITOR_GLARE, KS_EDITOR_TONEMAP, parseKsWeatherLighting, STOCK_WEATHER_PRESETS, sunDirectionFromAngles } from "../src/lighting.js";
 
 test("matches the initialized default Yebis display curve and reciprocal gamma", () => {
   assert.deepEqual(KS_EDITOR_TONEMAP, { function: -1, mappingFactor: 32, characteristicCurve: 0.5, curveScale: 2.6581413745880127, curveShoulder: 0.6653175950050354, inputFloor: 1 / 16384, outputEpsilon: 1 / 4194304 });
@@ -20,6 +20,13 @@ test("clamps full-frame automatic exposure to the installed editor range", () =>
   assert.equal(ksEditorAutoExposure(10), 0.2);
   assert.equal(ksEditorAutoExposure(0.01), 0.5);
   assert.equal(ksEditorAutoExposure(Number.NaN), 0.5);
+});
+
+test("matches the default Yebis threshold bright pass and bloom scale", () => {
+  assert.deepEqual(KS_EDITOR_GLARE, { enabled: true, quality: 3, sourceScale: 0.25, levels: 5, luminance: 1.6, threshold: 5, brightPassType: 1, brightPassRemap: 1, bloomFilterThreshold: 0.002, bloomGaussianRadiusScale: 0.95, bloomLuminanceGamma: 2, generationRangeScale: 1, shapeLuminance: 5, shapeBloomLuminance: 0.038, compositeBase: 0.035, ditherScale: 1 / 255, ditherOffset: -0.5 / 255 });
+  assert.deepEqual(ksEditorGlareBrightPass([2, 10, 20], 0.5), [0, 0, 5]);
+  assert.deepEqual(ksEditorGlareBrightPass([200000, -1, Number.NaN], 1, 0, 2), [64000, 0, 0]);
+  assert.ok(Math.abs(ksEditorBloomCompositeScale() - 0.01064) < 1e-12);
 });
 
 test("ships all seven stock SDK weather-lighting presets", () => {
