@@ -13,6 +13,27 @@ function unquote(value) {
   return String(value || "").trim().replace(/^(['"])(.*)\1$/, "$2");
 }
 
+function iniNumber(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) throw new TypeError("Manifest values must be finite numbers");
+  return Number(number.toFixed(6)).toString();
+}
+
+function iniVector(value, length, label) {
+  const values = Array.from(value || [], Number);
+  if (values.length !== length || values.some((item) => !Number.isFinite(item))) throw new TypeError(`${label} must contain ${length} finite numbers`);
+  return values.map(iniNumber).join(", ");
+}
+
+function iniFile(value) {
+  const file = String(value || "").trim();
+  if (!file) throw new TypeError("Manifest entries must have a file name");
+  if (!/[\s;,]/.test(file)) return file;
+  if (!file.includes("'")) return `'${file}'`;
+  if (!file.includes('"')) return `"${file}"`;
+  throw new TypeError(`Manifest file name cannot contain spaces and both quote characters: ${file}`);
+}
+
 function finiteNumber(section, key, fallback, warnings, source, required = false) {
   const raw = lastValue(section, key);
   if (raw === "") {
@@ -100,6 +121,65 @@ export function parseCarLodsIni(text, source = "data/lods.ini") {
   };
 }
 
+export function serializeModelsIni(workspace) {
+  const files = Array.isArray(workspace) ? workspace : workspace?.files;
+  if (!Array.isArray(files)) throw new TypeError("A track manifest needs workspace files");
+  const sections = [];
+  const usedModels = new Set(files.map((file) => file.manifestIndex).filter(Number.isInteger));
+  const usedDynamic = new Set(files.map((file) => file.dynamic?.index).filter(Number.isInteger));
+  let modelIndex = 0, dynamicIndex = 0;
+  const fallback = (used, dynamic) => {
+    let index = dynamic ? dynamicIndex : modelIndex;
+    while (used.has(index)) index++;
+    used.add(index);
+    if (dynamic) dynamicIndex = index + 1; else modelIndex = index + 1;
+    return index;
+  };
+  for (const file of files.filter((entry) => !entry.auxiliary)) {
+    if (file.dynamic) {
+      const item = file.dynamic, index = Number.isInteger(item.index) ? item.index : fallback(usedDynamic, true);
+      sections.push([
+        `[DYNAMIC_OBJECT_${index}]`, `FILE=${iniFile(file.name)}`,
+        `PROBABILITY=${iniNumber(item.probability ?? 100)}`,
+        `MULT=${iniVector(item.multiplicity || [1, 1], 2, "MULT")}`,
+        `POS_MODE=${String(item.posMode || "RANDOM").trim().toUpperCase()}`,
+        `RND_POS_CENTER=${iniVector(item.positionCenter || file.position || [0, 0, 0], 3, "RND_POS_CENTER")}`,
+        `RND_POS_RANGE=${iniVector(item.positionRange || [0, 0, 0], 3, "RND_POS_RANGE")}`,
+        `VEL_MODE=${String(item.velMode || "RANDOM").trim().toUpperCase()}`,
+        `RND_VEL_BASE=${iniVector(item.velocityBase || [0, 0, 0], 3, "RND_VEL_BASE")}`,
+        `RND_VEL_RANGE=${iniVector(item.velocityRange || [0, 0, 0], 3, "RND_VEL_RANGE")}`,
+        ...(item.playWav ? [`PLAY_WAV=${iniFile(item.playWav)}`] : [])
+      ].join("\n"));
+      continue;
+    }
+    const index = Number.isInteger(file.manifestIndex) ? file.manifestIndex : fallback(usedModels, false);
+    sections.push([
+      `[MODEL_${index}]`, `FILE=${iniFile(file.name)}`,
+      `POSITION=${iniVector(file.position || [0, 0, 0], 3, "POSITION")}`,
+      `ROTATION=${iniVector(file.rotation || [0, 0, 0], 3, "ROTATION")}`
+    ].join("\n"));
+  }
+  if (!sections.length) throw new TypeError("A track manifest needs at least one model file");
+  return `${sections.join("\n\n")}\n`;
+}
+
+export function serializeCarLodsIni(workspace) {
+  const files = Array.isArray(workspace) ? workspace : workspace?.files;
+  if (!Array.isArray(files)) throw new TypeError("A car LOD manifest needs workspace files");
+  const sections = [];
+  if (!Array.isArray(workspace)) {
+    if (workspace.cockpitHrDistance !== null && workspace.cockpitHrDistance !== undefined) sections.push(`[COCKPIT_HR]\nDISTANCE_SWITCH=${iniNumber(workspace.cockpitHrDistance)}`);
+    if (workspace.driverHrDistance !== null && workspace.driverHrDistance !== undefined) sections.push(`[DRIVER_HR]\nDISTANCE_SWITCH=${iniNumber(workspace.driverHrDistance)}`);
+  }
+  const lods = files.filter((file) => file.lod && !file.auxiliary).sort((a, b) => a.lod.index - b.lod.index);
+  if (!lods.length) throw new TypeError("A car LOD manifest needs at least one LOD file");
+  for (const file of lods) sections.push([
+    `[LOD_${file.lod.index}]`, `FILE=${iniFile(file.name)}`,
+    `IN=${iniNumber(file.lod.in)}`, `OUT=${iniNumber(file.lod.out)}`
+  ].join("\n"));
+  return `${sections.join("\n\n")}\n`;
+}
+
 export function carLodVisible(lod, distance, selectedIndex = null) {
   if (!lod) return true;
   if (selectedIndex !== null && selectedIndex !== undefined) return lod.index === Number(selectedIndex);
@@ -161,7 +241,7 @@ export function mergeKn5Models(entries, options = {}) {
     const root = remapNode(model.root, materialOffset), transform = modelPlacementMatrix(entry.position, entry.rotation);
     const workspaceLod = entry.lod ? { index: Number(entry.lod.index), in: Number(entry.lod.in) || 0, out: Number(entry.lod.out) || 0 } : null;
     children.push({ kind: "node", name: entry.name || `MODEL_${files.length}`, active: true, transform, children: [root], workspaceFile: entry.name || "", workspaceLod, workspaceAuxiliary:entry.auxiliary||null });
-    files.push({ name: entry.name || "", size: Math.max(0, Number(entry.size) || model.byteLength || 0), version: model.version, materialOffset, materials: model.materials.length, textures: model.textures.length, position: entry.position || [0, 0, 0], rotation: entry.rotation || [0, 0, 0], lod: workspaceLod, auxiliary:entry.auxiliary||null, dynamic: entry.dynamic || null, protected: Boolean(model.encryption) });
+    files.push({ name: entry.name || "", size: Math.max(0, Number(entry.size) || model.byteLength || 0), version: model.version, materialOffset, materials: model.materials.length, textures: model.textures.length, position: entry.position || [0, 0, 0], rotation: entry.rotation || [0, 0, 0], lod: workspaceLod, manifestIndex:Number.isInteger(entry.manifestIndex)?entry.manifestIndex:null, auxiliary:entry.auxiliary||null, dynamic: entry.dynamic || null, protected: Boolean(model.encryption) });
     if (model.encryption) protectedFiles.push({ name: entry.name || "", encryption: model.encryption });
     bytesRead += model.bytesRead || 0; byteLength += model.byteLength || 0; source = Math.max(source, model.source || 0); versions.add(model.version);
   }

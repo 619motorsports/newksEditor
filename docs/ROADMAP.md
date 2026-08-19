@@ -42,8 +42,8 @@ vertical slice is only the foundation.
   normal maps keep a generated flat-normal DDS. The inspector reports map types that
   have no safe stock binding. The importer samples each clip into 100 local-transform frames.
   The editor previews these frames and exports the native KSANIM v2 layout.
-  Bump-map conversion, packed material-map composition, direct geometry and
-  hierarchy editing, protected-payload preservation, and in-game output validation
+  Bump-map conversion, packed material-map composition, direct geometry editing,
+  protected-payload preservation, and in-game output validation
   remain. The KN5 v5/v6 writer also round-trips real static, textured, and skinned
   assets byte-for-byte.
 - Complete driver texture export/reload/review and hierarchy-edit workflows. Native
@@ -53,7 +53,8 @@ vertical slice is only the foundation.
   against their inverse-bind matrices, and selected shared driver models receive the
   configured KNH base pose before joining every car LOD. Packed or unpacked car `data/lods.ini` projects now load every
   contiguous LOD, preserve distance bands, expose cockpit/driver switches, and allow
-  automatic or forced LOD inspection; authoring and exporting those manifests remain.
+  automatic or forced LOD inspection. LOD ranges and distance switches now support
+  live editing, undo, recovery, project persistence, validation, and `lods.ini` export.
 
 ## 2. CSP authoring preview
 
@@ -231,7 +232,8 @@ vertical slice is only the foundation.
   skin metadata/editing, animation authoring, cross-folder shared-driver access without
   a browser file grant, lights,
   damage/dirt, instruments, steering/driver alignment, collider editing, and LOD-manifest
-  authoring remain.
+  file-name authoring remain. LOD ranges and cockpit/driver distance switches now support
+  live editing, project persistence, validation, and `lods.ini` export.
 - Track workspace: static multi-KN5 layouts now load from ordered `models*.ini`
   manifests or manual multi-file selection, including placement transforms and
   collision diagnostics. `DYNAMIC_OBJECT_n` entries now parse and load at their
@@ -244,7 +246,9 @@ vertical slice is only the foundation.
   drive the viewport with their configured basis, FOV, and clip planes. Referenced
   spline CSVs resolve and use the game's world-Y rotation and normalized sampling for
   manual path-position preview and configured-duration playback; live focused-car
-  targeting remains. Layout authoring, exact environment matching, remaining shaders
+  targeting remains. Static layout positions and rotations now support live editing,
+  project persistence, validation, and `models.ini` export. Dynamic object sections
+  retain their parsed fields during export. Exact environment matching, remaining shaders
   and CSP effects, and performance/spatial diagnostics remain.
 - Search, material editing, and direct hierarchy editing now form a tested vertical
   slice. Hierarchy edits use stable node paths and support names, active states,

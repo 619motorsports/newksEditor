@@ -4,13 +4,15 @@ import { createEditorProject, editorProjectCspEditCount, editorProjectEditCount,
 import { evaluateCspConfig, parseCspIni } from "../src/csp-config.js";
 
 test("normalizes portable projects and rejects incompatible input", () => {
-  const project = normalizeEditorProject({ format: "apex-editor-project", version: 1, asset: { name: "car.kn5", size: 42, kn5Version: 6 }, materialEdits: { body: { shader: "smCarPaint", properties: { ksDiffuse: 0.5, ksEmissive: [1, 0, 0] }, resources: { txMaps: { color: [1, 1, 1, 1] } } } }, meshEdits: { BODY: { isTransparent: false, layer: 3 } }, nodeEdits: { "0": { name: "BODY_RENAMED", active: false, transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 2, 3, 4, 1] } } });
+  const project = normalizeEditorProject({ format: "apex-editor-project", version: 1, asset: { name: "car.kn5", size: 42, kn5Version: 6 }, materialEdits: { body: { shader: "smCarPaint", properties: { ksDiffuse: 0.5, ksEmissive: [1, 0, 0] }, resources: { txMaps: { color: [1, 1, 1, 1] } } } }, meshEdits: { BODY: { isTransparent: false, layer: 3 } }, nodeEdits: { "0": { name: "BODY_RENAMED", active: false, transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 2, 3, 4, 1] } }, workspaceEdits: { files: { "1": { lodIn: 15, lodOut: 45 } }, cockpitHrDistance: 6 } });
   assert.equal(project.asset.name, "car.kn5");
-  assert.equal(editorProjectEditCount(project), 9);
+  assert.equal(editorProjectEditCount(project), 12);
   assert.equal(editorProjectCspEditCount(project), 6);
   assert.equal(project.nodeEdits["0"].name, "BODY_RENAMED");
   assert.equal(project.nodeEdits["0"].active, false);
   assert.deepEqual(project.nodeEdits["0"].transform.slice(12, 15), [2, 3, 4]);
+  assert.deepEqual(project.workspaceEdits.files["1"], { lodIn: 15, lodOut: 45 });
+  assert.equal(project.workspaceEdits.cockpitHrDistance, 6);
   assert.throws(() => normalizeEditorProject({ format: "other", version: 1 }), /Not an Apex Editor project/);
   assert.throws(() => normalizeEditorProject({ format: "apex-editor-project", version: 99 }), /Unsupported/);
 });

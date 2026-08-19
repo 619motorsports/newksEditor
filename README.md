@@ -27,6 +27,9 @@ bands. The car preview can follow camera distance or force an individual LOD. Us
 **Open showroom** to add a separate showroom/environment KN5; its resources remain
 file-scoped and its subtree becomes the automatic live-reflection source. The reflection
 selector can instead supply any single named scene subtree, matching ksEditor.
+Open the **Model** inspector to edit the active workspace manifest. For a track, edit each static model position and rotation.
+For a car, edit each LOD range and the cockpit or driver distance switch. Press Enter to save a field.
+The preview, undo history, recovery data, and project file use the same values. Select **Export models.ini** or **Export lods.ini** to download the manifest.
 Discovered
 `skins/<name>` folders can replace matching KN5 texture basenames just as they do in
 the game. Discovered `.ksanim` files can be sampled on a normalized timeline with
@@ -92,7 +95,9 @@ npm test
 - Ordered multi-KN5 track workspaces from manual selection or `models*.ini`, with
   per-file hierarchy roots, game-compatible placement transforms, material remapping,
   deterministic texture-name replacement, collision diagnostics, and deterministic
-  center previews for dynamic objects with their random ranges and velocity metadata
+  center previews for dynamic objects with their random ranges and velocity metadata.
+  Static model positions and rotations support live editing, undo, recovery, project
+  persistence, and `models.ini` export. Dynamic object sections retain all parsed fields during export.
 - Packed or unpacked `data/surfaces.ini` physics inspection and assembled-layout validation
   using the game's built-in `WALL`, stock system surfaces, track override precedence,
   nonzero sector IDs, and unique substring binding; fallback and ambiguous physics
@@ -108,7 +113,8 @@ npm test
   diagnostics, and virtual read-only INI files; packed or unpacked car `data/lods.ini`
   workspaces with contiguous `LOD_n` loading, `IN`/`OUT`
   range validation, cockpit/driver distance-switch inspection, engine-compatible
-  FOV-normalized automatic selection, and forced per-LOD inspection
+  FOV-normalized automatic selection, and forced per-LOD inspection. LOD ranges and
+  distance switches support live editing, undo, recovery, project persistence, and `lods.ini` export.
 - Car collision validation for `collider.kn5` texture/material rules, SDK triangle
   budget, origin transform, dimensions, degenerate triangles, welded boundary and
   non-manifold edges, plus packed or unpacked `colliders.ini` bottom-box inspection
