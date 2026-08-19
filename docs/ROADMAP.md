@@ -246,12 +246,13 @@ vertical slice is only the foundation.
   manual path-position preview and configured-duration playback; live focused-car
   targeting remains. Layout authoring, exact environment matching, remaining shaders
   and CSP effects, and performance/spatial diagnostics remain.
-- Searchable hierarchy, multi-select, undo/redo, validation findings, batch editing,
-  autosave/recovery, recent projects, and portable project files. Search, material
-  editing, 100-step undo/redo, autosave/recovery, portable project JSON, and CSP
-  export now form a tested vertical slice; track and archive validation are also
-  exposed in the inspector. Multi-select, batch editing, recent projects, and
-  geometry/hierarchy edits remain.
+- Search, material editing, and direct hierarchy editing now form a tested vertical
+  slice. Hierarchy edits use stable node paths and support names, active states,
+  local position, XYZ rotation, and scale. The preview, 100-step undo history,
+  autosave recovery, portable project JSON, and KN5 export use the same edits.
+  CSP export contains only material and mesh edits because CSP cannot change the
+  source hierarchy. Track and archive validation are also available in the inspector.
+  Multi-select, batch editing, recent projects, and geometry edits remain.
 
 ## 4. Distribution and proof
 
@@ -263,7 +264,8 @@ vertical slice is only the foundation.
 - Maintain golden-image comparisons for stock and CSP rendering on cars and tracks.
   A reusable CDP browser-smoke tool now provides deterministic capture hashes and
   WebGL/JavaScript error checks as the foundation for those comparisons. A separate
-  authoring smoke check proves edit, undo, redo, recovery, and CSP serialization on
-  a production KN5 in a real WebGL browser.
+  authoring smoke check proves edit, undo, redo, recovery, and serialization in a
+  real WebGL browser. Hierarchy checks also prove recursive visibility updates and
+  keep CSP export disabled for hierarchy-only projects.
 - Verify generated KN5/config outputs in Assetto Corsa and document unsupported CSP
   features. Completion requires passing all these gates, not merely launching the UI.

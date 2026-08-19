@@ -48,6 +48,18 @@ function cleanMeshEdit(value) {
   return Object.keys(output).length ? output : null;
 }
 
+function cleanNodeEdit(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const output = {};
+  if (typeof value.name === "string" && value.name.trim()) output.name = value.name.trim().slice(0, 1024);
+  if (typeof value.active === "boolean") output.active = value.active;
+  if (Array.isArray(value.transform) && value.transform.length === 16) {
+    const transform = value.transform.map(Number);
+    if (transform.every(Number.isFinite)) output.transform = transform;
+  }
+  return Object.keys(output).length ? output : null;
+}
+
 export function createEditorProject(asset = {}) {
   return {
     format: PROJECT_FORMAT,
@@ -58,7 +70,8 @@ export function createEditorProject(asset = {}) {
       kn5Version: Math.max(0, Number(asset.kn5Version) || 0)
     },
     materialEdits: Object.create(null),
-    meshEdits: Object.create(null)
+    meshEdits: Object.create(null),
+    nodeEdits: Object.create(null)
   };
 }
 
@@ -68,6 +81,7 @@ export function normalizeEditorProject(value) {
   const project = createEditorProject(value.asset || {});
   project.materialEdits = safeRecord(value.materialEdits, (item) => cleanEdit(item));
   project.meshEdits = safeRecord(value.meshEdits, (item) => cleanMeshEdit(item));
+  project.nodeEdits = safeRecord(value.nodeEdits, (item) => cleanNodeEdit(item));
   return project;
 }
 
@@ -91,7 +105,14 @@ export function formatEditorValue(value) {
 export function editorProjectEditCount(project) {
   const materials = Object.values(project?.materialEdits || {}).reduce((count, edit) => count + Object.keys(edit.properties || {}).length + Object.keys(edit.resources || {}).length + ["shader", "blendMode", "depthMode", "cullMode"].filter((key) => edit[key]).length, 0);
   const meshes = Object.values(project?.meshEdits || {}).reduce((count, edit) => count + ["isTransparent", "castShadows", "layer", "lodIn", "lodOut"].filter((key) => edit[key] !== undefined).length, 0);
-  return materials + meshes;
+  const nodes = Object.values(project?.nodeEdits || {}).reduce((count, edit) => count + ["name", "active", "transform"].filter((key) => edit[key] !== undefined).length, 0);
+  return materials + meshes + nodes;
+}
+
+export function editorProjectCspEditCount(project) {
+  const total = editorProjectEditCount(project);
+  const nodes = Object.values(project?.nodeEdits || {}).reduce((count, edit) => count + ["name", "active", "transform"].filter((key) => edit[key] !== undefined).length, 0);
+  return total - nodes;
 }
 
 function quoteListItem(value) {

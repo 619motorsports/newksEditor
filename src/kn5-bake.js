@@ -1,3 +1,5 @@
+import { applyNodeEdits } from "./node-authoring.js";
+
 function cloneNode(node) { return { ...node, transform:node.transform?[...node.transform]:node.transform, bounds:node.bounds?[...node.bounds]:node.bounds, bones:node.bones?.map((bone)=>({...bone,transform:[...bone.transform]})), children:(node.children||[]).map(cloneNode) }; }
 
 function cloneModel(model) {
@@ -14,7 +16,7 @@ function setProperty(property, value) {
 }
 
 export function bakeEditorProjectIntoKn5(model, project) {
-  const output=cloneModel(model),warnings=[],applied={materials:0,properties:0,resources:0,meshes:0};
+  const output=cloneModel(model),warnings=[],applied={materials:0,properties:0,resources:0,meshes:0,nodes:0};
   const textureIds=new Map(output.textures.map((texture,index)=>[texture.name.toLowerCase(),index]));
   for(const material of output.materials){const match=matchingEntry(project?.materialEdits,material.name);if(!match)continue;const [editName,edit]=match;let changed=false;
     if(edit.shader){material.shader=edit.shader;changed=true;}
@@ -25,5 +27,6 @@ export function bakeEditorProjectIntoKn5(model, project) {
     if(changed)applied.materials++;
   }
   const visit=(node)=>{if(node.kind==="mesh"||node.kind==="skinnedMesh"){const match=matchingEntry(project?.meshEdits,node.name);if(match){const edit=match[1];if(edit.isTransparent!==undefined)node.transparent=edit.isTransparent;if(edit.castShadows!==undefined)node.castShadows=edit.castShadows;if(edit.layer!==undefined)node.layer=edit.layer;if(edit.lodIn!==undefined)node.lodIn=edit.lodIn;if(edit.lodOut!==undefined)node.lodOut=edit.lodOut;applied.meshes++;}}for(const child of node.children||[])visit(child);};visit(output.root);
+  applied.nodes=applyNodeEdits(output.root,project?.nodeEdits,warnings);
   return { model:output,warnings,applied };
 }

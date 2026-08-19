@@ -85,6 +85,10 @@ npm test
   an inactive ancestor or a mesh with `visible`/`renderable` disabled stays hidden.
   Dimmed hierarchy rows remain selectable, and **Show hidden** exposes all such
   geometry explicitly for authoring inspection
+- Direct hierarchy authoring for node names, active states, and local transforms.
+  Transform controls use position, XYZ rotation in degrees, and scale. Stable
+  root-relative paths keep duplicate names independent. Edits update the preview,
+  support undo and recovery, save in project JSON, and bake into KN5 exports.
 - Ordered multi-KN5 track workspaces from manual selection or `models*.ini`, with
   per-file hierarchy roots, game-compatible placement transforms, material remapping,
   deterministic texture-name replacement, collision diagnostics, and deterministic
@@ -271,8 +275,8 @@ wet cubemap reflection and negative-wetness snow response,
 transparent-layer feedback,
 general CSP template/include expansion,
 randomized dynamic-object motion, subtractive procedural-emissive
-composition, FBX bump-map conversion and packed material maps, direct hierarchy and
-geometry editing, full local-light photometric fidelity,
+composition, FBX bump-map conversion and packed material maps, geometry editing,
+full local-light photometric fidelity,
 Yebis star, ghost, light-shaft, non-default max-61 Gaussian passes, controlled pixel matching,
 cloud billboards, and the remaining post-processing stack, VAO split-animation blending, normal overrides, dynamic
 extra samples, and tree samples remain on the implementation roadmap. CSP's exact
@@ -327,6 +331,9 @@ node tools/browser-smoke.mjs --model car.kn5 --assets path/to/car \
 
 Use `--resource txDiffuse --resource-value 'color: 1, 0, 0, 1'` to exercise a
 resource override, or `--mesh-field lodOut --mesh-value 25` for a mesh adjustment.
+Use `--node-field active --node-value false` for a hierarchy edit. The node fields
+also include `name`, `position`, `rotation`, and `scale`. Use `--node NODE` instead
+of `--mesh MESH` to edit the transform of a non-mesh node.
 The check verifies rendering, undo, redo, autosave recovery, portable-project reopen,
 project state, generated CSP, JavaScript errors, and WebGL errors.
 

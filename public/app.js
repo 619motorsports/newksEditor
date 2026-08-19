@@ -1,7 +1,7 @@
 import { computeKn5Visibility, parseKn5, propertyValue, walkNodes } from "/src/kn5.js";
 import { evaluateCspConfig, expandCspMaterialTemplates, parseCspIni } from "/src/csp-config.js";
 import { customEmissiveAtlasSize } from "/src/custom-emissive.js";
-import { cloneEditorProject, createEditorProject, editorProjectEditCount, formatEditorValue, normalizeEditorProject, parseEditorValue, serializeEditorCsp, serializeEditorProject } from "/src/editor-project.js";
+import { cloneEditorProject, createEditorProject, editorProjectCspEditCount, editorProjectEditCount, formatEditorValue, normalizeEditorProject, parseEditorValue, serializeEditorCsp, serializeEditorProject } from "/src/editor-project.js";
 import { decodeDdsRgba, inspectDds } from "/src/dds.js";
 import { createAssetFileIndex, discoverAssetAnimations, discoverAssetSkins, externalResourcePaths, matchSkinTextures, normalizeAssetPath, resolveAssetFile } from "/src/asset-files.js";
 import { carLodDistance, carLodVisible, mergeKn5Models, parseCarLodsIni, parseModelsIni } from "/src/kn5-workspace.js";
@@ -26,6 +26,7 @@ import { auditMaterialShaderProfiles, resolveMaterialRenderProfile } from "/src/
 import { KS_EDITOR_CUBEMAP, WEBGL_CUBEMAP_FACES, reflectionBlurFromExponent, selectReflectionCaptureItems } from "/src/reflections.js";
 import { createCspWindParticles, CSP_WIND_MAP_FORMAT, CSP_WIND_MAP_SIZE, CSP_WIND_PARTICLE_COUNT, updateCspWindParticles } from "/src/csp-wind.js";
 import { parseFbxWithTextures, resolveFbxTextures } from "/src/fbx-import.js";
+import { applyNodeEdits, composeNodeTransform, decomposeNodeTransform, nodePathEntries } from "/src/node-authoring.js";
 
 const $ = (selector) => document.querySelector(selector);
 const fileInput = $("#file");
@@ -111,6 +112,9 @@ let vaoError = "";
 let loadedModelDescriptors = [];
 let loadedWorkspaceOptions = {};
 let reflectionRootChoices = [];
+let nodePathByNode = new WeakMap();
+let nodeByPath = new Map();
+let nodeBaselines = new WeakMap();
 
 $("#gpu").textContent = renderer ? renderer.description : "WebGL 2 is unavailable";
 document.querySelectorAll("[data-file-mirror]").forEach((input) => input.addEventListener("change", () => load([...input.files])));
@@ -250,6 +254,9 @@ async function load(files, workspaceOptions = {}) {
     if (renderer) { renderer.isolate = false; renderer.surfaceOverlay = false; renderer.showHidden = false; }
     $("#isolate").disabled = true; $("#isolate").classList.remove("active"); $("#frame").textContent = "Frame scene";
     $("#show-hidden").disabled = !renderer; $("#show-hidden").classList.remove("active"); $("#show-hidden").textContent = "Show hidden";
+    initializeNodeAuthoring(model.root);
+    initializeEditorProject(modelFile);
+    applyProjectNodeEdits();
     const nodes = walkNodes(model.root);
     const meshes = nodes.filter(({ node }) => node.kind === "mesh" || node.kind === "skinnedMesh");
     sceneVisibility = computeKn5Visibility(model.root);
@@ -257,7 +264,6 @@ async function load(files, workspaceOptions = {}) {
     const triangles = meshes.reduce((sum, { node }) => sum + node.indices.length / 3, 0);
     modelSummary = { nodes, meshes, previewMeshes, triangles };window.__apexFbx=model.fbx||null;
     trackAudit = model.workspace?.kind === "track" ? auditTrackModel(model, trackSurfaceConfig) : null;trackSurfaceBindings=trackAudit?new Map(meshes.map(({node})=>[node,resolveTrackSurface(node.name,trackSurfaceConfig)])):new Map();window.__apexTrackAudit=trackAudit;carHierarchyAudit=model.workspace?.kind==="carLods"?auditCarHierarchy(model):null;window.__apexCarHierarchyAudit=carHierarchyAudit;refreshCarColliderAudit();
-    initializeEditorProject(modelFile);
     $("#welcome").hidden = true;
     $("#stats").hidden = false;
     $("#stats").innerHTML = `${previewMeshes.length.toLocaleString()} renderable / ${meshes.length.toLocaleString()} meshes<br>${Math.round(triangles).toLocaleString()} triangles<br>${model.materials.length} materials${model.workspace ? `<br>${model.workspace.files.length} KN5 files` : ""}`;
@@ -532,6 +538,56 @@ function projectStorageKey(file = modelFile) {
   return `apex-editor:project:${file.name}:${(hash >>> 0).toString(16)}`;
 }
 
+function initializeNodeAuthoring(root) {
+  nodePathByNode = new WeakMap(); nodeByPath = new Map(); nodeBaselines = new WeakMap();
+  for (const { node, path } of nodePathEntries(root)) {
+    nodePathByNode.set(node, path); nodeByPath.set(path, node);
+    nodeBaselines.set(node, { name: node.name, active: node.active, transform: node.transform ? [...node.transform] : null });
+  }
+}
+
+function nodeBaseline(node) {
+  return nodeBaselines.get(node) || { name: node.name, active: node.active, transform: node.transform ? [...node.transform] : null };
+}
+
+function restoreNodeBaselines() {
+  if (!model?.root) return;
+  for (const { node } of nodePathEntries(model.root)) {
+    const baseline = nodeBaselines.get(node);
+    if (!baseline) continue;
+    node.name = baseline.name; node.active = baseline.active;
+    if (baseline.transform) node.transform = [...baseline.transform];
+  }
+}
+
+function applyProjectNodeEdits() {
+  if (!model?.root) return;
+  restoreNodeBaselines();
+  const warnings = [];
+  applyNodeEdits(model.root, editorProject?.nodeEdits, warnings);
+  window.__apexNodeAuthoring = { paths: nodeByPath.size, edits: Object.keys(editorProject?.nodeEdits || {}).length, warnings };
+}
+
+function refreshHierarchyAuthoring() {
+  if (!model) return;
+  const nodes = walkNodes(model.root), meshes = nodes.filter(({ node }) => node.kind === "mesh" || node.kind === "skinnedMesh");
+  sceneVisibility = computeKn5Visibility(model.root);
+  const previewMeshes = meshes.filter(({ node }) => sceneVisibility.get(node)), triangles = meshes.reduce((sum, { node }) => sum + node.indices.length / 3, 0);
+  modelSummary = { nodes, meshes, previewMeshes, triangles };
+  trackAudit = model.workspace?.kind === "track" ? auditTrackModel(model, trackSurfaceConfig) : null;
+  trackSurfaceBindings = trackAudit ? new Map(meshes.map(({ node }) => [node, resolveTrackSurface(node.name, trackSurfaceConfig)])) : new Map();
+  window.__apexTrackAudit = trackAudit;
+  carHierarchyAudit = model.workspace?.kind === "carLods" ? auditCarHierarchy(model) : null;
+  window.__apexCarHierarchyAudit = carHierarchyAudit;
+  $("#stats").innerHTML = `${previewMeshes.length.toLocaleString()} renderable / ${meshes.length.toLocaleString()} meshes<br>${Math.round(triangles).toLocaleString()} triangles<br>${model.materials.length} materials${model.workspace ? `<br>${model.workspace.files.length} KN5 files` : ""}`;
+  $("#node-count").textContent = nodes.length;
+  renderTree($("#search").value);
+  renderer?.refreshHierarchy();
+  renderer?.setSurfaceBindings(trackSurfaceBindings);
+  configureSurfaceOverlay();
+  configureReflectionCaptureChoices();
+}
+
 function initializeEditorProject(file) {
   const fresh = createEditorProject({ name: file.name, size: file.size, kn5Version: model.version });
   editorProject = fresh;
@@ -548,8 +604,16 @@ function initializeEditorProject(file) {
 }
 
 function refreshAuthoredConfig() {
-  authoredConfig = editorProject && editorProjectEditCount(editorProject)
-    ? parseCspIni(serializeEditorCsp(editorProject), "<Apex authored edits>")
+  let liveProject = editorProject;
+  if (editorProject && modelSummary?.meshes) {
+    liveProject = cloneEditorProject(editorProject);
+    for (const { node } of modelSummary.meshes) {
+      const baselineName = nodeBaseline(node).name, edit = matchingProjectEdit(editorProject.meshEdits, baselineName)?.value;
+      if (edit && node.name.toLowerCase() !== baselineName.toLowerCase()) liveProject.meshEdits[node.name] = edit;
+    }
+  }
+  authoredConfig = liveProject && editorProjectCspEditCount(liveProject)
+    ? parseCspIni(serializeEditorCsp(liveProject), "<Apex authored edits>")
     : null;
 }
 
@@ -565,16 +629,20 @@ function commitEditorChange(label, mutate) {
   mutate(next);
   const normalized = normalizeEditorProject(next), after = serializeEditorProject(normalized);
   if (after === before) return false;
+  const hierarchyChanged = JSON.stringify(normalized.nodeEdits) !== JSON.stringify(editorProject.nodeEdits);
   undoStack.push({ label, snapshot: before });
   if (undoStack.length > 100) undoStack.shift();
   redoStack = [];
   editorProject = normalized;
+  if (hierarchyChanged) { applyProjectNodeEdits(); refreshHierarchyAuthoring(); }
   refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
   return true;
 }
 
 function restoreEditorSnapshot(snapshot) {
-  editorProject = normalizeEditorProject(JSON.parse(snapshot));
+  const restored = normalizeEditorProject(JSON.parse(snapshot)), hierarchyChanged = JSON.stringify(restored.nodeEdits) !== JSON.stringify(editorProject?.nodeEdits);
+  editorProject = restored;
+  if (hierarchyChanged) { applyProjectNodeEdits(); refreshHierarchyAuthoring(); }
   refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
 }
 
@@ -593,13 +661,13 @@ function redoEditorChange() {
 }
 
 function updateEditorButtons() {
-  const edits = editorProjectEditCount(editorProject), available = Boolean(editorProject && model);
+  const edits = editorProjectEditCount(editorProject), cspEdits = editorProjectCspEditCount(editorProject), available = Boolean(editorProject && model);
   $("#undo").disabled = !undoStack.length; $("#undo").title = undoStack.length ? `Undo ${undoStack.at(-1).label}` : "Nothing to undo";
   $("#redo").disabled = !redoStack.length; $("#redo").title = redoStack.length ? `Redo ${redoStack.at(-1).label}` : "Nothing to redo";
   $("#save-project").disabled = !available;
   $("#open-project").disabled = !available;
-  $("#export-csp").disabled = !available || !edits;
-  $("#export-csp").textContent = edits ? `Export CSP (${edits})` : "Export CSP";
+  $("#export-csp").disabled = !available || !cspEdits;
+  $("#export-csp").textContent = cspEdits ? `Export CSP (${cspEdits})` : "Export CSP";
   const kn5Blocked=model?.encryption?"CSP-protected KN5 files cannot be safely rewritten":model?.workspace?"Export each source model separately; assembled workspaces are not a single source asset":model?.fbx?"Export the imported FBX scene as a game-compatible KN5":"Export a game-compatible KN5 copy with compatible authored edits baked in";
   $("#export-kn5").disabled=!available||Boolean(model?.encryption)||Boolean(model?.workspace);$("#export-kn5").title=kn5Blocked;$("#export-kn5").textContent=edits?`Export KN5 (${edits})`:model?.fbx?"Export KN5":"Export KN5 copy";
 }
@@ -631,13 +699,14 @@ function saveEditorProject() {
 }
 
 function exportEditorCsp() {
-  if (editorProject && editorProjectEditCount(editorProject)) downloadText(`${projectBaseName()}_apex.ini`, serializeEditorCsp(editorProject), "text/plain");
+  if (editorProject && editorProjectCspEditCount(editorProject)) downloadText(`${projectBaseName()}_apex.ini`, serializeEditorCsp(editorProject), "text/plain");
 }
 
 function exportBakedKn5() {
   if(!model||!editorProject||model.encryption||model.workspace)return;
-  try{const baked=bakeEditorProjectIntoKn5(model,editorProject),bytes=serializeKn5(baked.model),url=URL.createObjectURL(new Blob([bytes],{type:"application/octet-stream"})),anchor=document.createElement("a");anchor.href=url;anchor.download=`${projectBaseName()}_apex.kn5`;anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);window.__apexLastKn5Export={bytes:bytes.byteLength,warnings:[...baked.warnings],applied:{...baked.applied}};status.textContent=baked.warnings.length?`Exported KN5 with ${baked.warnings.length} CSP-only edit warning${baked.warnings.length===1?"":"s"}; export CSP to preserve them`:`Exported game-compatible KN5 · ${(bytes.byteLength/1048576).toFixed(1)} MB`;}
+  try{restoreNodeBaselines();const baked=bakeEditorProjectIntoKn5(model,editorProject),bytes=serializeKn5(baked.model),url=URL.createObjectURL(new Blob([bytes],{type:"application/octet-stream"})),anchor=document.createElement("a");anchor.href=url;anchor.download=`${projectBaseName()}_apex.kn5`;anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);window.__apexLastKn5Export={bytes:bytes.byteLength,warnings:[...baked.warnings],applied:{...baked.applied}};status.textContent=baked.warnings.length?`Exported KN5 with ${baked.warnings.length} CSP-only edit warning${baked.warnings.length===1?"":"s"}; export CSP to preserve them`:`Exported game-compatible KN5 · ${(bytes.byteLength/1048576).toFixed(1)} MB`;}
   catch(error){console.error(error);status.textContent=`Could not export KN5: ${error.message}`;}
+  finally{applyProjectNodeEdits();}
 }
 
 async function loadEditorProject(file) {
@@ -647,7 +716,7 @@ async function loadEditorProject(file) {
     if (loaded.asset.size && loaded.asset.size !== modelFile.size) throw new Error(`Project expects a ${loaded.asset.size}-byte KN5, but ${modelFile.name} is ${modelFile.size} bytes`);
     if (loaded.asset.kn5Version && loaded.asset.kn5Version !== model.version) throw new Error(`Project expects KN5 v${loaded.asset.kn5Version}, but this model is v${model.version}`);
     editorProject = loaded; undoStack = []; redoStack = [];
-    refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
+    applyProjectNodeEdits(); refreshHierarchyAuthoring(); refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
   } catch (error) {
     console.error(error); status.textContent = `Could not open project: ${error.message}`;
   } finally { $("#project-file").value = ""; }
@@ -716,7 +785,7 @@ function renderTree(filter = "") {
   };
   visit(model.root, 0);
   tree.className = "tree";
-  tree.innerHTML = rows.map(({ node, depth }, index) => `<div class="node-row node-depth-${Math.min(depth, 24)} ${node.kind} ${sceneVisibility.get(node) ? "" : "node-off"}" data-row="${index}"><span class="node-icon">${node.kind === "mesh" || node.kind === "skinnedMesh" ? "◆" : "›"}</span><span class="node-name">${escapeHtml(node.name)}</span></div>`).join("");
+  tree.innerHTML = rows.map(({ node, depth }, index) => `<div class="node-row node-depth-${Math.min(depth, 24)} ${node.kind} ${sceneVisibility.get(node) ? "" : "node-off"} ${node === selectedNode ? "selected" : ""}" data-row="${index}"><span class="node-icon">${node.kind === "mesh" || node.kind === "skinnedMesh" ? "◆" : "›"}</span><span class="node-name">${escapeHtml(node.name)}</span></div>`).join("");
   tree.querySelectorAll(".node-row").forEach((row) => row.addEventListener("click", () => {
     tree.querySelector(".selected")?.classList.remove("selected");
     row.classList.add("selected");
@@ -734,7 +803,8 @@ function renderNodeInspector(node) {
   const override = cspEvaluation?.nodeOverrides.get(node);
   inspector.className = "inspector";
   const animated = activeAnimation?.tracks.some((track) => track.animated && track.name === node.name);
-  inspector.innerHTML = `<div class="section"><h3>${node.kind}</h3>${kv("Name", node.name)}${kv("Active", node.active ? "Yes" : "No")}${animated ? kv("Animation", `${activeAnimationName} @ ${animationPosition.toFixed(3)}`) : ""}${node.kind === "mesh" || node.kind === "skinnedMesh" ? `${kv("Visible", node.visible ? "Yes" : "No")}${kv("Renderable", node.renderable ? "Yes" : "No")}${kv("Game preview", sceneVisibility.get(node) ? "Visible" : "Hidden")}${kv("Vertices", (node.vertices.length / node.vertexStride).toLocaleString())}${kv("Triangles", (node.indices.length / 3).toLocaleString())}${node.bones ? kv("Bones", node.bones.length) : ""}${kv("Layer", node.layer)}${kv("LOD range", `${format(node.lodIn)} – ${format(node.lodOut)}`)}` : kv("Children", node.children.length)}</div>${override ? overrideHtml(override) : ""}${material ? meshAuthoringHtml(node, override) + materialHtml(material, override, node) : ""}`;
+  inspector.innerHTML = `<div class="section"><h3>${node.kind}</h3>${kv("Name", node.name)}${kv("Active", node.active ? "Yes" : "No")}${animated ? kv("Animation", `${activeAnimationName} @ ${animationPosition.toFixed(3)}`) : ""}${node.kind === "mesh" || node.kind === "skinnedMesh" ? `${kv("Visible", node.visible ? "Yes" : "No")}${kv("Renderable", node.renderable ? "Yes" : "No")}${kv("Game preview", sceneVisibility.get(node) ? "Visible" : "Hidden")}${kv("Vertices", (node.vertices.length / node.vertexStride).toLocaleString())}${kv("Triangles", (node.indices.length / 3).toLocaleString())}${node.bones ? kv("Bones", node.bones.length) : ""}${kv("Layer", node.layer)}${kv("LOD range", `${format(node.lodIn)} – ${format(node.lodOut)}`)}` : kv("Children", node.children.length)}</div>${nodeAuthoringHtml(node)}${override ? overrideHtml(override) : ""}${material ? meshAuthoringHtml(node, override) + materialHtml(material, override, node) : ""}`;
+  bindNodeEditors(node);
   if (material) { bindMeshEditors(node); bindMaterialEditors(material); }
 }
 
@@ -890,8 +960,23 @@ function overrideHtml(override) {
   return `<div class="section"><h3>CSP effective override</h3>${override.shader ? kv("Shader", override.shader) : ""}${override.blendMode ? kv("Blend mode", override.blendMode) : ""}${override.depthMode ? kv("Depth mode", override.depthMode) : ""}${override.cullMode ? kv("Cull mode", override.cullMode) : ""}${override.isTransparent !== null ? kv("Transparent", override.isTransparent ? "Yes" : "No") : ""}${override.layer !== null ? kv("Layer", override.layer) : ""}${override.lodIn !== null || override.lodOut !== null ? kv("LOD range", `${override.lodIn ?? "inherit"} – ${override.lodOut ?? "inherit"}`) : ""}${override.castShadows !== null ? kv("Cast shadows", override.castShadows ? "Yes" : "No") : ""}${custom ? `${kv("Emissive atlas", `${custom.resolution[0]} × ${custom.resolution[1]}`)}${kv("Emissive shapes", custom.shapes.length)}${kv("Color masks", custom.colorMasks.length)}${kv("Vertex anchors", custom.vertexMask?.points.filter(Boolean).length || 0)}${kv("Bounce-back rules", custom.bounceBack.length)}${kv("Input bindings", custom.bindings.length)}${kv("Approximated operations", custom.approximatedOperations.length)}${kv("Unsupported operations", custom.unsupportedOperations.length)}` : ""}${[...override.properties].map(([key, value]) => `<div class="kv"><span>${escapeHtml(key)}</span><span class="csp-value">${escapeHtml(Array.isArray(value) ? value.map(format).join(", ") : format(value))}</span></div>`).join("")}${[...override.resources].map(([slot, resource]) => `<div class="kv"><span>${escapeHtml(slot)}</span><span class="csp-value">${escapeHtml(resource.texture || resource.file || (Array.isArray(resource.color) ? resource.color.map(format).join(", ") : "Unresolved"))}</span></div>`).join("")}${override.sources.map((source) => `<div class="resource csp-source"><strong>${escapeHtml(source.section)}</strong><span>${escapeHtml(source.source)}:${source.line}</span></div>`).join("")}</div>`;
 }
 
+function nodeEditCount(edit) {
+  return ["name", "active", "transform"].filter((key) => edit?.[key] !== undefined).length;
+}
+
+function nodeAuthoringHtml(node) {
+  const path = nodePathByNode.get(node), edit = editorProject?.nodeEdits?.[path], baseline = nodeBaseline(node), count = nodeEditCount(edit);
+  let transform = "";
+  if (node.kind === "node" && node.transform) {
+    const components = decomposeNodeTransform(node.transform), authored = Boolean(edit?.transform);
+    const vector = (key, label, value, suffix = "") => `<label class="author-field"><span>${label}</span><input class="${authored ? "authored" : ""}" data-edit-node-transform="${key}" value="${escapeHtml(formatEditorValue(value))}" spellcheck="false"${suffix ? ` title="${escapeHtml(suffix)}"` : ""}></label>`;
+    transform = `${vector("position", "Position", components.position)}${vector("rotation", "Rotation °", components.rotation, "Euler XYZ degrees")}${vector("scale", "Scale", components.scale)}${components.decomposable ? "" : `<span class="empty validation-warning">This matrix contains shear or signed scale. Changing rotation or scale replaces it with a standard TRS matrix.</span>`}<div class="section-actions"><button class="mini" data-reset-node-transform ${authored ? "" : "disabled"}>Reset transform</button></div>`;
+  }
+  return `<div class="section"><h3>Node authoring${count ? ` · <span class="edit-count">${count} edits</span>` : ""}</h3>${kv("Stable path", path || "Unavailable")}<label class="author-field"><span>Name</span><input class="${edit?.name !== undefined ? "authored" : ""}" data-edit-node-name value="${escapeHtml(edit?.name || "")}" placeholder="Inherit: ${escapeHtml(baseline.name)}" maxlength="1024" spellcheck="false"></label><label class="author-field"><span>Active</span><select class="${edit?.active !== undefined ? "authored" : ""}" data-edit-node-active><option value="">Inherit: ${baseline.active ? "Yes" : "No"}</option><option value="true" ${edit?.active === true ? "selected" : ""}>Yes</option><option value="false" ${edit?.active === false ? "selected" : ""}>No</option></select></label>${transform}<div class="section-actions"><button class="mini" data-reset-node ${edit ? "" : "disabled"}>Reset node edits</button></div></div>`;
+}
+
 function meshAuthoringHtml(node, override) {
-  const edit = editorProject?.meshEdits?.[node.name], count = meshEditCount(edit), duplicateCount = modelSummary.meshes.filter(({ node: candidate }) => candidate.name.toLowerCase() === node.name.toLowerCase()).length;
+  const sourceName = nodeBaseline(node).name, edit = matchingProjectEdit(editorProject?.meshEdits, sourceName)?.value, count = meshEditCount(edit), duplicateCount = modelSummary.meshes.filter(({ node: candidate }) => nodeBaseline(candidate).name.toLowerCase() === sourceName.toLowerCase()).length;
   const booleanField = (key, label, inherited) => `<label class="author-field"><span>${label}</span><select class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-mesh-boolean="${key}"><option value="">Inherit: ${inherited ? "Yes" : "No"}</option><option value="true" ${edit?.[key] === true ? "selected" : ""}>Yes</option><option value="false" ${edit?.[key] === false ? "selected" : ""}>No</option></select></label>`;
   const numericField = (key, label, inherited) => `<label class="author-field"><span>${label}</span><input class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-mesh-number="${key}" value="${edit?.[key] ?? ""}" placeholder="Inherit: ${escapeHtml(String(inherited))}"></label>`;
   return `<div class="section"><h3>Mesh authoring${count ? ` · <span class="edit-count">${count} edits</span>` : ""}</h3>${booleanField("isTransparent", "Transparent", override?.isTransparent ?? node.transparent)}${numericField("layer", "Layer", override?.layer ?? node.layer)}${numericField("lodIn", "LOD in", override?.lodIn ?? node.lodIn)}${numericField("lodOut", "LOD out", override?.lodOut ?? node.lodOut)}${booleanField("castShadows", "Shadows", override?.castShadows ?? node.castShadows)}${duplicateCount > 1 ? `<span class="empty">This name matches ${duplicateCount} meshes; the CSP export applies to all of them.</span>` : ""}<div class="section-actions"><button class="mini" data-reset-mesh ${edit ? "" : "disabled"}>Reset mesh edits</button></div></div>`;
@@ -968,15 +1053,60 @@ function meshEditCount(edit) {
   return ["isTransparent", "castShadows", "layer", "lodIn", "lodOut"].filter((key) => edit?.[key] !== undefined).length;
 }
 
+function matchingProjectEdit(record, name) {
+  const key = Object.keys(record || {}).find((candidate) => candidate.toLowerCase() === String(name).toLowerCase());
+  return key ? { key, value: record[key] } : null;
+}
+
 function editMesh(project, meshName, mutate) {
   const edit = project.meshEdits[meshName] || {};
   mutate(edit); project.meshEdits[meshName] = edit;
 }
 
+function editNode(project, path, mutate) {
+  const edit = project.nodeEdits[path] || {};
+  mutate(edit); project.nodeEdits[path] = edit;
+}
+
+function parseNodeVector(input, label) {
+  const value = parseEditorValue(input.value);
+  if (!Array.isArray(value) || value.length !== 3) throw new Error(`${label} needs three finite numbers`);
+  return value;
+}
+
+function bindNodeEditors(node) {
+  const path = nodePathByNode.get(node);
+  if (!path) return;
+  inspector.querySelector("[data-edit-node-name]")?.addEventListener("change", (event) => {
+    const value = event.target.value.trim();
+    commitEditorChange(`${value ? "Rename" : "Reset name for"} ${node.name}`, (project) => editNode(project, path, (edit) => { if (value) edit.name = value; else delete edit.name; }));
+  });
+  inspector.querySelector("[data-edit-node-active]")?.addEventListener("change", (event) => {
+    const value = event.target.value;
+    commitEditorChange(`${value ? "Set" : "Reset"} ${node.name} active`, (project) => editNode(project, path, (edit) => { if (value) edit.active = value === "true"; else delete edit.active; }));
+  });
+  inspector.querySelectorAll("[data-edit-node-transform]").forEach((input) => {
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") input.blur(); });
+    input.addEventListener("change", () => {
+      try {
+        const key = input.dataset.editNodeTransform, value = parseNodeVector(input, key[0].toUpperCase() + key.slice(1));
+        const current = decomposeNodeTransform(node.transform);
+        let transform;
+        if (key === "position") { transform = [...node.transform]; transform.splice(12, 3, ...value); }
+        else transform = composeNodeTransform({ position: current.position, rotation: key === "rotation" ? value : current.rotation, scale: key === "scale" ? value : current.scale });
+        commitEditorChange(`Set ${node.name} ${key}`, (project) => editNode(project, path, (edit) => { edit.transform = transform; }));
+      } catch (error) { input.classList.add("invalid"); status.textContent = error.message; }
+    });
+  });
+  inspector.querySelector("[data-reset-node-transform]")?.addEventListener("click", () => commitEditorChange(`Reset ${node.name} transform`, (project) => editNode(project, path, (edit) => { delete edit.transform; })));
+  inspector.querySelector("[data-reset-node]")?.addEventListener("click", () => commitEditorChange(`Reset ${node.name} node edits`, (project) => { delete project.nodeEdits[path]; }));
+}
+
 function bindMeshEditors(node) {
+  const sourceName = nodeBaseline(node).name, sourceKey = matchingProjectEdit(editorProject?.meshEdits, sourceName)?.key || sourceName;
   inspector.querySelectorAll("[data-edit-mesh-boolean]").forEach((input) => input.addEventListener("change", () => {
     const key = input.dataset.editMeshBoolean, value = input.value;
-    commitEditorChange(`${value ? "Set" : "Reset"} ${node.name} ${key}`, (project) => editMesh(project, node.name, (edit) => { if (value) edit[key] = value === "true"; else delete edit[key]; }));
+    commitEditorChange(`${value ? "Set" : "Reset"} ${node.name} ${key}`, (project) => editMesh(project, sourceKey, (edit) => { if (value) edit[key] = value === "true"; else delete edit[key]; }));
   }));
   inspector.querySelectorAll("[data-edit-mesh-number]").forEach((input) => {
     input.addEventListener("keydown", (event) => { if (event.key === "Enter") input.blur(); });
@@ -985,11 +1115,11 @@ function bindMeshEditors(node) {
         const key = input.dataset.editMeshNumber, text = input.value.trim();
         const value = text ? parseEditorValue(text) : null;
         if (Array.isArray(value)) throw new Error(`${key} needs one finite number`);
-        commitEditorChange(`${text ? "Set" : "Reset"} ${node.name} ${key}`, (project) => editMesh(project, node.name, (edit) => { if (text) edit[key] = value; else delete edit[key]; }));
+        commitEditorChange(`${text ? "Set" : "Reset"} ${node.name} ${key}`, (project) => editMesh(project, sourceKey, (edit) => { if (text) edit[key] = value; else delete edit[key]; }));
       } catch (error) { input.classList.add("invalid"); status.textContent = error.message; }
     });
   });
-  inspector.querySelector("[data-reset-mesh]")?.addEventListener("click", () => commitEditorChange(`Reset ${node.name}`, (project) => { delete project.meshEdits[node.name]; }));
+  inspector.querySelector("[data-reset-mesh]")?.addEventListener("click", () => commitEditorChange(`Reset ${node.name}`, (project) => { delete project.meshEdits[sourceKey]; }));
 }
 
 function editMaterial(project, materialName, mutate) {
@@ -1237,7 +1367,7 @@ function createRenderer(canvas) {
   let externalFileIndex=createAssetFileIndex([]),externalTextures=new Map(),externalCpuTextures=new Map(),externalGpuTextures=new Set(),externalGeneration=0,externalRequirementSignature="",externalTextureStatus={selected:0,requested:0,ready:0,pending:0,missing:0,ambiguous:0,unsupported:0,formats:{},missingPaths:[],ambiguousPaths:[]};
   let selectedSkinFiles=[],selectedSkinName="",skinTextures=new Map(),skinGpuTextures=new Set(),skinGeneration=0,skinTextureStatus={name:"",available:0,matched:0,ready:0,pending:0,inherited:0,ambiguous:0,unsupported:0,formats:{},replacedNames:[]};
   const windParticles=createCspWindParticles();let windTargetIndex=0,windLastTime=0,windAccumulator=0,windUpdateCount=0,windRandomState=0x6d2b79f5,windAnimationTimer=0;
-  const api = { description, wireframe: false, isolate: false,showHidden:false, colliderVisible:false,surfaceOverlay:false,grassVisible:true,rainVisible:true,rainWetness:1,shadowsEnabled:true,vaoEnabled:true,weatherPreset:KS_EDITOR_DEFAULT_WEATHER,sunHeading:40,sunHeight:55,windHeading:50,windSpeed:5,autoExposure:true,exposure:.35, setModel, setCollider, setCsp,setGrassFx,setRainFx,setVaoBindings, setAnimation, setExternalFiles, setSkinFiles,setDriverCockpitMode,setShowHidden(value){api.showHidden=Boolean(value);refreshAnimationWorlds();draw();},setTrackCamera,setReflectionCaptureRoot(value){reflectionCaptureRoot=value||null;reflectionCubeInitialized=false;reflectionNextFace=0;draw();},setSurfaceBindings(value){surfaceBindings=value instanceof Map?value:new Map();draw();},setWorkspaceLod(value){workspaceLodIndex=value===null||value===undefined?null:Number(value);draw();},onExternalTextureStatus:null,onSkinTextureStatus:null,onWorkspaceLodStatus:null,onAnimationStatus:null,onTrackCameraChange:null,frame,draw,get textureStatus(){return {...textureStatus,formats:{...textureStatus.formats}};},get externalTextureStatus(){return {...externalTextureStatus,formats:{...externalTextureStatus.formats},missingPaths:[...externalTextureStatus.missingPaths],ambiguousPaths:[...externalTextureStatus.ambiguousPaths]};},get skinTextureStatus(){return {...skinTextureStatus,formats:{...skinTextureStatus.formats},replacedNames:[...skinTextureStatus.replacedNames]};},get animationStatus(){return {...animationStatus,unmatchedTracks:[...animationStatus.unmatchedTracks]};},get grassStatus(){const active=api.grassVisible&&grassStatus.instanceCount>0,shadowed=active&&api.shadowsEnabled&&!api.surfaceOverlay,path=grassAtlasPath(),atlasReady=Boolean(path&&externalTextures.get(path.toLowerCase())),hasGroups=(grassStatus.groupInstances||[]).some((count)=>count>0);return {...grassStatus,texture:path,textureGrid:[...(grassFx?.textureGrid||[])],textureBrightness:grassFx?.textureBrightness??1,maskBlur:grassFx?.maskBlur??1,colorSampleMipLevel:grassFx?.colorSampleMipLevel??0,atlasReady,atlasMode:atlasReady?(hasGroups?"texture-groups":"base-row"):"procedural-fallback",windMapMode:`csp-${hdrEnabled?CSP_WIND_MAP_FORMAT:"r8-fallback"}`,windMapSize:CSP_WIND_MAP_SIZE,windParticles:CSP_WIND_PARTICLE_COUNT,windUpdates:windUpdateCount,windSpeed:api.windSpeed,windHeading:api.windHeading,airMapMode:"static-editor-zero",visible:api.grassVisible,weatherLit:active,castsShadows:shadowed,receivesShadows:shadowed};},get rainStatus(){return {...rainStatus,visible:api.rainVisible&&Boolean(rainFx),wetness:api.rainVisible?api.rainWetness:0};},get shadowStatus(){return {...shadowStatus,enabled:api.shadowsEnabled&&!api.surfaceOverlay,splits:[...shadowStatus.splits],biases:[...shadowStatus.biases]};},get lightingStatus(){return {...lightingStatus,sunColor:[...lightingStatus.sunColor],ambientColor:[...lightingStatus.ambientColor],skyColor:[...lightingStatus.skyColor]};},get vaoStatus(){return {...vaoStatus,enabled:api.vaoEnabled&&vaoStatus.matchedMeshes>0};},get seasonalStatus(){return {...seasonalStatus,yearProgress:cspState?.usedInputs.get("YEAR_PROGRESS")?.value??null,gpuAutumn:gl.getUniform(program,locations.seasonAutumn),gpuWinter:gl.getUniform(program,locations.seasonWinter)};},get shaderProfileStatus(){return shaderProfileStatus?{...shaderProfileStatus,unknownShaders:[...shaderProfileStatus.unknownShaders]}:null;},get sceneStatus(){const previewVisible=items.filter(itemPreviewVisible).length;return {...sceneStatus,gameVisible:sceneStatus.visible,gameHidden:sceneStatus.hidden,previewVisible,previewHidden:items.length-previewVisible,visible:previewVisible,hidden:items.length-previewVisible,showHidden:api.showHidden,driverCockpitMode,driverHidden:items.filter((item)=>item.sceneVisible&&!itemPreviewVisible(item)).length,trackCamera:trackCamera?{name:trackCamera.name,position:[...trackCamera.position],fov:trackCamera.splineData?trackCamera.minFov:(trackCamera.minFov+trackCamera.maxFov)/2,splinePosition:trackCamera.splinePreviewPosition??null,splineOffset:trackCamera.splineOffset?[...trackCamera.splineOffset]:null}:null,colliderMeshes:colliderItems.length,colliderVisible:api.colliderVisible,surfaceOverlay:api.surfaceOverlay,surfacePhysicsMeshes:[...surfaceBindings.values()].filter((binding)=>binding.status!=="not-physics").length,grassBlades:grassStatus.instanceCount,grassVisible:api.grassVisible&&grassStatus.instanceCount>0,rainMeshes:rainStatus.matchedMeshes,rainVisible:api.rainVisible&&Boolean(rainFx),rainWetness:api.rainVisible?api.rainWetness:0,shadowsEnabled:api.shadowsEnabled&&!api.surfaceOverlay,shadowCasters:shadowStatus.casters,vaoEnabled:api.vaoEnabled&&vaoStatus.matchedMeshes>0,vaoMeshes:vaoStatus.matchedMeshes,seasonalMeshes:seasonalStatus.affectedMeshes,shaderAlphaMaterials:shaderProfileStatus?.shadowCutout||0,weather:lightingStatus.name,exposure:lightingStatus.effectiveExposure};},get workspaceLodStatus(){const cameraDistance=Math.sqrt(distanceSquared(bounds.center,cameraEye())),effectiveDistance=carLodDistance(cameraDistance,cameraFovDegrees),activeIndices=[...new Set(items.filter((item)=>item.workspaceLod&&carLodVisible(item.workspaceLod,effectiveDistance,workspaceLodIndex)).map((item)=>item.workspaceLod.index))].sort((a,b)=>a-b);return {selectedIndex:workspaceLodIndex,cameraDistance,effectiveDistance,activeIndices};},select(node){selected=node;draw();}};
+  const api = { description, wireframe: false, isolate: false,showHidden:false, colliderVisible:false,surfaceOverlay:false,grassVisible:true,rainVisible:true,rainWetness:1,shadowsEnabled:true,vaoEnabled:true,weatherPreset:KS_EDITOR_DEFAULT_WEATHER,sunHeading:40,sunHeight:55,windHeading:50,windSpeed:5,autoExposure:true,exposure:.35, setModel,refreshHierarchy, setCollider, setCsp,setGrassFx,setRainFx,setVaoBindings, setAnimation, setExternalFiles, setSkinFiles,setDriverCockpitMode,setShowHidden(value){api.showHidden=Boolean(value);refreshAnimationWorlds();draw();},setTrackCamera,setReflectionCaptureRoot(value){reflectionCaptureRoot=value||null;reflectionCubeInitialized=false;reflectionNextFace=0;draw();},setSurfaceBindings(value){surfaceBindings=value instanceof Map?value:new Map();draw();},setWorkspaceLod(value){workspaceLodIndex=value===null||value===undefined?null:Number(value);draw();},onExternalTextureStatus:null,onSkinTextureStatus:null,onWorkspaceLodStatus:null,onAnimationStatus:null,onTrackCameraChange:null,frame,draw,get textureStatus(){return {...textureStatus,formats:{...textureStatus.formats}};},get externalTextureStatus(){return {...externalTextureStatus,formats:{...externalTextureStatus.formats},missingPaths:[...externalTextureStatus.missingPaths],ambiguousPaths:[...externalTextureStatus.ambiguousPaths]};},get skinTextureStatus(){return {...skinTextureStatus,formats:{...skinTextureStatus.formats},replacedNames:[...skinTextureStatus.replacedNames]};},get animationStatus(){return {...animationStatus,unmatchedTracks:[...animationStatus.unmatchedTracks]};},get grassStatus(){const active=api.grassVisible&&grassStatus.instanceCount>0,shadowed=active&&api.shadowsEnabled&&!api.surfaceOverlay,path=grassAtlasPath(),atlasReady=Boolean(path&&externalTextures.get(path.toLowerCase())),hasGroups=(grassStatus.groupInstances||[]).some((count)=>count>0);return {...grassStatus,texture:path,textureGrid:[...(grassFx?.textureGrid||[])],textureBrightness:grassFx?.textureBrightness??1,maskBlur:grassFx?.maskBlur??1,colorSampleMipLevel:grassFx?.colorSampleMipLevel??0,atlasReady,atlasMode:atlasReady?(hasGroups?"texture-groups":"base-row"):"procedural-fallback",windMapMode:`csp-${hdrEnabled?CSP_WIND_MAP_FORMAT:"r8-fallback"}`,windMapSize:CSP_WIND_MAP_SIZE,windParticles:CSP_WIND_PARTICLE_COUNT,windUpdates:windUpdateCount,windSpeed:api.windSpeed,windHeading:api.windHeading,airMapMode:"static-editor-zero",visible:api.grassVisible,weatherLit:active,castsShadows:shadowed,receivesShadows:shadowed};},get rainStatus(){return {...rainStatus,visible:api.rainVisible&&Boolean(rainFx),wetness:api.rainVisible?api.rainWetness:0};},get shadowStatus(){return {...shadowStatus,enabled:api.shadowsEnabled&&!api.surfaceOverlay,splits:[...shadowStatus.splits],biases:[...shadowStatus.biases]};},get lightingStatus(){return {...lightingStatus,sunColor:[...lightingStatus.sunColor],ambientColor:[...lightingStatus.ambientColor],skyColor:[...lightingStatus.skyColor]};},get vaoStatus(){return {...vaoStatus,enabled:api.vaoEnabled&&vaoStatus.matchedMeshes>0};},get seasonalStatus(){return {...seasonalStatus,yearProgress:cspState?.usedInputs.get("YEAR_PROGRESS")?.value??null,gpuAutumn:gl.getUniform(program,locations.seasonAutumn),gpuWinter:gl.getUniform(program,locations.seasonWinter)};},get shaderProfileStatus(){return shaderProfileStatus?{...shaderProfileStatus,unknownShaders:[...shaderProfileStatus.unknownShaders]}:null;},get sceneStatus(){const previewVisible=items.filter(itemPreviewVisible).length;return {...sceneStatus,gameVisible:sceneStatus.visible,gameHidden:sceneStatus.hidden,previewVisible,previewHidden:items.length-previewVisible,visible:previewVisible,hidden:items.length-previewVisible,showHidden:api.showHidden,driverCockpitMode,driverHidden:items.filter((item)=>item.sceneVisible&&!itemPreviewVisible(item)).length,trackCamera:trackCamera?{name:trackCamera.name,position:[...trackCamera.position],fov:trackCamera.splineData?trackCamera.minFov:(trackCamera.minFov+trackCamera.maxFov)/2,splinePosition:trackCamera.splinePreviewPosition??null,splineOffset:trackCamera.splineOffset?[...trackCamera.splineOffset]:null}:null,colliderMeshes:colliderItems.length,colliderVisible:api.colliderVisible,surfaceOverlay:api.surfaceOverlay,surfacePhysicsMeshes:[...surfaceBindings.values()].filter((binding)=>binding.status!=="not-physics").length,grassBlades:grassStatus.instanceCount,grassVisible:api.grassVisible&&grassStatus.instanceCount>0,rainMeshes:rainStatus.matchedMeshes,rainVisible:api.rainVisible&&Boolean(rainFx),rainWetness:api.rainVisible?api.rainWetness:0,shadowsEnabled:api.shadowsEnabled&&!api.surfaceOverlay,shadowCasters:shadowStatus.casters,vaoEnabled:api.vaoEnabled&&vaoStatus.matchedMeshes>0,vaoMeshes:vaoStatus.matchedMeshes,seasonalMeshes:seasonalStatus.affectedMeshes,shaderAlphaMaterials:shaderProfileStatus?.shadowCutout||0,weather:lightingStatus.name,exposure:lightingStatus.effectiveExposure};},get workspaceLodStatus(){const cameraDistance=Math.sqrt(distanceSquared(bounds.center,cameraEye())),effectiveDistance=carLodDistance(cameraDistance,cameraFovDegrees),activeIndices=[...new Set(items.filter((item)=>item.workspaceLod&&carLodVisible(item.workspaceLod,effectiveDistance,workspaceLodIndex)).map((item)=>item.workspaceLod.index))].sort((a,b)=>a-b);return {selectedIndex:workspaceLodIndex,cameraDistance,effectiveDistance,activeIndices};},select(node){selected=node;draw();}};
   api.reflectionsEnabled=true;
 
   function itemPreviewVisible(item){return (api.showHidden||item.sceneVisible)&&!(driverCockpitMode&&item.workspaceAuxiliary==="driver"&&item.driverPath.some((name)=>driverHiddenNames.has(name)));}
@@ -1433,15 +1563,20 @@ function createRenderer(canvas) {
     refreshAnimationWorlds();draw();
   }
 
+  function refreshHierarchy() {
+    refreshAnimationWorlds(); reflectionCubeInitialized=false; reflectionNextFace=0; scheduleGrassRebuild(); draw();
+  }
+
   function refreshAnimationWorlds() {
     const min=[Infinity,Infinity,Infinity],max=[-Infinity,-Infinity,-Infinity],matchedTracks=new Set(),worldByName=new Map();let matchedNodes=0;
-    const visit=(node,parentWorld)=>{
+    const visit=(node,parentWorld,parentActive)=>{
       const animated=animationTransforms.get(node.name);if(animated){matchedTracks.add(node.name);matchedNodes++;}
-      const local=animated||node.transform,world=local?multiply(parentWorld,local):parentWorld,item=itemByNode.get(node);if(!worldByName.has(node.name))worldByName.set(node.name,world);
-      if(item){item.world=world;const itemBounds=transformBounds(item.localMin,item.localMax,world);item.center=itemBounds.min.map((value,index)=>(value+itemBounds.max[index])/2);if(itemPreviewVisible(item))for(let axis=0;axis<3;axis++){min[axis]=Math.min(min[axis],itemBounds.min[axis]);max[axis]=Math.max(max[axis],itemBounds.max[axis]);}}
-      for(const child of node.children)visit(child,world);
+      const local=animated||node.transform,world=local?multiply(parentWorld,local):parentWorld,item=itemByNode.get(node),branchActive=parentActive&&node.active;if(!worldByName.has(node.name))worldByName.set(node.name,world);
+      if(item){item.world=world;item.branchActive=branchActive;item.sceneVisible=Boolean(branchActive&&node.visible&&node.renderable);const itemBounds=transformBounds(item.localMin,item.localMax,world);item.center=itemBounds.min.map((value,index)=>(value+itemBounds.max[index])/2);if(itemPreviewVisible(item))for(let axis=0;axis<3;axis++){min[axis]=Math.min(min[axis],itemBounds.min[axis]);max[axis]=Math.max(max[axis],itemBounds.max[axis]);}}
+      for(const child of node.children)visit(child,world,branchActive);
     };
-    let skinnedMeshes=0,skinnedVertices=0,maxSkinnedDisplacement=0;if(sceneRoot)visit(sceneRoot,identity());for(const item of items)if(item.node.kind==="skinnedMesh"){const skinned=currentAnimation?skinMeshVertices(item.node,worldByName,item.world):item.node.vertices;skinnedMeshes++;skinnedVertices+=item.node.vertices.length/item.node.vertexStride;if(currentAnimation)for(let offset=0;offset<skinned.length;offset+=item.node.vertexStride)maxSkinnedDisplacement=Math.max(maxSkinnedDisplacement,Math.hypot(skinned[offset]-item.node.vertices[offset],skinned[offset+1]-item.node.vertices[offset+1],skinned[offset+2]-item.node.vertices[offset+2]));gl.bindBuffer(gl.ARRAY_BUFFER,item.vertex);gl.bufferSubData(gl.ARRAY_BUFFER,0,skinned);}
+    let skinnedMeshes=0,skinnedVertices=0,maxSkinnedDisplacement=0;if(sceneRoot)visit(sceneRoot,identity(),true);for(const item of items)if(item.node.kind==="skinnedMesh"){const skinned=currentAnimation?skinMeshVertices(item.node,worldByName,item.world):item.node.vertices;skinnedMeshes++;skinnedVertices+=item.node.vertices.length/item.node.vertexStride;if(currentAnimation)for(let offset=0;offset<skinned.length;offset+=item.node.vertexStride)maxSkinnedDisplacement=Math.max(maxSkinnedDisplacement,Math.hypot(skinned[offset]-item.node.vertices[offset],skinned[offset+1]-item.node.vertices[offset+1],skinned[offset+2]-item.node.vertices[offset+2]));gl.bindBuffer(gl.ARRAY_BUFFER,item.vertex);gl.bufferSubData(gl.ARRAY_BUFFER,0,skinned);}
+    sceneStatus={...sceneStatus,total:items.length,visible:items.filter((item)=>item.sceneVisible).length,hidden:items.filter((item)=>!item.sceneVisible).length};
     const center=min[0]===Infinity?[0,0,0]:min.map((value,index)=>(value+max[index])/2);bounds={center,radius:min[0]===Infinity?1:Math.hypot(...sub(max,center))};
     const animatedTracks=currentAnimation?.tracks.filter((track)=>track.animated)||[];
     animationStatus={name:currentAnimationName,position:currentAnimationPosition,version:currentAnimation?.version||0,frameCount:currentAnimation?.frameCount||0,tracks:currentAnimation?.tracks.length||0,animatedTracks:animatedTracks.length,matchedTracks:matchedTracks.size,matchedNodes,skinnedMeshes,skinnedVertices,maxSkinnedDisplacement,unmatchedTracks:animatedTracks.map((track)=>track.name).filter((name)=>!matchedTracks.has(name))};
