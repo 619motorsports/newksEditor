@@ -62,9 +62,13 @@ function cleanNodeEdit(value) {
 
 function cleanGeometryEdit(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  if (!Array.isArray(value.transform) || value.transform.length !== 16) return null;
-  const transform = value.transform.map(Number);
-  return transform.every(Number.isFinite) ? { transform } : null;
+  const output = {};
+  if (Array.isArray(value.transform) && value.transform.length === 16) {
+    const transform = value.transform.map(Number);
+    if (transform.every(Number.isFinite)) output.transform = transform;
+  }
+  for (const key of ["removeDegenerate", "reverseWinding", "recalculateNormals"]) if (value[key] === true) output[key] = true;
+  return Object.keys(output).length ? output : null;
 }
 
 function cleanWorkspaceFileEdit(value) {
@@ -137,7 +141,7 @@ export function editorProjectEditCount(project) {
   const materials = Object.values(project?.materialEdits || {}).reduce((count, edit) => count + Object.keys(edit.properties || {}).length + Object.keys(edit.resources || {}).length + ["shader", "blendMode", "depthMode", "cullMode"].filter((key) => edit[key]).length, 0);
   const meshes = Object.values(project?.meshEdits || {}).reduce((count, edit) => count + ["isTransparent", "castShadows", "layer", "lodIn", "lodOut"].filter((key) => edit[key] !== undefined).length, 0);
   const nodes = Object.values(project?.nodeEdits || {}).reduce((count, edit) => count + ["name", "active", "transform"].filter((key) => edit[key] !== undefined).length, 0);
-  const geometry = Object.keys(project?.geometryEdits || {}).length;
+  const geometry = Object.values(project?.geometryEdits || {}).reduce((count, edit) => count + ["transform", "removeDegenerate", "reverseWinding", "recalculateNormals"].filter((key) => edit[key] !== undefined).length, 0);
   const workspaceFiles = Object.values(project?.workspaceEdits?.files || {}).reduce((count, edit) => count + ["position", "rotation", "lodIn", "lodOut"].filter((key) => edit[key] !== undefined).length, 0);
   const workspace = workspaceFiles + ["cockpitHrDistance", "driverHrDistance"].filter((key) => project?.workspaceEdits?.[key] !== undefined).length;
   return materials + meshes + nodes + geometry + workspace;
@@ -146,7 +150,7 @@ export function editorProjectEditCount(project) {
 export function editorProjectCspEditCount(project) {
   const total = editorProjectEditCount(project);
   const nodes = Object.values(project?.nodeEdits || {}).reduce((count, edit) => count + ["name", "active", "transform"].filter((key) => edit[key] !== undefined).length, 0);
-  const geometry = Object.keys(project?.geometryEdits || {}).length;
+  const geometry = Object.values(project?.geometryEdits || {}).reduce((count, edit) => count + ["transform", "removeDegenerate", "reverseWinding", "recalculateNormals"].filter((key) => edit[key] !== undefined).length, 0);
   const workspaceFiles = Object.values(project?.workspaceEdits?.files || {}).reduce((count, edit) => count + ["position", "rotation", "lodIn", "lodOut"].filter((key) => edit[key] !== undefined).length, 0);
   const workspace = workspaceFiles + ["cockpitHrDistance", "driverHrDistance"].filter((key) => project?.workspaceEdits?.[key] !== undefined).length;
   return total - nodes - geometry - workspace;

@@ -271,7 +271,7 @@ async function load(files, workspaceOptions = {}) {
     trackAudit = model.workspace?.kind === "track" ? auditTrackModel(model, trackSurfaceConfig) : null;trackSurfaceBindings=trackAudit?new Map(meshes.map(({node})=>[node,resolveTrackSurface(node.name,trackSurfaceConfig)])):new Map();window.__apexTrackAudit=trackAudit;carHierarchyAudit=model.workspace?.kind==="carLods"?auditCarHierarchy(model):null;window.__apexCarHierarchyAudit=carHierarchyAudit;refreshCarColliderAudit();
     $("#welcome").hidden = true;
     $("#stats").hidden = false;
-    $("#stats").innerHTML = `${previewMeshes.length.toLocaleString()} renderable / ${meshes.length.toLocaleString()} meshes<br>${Math.round(triangles).toLocaleString()} triangles<br>${model.materials.length} materials${model.workspace ? `<br>${model.workspace.files.length} KN5 files` : ""}`;
+    $("#stats").innerHTML = `${previewMeshes.length.toLocaleString()} renderable / ${meshes.length.toLocaleString()} meshes<br>${Math.round(triangles).toLocaleString()} triangle${Math.round(triangles) === 1 ? "" : "s"}<br>${model.materials.length} materials${model.workspace ? `<br>${model.workspace.files.length} KN5 files` : ""}`;
     $("#node-count").textContent = nodes.length;
     $("#search").disabled = false;
     $("#frame").disabled = !renderer;
@@ -640,7 +640,7 @@ function refreshHierarchyAuthoring(geometryChanged = false) {
   window.__apexTrackAudit = trackAudit;
   carHierarchyAudit = model.workspace?.kind === "carLods" ? auditCarHierarchy(model) : null;
   window.__apexCarHierarchyAudit = carHierarchyAudit;
-  $("#stats").innerHTML = `${previewMeshes.length.toLocaleString()} renderable / ${meshes.length.toLocaleString()} meshes<br>${Math.round(triangles).toLocaleString()} triangles<br>${model.materials.length} materials${model.workspace ? `<br>${model.workspace.files.length} KN5 files` : ""}`;
+  $("#stats").innerHTML = `${previewMeshes.length.toLocaleString()} renderable / ${meshes.length.toLocaleString()} meshes<br>${Math.round(triangles).toLocaleString()} triangle${Math.round(triangles) === 1 ? "" : "s"}<br>${model.materials.length} materials${model.workspace ? `<br>${model.workspace.files.length} KN5 files` : ""}`;
   $("#node-count").textContent = nodes.length;
   renderTree($("#search").value);
   if (geometryChanged) renderer?.refreshGeometry(); else renderer?.refreshHierarchy();
@@ -1068,9 +1068,11 @@ function geometryAuthoringHtml(node) {
   if (node.kind === "skinnedMesh") return `<div class="section"><h3>Geometry authoring</h3><span class="empty">Skinned bind-pose geometry stays read-only until bone-space editing can preserve every inverse bind.</span></div>`;
   const path = nodePathByNode.get(node), baseline = geometryBaselines.get(path), edit = editorProject?.geometryEdits?.[path];
   if (!path || !baseline) return "";
-  const metrics = staticGeometryMetrics({ ...node, vertices: baseline.vertices }), currentMetrics = staticGeometryMetrics(node), components = edit ? decomposeNodeTransform(edit.transform) : { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1], decomposable: true };
-  const vector = (key, label, value, title = "") => `<label class="author-field"><span>${label}</span><input class="${edit ? "authored" : ""}" data-edit-geometry-transform="${key}" value="${escapeHtml(formatEditorValue(value))}" spellcheck="false"${title ? ` title="${escapeHtml(title)}"` : ""}></label>`;
-  return `<div class="section"><h3>Geometry authoring${edit ? ` · <span class="edit-count">1 edit</span>` : ""}</h3>${kv("Stable path", path)}${kv("Pivot", metrics.center.map(format).join(", "))}${kv("Source size", metrics.size.map(format).join(" × "))}${edit ? kv("Current size", currentMetrics.size.map(format).join(" × ")) : ""}${vector("position", "Vertex offset", components.position)}${vector("rotation", "Vertex rotation °", components.rotation, "Euler XYZ degrees")}${vector("scale", "Vertex scale", components.scale)}${components.decomposable ? "" : `<span class="empty validation-warning">This project transform cannot be represented as standard position, rotation, and scale.</span>`}<span class="empty">The transform uses the source bounds center. It updates positions, normals, tangents, and the KN5 bounding sphere.</span><div class="section-actions"><button class="mini" data-reset-geometry ${edit ? "" : "disabled"}>Reset geometry</button></div></div>`;
+  const metrics = staticGeometryMetrics({ ...node, vertices: baseline.vertices, indices: baseline.indices }), currentMetrics = staticGeometryMetrics(node), components = edit?.transform ? decomposeNodeTransform(edit.transform) : { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1], decomposable: true }, count = geometryEditCount(edit);
+  const vector = (key, label, value, title = "") => `<label class="author-field"><span>${label}</span><input class="${edit?.transform ? "authored" : ""}" data-edit-geometry-transform="${key}" value="${escapeHtml(formatEditorValue(value))}" spellcheck="false"${title ? ` title="${escapeHtml(title)}"` : ""}></label>`;
+  const operation = (key, label, title) => `<label class="author-field"><span>${label}</span><select class="${edit?.[key] ? "authored" : ""}" data-edit-geometry-operation="${key}" title="${escapeHtml(title)}"><option value="">Keep source</option><option value="true" ${edit?.[key] ? "selected" : ""}>Apply</option></select></label>`;
+  const topology = (value) => `${value.vertices.toLocaleString()} ${value.vertices === 1 ? "vertex" : "vertices"} · ${value.triangles.toLocaleString()} triangle${value.triangles === 1 ? "" : "s"}`;
+  return `<div class="section"><h3>Geometry authoring${count ? ` · <span class="edit-count">${count} edit${count === 1 ? "" : "s"}</span>` : ""}</h3>${kv("Stable path", path)}${kv("Pivot", metrics.center.map(format).join(", "))}${kv("Source size", metrics.size.map(format).join(" × "))}${edit?.transform ? kv("Current size", currentMetrics.size.map(format).join(" × ")) : ""}${kv("Source topology", topology(metrics))}${count ? kv("Current topology", topology(currentMetrics)) : ""}${vector("position", "Vertex offset", components.position)}${vector("rotation", "Vertex rotation °", components.rotation, "Euler XYZ degrees")}${vector("scale", "Vertex scale", components.scale)}${components.decomposable ? "" : `<span class="empty validation-warning">This project transform cannot be represented as standard position, rotation, and scale.</span>`}${operation("removeDegenerate", "Remove degenerate triangles", "Remove repeated-index and zero-area triangles")}${operation("reverseWinding", "Reverse faces", "Reverse triangle winding and vertex normals")}${operation("recalculateNormals", "Rebuild normals", "Build area-weighted normals from the edited triangle winding")}<span class="empty">Transforms use the source bounds center. Geometry edits update vertex data, triangle data, GPU buffers, preview bounds, and KN5 output.</span><div class="section-actions"><button class="mini" data-reset-geometry ${edit ? "" : "disabled"}>Reset geometry</button></div></div>`;
 }
 
 function meshAuthoringHtml(node, override) {
@@ -1205,6 +1207,17 @@ function geometryTransformIsIdentity(transform) {
   return transform.every((value, index) => Math.abs(value - expected[index]) < 1e-7);
 }
 
+function geometryEditCount(edit) {
+  return ["transform", "removeDegenerate", "reverseWinding", "recalculateNormals"].filter((key) => edit?.[key] !== undefined).length;
+}
+
+function updateGeometryEdit(project, path, mutate) {
+  const edit = { ...(project.geometryEdits[path] || {}) };
+  mutate(edit);
+  if (Object.keys(edit).length) project.geometryEdits[path] = edit;
+  else delete project.geometryEdits[path];
+}
+
 function bindGeometryEditors(node) {
   const path = nodePathByNode.get(node);
   if (!path || node.kind !== "mesh" || model?.workspace || !geometryBaselines.has(path)) return;
@@ -1213,14 +1226,18 @@ function bindGeometryEditors(node) {
       try {
         const key = input.dataset.editGeometryTransform, value = parseNodeVector(input, key[0].toUpperCase() + key.slice(1));
         if (key === "scale" && value.some((component) => Math.abs(component) < 1e-6)) throw new Error("Vertex scale cannot collapse an axis");
-        const existing = editorProject?.geometryEdits?.[path], current = existing ? decomposeNodeTransform(existing.transform) : { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] };
+        const existing = editorProject?.geometryEdits?.[path], current = existing?.transform ? decomposeNodeTransform(existing.transform) : { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] };
         const transform = composeNodeTransform({ position: key === "position" ? value : current.position, rotation: key === "rotation" ? value : current.rotation, scale: key === "scale" ? value : current.scale });
-        commitEditorChange(`Set ${node.name} geometry ${key}`, (project) => { if (geometryTransformIsIdentity(transform)) delete project.geometryEdits[path]; else project.geometryEdits[path] = { transform }; });
+        commitEditorChange(`Set ${node.name} geometry ${key}`, (project) => updateGeometryEdit(project, path, (edit) => { if (geometryTransformIsIdentity(transform)) delete edit.transform; else edit.transform = transform; }));
       } catch (error) { input.classList.add("invalid"); status.textContent = error.message; }
     };
     input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } });
     input.addEventListener("change", commit);
   });
+  inspector.querySelectorAll("[data-edit-geometry-operation]").forEach((select) => select.addEventListener("change", () => {
+    const key = select.dataset.editGeometryOperation, enabled = select.value === "true";
+    commitEditorChange(`${enabled ? "Apply" : "Reset"} ${node.name} ${key}`, (project) => updateGeometryEdit(project, path, (edit) => { if (enabled) edit[key] = true; else delete edit[key]; }));
+  }));
   inspector.querySelector("[data-reset-geometry]")?.addEventListener("click", () => commitEditorChange(`Reset ${node.name} geometry`, (project) => { delete project.geometryEdits[path]; }));
 }
 
@@ -1754,12 +1771,16 @@ function createRenderer(canvas) {
     for (const item of items) {
       gl.bindBuffer(gl.ARRAY_BUFFER, item.vertex);
       gl.bufferData(gl.ARRAY_BUFFER, item.node.vertices, gl.STATIC_DRAW);
+      gl.bindVertexArray(item.vao);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, item.index);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, item.node.indices, gl.STATIC_DRAW);
       item.localMin = [Infinity, Infinity, Infinity]; item.localMax = [-Infinity, -Infinity, -Infinity];
       for (let offset = 0; offset < item.node.vertices.length; offset += item.node.vertexStride) for (let axis = 0; axis < 3; axis++) {
         const value = item.node.vertices[offset + axis];
         item.localMin[axis] = Math.min(item.localMin[axis], value); item.localMax[axis] = Math.max(item.localMax[axis], value);
       }
     }
+    gl.bindVertexArray(null);
     refreshAnimationWorlds(); reflectionCubeInitialized=false; reflectionNextFace=0; scheduleGrassRebuild(); draw();
   }
 

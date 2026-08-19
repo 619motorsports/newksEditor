@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyGeometryEdits, captureStaticGeometryBaselines, staticGeometryMetrics, transformStaticGeometry } from "../src/geometry-authoring.js";
+import { applyGeometryEdits, captureStaticGeometryBaselines, repairStaticTopology, staticGeometryMetrics, transformStaticGeometry } from "../src/geometry-authoring.js";
 import { composeNodeTransform } from "../src/node-authoring.js";
 
 const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
@@ -57,15 +57,37 @@ test("rotates ordinary three-float tangents from imported geometry", () => {
   assert.ok(result.vertices[10] < -.9999);
 });
 
+test("removes degenerate triangles and rebuilds area-weighted normals", () => {
+  const source = mesh();
+  source.indices = new Uint16Array([0, 1, 2, 0, 0, 1]);
+  for (let offset = 0; offset < source.vertices.length; offset += source.vertexStride) source.vertices.set([0, 1, 0], offset + 3);
+  const result = repairStaticTopology(source, { removeDegenerate: true, recalculateNormals: true });
+  assert.deepEqual(Array.from(result.indices), [0, 1, 2]);
+  assert.equal(result.removedTriangles, 1);
+  for (let offset = 0; offset < result.vertices.length; offset += source.vertexStride) assert.deepEqual(Array.from(result.vertices.slice(offset + 3, offset + 6)), [0, 0, 1]);
+});
+
+test("reverses triangle winding and source normals together", () => {
+  const source = mesh(), result = repairStaticTopology(source, { reverseWinding: true });
+  assert.deepEqual(Array.from(result.indices), [0, 2, 1]);
+  for (let offset = 0; offset < result.vertices.length; offset += source.vertexStride) {
+    assert.ok(Math.abs(result.vertices[offset + 3]) < 1e-8); assert.ok(Math.abs(result.vertices[offset + 4]) < 1e-8); assert.equal(result.vertices[offset + 5], -1);
+  }
+});
+
 test("restores baselines before reapplying stable-path geometry edits", () => {
-  const node = mesh(), root = { kind: "node", name: "ROOT", active: true, transform: identity, children: [node] }, baselines = captureStaticGeometryBaselines(root), warnings = [];
-  const edit = { "0": { transform: composeNodeTransform({ position: [1, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] }) } };
+  const node = mesh(); node.indices = new Uint16Array([0, 1, 2, 0, 0, 1]);
+  const root = { kind: "node", name: "ROOT", active: true, transform: identity, children: [node] }, baselines = captureStaticGeometryBaselines(root), warnings = [];
+  const edit = { "0": { transform: composeNodeTransform({ position: [1, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] }), removeDegenerate: true } };
   assert.equal(applyGeometryEdits(root, edit, baselines, warnings), 1);
   assert.equal(node.vertices[0], 1);
+  assert.equal(node.indices.length, 3);
   assert.equal(applyGeometryEdits(root, edit, baselines, warnings), 1);
   assert.equal(node.vertices[0], 1);
+  assert.equal(node.indices.length, 3);
   assert.equal(applyGeometryEdits(root, {}, baselines, warnings), 0);
   assert.equal(node.vertices[0], 0);
+  assert.equal(node.indices.length, 6);
   assert.deepEqual(warnings, []);
   assert.deepEqual(staticGeometryMetrics(node).size, [2, 2, 0]);
 });

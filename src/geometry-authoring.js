@@ -15,7 +15,9 @@ function matrix(value) {
 
 function normalize(value, fallback = [0, 1, 0]) {
   const length = Math.hypot(...value);
-  return length > 1e-8 ? value.map((component) => component / length) : [...fallback];
+  if (length > 1e-8) return value.map((component) => component / length);
+  const fallbackLength = Math.hypot(...fallback);
+  return fallbackLength > 1e-8 ? fallback.map((component) => component / fallbackLength) : [0, 1, 0];
 }
 
 function localBounds(vertices, stride) {
@@ -31,6 +33,40 @@ function localBounds(vertices, stride) {
   let radius = 0;
   for (let offset = 0; offset < vertices.length; offset += stride) radius = Math.max(radius, Math.hypot(vertices[offset] - center[0], vertices[offset + 1] - center[1], vertices[offset + 2] - center[2]));
   return { minimum, maximum, center, size, radius };
+}
+
+function triangleCross(vertices, stride, a, b, c) {
+  const ao = a * stride, bo = b * stride, co = c * stride;
+  const ab = [vertices[bo] - vertices[ao], vertices[bo + 1] - vertices[ao + 1], vertices[bo + 2] - vertices[ao + 2]];
+  const ac = [vertices[co] - vertices[ao], vertices[co + 1] - vertices[ao + 1], vertices[co + 2] - vertices[ao + 2]];
+  return [ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]];
+}
+
+function validateIndices(indices, vertexCount) {
+  if (!(indices instanceof Uint16Array) || indices.length % 3) throw new TypeError("Static topology needs complete 16-bit triangles");
+  for (const index of indices) if (index >= vertexCount) throw new RangeError(`Topology index ${index} exceeds ${vertexCount} vertices`);
+}
+
+function removeDegenerateTriangles(vertices, indices, stride) {
+  const scale = Math.max(1, Math.hypot(...localBounds(vertices, stride).size)), minimumDoubleArea = Number.EPSILON * 64 * scale * scale, output = [];
+  for (let offset = 0; offset < indices.length; offset += 3) {
+    const a = indices[offset], b = indices[offset + 1], c = indices[offset + 2];
+    if (a === b || b === c || a === c || Math.hypot(...triangleCross(vertices, stride, a, b, c)) <= minimumDoubleArea) continue;
+    output.push(a, b, c);
+  }
+  return new Uint16Array(output);
+}
+
+function rebuildNormals(vertices, indices, stride) {
+  const vertexCount = vertices.length / stride, sums = new Float64Array(vertexCount * 3);
+  for (let offset = 0; offset < indices.length; offset += 3) {
+    const a = indices[offset], b = indices[offset + 1], c = indices[offset + 2], cross = triangleCross(vertices, stride, a, b, c);
+    for (const index of [a, b, c]) for (let axis = 0; axis < 3; axis++) sums[index * 3 + axis] += cross[axis];
+  }
+  for (let index = 0; index < vertexCount; index++) {
+    const offset = index * stride, normal = normalize(Array.from(sums.slice(index * 3, index * 3 + 3)), [vertices[offset + 3], vertices[offset + 4], vertices[offset + 5]]);
+    vertices.set(normal, offset + 3);
+  }
 }
 
 function inverseTranspose3(transform) {
@@ -75,6 +111,22 @@ export function staticGeometryMetrics(node) {
   return { ...localBounds(node.vertices, node.vertexStride), vertices: node.vertices.length / node.vertexStride, triangles: node.indices.length / 3 };
 }
 
+export function repairStaticTopology(node, edit = {}, baselineVertices = node?.vertices, baselineIndices = node?.indices) {
+  if (node?.kind !== "mesh" || node.vertexStride !== 11) throw new TypeError("Topology repair requires a static 11-float KN5 mesh");
+  if (!(baselineVertices instanceof Float32Array) || baselineVertices.length % node.vertexStride) throw new TypeError("Topology baseline vertices do not match the mesh");
+  const vertexCount = baselineVertices.length / node.vertexStride;
+  validateIndices(baselineIndices, vertexCount);
+  const vertices = cloneFloat32(baselineVertices), sourceTriangles = baselineIndices.length / 3;
+  let indices = baselineIndices.slice();
+  if (edit.removeDegenerate) indices = removeDegenerateTriangles(vertices, indices, node.vertexStride);
+  if (edit.reverseWinding) {
+    for (let offset = 0; offset < indices.length; offset += 3) [indices[offset + 1], indices[offset + 2]] = [indices[offset + 2], indices[offset + 1]];
+  }
+  if (edit.recalculateNormals) rebuildNormals(vertices, indices, node.vertexStride);
+  else if (edit.reverseWinding) for (let offset = 0; offset < vertices.length; offset += node.vertexStride) for (let axis = 3; axis < 6; axis++) vertices[offset + axis] *= -1;
+  return { vertices, indices, sourceTriangles, triangles: indices.length / 3, removedTriangles: sourceTriangles - indices.length / 3 };
+}
+
 export function transformStaticGeometry(node, transformValue, baselineVertices = node?.vertices) {
   if (node?.kind !== "mesh" || node.vertexStride !== 11) throw new TypeError("Geometry transforms require a static 11-float KN5 mesh");
   if (!(baselineVertices instanceof Float32Array) || baselineVertices.length !== node.vertices.length) throw new TypeError("Geometry baseline does not match the mesh");
@@ -94,7 +146,7 @@ export function transformStaticGeometry(node, transformValue, baselineVertices =
 }
 
 export function captureStaticGeometryBaselines(root) {
-  return new Map(nodePathEntries(root).filter(({ node }) => node.kind === "mesh" && node.vertexStride === 11).map(({ node, path }) => [path, { vertices: cloneFloat32(node.vertices), bounds: node.bounds ? [...node.bounds] : null }]));
+  return new Map(nodePathEntries(root).filter(({ node }) => node.kind === "mesh" && node.vertexStride === 11).map(({ node, path }) => [path, { vertices: cloneFloat32(node.vertices), indices: node.indices.slice(), bounds: node.bounds ? [...node.bounds] : null }]));
 }
 
 export function applyGeometryEdits(root, edits, baselines = null, warnings = []) {
@@ -102,6 +154,7 @@ export function applyGeometryEdits(root, edits, baselines = null, warnings = [])
     const node = nodeAtPath(root, path);
     if (!node) continue;
     node.vertices = cloneFloat32(baseline.vertices);
+    node.indices = baseline.indices.slice();
     if (baseline.bounds) node.bounds = [...baseline.bounds];
   }
   let applied = 0;
@@ -111,9 +164,14 @@ export function applyGeometryEdits(root, edits, baselines = null, warnings = [])
     if (node.kind === "skinnedMesh") { warnings.push(`${path}: ${node.name} uses skinned bind-pose geometry and was not changed`); continue; }
     if (node.kind !== "mesh" || node.vertexStride !== 11) { warnings.push(`${path}: ${node.name} is not editable static KN5 geometry`); continue; }
     try {
-      const baseline = baselines instanceof Map ? baselines.get(path)?.vertices : node.vertices;
-      const result = transformStaticGeometry(node, edit.transform, baseline);
-      node.vertices = result.vertices; node.bounds = result.bounds; applied++;
+      const baseline = baselines instanceof Map ? baselines.get(path) : null;
+      const topology = repairStaticTopology(node, edit, baseline?.vertices || node.vertices, baseline?.indices || node.indices);
+      node.vertices = topology.vertices; node.indices = topology.indices;
+      if (edit.transform || edit.recalculateNormals) {
+        const result = transformStaticGeometry(node, edit.transform || IDENTITY, node.vertices);
+        node.vertices = result.vertices; node.bounds = result.bounds;
+      }
+      applied++;
     } catch (error) { warnings.push(`${path}: ${error.message}`); }
   }
   return applied;

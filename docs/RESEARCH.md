@@ -1999,6 +1999,26 @@ imported the image as `base_color_texture.png` without a source folder. WebGL lo
 the PNG, rendered the textured cube, and returned error zero. The browser log had no
 errors.
 
+## Static geometry authoring evidence
+
+Apex stores static geometry edits by stable hierarchy path. Each application starts
+from captured source vertex and index buffers. This rule prevents cumulative changes
+during preview refresh, undo, recovery, and export.
+
+The transform path uses the source bounds center as its pivot. It transforms positions,
+applies the inverse-transpose matrix to normals, and preserves both supported tangent
+encodings. It also recalculates the KN5 bounding sphere.
+
+The topology path removes repeated-index and zero-area triangles with a scale-aware
+tolerance. Face reversal swaps the second and third indices and reverses source
+normals. Normal rebuilds use area-weighted triangle cross products.
+
+Unit checks cover ordinary and packed tangents, normal transforms, topology repair,
+baseline restoration, source-buffer immutability, and KN5 write/read round trips. A
+live WebGL check reduced a two-triangle mesh to one triangle. Undo, redo, and recovery
+preserved all three topology operations, and KN5 export completed. CSP export stayed
+disabled because CSP cannot replace source geometry.
+
 ## Desktop packaging evidence
 
 The desktop shell uses Electron 43.4.1 and serves the existing application from an
