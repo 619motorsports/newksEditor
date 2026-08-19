@@ -42,7 +42,8 @@ vertical slice is only the foundation.
   normal maps keep a generated flat-normal DDS. The inspector reports map types that
   have no safe stock binding. The importer samples each clip into 100 local-transform frames.
   The editor previews these frames and exports the native KSANIM v2 layout.
-  Bump-map conversion, packed material-map composition, direct geometry editing,
+  Bump-map conversion, packed material-map composition, vertex-level topology editing,
+  skinned bind-pose geometry editing,
   protected-payload preservation, and in-game output validation
   remain. The KN5 v5/v6 writer also round-trips real static, textured, and skinned
   assets byte-for-byte.
@@ -250,13 +251,16 @@ vertical slice is only the foundation.
   project persistence, validation, and `models.ini` export. Dynamic object sections
   retain their parsed fields during export. Exact environment matching, remaining shaders
   and CSP effects, and performance/spatial diagnostics remain.
-- Search, material editing, and direct hierarchy editing now form a tested vertical
-  slice. Hierarchy edits use stable node paths and support names, active states,
+- Search, material editing, direct hierarchy editing, and static-mesh geometry transforms
+  now form a tested vertical slice. Hierarchy edits use stable node paths and support names, active states,
   local position, XYZ rotation, and scale. The preview, 100-step undo history,
   autosave recovery, portable project JSON, and KN5 export use the same edits.
+  Static geometry edits use the source bounds center. They update positions,
+  inverse-transpose normals, tangents, GPU buffers, preview bounds, and KN5 bounds.
   CSP export contains only material and mesh edits because CSP cannot change the
-  source hierarchy. Track and archive validation are also available in the inspector.
-  Multi-select, batch editing, recent projects, and geometry edits remain.
+  source hierarchy or geometry. Track and archive validation are also available in the inspector.
+  Multi-select, batch editing, recent projects, vertex-level topology editing, and
+  skinned bind-pose geometry editing remain.
 
 ## 4. Distribution and proof
 
@@ -270,6 +274,7 @@ vertical slice is only the foundation.
   WebGL/JavaScript error checks as the foundation for those comparisons. A separate
   authoring smoke check proves edit, undo, redo, recovery, and serialization in a
   real WebGL browser. Hierarchy checks also prove recursive visibility updates and
-  keep CSP export disabled for hierarchy-only projects.
+  keep CSP export disabled for hierarchy-only projects. Static geometry checks prove
+  live bounds updates, invalid-scale rejection, recovery, and KN5-only export.
 - Verify generated KN5/config outputs in Assetto Corsa and document unsupported CSP
   features. Completion requires passing all these gates, not merely launching the UI.

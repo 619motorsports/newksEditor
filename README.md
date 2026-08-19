@@ -92,6 +92,11 @@ npm test
   Transform controls use position, XYZ rotation in degrees, and scale. Stable
   root-relative paths keep duplicate names independent. Edits update the preview,
   support undo and recovery, save in project JSON, and bake into KN5 exports.
+- Static-mesh geometry authoring for vertex position, rotation, and scale around the
+  source bounds center. Edits update positions, inverse-transpose normals, tangents,
+  GPU buffers, preview bounds, GrassFX, reflections, and the KN5 bounding sphere.
+  Stable node paths keep the edits in undo history, recovery data, project JSON, and
+  KN5 exports. Skinned bind-pose geometry remains read-only.
 - Ordered multi-KN5 track workspaces from manual selection or `models*.ini`, with
   per-file hierarchy roots, game-compatible placement transforms, material remapping,
   deterministic texture-name replacement, collision diagnostics, and deterministic
@@ -281,7 +286,8 @@ wet cubemap reflection and negative-wetness snow response,
 transparent-layer feedback,
 general CSP template/include expansion,
 randomized dynamic-object motion, subtractive procedural-emissive
-composition, FBX bump-map conversion and packed material maps, geometry editing,
+composition, FBX bump-map conversion and packed material maps, vertex-level topology
+editing and skinned bind-pose geometry editing,
 full local-light photometric fidelity,
 Yebis star, ghost, light-shaft, non-default max-61 Gaussian passes, controlled pixel matching,
 cloud billboards, and the remaining post-processing stack, VAO split-animation blending, normal overrides, dynamic
