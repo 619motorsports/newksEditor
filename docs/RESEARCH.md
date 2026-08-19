@@ -1730,15 +1730,27 @@ levels. `GetBloomCompositeLuminanceScale` at `0x100e14f0` calculates each weight
 `1 × 0.035 × 5 × 1.6 × 0.038 = 0.01064` for the installed custom shape.
 
 Apex now reproduces the recovered source scale, level count, bright-pass equation,
-composite weights, screen blend, and dither scale. It uses a portable nine-tap separable
-Gaussian at each level. Yebis uses its `GaussianFilterMax61x61_2Pass` implementation, so
-exact kernel width and sampling remain a pixel-matching gate. The star, ghost, and
-light-shaft branches also remain outside this bloom-core increment.
+composite weights, screen blend, and dither scale. The glare call enters
+`GaussianFilterMax61x61_2Pass` at `0x100d0d90`. The configured bloom dispersion passes
+RGB radii in the wavelength ratios 615:540:465 and sets the alpha radius to zero. These
+unequal radii make the function delegate to `GaussianFilterMax29x29_2Pass` at
+`0x100cfde0`. Thus, the max-61 implementation is not the active default kernel.
+
+`GPUTexUtil_GetGaussianArray` at `0x10078150` evaluates
+`exp(-x²/(2σ²))`. `GPUTexUtil_GetColorWeight15_Gauss29` at `0x1007bd10` pairs taps for
+linear texture sampling, normalizes the full 29-tap kernel, and emits the center plus
+seven positive and seven negative samples. The active scalar-weight path averages the
+four channel offsets and uses the red-channel weights. The 0.002 threshold selects
+5, 7, 13, 15, and 15 samples across the five default levels. The source level is two,
+and the recovered scale is `2^(1-2) × 0.95 × 2.2`. This gives sigma values 1.045, 2.09,
+4.18, 8.36, and 16.72. Apex now uploads these native offsets and weights for both axes.
+The star, ghost, light-shaft, and non-default max-61 branches remain outside this
+bloom-core increment.
 
 The same binary preserves distinct linear, linear-saturated, Reinhard, luminance,
 logarithmic, and pre-map shader variants. The default post filter sets adaptation delay
 to zero, so Apex's immediate event-driven exposure is consistent with this shipped
-editor configuration. Yebis star, ghost, light-shaft, exact Gaussian, non-default curves,
+editor configuration. Yebis star, ghost, light-shaft, non-default max-61 Gaussian, non-default curves,
 and controlled editor/game pixel matching remain fidelity work. The legacy non-Yebis
 SDK shaders separately expose a temporal adaptation rate, but that dormant path is not
 substituted for the active default.

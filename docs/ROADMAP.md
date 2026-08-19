@@ -199,8 +199,9 @@ vertical slice is only the foundation.
   reflection sampling and refraction are disabled during capture
   to avoid recursive feedback. The default Yebis path now uses its recovered quality-3
   quarter-resolution source, five bloom levels, threshold bright pass, equal native
-  composite weights, screen blend, and output-dither scale. Its portable separable Gaussian
-  approximates Yebis's max-61 filter. Yebis star, ghost, light-shaft, exact Gaussian,
+  composite weights, screen blend, and output-dither scale. Its separable bloom uses the
+  active native 29-tap fallback, including the 15 bilinear samples, level radii, wavelength
+  dispersion, and tail cutoff. Yebis star, ghost, light-shaft, non-default max-61 Gaussian,
   non-default tone functions, cloud billboards, exact local-shadow filtering/scheduling, and controlled
   game-image matching remain. GrassFX full-density GPU dispatch, moving-vehicle
   air/deformation stamps, CSP's exact local-shadow Gaussian filter, wet cubemap

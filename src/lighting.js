@@ -19,6 +19,10 @@ export const KS_EDITOR_GLARE = Object.freeze({
   brightPassRemap: 1,
   bloomFilterThreshold: 0.002,
   bloomGaussianRadiusScale: 0.95,
+  bloomSourceLevel: 2,
+  bloomRadiusDisplayScale: 2.2,
+  bloomKernelSamples: 15,
+  bloomDispersion: Object.freeze([1, 5.399999736e-7 / 6.149999763e-7, 4.649999994e-7 / 6.149999763e-7, 0]),
   bloomLuminanceGamma: 2,
   generationRangeScale: 1,
   shapeLuminance: 5,
@@ -63,6 +67,49 @@ export function ksEditorGlareBrightPass(rgb, exposure = 1, threshold = KS_EDITOR
 
 export function ksEditorBloomCompositeScale({ range = KS_EDITOR_GLARE.generationRangeScale, glareLuminance = KS_EDITOR_GLARE.luminance, shapeLuminance = KS_EDITOR_GLARE.shapeLuminance, bloomLuminance = KS_EDITOR_GLARE.shapeBloomLuminance } = {}) {
   return Math.max(0, Number(range) || 0) * KS_EDITOR_GLARE.compositeBase * Math.max(0, Number(shapeLuminance) || 0) * Math.max(0, Number(glareLuminance) || 0) * Math.max(0, Number(bloomLuminance) || 0);
+}
+
+function yebisGauss29(sigma) {
+  const radius = Math.max(1e-8, Number(sigma) || 0);
+  const gaussian = Array.from({ length: 15 }, (_, index) => Math.exp(-(index * index) / (2 * radius * radius)));
+  const total = gaussian[0] + 2 * gaussian.slice(1).reduce((sum, value) => sum + value, 0);
+  const offsets = [0], weights = [gaussian[0] / total];
+  for (let pair = 0; pair < 7; pair++) {
+    const odd = pair * 2 + 1, even = odd + 1, pairWeight = gaussian[odd] + gaussian[even];
+    const offset = pairWeight > 0 ? (gaussian[odd] * odd + gaussian[even] * even) / pairWeight : even;
+    offsets.push(offset, -offset);
+    weights.push(pairWeight / total, pairWeight / total);
+  }
+  return { offsets, weights };
+}
+
+export function ksEditorBloomGaussianKernel(level = 0, {
+  threshold = KS_EDITOR_GLARE.bloomFilterThreshold,
+  radiusScale = KS_EDITOR_GLARE.bloomGaussianRadiusScale,
+  sourceLevel = KS_EDITOR_GLARE.bloomSourceLevel,
+  displayScale = KS_EDITOR_GLARE.bloomRadiusDisplayScale,
+  dispersion = KS_EDITOR_GLARE.bloomDispersion
+} = {}) {
+  const index = Math.max(0, Math.floor(Number(level) || 0));
+  const sigma = 2 ** index * 2 ** (1 - Math.max(0, Math.floor(Number(sourceLevel) || 0))) * Math.max(0, Number(radiusScale) || 0) * Math.max(0, Number(displayScale) || 0);
+  const channelSigmas = Array.from({ length: 4 }, (_, channel) => sigma * Math.max(0, Number(dispersion?.[channel]) || 0));
+  const channels = channelSigmas.map(yebisGauss29);
+  const offsets = Array.from({ length: KS_EDITOR_GLARE.bloomKernelSamples }, (_, sample) => channels.reduce((sum, channel) => sum + channel.offsets[sample], 0) * 0.25);
+  const weights = [...channels[0].weights];
+  const normalizer = Math.sqrt(2 * Math.PI) * Math.max(1e-8, sigma);
+  let cutoff = KS_EDITOR_GLARE.bloomKernelSamples;
+  for (let rawTap = 2; rawTap < KS_EDITOR_GLARE.bloomKernelSamples; rawTap++) {
+    const density = Math.exp(-(rawTap * rawTap) / (2 * sigma * sigma)) / normalizer;
+    if (density < Math.max(0, Number(threshold) || 0)) { cutoff = rawTap; break; }
+  }
+  const sampleCount = Math.min(KS_EDITOR_GLARE.bloomKernelSamples, Math.floor(cutoff / 2) * 2 + 1);
+  return Object.freeze({
+    sigma,
+    channelSigmas: Object.freeze(channelSigmas),
+    sampleCount,
+    offsets: Object.freeze(offsets),
+    weights: Object.freeze(weights)
+  });
 }
 
 export function cspLineClosestPoint(from, to, position) {
