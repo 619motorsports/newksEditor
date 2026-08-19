@@ -62,6 +62,12 @@ function outputTextureName(value, fallback, format) {
   return `${stem}.${format}`;
 }
 
+function boundTextureName(value, fallback, format, materialId, slot) {
+  const name = outputTextureName(value, fallback, format), separator = name.lastIndexOf("."), stem = separator >= 0 ? name.slice(0, separator) : name, extension = separator >= 0 ? name.slice(separator) : "";
+  const role = safeName(slot, "texture").replace(/[^a-z0-9_-]+/gi, "_");
+  return `APEX_FBX_${String(materialId).padStart(3, "0")}_${role}_${stem}${extension}`;
+}
+
 function isEmbeddedSource(value) {
   return /^(?:blob|data):/i.test(String(value || ""));
 }
@@ -137,10 +143,10 @@ function textureSource(texture) {
 }
 
 function createTextureBinding(sourceTexture, options) {
-  const { materialId, textureIndex, resourceIndex, material, slot, sourceField, fallbackName, fallbackData } = options;
+  const { materialId, textureIndex, resourceIndex, material, slot, sourceField, fallbackName, fallbackData, opacity = 1 } = options;
   const resolution = sourceTexture?.userData?.apexFbxResolution;
   const resolved = resolution?.data && (resolution.status === "resolved" || resolution.status === "embedded");
-  const selectedTexture = resolved ? resolution.name : fallbackName;
+  const selectedTexture = resolved ? boundTextureName(resolution.name, "FBX_Texture", resolution.format, materialId, slot) : fallbackName;
   const texture = { active: true, name: selectedTexture, data: resolved ? resolution.data : fallbackData };
   const resource = { slot, textureId: resourceIndex, texture: selectedTexture };
   if (!sourceTexture) return { texture, resource, reference: null };
@@ -153,7 +159,7 @@ function createTextureBinding(sourceTexture, options) {
       sourceKind: resolution?.embedded || isEmbeddedSource(source) ? "embedded" : "external",
       status: resolution?.status || "missing", matchedBy: resolution?.matchedBy || "",
       path: resolution?.path || "", format: resolution?.format || "", output: selectedTexture,
-      fallbackName, fallbackData
+      fallbackName, fallbackData, opacity
     }
   };
 }
@@ -167,23 +173,23 @@ function ignoredMapWarning(material, label, reason) {
   return `${material}: ${label} is not exported (${reason}).`;
 }
 
-function createMaterial(source, index, skinned, textureOffset) {
-  const name = safeName(source?.name, `Material_${index}`), color = source?.color?.toArray?.() || [0.5, 0.5, 0.5];
+function createMaterial(source, index, skinned, textureOffset, outputName = "") {
+  const name = outputName || safeName(source?.name, `Material_${index}`), color = source?.color?.toArray?.() || [0.5, 0.5, 0.5];
   const specular = source?.specular?.toArray?.() || [0.04, 0.04, 0.04], specularLevel = Math.max(...specular);
   const opacity = Math.min(1, Math.max(0, Number(source?.opacity ?? 1))), transparent = Boolean(source?.transparent || opacity < 0.999);
   const properties = skinned ? [property("bones", 0)] : [];
   properties.push(property("ksAmbient", 0.35), property("ksDiffuse", 0.8), property("ksSpecular", specularLevel), property("ksSpecularEXP", source?.shininess ?? 10), property("ksEmissive", source?.emissiveIntensity ?? 0), property("ksAlphaRef", 0));
   if (skinned) properties.push(property("fresnelC", 0), property("fresnelEXP", 0), property("fresnelMaxLevel", 0), property("nmObjectSpace", 0), property("isAdditive", 0), property("useDetail", 0), property("detailUVMultiplier", 0), property("boh", 0));
   const textures = [], resources = [], textureReferences = [], materialMaps = [], materialMapWarnings = [];
-  const addBinding = (sourceTexture, slot, sourceField, fallbackName, fallbackData) => {
+  const addBinding = (sourceTexture, slot, sourceField, fallbackName, fallbackData, bindingOpacity = 1) => {
     const binding = createTextureBinding(sourceTexture, {
       materialId: index, textureIndex: textureOffset + textures.length, resourceIndex: resources.length,
-      material: name, slot, sourceField, fallbackName, fallbackData
+      material: name, slot, sourceField, fallbackName, fallbackData, opacity: bindingOpacity
     });
     textures.push(binding.texture); resources.push(binding.resource);
     if (binding.reference) textureReferences.push(binding.reference);
   };
-  addBinding(source?.map, "txDiffuse", "map", textureName(name, index), createColorDds(color, opacity));
+  addBinding(source?.map, "txDiffuse", "map", textureName(name, index), createColorDds(color, opacity), opacity);
   if (source?.map) materialMaps.push({ material: name, sourceField: "map", slot: "txDiffuse", source: textureSource(source.map), status: "preserved" });
   if (source?.normalMap && !skinned) {
     addBinding(source.normalMap, "txNormal", "normalMap", textureName(name, index, "normal"), createColorDds([0.5, 0.5, 1], 1));
@@ -216,6 +222,7 @@ function textureReferenceWarning(reference) {
   if (reference.status === "ambiguous") return `${prefix} matched more than one source file. ${fallback}`;
   if (reference.status === "unsupported") return `${prefix} uses an unsupported image format. Use DDS, PNG, JPEG, or WebP.`;
   if (reference.status === "error") return `${prefix} could not be read. ${fallback}`;
+  if ((reference.status === "resolved" || reference.status === "embedded") && reference.slot === "txDiffuse" && reference.opacity < 0.999) return `${prefix} uses the image alpha. The app cannot multiply the authored opacity ${reference.opacity} into this encoded image.`;
   return "";
 }
 
@@ -231,7 +238,7 @@ function applyTextureResolution(model, reference, resolution) {
   const texture = model.textures[reference.textureIndex], resource = model.materials[reference.materialId]?.resources?.[reference.resourceIndex];
   if (!texture || !resource) return;
   const resolved = resolution?.data && (resolution.status === "resolved" || resolution.status === "embedded");
-  texture.name = resolved ? resolution.name : reference.fallbackName;
+  texture.name = resolved ? boundTextureName(resolution.name, "FBX_Texture", resolution.format, reference.materialId, reference.slot) : reference.fallbackName;
   texture.data = resolved ? resolution.data : reference.fallbackData;
   resource.texture = texture.name;
   resource.textureId = reference.resourceIndex;
@@ -247,6 +254,13 @@ export async function resolveFbxTextures(model, filesOrIndex) {
     applyTextureResolution(model, reference, await resolveExternalSource(reference.source, index, cache));
   }));
   return updateTextureReferenceSummary(model);
+}
+
+/** Resolve every retained FBX source model before an assembled workspace is rebuilt. */
+export async function resolveFbxModelTextures(models, filesOrIndex) {
+  const imports = [...new Set(models || [])].filter((model) => model?.fbx);
+  await Promise.all(imports.map((model) => resolveFbxTextures(model, filesOrIndex)));
+  return imports.length;
 }
 
 function tangentForTriangle(positions, uvs) {
@@ -279,6 +293,10 @@ function attributeComponent(attribute, index, component) {
   return [attribute.getX, attribute.getY, attribute.getZ, attribute.getW][component].call(attribute, index);
 }
 
+function meshUsesSkinning(object) {
+  return Boolean(object?.isSkinnedMesh && object.geometry?.getAttribute?.("skinWeight") && object.geometry?.getAttribute?.("skinIndex") && object.skeleton);
+}
+
 function meshParts(object, materialIds, warnings) {
   const geometry = object.geometry;
   if (!geometry?.getAttribute?.("position")) { warnings.push(`${object.name || "Unnamed mesh"}: no position data`); return []; }
@@ -286,7 +304,7 @@ function meshParts(object, materialIds, warnings) {
   const position = geometry.getAttribute("position"), normal = geometry.getAttribute("normal"), uv = geometry.getAttribute("uv");
   const skinWeight = object.isSkinnedMesh ? geometry.getAttribute("skinWeight") : null, skinIndex = object.isSkinnedMesh ? geometry.getAttribute("skinIndex") : null;
   if (object.isSkinnedMesh && (!skinWeight || !skinIndex || !object.skeleton)) warnings.push(`${object.name}: incomplete skin data; imported as a static mesh`);
-  const skinned = Boolean(object.isSkinnedMesh && skinWeight && skinIndex && object.skeleton), stride = skinned ? 19 : 11;
+  const skinned = meshUsesSkinning(object), stride = skinned ? 19 : 11;
   const index = geometry.index, elementCount = index ? index.count : position.count, sources = Array.isArray(object.material) ? object.material : [object.material];
   const buckets = new Map();
   for (let offset = 0; offset + 2 < elementCount; offset += 3) {
@@ -309,7 +327,7 @@ function meshParts(object, materialIds, warnings) {
     const values = new Float32Array(chunks[chunkIndex]), vertexCount = values.length / stride, indices = new Uint16Array(vertexCount);
     for (let indexValue = 0; indexValue < vertexCount; indexValue++) indices[indexValue] = indexValue;
     const suffix = multiple ? `_SUB${materialIndex}${chunks.length > 1 ? `_PART${chunkIndex}` : ""}` : "", name = `${safeName(object.name, "Mesh")}${suffix}`;
-    const sourceMaterial = sources[materialIndex] || sources[0], materialId = materialIds.get(sourceMaterial) ?? 0;
+    const sourceMaterial = sources[materialIndex] || sources[0], ids = materialIds.get(sourceMaterial), materialId = ids?.get(skinned) ?? ids?.values?.().next().value ?? 0;
     const common = { name, children: [], active: object.visible !== false, castShadows: true, visible: object.visible !== false, transparent: Boolean(sourceMaterial?.transparent || Number(sourceMaterial?.opacity) < 0.999), vertices: values, vertexStride: stride, indices, materialId, layer: 0, lodIn: 0, lodOut: 1000000, renderable: true };
     if (skinned) parts.push({ type: 3, kind: "skinnedMesh", ...common, bones: object.skeleton.bones.map((bone, boneIndex) => ({ name: safeName(bone.name, `Bone_${boneIndex}`), transform: object.skeleton.boneInverses[boneIndex]?.toArray?.() || [...IDENTITY] })) });
     else parts.push({ type: 2, kind: "mesh", ...common, bounds: boundsFor(values, stride) });
@@ -379,24 +397,29 @@ export function convertFbxAnimations(scene, sourceName = "scene.fbx") {
 
 /** Convert a Three.js FBX scene into the same model shape used by the KN5 reader/writer. */
 export function convertFbxScene(scene, sourceName = "scene.fbx", inputBytes = 0, header = { format: "unknown", version: 0 }) {
-  const warnings = [], sourceMaterials = [], usage = new Map(), materialByName = new Map(), canonicalByObject = new Map();
+  const warnings = [], usage = new Map();
   scene.traverse((object) => {
     if (!object.isMesh) return;
     for (const material of (Array.isArray(object.material) ? object.material : [object.material]).filter(Boolean)) {
-      const key = safeName(material.name, `Material_${sourceMaterials.length}`).toLowerCase();
-      let canonical = materialByName.get(key);
-      if (!canonical) { canonical = material; materialByName.set(key, canonical); sourceMaterials.push(canonical); }
-      canonicalByObject.set(material, canonical); usage.set(canonical, Boolean(usage.get(canonical) || object.isSkinnedMesh));
+      let modes = usage.get(material);
+      if (!modes) { modes = new Set(); usage.set(material, modes); }
+      modes.add(meshUsesSkinning(object));
     }
   });
-  if (!sourceMaterials.length) sourceMaterials.push({ name: "DefaultMaterial", color: { toArray: () => [0.5, 0.5, 0.5] } });
+  if (!usage.size) usage.set({ name: "DefaultMaterial", color: { toArray: () => [0.5, 0.5, 0.5] } }, new Set([false]));
+  const sourceMaterials = [...usage].flatMap(([source, modes]) => [...modes].sort().map((skinned) => ({ source, skinned })));
+  const materialNames = new Map(), nextMaterialName = (source, index) => {
+    const base = safeName(source?.name, `Material_${index}`), key = base.toLowerCase(), ordinal = (materialNames.get(key) || 0) + 1;
+    materialNames.set(key, ordinal);
+    return ordinal === 1 ? base : `${base}_${ordinal}`;
+  };
   const materials = [], textures = [], textureReferences = [], materialMaps = [], materialMapWarnings = [], materialIds = new Map();
-  sourceMaterials.forEach((source, index) => {
-    const converted = createMaterial(source, index, usage.get(source), textures.length);
+  sourceMaterials.forEach(({ source, skinned }, index) => {
+    const converted = createMaterial(source, index, skinned, textures.length, nextMaterialName(source, index));
     materials.push(converted.material); textures.push(...converted.textures); textureReferences.push(...converted.textureReferences);
-    materialMaps.push(...converted.materialMaps); materialMapWarnings.push(...converted.materialMapWarnings); materialIds.set(source, index);
+    materialMaps.push(...converted.materialMaps); materialMapWarnings.push(...converted.materialMapWarnings);
+    let ids = materialIds.get(source); if (!ids) { ids = new Map(); materialIds.set(source, ids); } ids.set(skinned, index);
   });
-  for (const [source, canonical] of canonicalByObject) materialIds.set(source, materialIds.get(canonical));
   const rootObjects = scene.name ? [scene] : (scene.children || []);
   const root = { type: 1, kind: "node", name: `FBX: ${safeName(sourceName, "scene.fbx")}`, children: rootObjects.map((child) => convertObject(child, materialIds, warnings)), active: true, transform: [...IDENTITY] };
   const animations = convertFbxAnimations(scene, sourceName);

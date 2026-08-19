@@ -80,6 +80,12 @@ function inverseTranspose3(transform) {
   return [inverse[0], inverse[3], inverse[6], inverse[1], inverse[4], inverse[7], inverse[2], inverse[5], inverse[8]];
 }
 
+function linearDeterminant(transform) {
+  return transform[0] * (transform[5] * transform[10] - transform[9] * transform[6])
+    - transform[4] * (transform[1] * transform[10] - transform[9] * transform[2])
+    + transform[8] * (transform[1] * transform[6] - transform[5] * transform[2]);
+}
+
 function direction(transform, value) {
   return [
     transform[0] * value[0] + transform[4] * value[1] + transform[8] * value[2],
@@ -142,7 +148,7 @@ export function transformStaticGeometry(node, transformValue, baselineVertices =
     if (plainTangent) vertices.set(orthogonal, offset + 8); else packTangent(outputView, (offset + 8) * 4, orthogonal, tangent.packed);
   }
   const bounds = localBounds(vertices, node.vertexStride);
-  return { vertices, bounds: [...bounds.center, bounds.radius], metrics: bounds };
+  return { vertices, bounds: [...bounds.center, bounds.radius], metrics: bounds, mirrored: linearDeterminant(transform) < 0 };
 }
 
 export function captureStaticGeometryBaselines(root) {
@@ -170,6 +176,11 @@ export function applyGeometryEdits(root, edits, baselines = null, warnings = [])
       if (edit.transform || edit.recalculateNormals) {
         const result = transformStaticGeometry(node, edit.transform || IDENTITY, node.vertices);
         node.vertices = result.vertices; node.bounds = result.bounds;
+        if (result.mirrored) {
+          for (let offset = 0; offset < node.indices.length; offset += 3) {
+            [node.indices[offset + 1], node.indices[offset + 2]] = [node.indices[offset + 2], node.indices[offset + 1]];
+          }
+        }
       }
       applied++;
     } catch (error) { warnings.push(`${path}: ${error.message}`); }

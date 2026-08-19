@@ -92,6 +92,20 @@ test("restores baselines before reapplying stable-path geometry edits", () => {
   assert.deepEqual(staticGeometryMetrics(node).size, [2, 2, 0]);
 });
 
+test("reverses winding after a mirrored geometry transform", () => {
+  const node = mesh(), root = { kind: "node", name: "ROOT", active: true, transform: identity, children: [node] }, baselines = captureStaticGeometryBaselines(root), warnings = [];
+  const transform = composeNodeTransform({ position: [0, 0, 0], rotation: [0, 0, 0], scale: [-1, 1, 1] });
+  assert.equal(applyGeometryEdits(root, { "0": { transform } }, baselines, warnings), 1);
+  assert.deepEqual(Array.from(node.indices), [0, 2, 1]);
+  const a = node.indices[0] * node.vertexStride, b = node.indices[1] * node.vertexStride, c = node.indices[2] * node.vertexStride;
+  const ab = [node.vertices[b] - node.vertices[a], node.vertices[b + 1] - node.vertices[a + 1], node.vertices[b + 2] - node.vertices[a + 2]];
+  const ac = [node.vertices[c] - node.vertices[a], node.vertices[c + 1] - node.vertices[a + 1], node.vertices[c + 2] - node.vertices[a + 2]];
+  const faceZ = ab[0] * ac[1] - ab[1] * ac[0];
+  assert.ok(faceZ > 0);
+  assert.ok(node.vertices[a + 5] > 0);
+  assert.deepEqual(warnings, []);
+});
+
 test("rejects collapsed transforms and protects skinned bind-pose geometry", () => {
   const source = mesh(), collapsed = composeNodeTransform({ position: [0, 0, 0], rotation: [0, 0, 0], scale: [0, 1, 1] });
   assert.throws(() => transformStaticGeometry(source, collapsed), /cannot collapse/);

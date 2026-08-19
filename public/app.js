@@ -28,7 +28,7 @@ import { adjustCspSeasonColor, analyzeCspSeasonalOverrides } from "/src/seasons.
 import { auditMaterialShaderProfiles, resolveMaterialRenderProfile } from "/src/shader-profiles.js";
 import { KS_EDITOR_CUBEMAP, WEBGL_CUBEMAP_FACES, reflectionBlurFromExponent, selectReflectionCaptureItems } from "/src/reflections.js";
 import { createCspWindParticles, CSP_WIND_MAP_FORMAT, CSP_WIND_MAP_SIZE, CSP_WIND_PARTICLE_COUNT, updateCspWindParticles } from "/src/csp-wind.js";
-import { parseFbxWithTextures, resolveFbxTextures } from "/src/fbx-import.js";
+import { parseFbxWithTextures, resolveFbxModelTextures } from "/src/fbx-import.js";
 import { applyNodeEdits, composeNodeTransform, decomposeNodeTransform, nodePathEntries } from "/src/node-authoring.js";
 
 const $ = (selector) => document.querySelector(selector);
@@ -142,11 +142,11 @@ $("#asset-folder").addEventListener("change", async (event) => {
   configureAnimationChoices();
   await configureDriverData();
   await configureTrackDataChoices();
-  if (model?.fbx) {
-    await resolveFbxTextures(model, assetFileIndex);
-    window.__apexFbx = model.fbx;
-    renderer?.setModel(model);
-    status.textContent = modelStatusText();
+  const importedFbxModels=[...new Set(loadedModelDescriptors.map((descriptor)=>descriptor.model).filter((entry)=>entry?.fbx))];
+  if(importedFbxModels.length){
+    await resolveFbxModelTextures(importedFbxModels,assetFileIndex);
+    if(model?.workspace)await load(loadedModelDescriptors,loadedWorkspaceOptions);
+    else{model=importedFbxModels[0];window.__apexFbx=model.fbx;renderer?.setModel(model);status.textContent=modelStatusText();}
   }
   await Promise.all([renderer?.setExternalFiles([...assetFolderFiles,...cspTextureFolderFiles]), renderer?.setSkinFiles([], "")]);
   refreshCarColliderAudit();
@@ -246,13 +246,13 @@ async function load(files, workspaceOptions = {}) {
       const descriptor = descriptors[index], file = descriptor.file;
       status.textContent = `Loading ${file.name} · ${index + 1}/${descriptors.length}…`;
       await new Promise((resolve) => requestAnimationFrame(resolve));
-      let parsed = parsedByFile.get(file);
+      let parsed = descriptor.model || parsedByFile.get(file);
       if (!parsed) { const bytes=await file.arrayBuffer();parsed=/\.fbx$/i.test(file.name)?await parseFbxWithTextures(bytes,file.name,assetFileIndex):parseKn5(bytes);if(descriptor.driverPose){sharedDriverPoseResult=applyDriverBasePose(parsed,descriptor.driverPose);parsed=sharedDriverPoseResult.model;}if(descriptor.auxiliary==="driver")sharedDriverHideAudit=auditDriverHiddenObjects(parsed,driverConfig?.hideObjects||[]);parsedByFile.set(file, parsed); }
       entries.push({ name: descriptor.name || file.name, size: file.size, model: parsed, position: descriptor.position, rotation: descriptor.rotation, lod: descriptor.lod, manifestIndex: descriptor.manifestIndex, auxiliary:descriptor.auxiliary, dynamic: descriptor.dynamic });
     }
     const forceWorkspace = workspaceOptions.forceWorkspace || entries.length > 1 || entries.some((entry) => [...(entry.position || []), ...(entry.rotation || [])].some((value) => Number(value) !== 0));
     model = forceWorkspace ? mergeKn5Models(entries, { name: displayName, kind: workspaceOptions.kind, manifest: workspaceOptions.manifest, warnings: workspaceOptions.warnings, cockpitHrDistance: workspaceOptions.cockpitHrDistance, driverHrDistance: workspaceOptions.driverHrDistance }) : entries[0].model;
-    loadedModelDescriptors=descriptors.map((descriptor)=>({...descriptor}));loadedWorkspaceOptions={...workspaceOptions,name:displayName};
+    loadedModelDescriptors=descriptors.map((descriptor,index)=>({...descriptor,model:entries[index].model}));loadedWorkspaceOptions={...workspaceOptions,name:displayName};
     const totalSize = descriptors.reduce((sum, descriptor) => sum + (Number(descriptor.file.size) || 0), 0);
     modelFile = forceWorkspace ? { name: displayName, size: totalSize, workspaceKey: descriptors.map((descriptor, index) => `${descriptor.file.webkitRelativePath || descriptor.file.name}:${descriptor.file.size}:${entries[index].position || ""}:${entries[index].rotation || ""}:${entries[index].lod ? `${entries[index].lod.index},${entries[index].lod.in},${entries[index].lod.out}` : ""}`).join("|") } : descriptors[0].file;
     selectedNode = null;
