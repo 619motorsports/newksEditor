@@ -131,7 +131,10 @@ npm test
 - Car collision validation for `collider.kn5` texture/material rules, SDK triangle
   budget, origin transform, dimensions, degenerate triangles, welded boundary and
   non-manifold edges, plus packed or unpacked `colliders.ini` bottom-box inspection
-  and a non-destructive orange edge overlay on the active car LOD
+  and a non-destructive orange edge overlay on the active car LOD. Each static collider
+  mesh supports offset, rotation, scale, degenerate-face removal, face reversal, and
+  normal rebuilding. Edits update the overlay and audit immediately. They also support
+  undo, recovery, project JSON, reset, and standalone `collider.kn5` export.
 - Per-LOD car hierarchy preflight for all 14 SDK-listed suspension, wheel, cockpit,
   steering, and brake-disc nodes; duplicate/null-kind diagnostics; left/right and
   +Z-forward wheel-axis checks; related-pivot and cross-LOD alignment

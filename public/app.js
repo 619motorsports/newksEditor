@@ -29,7 +29,7 @@ import { auditMaterialShaderProfiles, resolveMaterialRenderProfile } from "/src/
 import { KS_EDITOR_CUBEMAP, WEBGL_CUBEMAP_FACES, reflectionBlurFromExponent, selectReflectionCaptureItems } from "/src/reflections.js";
 import { createCspWindParticles, CSP_WIND_MAP_FORMAT, CSP_WIND_MAP_SIZE, CSP_WIND_PARTICLE_COUNT, updateCspWindParticles } from "/src/csp-wind.js";
 import { parseFbxWithTextures, resolveFbxTextures } from "/src/fbx-import.js";
-import { applyNodeEdits, composeNodeTransform, decomposeNodeTransform, nodePathEntries } from "/src/node-authoring.js";
+import { applyNodeEdits, composeNodeTransform, decomposeNodeTransform, nodeAtPath, nodePathEntries } from "/src/node-authoring.js";
 
 const $ = (selector) => document.querySelector(selector);
 const fileInput = $("#file");
@@ -94,6 +94,7 @@ let carColliderModel = null;
 let carColliderAudit = null;
 let carColliderFileName = "";
 let carColliderError = "";
+let colliderGeometryBaselines = new Map();
 let bottomColliderConfig = null;
 let bottomColliderFileName = "";
 let carHierarchyAudit = null;
@@ -282,7 +283,7 @@ async function load(files, workspaceOptions = {}) {
     configureAnimationChoices();
     status.textContent = modelStatusText();
     renderTree();
-    renderer?.setModel(model);configureReflectionCaptureChoices();applyVaoPatch();renderer?.setSurfaceBindings(trackSurfaceBindings);configureSurfaceOverlay();
+    renderer?.setModel(model);refreshCarColliderPreview();configureReflectionCaptureChoices();applyVaoPatch();renderer?.setSurfaceBindings(trackSurfaceBindings);configureSurfaceOverlay();
     renderer?.setDriverCockpitMode(driverCockpitView,driverConfig?.hideObjects||[]);
     configureLodPreview();
     configureDriverViewButton();
@@ -384,19 +385,32 @@ async function configurePackedData() {
 }
 
 async function configureCarCollider() {
-  carColliderModel=null;carColliderAudit=null;carColliderFileName="";carColliderError="";bottomColliderConfig=null;bottomColliderFileName="";window.__apexColliderAudit=null;window.__apexBottomColliders=null;
+  carColliderModel=null;carColliderAudit=null;carColliderFileName="";carColliderError="";colliderGeometryBaselines=new Map();bottomColliderConfig=null;bottomColliderFileName="";window.__apexColliderAudit=null;window.__apexColliderAuthoring=null;window.__apexBottomColliders=null;
   const candidates=assetFileIndex.entries.filter((entry)=>/(^|\/)collider\.kn5$/i.test(entry.relativePath)),entry=candidates.find((candidate)=>/^collider\.kn5$/i.test(candidate.relativePath))||(candidates.length===1?candidates[0]:null);
-  if(entry){carColliderFileName=entry.relativePath;try{carColliderModel=parseKn5(await entry.file.arrayBuffer());}catch(error){console.error(error);carColliderError=error.message;}}
+  if(entry){carColliderFileName=entry.relativePath;try{carColliderModel=parseKn5(await entry.file.arrayBuffer());colliderGeometryBaselines=captureStaticGeometryBaselines(carColliderModel.root);}catch(error){console.error(error);carColliderError=error.message;}}
   const configs=assetFileIndex.entries.filter((candidate)=>/(^|\/)data\/colliders\.ini$/i.test(candidate.relativePath)),configEntry=configs.find((candidate)=>/^data\/colliders\.ini$/i.test(candidate.relativePath))||(configs.length===1?configs[0]:null)||virtualAcdAssetEntry("colliders.ini");
   if(configEntry){bottomColliderFileName=configEntry.relativePath;try{bottomColliderConfig=parseBottomCollidersIni(await configEntry.file.text(),configEntry.relativePath);window.__apexBottomColliders=bottomColliderConfig;}catch(error){console.error(error);carColliderError=carColliderError||error.message;}}
-  renderer?.setCollider(carColliderModel);configureColliderOverlay();
+  applyProjectColliderEdits();refreshCarColliderPreview();
+}
+
+function applyProjectColliderEdits() {
+  const warnings=[];
+  const applied=carColliderModel?.root?applyGeometryEdits(carColliderModel.root,editorProject?.colliderEdits,colliderGeometryBaselines,warnings):0;
+  window.__apexColliderAuthoring={edits:Object.keys(editorProject?.colliderEdits||{}).length,applied,warnings};
+}
+
+function refreshCarColliderPreview() {
+  const visible=Boolean(renderer?.colliderVisible);
+  renderer?.setCollider(carColliderModel);
+  if(renderer&&visible&&carColliderModel){renderer.colliderVisible=true;renderer.draw();}
+  configureColliderOverlay();
 }
 
 function refreshCarColliderAudit() {
   carColliderAudit=carColliderModel&&model?auditCarCollider(carColliderModel,model):null;window.__apexColliderAudit=carColliderAudit;configureColliderOverlay();
 }
 
-function configureColliderOverlay(){const button=$("#collider-overlay"),available=Boolean(model&&carColliderModel);button.hidden=!available;button.disabled=!available;if(!available){button.classList.remove("active");if(renderer)renderer.colliderVisible=false;}}
+function configureColliderOverlay(){const button=$("#collider-overlay"),available=Boolean(model&&carColliderModel);button.hidden=!available;button.disabled=!available;button.classList.toggle("active",available&&Boolean(renderer?.colliderVisible));if(!available&&renderer)renderer.colliderVisible=false;}
 function configureSurfaceOverlay(){const button=$("#surface-overlay"),available=Boolean(model?.workspace?.kind==="track"&&trackSurfaceBindings.size);button.hidden=!available;button.disabled=!available;button.classList.toggle("active",available&&Boolean(renderer?.surfaceOverlay));if(!available&&renderer)renderer.surfaceOverlay=false;}
 
 function virtualAcdAssetEntry(path) {
@@ -610,9 +624,10 @@ function applyProjectSceneEdits() {
   const warnings = [];
   const applied = model?.root ? applyGeometryEdits(model.root, editorProject?.geometryEdits, geometryBaselines, warnings) : 0;
   window.__apexGeometryAuthoring = { edits: Object.keys(editorProject?.geometryEdits || {}).length, applied, warnings };
+  applyProjectColliderEdits();
 }
 
-function refreshHierarchyAuthoring(geometryChanged = false) {
+function refreshHierarchyAuthoring(geometryChanged = false, colliderChanged = false) {
   if (!model) return;
   const nodes = walkNodes(model.root), meshes = nodes.filter(({ node }) => node.kind === "mesh" || node.kind === "skinnedMesh");
   sceneVisibility = computeKn5Visibility(model.root);
@@ -628,7 +643,9 @@ function refreshHierarchyAuthoring(geometryChanged = false) {
   renderTree($("#search").value);
   if (geometryChanged) renderer?.refreshGeometry(); else renderer?.refreshHierarchy();
   renderer?.setSurfaceBindings(trackSurfaceBindings);
-  if (geometryChanged) { refreshCarColliderAudit(); applyVaoPatch(); }
+  if (colliderChanged) refreshCarColliderPreview();
+  if (geometryChanged || colliderChanged) refreshCarColliderAudit();
+  if (geometryChanged) applyVaoPatch();
   configureSurfaceOverlay();
   configureLodPreview(true);
   configureReflectionCaptureChoices();
@@ -676,21 +693,22 @@ function commitEditorChange(label, mutate) {
   const normalized = normalizeEditorProject(next), after = serializeEditorProject(normalized);
   if (after === before) return false;
   const geometryChanged = JSON.stringify(normalized.geometryEdits) !== JSON.stringify(editorProject.geometryEdits);
-  const sceneChanged = geometryChanged || JSON.stringify(normalized.nodeEdits) !== JSON.stringify(editorProject.nodeEdits) || JSON.stringify(normalized.workspaceEdits) !== JSON.stringify(editorProject.workspaceEdits) || JSON.stringify(normalized.surfaceEdits) !== JSON.stringify(editorProject.surfaceEdits);
+  const colliderChanged = JSON.stringify(normalized.colliderEdits) !== JSON.stringify(editorProject.colliderEdits);
+  const sceneChanged = geometryChanged || colliderChanged || JSON.stringify(normalized.nodeEdits) !== JSON.stringify(editorProject.nodeEdits) || JSON.stringify(normalized.workspaceEdits) !== JSON.stringify(editorProject.workspaceEdits) || JSON.stringify(normalized.surfaceEdits) !== JSON.stringify(editorProject.surfaceEdits);
   undoStack.push({ label, snapshot: before });
   if (undoStack.length > 100) undoStack.shift();
   redoStack = [];
   editorProject = normalized;
-  if (sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged); }
+  if (sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged,colliderChanged); }
   refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
   if (sceneChanged && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
   return true;
 }
 
 function restoreEditorSnapshot(snapshot) {
-  const restored = normalizeEditorProject(JSON.parse(snapshot)), geometryChanged = JSON.stringify(restored.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits), sceneChanged = geometryChanged || JSON.stringify(restored.nodeEdits) !== JSON.stringify(editorProject?.nodeEdits) || JSON.stringify(restored.workspaceEdits) !== JSON.stringify(editorProject?.workspaceEdits) || JSON.stringify(restored.surfaceEdits) !== JSON.stringify(editorProject?.surfaceEdits);
+  const restored = normalizeEditorProject(JSON.parse(snapshot)), geometryChanged = JSON.stringify(restored.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits), colliderChanged = JSON.stringify(restored.colliderEdits) !== JSON.stringify(editorProject?.colliderEdits), sceneChanged = geometryChanged || colliderChanged || JSON.stringify(restored.nodeEdits) !== JSON.stringify(editorProject?.nodeEdits) || JSON.stringify(restored.workspaceEdits) !== JSON.stringify(editorProject?.workspaceEdits) || JSON.stringify(restored.surfaceEdits) !== JSON.stringify(editorProject?.surfaceEdits);
   editorProject = restored;
-  if (sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged); }
+  if (sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged,colliderChanged); }
   refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
   if (sceneChanged && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
 }
@@ -710,7 +728,7 @@ function redoEditorChange() {
 }
 
 function updateEditorButtons() {
-  const edits = editorProjectEditCount(editorProject), cspEdits = editorProjectCspEditCount(editorProject), available = Boolean(editorProject && model);
+  const edits = editorProjectEditCount(editorProject), cspEdits = editorProjectCspEditCount(editorProject), kn5Edits=edits-colliderProjectEditCount(editorProject), available = Boolean(editorProject && model);
   $("#undo").disabled = !undoStack.length; $("#undo").title = undoStack.length ? `Undo ${undoStack.at(-1).label}` : "Nothing to undo";
   $("#redo").disabled = !redoStack.length; $("#redo").title = redoStack.length ? `Redo ${redoStack.at(-1).label}` : "Nothing to redo";
   $("#save-project").disabled = !available;
@@ -718,7 +736,7 @@ function updateEditorButtons() {
   $("#export-csp").disabled = !available || !cspEdits;
   $("#export-csp").textContent = cspEdits ? `Export CSP (${cspEdits})` : "Export CSP";
   const kn5Blocked=model?.encryption?"CSP-protected KN5 files cannot be safely rewritten":model?.workspace?"Export each source model separately; assembled workspaces are not a single source asset":model?.fbx?"Export the imported FBX scene as a game-compatible KN5":"Export a game-compatible KN5 copy with compatible authored edits baked in";
-  $("#export-kn5").disabled=!available||Boolean(model?.encryption)||Boolean(model?.workspace);$("#export-kn5").title=kn5Blocked;$("#export-kn5").textContent=edits?`Export KN5 (${edits})`:model?.fbx?"Export KN5":"Export KN5 copy";
+  $("#export-kn5").disabled=!available||Boolean(model?.encryption)||Boolean(model?.workspace);$("#export-kn5").title=kn5Blocked;$("#export-kn5").textContent=kn5Edits?`Export KN5 (${kn5Edits})`:model?.fbx?"Export KN5":"Export KN5 copy";
 }
 
 function projectBaseName() {
@@ -758,15 +776,21 @@ function exportBakedKn5() {
   finally{applyProjectSceneEdits();}
 }
 
+function exportColliderKn5() {
+  if(!carColliderModel)return;
+  try{const bytes=serializeKn5(carColliderModel),url=URL.createObjectURL(new Blob([bytes],{type:"application/octet-stream"})),anchor=document.createElement("a");window.__apexLastColliderExport={name:"collider.kn5",bytes:bytes.byteLength,edits:Object.keys(editorProject?.colliderEdits||{}).length,errors:carColliderAudit?.errors||0,warnings:carColliderAudit?.warnings||0};status.textContent=`Exported collider.kn5 · ${carColliderAudit?.triangles?.toLocaleString()||0} triangles · ${carColliderAudit?.errors||0} validation errors`;anchor.href=url;anchor.download="collider.kn5";anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+  catch(error){console.error(error);status.textContent=`Could not export collider.kn5: ${error.message}`;}
+}
+
 async function loadEditorProject(file) {
   if (!file || !model) return;
   try {
     const loaded = normalizeEditorProject(JSON.parse(await file.text()));
     if (loaded.asset.size && loaded.asset.size !== modelFile.size) throw new Error(`Project expects a ${loaded.asset.size}-byte KN5, but ${modelFile.name} is ${modelFile.size} bytes`);
     if (loaded.asset.kn5Version && loaded.asset.kn5Version !== model.version) throw new Error(`Project expects KN5 v${loaded.asset.kn5Version}, but this model is v${model.version}`);
-    const geometryChanged = JSON.stringify(loaded.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits);
+    const geometryChanged = JSON.stringify(loaded.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits), colliderChanged = JSON.stringify(loaded.colliderEdits) !== JSON.stringify(editorProject?.colliderEdits);
     editorProject = loaded; undoStack = []; redoStack = [];
-    applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged); refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
+    applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged,colliderChanged); refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
     if (!selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
   } catch (error) {
     console.error(error); status.textContent = `Could not open project: ${error.message}`;
@@ -886,6 +910,7 @@ function renderModelInspector(file, nodes, triangles) {
   }));
   bindWorkspaceEditors();
   bindSurfaceEditors();
+  bindColliderEditors();
 }
 
 function renderMaterialInspector(material) {
@@ -988,7 +1013,17 @@ function packedDataInspectorHtml() {
 
 function carColliderInspectorHtml() {
   if(!carColliderFileName&&!bottomColliderFileName)return "";if(carColliderError&&!carColliderAudit&&!bottomColliderConfig)return `<div class="section"><h3>Car collision validation</h3>${kv("Status","Could not parse")}${kv("Error",carColliderError)}</div>`;const audit=carColliderAudit,dimensions=audit?.bounds?.size.map((value)=>`${format(value)} m`).join(" × ")||"Unavailable",boxes=bottomColliderConfig?.colliders||[];
-  return `<div class="section"><h3>Car collision validation</h3>${carColliderFileName?kv("3D collider",carColliderFileName):kv("3D collider","Not available")}${audit?`${kv("Meshes",audit.meshes)}${kv("Vertices",audit.vertices)}${kv("Triangles",audit.triangles)}${kv("Dimensions",dimensions)}${kv("Textures",audit.textures)}${kv("Closed manifold",audit.topology.closed?"Yes":"No")}${kv("Boundary edges",audit.topology.boundaryEdges)}${kv("Non-manifold edges",audit.topology.nonManifoldEdges)}${kv("Errors",audit.errors)}${kv("Warnings",audit.warnings)}${audit.findings.map((finding)=>`<div class="resource ${finding.severity==="error"?"validation-error":""}"><strong>${finding.severity==="error"?"Error":"Warning"}</strong><span>${escapeHtml(finding.message)}</span></div>`).join("")}`:""}${bottomColliderFileName?`${kv("Bottom boxes",`${boxes.length} · ${bottomColliderFileName}`)}${boxes.map((box)=>`<div class="resource"><strong>COLLIDER_${box.index}${box.groundEnabled?" · ground":" · disabled"}</strong><span>centre ${box.centre.map(format).join(", ")} m · size ${box.size.map(format).join(" × ")} m</span></div>`).join("")}${(bottomColliderConfig?.warnings||[]).map((warning)=>`<div class="resource"><strong>Warning</strong><span>${escapeHtml(warning)}</span></div>`).join("")}`:""}<span class="empty">Floor-plane placement needs visual verification; the lowest render-LOD vertex is only a conservative comparison.</span></div>`;
+  return `<div class="section"><h3>Car collision validation</h3>${carColliderFileName?kv("3D collider",carColliderFileName):kv("3D collider","Not available")}${audit?`${kv("Meshes",audit.meshes)}${kv("Vertices",audit.vertices)}${kv("Triangles",audit.triangles)}${kv("Dimensions",dimensions)}${kv("Textures",audit.textures)}${kv("Closed manifold",audit.topology.closed?"Yes":"No")}${kv("Boundary edges",audit.topology.boundaryEdges)}${kv("Non-manifold edges",audit.topology.nonManifoldEdges)}${kv("Errors",audit.errors)}${kv("Warnings",audit.warnings)}${audit.findings.map((finding)=>`<div class="resource ${finding.severity==="error"?"validation-error":""}"><strong>${finding.severity==="error"?"Error":"Warning"}</strong><span>${escapeHtml(finding.message)}</span></div>`).join("")}`:""}${colliderAuthoringHtml()}${bottomColliderFileName?`${kv("Bottom boxes",`${boxes.length} · ${bottomColliderFileName}`)}${boxes.map((box)=>`<div class="resource"><strong>COLLIDER_${box.index}${box.groundEnabled?" · ground":" · disabled"}</strong><span>centre ${box.centre.map(format).join(", ")} m · size ${box.size.map(format).join(" × ")} m</span></div>`).join("")}${(bottomColliderConfig?.warnings||[]).map((warning)=>`<div class="resource"><strong>Warning</strong><span>${escapeHtml(warning)}</span></div>`).join("")}`:""}<span class="empty">Floor-plane placement needs visual verification; the lowest render-LOD vertex is only a conservative comparison.</span></div>`;
+}
+
+function colliderAuthoringHtml() {
+  if(!carColliderModel?.root||!editorProject)return "";
+  const meshes=nodePathEntries(carColliderModel.root).filter(({node,path})=>node.kind==="mesh"&&node.vertexStride===11&&colliderGeometryBaselines.has(path)),count=colliderProjectEditCount();
+  const controls=meshes.map(({node,path})=>{const baseline=colliderGeometryBaselines.get(path),edit=editorProject.colliderEdits?.[path],source=staticGeometryMetrics({...node,vertices:baseline.vertices,indices:baseline.indices}),current=staticGeometryMetrics(node),components=edit?.transform?decomposeNodeTransform(edit.transform):{position:[0,0,0],rotation:[0,0,0],scale:[1,1,1],decomposable:true};
+    const vector=(key,label,value,title="")=>`<label class="author-field"><span>${label}</span><input class="${edit?.transform?"authored":""}" data-edit-collider-transform="${key}" data-collider-path="${escapeHtml(path)}" value="${escapeHtml(formatEditorValue(value))}" spellcheck="false"${title?` title="${escapeHtml(title)}"`:""}></label>`;
+    const operation=(key,label,title)=>`<label class="author-field"><span>${label}</span><select class="${edit?.[key]?"authored":""}" data-edit-collider-operation="${key}" data-collider-path="${escapeHtml(path)}" title="${escapeHtml(title)}"><option value="">Keep source</option><option value="true" ${edit?.[key]?"selected":""}>Apply</option></select></label>`;
+    return `<div class="resource"><strong>${escapeHtml(node.name)} · ${escapeHtml(path)}</strong><span>Pivot ${source.center.map(format).join(", ")} · source ${source.size.map(format).join(" × ")} m · ${source.triangles.toLocaleString()} triangles${edit?` · current ${current.size.map(format).join(" × ")} m · ${current.triangles.toLocaleString()} triangles`:""}</span>${vector("position","Vertex offset",components.position)}${vector("rotation","Rotation °",components.rotation,"Euler XYZ degrees")}${vector("scale","Vertex scale",components.scale)}${components.decomposable?"":`<span class="empty validation-warning">This transform cannot be represented as standard position, rotation, and scale.</span>`}${operation("removeDegenerate","Remove degenerate","Remove repeated-index and zero-area triangles")}${operation("reverseWinding","Reverse faces","Reverse triangle winding and vertex normals")}${operation("recalculateNormals","Rebuild normals","Build area-weighted normals from the edited triangle winding")}<div class="section-actions"><button class="mini" data-reset-collider="${escapeHtml(path)}" ${edit?"":"disabled"}>Reset mesh</button></div></div>`;}).join("");
+  return `${kv("Collider edits",count)}${controls}<span class="empty">Transforms use each source mesh bounds center. Export writes the edited standalone collider without changing the visual car KN5.</span><div class="section-actions"><button class="mini" data-export-collider>Export collider.kn5</button><button class="mini" data-reset-colliders ${count?"":"disabled"}>Reset collider edits</button></div>`;
 }
 
 function carHierarchyInspectorHtml(){const audit=carHierarchyAudit;if(!audit)return "";return `<div class="section"><h3>Car hierarchy validation</h3>${kv("Required nodes per LOD",audit.requiredNodes)}${kv("Errors",audit.errors)}${kv("Warnings",audit.warnings)}${audit.lods.map((lod)=>`<div class="resource"><strong>LOD ${lod.index} · ${escapeHtml(lod.file)}</strong><span>${lod.requiredPresent}/${audit.requiredNodes} required · ${lod.nodes.toLocaleString()} nodes · ${lod.uniqueNames.toLocaleString()} unique names</span></div>`).join("")}${audit.findings.map((finding)=>`<div class="resource ${finding.severity==="error"?"validation-error":""}"><strong>${finding.severity==="error"?"Error":"Warning"} · ${escapeHtml(finding.file)}</strong><span>${escapeHtml(finding.message)}</span></div>`).join("")}</div>`;}
@@ -1208,6 +1243,10 @@ function geometryEditCount(edit) {
   return ["transform", "removeDegenerate", "reverseWinding", "recalculateNormals"].filter((key) => edit?.[key] !== undefined).length;
 }
 
+function colliderProjectEditCount(project=editorProject) {
+  return Object.values(project?.colliderEdits||{}).reduce((sum,edit)=>sum+geometryEditCount(edit),0);
+}
+
 function updateGeometryEdit(project, path, mutate) {
   const edit = { ...(project.geometryEdits[path] || {}) };
   mutate(edit);
@@ -1236,6 +1275,26 @@ function bindGeometryEditors(node) {
     commitEditorChange(`${enabled ? "Apply" : "Reset"} ${node.name} ${key}`, (project) => updateGeometryEdit(project, path, (edit) => { if (enabled) edit[key] = true; else delete edit[key]; }));
   }));
   inspector.querySelector("[data-reset-geometry]")?.addEventListener("click", () => commitEditorChange(`Reset ${node.name} geometry`, (project) => { delete project.geometryEdits[path]; }));
+}
+
+function updateColliderEdit(project, path, mutate) {
+  project.colliderEdits ||= Object.create(null);
+  const edit={...(project.colliderEdits[path]||{})};
+  mutate(edit);
+  if(Object.keys(edit).length)project.colliderEdits[path]=edit;
+  else delete project.colliderEdits[path];
+}
+
+function bindColliderEditors() {
+  if(!carColliderModel?.root||!editorProject)return;
+  inspector.querySelectorAll("[data-edit-collider-transform]").forEach((input)=>{
+    const commit=()=>{try{const path=input.dataset.colliderPath,key=input.dataset.editColliderTransform,node=nodeAtPath(carColliderModel.root,path);if(!node)throw new Error(`Collider mesh ${path} is unavailable`);const value=parseNodeVector(input,key[0].toUpperCase()+key.slice(1));if(key==="scale"&&value.some((component)=>Math.abs(component)<1e-6))throw new Error("Collider scale cannot collapse an axis");const existing=editorProject.colliderEdits?.[path],current=existing?.transform?decomposeNodeTransform(existing.transform):{position:[0,0,0],rotation:[0,0,0],scale:[1,1,1]},transform=composeNodeTransform({position:key==="position"?value:current.position,rotation:key==="rotation"?value:current.rotation,scale:key==="scale"?value:current.scale});input.classList.remove("invalid");const changed=commitEditorChange(`Set ${node.name} collider ${key}`,(project)=>updateColliderEdit(project,path,(edit)=>{if(geometryTransformIsIdentity(transform))delete edit.transform;else edit.transform=transform;}));if(!changed)status.textContent=modelStatusText();}catch(error){input.classList.add("invalid");status.textContent=error.message;}};
+    input.addEventListener("keydown",(event)=>{if(event.key==="Enter"){event.preventDefault();commit();}});input.addEventListener("change",commit);
+  });
+  inspector.querySelectorAll("[data-edit-collider-operation]").forEach((select)=>select.addEventListener("change",()=>{const path=select.dataset.colliderPath,key=select.dataset.editColliderOperation,node=nodeAtPath(carColliderModel.root,path),enabled=select.value==="true";commitEditorChange(`${enabled?"Apply":"Reset"} ${node?.name||path} collider ${key}`,(project)=>updateColliderEdit(project,path,(edit)=>{if(enabled)edit[key]=true;else delete edit[key];}));}));
+  inspector.querySelectorAll("[data-reset-collider]").forEach((button)=>button.addEventListener("click",()=>{const path=button.dataset.resetCollider,node=nodeAtPath(carColliderModel.root,path);commitEditorChange(`Reset ${node?.name||path} collider edits`,(project)=>{delete project.colliderEdits[path];});}));
+  inspector.querySelector("[data-reset-colliders]")?.addEventListener("click",()=>commitEditorChange("Reset collider edits",(project)=>{project.colliderEdits=Object.create(null);}));
+  inspector.querySelector("[data-export-collider]")?.addEventListener("click",exportColliderKn5);
 }
 
 function editWorkspaceFile(project, index, mutate) {
