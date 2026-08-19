@@ -80,8 +80,9 @@ vertical slice is only the foundation.
   records through a tested camera-side silhouette proxy with exclusion polygons.
   Recovered interior/exterior view enums and tri-state track-receiver modes now gate
   bounded light selection and per-mesh ordinary/GrassFX receivers, including
-  template-expanded `SelfLight` defaults. Native occluder cell/BVH ordering and size
-  weighting, native Gaussian filtering, and photometric behavior remain.
+  template-expanded `SelfLight` defaults. Local shadows use the recovered four-sample
+  resolve and separable 7-tap or 15-tap filters. Native occluder cell/BVH ordering,
+  32-slot atlas packing, dynamic refresh scheduling, and photometric behavior remain.
 - Complete VAO split-animation blending, legacy normal overrides, dynamic-object
   extra samples, and tree samples; add higher-fidelity car
   paint/glass/interior rendering. Installed legacy/v3/v4/v5 `.vao-patch` containers
@@ -161,9 +162,10 @@ vertical slice is only the foundation.
   substrate-normal concentrated diffuse, fixed 52.8-exponent gloss, strongest-light
   backlighting, and fake-shadow detail response. A cached 1024² static-editor depth
   radial-ESM atlas shadows up to four camera-prioritized authored spotlights in four
-  512² cells for both ordinary materials and GrassFX; GrassFX uses CSP's 10 cm lowered
-  receiver. Full unsampled compute density, moving-vehicle air/deformation stamping,
-  CSP's exact Gaussian local-shadow prefilter and dynamic/car atlas refresh scheduling,
+  512² cells for both ordinary materials and GrassFX. Its recovered four-sample
+  resolve and separable 7-tap or 15-tap filters run before receiver sampling. GrassFX
+  uses CSP's 10 cm lowered receiver. Full unsampled compute density,
+  moving-vehicle air/deformation stamping, 32-slot packing, dynamic/car atlas refresh scheduling,
   wet cubemap reflection,
   negative-wetness snow, and the rest of CSP's game-only lighting integration remain.
   RainFX now classifies puddle, soaking, smooth, rough, line, relief, and stream
@@ -202,9 +204,9 @@ vertical slice is only the foundation.
   composite weights, screen blend, and output-dither scale. Its separable bloom uses the
   active native 29-tap fallback, including the 15 bilinear samples, level radii, wavelength
   dispersion, and tail cutoff. Yebis star, ghost, light-shaft, non-default max-61 Gaussian,
-  non-default tone functions, cloud billboards, exact local-shadow filtering/scheduling, and controlled
+  non-default tone functions, cloud billboards, full local-shadow packing/scheduling, and controlled
   game-image matching remain. GrassFX full-density GPU dispatch, moving-vehicle
-  air/deformation stamps, CSP's exact local-shadow Gaussian filter, wet cubemap
+  air/deformation stamps, CSP's full local-shadow atlas packing, wet cubemap
   reflection, and transparent-layer refraction feedback remain separate fidelity gates.
 
 ## 3. Track and car workflows

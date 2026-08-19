@@ -249,8 +249,8 @@ npm test
 
 A portable BC6H/BC7 fallback for systems without BPTC, dynamic RainFX accumulation,
 drainage, spray and occlusion, GrassFX's full 868,352-thread density rather than the
-portable CPU sampling budget, CSP's exact Gaussian local-shadow prefilter and
-dynamic/car atlas refresh scheduling,
+portable CPU sampling budget, CSP's full 32-slot local-shadow packing and dynamic/car
+atlas refresh scheduling,
 wet cubemap reflection and negative-wetness snow response,
 transparent-layer feedback,
 general CSP template/include expansion,

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { computeDirectionalProbeShadowCascades, computeDirectionalShadowCascades, computeLocalLightShadow, cspExponentialShadowParams, cspLocalShadowFilter, resolveCspExponentialShadow, CSP_LOCAL_SHADOW_ATLAS_SIZE, CSP_LOCAL_SHADOW_CELL_SIZE, CSP_LOCAL_SHADOW_DEFAULT_EXP_FACTOR, CSP_LOCAL_SHADOW_FILTERS, CSP_LOCAL_SHADOW_LIMIT, KS_SHADOW_BIASES, KS_SHADOW_MAP_SIZE, KS_SHADOW_SPLITS, shadowCasterEnabled } from "../src/shadows.js";
+import { computeDirectionalProbeShadowCascades, computeDirectionalShadowCascades, computeLocalLightShadow, cspExponentialShadowParams, cspLocalShadowFilter, resolveCspExponentialShadow, CSP_LOCAL_SHADOW_ATLAS_SIZE, CSP_LOCAL_SHADOW_CELL_SIZE, CSP_LOCAL_SHADOW_DEFAULT_EXP_FACTOR, CSP_LOCAL_SHADOW_FILTERS, CSP_LOCAL_SHADOW_LIMIT, CSP_LOCAL_SHADOW_SAMPLES, KS_SHADOW_BIASES, KS_SHADOW_MAP_SIZE, KS_SHADOW_SPLITS, shadowCasterEnabled } from "../src/shadows.js";
 
 test("uses the native ksEditor shadow-map constants", () => {
   assert.equal(KS_SHADOW_MAP_SIZE, 2048);
@@ -48,6 +48,7 @@ test("builds the bounded static-editor CSP local-shadow projection", () => {
   assert.equal(CSP_LOCAL_SHADOW_ATLAS_SIZE, 1024);
   assert.equal(CSP_LOCAL_SHADOW_CELL_SIZE, 512);
   assert.equal(CSP_LOCAL_SHADOW_LIMIT, 4);
+  assert.equal(CSP_LOCAL_SHADOW_SAMPLES, 4);
   const shadow = computeLocalLightShadow({ position: [2, 5, 3], direction: [0, -1, 0], spot: 120, range: 20, shadowSpot: 150, shadowRange: 45, shadowClipPlane: 0.07 });
   assert.equal(shadow.spot, 150);
   assert.equal(shadow.near, 0.07);

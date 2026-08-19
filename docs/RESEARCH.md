@@ -514,8 +514,8 @@ On the complete Imola main KN5, 18 light sections currently produce 169 bounded
 preview instances when night and the tested flag conditions are enabled. This path
 consumes world transforms and mesh normals and completes without a WebGL error on
 3,036,891 triangles. It remains an authoring approximation: native occluder spatial
-indexing, visibility levels, native Gaussian shadow filtering, and full photometric
-matching are not implemented yet. Receiver/view filtering is now implemented by the
+indexing, visibility levels, 32-slot shadow packing, dynamic refresh, and full
+photometric matching are not implemented yet. Receiver/view filtering uses the
 native enums described above.
 
 ## GrassFX evidence
@@ -784,13 +784,25 @@ and computes automatic boost as
 
 Apex implements the editor-relevant static subset. Up to four authored spotlight
 shadows among the nearest 32 active lights receive 512² cells in a cached 1024² R32F
-atlas, with a normalized RGBA8 fallback where float render targets are unavailable.
-Opaque and alpha-tested scene geometry writes recovered radial exponential depth;
-ordinary materials and GrassFX use the public one-sample receiver equation, native
-normal-dependent bias, automatic or authored boost, clip sphere, and optional extra
-filtering. GrassFX preserves the recovered 0.1 m receiver offset. Generated grass
-does not cast local shadows. This is intentionally not a claim of CSP's exact native
-MSAA/Gaussian kernel, 32-slot packing, or moving-car/dynamic refresh behavior.
+atlas. A normalized RGBA8 fallback covers systems without float render targets.
+Opaque and alpha-tested scene geometry writes recovered radial exponential depth.
+When supported, the atlas uses four-sample color and depth renderbuffers. A fixed
+resolve then averages the samples into the single-sample atlas. The renderer uses
+the recovered 7-tap standard, value-aware 7-tap headlight, and 15-tap extra-blur
+separable filters. Ordinary materials and GrassFX use the public one-sample receiver
+equation, native normal-dependent bias, automatic or authored boost, and clip sphere.
+GrassFX preserves the recovered 0.1 m receiver offset. Generated grass does not cast
+local shadows. The portable path does not claim CSP's 32-slot packing or its
+moving-car and dynamic refresh behavior.
+
+A production Electron run tested the four-sample path on Monza's seven-file,
+1,428-mesh workspace. `NIGHT_SMOOTH=1` activated 114 lights, including two authored
+shadow lights. The camera selected one shadow light and 307 scene casters for the
+local atlas. Chromium selected the four-sample R32F resolve and the standard
+separable filter. The night frame hashed to `4fc183e6cbcda773`; every captured state
+returned WebGL error zero, and the browser logged no exception. Animated GrassFX
+wind makes this hash run-specific. The reported light, caster, and sample counts
+prove that the local resolve executed.
 
 The native surface setup names a separate `GrassFX: normals and AO` target and creates
 it with format code `0x1c` (`RGBA8_UNORM`). Disassembly of the shipped
@@ -1762,6 +1774,15 @@ rendered 1,023 of 1,239 meshes and 3,036,891 triangles; its live scene cubemap r
 Both checks used Light Clouds, automatic exposure 0.2, and an RGBA16F target with 4×
 MSAA. Neither check produced a JavaScript or browser warning/error. These checks prove
 the portable runtime path, not pixel equality with ksEditor or Assetto Corsa.
+
+A follow-up production Electron run used the full textured Nissan 370Z with manual
+exposure 0.35. It loaded all 82 textures, rendered 193 of 215 scene meshes, and used
+all five active bloom kernels. Runtime diagnostics reported 5/7/13/15/15 samples and
+sigma values 1.045/2.09/4.18/8.36/16.72. The lit frame hashed to
+`bd999be64c9d42ed`; shadows-off and low-sun frames hashed to `1fd352c0372fba95`
+and `4be34d217367d96a`. Every state returned WebGL error zero, and the browser logged
+no exception. This proves the recovered Gaussian code executes in the production
+WebGL path. It does not prove pixel equality with the native editor.
 
 ## CSP vertex ambient-occlusion evidence
 

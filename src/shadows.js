@@ -5,6 +5,7 @@ export const KS_SUN_DIRECTION = Object.freeze([0.35, 0.82, 0.42]);
 export const CSP_LOCAL_SHADOW_ATLAS_SIZE = 1024;
 export const CSP_LOCAL_SHADOW_CELL_SIZE = 512;
 export const CSP_LOCAL_SHADOW_LIMIT = 4;
+export const CSP_LOCAL_SHADOW_SAMPLES = 4;
 export const CSP_LOCAL_SHADOW_DEFAULT_EXP_FACTOR = 20;
 export const CSP_LOCAL_SHADOW_DEFAULT_CLIP_PLANE = 0.5;
 export const CSP_LOCAL_SHADOW_DEFAULT_CLIP_SPHERE = 0.5;

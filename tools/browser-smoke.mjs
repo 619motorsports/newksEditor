@@ -235,6 +235,8 @@ for (const [name, value] of conditionChanges) {
       ...await screenshotState(),
       grassLocalLights: grassFx ? await evaluate(`window.__apexRenderer?.grassStatus.localLights??0`) : null,
       grassLocalShadowLights: grassFx ? await evaluate(`window.__apexRenderer?.grassStatus.localShadowLights??0`) : null,
+      grassLocalShadowSamples: grassFx ? await evaluate(`window.__apexRenderer?.grassStatus.localShadowSamples??0`) : null,
+      grassLocalShadowAtlasMode: grassFx ? await evaluate(`window.__apexRenderer?.grassStatus.localShadowAtlasMode??""`) : null,
     };
   } else states[`${name}=${value}`] = null;
   if (present) await setCondition(name, 0);
