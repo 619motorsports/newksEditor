@@ -89,7 +89,7 @@ const state = await evaluate(`(async()=>({
   gpu:document.querySelector('#gpu')?.textContent||'',
   glError:document.querySelector('#view')?.getContext('webgl2')?.getError()??null,
   textures:window.__apexRenderer?.textureStatus||null,
-  fbx:window.__apexFbx?{sourceName:window.__apexFbx.sourceName,format:window.__apexFbx.format,version:window.__apexFbx.version,textureSummary:window.__apexFbx.textureSummary,references:window.__apexFbx.textureReferences.map(reference=>({material:reference.material,source:reference.source,status:reference.status,matchedBy:reference.matchedBy,path:reference.path,format:reference.format,output:reference.output})),warnings:window.__apexFbx.warnings}:null,
+  fbx:window.__apexFbx?{sourceName:window.__apexFbx.sourceName,format:window.__apexFbx.format,version:window.__apexFbx.version,textureSummary:window.__apexFbx.textureSummary,references:window.__apexFbx.textureReferences.map(reference=>({material:reference.material,slot:reference.slot,source:reference.source,status:reference.status,matchedBy:reference.matchedBy,path:reference.path,format:reference.format,output:reference.output})),warnings:window.__apexFbx.warnings}:null,
   scene:window.__apexRenderer?.sceneStatus||null,
   contentSecurityPolicy:(await fetch('/')).headers.get('content-security-policy')||''
 }))()`);

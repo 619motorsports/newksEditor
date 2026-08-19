@@ -65,11 +65,13 @@ npm test
   original object names, UV seams, normals, skin weights, and bone inverse-bind matrices.
   It flips the UV V coordinate to match ksEditor. It also limits each KN5 mesh to
   65,535 vertices. The importer preserves supported embedded PNG, JPEG, and WebP
-  diffuse textures. It also resolves external DDS, PNG, JPEG, and WebP textures.
+  textures. It also resolves external DDS, PNG, JPEG, and WebP textures.
   A relative path, suffix, or basename must resolve to one file. Missing, ambiguous,
-  and unsupported textures use an embedded one-pixel DDS color. Each FBX animation
-  clip is sampled into 100 local-transform frames. The timeline previews the result,
-  and the export action writes the native KSANIM v2 layout.
+  and unsupported diffuse textures use an embedded one-pixel DDS color. Static normal
+  maps use `ksPerPixelNM` and `txNormal`. Missing normal maps use an embedded flat-normal
+  DDS. The inspector reports maps that have no safe stock KN5 binding. Each FBX
+  animation clip is sampled into 100 local-transform frames. The timeline previews
+  the result, and the export action writes the native KSANIM v2 layout.
 - KN5 v5/v6 headers, embedded texture, material, hierarchy, static and skinned-mesh
   parsing, including recognition of appended CSP KN5ENC v1 protected payloads
 - Stock shader parameters, texture-resource inspection, embedded BC1/2/3,
@@ -269,7 +271,7 @@ wet cubemap reflection and negative-wetness snow response,
 transparent-layer feedback,
 general CSP template/include expansion,
 randomized dynamic-object motion, subtractive procedural-emissive
-composition, additional FBX material maps, direct hierarchy and
+composition, FBX bump-map conversion and packed material maps, direct hierarchy and
 geometry editing, full local-light photometric fidelity,
 Yebis star, ghost, light-shaft, non-default max-61 Gaussian passes, controlled pixel matching,
 cloud billboards, and the remaining post-processing stack, VAO split-animation blending, normal overrides, dynamic

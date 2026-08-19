@@ -41,9 +41,10 @@ function fbxObjectName(object, fallback) {
   return safeName(object?.userData?.originalName || object?.name, fallback);
 }
 
-function textureName(materialName, index) {
+function textureName(materialName, index, role = "diffuse") {
   const stem = safeName(materialName, `material_${index}`).replace(/[^a-z0-9._-]+/gi, "_").replace(/^_+|_+$/g, "") || `material_${index}`;
-  return `APEX_FBX_${String(index).padStart(3, "0")}_${stem}.dds`;
+  const suffix = role === "diffuse" ? "" : `_${role}`;
+  return `APEX_FBX_${String(index).padStart(3, "0")}_${stem}${suffix}.dds`;
 }
 
 function textureFormat(input) {
@@ -130,35 +131,91 @@ export function createColorDds(color = [0.5, 0.5, 0.5], alpha = 1) {
   return output;
 }
 
-function createMaterial(source, index, skinned) {
+function textureSource(texture) {
+  const resolution = texture?.userData?.apexFbxResolution;
+  return resolution?.source || texture?.userData?.apexFbxSource || texture?.name || "Unnamed texture";
+}
+
+function createTextureBinding(sourceTexture, options) {
+  const { materialId, textureIndex, resourceIndex, material, slot, sourceField, fallbackName, fallbackData } = options;
+  const resolution = sourceTexture?.userData?.apexFbxResolution;
+  const resolved = resolution?.data && (resolution.status === "resolved" || resolution.status === "embedded");
+  const selectedTexture = resolved ? resolution.name : fallbackName;
+  const texture = { active: true, name: selectedTexture, data: resolved ? resolution.data : fallbackData };
+  const resource = { slot, textureId: resourceIndex, texture: selectedTexture };
+  if (!sourceTexture) return { texture, resource, reference: null };
+  const source = textureSource(sourceTexture);
+  return {
+    texture,
+    resource,
+    reference: {
+      materialId, textureIndex, resourceIndex, material, slot, sourceField, source,
+      sourceKind: resolution?.embedded || isEmbeddedSource(source) ? "embedded" : "external",
+      status: resolution?.status || "missing", matchedBy: resolution?.matchedBy || "",
+      path: resolution?.path || "", format: resolution?.format || "", output: selectedTexture,
+      fallbackName, fallbackData
+    }
+  };
+}
+
+const OPTIONAL_MAPS = [
+  ["bumpMap", "bump map"], ["emissiveMap", "emissive map"], ["specularMap", "specular map"],
+  ["aoMap", "ambient-occlusion map"], ["displacementMap", "displacement map"], ["envMap", "environment map"]
+];
+
+function ignoredMapWarning(material, label, reason) {
+  return `${material}: ${label} is not exported (${reason}).`;
+}
+
+function createMaterial(source, index, skinned, textureOffset) {
   const name = safeName(source?.name, `Material_${index}`), color = source?.color?.toArray?.() || [0.5, 0.5, 0.5];
   const specular = source?.specular?.toArray?.() || [0.04, 0.04, 0.04], specularLevel = Math.max(...specular);
   const opacity = Math.min(1, Math.max(0, Number(source?.opacity ?? 1))), transparent = Boolean(source?.transparent || opacity < 0.999);
   const properties = skinned ? [property("bones", 0)] : [];
   properties.push(property("ksAmbient", 0.35), property("ksDiffuse", 0.8), property("ksSpecular", specularLevel), property("ksSpecularEXP", source?.shininess ?? 10), property("ksEmissive", source?.emissiveIntensity ?? 0), property("ksAlphaRef", 0));
   if (skinned) properties.push(property("fresnelC", 0), property("fresnelEXP", 0), property("fresnelMaxLevel", 0), property("nmObjectSpace", 0), property("isAdditive", 0), property("useDetail", 0), property("detailUVMultiplier", 0), property("boh", 0));
-  const generatedTexture = textureName(name, index), sourceTexture = source?.map, resolution = sourceTexture?.userData?.apexFbxResolution;
-  const resolved = resolution?.data && (resolution.status === "resolved" || resolution.status === "embedded");
-  const selectedTexture = resolved ? resolution.name : generatedTexture, selectedData = resolved ? resolution.data : createColorDds(color, opacity);
+  const textures = [], resources = [], textureReferences = [], materialMaps = [], materialMapWarnings = [];
+  const addBinding = (sourceTexture, slot, sourceField, fallbackName, fallbackData) => {
+    const binding = createTextureBinding(sourceTexture, {
+      materialId: index, textureIndex: textureOffset + textures.length, resourceIndex: resources.length,
+      material: name, slot, sourceField, fallbackName, fallbackData
+    });
+    textures.push(binding.texture); resources.push(binding.resource);
+    if (binding.reference) textureReferences.push(binding.reference);
+  };
+  addBinding(source?.map, "txDiffuse", "map", textureName(name, index), createColorDds(color, opacity));
+  if (source?.map) materialMaps.push({ material: name, sourceField: "map", slot: "txDiffuse", source: textureSource(source.map), status: "preserved" });
+  if (source?.normalMap && !skinned) {
+    addBinding(source.normalMap, "txNormal", "normalMap", textureName(name, index, "normal"), createColorDds([0.5, 0.5, 1], 1));
+    materialMaps.push({ material: name, sourceField: "normalMap", slot: "txNormal", source: textureSource(source.normalMap), status: "preserved" });
+  } else if (source?.normalMap) {
+    materialMaps.push({ material: name, sourceField: "normalMap", slot: "", source: textureSource(source.normalMap), status: "ignored" });
+    materialMapWarnings.push(ignoredMapWarning(name, "normal map", "the stock skinned normal shader requires additional detail and packed-map inputs"));
+  }
+  if (source?.alphaMap) {
+    if (source.alphaMap === source.map) materialMaps.push({ material: name, sourceField: "alphaMap", slot: "txDiffuse alpha", source: textureSource(source.alphaMap), status: "folded" });
+    else {
+      materialMaps.push({ material: name, sourceField: "alphaMap", slot: "", source: textureSource(source.alphaMap), status: "ignored" });
+      materialMapWarnings.push(ignoredMapWarning(name, "separate opacity map", "stock single-layer shaders read opacity from txDiffuse alpha"));
+    }
+  }
+  for (const [field, label] of OPTIONAL_MAPS) if (source?.[field]) {
+    materialMaps.push({ material: name, sourceField: field, slot: "", source: textureSource(source[field]), status: "ignored" });
+    materialMapWarnings.push(ignoredMapWarning(name, label, field === "bumpMap" ? "a height map must be converted to a tangent-space normal map" : "there is no direct stock KN5 resource binding"));
+  }
   return {
-    material: { name, shader: skinned ? "ksSkinnedMesh" : "ksPerPixel", blendMode: transparent ? 1 : 0, depthMode: 0, properties, resources: [{ slot: "txDiffuse", textureId: 0, texture: selectedTexture }] },
-    texture: { active: true, name: selectedTexture, data: selectedData },
-    textureReference: sourceTexture ? {
-      materialId: index, textureIndex: index, resourceIndex: 0, material: name,
-      source: resolution?.source || sourceTexture.userData?.apexFbxSource || sourceTexture.name || "Unnamed texture",
-      sourceKind: resolution?.embedded ? "embedded" : "external", status: resolution?.status || "missing",
-      matchedBy: resolution?.matchedBy || "", path: resolution?.path || "", format: resolution?.format || "",
-      output: selectedTexture, fallbackName: generatedTexture, fallbackData: createColorDds(color, opacity)
-    } : null
+    material: { name, shader: skinned ? "ksSkinnedMesh" : source?.normalMap ? "ksPerPixelNM" : "ksPerPixel", blendMode: transparent ? 1 : 0, depthMode: 0, properties, resources },
+    textures, textureReferences, materialMaps, materialMapWarnings
   };
 }
 
 function textureReferenceWarning(reference) {
-  const prefix = `${reference.material}: ${reference.source}`;
-  if (reference.status === "missing") return `${prefix} was not found. The generated color texture remains active.`;
-  if (reference.status === "ambiguous") return `${prefix} matched more than one source file. The generated color texture remains active.`;
+  const prefix = `${reference.material} ${reference.slot}: ${reference.source}`;
+  const fallback = reference.slot === "txNormal" ? "The generated flat normal texture remains active." : "The generated color texture remains active.";
+  if (reference.status === "missing") return `${prefix} was not found. ${fallback}`;
+  if (reference.status === "ambiguous") return `${prefix} matched more than one source file. ${fallback}`;
   if (reference.status === "unsupported") return `${prefix} uses an unsupported image format. Use DDS, PNG, JPEG, or WebP.`;
-  if (reference.status === "error") return `${prefix} could not be read. The generated color texture remains active.`;
+  if (reference.status === "error") return `${prefix} could not be read. ${fallback}`;
   return "";
 }
 
@@ -166,7 +223,7 @@ function updateTextureReferenceSummary(model) {
   const references = model?.fbx?.textureReferences || [], counts = { referenced: references.length, resolved: 0, embedded: 0, missing: 0, ambiguous: 0, unsupported: 0, error: 0 };
   for (const reference of references) if (reference.status in counts) counts[reference.status]++;
   model.fbx.textureSummary = counts;
-  model.fbx.warnings = [...(model.fbx.geometryWarnings || []), ...references.map(textureReferenceWarning).filter(Boolean)];
+  model.fbx.warnings = [...(model.fbx.geometryWarnings || []), ...(model.fbx.materialMapWarnings || []), ...references.map(textureReferenceWarning).filter(Boolean)];
   return counts;
 }
 
@@ -333,16 +390,18 @@ export function convertFbxScene(scene, sourceName = "scene.fbx", inputBytes = 0,
     }
   });
   if (!sourceMaterials.length) sourceMaterials.push({ name: "DefaultMaterial", color: { toArray: () => [0.5, 0.5, 0.5] } });
-  const materials = [], textures = [], textureReferences = [], materialIds = new Map();
+  const materials = [], textures = [], textureReferences = [], materialMaps = [], materialMapWarnings = [], materialIds = new Map();
   sourceMaterials.forEach((source, index) => {
-    const converted = createMaterial(source, index, usage.get(source)); materials.push(converted.material); textures.push(converted.texture); materialIds.set(source, index);
-    if (converted.textureReference) textureReferences.push(converted.textureReference);
+    const converted = createMaterial(source, index, usage.get(source), textures.length);
+    materials.push(converted.material); textures.push(...converted.textures); textureReferences.push(...converted.textureReferences);
+    materialMaps.push(...converted.materialMaps); materialMapWarnings.push(...converted.materialMapWarnings); materialIds.set(source, index);
   });
   for (const [source, canonical] of canonicalByObject) materialIds.set(source, materialIds.get(canonical));
   const rootObjects = scene.name ? [scene] : (scene.children || []);
   const root = { type: 1, kind: "node", name: `FBX: ${safeName(sourceName, "scene.fbx")}`, children: rootObjects.map((child) => convertObject(child, materialIds, warnings)), active: true, transform: [...IDENTITY] };
   const animations = convertFbxAnimations(scene, sourceName);
-  const model = { magic: "sc6969", version: 6, source: 0, textures, materials, root, bytesRead: inputBytes, byteLength: inputBytes, fbx: { sourceName, format: header.format, version: header.version, materials: materials.length, animations, geometryWarnings: [...warnings], textureReferences, warnings: [] } };
+  const mapSummary = materialMaps.reduce((summary, entry) => { summary[entry.status]++; return summary; }, { preserved: 0, folded: 0, ignored: 0 });
+  const model = { magic: "sc6969", version: 6, source: 0, textures, materials, root, bytesRead: inputBytes, byteLength: inputBytes, fbx: { sourceName, format: header.format, version: header.version, materials: materials.length, animations, geometryWarnings: [...warnings], materialMaps, materialMapWarnings, mapSummary, textureReferences, warnings: [] } };
   updateTextureReferenceSummary(model);
   return model;
 }

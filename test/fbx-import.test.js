@@ -90,6 +90,43 @@ test("resolves FBX diffuse textures after a source folder is selected", async ()
   assert.ok(inspectDds(model.textures[0].data));
 });
 
+test("preserves a static FBX normal map with the stock normal shader", async () => {
+  const scene = new Group(), material = new MeshPhongMaterial({ name: "Paint" }), diffuse = new Texture(), normal = new Texture();
+  diffuse.name = "Paint diffuse"; diffuse.userData.apexFbxSource = "textures\\paint.png"; material.map = diffuse;
+  normal.name = "Paint normal"; normal.userData.apexFbxSource = "textures\\paint_n.png"; material.normalMap = normal;
+  const mesh = new Mesh(triangleGeometry(3), material); mesh.name = "Body"; scene.add(mesh);
+  const model = convertFbxScene(scene), converted = model.materials[0];
+  assert.equal(converted.shader, "ksPerPixelNM");
+  assert.deepEqual(converted.resources.map((resource) => [resource.slot, resource.textureId]), [["txDiffuse", 0], ["txNormal", 1]]);
+  assert.deepEqual(model.fbx.mapSummary, { preserved: 2, folded: 0, ignored: 0 });
+  assert.deepEqual(model.fbx.textureSummary, { referenced: 2, resolved: 0, embedded: 0, missing: 2, ambiguous: 0, unsupported: 0, error: 0 });
+  const normalFallback = decodeDdsRgba(model.textures[1].data, inspectDds(model.textures[1].data));
+  assert.deepEqual([...normalFallback[0].pixels], [128, 128, 255, 255]);
+
+  await resolveFbxTextures(model, [sourceFile("paint.png", "source/textures/paint.png", onePixelPng), sourceFile("paint_n.png", "source/textures/paint_n.png", onePixelPng)]);
+  assert.equal(model.fbx.textureSummary.resolved, 2);
+  assert.deepEqual(converted.resources.map((resource) => resource.texture), ["paint.png", "paint_n.png"]);
+  const reparsed = parseKn5(serializeKn5(model));
+  assert.equal(reparsed.materials[0].shader, "ksPerPixelNM");
+  assert.deepEqual(reparsed.materials[0].resources.map((resource) => [resource.slot, resource.texture]), [["txDiffuse", "paint.png"], ["txNormal", "paint_n.png"]]);
+});
+
+test("reports FBX maps that have no safe stock KN5 binding", () => {
+  const scene = new Group(), material = new MeshPhongMaterial({ name: "Driver" });
+  material.normalMap = Object.assign(new Texture(), { name: "driver_n.png" });
+  material.bumpMap = Object.assign(new Texture(), { name: "driver_height.png" });
+  material.emissiveMap = Object.assign(new Texture(), { name: "driver_emissive.png" });
+  material.alphaMap = Object.assign(new Texture(), { name: "driver_alpha.png" });
+  const mesh = new Mesh(triangleGeometry(3), material); mesh.name = "Driver"; mesh.isSkinnedMesh = true; scene.add(mesh);
+  const model = convertFbxScene(scene);
+  assert.equal(model.materials[0].shader, "ksSkinnedMesh");
+  assert.deepEqual(model.fbx.mapSummary, { preserved: 0, folded: 0, ignored: 4 });
+  assert.equal(model.fbx.materialMapWarnings.length, 4);
+  assert.ok(model.fbx.warnings.some((warning) => warning.includes("stock skinned normal shader")));
+  assert.ok(model.fbx.warnings.some((warning) => warning.includes("height map must be converted")));
+  assert.ok(model.fbx.warnings.some((warning) => warning.includes("txDiffuse alpha")));
+});
+
 test("preserves a supported embedded FBX diffuse image", () => {
   const scene = new Group(), material = new MeshPhongMaterial({ name: "EmbeddedPaint" }), map = new Texture();
   map.name = "Embedded map";
@@ -154,4 +191,16 @@ test("maps a selected DDS source texture in the official GT40 FBX", async (t) =>
   assert.deepEqual(texture.data, grey);
   const reparsed = parseKn5(serializeKn5(model));
   assert.equal(reparsed.materials.find((material) => material.name === "SPRING").resources[0].texture, "Grey.dds");
+});
+
+test("preserves normal-map connections from an installed production FBX", async (t) => {
+  const source = "/mnt/D/SteamLibrary/steamapps/common/assettocorsa/content/cars/619_nextgen_mustang/nextgen_commonnewhires.fbx";
+  let bytes;
+  try { bytes = await readFile(source); }
+  catch { t.skip("The production normal-mapped FBX fixture is not installed"); return; }
+  const model = parseFbx(bytes, "nextgen_commonnewhires.fbx"), normalMaterials = model.materials.filter((material) => material.shader === "ksPerPixelNM");
+  assert.deepEqual(normalMaterials.map((material) => material.name), ["MI_DriverSeat_NG", "MI_Flaps_NG", "MI_Cockpit_parts_NG", "MI_SteeringWheel_NG", "LightShader"]);
+  assert.ok(normalMaterials.every((material) => material.resources.map((resource) => resource.slot).join(",") === "txDiffuse,txNormal"));
+  assert.deepEqual(model.fbx.mapSummary, { preserved: 23, folded: 0, ignored: 0 });
+  assert.equal(model.textures.length, 27);
 });

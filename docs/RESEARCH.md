@@ -1953,7 +1953,32 @@ file.
 Apex embeds resolved DDS, PNG, JPEG, and WebP bytes in the KN5 output. The importer
 also captures supported embedded FBX images through their temporary blob or data URL.
 Missing, ambiguous, unreadable, and unsupported images retain the material-color DDS.
-The inspector shows the state and output name for each diffuse reference.
+The inspector shows the slot, state, and output name for each texture reference.
+
+`FBXImporter::load` at `0x10004200` starts each material with `ksPerPixel`.
+It also sets `ksSpecularEXP` to 1. For recognized surface materials, it reads
+the first component of the ambient, diffuse, and specular colors. Values of
+`ksSpecularEXP` that are less than 1 become 10.
+
+ksEditor loops through all 32 entries in `FbxLayerElement::sTextureChannelNames`.
+It accepts only `FbxFileTexture` objects and reduces each path to a basename.
+It searches the configured folders and the automatic sibling `texture` folder.
+The first file found fills `txDiffuse`. Later channels cannot replace this resource.
+The importer never requests `txNormal`.
+
+Apex keeps the explicit FBX diffuse channel as `txDiffuse`. For static materials,
+it maps `normalMap` to `txNormal` and selects `ksPerPixelNM`. Unresolved normal
+references use a flat tangent-space DDS. The inspector reports every preserved map.
+It also reports maps that have no safe stock KN5 binding.
+
+An installed production FBX contains 22 materials and 23 texture references.
+Five static materials contain true normal-map connections. Apex assigns
+`ksPerPixelNM` and both required resources to all five materials. The converted
+scene contains 17 `ksPerPixel` materials and five `ksPerPixelNM` materials.
+
+A live browser import loaded all 27 generated DDS textures. The selected normal-mapped
+material showed both `txDiffuse` and `txNormal` in the inspector. The scene drew
+241,432 triangles, and WebGL returned error zero. The browser log contained no errors.
 
 The official GT40 FBX contains `Grey.dds` and `exterior_engine_diffuse.dds`
 references. A selected source folder resolved `Grey.dds` by suffix. The exported KN5
