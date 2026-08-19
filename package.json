@@ -1,0 +1,14 @@
+{
+  "name": "apex-editor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cross-platform Assetto Corsa car and track editor",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

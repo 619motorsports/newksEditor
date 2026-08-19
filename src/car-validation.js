@@ -1,0 +1,67 @@
+import { walkNodes } from "./kn5.js";
+import { lastValue, parseCspIni } from "./csp-config.js";
+
+const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+
+function multiply(a,b){const result=new Array(16).fill(0);for(let column=0;column<4;column++)for(let row=0;row<4;row++)for(let index=0;index<4;index++)result[column*4+row]+=a[index*4+row]*b[column*4+index];return result;}
+function point(matrix,x,y,z){return [matrix[0]*x+matrix[4]*y+matrix[8]*z+matrix[12],matrix[1]*x+matrix[5]*y+matrix[9]*z+matrix[13],matrix[2]*x+matrix[6]*y+matrix[10]*z+matrix[14]];}
+function finiteBounds(){return {min:[Infinity,Infinity,Infinity],max:[-Infinity,-Infinity,-Infinity]};}
+function include(bounds,value){for(let axis=0;axis<3;axis++){bounds.min[axis]=Math.min(bounds.min[axis],value[axis]);bounds.max[axis]=Math.max(bounds.max[axis],value[axis]);}}
+function finishBounds(bounds){if(bounds.min[0]===Infinity)return null;return {...bounds,size:bounds.max.map((value,index)=>value-bounds.min[index]),center:bounds.min.map((value,index)=>(value+bounds.max[index])/2)};}
+
+function meshWorlds(model){const result=[];const visit=(node,parent,parentLod=null,parentAuxiliary=null)=>{const world=node.transform?multiply(parent,node.transform):parent,lod=node.workspaceLod||parentLod,auxiliary=node.workspaceAuxiliary||parentAuxiliary;if(node.kind==="mesh"||node.kind==="skinnedMesh")result.push({node,world,lod,auxiliary});for(const child of node.children||[])visit(child,world,lod,auxiliary);};visit(model.root,identity);return result;}
+
+export function modelBounds(model, predicate = () => true) {
+  const bounds=finiteBounds();for(const entry of meshWorlds(model)){const {node,world}=entry;if(!predicate(node,entry))continue;for(let offset=0;offset<node.vertices.length;offset+=node.vertexStride)include(bounds,point(world,node.vertices[offset],node.vertices[offset+1],node.vertices[offset+2]));}return finishBounds(bounds);
+}
+
+function topology(meshes,epsilon=1e-5){const vertexKeys=new Map(),edges=new Map();let nextVertex=0,degenerateTriangles=0;
+  const vertex=(value)=>{const key=value.map((component)=>Math.round(component/epsilon)).join(",");if(!vertexKeys.has(key))vertexKeys.set(key,nextVertex++);return vertexKeys.get(key);};
+  const edge=(a,b)=>{const key=a<b?`${a}:${b}`:`${b}:${a}`;edges.set(key,(edges.get(key)||0)+1);};
+  for(const {node,world}of meshes){const ids=[];for(let offset=0;offset<node.vertices.length;offset+=node.vertexStride)ids.push(vertex(point(world,node.vertices[offset],node.vertices[offset+1],node.vertices[offset+2])));for(let offset=0;offset+2<node.indices.length;offset+=3){const a=ids[node.indices[offset]],b=ids[node.indices[offset+1]],c=ids[node.indices[offset+2]];if(a===b||b===c||a===c){degenerateTriangles++;continue;}edge(a,b);edge(b,c);edge(c,a);}}
+  const counts=[...edges.values()];return {weldedVertices:vertexKeys.size,edges:edges.size,boundaryEdges:counts.filter((count)=>count===1).length,nonManifoldEdges:counts.filter((count)=>count>2).length,degenerateTriangles,closed:counts.length>0&&counts.every((count)=>count===2)};
+}
+
+function transformDeviation(model){let maximum=0;for(const {node}of walkNodes(model.root)){if(!node.transform)continue;for(let index=0;index<16;index++)maximum=Math.max(maximum,Math.abs(node.transform[index]-identity[index]));}return maximum;}
+
+export function auditCarCollider(collider, carModel = null) {
+  const meshes=meshWorlds(collider),triangles=meshes.reduce((sum,{node})=>sum+node.indices.length/3,0),vertices=meshes.reduce((sum,{node})=>sum+node.vertices.length/node.vertexStride,0),bounds=modelBounds(collider),carBounds=carModel?modelBounds(carModel,(_node,entry)=>!entry.auxiliary&&(!entry.lod||entry.lod.index===0)):null,findings=[];
+  if(!meshes.length)findings.push({severity:"error",message:"collider.kn5 has no collision mesh"});
+  if(meshes.some(({node})=>node.kind==="skinnedMesh"))findings.push({severity:"error",message:"Collider geometry must not be skinned"});
+  if(collider.textures.length)findings.push({severity:"error",message:`Collider contains ${collider.textures.length} texture${collider.textures.length===1?"":"s"}; the SDK requires export with no textures`});
+  const usedMaterials=[...new Set(meshes.map(({node})=>node.materialId))],invalidMaterials=usedMaterials.filter((index)=>!/^GL$/i.test(collider.materials[index]?.shader||""));
+  if(invalidMaterials.length)findings.push({severity:"error",message:`${invalidMaterials.length} used material${invalidMaterials.length===1?" does":"s do"} not use the GL collision shader`});
+  if(triangles>60)findings.push({severity:"warning",message:`Collider has ${triangles.toLocaleString()} triangles; the SDK guideline is no more than 40–60`});
+  const topologyResult=topology(meshes);if(meshes.length&&!topologyResult.closed)findings.push({severity:"error",message:`Collider is not a closed manifold (${topologyResult.boundaryEdges} boundary, ${topologyResult.nonManifoldEdges} non-manifold edges)`});
+  if(topologyResult.degenerateTriangles)findings.push({severity:"warning",message:`Collider contains ${topologyResult.degenerateTriangles} degenerate triangle${topologyResult.degenerateTriangles===1?"":"s"}`});
+  const pivotDeviation=transformDeviation(collider);if(pivotDeviation>1e-5)findings.push({severity:"warning",message:`Collider hierarchy is transformed (${pivotDeviation.toPrecision(3)} maximum identity deviation); verify its pivot and wheel-axis orientation at 0,0,0`});
+  if(bounds&&(bounds.size.some((value)=>value<0.01)||bounds.size.some((value)=>value>20)))findings.push({severity:"error",message:`Collider dimensions are implausible: ${bounds.size.map((value)=>value.toFixed(3)).join(" × ")} m`});
+  if(bounds&&carBounds){const outside=[0,2].filter((axis)=>bounds.min[axis]<carBounds.min[axis]-.05||bounds.max[axis]>carBounds.max[axis]+.05);if(outside.length)findings.push({severity:"warning",message:`Collider extends outside the visual LOD bounds on ${outside.map((axis)=>axis===0?"X":"Z").join(" and ")}`});if(bounds.min[1]<carBounds.min[1]-.05)findings.push({severity:"warning",message:"Collider extends below the lowest visual-LOD vertex; verify that it does not extend below the car floor"});}
+  return {meshes:meshes.length,vertices,triangles,materials:usedMaterials.length,textures:collider.textures.length,bounds,carBounds,topology:topologyResult,pivotDeviation,findings,errors:findings.filter((item)=>item.severity==="error").length,warnings:findings.filter((item)=>item.severity==="warning").length};
+}
+
+function vector(section,key,source,warnings){const raw=lastValue(section,key).trim(),values=raw.split(",").map((value)=>Number(value.trim()));if(values.length!==3||values.some((value)=>!Number.isFinite(value))){warnings.push(`${source}:${section.line}: ${section.name} ${key} must contain three finite numbers`);return null;}return values;}
+
+export function parseBottomCollidersIni(text,source="data/colliders.ini"){
+  const config=parseCspIni(text,source),warnings=config.warnings.map((warning)=>`${warning.source}:${warning.line}: ${warning.message}`),colliders=[],seen=new Set();
+  for(const section of config.sections){const match=section.name.match(/^COLLIDER_(\d+)$/i);if(!match)continue;const index=Number(match[1]);if(seen.has(index)){warnings.push(`${source}:${section.line}: duplicate COLLIDER_${index}`);continue;}seen.add(index);const centre=vector(section,"CENTRE",source,warnings),size=vector(section,"SIZE",source,warnings);if(!centre||!size)continue;if(size.some((value)=>value<=0))warnings.push(`${source}:${section.line}: ${section.name} SIZE components must be positive`);const groundRaw=lastValue(section,"GROUND_ENABLE","1"),ground=Number(groundRaw);if(!Number.isFinite(ground))warnings.push(`${source}:${section.line}: ${section.name} GROUND_ENABLE must be numeric`);colliders.push({index,section:section.name,line:section.line,centre,size,groundEnabled:Number.isFinite(ground)?ground!==0:true,bounds:{min:centre.map((value,axis)=>value-size[axis]/2),max:centre.map((value,axis)=>value+size[axis]/2)}});}
+  colliders.sort((a,b)=>a.index-b.index);const indices=new Set(colliders.map((item)=>item.index));if(colliders.length&&!indices.has(0))warnings.push(`${source}: COLLIDER_0 is missing`);for(let index=0;index<(colliders.at(-1)?.index||0);index++)if(!indices.has(index))warnings.push(`${source}: COLLIDER_${index} is missing; later sections might be ignored by the game`);
+  return {source,colliders,warnings,ignoredSections:config.sections.length-colliders.length};
+}
+
+export const requiredCarNodes=["SUSP_LF","SUSP_LR","SUSP_RF","SUSP_RR","WHEEL_LF","WHEEL_LR","WHEEL_RF","WHEEL_RR","COCKPIT_LR","STEER_LR","DISC_LF","DISC_LR","DISC_RF","DISC_RR"];
+
+function hierarchyLods(model){const roots=model.workspace?.kind==="carLods"?model.root.children.filter((node)=>node.workspaceLod).map((node)=>({node,index:node.workspaceLod.index,file:node.workspaceFile||node.name})):[{node:model.root,index:0,file:model.workspace?.files?.[0]?.name||"LOD 0"}];return roots.map((lod)=>{const nodes=[],byName=new Map();const visit=(node,parent)=>{const world=node.transform?multiply(parent,node.transform):parent,entry={node,world};nodes.push(entry);const key=node.name.toUpperCase();if(key){const matches=byName.get(key)||[];matches.push(entry);byName.set(key,matches);}for(const child of node.children||[])visit(child,world);};visit(lod.node,identity);return {...lod,nodes,byName};});}
+function translation(entry){return entry?.world?.slice(12,15)||null;}
+function distance(a,b){return a&&b?Math.hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2]):Infinity;}
+export function auditCarHierarchy(model){const lods=hierarchyLods(model),findings=[];
+  for(const lod of lods){for(const name of requiredCarNodes){const entries=lod.byName.get(name)||[];if(!entries.length)findings.push({severity:"warning",file:lod.file,message:`${name} is missing from LOD ${lod.index} (SDK-required, but some official reduced LODs omit it)`});else if(entries[0].node.kind!=="node")findings.push({severity:"error",file:lod.file,message:`${name} must be a hierarchy node, not a ${entries[0].node.kind}`});}
+    const duplicates=[...lod.byName].filter(([,entries])=>entries.filter((entry)=>entry.node.kind==="node").length>1).map(([name])=>name),requiredDuplicates=duplicates.filter((name)=>requiredCarNodes.includes(name)),otherDuplicates=duplicates.filter((name)=>!requiredCarNodes.includes(name));if(requiredDuplicates.length)findings.push({severity:"warning",file:lod.file,message:`LOD ${lod.index} duplicates SDK-required hierarchy nodes: ${requiredDuplicates.join(", ")}`});if(otherDuplicates.length)findings.push({severity:"warning",file:lod.file,message:`LOD ${lod.index} has duplicate hierarchy-node names: ${otherDuplicates.slice(0,12).join(", ")}${otherDuplicates.length>12?` (+${otherDuplicates.length-12})`:""}`});
+    if(lod.index===0)for(const name of ["COCKPIT_HR","STEER_HR"])if(!lod.byName.has(name))findings.push({severity:"warning",file:lod.file,message:`${name} is recommended for LOD 0`});
+    if(lod.index>0)for(const name of ["COCKPIT_HR","STEER_HR"])if(lod.byName.has(name))findings.push({severity:"warning",file:lod.file,message:`${name} should only be present in LOD 0`});
+    const one=(name)=>lod.byName.get(name)?.[0];for(const corner of ["LF","LR","RF","RR"]){const wheel=one(`WHEEL_${corner}`);for(const prefix of ["SUSP","DISC","RIM"]){const related=one(`${prefix}_${corner}`);if(related&&wheel&&distance(translation(related),translation(wheel))>.05)findings.push({severity:"warning",file:lod.file,message:`${prefix}_${corner} pivot is ${distance(translation(related),translation(wheel)).toFixed(3)} m from WHEEL_${corner}`});}}
+    const wheels=["WHEEL_LF","WHEEL_LR","WHEEL_RF","WHEEL_RR"].map(one);if(wheels.every(Boolean)){const positions=wheels.map((entry)=>translation(entry)),left=(positions[0][0]+positions[1][0])/2,right=(positions[2][0]+positions[3][0])/2,front=(positions[0][2]+positions[2][2])/2,rear=(positions[1][2]+positions[3][2])/2;if(left<=right)findings.push({severity:"error",file:lod.file,message:`LOD ${lod.index} wheel pivots do not use the expected left/right X orientation`});if(front<=rear)findings.push({severity:"error",file:lod.file,message:`LOD ${lod.index} wheel pivots do not use +Z as the front direction`});}
+  }
+  if(lods.length>1){const reference=lods.find((lod)=>lod.index===0)||lods[0];for(const lod of lods)if(lod!==reference)for(const name of ["WHEEL_LF","WHEEL_LR","WHEEL_RF","WHEEL_RR"]){const expected=translation(reference.byName.get(name)?.[0]),actual=translation(lod.byName.get(name)?.[0]);if(expected&&actual&&distance(expected,actual)>.05)findings.push({severity:"warning",file:lod.file,message:`${name} differs from LOD 0 by ${distance(expected,actual).toFixed(3)} m`});}}
+  return {lods:lods.map((lod)=>({index:lod.index,file:lod.file,nodes:lod.nodes.length,uniqueNames:lod.byName.size,requiredPresent:requiredCarNodes.filter((name)=>lod.byName.has(name)).length})),requiredNodes:requiredCarNodes.length,findings,errors:findings.filter((item)=>item.severity==="error").length,warnings:findings.filter((item)=>item.severity==="warning").length};
+}

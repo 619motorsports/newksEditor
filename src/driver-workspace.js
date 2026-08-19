@@ -1,0 +1,33 @@
+import { lastValue, parseCspIni } from "./csp-config.js";
+import { walkKnh } from "./knh.js";
+import { walkNodes } from "./kn5.js";
+
+function section(config,name){return config.sections.find((candidate)=>candidate.name.toUpperCase()===name);}
+function number(value,fallback,warnings,label){if(String(value).trim()==="")return fallback;const parsed=Number(value);if(Number.isFinite(parsed))return parsed;warnings.push(`${label} must be finite`);return fallback;}
+function vector(value,warnings,label){const values=String(value).split(",").map((item)=>Number(item.trim()));if(values.length===3&&values.every(Number.isFinite))return values;warnings.push(`${label} must contain three finite numbers`);return [0,0,0];}
+
+export function findDriverModelAsset(entries,modelName){const name=String(modelName||"").trim(),expected=name?`${name}.kn5`:"",matches=expected?(entries||[]).filter((entry)=>String(entry.relativePath||entry.path||entry.file?.name||"").replace(/\\/g,"/").split("/").at(-1).toLowerCase()===expected.toLowerCase()):[];return {expected,status:!expected?"unconfigured":matches.length===1?"resolved":matches.length?"ambiguous":"missing",entry:matches.length===1?matches[0]:null,matches};}
+
+export function parseDriver3dIni(text,source="data/driver3d.ini"){
+  const config=parseCspIni(text,source),warnings=config.warnings.map((warning)=>`${warning.source}:${warning.line}: ${warning.message}`),modelSection=section(config,"MODEL"),steerSection=section(config,"STEER_ANIMATION"),shiftSection=section(config,"SHIFT_ANIMATION");
+  const modelName=modelSection?lastValue(modelSection,"NAME").trim():"";if(!modelSection)warnings.push(`${source}: MODEL section is missing`);else if(!modelName)warnings.push(`${source}:${modelSection.line}: MODEL NAME is missing`);
+  const steerName=steerSection?lastValue(steerSection,"NAME").trim():"";if(!steerSection)warnings.push(`${source}: STEER_ANIMATION section is missing`);else if(!steerName)warnings.push(`${source}:${steerSection.line}: STEER_ANIMATION NAME is missing`);
+  const hideObjects=config.sections.filter((candidate)=>/^HIDE_OBJECT_\d+$/i.test(candidate.name)).map((candidate)=>lastValue(candidate,"NAME").trim()).filter(Boolean);
+  return {source,model:{name:modelName,position:modelSection?vector(lastValue(modelSection,"POSITION","0,0,0"),warnings,`${source}:${modelSection.line}: MODEL POSITION`):[0,0,0]},steer:{name:steerName,lock:steerSection?number(lastValue(steerSection,"LOCK"),0,warnings,`${source}:${steerSection.line}: STEER_ANIMATION LOCK`):0},shift:shiftSection?{name:"shift.ksanim",blendTime:number(lastValue(shiftSection,"BLEND_TIME"),0,warnings,`${source}:${shiftSection.line}: SHIFT_ANIMATION BLEND_TIME`),positiveTime:number(lastValue(shiftSection,"POSITIVE_TIME"),0,warnings,`${source}:${shiftSection.line}: SHIFT_ANIMATION POSITIVE_TIME`),staticTime:number(lastValue(shiftSection,"STATIC_TIME"),0,warnings,`${source}:${shiftSection.line}: SHIFT_ANIMATION STATIC_TIME`),negativeTime:number(lastValue(shiftSection,"NEGATIVE_TIME"),0,warnings,`${source}:${shiftSection.line}: SHIFT_ANIMATION NEGATIVE_TIME`),preloadRpm:number(lastValue(shiftSection,"PRELOAD_RPM"),0,warnings,`${source}:${shiftSection.line}: SHIFT_ANIMATION PRELOAD_RPM`),invertHands:number(lastValue(shiftSection,"INVERT_SHIFTING_HANDS"),0,warnings,`${source}:${shiftSection.line}: SHIFT_ANIMATION INVERT_SHIFTING_HANDS`)!==0}:null,hideObjects,warnings};
+}
+
+export function auditDriverRig(config,{pose=null,steerAnimation=null,shiftAnimation=null}={}){
+  const findings=[],poseRows=walkKnh(pose?.root),names=new Map();for(const {node}of poseRows){const key=node.name.toUpperCase(),matches=names.get(key)||[];matches.push(node);names.set(key,matches);}for(const name of ["DRIVER:RIG_CENTER","DRIVER:RIG_HAND_L","DRIVER:RIG_HAND_R","DRIVER:RIG_HEAD"]){if(pose&&!names.has(name))findings.push({severity:"error",message:`Base pose is missing ${name}`});}
+  if(!pose)findings.push({severity:"warning",message:"driver_base_pos.knh is not available"});
+  const animation=(value,label)=>{if(!value){findings.push({severity:"warning",message:`${label} animation is not available`});return null;}const animated=value.tracks.filter((track)=>track.animated),matched=animated.filter((track)=>names.has(track.name.toUpperCase()));if(pose&&!matched.length)findings.push({severity:"error",message:`${label} animation has no animated tracks matching the base pose`});return {source:value.source,version:value.version,frames:value.frameCount,tracks:value.tracks.length,animated:animated.length,matched:matched.length};};
+  const steer=animation(steerAnimation,"Steering"),shift=config?.shift?animation(shiftAnimation,"Shift"):null;return {driverModel:config?.model.name||"",position:config?.model.position||[0,0,0],steerName:config?.steer.name||"",steerLock:config?.steer.lock||0,poseNodes:poseRows.length,hiddenObjects:config?.hideObjects.length||0,steer,shift,findings,errors:findings.filter((item)=>item.severity==="error").length,warnings:findings.filter((item)=>item.severity==="warning").length};
+}
+
+export function applyDriverBasePose(model,pose){if(!model?.root||!pose?.root)throw new TypeError("A parsed driver KN5 and KNH base pose are required");const poseRows=walkKnh(pose.root),byName=new Map();for(const {node}of poseRows)if(!byName.has(node.name.toUpperCase()))byName.set(node.name.toUpperCase(),node.transform);let applied=0;const matched=new Set();for(const {node}of walkNodes(model.root)){const transform=byName.get(node.name.toUpperCase());if(!transform||!node.transform)continue;node.transform=[...transform];applied++;matched.add(node.name.toUpperCase());}return {model,applied,poseNodes:poseRows.length,unmatchedPose:poseRows.map(({node})=>node.name).filter((name)=>!matched.has(name.toUpperCase()))};}
+
+export function auditDriverHiddenObjects(model,names=[]){
+  if(!model?.root)throw new TypeError("A parsed driver KN5 is required");
+  const requested=[...new Map((names||[]).map((name)=>String(name||"").trim()).filter(Boolean).map((name)=>[name.toUpperCase(),name])).values()],rows=walkNodes(model.root),matches=[],coveredMeshes=new Set();
+  for(const name of requested){const nodes=rows.filter(({node})=>node.name.toUpperCase()===name.toUpperCase()).map(({node})=>node);for(const node of nodes)for(const row of walkNodes(node))if(row.node.kind==="mesh"||row.node.kind==="skinnedMesh")coveredMeshes.add(row.node);matches.push({name,nodes:nodes.length});}
+  return {requested:requested.length,matched:matches.filter((item)=>item.nodes>0).length,meshCount:coveredMeshes.size,matches,unmatched:matches.filter((item)=>!item.nodes).map((item)=>item.name)};
+}

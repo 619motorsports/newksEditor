@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Apex Editor</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header>
+    <div class="brand"><span class="mark">A</span><div><strong>Apex Editor</strong><small>Assetto Corsa workspace</small></div></div>
+    <div class="toolbar">
+      <label class="button primary">Open KN5<input id="file" type="file" accept=".kn5" multiple hidden></label>
+      <label class="button">Open CSP config<input id="csp-file" type="file" accept=".ini,.txt" hidden></label>
+      <label id="vao-file-button" class="button" title="Open a CSP vertex ambient-occlusion patch for this car or track">Open VAO patch<input id="vao-file" type="file" accept=".vao-patch" hidden></label>
+      <label id="asset-folder-button" class="button" title="Choose the car or track folder to resolve project-relative CSP textures">Open asset folder<input id="asset-folder" type="file" webkitdirectory directory multiple hidden></label>
+      <label id="csp-texture-folder-button" class="button" title="Choose assettocorsa/extension/textures to resolve shared CSP assets such as GrassFX atlases">Open CSP textures<input id="csp-texture-folder" type="file" webkitdirectory directory multiple hidden></label>
+      <label id="reflection-environment-button" class="button" hidden title="Add a showroom or other KN5 environment and use only its subtree for live reflections">Open showroom<input id="reflection-environment-file" type="file" accept=".kn5" hidden></label>
+      <select id="reflection-root" hidden aria-label="Reflection capture subtree"><option value="">Reflections · automatic</option></select>
+      <select id="layout-select" hidden aria-label="Asset workspace manifest"></select>
+      <button id="open-layout" disabled hidden>Open workspace</button>
+      <select id="skin-select" hidden aria-label="Car or track skin"><option value="">Embedded textures</option></select>
+      <select id="animation-select" hidden aria-label="KSANIM animation"><option value="">Bind pose</option></select>
+      <label id="animation-position-control" class="toolbar-range" hidden><span>Animation</span><input id="animation-position" type="range" min="0" max="1" step="0.001" value="0"><output id="animation-position-output">0.000</output></label>
+      <select id="lod-preview" hidden aria-label="Car LOD preview"><option value="auto">LOD auto (45° camera)</option></select>
+      <select id="track-camera-select" hidden aria-label="Track camera preview"><option value="">Orbit camera</option></select>
+      <label id="track-camera-position-control" class="toolbar-range" hidden><span>Camera spline</span><input id="track-camera-position" type="range" min="0" max="1" step="0.001" value="0"><output id="track-camera-position-output">0.000</output></label>
+      <button id="track-camera-play" hidden disabled title="Play the selected camera spline once at SPLINE_ANIMATION_LENGTH">Play spline</button>
+      <button id="collider-overlay" hidden disabled title="Overlay collider.kn5 on the active car LOD">Collider overlay</button>
+      <button id="surface-overlay" hidden disabled title="Color physics meshes by their exact runtime surface binding">Surface physics</button>
+      <button id="grass-fx-toggle" hidden disabled title="Toggle the generated CSP GrassFX authoring preview">GrassFX</button>
+      <button id="rain-fx-toggle" hidden disabled title="Toggle the CSP RainFX wet-surface authoring preview">RainFX</button>
+      <label id="rain-wetness-control" class="toolbar-range" hidden><span>Wetness</span><input id="rain-wetness" type="range" min="0" max="1" step="0.01" value="1"><output id="rain-wetness-output">1.00</output></label>
+      <button id="sun-shadows" class="active" title="Toggle the native three-cascade directional shadow preview">Sun shadows</button>
+      <button id="scene-reflections" class="active" title="Toggle the native-style scene cubemap reflection preview">Scene reflections</button>
+      <button id="vao-toggle" class="active" hidden disabled title="Toggle CSP vertex ambient occlusion">VAO</button>
+      <label id="year-progress-control" class="toolbar-range" hidden title="Preview CSP seasonal conditions using the track config's YEAR_PROGRESS LUTs"><span>Year</span><input id="year-progress" type="range" min="0" max="1" step="0.001" value="0.5"><output id="year-progress-output">0.500</output></label>
+      <select id="weather-select" aria-label="Stock weather lighting"></select>
+      <label class="toolbar-range"><span>Sun heading</span><input id="sun-heading" type="range" min="0" max="360" step="1" value="40"><output id="sun-heading-output">40°</output></label>
+      <label class="toolbar-range"><span>Sun height</span><input id="sun-height" type="range" min="0" max="90" step="1" value="55"><output id="sun-height-output">55°</output></label>
+      <label class="toolbar-range"><span>Wind heading</span><input id="wind-heading" type="range" min="0" max="360" step="1" value="50"><output id="wind-heading-output">50°</output></label>
+      <label class="toolbar-range"><span>Wind speed</span><input id="wind-speed" type="range" min="0" max="35" step="0.5" value="5"><output id="wind-speed-output">5.0 m/s</output></label>
+      <button id="auto-exposure" class="active" title="Toggle deterministic full-frame automatic exposure">Auto exposure</button>
+      <label class="toolbar-range"><span>Exposure</span><input id="exposure" type="range" min="0.05" max="1" step="0.01" value="0.35" disabled><output id="exposure-output">0.35</output></label>
+      <label id="driver-model-button" class="button" hidden title="Choose the shared driver KN5 named by driver3d.ini">Open driver KN5<input id="driver-model-file" type="file" accept=".kn5" hidden></label>
+      <button id="driver-cockpit-view" hidden disabled title="Hide the driver objects listed by driver3d.ini for a cockpit preview">Cockpit driver</button>
+      <button id="undo" disabled title="Undo authored edit (Ctrl/Cmd+Z)">Undo</button>
+      <button id="redo" disabled title="Redo authored edit (Ctrl/Cmd+Shift+Z)">Redo</button>
+      <button id="save-project" disabled>Save project</button>
+      <button id="open-project" disabled>Open project</button>
+      <input id="project-file" type="file" accept=".json,.apex.json" hidden>
+      <button id="export-csp" disabled>Export CSP</button>
+      <button id="export-kn5" disabled>Export KN5 copy</button>
+      <button id="frame" disabled>Frame scene</button>
+      <button id="isolate" disabled>Isolate selection</button>
+      <button id="wireframe" disabled>Wireframe</button>
+    </div>
+    <div id="status" class="status">No model loaded</div>
+  </header>
+  <main>
+    <aside class="left panel">
+      <div class="panel-title"><span>Scene</span><span id="node-count" class="badge">0</span></div>
+      <input id="search" class="search" placeholder="Filter nodes…" disabled>
+      <div id="tree" class="tree empty">Open a car or track KN5 to inspect it.</div>
+    </aside>
+    <section class="viewport">
+      <canvas id="view"></canvas>
+      <div class="view-hint">Drag to orbit · Shift+drag to pan · Wheel to zoom</div>
+      <div id="loading" class="loading" hidden><div class="spinner"></div><span>Reading KN5…</span></div>
+      <div id="welcome" class="welcome">
+        <div class="welcome-icon">KN5</div>
+        <h1>See the asset, not the guesswork.</h1>
+        <p>Inspect real Assetto Corsa geometry, materials, hierarchy and embedded textures on any desktop platform.</p>
+        <label class="button primary large">Choose KN5 files<input type="file" accept=".kn5" multiple hidden data-file-mirror></label>
+      </div>
+      <div id="stats" class="stats" hidden></div>
+    </section>
+    <aside class="right panel">
+      <div class="tabs"><button class="tab active" data-tab="material">Material</button><button class="tab" data-tab="model">Model</button></div>
+      <div id="inspector" class="inspector empty">Select a mesh or material to inspect its game data.</div>
+    </aside>
+  </main>
+  <footer><span id="pipeline">Stock KN5 pipeline</span><span id="gpu">Detecting renderer…</span></footer>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

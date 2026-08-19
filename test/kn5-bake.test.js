@@ -1,0 +1,11 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { bakeEditorProjectIntoKn5 } from "../src/kn5-bake.js";
+import { parseKn5 } from "../src/kn5.js";
+import { serializeKn5 } from "../src/kn5-write.js";
+
+function model(){return {magic:"sc6969",version:6,source:0,textures:[{active:true,name:"body.dds",data:new Uint8Array([1,2,3])}],materials:[{name:"Body",shader:"ksPerPixel",blendMode:0,depthMode:0,properties:[{name:"ksDiffuse",value:1,value2:[0,0],value3:[0,0,0],value4:[0,0,0,0]}],resources:[{slot:"txDiffuse",textureId:0,texture:"body.dds"}]}],root:{type:1,kind:"node",name:"root",active:true,transform:[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],children:[{type:2,kind:"mesh",name:"BODY",active:true,children:[],castShadows:true,visible:true,transparent:false,vertices:new Float32Array(11),vertexStride:11,indices:new Uint16Array(),materialId:0,layer:0,lodIn:0,lodOut:0,bounds:[0,0,0,1],renderable:true}]}};}
+
+test("bakes KN5-compatible material and mesh edits without mutating the source",()=>{const source=model(),project={materialEdits:{body:{shader:"ksPerPixelNM",blendMode:"1",properties:{ksDiffuse:.25,detailUVMultiplier:[2,3]},resources:{txDiffuse:{texture:"BODY.DDS"}}}},meshEdits:{body:{isTransparent:true,castShadows:false,layer:4,lodOut:75}}};const baked=bakeEditorProjectIntoKn5(source,project);assert.equal(source.materials[0].shader,"ksPerPixel");assert.deepEqual(baked.applied,{materials:1,properties:2,resources:1,meshes:1});const parsed=parseKn5(serializeKn5(baked.model));assert.equal(parsed.materials[0].shader,"ksPerPixelNM");assert.equal(parsed.materials[0].blendMode,1);assert.equal(parsed.materials[0].properties[0].value,.25);assert.deepEqual(parsed.materials[0].properties[1].value2,[2,3]);assert.equal(parsed.root.children[0].transparent,true);assert.equal(parsed.root.children[0].castShadows,false);assert.equal(parsed.root.children[0].lodOut,75);});
+
+test("reports CSP-only and unresolved resource edits",()=>{const baked=bakeEditorProjectIntoKn5(model(),{materialEdits:{Body:{cullMode:"NONE",blendMode:"ALPHA_BLEND",resources:{txDiffuse:{file:"paint.dds"},txNormal:{texture:"missing.dds"}}}}});assert.equal(baked.warnings.length,4);assert.equal(baked.model.materials[0].blendMode,0);});
