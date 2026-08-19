@@ -20,6 +20,13 @@ test("normalizes portable projects and rejects incompatible input", () => {
   assert.throws(() => normalizeEditorProject({ format: "apex-editor-project", version: 99 }), /Unsupported/);
 });
 
+test("normalizes dynamic track manifest edits as non-CSP project fields", () => {
+  const project = normalizeEditorProject({ format: "apex-editor-project", version: 1, workspaceEdits: { files: { "2": { probability: 25, multiplicity: [2, 5], posMode: "fixed", positionCenter: [-10, 40, 50], positionRange: [1, 2, 3], velMode: "linear", velocityBase: [8, 9, 10], velocityRange: [0, 1, 2], playWav: null } } } });
+  assert.deepEqual(project.workspaceEdits.files["2"], { probability: 25, multiplicity: [2, 5], posMode: "FIXED", positionCenter: [-10, 40, 50], positionRange: [1, 2, 3], velMode: "LINEAR", velocityBase: [8, 9, 10], velocityRange: [0, 1, 2], playWav: null });
+  assert.equal(editorProjectEditCount(project), 9);
+  assert.equal(editorProjectCspEditCount(project), 0);
+});
+
 test("parses and formats scalar and vector editor values", () => {
   assert.equal(parseEditorValue("0.375"), 0.375);
   assert.deepEqual(parseEditorValue("1, 0.5, 0"), [1, 0.5, 0]);

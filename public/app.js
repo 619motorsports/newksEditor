@@ -5,7 +5,8 @@ import { cloneEditorProject, createEditorProject, editorProjectCspEditCount, edi
 import { decodeDdsRgba, inspectDds } from "/src/dds.js";
 import { createAssetFileIndex, discoverAssetAnimations, discoverAssetSkins, externalResourcePaths, matchSkinTextures, normalizeAssetPath, resolveAssetFile } from "/src/asset-files.js";
 import { applyGeometryEdits, captureStaticGeometryBaselines, staticGeometryMetrics } from "/src/geometry-authoring.js";
-import { carLodDistance, carLodVisible, mergeKn5Models, modelPlacementMatrix, parseCarLodsIni, parseModelsIni, serializeCarLodsIni, serializeModelsIni } from "/src/kn5-workspace.js";
+import { carLodDistance, carLodVisible, mergeKn5Models, parseCarLodsIni, parseModelsIni, serializeCarLodsIni, serializeModelsIni } from "/src/kn5-workspace.js";
+import { applyWorkspaceEdits, captureWorkspaceBaseline, workspaceEditCount as countWorkspaceEdits } from "/src/workspace-authoring.js";
 import { parseKsAnimation, sampleKsAnimation, serializeKsAnimation } from "/src/ksanim.js";
 import { bakeEditorProjectIntoKn5 } from "/src/kn5-bake.js";
 import { serializeKn5 } from "/src/kn5-write.js";
@@ -553,15 +554,7 @@ function initializeNodeAuthoring(root) {
 }
 
 function initializeWorkspaceAuthoring() {
-  const workspace = model?.workspace;
-  workspaceBaseline = workspace ? {
-    cockpitHrDistance: workspace.cockpitHrDistance,
-    driverHrDistance: workspace.driverHrDistance,
-    files: workspace.files.map((file) => ({
-      position: [...file.position], rotation: [...file.rotation],
-      lod: file.lod ? { ...file.lod } : null
-    }))
-  } : null;
+  workspaceBaseline = captureWorkspaceBaseline(model);
 }
 
 function nodeBaseline(node) {
@@ -589,36 +582,13 @@ function applyProjectNodeEdits() {
 function applyProjectWorkspaceEdits() {
   const workspace = model?.workspace;
   if (!workspace || !workspaceBaseline) return;
-  workspace.cockpitHrDistance = workspaceBaseline.cockpitHrDistance;
-  workspace.driverHrDistance = workspaceBaseline.driverHrDistance;
-  for (let index = 0; index < workspace.files.length; index++) {
-    const file = workspace.files[index], baseline = workspaceBaseline.files[index], root = model.root.children[index];
-    if (!baseline) continue;
-    file.position = [...baseline.position]; file.rotation = [...baseline.rotation];
-    if (file.lod && baseline.lod) { file.lod.in = baseline.lod.in; file.lod.out = baseline.lod.out; }
-    if (root) {
-      root.transform = modelPlacementMatrix(file.position, file.rotation);
-      if (root.workspaceLod && baseline.lod) { root.workspaceLod.in = baseline.lod.in; root.workspaceLod.out = baseline.lod.out; }
-    }
-  }
   const edits = editorProject?.workspaceEdits || {}, fileEdits = edits.files || {};
-  for (const [key, edit] of Object.entries(fileEdits)) {
-    const index = Number(key), file = workspace.files[index], root = model.root.children[index];
-    if (!Number.isInteger(index) || !file || !root) continue;
-    if (edit.position) file.position = [...edit.position];
-    if (edit.rotation) file.rotation = [...edit.rotation];
-    root.transform = modelPlacementMatrix(file.position, file.rotation);
-    if (file.lod && root.workspaceLod) {
-      if (edit.lodIn !== undefined) file.lod.in = root.workspaceLod.in = edit.lodIn;
-      if (edit.lodOut !== undefined) file.lod.out = root.workspaceLod.out = edit.lodOut;
-    }
-  }
-  for (const key of ["cockpitHrDistance", "driverHrDistance"]) if (edits[key] !== undefined) workspace[key] = edits[key];
+  const applied = applyWorkspaceEdits(model, edits, workspaceBaseline);
   try {
     const text = workspace.kind === "carLods" ? serializeCarLodsIni(workspace) : serializeModelsIni(workspace);
     workspace.authoredWarnings = workspace.kind === "carLods" ? parseCarLodsIni(text, workspace.manifest || "data/lods.ini").warnings : parseModelsIni(text, workspace.manifest || "models.ini").warnings;
   } catch (error) { workspace.authoredWarnings = [error.message]; }
-  window.__apexWorkspaceAuthoring = { edits: Object.keys(fileEdits).length + ["cockpitHrDistance", "driverHrDistance"].filter((key) => edits[key] !== undefined).length, warnings: [...workspace.authoredWarnings] };
+  window.__apexWorkspaceAuthoring = { edits: applied, files: Object.keys(fileEdits).length, warnings: [...workspace.authoredWarnings] };
 }
 
 function applyProjectSceneEdits() {
@@ -971,8 +941,7 @@ function animationInspectorHtml() {
 }
 
 function workspaceEditCount() {
-  const edits = editorProject?.workspaceEdits;
-  return Object.values(edits?.files || {}).reduce((count, edit) => count + ["position", "rotation", "lodIn", "lodOut"].filter((key) => edit[key] !== undefined).length, 0) + ["cockpitHrDistance", "driverHrDistance"].filter((key) => edits?.[key] !== undefined).length;
+  return countWorkspaceEdits(editorProject?.workspaceEdits);
 }
 
 function workspaceInspectorHtml() {
@@ -982,12 +951,17 @@ function workspaceInspectorHtml() {
   const warnings = [...new Set([...(workspace.warnings || []), ...(workspace.authoredWarnings || [])])];
   const switchField = (key, label, current) => `<label class="author-field"><span>${label}</span><input class="${edits[key] !== undefined ? "authored" : ""}" data-edit-workspace-switch="${key}" value="${edits[key] ?? ""}" placeholder="Inherit: ${escapeHtml(String(current ?? "not set"))}"></label>`;
   const files = workspace.files.map((file, index) => {
-    const edit = edits.files?.[String(index)], baseline = workspaceBaseline?.files?.[index], editable = !file.auxiliary && (isCar ? Boolean(file.lod) : !file.dynamic);
+    const edit = edits.files?.[String(index)], baseline = workspaceBaseline?.files?.[index], editable = !file.auxiliary && (isCar ? Boolean(file.lod) : true);
     const vector = (key, label, value) => `<label class="author-field"><span>${label}</span><input class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-workspace-vector="${key}" data-workspace-file="${index}" value="${escapeHtml(formatEditorValue(value))}" spellcheck="false"></label>`;
     const number = (key, label, current) => `<label class="author-field"><span>${label}</span><input class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-workspace-number="${key}" data-workspace-file="${index}" value="${edit?.[key] ?? ""}" placeholder="Inherit: ${escapeHtml(String(current))}"></label>`;
+    const dynamicVector = (key, label, value, length = 3) => `<label class="author-field"><span>${label}</span><input class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-workspace-dynamic-vector="${key}" data-vector-length="${length}" data-workspace-file="${index}" value="${escapeHtml(formatEditorValue(value))}" spellcheck="false"></label>`;
+    const dynamicNumber = (key, label, value) => `<label class="author-field"><span>${label}</span><input class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-workspace-dynamic-number="${key}" data-workspace-file="${index}" value="${escapeHtml(String(value))}" spellcheck="false"></label>`;
+    const dynamicText = (key, label, value) => `<label class="author-field"><span>${label}</span><input class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-workspace-dynamic-text="${key}" data-workspace-file="${index}" value="${escapeHtml(String(value ?? ""))}" maxlength="1024" spellcheck="false"></label>`;
     const controls = !editable ? "" : isCar
       ? `${number("lodIn", "LOD in", baseline?.lod?.in ?? file.lod.in)}${number("lodOut", "LOD out", baseline?.lod?.out ?? file.lod.out)}`
-      : `${vector("position", "Position", file.position)}${vector("rotation", "Rotation °", file.rotation)}`;
+      : file.dynamic
+        ? `${dynamicNumber("probability", "Probability %", file.dynamic.probability)}${dynamicVector("multiplicity", "Multiplicity min, max", file.dynamic.multiplicity, 2)}${dynamicText("posMode", "Position mode", file.dynamic.posMode)}${dynamicVector("positionCenter", "Position center", file.dynamic.positionCenter)}${dynamicVector("positionRange", "Position range ±", file.dynamic.positionRange)}${dynamicText("velMode", "Velocity mode", file.dynamic.velMode)}${dynamicVector("velocityBase", "Velocity base", file.dynamic.velocityBase)}${dynamicVector("velocityRange", "Velocity range ±", file.dynamic.velocityRange)}${dynamicText("playWav", "Audio file", file.dynamic.playWav)}`
+        : `${vector("position", "Position", file.position)}${vector("rotation", "Rotation °", file.rotation)}`;
     return `<div class="resource"><strong>${file.auxiliary === "driver" ? "Driver · " : file.auxiliary === "reflectionEnvironment" ? "Reflection environment · " : isCar && file.lod ? `LOD ${file.lod.index} · ` : file.dynamic ? `Dynamic ${file.dynamic.index} · ` : ""}${escapeHtml(file.name)}</strong><span>${isCar && file.lod ? `${format(file.lod.in)} ≤ distance &lt; ${format(file.lod.out)} m · ` : file.auxiliary === "reflectionEnvironment" ? "Cubemap capture subtree · " : file.auxiliary ? "Shared auxiliary · " : ""}KN5 v${file.version} · ${(file.size / 1048576).toFixed(2)} MB · ${file.materials} materials · ${file.textures} textures${file.position.some((value) => value !== 0) || file.rotation.some((value) => value !== 0) ? ` · position ${file.position.map(format).join(", ")} · rotation ${file.rotation.map(format).join(", ")}` : ""}${file.dynamic ? ` · deterministic center preview · ${format(file.dynamic.probability)}% · velocity ${file.dynamic.velocityBase.map(format).join(", ")} ± ${file.dynamic.velocityRange.map(format).join(", ")}` : ""}</span>${controls}${editable ? `<div class="section-actions"><button class="mini" data-reset-workspace-file="${index}" ${edit ? "" : "disabled"}>Reset file edits</button></div>` : ""}</div>`;
   }).join("");
   return `<div class="section"><h3>${isCar ? "Car LOD workspace" : "Track workspace"}${count ? ` · <span class="edit-count">${count} edit${count === 1 ? "" : "s"}</span>` : ""}</h3>${kv("Manifest", workspace.manifest || "Manual selection")}${kv("Files", workspace.files.length)}${!isCar ? kv("Dynamic objects", workspace.files.filter((file) => file.dynamic).length) : ""}${kv("Versions", workspace.versions.join(", "))}${isCar ? `${switchField("cockpitHrDistance", "Cockpit HR", workspaceBaseline?.cockpitHrDistance)}${switchField("driverHrDistance", "Driver HR", workspaceBaseline?.driverHrDistance)}` : ""}${kv("Texture name collisions", workspace.textureCollisions.length)}${kv("Protected files", workspace.protectedFiles.length)}${kv("Warnings", warnings.length)}${files}${warnings.slice(0, 8).map((warning) => `<div class="resource validation-warning"><strong>Manifest warning</strong><span>${escapeHtml(warning)}</span></div>`).join("")}<div class="section-actions"><button class="mini" data-export-workspace>Export ${isCar ? "lods.ini" : "models.ini"}</button><button class="mini" data-reset-workspace ${count ? "" : "disabled"}>Reset manifest edits</button></div></div>`;
@@ -1269,6 +1243,41 @@ function bindWorkspaceEditors() {
         if (Array.isArray(value)) throw new Error(`${key} needs one finite number`);
         if (text && value < 0) throw new Error(`${key} cannot be negative`);
         commitEditorChange(`${text ? "Set" : "Reset"} ${model.workspace.files[index].name} ${key}`, (project) => editWorkspaceFile(project, index, (edit) => { if (text) edit[key] = value; else delete edit[key]; }));
+      } catch (error) { input.classList.add("invalid"); status.textContent = error.message; }
+    };
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } });
+    input.addEventListener("change", commit);
+  });
+  inspector.querySelectorAll("[data-edit-workspace-dynamic-vector]").forEach((input) => {
+    const commit = () => {
+      try {
+        const index = Number(input.dataset.workspaceFile), key = input.dataset.editWorkspaceDynamicVector, length = Number(input.dataset.vectorLength) || 3, value = parseEditorValue(input.value);
+        if (!Array.isArray(value) || value.length !== length) throw new Error(`${key} needs ${length} finite numbers`);
+        if (key === "multiplicity" && (value.some((component) => component < 0) || value[1] < value[0])) throw new Error("Multiplicity needs a nonnegative minimum followed by an equal or greater maximum");
+        commitEditorChange(`Set ${model.workspace.files[index].name} ${key}`, (project) => editWorkspaceFile(project, index, (edit) => { edit[key] = value; }));
+      } catch (error) { input.classList.add("invalid"); status.textContent = error.message; }
+    };
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } });
+    input.addEventListener("change", commit);
+  });
+  inspector.querySelectorAll("[data-edit-workspace-dynamic-number]").forEach((input) => {
+    const commit = () => {
+      try {
+        const index = Number(input.dataset.workspaceFile), key = input.dataset.editWorkspaceDynamicNumber, value = parseEditorValue(input.value);
+        if (Array.isArray(value)) throw new Error(`${key} needs one finite number`);
+        if (key === "probability" && (value < 0 || value > 100)) throw new Error("Probability must be from 0 to 100");
+        commitEditorChange(`Set ${model.workspace.files[index].name} ${key}`, (project) => editWorkspaceFile(project, index, (edit) => { edit[key] = value; }));
+      } catch (error) { input.classList.add("invalid"); status.textContent = error.message; }
+    };
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } });
+    input.addEventListener("change", commit);
+  });
+  inspector.querySelectorAll("[data-edit-workspace-dynamic-text]").forEach((input) => {
+    const commit = () => {
+      try {
+        const index = Number(input.dataset.workspaceFile), key = input.dataset.editWorkspaceDynamicText, text = input.value.trim();
+        if (key !== "playWav" && !text) throw new Error(`${key} cannot be empty`);
+        commitEditorChange(`Set ${model.workspace.files[index].name} ${key}`, (project) => editWorkspaceFile(project, index, (edit) => { edit[key] = key === "playWav" ? text || null : text.toUpperCase(); }));
       } catch (error) { input.classList.add("invalid"); status.textContent = error.message; }
     };
     input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } });

@@ -239,7 +239,9 @@ vertical slice is only the foundation.
   manifests or manual multi-file selection, including placement transforms and
   collision diagnostics. `DYNAMIC_OBJECT_n` entries now parse and load at their
   deterministic range centers with probability, multiplicity, velocity, and audio
-  diagnostics; randomized motion playback remains. Packed or unpacked `surfaces.ini` physics,
+  diagnostics. Their native manifest fields now support live editing, undo, recovery,
+  project persistence, validation, and `models.ini` export. The preview uses the
+  deterministic position center. Randomized motion playback remains. Packed or unpacked `surfaces.ini` physics,
   the runtime `WALL` plus system/track definition merge, exact nonzero-sector and
   unique-substring physical-mesh bindings, contiguous starts/pits, timing-gate pairs,
   and hotlap markers now have an assembled-layout audit and spatial physics overlay.
@@ -248,8 +250,7 @@ vertical slice is only the foundation.
   spline CSVs resolve and use the game's world-Y rotation and normalized sampling for
   manual path-position preview and configured-duration playback; live focused-car
   targeting remains. Static layout positions and rotations now support live editing,
-  project persistence, validation, and `models.ini` export. Dynamic object sections
-  retain their parsed fields during export. Exact environment matching, remaining shaders
+  project persistence, validation, and `models.ini` export. Exact environment matching, remaining shaders
   and CSP effects, and performance/spatial diagnostics remain.
 - Search, material editing, direct hierarchy editing, and static-mesh geometry transforms
   now form a tested vertical slice. Hierarchy edits use stable node paths and support names, active states,
@@ -259,6 +260,8 @@ vertical slice is only the foundation.
   inverse-transpose normals, tangents, GPU buffers, preview bounds, and KN5 bounds.
   Static topology repair removes degenerate triangles, reverses faces, and rebuilds
   area-weighted normals. Each operation starts from the source vertex and index buffers.
+  Dynamic track objects use the same edit history, recovery data, and portable project
+  data as static layout edits. Their native fields remain separate from CSP export.
   CSP export contains only material and mesh edits because CSP cannot change the
   source hierarchy or geometry. Track and archive validation are also available in the inspector.
   Multi-select, batch editing, recent projects, arbitrary vertex and face editing,

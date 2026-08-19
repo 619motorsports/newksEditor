@@ -1559,6 +1559,16 @@ Installed tracks use ordered `[MODEL_n]` sections in `models*.ini`, with `FILE`,
 `[DYNAMIC_OBJECT_n]` have different runtime semantics and are not treated as static
 layout geometry.
 
+Dynamic sections preserve `PROBABILITY`, `MULT`, `POS_MODE`, `RND_POS_CENTER`,
+`RND_POS_RANGE`, `VEL_MODE`, `RND_VEL_BASE`, `RND_VEL_RANGE`, and `PLAY_WAV`.
+Apex edits these native fields and writes them back to `models.ini`. The preview uses
+`RND_POS_CENTER` as the deterministic model-root position.
+
+The preview does not simulate position modes, velocity modes, or random ranges.
+Those behaviors remain a separate native-motion recovery task. A production WebGL
+test covered all nine fields, validation, undo, redo, recovery, and export.
+The serializer round-trip test also proves that audio removal omits `PLAY_WAV`.
+
 The installed `acs.exe` includes matching PDB symbols. Its `TrackAvatar::init3D`
 function at `1401c8740` reads `POSITION` and `ROTATION` with `INIReader::getFloat3`,
 multiplies all rotation components by `0x3c8ef998` (pi/180), calls

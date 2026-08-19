@@ -104,7 +104,10 @@ npm test
   deterministic texture-name replacement, collision diagnostics, and deterministic
   center previews for dynamic objects with their random ranges and velocity metadata.
   Static model positions and rotations support live editing, undo, recovery, project
-  persistence, and `models.ini` export. Dynamic object sections retain all parsed fields during export.
+  persistence, and `models.ini` export. Dynamic objects support edits to probability,
+  multiplicity, position mode, position center and range, velocity mode, velocity base
+  and range, and audio. These edits use the same undo, recovery, project, and
+  `models.ini` export paths. The preview stays at the deterministic position center.
 - Packed or unpacked `data/surfaces.ini` physics inspection and assembled-layout validation
   using the game's built-in `WALL`, stock system surfaces, track override precedence,
   nonzero sector IDs, and unique substring binding; fallback and ambiguous physics
