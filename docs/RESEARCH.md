@@ -1684,24 +1684,46 @@ procedural horizon/sky gradient and sun disc, weather ambient and direct light,
 environment response, emissive and CSP local lights, and distance fog. It resolves a
 supported multisample RGBA16F target, builds the full-frame mip chain, derives exposure
 from the final 1×1 average luminance, clamps automatic exposure to the installed
-0.2–0.5 range, and supports an explicit manual value. The final portable display pass
-uses a bounded Reinhard-style filmic mapping with the installed gamma and saturation.
-That display curve is intentionally labeled an approximation: the public symbols show
-the Yebis exposure and post-effect path, but the proprietary behavior selected by
-`FUNCTION=-1`, its temporal eye adaptation, and cloud billboard rendering have not
-been reproduced. They require controlled editor/game image matching.
+0.2–0.5 range, and supports an explicit manual value.
 
-Production Chrome checks again covered both asset scales. The assembled Nissan 370Z
-used the stock Clear preset, RGBA16F with 4× MSAA, automatic exposure 0.2, 164 shadow
-casters, and all 82 textures. Its 55° sun capture hash was `21b86f802fb68243`, the
-10° sun hash was `9e3c9e4f234548fb`, and the shadows-disabled hash was
-`40ac5bd12a5eb1fa`. A separate UI check selected manual exposure 0.35 and reported it
-unchanged in the renderer state. Imola used Light Clouds, its 12 km fog distance,
-RGBA16F with 4× MSAA, automatic exposure 0.5, 273 shadow casters, and all 110 textures;
-its corresponding hashes were `9bbb5f0950b8088a`, `301510c6bfd72134`, and
-`560b8ef90fe4c2f9`. Every capture returned WebGL error zero and no JavaScript or browser
-log errors. The distinct sun-height captures prove live weather-curve evaluation, not
-pixel equality with ksEditor or Assetto Corsa.
+The installed `ksNet.dll` contains 2,649 embedded DXBC programs. Its effect table maps
+`tech_TonemapHDR_Dither_Exposure_Gamma` to pixel program 2095 for the configured
+`FUNCTION=-1` default. D3D reflection identifies `fParam_GammaCorrection` at byte 3232
+with default 0.454545468 and `fParam_TonemapMaxMappingLuminance` at byte 3328 with
+default `(1, 1, 1.015625, 1)`. The program clamps input to `2^-14`, computes
+`q = exp(-input × curve.x)`, then `saturate((1-q) × (1-q×curve.y)^2)`, adds `2^-22`,
+and applies the gamma exponent. Ghidra resolves `CPostEffect::SetTonemapParameters`
+at `0x100933a0`, `GetEffectiveTonemapParameters` at `0x100894b0`,
+`CRenderGlare::TonemapToSurface` at `0x100e2f00`, and
+`CTextureUtil::DrawRectGPU_TonemapHDR` at `0x100b9310`. Together they prove that the
+configured 1.2 gamma is passed through the effective settings and uploaded as its
+reciprocal. The saturation matrix is applied before the curve. Apex now implements
+those recovered instructions rather than the previous Reinhard approximation.
+
+The reflected mapping vector is only the effect-file initializer. `CPostEffect::Initialize`
+overwrites it after setting the characteristic-curve control to 0.5. With the editor's
+default feature flags, `UpdateParameters_ChangeFormat` selects `EHDRTONEMAP=10` and
+`CTextureUtil::SetTonemapEffectParameters` computes `p = float(pow(0.5, 0.3333333433))`.
+Its first curve coefficient is `float(1 + p × 2.0891273022) = 2.6581413746`. The second
+is the linear interpolation of the binary's 21-value, 0.05-step normalization table at
+`p`, yielding `0.6653175950`. Those initialized coefficients, rather than the reflected
+`(1, 1)`, are the default values uploaded for the active editor display pass.
+
+The same binary preserves distinct linear, linear-saturated, Reinhard, luminance,
+logarithmic, and pre-map shader variants. The default post filter sets adaptation delay
+to zero, so Apex's immediate event-driven exposure is consistent with this shipped
+editor configuration; Yebis glare/bright-pass composition, dither, non-default curves,
+and controlled editor/game pixel matching remain fidelity work. The legacy non-Yebis
+SDK shaders separately expose a temporal adaptation rate, but that dormant path is not
+substituted for the active default.
+
+The corrected curve was checked in the production browser path at both asset scales.
+The compact Nissan 370Z LOD rendered three meshes and 2,343 triangles. Full Imola
+rendered 1,023 of 1,239 meshes and 3,036,891 triangles; its live scene cubemap reported
+238 draws and 107,886 triangles while the directional pass reported 179 mesh casters.
+Both checks used Light Clouds, automatic exposure 0.2, and an RGBA16F target with 4×
+MSAA. Neither check produced a JavaScript or browser warning/error. These checks prove
+the portable runtime path, not pixel equality with ksEditor or Assetto Corsa.
 
 ## CSP vertex ambient-occlusion evidence
 

@@ -1,7 +1,26 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { cspLightDistanceFade, cspLightReceiverVisible, cspLineClosestPoint, cspLineLightSample, cspSecondarySpotAttenuation, cspSecondarySpotPacking, cspSpotConeFactor, cspSpotConePacking, cspSpotEdgeFactors, cspSpotEdgePacking, CSP_SPOT_HALF_ANGLE_MAX, CSP_SPOT_SHARPNESS_MAX, evaluateKsLighting, KS_EDITOR_DEFAULT_WEATHER, parseKsWeatherLighting, STOCK_WEATHER_PRESETS, sunDirectionFromAngles } from "../src/lighting.js";
+import { cspLightDistanceFade, cspLightReceiverVisible, cspLineClosestPoint, cspLineLightSample, cspSecondarySpotAttenuation, cspSecondarySpotPacking, cspSpotConeFactor, cspSpotConePacking, cspSpotEdgeFactors, cspSpotEdgePacking, CSP_SPOT_HALF_ANGLE_MAX, CSP_SPOT_SHARPNESS_MAX, evaluateKsLighting, ksEditorAutoExposure, ksEditorYebisToneMap, KS_EDITOR_DEFAULT_WEATHER, KS_EDITOR_TONEMAP, parseKsWeatherLighting, STOCK_WEATHER_PRESETS, sunDirectionFromAngles } from "../src/lighting.js";
+
+test("matches the initialized default Yebis display curve and reciprocal gamma", () => {
+  assert.deepEqual(KS_EDITOR_TONEMAP, { function: -1, mappingFactor: 32, characteristicCurve: 0.5, curveScale: 2.6581413745880127, curveShoulder: 0.6653175950050354, inputFloor: 1 / 16384, outputEpsilon: 1 / 4194304 });
+  const neutral = ksEditorYebisToneMap([1, 1, 1], 1, { gamma: 1.2, saturation: 0.95 });
+  const decay = Math.exp(-KS_EDITOR_TONEMAP.curveScale);
+  const expectedCurve = (1 - decay) * Math.pow(1 - decay * KS_EDITOR_TONEMAP.curveShoulder, 2);
+  const expected = Math.pow(expectedCurve + 1 / 4194304, 1 / 1.2);
+  assert.ok(neutral.every((value) => Math.abs(value - expected) < 1e-12));
+  const colored = ksEditorYebisToneMap([1, 0.25, 0.05], 0.5);
+  assert.ok(colored[0] > colored[1] && colored[1] > colored[2]);
+  assert.ok(colored.every((value) => Number.isFinite(value) && value >= 0 && value <= 1));
+});
+
+test("clamps full-frame automatic exposure to the installed editor range", () => {
+  assert.equal(ksEditorAutoExposure(1), 0.32);
+  assert.equal(ksEditorAutoExposure(10), 0.2);
+  assert.equal(ksEditorAutoExposure(0.01), 0.5);
+  assert.equal(ksEditorAutoExposure(Number.NaN), 0.5);
+});
 
 test("ships all seven stock SDK weather-lighting presets", () => {
   assert.equal(STOCK_WEATHER_PRESETS.length, 7);

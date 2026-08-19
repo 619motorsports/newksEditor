@@ -178,7 +178,10 @@ vertical slice is only the foundation.
   stock SDK presets now use the native version-3 HDR color conversion and sun-angle
   interpolation. A procedural HDR sky and sun, distance fog, supported multisample
   RGBA16F composition, full-frame automatic exposure within the shipped 0.2–0.5
-  limits, manual exposure, and display mapping share the same linear pass. The stock
+  limits and manual exposure share the same linear pass. The display stage now executes
+  the embedded Yebis `FUNCTION=-1` shader's exponential cubic curve, pre-curve
+  saturation, reciprocal gamma, input floor, and output epsilon with the native
+  characteristic-curve initialization. The stock
   directional path uses three 2048² cascades, the shipped 2/12/50 m camera splits,
   SDK biases, mesh/CSP caster flags, and native non-opaque-material cutouts. Runtime
   reflection capture follows ksEditor’s 90° face orientation, 0.01–500 m clip range,
@@ -194,8 +197,8 @@ vertical slice is only the foundation.
   transparent layers. Grass blades share HDR weather/fog lighting, receive the same
   cascades, and use their tapered instanced geometry in viewport and probe shadow maps;
   reflection sampling and refraction are disabled during capture
-  to avoid recursive feedback. Exact Yebis tone mapping,
-  temporal eye adaptation, cloud billboards, exact local-shadow filtering/scheduling, and controlled
+  to avoid recursive feedback. Yebis glare, bright-pass and dither composition,
+  non-default tone functions, cloud billboards, exact local-shadow filtering/scheduling, and controlled
   game-image matching remain. GrassFX full-density GPU dispatch, moving-vehicle
   air/deformation stamps, CSP's exact local-shadow Gaussian filter, wet cubemap
   reflection, and transparent-layer refraction feedback remain separate fidelity gates.

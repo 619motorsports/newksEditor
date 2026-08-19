@@ -19,6 +19,10 @@ it with Apex Editor.
 - `DumpScalars.java` prints little-endian integer and floating-point interpretations
   at selected addresses for validating optimized constant loads.
 
+`tools/dxbc-reflect.c` is a companion Wine/D3DCompiler utility for listing DXBC
+constant buffers, reflected defaults, and resource bindings. `tools/dxbc-disasm.c`
+prints the corresponding shader instructions.
+
 Example after importing `dwrite.dll` into a headless project:
 
 ```sh
