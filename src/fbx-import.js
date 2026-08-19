@@ -1,5 +1,6 @@
 import { LoadingManager, Texture } from "three";
 import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
+import { createAssetFileIndex, normalizeAssetPath, resolveAssetFile } from "./asset-files.js";
 
 const IDENTITY = Object.freeze([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 const MAX_KN5_VERTICES = 0xffff;
@@ -41,6 +42,75 @@ function textureName(materialName, index) {
   return `APEX_FBX_${String(index).padStart(3, "0")}_${stem}.dds`;
 }
 
+function textureFormat(input) {
+  const bytes = bytesOf(input);
+  if (bytes.byteLength >= 4 && bytes[0] === 0x44 && bytes[1] === 0x44 && bytes[2] === 0x53 && bytes[3] === 0x20) return "dds";
+  if (bytes.byteLength >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "png";
+  if (bytes.byteLength >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "jpg";
+  if (bytes.byteLength >= 12 && String.fromCharCode(...bytes.subarray(0, 4)) === "RIFF" && String.fromCharCode(...bytes.subarray(8, 12)) === "WEBP") return "webp";
+  return "";
+}
+
+function outputTextureName(value, fallback, format) {
+  const basename = normalizeAssetPath(value).split("/").at(-1) || fallback;
+  const stem = safeName(basename, fallback).replace(/\.[^.]+$/, "").replace(/[^a-z0-9._-]+/gi, "_").replace(/^_+|_+$/g, "") || fallback;
+  return `${stem}.${format}`;
+}
+
+function isEmbeddedSource(value) {
+  return /^(?:blob|data):/i.test(String(value || ""));
+}
+
+function asFileIndex(filesOrIndex) {
+  return filesOrIndex?.entries && filesOrIndex?.exact ? filesOrIndex : createAssetFileIndex(filesOrIndex || []);
+}
+
+function textureResolution(texture, source, status, extra = {}) {
+  const resolution = { source, status, matchedBy: "", path: "", ...extra };
+  texture.userData.apexFbxResolution = resolution;
+  return resolution;
+}
+
+async function supportedFileResolution(file, source, status, matchedBy = "", path = "") {
+  try {
+    const data = new Uint8Array(await file.arrayBuffer()), format = textureFormat(data);
+    if (!format) return { source, status: "unsupported", matchedBy, path, name: file.name || path, format: "" };
+    return { source, status, matchedBy, path, name: outputTextureName(file.name || path, "FBX_Texture", format), format, data };
+  } catch (error) {
+    return { source, status: "error", matchedBy, path, name: file?.name || path, format: "", error: error.message };
+  }
+}
+
+async function resolveExternalSource(source, index, cache = new Map()) {
+  const match = resolveAssetFile(index, source);
+  if (match.status !== "resolved") return { source, status: match.status, matchedBy: match.matchedBy, path: "" };
+  let pending = cache.get(match.file);
+  if (!pending) {
+    pending = supportedFileResolution(match.file, "", "resolved");
+    cache.set(match.file, pending);
+  }
+  const result = await pending;
+  return { ...result, source, matchedBy: match.matchedBy, path: match.path };
+}
+
+async function resolveCapturedTexture(capture, index, cache) {
+  const { texture, source } = capture;
+  if (!isEmbeddedSource(source)) {
+    const resolution = await resolveExternalSource(source, index, cache);
+    return textureResolution(texture, source, resolution.status, resolution);
+  }
+  try {
+    const response = await fetch(source), blob = await response.blob(), data = new Uint8Array(await blob.arrayBuffer()), format = textureFormat(data);
+    const reference = safeName(texture.name, "Embedded_Texture");
+    if (!format) return textureResolution(texture, reference, "unsupported", { embedded: true });
+    return textureResolution(texture, reference, "embedded", { embedded: true, name: outputTextureName(reference, "Embedded_Texture", format), format, data });
+  } catch (error) {
+    return textureResolution(texture, safeName(texture.name, "Embedded_Texture"), "error", { embedded: true, error: error.message });
+  } finally {
+    if (/^blob:/i.test(source)) globalThis.URL?.revokeObjectURL?.(source);
+  }
+}
+
 /** Make a one-pixel BGRA8 DDS used when an FBX material color has no KN5 texture. */
 export function createColorDds(color = [0.5, 0.5, 0.5], alpha = 1) {
   const output = new Uint8Array(132), view = new DataView(output.buffer);
@@ -63,12 +133,59 @@ function createMaterial(source, index, skinned) {
   const properties = skinned ? [property("bones", 0)] : [];
   properties.push(property("ksAmbient", 0.35), property("ksDiffuse", 0.8), property("ksSpecular", specularLevel), property("ksSpecularEXP", source?.shininess ?? 10), property("ksEmissive", source?.emissiveIntensity ?? 0), property("ksAlphaRef", 0));
   if (skinned) properties.push(property("fresnelC", 0), property("fresnelEXP", 0), property("fresnelMaxLevel", 0), property("nmObjectSpace", 0), property("isAdditive", 0), property("useDetail", 0), property("detailUVMultiplier", 0), property("boh", 0));
-  const generatedTexture = textureName(name, index);
+  const generatedTexture = textureName(name, index), sourceTexture = source?.map, resolution = sourceTexture?.userData?.apexFbxResolution;
+  const resolved = resolution?.data && (resolution.status === "resolved" || resolution.status === "embedded");
+  const selectedTexture = resolved ? resolution.name : generatedTexture, selectedData = resolved ? resolution.data : createColorDds(color, opacity);
   return {
-    material: { name, shader: skinned ? "ksSkinnedMesh" : "ksPerPixel", blendMode: transparent ? 1 : 0, depthMode: 0, properties, resources: [{ slot: "txDiffuse", textureId: index, texture: generatedTexture }] },
-    texture: { active: true, name: generatedTexture, data: createColorDds(color, opacity) },
-    referencedTexture: source?.map?.name || ""
+    material: { name, shader: skinned ? "ksSkinnedMesh" : "ksPerPixel", blendMode: transparent ? 1 : 0, depthMode: 0, properties, resources: [{ slot: "txDiffuse", textureId: 0, texture: selectedTexture }] },
+    texture: { active: true, name: selectedTexture, data: selectedData },
+    textureReference: sourceTexture ? {
+      materialId: index, textureIndex: index, resourceIndex: 0, material: name,
+      source: resolution?.source || sourceTexture.userData?.apexFbxSource || sourceTexture.name || "Unnamed texture",
+      sourceKind: resolution?.embedded ? "embedded" : "external", status: resolution?.status || "missing",
+      matchedBy: resolution?.matchedBy || "", path: resolution?.path || "", format: resolution?.format || "",
+      output: selectedTexture, fallbackName: generatedTexture, fallbackData: createColorDds(color, opacity)
+    } : null
   };
+}
+
+function textureReferenceWarning(reference) {
+  const prefix = `${reference.material}: ${reference.source}`;
+  if (reference.status === "missing") return `${prefix} was not found. The generated color texture remains active.`;
+  if (reference.status === "ambiguous") return `${prefix} matched more than one source file. The generated color texture remains active.`;
+  if (reference.status === "unsupported") return `${prefix} uses an unsupported image format. Use DDS, PNG, JPEG, or WebP.`;
+  if (reference.status === "error") return `${prefix} could not be read. The generated color texture remains active.`;
+  return "";
+}
+
+function updateTextureReferenceSummary(model) {
+  const references = model?.fbx?.textureReferences || [], counts = { referenced: references.length, resolved: 0, embedded: 0, missing: 0, ambiguous: 0, unsupported: 0, error: 0 };
+  for (const reference of references) if (reference.status in counts) counts[reference.status]++;
+  model.fbx.textureSummary = counts;
+  model.fbx.warnings = [...(model.fbx.geometryWarnings || []), ...references.map(textureReferenceWarning).filter(Boolean)];
+  return counts;
+}
+
+function applyTextureResolution(model, reference, resolution) {
+  const texture = model.textures[reference.textureIndex], resource = model.materials[reference.materialId]?.resources?.[reference.resourceIndex];
+  if (!texture || !resource) return;
+  const resolved = resolution?.data && (resolution.status === "resolved" || resolution.status === "embedded");
+  texture.name = resolved ? resolution.name : reference.fallbackName;
+  texture.data = resolved ? resolution.data : reference.fallbackData;
+  resource.texture = texture.name;
+  resource.textureId = reference.resourceIndex;
+  Object.assign(reference, { status: resolution?.status || "missing", matchedBy: resolution?.matchedBy || "", path: resolution?.path || "", format: resolution?.format || "", output: texture.name });
+}
+
+/** Resolve FBX texture references again after the user selects a source folder. */
+export async function resolveFbxTextures(model, filesOrIndex) {
+  if (!model?.fbx) throw new TypeError("The model is not an FBX import");
+  const index = asFileIndex(filesOrIndex), cache = new Map();
+  await Promise.all((model.fbx.textureReferences || []).map(async (reference) => {
+    if (reference.sourceKind === "embedded") return;
+    applyTextureResolution(model, reference, await resolveExternalSource(reference.source, index, cache));
+  }));
+  return updateTextureReferenceSummary(model);
 }
 
 function tangentForTriangle(positions, uvs) {
@@ -160,27 +277,48 @@ export function convertFbxScene(scene, sourceName = "scene.fbx", inputBytes = 0,
     }
   });
   if (!sourceMaterials.length) sourceMaterials.push({ name: "DefaultMaterial", color: { toArray: () => [0.5, 0.5, 0.5] } });
-  const materials = [], textures = [], materialIds = new Map();
+  const materials = [], textures = [], textureReferences = [], materialIds = new Map();
   sourceMaterials.forEach((source, index) => {
     const converted = createMaterial(source, index, usage.get(source)); materials.push(converted.material); textures.push(converted.texture); materialIds.set(source, index);
-    if (converted.referencedTexture) warnings.push(`${converted.material.name}: ${converted.referencedTexture} was replaced with a generated color texture; assign the source texture before final export`);
+    if (converted.textureReference) textureReferences.push(converted.textureReference);
   });
   for (const [source, canonical] of canonicalByObject) materialIds.set(source, materialIds.get(canonical));
   const root = { type: 1, kind: "node", name: `FBX: ${safeName(sourceName, "scene.fbx")}`, children: (scene.children || []).map((child) => convertObject(child, materialIds, warnings)), active: true, transform: [...IDENTITY] };
   const animations = (scene.animations || []).map((clip) => ({ name: safeName(clip.name, "Animation"), duration: Number(clip.duration) || 0, tracks: clip.tracks?.length || 0 }));
-  return { magic: "sc6969", version: 6, source: 0, textures, materials, root, bytesRead: inputBytes, byteLength: inputBytes, fbx: { sourceName, format: header.format, version: header.version, materials: materials.length, animations, warnings } };
+  const model = { magic: "sc6969", version: 6, source: 0, textures, materials, root, bytesRead: inputBytes, byteLength: inputBytes, fbx: { sourceName, format: header.format, version: header.version, materials: materials.length, animations, geometryWarnings: [...warnings], textureReferences, warnings: [] } };
+  updateTextureReferenceSummary(model);
+  return model;
 }
 
-function managerWithoutTextureIo() {
-  const manager = new LoadingManager(), placeholder = { path: "", setPath(path) { this.path = path || ""; return this; }, load() { return new Texture(); } };
+function managerWithTextureCapture() {
+  const manager = new LoadingManager(), captures = [], placeholder = { path: "", setPath(path) { this.path = path || ""; return this; }, load(source) { const texture = new Texture(); texture.userData.apexFbxSource = String(source || ""); captures.push({ texture, source: String(source || "") }); return texture; } };
   manager.addHandler(/./, placeholder);
-  return manager;
+  return { manager, captures };
+}
+
+function parseFbxScene(bytes) {
+  const capture = managerWithTextureCapture(), buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  return { scene: new FBXLoader(capture.manager).parse(buffer, ""), captures: capture.captures };
 }
 
 export function parseFbx(input, sourceName = "scene.fbx") {
   const bytes = bytesOf(input), header = inspectFbxHeader(bytes);
   try {
-    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), scene = new FBXLoader(managerWithoutTextureIo()).parse(buffer, "");
+    const { scene, captures } = parseFbxScene(bytes), model = convertFbxScene(scene, sourceName, bytes.byteLength, header);
+    for (const capture of captures) if (/^blob:/i.test(capture.source)) globalThis.URL?.revokeObjectURL?.(capture.source);
+    return model;
+  } catch (error) {
+    if (error instanceof FbxImportError) throw error;
+    throw new FbxImportError(`Could not import ${sourceName}: ${error.message}`, error);
+  }
+}
+
+/** Import an FBX and preserve supported embedded images or selected source-folder textures. */
+export async function parseFbxWithTextures(input, sourceName = "scene.fbx", filesOrIndex = []) {
+  const bytes = bytesOf(input), header = inspectFbxHeader(bytes);
+  try {
+    const { scene, captures } = parseFbxScene(bytes), index = asFileIndex(filesOrIndex), cache = new Map();
+    await Promise.all(captures.map((capture) => resolveCapturedTexture(capture, index, cache)));
     return convertFbxScene(scene, sourceName, bytes.byteLength, header);
   } catch (error) {
     if (error instanceof FbxImportError) throw error;

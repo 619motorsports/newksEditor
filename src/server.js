@@ -33,7 +33,7 @@ const contentSecurityPolicy = [
   "script-src 'self' 'sha256-tEXe25dtif2LwpNJCTLnEVIg3DbNBDfAjN7yOdhyZdA='",
   "style-src 'self'",
   "img-src 'self' blob: data:",
-  "connect-src 'self'",
+  "connect-src 'self' blob: data:",
   "worker-src 'self' blob:",
   "object-src 'none'",
   "base-uri 'none'",

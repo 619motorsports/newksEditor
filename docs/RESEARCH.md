@@ -1932,10 +1932,27 @@ Both scenes serialize to KN5 v6 and parse again. A live Electron run loaded all
 generated DDS textures and returned WebGL error zero. The packaged Linux application
 also imported the sphere with no JavaScript or browser-log errors.
 
-FBX texture filenames are not yet mapped to KN5 resources. Apex embeds the FBX
-material color as a one-pixel DDS and reports each texture assignment that needs work.
-The importer records animation metadata, but it does not export FBX animation to
-KSANIM.
+Three.js removes the directory from an external FBX image path before it loads the
+image. Apex captures the remaining filename from the loader. It resolves that name
+against the selected source folder with the shared path resolver. The resolver uses
+an exact path, a unique suffix, or a unique basename. It does not select an ambiguous
+file.
+
+Apex embeds resolved DDS, PNG, JPEG, and WebP bytes in the KN5 output. The importer
+also captures supported embedded FBX images through their temporary blob or data URL.
+Missing, ambiguous, unreadable, and unsupported images retain the material-color DDS.
+The inspector shows the state and output name for each diffuse reference.
+
+The official GT40 FBX contains `Grey.dds` and `exterior_engine_diffuse.dds`
+references. A selected source folder resolved `Grey.dds` by suffix. The exported KN5
+retained the DDS bytes and the `txDiffuse` name after a write/read round trip. The
+second missing reference kept its generated DDS. The importer records animation
+metadata, but it does not export FBX animation to KSANIM.
+
+A Blender-generated binary FBX embedded the SDK `Arrows.png` image. The browser
+imported the image as `base_color_texture.png` without a source folder. WebGL loaded
+the PNG, rendered the textured cube, and returned error zero. The browser log had no
+errors.
 
 ## Desktop packaging evidence
 

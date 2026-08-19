@@ -13,6 +13,7 @@ test("serves the desktop application and its explicitly allowed modules", async 
     const page = await fetch(url);
     assert.equal(page.status, 200);
     assert.match(page.headers.get("content-security-policy"), /default-src 'self'/);
+    assert.match(page.headers.get("content-security-policy"), /connect-src 'self' blob: data:/);
     assert.match(await page.text(), /Apex Editor/);
     const module = await fetch(`${url}/src/kn5.js`);
     assert.equal(module.status, 200);

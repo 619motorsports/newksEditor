@@ -25,7 +25,7 @@ import { adjustCspSeasonColor, analyzeCspSeasonalOverrides } from "/src/seasons.
 import { auditMaterialShaderProfiles, resolveMaterialRenderProfile } from "/src/shader-profiles.js";
 import { KS_EDITOR_CUBEMAP, WEBGL_CUBEMAP_FACES, reflectionBlurFromExponent, selectReflectionCaptureItems } from "/src/reflections.js";
 import { createCspWindParticles, CSP_WIND_MAP_FORMAT, CSP_WIND_MAP_SIZE, CSP_WIND_PARTICLE_COUNT, updateCspWindParticles } from "/src/csp-wind.js";
-import { parseFbx } from "/src/fbx-import.js";
+import { parseFbxWithTextures, resolveFbxTextures } from "/src/fbx-import.js";
 
 const $ = (selector) => document.querySelector(selector);
 const fileInput = $("#file");
@@ -131,6 +131,12 @@ $("#asset-folder").addEventListener("change", async (event) => {
   configureAnimationChoices();
   await configureDriverData();
   await configureTrackDataChoices();
+  if (model?.fbx) {
+    await resolveFbxTextures(model, assetFileIndex);
+    window.__apexFbx = model.fbx;
+    renderer?.setModel(model);
+    status.textContent = modelStatusText();
+  }
   await Promise.all([renderer?.setExternalFiles([...assetFolderFiles,...cspTextureFolderFiles]), renderer?.setSkinFiles([], "")]);
   refreshCarColliderAudit();
   updateExternalTextureUi();
@@ -228,7 +234,7 @@ async function load(files, workspaceOptions = {}) {
       status.textContent = `Loading ${file.name} · ${index + 1}/${descriptors.length}…`;
       await new Promise((resolve) => requestAnimationFrame(resolve));
       let parsed = parsedByFile.get(file);
-      if (!parsed) { const bytes=await file.arrayBuffer();parsed=/\.fbx$/i.test(file.name)?parseFbx(bytes,file.name):parseKn5(bytes);if(descriptor.driverPose){sharedDriverPoseResult=applyDriverBasePose(parsed,descriptor.driverPose);parsed=sharedDriverPoseResult.model;}if(descriptor.auxiliary==="driver")sharedDriverHideAudit=auditDriverHiddenObjects(parsed,driverConfig?.hideObjects||[]);parsedByFile.set(file, parsed); }
+      if (!parsed) { const bytes=await file.arrayBuffer();parsed=/\.fbx$/i.test(file.name)?await parseFbxWithTextures(bytes,file.name,assetFileIndex):parseKn5(bytes);if(descriptor.driverPose){sharedDriverPoseResult=applyDriverBasePose(parsed,descriptor.driverPose);parsed=sharedDriverPoseResult.model;}if(descriptor.auxiliary==="driver")sharedDriverHideAudit=auditDriverHiddenObjects(parsed,driverConfig?.hideObjects||[]);parsedByFile.set(file, parsed); }
       entries.push({ name: descriptor.name || file.name, size: file.size, model: parsed, position: descriptor.position, rotation: descriptor.rotation, lod: descriptor.lod, auxiliary:descriptor.auxiliary, dynamic: descriptor.dynamic });
     }
     const forceWorkspace = workspaceOptions.forceWorkspace || entries.length > 1 || entries.some((entry) => [...(entry.position || []), ...(entry.rotation || [])].some((value) => Number(value) !== 0));
@@ -728,15 +734,16 @@ function renderMaterialInspector(material) {
 
 function fbxImportInspectorHtml() {
   if (!model?.fbx) return "";
-  const source = model.fbx;
-  return `<div class="section"><h3>FBX import</h3>${kv("Source", `${source.format} ${source.version}`)}${kv("KN5 target", `v${model.version}`)}${kv("Animations", source.animations.length)}${kv("Generated materials", source.materials)}${kv("Warnings", source.warnings.length)}${source.animations.map((clip) => `<div class="resource"><strong>${escapeHtml(clip.name)}</strong><span>${format(clip.duration)} s · ${clip.tracks} tracks</span></div>`).join("")}${source.warnings.map((warning) => `<div class="resource validation-warning"><strong>Material action</strong><span>${escapeHtml(warning)}</span></div>`).join("")}</div>`;
+  const source = model.fbx, textures = source.textureSummary || {};
+  return `<div class="section"><h3>FBX import</h3>${kv("Source", `${source.format} ${source.version}`)}${kv("KN5 target", `v${model.version}`)}${kv("Animations", source.animations.length)}${kv("Materials", source.materials)}${kv("Texture references", textures.referenced || 0)}${kv("Source textures", (textures.resolved || 0) + (textures.embedded || 0))}${textures.embedded ? kv("Embedded textures", textures.embedded) : ""}${textures.missing ? kv("Missing textures", textures.missing) : ""}${textures.ambiguous ? kv("Ambiguous textures", textures.ambiguous) : ""}${textures.unsupported ? kv("Unsupported textures", textures.unsupported) : ""}${kv("Warnings", source.warnings.length)}${source.textureReferences.map((reference) => `<div class="resource"><strong>${escapeHtml(reference.material)}</strong><span>${escapeHtml(reference.source)} · ${escapeHtml(reference.status)}${reference.output ? ` → ${escapeHtml(reference.output)}` : ""}</span></div>`).join("")}${source.animations.map((clip) => `<div class="resource"><strong>${escapeHtml(clip.name)}</strong><span>${format(clip.duration)} s · ${clip.tracks} tracks</span></div>`).join("")}${source.warnings.map((warning) => `<div class="resource validation-warning"><strong>Import action</strong><span>${escapeHtml(warning)}</span></div>`).join("")}</div>`;
 }
 
 function pipelineLabel() {
   const external = renderer?.externalTextureStatus, texturePart = external?.requested ? ` · ${external.ready}/${external.requested} external textures` : "";
+  const fbxTextures=model?.fbx?.textureSummary,fbxTexturePart=fbxTextures?.referenced?` · ${(fbxTextures.resolved+fbxTextures.embedded)}/${fbxTextures.referenced} source textures`:"";
   const source = model?.workspace?.kind === "carLods" ? "Car LOD workspace" : model?.workspace ? "Model workspace" : model?.fbx ? "FBX authoring" : "KN5";
   const stock = model?.workspace?.kind === "carLods" ? "Stock car LOD pipeline" : model?.workspace ? "Multi-model pipeline" : model?.fbx ? "FBX → KN5 authoring pipeline" : "Stock KN5 pipeline", skinPart = assetSkinName ? ` · skin ${assetSkinName}` : "", animationPart = activeAnimationName ? ` · ${renderer?.animationStatus.matchedNodes || 0} animated nodes` : "",vaoPart=vaoBinding?.matchedMeshes?` · VAO ${vaoBinding.matchedMeshes.toLocaleString()} meshes`:"";
-  return cspEvaluation ? `${source} + CSP${skinPart}${animationPart}${vaoPart} · ${cspEvaluation.nodeOverrides.size.toLocaleString()} meshes · ${cspEvaluation.customEmissiveMeshes.toLocaleString()} emissive · ${cspEvaluation.lights.length.toLocaleString()} lights${texturePart}` : `${stock}${skinPart}${animationPart}${vaoPart}`;
+  return cspEvaluation ? `${source} + CSP${skinPart}${animationPart}${vaoPart}${fbxTexturePart} · ${cspEvaluation.nodeOverrides.size.toLocaleString()} meshes · ${cspEvaluation.customEmissiveMeshes.toLocaleString()} emissive · ${cspEvaluation.lights.length.toLocaleString()} lights${texturePart}` : `${stock}${skinPart}${animationPart}${vaoPart}${fbxTexturePart}`;
 }
 
 function updateExternalTextureUi() {

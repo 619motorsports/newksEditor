@@ -9,6 +9,7 @@ const port = Number(option("port", "9230"));
 const screenshotPath = option("screenshot");
 const modelPath = option("model");
 const meshName = option("mesh");
+const assetsPath = option("assets");
 const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
 const target = targets.find((entry) => entry.type === "page");
 if (!target) throw new Error(`No packaged Apex Editor page target is available on port ${port}`);
@@ -63,6 +64,10 @@ await command("Page.enable");
 await command("DOM.enable");
 await command("Page.reload", { ignoreCache: true });
 await waitFor("window.__apexAppReady===true");
+if (assetsPath) {
+  await setFile("#asset-folder", assetsPath);
+  await waitFor("document.querySelector('#asset-folder')?.files.length>0", 120000);
+}
 if (modelPath) {
   await setFile("#file", modelPath);
   await waitFor("document.querySelector('#status').textContent.includes('KN5 v')", 120000);
@@ -84,6 +89,7 @@ const state = await evaluate(`(async()=>({
   gpu:document.querySelector('#gpu')?.textContent||'',
   glError:document.querySelector('#view')?.getContext('webgl2')?.getError()??null,
   textures:window.__apexRenderer?.textureStatus||null,
+  fbx:window.__apexFbx?{sourceName:window.__apexFbx.sourceName,format:window.__apexFbx.format,version:window.__apexFbx.version,textureSummary:window.__apexFbx.textureSummary,references:window.__apexFbx.textureReferences.map(reference=>({material:reference.material,source:reference.source,status:reference.status,matchedBy:reference.matchedBy,path:reference.path,format:reference.format,output:reference.output})),warnings:window.__apexFbx.warnings}:null,
   scene:window.__apexRenderer?.sceneStatus||null,
   contentSecurityPolicy:(await fetch('/')).headers.get('content-security-policy')||''
 }))()`);

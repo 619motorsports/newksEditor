@@ -35,10 +35,14 @@ vertical slice is only the foundation.
   It imports static and skinned geometry, material groups, transforms, normals, UVs,
   skin weights, bone inverse-bind matrices, and animation metadata. It applies the
   recovered ksEditor V-coordinate sign change and writes a KN5 v6 file. Generated
-  one-pixel DDS textures preserve FBX material colors. Source texture extraction,
-  animation export, direct geometry and hierarchy editing, protected-payload
-  preservation, and in-game output validation remain. The KN5 v5/v6 writer also
-  round-trips real static, textured, and skinned assets byte-for-byte.
+  one-pixel DDS textures preserve FBX material colors. The importer now captures
+  external diffuse references and preserves supported DDS, PNG, JPEG, or WebP files
+  that resolve uniquely in a selected source folder. It also preserves supported
+  embedded images. Missing, ambiguous, and unsupported references keep the generated
+  color texture. Additional material-map slots, animation export, direct geometry and
+  hierarchy editing, protected-payload preservation, and in-game output validation
+  remain. The KN5 v5/v6 writer also round-trips real static, textured, and skinned
+  assets byte-for-byte.
 - Complete driver texture export/reload/review and hierarchy-edit workflows. Native
   KSANIM v1/v2 transform tracks now parse,
   bind to every matching hierarchy node, and preview with the game's normalized

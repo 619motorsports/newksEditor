@@ -32,7 +32,9 @@ Discovered
 the game. Discovered `.ksanim` files can be sampled on a normalized timeline with
 their matching KN5 hierarchy transforms applied live. The same asset folder
 resolves case-insensitive external CSP texture paths and reports missing or ambiguous
-files. Files stay on the local machine; the app does not upload them.
+files. For FBX import, select the source folder before or after you open the FBX.
+Apex embeds each resolved supported diffuse texture in the exported KN5. Files stay
+on the local machine. The app does not upload them.
 
 Start the desktop version during development.
 
@@ -61,8 +63,11 @@ npm test
   triangulates geometry and splits meshes by material. It preserves node transforms,
   UV seams, normals, skin weights, bone inverse-bind matrices, and animation metadata.
   It flips the UV V coordinate to match ksEditor. It also limits each KN5 mesh to
-  65,535 vertices. Imported material colors become embedded one-pixel DDS textures.
-  Source texture extraction and FBX animation export remain incomplete.
+  65,535 vertices. The importer preserves supported embedded PNG, JPEG, and WebP
+  diffuse textures. It also resolves external DDS, PNG, JPEG, and WebP textures.
+  A relative path, suffix, or basename must resolve to one file. Missing, ambiguous,
+  and unsupported textures use an embedded one-pixel DDS color. FBX animation export
+  remains incomplete.
 - KN5 v5/v6 headers, embedded texture, material, hierarchy, static and skinned-mesh
   parsing, including recognition of appended CSP KN5ENC v1 protected payloads
 - Stock shader parameters, texture-resource inspection, embedded BC1/2/3,
