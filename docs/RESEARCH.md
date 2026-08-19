@@ -1552,6 +1552,16 @@ capture colored all 375 bindings, retained a coherent continuous circuit and sur
 boundaries, produced hash `a4d6d0ca8bfbe84b`, and reported no JavaScript or WebGL
 errors.
 
+The surface editor preserves the native section index and all 14 parsed fields.
+These fields cover matching, grip, damping, dirt, penalties, validity, pitlane state,
+surface waves, vibration, sound, pitch, and force feedback. The project stores edits
+separately from CSP overrides and writes a standalone `surfaces.ini`.
+
+A production WebGL test changed `KEY=ROAD` to `KEY=TARMAC`. The live audit changed
+one mesh from fallback physics to an exact match. The same test covered all fields,
+invalid input, undo, redo, recovery, the surface overlay, and export. A serializer
+round trip preserved every field and rejected unsafe INI text.
+
 ## Track layout assembly evidence
 
 Installed tracks use ordered `[MODEL_n]` sections in `models*.ini`, with `FILE`,

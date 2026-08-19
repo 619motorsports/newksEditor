@@ -112,7 +112,10 @@ npm test
   using the game's built-in `WALL`, stock system surfaces, track override precedence,
   nonzero sector IDs, and unique substring binding; fallback and ambiguous physics
   meshes, contiguous starts and pits, paired timing gates, and the hotlap marker are
-  diagnosed, with an exact-binding surface-physics viewport overlay
+  diagnosed, with an exact-binding surface-physics viewport overlay. Local surfaces
+  expose all 14 parsed physics fields for live editing. Edits support validation,
+  undo, recovery, project persistence, binding refresh, and `surfaces.ini` export.
+  Packed input stays read-only and exports a standalone file.
 - Version-3 `cameras*.ini` inspection with count, basis, FOV, lap-interval, and
   clip-plane diagnostics, plus fixed track-camera preview using the configured
   position, orientation, FOV, and near/far planes. Referenced camera-spline CSVs are

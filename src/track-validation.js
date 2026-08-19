@@ -4,9 +4,52 @@ import { walkNodes } from "./kn5.js";
 function number(section,key,fallback,warnings,source){const raw=lastValue(section,key);if(raw==="")return fallback;const value=Number(raw);if(Number.isFinite(value))return value;warnings.push(`${source}:${section.line}: ${section.name} ${key} must be finite`);return fallback;}
 
 export function parseSurfacesIni(text,source="data/surfaces.ini"){
-  const config=parseCspIni(text,source),warnings=config.warnings.map((warning)=>`${warning.source}:${warning.line}: ${warning.message}`),surfaces=[],keys=new Set();
-  for(const section of config.sections){const match=section.name.match(/^SURFACE_(\d+)$/i);if(!match)continue;const key=lastValue(section,"KEY").trim();if(!key){warnings.push(`${source}:${section.line}: ${section.name} has no KEY`);continue;}const normalized=key.toUpperCase();if(keys.has(normalized))warnings.push(`${source}:${section.line}: duplicate surface KEY ${key}`);keys.add(normalized);surfaces.push({index:Number(match[1]),key,friction:number(section,"FRICTION",1,warnings,source),damping:number(section,"DAMPING",0,warnings,source),dirtAdditive:number(section,"DIRT_ADDITIVE",0,warnings,source),blackFlagTime:number(section,"BLACK_FLAG_TIME",0,warnings,source),isValidTrack:number(section,"IS_VALID_TRACK",0,warnings,source)!==0,isPitlane:number(section,"IS_PITLANE",0,warnings,source)!==0,sinHeight:number(section,"SIN_HEIGHT",0,warnings,source),sinLength:number(section,"SIN_LENGTH",0,warnings,source),vibrationGain:number(section,"VIBRATION_GAIN",0,warnings,source),vibrationLength:number(section,"VIBRATION_LENGTH",0,warnings,source),wav:lastValue(section,"WAV").trim(),wavPitch:number(section,"WAV_PITCH",0,warnings,source),ffEffect:lastValue(section,"FF_EFFECT").trim(),section:section.name,line:section.line});}
+  const config=parseCspIni(text,source),warnings=config.warnings.map((warning)=>`${warning.source}:${warning.line}: ${warning.message}`),surfaces=[],keys=new Set(),indices=new Set();
+  for(const section of config.sections){const match=section.name.match(/^SURFACE_(\d+)$/i);if(!match)continue;const index=Number(match[1]);if(indices.has(index))warnings.push(`${source}:${section.line}: duplicate SURFACE_${index} section`);indices.add(index);const key=lastValue(section,"KEY").trim();if(!key){warnings.push(`${source}:${section.line}: ${section.name} has no KEY`);continue;}const normalized=key.toUpperCase();if(keys.has(normalized))warnings.push(`${source}:${section.line}: duplicate surface KEY ${key}`);keys.add(normalized);surfaces.push({index,key,friction:number(section,"FRICTION",1,warnings,source),damping:number(section,"DAMPING",0,warnings,source),dirtAdditive:number(section,"DIRT_ADDITIVE",0,warnings,source),blackFlagTime:number(section,"BLACK_FLAG_TIME",0,warnings,source),isValidTrack:number(section,"IS_VALID_TRACK",0,warnings,source)!==0,isPitlane:number(section,"IS_PITLANE",0,warnings,source)!==0,sinHeight:number(section,"SIN_HEIGHT",0,warnings,source),sinLength:number(section,"SIN_LENGTH",0,warnings,source),vibrationGain:number(section,"VIBRATION_GAIN",0,warnings,source),vibrationLength:number(section,"VIBRATION_LENGTH",0,warnings,source),wav:lastValue(section,"WAV").trim(),wavPitch:number(section,"WAV_PITCH",0,warnings,source),ffEffect:lastValue(section,"FF_EFFECT").trim(),section:section.name,line:section.line});}
   surfaces.sort((a,b)=>a.index-b.index);return {source,surfaces,warnings,ignoredSections:config.sections.length-surfaces.length};
+}
+
+function surfaceNumber(value, label) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) throw new TypeError(`${label} must be finite`);
+  return Number(number.toFixed(6)).toString();
+}
+
+function surfaceText(value, label, required = false) {
+  const text = String(value || "").trim();
+  if (required && !text) throw new TypeError(`${label} cannot be empty`);
+  if (/\r|\n/.test(text)) throw new TypeError(`${label} cannot contain a line break`);
+  if (text.includes(";")) throw new TypeError(`${label} cannot contain an INI comment marker`);
+  return text;
+}
+
+export function serializeSurfacesIni(config) {
+  const surfaces = Array.isArray(config) ? config : config?.surfaces;
+  if (!Array.isArray(surfaces) || !surfaces.length) throw new TypeError("A surface manifest needs at least one surface");
+  const used = new Set(), sections = [];
+  for (let position = 0; position < surfaces.length; position++) {
+    const surface = surfaces[position], index = Number.isInteger(surface.index) && surface.index >= 0 ? surface.index : position;
+    if (used.has(index)) throw new TypeError(`SURFACE_${index} is duplicated`);
+    used.add(index);
+    sections.push([
+      `[SURFACE_${index}]`,
+      `KEY=${surfaceText(surface.key, "KEY", true)}`,
+      `FRICTION=${surfaceNumber(surface.friction, "FRICTION")}`,
+      `DAMPING=${surfaceNumber(surface.damping, "DAMPING")}`,
+      `DIRT_ADDITIVE=${surfaceNumber(surface.dirtAdditive, "DIRT_ADDITIVE")}`,
+      `BLACK_FLAG_TIME=${surfaceNumber(surface.blackFlagTime, "BLACK_FLAG_TIME")}`,
+      `IS_VALID_TRACK=${surface.isValidTrack ? 1 : 0}`,
+      `IS_PITLANE=${surface.isPitlane ? 1 : 0}`,
+      `SIN_HEIGHT=${surfaceNumber(surface.sinHeight, "SIN_HEIGHT")}`,
+      `SIN_LENGTH=${surfaceNumber(surface.sinLength, "SIN_LENGTH")}`,
+      `VIBRATION_GAIN=${surfaceNumber(surface.vibrationGain, "VIBRATION_GAIN")}`,
+      `VIBRATION_LENGTH=${surfaceNumber(surface.vibrationLength, "VIBRATION_LENGTH")}`,
+      `WAV=${surfaceText(surface.wav, "WAV")}`,
+      `WAV_PITCH=${surfaceNumber(surface.wavPitch, "WAV_PITCH")}`,
+      `FF_EFFECT=${surfaceText(surface.ffEffect, "FF_EFFECT")}`
+    ].join("\n"));
+  }
+  return `${sections.join("\n\n")}\n`;
 }
 
 function numbered(names,prefix){return [...names].map((name)=>name.match(new RegExp(`^${prefix}_(\\d+)$`,"i"))).filter(Boolean).map((match)=>Number(match[1])).sort((a,b)=>a-b);}

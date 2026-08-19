@@ -245,6 +245,9 @@ vertical slice is only the foundation.
   the runtime `WALL` plus system/track definition merge, exact nonzero-sector and
   unique-substring physical-mesh bindings, contiguous starts/pits, timing-gate pairs,
   and hotlap markers now have an assembled-layout audit and spatial physics overlay.
+  All parsed local-surface fields now support live editing, undo, recovery, project
+  persistence, validation, binding refresh, and `surfaces.ini` export. Packed input
+  exports a standalone file because `data.acd` repacking remains separate.
   Version-3 camera sets are validated and can
   drive the viewport with their configured basis, FOV, and clip planes. Referenced
   spline CSVs resolve and use the game's world-Y rotation and normalized sampling for

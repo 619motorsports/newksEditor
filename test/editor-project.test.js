@@ -27,6 +27,13 @@ test("normalizes dynamic track manifest edits as non-CSP project fields", () => 
   assert.equal(editorProjectCspEditCount(project), 0);
 });
 
+test("normalizes track surface edits as non-CSP project fields", () => {
+  const project = normalizeEditorProject({ format: "apex-editor-project", version: 1, surfaceEdits: { "0": { key: "tarmac", friction: "1.05", damping: 0.02, dirtAdditive: 0.1, blackFlagTime: 3, isValidTrack: true, isPitlane: false, sinHeight: 0.001, sinLength: 2.5, vibrationGain: 0.15, vibrationLength: 0.4, wav: null, wavPitch: 1.2, ffEffect: "GRAIN" } } });
+  assert.deepEqual(project.surfaceEdits["0"], { key: "TARMAC", friction: 1.05, damping: 0.02, dirtAdditive: 0.1, blackFlagTime: 3, isValidTrack: true, isPitlane: false, sinHeight: 0.001, sinLength: 2.5, vibrationGain: 0.15, vibrationLength: 0.4, wav: null, wavPitch: 1.2, ffEffect: "GRAIN" });
+  assert.equal(editorProjectEditCount(project), 14);
+  assert.equal(editorProjectCspEditCount(project), 0);
+});
+
 test("parses and formats scalar and vector editor values", () => {
   assert.equal(parseEditorValue("0.375"), 0.375);
   assert.deepEqual(parseEditorValue("1, 0.5, 0"), [1, 0.5, 0]);

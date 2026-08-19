@@ -16,7 +16,7 @@ const sourceFiles = new Set([
   "kn5-bake.js", "kn5-workspace.js", "kn5-write.js", "kn5.js", "knh.js",
   "ksanim.js", "lighting.js", "node-authoring.js", "rain-fx.js", "reflections.js", "seasons.js",
   "shader-profiles.js", "shadows.js", "skinning.js", "track-cameras.js",
-  "track-validation.js", "vao-patch.js", "workspace-authoring.js"
+  "surface-authoring.js", "track-validation.js", "vao-patch.js", "workspace-authoring.js"
 ]);
 const threeBuildFiles = new Set(["three.core.js", "three.module.js"]);
 const threeAddonFiles = new Set(["curves/NURBSCurve.js", "curves/NURBSUtils.js", "libs/fflate.module.js", "loaders/FBXLoader.js"]);

@@ -10,7 +10,8 @@ import { applyWorkspaceEdits, captureWorkspaceBaseline, workspaceEditCount as co
 import { parseKsAnimation, sampleKsAnimation, serializeKsAnimation } from "/src/ksanim.js";
 import { bakeEditorProjectIntoKn5 } from "/src/kn5-bake.js";
 import { serializeKn5 } from "/src/kn5-write.js";
-import { auditTrackModel, parseSurfacesIni, resolveTrackSurface } from "/src/track-validation.js";
+import { auditTrackModel, parseSurfacesIni, resolveTrackSurface, serializeSurfacesIni } from "/src/track-validation.js";
+import { applySurfaceEdits, captureSurfaceBaseline, surfaceEditCount as countSurfaceEdits } from "/src/surface-authoring.js";
 import { findAcdEntry, parseAcd } from "/src/acd.js";
 import { auditCarCollider, auditCarHierarchy, parseBottomCollidersIni } from "/src/car-validation.js";
 import { parseKnh } from "/src/knh.js";
@@ -75,6 +76,7 @@ let activeFbxAnimationIndex = -1;
 let animationPosition = 0;
 let assetSurfaceEntries = [];
 let trackSurfaceConfig = null;
+let trackSurfaceBaseline = null;
 let trackSurfaceFileName = "";
 let trackAudit = null;
 let trackSurfaceBindings = new Map();
@@ -362,7 +364,7 @@ function cspPreviewContext() {
 }
 
 async function configureTrackDataChoices() {
-  assetSurfaceEntries=assetFileIndex.entries.filter((entry)=>/(^|\/)data\/surfaces\.ini$/i.test(entry.relativePath));const packed=virtualAcdAssetEntry("surfaces.ini");if(packed&&!assetSurfaceEntries.some((entry)=>/^data\/surfaces\.ini$/i.test(entry.relativePath)))assetSurfaceEntries.push(packed);trackSurfaceConfig=null;trackSurfaceFileName="";trackAudit=null;trackSurfaceBindings=new Map();renderer?.setSurfaceBindings(trackSurfaceBindings);configureSurfaceOverlay();
+  assetSurfaceEntries=assetFileIndex.entries.filter((entry)=>/(^|\/)data\/surfaces\.ini$/i.test(entry.relativePath));const packed=virtualAcdAssetEntry("surfaces.ini");if(packed&&!assetSurfaceEntries.some((entry)=>/^data\/surfaces\.ini$/i.test(entry.relativePath)))assetSurfaceEntries.push(packed);trackSurfaceConfig=null;trackSurfaceBaseline=null;trackSurfaceFileName="";trackAudit=null;trackSurfaceBindings=new Map();renderer?.setSurfaceBindings(trackSurfaceBindings);configureSurfaceOverlay();
   const entries=assetFileIndex.entries.filter((entry)=>/(^|\/)data\/cameras(?:_[^\/]*)?\.ini$/i.test(entry.relativePath)),splineCache=new Map();trackCameraSets=[];trackCameraChoices=[];trackCameraErrors=[];trackCameraPosition=0;window.__apexTrackCameras=[];
   for(const entry of entries){try{const set=parseTrackCamerasIni(await entry.file.text(),entry.relativePath),directory=entry.relativePath.split("/").slice(0,-1).join("/");for(const camera of set.cameras)if(camera.spline){const requested=normalizeAssetPath(`${directory}/${camera.spline}`),resolved=resolveAssetFile(assetFileIndex,requested);if(resolved.status!=="resolved"){set.warnings.push(`${set.source}: CAMERA_${camera.index} spline ${camera.spline} is ${resolved.status}`);continue;}let parsed=splineCache.get(resolved.path.toLowerCase());if(!parsed){parsed=parseCameraSplineCsv(await resolved.file.text(),resolved.path);splineCache.set(resolved.path.toLowerCase(),parsed);}const points=rotateCameraSpline(parsed.points,camera.splineRotation);camera.splineData={source:parsed.source,points,length:parsed.length,warnings:[...parsed.warnings]};set.warnings.push(...parsed.warnings);}trackCameraSets.push(set);for(const camera of set.cameras)trackCameraChoices.push({key:`${entry.path}:${camera.index}`,set,camera});}catch(error){console.error(error);trackCameraErrors.push(`${entry.relativePath}: ${error.message}`);}}
   const select=$("#track-camera-select");select.replaceChildren(new Option("Orbit camera",""),...trackCameraChoices.map((choice)=>new Option(`${choice.set.name||choice.set.source} · ${choice.camera.index}: ${choice.camera.name}`,choice.key)));select.hidden=!trackCameraChoices.length;select.value="";select.title=trackCameraChoices.length?`${trackCameraSets.length} camera sets · ${trackCameraChoices.length} cameras`:"No track camera files discovered";stopTrackCameraPlayback();$("#track-camera-position-control").hidden=true;$("#track-camera-play").hidden=true;$("#track-camera-play").disabled=true;setTrackCameraPosition(0);renderer?.setTrackCamera(null);window.__apexTrackCameras=trackCameraSets;
@@ -413,11 +415,11 @@ function configureDriverModelButton(){const button=$("#driver-model-button"),nam
 function configureDriverViewButton(){const button=$("#driver-cockpit-view"),available=Boolean(model?.workspace?.files.some((file)=>file.auxiliary==="driver")&&sharedDriverHideAudit?.matched);button.hidden=!sharedDriverFile;button.disabled=!available;button.classList.toggle("active",available&&driverCockpitView);button.textContent=driverCockpitView?"Cockpit driver · hidden":"Cockpit driver";button.title=sharedDriverHideAudit?`${sharedDriverHideAudit.matched}/${sharedDriverHideAudit.requested} configured objects match; ${sharedDriverHideAudit.meshCount} mesh${sharedDriverHideAudit.meshCount===1?"":"es"} hidden in cockpit mode`:"No shared driver geometry is loaded";}
 
 async function selectTrackSurfaceConfig(manifestEntry) {
-  trackSurfaceConfig=null;trackSurfaceFileName="";trackAudit=null;if(!assetSurfaceEntries.length)return;
+  trackSurfaceConfig=null;trackSurfaceBaseline=null;trackSurfaceFileName="";trackAudit=null;if(!assetSurfaceEntries.length)return;
   const parts=manifestEntry.relativePath.split("/"),directory=parts.slice(0,-1).join("/"),basename=parts.at(-1),layout=basename.match(/^models_(.+)\.ini$/i)?.[1];
   const preferred=[layout?normalizeAssetPath(`${directory}/${layout}/data/surfaces.ini`):"",normalizeAssetPath(`${directory}/data/surfaces.ini`)].filter(Boolean);
   let entry=preferred.map((path)=>assetSurfaceEntries.find((candidate)=>candidate.relativePath.toLowerCase()===path.toLowerCase())).find(Boolean);if(!entry&&assetSurfaceEntries.length===1)entry=assetSurfaceEntries[0];if(!entry)return;
-  try{trackSurfaceConfig=parseSurfacesIni(await entry.file.text(),entry.relativePath);trackSurfaceFileName=entry.relativePath;}catch(error){console.error(error);status.textContent=`Could not read ${entry.relativePath}: ${error.message}`;}
+  try{trackSurfaceConfig=parseSurfacesIni(await entry.file.text(),entry.relativePath);trackSurfaceBaseline=captureSurfaceBaseline(trackSurfaceConfig);trackSurfaceFileName=entry.relativePath;}catch(error){console.error(error);status.textContent=`Could not read ${entry.relativePath}: ${error.message}`;}
 }
 
 async function loadSelectedAnimation(event) {
@@ -485,7 +487,7 @@ async function loadSelectedLayout() {
 
 async function loadSelectedCarLods(manifestEntry) {
   try {
-    trackSurfaceConfig=null;trackSurfaceFileName="";trackAudit=null;
+    trackSurfaceConfig=null;trackSurfaceBaseline=null;trackSurfaceFileName="";trackAudit=null;
     const manifest = parseCarLodsIni(await manifestEntry.file.text(), manifestEntry.relativePath);
     const parts = manifestEntry.relativePath.split("/"), manifestDirectory = parts.slice(0, -1), dataDirectory = manifestDirectory.at(-1) || "";
     const base = /^data(?:[-_].*)?$/i.test(dataDirectory) ? manifestDirectory.slice(0, -1).join("/") : manifestDirectory.join("/");
@@ -591,7 +593,18 @@ function applyProjectWorkspaceEdits() {
   window.__apexWorkspaceAuthoring = { edits: applied, files: Object.keys(fileEdits).length, warnings: [...workspace.authoredWarnings] };
 }
 
+function applyProjectSurfaceEdits() {
+  if (!trackSurfaceConfig || !trackSurfaceBaseline) return;
+  const edits = editorProject?.surfaceEdits || {}, applied = applySurfaceEdits(trackSurfaceConfig, edits, trackSurfaceBaseline);
+  try {
+    const text = serializeSurfacesIni(trackSurfaceConfig);
+    trackSurfaceConfig.authoredWarnings = parseSurfacesIni(text, trackSurfaceFileName || "data/surfaces.ini").warnings;
+  } catch (error) { trackSurfaceConfig.authoredWarnings = [error.message]; }
+  window.__apexSurfaceAuthoring = { edits: applied, surfaces: Object.keys(edits).length, warnings: [...trackSurfaceConfig.authoredWarnings] };
+}
+
 function applyProjectSceneEdits() {
+  applyProjectSurfaceEdits();
   applyProjectNodeEdits();
   applyProjectWorkspaceEdits();
   const warnings = [];
@@ -663,7 +676,7 @@ function commitEditorChange(label, mutate) {
   const normalized = normalizeEditorProject(next), after = serializeEditorProject(normalized);
   if (after === before) return false;
   const geometryChanged = JSON.stringify(normalized.geometryEdits) !== JSON.stringify(editorProject.geometryEdits);
-  const sceneChanged = geometryChanged || JSON.stringify(normalized.nodeEdits) !== JSON.stringify(editorProject.nodeEdits) || JSON.stringify(normalized.workspaceEdits) !== JSON.stringify(editorProject.workspaceEdits);
+  const sceneChanged = geometryChanged || JSON.stringify(normalized.nodeEdits) !== JSON.stringify(editorProject.nodeEdits) || JSON.stringify(normalized.workspaceEdits) !== JSON.stringify(editorProject.workspaceEdits) || JSON.stringify(normalized.surfaceEdits) !== JSON.stringify(editorProject.surfaceEdits);
   undoStack.push({ label, snapshot: before });
   if (undoStack.length > 100) undoStack.shift();
   redoStack = [];
@@ -675,7 +688,7 @@ function commitEditorChange(label, mutate) {
 }
 
 function restoreEditorSnapshot(snapshot) {
-  const restored = normalizeEditorProject(JSON.parse(snapshot)), geometryChanged = JSON.stringify(restored.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits), sceneChanged = geometryChanged || JSON.stringify(restored.nodeEdits) !== JSON.stringify(editorProject?.nodeEdits) || JSON.stringify(restored.workspaceEdits) !== JSON.stringify(editorProject?.workspaceEdits);
+  const restored = normalizeEditorProject(JSON.parse(snapshot)), geometryChanged = JSON.stringify(restored.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits), sceneChanged = geometryChanged || JSON.stringify(restored.nodeEdits) !== JSON.stringify(editorProject?.nodeEdits) || JSON.stringify(restored.workspaceEdits) !== JSON.stringify(editorProject?.workspaceEdits) || JSON.stringify(restored.surfaceEdits) !== JSON.stringify(editorProject?.surfaceEdits);
   editorProject = restored;
   if (sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged); }
   refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
@@ -872,6 +885,7 @@ function renderModelInspector(file, nodes, triangles) {
     $("#pipeline").textContent = pipelineLabel();
   }));
   bindWorkspaceEditors();
+  bindSurfaceEditors();
 }
 
 function renderMaterialInspector(material) {
@@ -993,8 +1007,17 @@ function weatherLightingInspectorHtml(){const value=renderer?.lightingStatus;if(
 function reflectionCaptureInspectorHtml(){const value=renderer?.sceneStatus?.reflections;if(!value)return "";const preview=!value.enabled?"Procedural fallback · live capture disabled":value.ready?"Live scene cubemap":"Procedural fallback",mode={environment:"Showroom environment",explicit:"Selected subtree",scene:"Whole scene",fallback:"Automatic fallback",disabled:"Disabled"}[value.selectionMode]||"Automatic";return `<div class="section"><h3>Scene reflections</h3>${kv("Preview",preview)}${kv("Capture selection",value.rootName?`${mode} · ${value.rootName}`:mode)}${kv("Capture target",`${value.size}² · ${value.faces||0}/6 valid faces`)}${value.ready?`${kv("Material path",value.materialPath||"Shared viewport shader")}${kv("Capture meshes",`${value.opaqueMeshes||0} opaque · ${value.transparentMeshes||0} transparent`)}${kv("Probe shadows",value.directionalShadows?`3 cascades · ${value.shadowCasters||0} mesh casters`:"Disabled")}${kv("GrassFX",value.grassFx?`${(value.grassInstances||0).toLocaleString()} lit instances${value.grassCastsShadows?" · cast/receive shadows":""}`:"Not in selected subtree")}${kv("Latest update",`${value.updatedFaces} face${value.updatedFaces===1?"":"s"} · next ${value.nextFace}`)}${kv("Capture geometry",`${value.draws.toLocaleString()} draws · ${Math.round(value.triangles).toLocaleString()} triangles`)}${kv("CSP lights",value.cspLights||0)}${kv("Clip range",`${KS_EDITOR_CUBEMAP.nearPlane}–${value.farPlane} m`)}${kv("CPU submission",`${format(value.captureMilliseconds)} ms`)}`:""}${value.reason?kv("Fallback reason",value.reason):""}<span class="empty">The capture follows ksEditor’s 512², 90° six-face camera at the active view position, initializes all faces, then refreshes one face per draw. It uses the viewport material path, probe-centered directional cascades, and weather-lit whole-track GrassFX with instanced shadow casting. Reflection sampling and refraction are disabled to prevent recursive feedback.</span></div>`;}
 
 function trackValidationInspectorHtml() {
-  if(!trackAudit)return "";const severity=(finding)=>finding.severity==="error"?"Error":"Warning";
-  return `<div class="section"><h3>Track validation</h3>${kv("surfaces.ini",trackSurfaceFileName||"Not available")}${kv("Track surface overrides",trackSurfaceConfig?.surfaces.length||0)}${kv("Runtime surfaces",trackAudit.runtimeSurfaces)}${kv("Starting positions",trackAudit.starts)}${kv("Pit positions",trackAudit.pits)}${kv("Timing gates",trackAudit.timeGates)}${kv("Hotlap marker",trackAudit.hotlap?"Present":"Missing")}${kv("Errors",trackAudit.errors)}${kv("Warnings",trackAudit.warnings)}${trackAudit.findings.map((finding)=>`<div class="resource ${finding.severity==="error"?"validation-error":""}"><strong>${severity(finding)}</strong><span>${escapeHtml(finding.message)}</span></div>`).join("")}${trackAudit.surfaceMatches.map((surface)=>`<div class="resource"><strong>${escapeHtml(surface.key)}</strong><span>${surface.count.toLocaleString()} physics meshes · ${escapeHtml(surface.origin)}</span></div>`).join("")}${(trackSurfaceConfig?.warnings||[]).slice(0,8).map((warning)=>`<div class="resource"><strong>surfaces.ini</strong><span>${escapeHtml(warning)}</span></div>`).join("")}${trackAudit.unmatchedPhysical.slice(0,12).map((name)=>`<div class="resource"><strong>Default physics fallback</strong><span>${escapeHtml(name)}</span></div>`).join("")}${trackAudit.ambiguousPhysical.slice(0,12).map((item)=>`<div class="resource validation-error"><strong>Ambiguous physics mesh</strong><span>${escapeHtml(item.name)} → ${escapeHtml(item.keys.join(", "))}</span></div>`).join("")}${trackAudit.unmatchedPhysical.length>12?`<span class="empty">${trackAudit.unmatchedPhysical.length-12} more fallback physics meshes</span>`:""}${trackAudit.ambiguousPhysical.length>12?`<span class="empty">${trackAudit.ambiguousPhysical.length-12} more ambiguous physics meshes</span>`:""}</div>`;
+  if (!trackAudit) return "";
+  const severity = (finding) => finding.severity === "error" ? "Error" : "Warning", edits = editorProject?.surfaceEdits || {}, editCount = countSurfaceEdits(edits);
+  const surfaceControls = (trackSurfaceConfig?.surfaces || []).map((surface, position) => {
+    const edit = edits[String(position)], match = trackAudit.surfaceMatches.find((item) => item.key.toUpperCase() === surface.key.toUpperCase());
+    const number = (key, label) => `<label class="author-field"><span>${label}</span><input class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-surface-number="${key}" data-surface-position="${position}" value="${escapeHtml(formatEditorValue(surface[key]))}" spellcheck="false"></label>`;
+    const text = (key, label) => `<label class="author-field"><span>${label}</span><input class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-surface-text="${key}" data-surface-position="${position}" value="${escapeHtml(String(surface[key] ?? ""))}" maxlength="${key === "key" ? 128 : 1024}" spellcheck="false"></label>`;
+    const boolean = (key, label) => `<label class="author-field"><span>${label}</span><select class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-surface-boolean="${key}" data-surface-position="${position}"><option value="true" ${surface[key] ? "selected" : ""}>Yes</option><option value="false" ${surface[key] ? "" : "selected"}>No</option></select></label>`;
+    return `<div class="resource"><strong>SURFACE_${surface.index} · ${escapeHtml(surface.key)}</strong><span>${(match?.count || 0).toLocaleString()} physics meshes · friction ${format(surface.friction)}${surface.isPitlane ? " · pit lane" : ""}</span>${text("key", "Surface key")}${number("friction", "Friction")}${number("damping", "Damping")}${number("dirtAdditive", "Dirt additive")}${number("blackFlagTime", "Black-flag time")}${boolean("isValidTrack", "Valid track")}${boolean("isPitlane", "Pit lane")}${number("sinHeight", "Sine height")}${number("sinLength", "Sine length")}${number("vibrationGain", "Vibration gain")}${number("vibrationLength", "Vibration length")}${text("wav", "WAV file")}${number("wavPitch", "WAV pitch")}${text("ffEffect", "FF effect")}<div class="section-actions"><button class="mini" data-reset-surface="${position}" ${edit ? "" : "disabled"}>Reset ${escapeHtml(surface.key)} edits</button></div></div>`;
+  }).join("");
+  const configWarnings = [...new Set([...(trackSurfaceConfig?.warnings || []), ...(trackSurfaceConfig?.authoredWarnings || [])])];
+  return `<div class="section"><h3>Track validation${editCount ? ` · <span class="edit-count">${editCount} surface edit${editCount === 1 ? "" : "s"}</span>` : ""}</h3>${kv("surfaces.ini",trackSurfaceFileName||"Not available")}${kv("Track surface overrides",trackSurfaceConfig?.surfaces.length||0)}${kv("Runtime surfaces",trackAudit.runtimeSurfaces)}${kv("Starting positions",trackAudit.starts)}${kv("Pit positions",trackAudit.pits)}${kv("Timing gates",trackAudit.timeGates)}${kv("Hotlap marker",trackAudit.hotlap?"Present":"Missing")}${kv("Errors",trackAudit.errors)}${kv("Warnings",trackAudit.warnings)}${trackAudit.findings.map((finding)=>`<div class="resource ${finding.severity==="error"?"validation-error":""}"><strong>${severity(finding)}</strong><span>${escapeHtml(finding.message)}</span></div>`).join("")}${surfaceControls}${trackAudit.surfaceMatches.filter((surface)=>!(trackSurfaceConfig?.surfaces||[]).some((item)=>item.key.toUpperCase()===surface.key.toUpperCase())).map((surface)=>`<div class="resource"><strong>${escapeHtml(surface.key)}</strong><span>${surface.count.toLocaleString()} physics meshes · ${escapeHtml(surface.origin)}</span></div>`).join("")}${configWarnings.slice(0,8).map((warning)=>`<div class="resource"><strong>surfaces.ini</strong><span>${escapeHtml(warning)}</span></div>`).join("")}${trackAudit.unmatchedPhysical.slice(0,12).map((name)=>`<div class="resource"><strong>Default physics fallback</strong><span>${escapeHtml(name)}</span></div>`).join("")}${trackAudit.ambiguousPhysical.slice(0,12).map((item)=>`<div class="resource validation-error"><strong>Ambiguous physics mesh</strong><span>${escapeHtml(item.name)} → ${escapeHtml(item.keys.join(", "))}</span></div>`).join("")}${trackAudit.unmatchedPhysical.length>12?`<span class="empty">${trackAudit.unmatchedPhysical.length-12} more fallback physics meshes</span>`:""}${trackAudit.ambiguousPhysical.length>12?`<span class="empty">${trackAudit.ambiguousPhysical.length-12} more ambiguous physics meshes</span>`:""}${trackSurfaceConfig?`<div class="section-actions"><button class="mini" data-export-surfaces>Export surfaces.ini</button><button class="mini" data-reset-surfaces ${editCount ? "" : "disabled"}>Reset surface edits</button></div>`:""}</div>`;
 }
 
 function lightHtml(light) {
@@ -1220,6 +1243,61 @@ function editWorkspaceFile(project, index, mutate) {
   project.workspaceEdits.files ||= Object.create(null);
   const key = String(index), edit = project.workspaceEdits.files[key] || {};
   mutate(edit); project.workspaceEdits.files[key] = edit;
+}
+
+function editSurface(project, position, mutate) {
+  project.surfaceEdits ||= Object.create(null);
+  const key = String(position), edit = project.surfaceEdits[key] || {};
+  mutate(edit); project.surfaceEdits[key] = edit;
+}
+
+function bindSurfaceEditors() {
+  if (!trackSurfaceConfig) return;
+  inspector.querySelectorAll("[data-edit-surface-number]").forEach((input) => {
+    const commit = () => {
+      try {
+        const position = Number(input.dataset.surfacePosition), key = input.dataset.editSurfaceNumber, value = parseEditorValue(input.value);
+        if (Array.isArray(value)) throw new Error(`${key} needs one finite number`);
+        commitEditorChange(`Set ${trackSurfaceConfig.surfaces[position].key} ${key}`, (project) => editSurface(project, position, (edit) => { edit[key] = value; }));
+      } catch (error) { input.classList.add("invalid"); status.textContent = error.message; }
+    };
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } });
+    input.addEventListener("change", commit);
+  });
+  inspector.querySelectorAll("[data-edit-surface-boolean]").forEach((select) => select.addEventListener("change", () => {
+    const position = Number(select.dataset.surfacePosition), key = select.dataset.editSurfaceBoolean;
+    commitEditorChange(`Set ${trackSurfaceConfig.surfaces[position].key} ${key}`, (project) => editSurface(project, position, (edit) => { edit[key] = select.value === "true"; }));
+  }));
+  inspector.querySelectorAll("[data-edit-surface-text]").forEach((input) => {
+    const commit = () => {
+      try {
+        const position = Number(input.dataset.surfacePosition), key = input.dataset.editSurfaceText, text = input.value.trim();
+        if (text.includes(";")) throw new Error(`${key} cannot contain an INI comment marker`);
+        if (key === "key") {
+          if (!text) throw new Error("Surface key cannot be empty");
+          const duplicate = trackSurfaceConfig.surfaces.some((surface, index) => index !== position && surface.key.toUpperCase() === text.toUpperCase());
+          if (duplicate) throw new Error(`Surface key ${text.toUpperCase()} is already in use`);
+        }
+        commitEditorChange(`Set ${trackSurfaceConfig.surfaces[position].key} ${key}`, (project) => editSurface(project, position, (edit) => { edit[key] = key === "key" ? text.toUpperCase() : text || null; }));
+      } catch (error) { input.classList.add("invalid"); status.textContent = error.message; }
+    };
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } });
+    input.addEventListener("change", commit);
+  });
+  inspector.querySelectorAll("[data-reset-surface]").forEach((button) => button.addEventListener("click", () => {
+    const position = button.dataset.resetSurface, surface = trackSurfaceConfig.surfaces[Number(position)];
+    commitEditorChange(`Reset ${surface.key} surface edits`, (project) => { delete project.surfaceEdits[position]; });
+  }));
+  inspector.querySelector("[data-reset-surfaces]")?.addEventListener("click", () => commitEditorChange("Reset surface edits", (project) => { project.surfaceEdits = Object.create(null); }));
+  inspector.querySelector("[data-export-surfaces]")?.addEventListener("click", () => {
+    try {
+      const text = serializeSurfacesIni(trackSurfaceConfig), name = trackSurfaceFileName.split("/").at(-1) || "surfaces.ini";
+      downloadText(name, text, "text/plain");
+      window.__apexLastSurfaceExport = { name, text, warnings: [...(trackSurfaceConfig.authoredWarnings || [])] };
+      const count = trackSurfaceConfig.surfaces.length;
+      status.textContent = `Exported ${name} · ${count} surface${count === 1 ? "" : "s"}`;
+    } catch (error) { console.error(error); status.textContent = `Could not export surfaces.ini: ${error.message}`; }
+  });
 }
 
 function bindWorkspaceEditors() {
