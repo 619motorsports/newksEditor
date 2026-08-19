@@ -124,11 +124,12 @@ await waitFor(`window.__apexAppReady===true`);
 trace("app loaded");
 if (assetsPath) {
   await setFile("#asset-folder", assetsPath);
-  await waitFor(`window.__apexRenderer?.externalTextureStatus.selected>0`);
+  await waitFor(`document.querySelector('#asset-folder')?.files.length>0`);
   trace("asset folder selected");
 }
-if(cspAssetsPath){await setFile("#csp-texture-folder",cspAssetsPath);await waitFor(`window.__apexRenderer?.externalTextureStatus.selected>0`);trace("shared CSP texture folder selected");}
+if(cspAssetsPath){await setFile("#csp-texture-folder",cspAssetsPath);await waitFor(`document.querySelector('#csp-texture-folder')?.files.length>0`);trace("shared CSP texture folder selected");}
 if (layoutName) {
+  await waitFor(`[...document.querySelector('#layout-select').options].some(option=>option.textContent.endsWith(${JSON.stringify(layoutName)})||option.value.endsWith(${JSON.stringify(layoutName)}))`);
   const opened = await evaluate(`(()=>{const select=document.querySelector('#layout-select'),option=[...select.options].find(option=>option.textContent.endsWith(${JSON.stringify(layoutName)})||option.value.endsWith(${JSON.stringify(layoutName)}));if(!option)return false;select.value=option.value;document.querySelector('#open-layout').click();return true;})()`);
   if (!opened) throw new Error(`Layout manifest was not discovered: ${layoutName}`);
   await waitFor(`document.querySelector('#status').textContent.includes('KN5 files')`, 120000);

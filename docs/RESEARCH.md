@@ -1888,6 +1888,22 @@ with manual exposure 0.35, and evaluated hundreds of seasonal meshes. Year progr
 browser-log errors. Brown bark and other non-green, non-upward materials correctly
 remain unchanged under the native mask.
 
+## Viewport camera state after reflection capture
+
+The live scene cubemap uses the same material program as the main viewport. Each
+cubemap face uploads a different view-projection matrix. The capture path previously
+left the last face matrix active after it returned. The sky used the viewport camera,
+but the main geometry used the stale cubemap camera.
+
+Apex now uploads the viewport matrix again before it draws the main geometry. A
+production Monza run used a saved TV camera, 1,428 meshes, 130 textures, and live
+scene reflections. A second run loaded all four Nissan 370Z LODs, all 82 embedded
+textures, and the selected skin. Both runs returned WebGL error zero and no browser
+errors. The Nissan frame also proves that the correction does not invert the car.
+
+The browser smoke check now waits for folder input and manifest discovery separately.
+This sequence removes a clean-session race that occurred before the renderer existed.
+
 ## Desktop packaging evidence
 
 The desktop shell uses Electron 43.4.1 and serves the existing application from an
