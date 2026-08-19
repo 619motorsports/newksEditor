@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { Kn5Error, parseKn5, walkNodes } from "../src/kn5.js";
+import { computeKn5Visibility, Kn5Error, parseKn5, walkNodes } from "../src/kn5.js";
 
 const fixture = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/cars/ks_nissan_370z/collider.kn5";
 const carFixture = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/cars/ks_nissan_370z/nissan_370z.kn5";
@@ -74,4 +74,18 @@ test("rejects invalid and truncated files with offsets", () => {
   assert.throws(() => parseKn5(new TextEncoder().encode("not-kn5")), Kn5Error);
   const header = new Uint8Array([115, 99, 54, 57, 54, 57, 6, 0, 0, 0]);
   assert.throws(() => parseKn5(header), /source marker.*0xa/);
+});
+
+test("computes game visibility from active branches and mesh flags", () => {
+  const visible = { kind: "mesh", name: "visible", active: true, visible: true, renderable: true, children: [] };
+  const collision = { kind: "mesh", name: "collision", active: true, visible: true, renderable: false, children: [] };
+  const child = { kind: "mesh", name: "inactive child", active: true, visible: true, renderable: true, children: [] };
+  const inactive = { kind: "node", name: "inactive", active: false, children: [child] };
+  const root = { kind: "node", name: "root", active: true, children: [visible, collision, inactive] };
+  const state = computeKn5Visibility(root);
+  assert.equal(state.get(root), true);
+  assert.equal(state.get(visible), true);
+  assert.equal(state.get(collision), false);
+  assert.equal(state.get(inactive), false);
+  assert.equal(state.get(child), false);
 });

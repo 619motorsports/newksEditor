@@ -1,60 +1,113 @@
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { createServer } from "node:http";
-import { extname, join, normalize } from "node:path";
+import { extname, isAbsolute, join, normalize, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const root = fileURLToPath(new URL("../public/", import.meta.url));
+const publicRoot = fileURLToPath(new URL("../public/", import.meta.url));
 const sourceRoot = fileURLToPath(new URL("./", import.meta.url));
-const port = Number(process.env.APEX_EDITOR_PORT || 4173);
+const sourceFiles = new Set([
+  "acd.js", "asset-files.js", "car-validation.js", "csp-config.js",
+  "csp-noise.js", "csp-occlusion.js", "csp-wind.js", "custom-emissive.js",
+  "dds.js", "driver-workspace.js", "editor-project.js", "grass-fx.js",
+  "kn5-bake.js", "kn5-workspace.js", "kn5-write.js", "kn5.js", "knh.js",
+  "ksanim.js", "lighting.js", "rain-fx.js", "reflections.js", "seasons.js",
+  "shader-profiles.js", "shadows.js", "skinning.js", "track-cameras.js",
+  "track-validation.js", "vao-patch.js"
+]);
 const mime = {
-  ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8",
-  ".svg": "image/svg+xml"
+  ".css": "text/css; charset=utf-8",
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".wasm": "application/wasm"
 };
+const contentSecurityPolicy = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self'",
+  "img-src 'self' blob: data:",
+  "connect-src 'self'",
+  "worker-src 'self' blob:",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "frame-ancestors 'none'"
+].join("; ");
 
-createServer((request, response) => {
-  const url = new URL(request.url, `http://${request.headers.host}`);
-  let path;
-  if (url.pathname === "/src/kn5.js") path = join(sourceRoot, "kn5.js");
-  else if (url.pathname === "/src/csp-config.js") path = join(sourceRoot, "csp-config.js");
-  else if (url.pathname === "/src/csp-occlusion.js") path = join(sourceRoot, "csp-occlusion.js");
-  else if (url.pathname === "/src/custom-emissive.js") path = join(sourceRoot, "custom-emissive.js");
-  else if (url.pathname === "/src/editor-project.js") path = join(sourceRoot, "editor-project.js");
-  else if (url.pathname === "/src/dds.js") path = join(sourceRoot, "dds.js");
-  else if (url.pathname === "/src/asset-files.js") path = join(sourceRoot, "asset-files.js");
-  else if (url.pathname === "/src/kn5-workspace.js") path = join(sourceRoot, "kn5-workspace.js");
-  else if (url.pathname === "/src/ksanim.js") path = join(sourceRoot, "ksanim.js");
-  else if (url.pathname === "/src/kn5-bake.js") path = join(sourceRoot, "kn5-bake.js");
-  else if (url.pathname === "/src/kn5-write.js") path = join(sourceRoot, "kn5-write.js");
-  else if (url.pathname === "/src/track-validation.js") path = join(sourceRoot, "track-validation.js");
-  else if (url.pathname === "/src/acd.js") path = join(sourceRoot, "acd.js");
-  else if (url.pathname === "/src/car-validation.js") path = join(sourceRoot, "car-validation.js");
-  else if (url.pathname === "/src/knh.js") path = join(sourceRoot, "knh.js");
-  else if (url.pathname === "/src/driver-workspace.js") path = join(sourceRoot, "driver-workspace.js");
-  else if (url.pathname === "/src/skinning.js") path = join(sourceRoot, "skinning.js");
-  else if (url.pathname === "/src/track-cameras.js") path = join(sourceRoot, "track-cameras.js");
-  else if (url.pathname === "/src/grass-fx.js") path = join(sourceRoot, "grass-fx.js");
-  else if (url.pathname === "/src/csp-noise.js") path = join(sourceRoot, "csp-noise.js");
-  else if (url.pathname === "/src/csp-wind.js") path = join(sourceRoot, "csp-wind.js");
-  else if (url.pathname === "/src/rain-fx.js") path = join(sourceRoot, "rain-fx.js");
-  else if (url.pathname === "/src/shadows.js") path = join(sourceRoot, "shadows.js");
-  else if (url.pathname === "/src/lighting.js") path = join(sourceRoot, "lighting.js");
-  else if (url.pathname === "/src/vao-patch.js") path = join(sourceRoot, "vao-patch.js");
-  else if (url.pathname === "/src/seasons.js") path = join(sourceRoot, "seasons.js");
-  else if (url.pathname === "/src/shader-profiles.js") path = join(sourceRoot, "shader-profiles.js");
-  else if (url.pathname === "/src/reflections.js") path = join(sourceRoot, "reflections.js");
-  else {
-    const relative = url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname.slice(1));
-    path = join(root, normalize(relative));
-    if (!path.startsWith(root)) path = "";
+function safePublicPath(pathname) {
+  let relativeName;
+  try { relativeName = pathname === "/" ? "index.html" : decodeURIComponent(pathname.slice(1)); }
+  catch { return ""; }
+  if (!relativeName || relativeName.includes("\0")) return "";
+  const path = resolve(publicRoot, normalize(relativeName));
+  const fromRoot = relative(resolve(publicRoot), path);
+  return !fromRoot.startsWith("..") && !isAbsolute(fromRoot) ? path : "";
+}
+
+function routePath(pathname) {
+  if (pathname.startsWith("/src/")) {
+    const name = pathname.slice(5);
+    return sourceFiles.has(name) ? join(sourceRoot, name) : "";
   }
-  if (!path || !existsSync(path) || !statSync(path).isFile()) {
-    response.writeHead(404, { "content-type": "text/plain" });
-    response.end("Not found");
-    return;
-  }
-  response.writeHead(200, { "content-type": mime[extname(path)] || "application/octet-stream", "cache-control": "no-store" });
-  createReadStream(path).pipe(response);
-}).listen(port, "127.0.0.1", () => {
-  console.log(`Apex Editor is running at http://127.0.0.1:${port}`);
-});
+  return safePublicPath(pathname);
+}
+
+function writeHeaders(response, status, type = "text/plain; charset=utf-8") {
+  response.writeHead(status, {
+    "cache-control": "no-store",
+    "content-security-policy": contentSecurityPolicy,
+    "content-type": type,
+    "cross-origin-resource-policy": "same-origin",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  });
+}
+
+export function createApexServer() {
+  return createServer((request, response) => {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      writeHeaders(response, 405);
+      response.end("Method not allowed");
+      return;
+    }
+    let pathname;
+    try { pathname = new URL(request.url || "/", "http://127.0.0.1").pathname; }
+    catch { pathname = ""; }
+    const path = routePath(pathname);
+    if (!path || !existsSync(path) || !statSync(path).isFile()) {
+      writeHeaders(response, 404);
+      response.end("Not found");
+      return;
+    }
+    writeHeaders(response, 200, mime[extname(path)] || "application/octet-stream");
+    if (request.method === "HEAD") response.end();
+    else createReadStream(path).pipe(response);
+  });
+}
+
+export async function startApexServer(options = {}) {
+  const host = options.host || "127.0.0.1";
+  const port = options.port === undefined ? Number(process.env.APEX_EDITOR_PORT || 4173) : Number(options.port);
+  const server = createApexServer();
+  await new Promise((resolveListening, reject) => {
+    server.once("error", reject);
+    server.listen(port, host, () => {
+      server.off("error", reject);
+      resolveListening();
+    });
+  });
+  const address = server.address();
+  const actualPort = typeof address === "object" && address ? address.port : port;
+  server.apexUrl = `http://${host}:${actualPort}`;
+  if (options.log !== false) console.log(`Apex Editor is running at ${server.apexUrl}`);
+  return server;
+}
+
+const invokedPath = process.argv[1] ? resolve(process.argv[1]) : "";
+if (invokedPath && invokedPath === resolve(fileURLToPath(import.meta.url))) {
+  startApexServer().catch((error) => {
+    console.error(`Could not start Apex Editor: ${error.message}`);
+    process.exitCode = 1;
+  });
+}

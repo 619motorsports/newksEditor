@@ -216,6 +216,18 @@ export function walkNodes(root) {
   return result;
 }
 
+export function computeKn5Visibility(root) {
+  const result = new WeakMap();
+  const visit = (node, parentActive) => {
+    const branchActive = Boolean(parentActive && node.active);
+    const meshVisible = node.kind !== "mesh" && node.kind !== "skinnedMesh" || Boolean(node.visible && node.renderable);
+    result.set(node, branchActive && meshVisible);
+    for (const child of node.children || []) visit(child, branchActive);
+  };
+  visit(root, true);
+  return result;
+}
+
 export function propertyValue(material, name, fallback = 0) {
   return material?.properties.find((p) => p.name === name)?.value ?? fallback;
 }

@@ -7,7 +7,13 @@ a WebGL 2 preview.
 
 ## Run
 
-Node.js 20 or newer is the only runtime dependency.
+Install Node.js 20 or newer. Then install the locked dependencies.
+
+```sh
+npm ci
+```
+
+Start the browser version.
 
 ```sh
 npm start
@@ -28,6 +34,23 @@ their matching KN5 hierarchy transforms applied live. The same asset folder
 resolves case-insensitive external CSP texture paths and reports missing or ambiguous
 files. Files stay on the local machine; the app does not upload them.
 
+Start the desktop version during development.
+
+```sh
+npm run desktop
+```
+
+Create a package for the current operating system.
+
+```sh
+npm run dist:linux
+npm run dist:windows
+npm run dist:mac
+```
+
+The build writes packages to `release/`. Windows and macOS packages are not signed.
+Run their package commands on their target operating systems before distribution.
+
 ```sh
 npm test
 ```
@@ -43,7 +66,10 @@ npm test
   tangent-space normal maps, packed maps channels, diffuse/normal detail maps, and
   world-space four-layer track materials
 - Car- and track-scale orbit preview, hierarchy filtering, selected-mesh framing,
-  isolation, and wireframe
+  isolation, and wireframe. Normal preview follows recursive KN5 game visibility:
+  an inactive ancestor or a mesh with `visible`/`renderable` disabled stays hidden.
+  Dimmed hierarchy rows remain selectable, and **Show hidden** exposes all such
+  geometry explicitly for authoring inspection
 - Ordered multi-KN5 track workspaces from manual selection or `models*.ini`, with
   per-file hierarchy roots, game-compatible placement transforms, material remapping,
   deterministic texture-name replacement, collision diagnostics, and deterministic
@@ -238,8 +264,9 @@ For repeatable GPU checks, launch Chrome with a remote-debugging port and run
 `node tools/browser-smoke.mjs --model … --config … --mesh … --assets … --csp-assets … --input NAME=VALUE`.
 The tool isolates or assembles the selected mesh, hashes browser captures, and
 reports JavaScript and WebGL errors. Pass `--screenshot FILE.png` to retain the
-initial capture for visual inspection. Pass `--shadows` to capture and compare the
-native-shaped directional preview with shadows disabled. Pass `--lighting`, plus
+initial capture for visual inspection. Pass `--assembled --show-hidden` to compare
+the game-visible scene with the all-mesh authoring view. Pass `--shadows` to capture
+and compare the native-shaped directional preview with shadows disabled. Pass `--lighting`, plus
 optional `--weather`, `--sun-heading`, `--sun-height`, `--compare-sun-height`, or
 `--manual-exposure`, to verify and compare the HDR weather-lighting path. Pass
 `--vao FILE.vao-patch` to bind a CSP vertex-AO patch and capture its enabled and
@@ -282,3 +309,13 @@ Use `--resource txDiffuse --resource-value 'color: 1, 0, 0, 1'` to exercise a
 resource override, or `--mesh-field lodOut --mesh-value 25` for a mesh adjustment.
 The check verifies rendering, undo, redo, autosave recovery, portable-project reopen,
 project state, generated CSP, JavaScript errors, and WebGL errors.
+
+The packaged desktop application has a separate production check:
+
+```sh
+node tools/desktop-smoke.mjs --model car.kn5 --assets path/to/car \
+  --mesh BODY --screenshot desktop.png
+```
+
+This check connects to the Electron application through the Chrome DevTools Protocol.
+It checks the renderer sandbox, navigation policy, CSP, model load, and WebGL state.

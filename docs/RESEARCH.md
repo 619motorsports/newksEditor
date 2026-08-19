@@ -66,6 +66,26 @@ count as a source marker shifted every subsequent field and was the cause of man
 apparent mod-file failures. The corrected v5 path consumes the complete collider and
 also parses the public scene of protected v5 cars.
 
+### Scene visibility semantics
+
+KN5 visibility is hierarchical. A mesh participates in the normal game preview only
+when every node from the root to that mesh has `active != 0`, and the mesh itself has
+both `visible != 0` and `renderable != 0`. Apex stores that derived result separately
+from the source flags. Hidden rows stay in the hierarchy for inspection, and the
+**Show hidden** mode changes only preview inclusion and framing; it does not mutate the
+parsed KN5 state.
+
+Production Chrome checks exercise both forms of hiding. The complete Imola main KN5
+contains 1,239 meshes: 1,023 are game-visible and 216 non-renderable collision meshes
+are hidden. Its normal and all-mesh captures hashed to `b620d56af64ea684` and
+`d5f9126b08eeee35`. The complete Kunos Nissan 370Z contains 215 meshes: 193 are
+game-visible and 22 descendants of inactive damage, low-resolution cockpit, belt, and
+wheel-blur branches are hidden even though their own leaf flags are enabled. Its two
+captures hashed to `d641f95f4d93900e` and `5c0726c6ccf2c622`. All four captures
+returned WebGL error zero with no browser exception. The renderer diagnostics retain
+both `gameVisible`/`gameHidden` and current `previewVisible`/`previewHidden` counts so
+the inspection override cannot be mistaken for source visibility.
+
 ## Rendering implication
 
 The stock `.shader` containers contain ordinary D3D11 DXBC. Reflection strings show
@@ -1786,3 +1806,25 @@ with manual exposure 0.35, and evaluated hundreds of seasonal meshes. Year progr
 `3093ba7be063a1a4`. Both captures returned WebGL error zero and no JavaScript or
 browser-log errors. Brown bark and other non-green, non-upward materials correctly
 remain unchanged under the native mask.
+
+## Desktop packaging evidence
+
+The desktop shell uses Electron 43.4.1 and serves the existing application from an
+ephemeral loopback port. The renderer has no Node.js integration. Context isolation,
+the Chromium sandbox, web security, and the application content security policy are
+active. The shell rejects new windows, external navigation, and permission requests.
+
+The production check loaded the installed Nissan 370Z KN5 in the packaged Linux
+application. It loaded all 82 textures and reported no unsupported textures. The
+normal view showed 193 of 215 scene meshes. The application reported WebGL error zero,
+no browser errors, and no renderer access to `process` or `require`.
+
+The Linux build produced these unsigned artifacts:
+
+- `Apex Editor-0.1.0-linux-x86_64.AppImage`: SHA-256
+  `65815f009eb7d5c67284698b0840188a583607bdb2d75a8fd77dd00a5bc9802b`
+- `Apex Editor-0.1.0-linux-x64.tar.gz`: SHA-256
+  `6b72c3d15f8ae5e1f274aac64d9eacbf20c81347a3850745d43df226fcec5229`
+
+The artifacts prove the Linux package path. They do not prove Windows or macOS
+packaging, code signing, or installer behavior.

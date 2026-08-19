@@ -7,6 +7,9 @@ vertical slice is only the foundation.
 ## 1. Asset fidelity
 
 - Complete and fixture-test static, skinned, and version-specific KN5 node layouts.
+  Recursive active-branch, mesh-visible, and renderable flags now control the normal
+  preview, while an explicit authoring toggle reveals hidden geometry without changing
+  its parsed game state.
 - Complete embedded texture coverage, normal maps, maps channels, detail maps,
   UV multipliers, blending, depth modes, two-sided rendering, and all commonly used
   stock car/track shaders. The seven shipped cutout-package flags, native shader-default
@@ -233,6 +236,9 @@ vertical slice is only the foundation.
 ## 4. Distribution and proof
 
 - Package signed applications for Windows, macOS, and Linux with no Wine dependency.
+  The Electron shell now uses a sandboxed renderer and a loopback-only local server.
+  Reproducible Linux AppImage and tar.gz packages now pass a production WebGL check.
+  Target-native Windows and macOS packages, signing, and release automation remain.
 - Run parser/writer round trips against representative official and mod assets.
 - Maintain golden-image comparisons for stock and CSP rendering on cars and tracks.
   A reusable CDP browser-smoke tool now provides deterministic capture hashes and
