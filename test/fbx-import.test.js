@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { AnimationClip, BufferGeometry, Float32BufferAttribute, Group, Mesh, MeshPhongMaterial, NumberKeyframeTrack, QuaternionKeyframeTrack, Texture, VectorKeyframeTrack } from "three";
 import { decodeDdsRgba, inspectDds } from "../src/dds.js";
-import { convertFbxAnimations, convertFbxScene, inspectFbxHeader, parseFbx, parseFbxWithTextures, resolveFbxTextures } from "../src/fbx-import.js";
+import { convertFbxAnimations, convertFbxScene, FbxImportError, inspectFbxHeader, parseFbx, parseFbxWithTextures, resolveFbxTextures } from "../src/fbx-import.js";
 import { parseKsAnimation, serializeKsAnimation } from "../src/ksanim.js";
 import { parseKn5, walkNodes } from "../src/kn5.js";
 import { serializeKn5 } from "../src/kn5-write.js";
@@ -17,6 +17,22 @@ test("recognizes binary and ASCII FBX headers", () => {
   assert.deepEqual(inspectFbxHeader(binary), { format: "binary", version: 7400 });
   assert.deepEqual(inspectFbxHeader(new TextEncoder().encode("; FBX 7.4.0 project file\nFBXVersion: 7400\n")), { format: "ascii", version: 7400 });
   assert.throws(() => inspectFbxHeader(new Uint8Array(32)), /recognized FBX header/);
+});
+
+test("reports controlled errors for truncated FBX payloads", async () => {
+  const binary = new Uint8Array(27);
+  binary.set(new TextEncoder().encode("Kaydara FBX Binary  \0\x1a\0"));
+  new DataView(binary.buffer).setUint32(23, 7400, true);
+  const ascii = new TextEncoder().encode("; FBX 7.4.0 project file\nFBXVersion: 7400\nObjects: {");
+
+  assert.throws(
+    () => parseFbx(binary, "truncated-binary.fbx"),
+    (error) => error instanceof FbxImportError && error.message.startsWith("Could not import truncated-binary.fbx:")
+  );
+  await assert.rejects(
+    parseFbxWithTextures(ascii, "truncated-ascii.fbx"),
+    (error) => error instanceof FbxImportError && error.message.startsWith("Could not import truncated-ascii.fbx:")
+  );
 });
 
 test("samples FBX clips into native 100-frame local-transform tracks", () => {
