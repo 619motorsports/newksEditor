@@ -100,6 +100,20 @@ test("keeps distinct same-named FBX material objects", () => {
   assert.deepEqual(pixels, [[255, 0, 0, 255], [0, 0, 255, 255]]);
 });
 
+test("uses global texture IDs across FBX materials", async () => {
+  const scene = new Group(), body = new MeshPhongMaterial({ name: "Body" }), trim = new MeshPhongMaterial({ name: "Trim" });
+  body.map = Object.assign(new Texture(), { name: "body.png" });
+  trim.map = Object.assign(new Texture(), { name: "trim.png" });
+  body.map.userData.apexFbxSource = "textures/body.png"; trim.map.userData.apexFbxSource = "textures/trim.png";
+  scene.add(new Mesh(triangleGeometry(3), body), new Mesh(triangleGeometry(3), trim));
+  const model = convertFbxScene(scene);
+
+  assert.deepEqual(model.materials.map((material) => material.resources[0].textureId), [0, 1]);
+  await resolveFbxTextures(model, [sourceFile("body.png", "source/textures/body.png", onePixelPng), sourceFile("trim.png", "source/textures/trim.png", onePixelPng)]);
+  assert.deepEqual(model.materials.map((material) => material.resources[0].textureId), [0, 1]);
+  assert.deepEqual(parseKn5(serializeKn5(model)).materials.map((material) => material.resources[0].textureId), [0, 1]);
+});
+
 test("splits a shared FBX material into static and skinned variants", () => {
   const scene = new Group(), material = new MeshPhongMaterial({ name: "Shared" }), staticMesh = new Mesh(triangleGeometry(3), material), skinnedMesh = markSkinned(new Mesh(triangleGeometry(3), material));
   scene.add(staticMesh, skinnedMesh);

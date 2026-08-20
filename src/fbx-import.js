@@ -161,7 +161,7 @@ function createTextureBinding(sourceTexture, options) {
   const resolved = resolution?.data && (resolution.status === "resolved" || resolution.status === "embedded");
   const selectedTexture = resolved ? boundTextureName(resolution.name, "FBX_Texture", resolution.format, materialId, slot, sourceScope) : fallbackName;
   const texture = { active: true, name: selectedTexture, data: resolved ? resolution.data : fallbackData };
-  const resource = { slot, textureId: resourceIndex, texture: selectedTexture };
+  const resource = { slot, textureId: textureIndex, texture: selectedTexture };
   if (!sourceTexture) return { texture, resource, reference: null };
   const source = textureSource(sourceTexture);
   return {
@@ -262,7 +262,7 @@ function applyTextureResolution(model, reference, resolution) {
   texture.name = resolved ? boundTextureName(resolution.name, "FBX_Texture", resolution.format, reference.materialId, reference.slot, reference.sourceScope) : reference.fallbackName;
   texture.data = resolved ? resolution.data : reference.fallbackData;
   resource.texture = texture.name;
-  resource.textureId = reference.resourceIndex;
+  resource.textureId = reference.textureIndex;
   Object.assign(reference, { status: resolution?.status || "missing", matchedBy: resolution?.matchedBy || "", path: resolution?.path || "", format: resolution?.format || "", output: texture.name });
 }
 
