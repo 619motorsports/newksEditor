@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import test from "node:test";
 import { parseKn5 } from "../src/kn5.js";
 import { parseKsAnimation } from "../src/ksanim.js";
 import { bindVaoPatch, CSP_VAO_BIND_DISTANCE_SQUARED, parseSplitAoConfig, parseVaoData, parseVaoPatch, resolveSplitAoAnimation, splitAoAnimationNodeScope, splitAoBindingAmount } from "../src/vao-patch.js";
+import { assettoPath, carFixtureRoot, carMainKn5 } from "./fixture-paths.js";
 
 test("decodes native v4 square-root AO and v5 linear AO bytes", () => {
   const payload = vaoRecord("mesh", 1, [1, 2, 3], 3, Uint8Array.of(0, 64, 255));
@@ -103,7 +105,7 @@ test("does not apply shared-ancestor door AO to sibling branches", () => {
 });
 
 test("parses installed CSP legacy, v4, and v5 ZIP fixtures", async (t) => {
-  const extension = "/mnt/D/SteamLibrary/steamapps/common/assettocorsa/extension";
+  const extension = assettoPath("extension");
   let legacy, v4, v5;
   try { [legacy, v4, v5] = await Promise.all([readFile(`${extension}/vao-patches/ks_barcelona__layout_gp.vao-patch`), readFile(`${extension}/vao-patches-cars/ks_nissan_370z.vao-patch`), readFile(`${extension}/vao-patches-cars/ks_bmw_m4_akrapovic.vao-patch`)]); }
   catch { t.skip("Installed CSP VAO fixtures are unavailable"); return; }
@@ -114,8 +116,14 @@ test("parses installed CSP legacy, v4, and v5 ZIP fixtures", async (t) => {
   assert.equal(bmw.version, 5); assert.ok(bmw.recordCount > 100); assert.equal(bmw.entry, "Patch_v5.data");
 });
 
-test("binds an installed CSP car VAO patch to production KN5 geometry", async (t) => {
-  const car = "/mnt/D/SteamLibrary/steamapps/common/assettocorsa/content/cars/ks_nissan_370z", patchPath = "/mnt/D/SteamLibrary/steamapps/common/assettocorsa/extension/vao-patches-cars/ks_nissan_370z.vao-patch";
+test("binds the repository car VAO patch to production KN5 geometry", async () => {
+  const [patchBytes, kn5Bytes] = await Promise.all([readFile(join(carFixtureRoot, "main_geometry.vao-patch")), readFile(carMainKn5)]), patch = await parseVaoPatch(patchBytes, "main_geometry.vao-patch"), binding = bindVaoPatch(parseKn5(kn5Bytes), patch);
+  assert.equal(patch.version, 5); assert.equal(patch.recordCount, 420); assert.equal(binding.matchedMeshes, 27); assert.equal(binding.unmatchedRecords + binding.matchedRecords + binding.alternateRecords + binding.normalRecords, patch.recordCount);
+  assert.ok(binding.minimum < binding.maximum); assert.ok(binding.mean > 0 && binding.mean < 255);
+});
+
+test("scopes installed Nissan split AO to the animated door subtree", async (t) => {
+  const car = assettoPath("content/cars/ks_nissan_370z"), patchPath = assettoPath("extension/vao-patches-cars/ks_nissan_370z.vao-patch");
   let patchBytes, kn5Bytes, animationBytes;
   try { [patchBytes, kn5Bytes, animationBytes] = await Promise.all([readFile(patchPath), readFile(`${car}/nissan_370z.kn5`), readFile(`${car}/animations/car_door_L.ksanim`)]); }
   catch { t.skip("Installed Nissan VAO/KN5 fixtures are unavailable"); return; }
