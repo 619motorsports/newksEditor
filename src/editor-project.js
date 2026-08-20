@@ -1,4 +1,5 @@
 import { SURFACE_EDIT_KEYS } from "./surface-authoring.js";
+import { damageEditKeys } from "./car-damage.js";
 import { BOTTOM_COLLIDER_EDIT_KEYS, validateBottomColliderVector } from "./bottom-collider-authoring.js";
 import { normalizeSkinMetadataEdit, SKIN_METADATA_FIELDS } from "./skin-metadata.js";
 import { normalizeFileIdentity } from "./file-identity.js";
@@ -124,6 +125,35 @@ function cleanSurfaceEdit(value) {
   return Object.keys(output).length ? output : null;
 }
 
+function cleanDamageEdit(value, section) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const output = {}, keys = new Set(damageEditKeys(section)), float32Maximum = 3.4028234663852886e38;
+  const numberKeys = ["minSpeed", "maxSpeed", "initialLevel", "staticRotationAngle", "multG", "fullSpeed", "oscillationMinAngle", "oscillationMaxAngle"];
+  for (const key of numberKeys) {
+    if (!keys.has(key) || value[key] === null || value[key] === undefined || value[key] === "") continue;
+    const number = Number(value[key]);
+    if (!Number.isFinite(number) || Math.abs(number) > float32Maximum) continue;
+    if (["minSpeed", "maxSpeed", "fullSpeed"].includes(key) && number < 0) continue;
+    if (key === "initialLevel" && (number < 0 || number > 100)) continue;
+    output[key] = number;
+  }
+  for (const key of ["staticRotationAxis", "oscillationAxis", "allowedG"]) {
+    if (!keys.has(key) || !Array.isArray(value[key]) || value[key].length !== 3) continue;
+    const vector = value[key].map(Number);
+    if (vector.every((component) => Number.isFinite(component) && Math.abs(component) <= float32Maximum)) output[key] = vector;
+  }
+  if (keys.has("enabled") && typeof value.enabled === "boolean") output.enabled = value.enabled;
+  if (keys.has("name") && typeof value.name === "string") {
+    const name = value.name.trim();
+    if (name && name.length <= 1024 && !/[\r\n;]/.test(name)) output.name = name;
+  }
+  if (keys.has("damageZone") && typeof value.damageZone === "string") {
+    const zone = value.damageZone.trim().toUpperCase();
+    if (/^[A-Z0-9_-]{1,64}$/.test(zone)) output.damageZone = zone;
+  }
+  return Object.keys(output).length ? output : null;
+}
+
 function cleanBottomColliderEdit(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const output = {};
@@ -145,12 +175,14 @@ export function createEditorProject(asset = {}) {
       kn5Version: Math.max(0, Number(asset.kn5Version) || 0)
     },
     colliderAsset: null,
+    damageAsset: null,
     bottomColliderAsset: null,
     materialEdits: Object.create(null),
     meshEdits: Object.create(null),
     nodeEdits: Object.create(null),
     geometryEdits: Object.create(null),
     colliderEdits: Object.create(null),
+    damageEdits: Object.create(null),
     bottomColliderEdits: Object.create(null),
     workspaceEdits: { files: Object.create(null) },
     surfaceEdits: Object.create(null),
@@ -168,6 +200,8 @@ export function normalizeEditorProject(value) {
   project.geometryEdits = safeRecord(value.geometryEdits, (item) => cleanGeometryEdit(item));
   project.colliderEdits = safeRecord(value.colliderEdits, (item) => cleanGeometryEdit(item));
   project.colliderAsset = Object.keys(project.colliderEdits).length ? normalizeFileIdentity(value.colliderAsset) : null;
+  project.damageEdits = safeRecord(value.damageEdits, (item, section) => cleanDamageEdit(item, section));
+  project.damageAsset = Object.keys(project.damageEdits).length ? normalizeFileIdentity(value.damageAsset) : null;
   project.bottomColliderEdits = safeRecord(value.bottomColliderEdits, (item) => cleanBottomColliderEdit(item));
   project.bottomColliderAsset = Object.keys(project.bottomColliderEdits).length ? normalizeFileIdentity(value.bottomColliderAsset) : null;
   project.workspaceEdits = cleanWorkspaceEdits(value.workspaceEdits);
@@ -183,8 +217,8 @@ export function cloneEditorProject(project) {
 /** Classify authoring changes so callers can refresh only affected scene data. */
 export function classifyEditorProjectChanges(previous, next) {
   const changed = (key) => JSON.stringify(previous?.[key] || null) !== JSON.stringify(next?.[key] || null);
-  const geometryChanged = changed("geometryEdits"), nodeChanged = changed("nodeEdits"), workspaceChanged = changed("workspaceEdits"), surfaceChanged = changed("surfaceEdits"), skinChanged = changed("skinEdits"), colliderChanged = changed("colliderEdits") || changed("colliderAsset") || changed("bottomColliderEdits") || changed("bottomColliderAsset");
-  return Object.freeze({ geometryChanged, nodeChanged, workspaceChanged, surfaceChanged, skinChanged, colliderChanged, sceneChanged: geometryChanged || nodeChanged || workspaceChanged || colliderChanged });
+  const geometryChanged = changed("geometryEdits"), nodeChanged = changed("nodeEdits"), workspaceChanged = changed("workspaceEdits"), surfaceChanged = changed("surfaceEdits"), skinChanged = changed("skinEdits"), colliderChanged = changed("colliderEdits") || changed("colliderAsset") || changed("bottomColliderEdits") || changed("bottomColliderAsset"), damageChanged = changed("damageEdits") || changed("damageAsset");
+  return Object.freeze({ geometryChanged, nodeChanged, workspaceChanged, surfaceChanged, skinChanged, colliderChanged, damageChanged, sceneChanged: geometryChanged || nodeChanged || workspaceChanged || colliderChanged });
 }
 
 export function parseEditorValue(text) {
@@ -206,12 +240,13 @@ export function editorProjectEditCount(project) {
   const nodes = Object.values(project?.nodeEdits || {}).reduce((count, edit) => count + ["name", "active", "transform"].filter((key) => edit[key] !== undefined).length, 0);
   const geometry = Object.values(project?.geometryEdits || {}).reduce((count, edit) => count + ["transform", "removeDegenerate", "reverseWinding", "recalculateNormals"].filter((key) => edit[key] !== undefined).length, 0);
   const colliders = Object.values(project?.colliderEdits || {}).reduce((count, edit) => count + ["transform", "removeDegenerate", "reverseWinding", "recalculateNormals"].filter((key) => edit[key] !== undefined).length, 0);
+  const damage = Object.entries(project?.damageEdits || {}).reduce((count, [section, edit]) => count + damageEditKeys(section).filter((key) => edit?.[key] !== undefined).length, 0);
   const bottomColliders = Object.values(project?.bottomColliderEdits || {}).reduce((count, edit) => count + BOTTOM_COLLIDER_EDIT_KEYS.filter((key) => edit?.[key] !== undefined).length, 0);
   const workspaceFiles = Object.values(project?.workspaceEdits?.files || {}).reduce((count, edit) => count + WORKSPACE_FILE_EDIT_KEYS.filter((key) => edit[key] !== undefined).length, 0);
   const workspace = workspaceFiles + ["cockpitHrDistance", "driverHrDistance"].filter((key) => project?.workspaceEdits?.[key] !== undefined).length;
   const surfaces = Object.values(project?.surfaceEdits || {}).reduce((count, edit) => count + SURFACE_EDIT_KEYS.filter((key) => edit?.[key] !== undefined).length, 0);
   const skins = Object.values(project?.skinEdits || {}).reduce((count, edit) => count + SKIN_METADATA_FIELDS.filter((key) => edit?.[key] !== undefined).length, 0);
-  return materials + meshes + nodes + geometry + colliders + bottomColliders + workspace + surfaces + skins;
+  return materials + meshes + nodes + geometry + colliders + bottomColliders + damage + workspace + surfaces + skins;
 }
 
 export function editorProjectKn5EditCount(project) {
@@ -221,8 +256,9 @@ export function editorProjectKn5EditCount(project) {
   const surfaces = Object.values(project?.surfaceEdits || {}).reduce((count, edit) => count + SURFACE_EDIT_KEYS.filter((key) => edit?.[key] !== undefined).length, 0);
   const skins = Object.values(project?.skinEdits || {}).reduce((count, edit) => count + SKIN_METADATA_FIELDS.filter((key) => edit?.[key] !== undefined).length, 0);
   const colliders = Object.values(project?.colliderEdits || {}).reduce((count, edit) => count + ["transform", "removeDegenerate", "reverseWinding", "recalculateNormals"].filter((key) => edit[key] !== undefined).length, 0);
+  const damage = Object.entries(project?.damageEdits || {}).reduce((count, [section, edit]) => count + damageEditKeys(section).filter((key) => edit?.[key] !== undefined).length, 0);
   const bottomColliders = Object.values(project?.bottomColliderEdits || {}).reduce((count, edit) => count + BOTTOM_COLLIDER_EDIT_KEYS.filter((key) => edit?.[key] !== undefined).length, 0);
-  return total - colliders - bottomColliders - workspace - surfaces - skins;
+  return total - colliders - bottomColliders - damage - workspace - surfaces - skins;
 }
 
 export function editorProjectCspEditCount(project) {

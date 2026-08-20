@@ -35,6 +35,7 @@ import { applyNodeEdits, composeNodeTransform, decomposeNodeTransform, nodeAtPat
 import { advanceDynamicTrackObjects, contiguousDynamicTrackObjects, dynamicTrackRootTransform, sampleDynamicTrackObjects } from "/src/dynamic-track.js";
 import { analyzeScene } from "/src/scene-diagnostics.js";
 import { captureSkinMetadataEditorTarget, createSkinMetadata, createSkinMetadataLoadGuard, effectiveSkinMetadata, readSkinMetadataFile, serializeSkinMetadata, SKIN_METADATA_TEXT_FIELDS } from "/src/skin-metadata.js";
+import { applyCarDamageEdits, captureCarDamageBaseline, carDamageEditCount as countCarDamageEdits, parseCarDamageIni, readCarDamageFile, serializeCarDamageIni } from "/src/car-damage.js";
 
 const $ = (selector) => document.querySelector(selector);
 const fileInput = $("#file");
@@ -110,6 +111,11 @@ let carColliderIdentity = null;
 let colliderGeometryBaselines = new Map();
 let bottomColliderConfig = null;
 let bottomColliderFileName = "";
+let carDamageConfig = null;
+let carDamageFileName = "";
+let carDamageIdentity = null;
+let carDamageBaseline = null;
+let carDamageError = "";
 let bottomColliderIdentity = null;
 let bottomColliderBaseline = null;
 let carHierarchyAudit = null;
@@ -155,6 +161,7 @@ $("#asset-folder").addEventListener("change", async (event) => {
   assetFolderName = files[0]?.webkitRelativePath?.split("/")[0] || (files.length ? `${files.length} selected files` : "");
   assetFileIndex = createAssetFileIndex(files);
   await configurePackedData();
+  await configureCarDamage();
   await configureCarCollider();
   configureLayoutChoices();
   configureSkinChoices();
@@ -456,6 +463,38 @@ async function configurePackedData() {
   catch(error){console.error(error);packedDataError=error.message;packedDataFileName=entry.relativePath;}
 }
 
+async function configureCarDamage() {
+  carDamageConfig=null;carDamageFileName="";carDamageIdentity=null;carDamageBaseline=null;carDamageError="";window.__apexCarDamage=null;window.__apexCarDamageAuthoring=null;
+  const candidates=assetFileIndex.entries.filter((entry)=>/(^|\/)data\/damage\.ini$/i.test(entry.relativePath)),entry=candidates.find((candidate)=>/^data\/damage\.ini$/i.test(candidate.relativePath))||(candidates.length===1?candidates[0]:null)||virtualAcdAssetEntry("damage.ini");
+  if(!entry)return;
+  carDamageFileName=entry.relativePath;
+  try{
+    const {bytes,config}=await readCarDamageFile(entry.file,entry.relativePath);
+    carDamageConfig=config;
+    carDamageIdentity=await createFileIdentity(entry.relativePath,bytes);
+    carDamageBaseline=captureCarDamageBaseline(carDamageConfig);
+    window.__apexCarDamage=carDamageConfig;
+  }catch(error){console.error(error);carDamageError=error.message;}
+  applyProjectCarDamageEdits();
+}
+
+function carDamageMatchesOpenModel(){return Boolean(model&&carDamageConfig&&assetFolderMatchesModelFiles(assetFileIndex,loadedModelDescriptors));}
+function damageProjectHasEdits(project=editorProject){return Boolean(countCarDamageEdits(project?.damageEdits));}
+function carDamageEditsMatchProject(project=editorProject){return !damageProjectHasEdits(project)||fileIdentityMatches(project?.damageAsset,carDamageIdentity);}
+
+function applyProjectCarDamageEdits(){
+  const warnings=[],assetMatch=carDamageMatchesOpenModel(),identityMatch=carDamageEditsMatchProject();
+  if(carDamageConfig&&!assetMatch)warnings.push("The selected asset folder does not contain the open model. The app did not apply damage edits.");
+  if(carDamageConfig&&assetMatch&&!identityMatch)warnings.push("The current damage.ini does not match this project's damage edits. The app did not apply them.");
+  const edits=assetMatch&&identityMatch?editorProject?.damageEdits:{},applied=applyCarDamageEdits(carDamageConfig,edits,carDamageBaseline);
+  if(carDamageConfig){try{const text=serializeCarDamageIni(carDamageConfig);carDamageConfig.authoredWarnings=parseCarDamageIni(text,carDamageFileName||"data/damage.ini").warnings;}catch(error){carDamageConfig.authoredWarnings=[error.message];}}
+  const nodeNames=new Map();
+  if(assetMatch)for(const {node} of walkNodes(model.root)){const key=String(node.name||"").toLowerCase();nodeNames.set(key,(nodeNames.get(key)||0)+1);}
+  const matches=(carDamageConfig?.visualObjects||[]).map((object)=>({section:object.section,name:object.name,count:nodeNames.get(object.name.toLowerCase())||0}));
+  const matchedObjects=matches.filter((entry)=>entry.count).length,missingObjects=matches.length-matchedObjects;
+  window.__apexCarDamageAuthoring={edits:countCarDamageEdits(editorProject?.damageEdits),applied,warnings:[...warnings,...(carDamageConfig?.authoredWarnings||[])],assetMatch,identityMatch,matchedObjects,missingObjects,matches};
+}
+
 async function configureCarCollider() {
   carColliderModel=null;carColliderAudit=null;carColliderFileName="";carColliderError="";carColliderIdentity=null;colliderGeometryBaselines=new Map();bottomColliderConfig=null;bottomColliderFileName="";bottomColliderIdentity=null;bottomColliderBaseline=null;window.__apexColliderAudit=null;window.__apexColliderAuthoring=null;window.__apexBottomColliders=null;window.__apexBottomColliderAuthoring=null;
   const candidates=assetFileIndex.entries.filter((entry)=>/(^|\/)collider\.kn5$/i.test(entry.relativePath)),entry=candidates.find((candidate)=>/^collider\.kn5$/i.test(candidate.relativePath))||(candidates.length===1?candidates[0]:null);
@@ -747,6 +786,7 @@ function applyProjectSurfaceEdits() {
 }
 
 function applyProjectSceneEdits() {
+  applyProjectCarDamageEdits();
   applyProjectSurfaceEdits();
   applyProjectBottomColliderEdits();
   applyProjectNodeEdits();
@@ -841,8 +881,9 @@ function commitEditorChange(label, mutate) {
     refreshHierarchyAuthoring(changes.geometryChanged, changes.colliderChanged);
   }
   else if (changes.surfaceChanged) { applyProjectSurfaceEdits(); refreshTrackSurfaceAuthoring(); }
+  if (changes.damageChanged && !changes.sceneChanged) applyProjectCarDamageEdits();
   refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
-  if ((changes.sceneChanged || changes.surfaceChanged || changes.skinChanged) && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
+  if ((changes.sceneChanged || changes.surfaceChanged || changes.skinChanged || changes.damageChanged) && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
   return true;
 }
 
@@ -858,7 +899,9 @@ function restoreEditorSnapshot(snapshot) {
     refreshHierarchyAuthoring(changes.geometryChanged, changes.colliderChanged);
   }
   else if (changes.surfaceChanged) { applyProjectSurfaceEdits(); refreshTrackSurfaceAuthoring(); }
+  if (changes.damageChanged && !changes.sceneChanged) applyProjectCarDamageEdits();
   refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
+  if ((changes.sceneChanged || changes.surfaceChanged || changes.skinChanged || changes.damageChanged) && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
   if ((changes.sceneChanged || changes.surfaceChanged || changes.skinChanged) && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
 }
 
@@ -932,6 +975,13 @@ function exportColliderKn5() {
   catch(error){console.error(error);status.textContent=`Could not export collider.kn5: ${error.message}`;}
 }
 
+function exportCarDamageIni(){
+  if(!carDamageMatchesOpenModel()){status.textContent="Open a model from the selected asset folder before exporting damage.ini";return;}
+  if(!carDamageEditsMatchProject()){status.textContent="The current damage.ini does not match this project's damage edits. Reset the stale edits before export.";return;}
+  try{const text=serializeCarDamageIni(carDamageConfig),name=carDamageFileName.split("/").at(-1)||"damage.ini";downloadText(name,text,"text/plain");window.__apexLastCarDamageExport={name,text,edits:damageProjectEditCount(),warnings:[...(carDamageConfig.authoredWarnings||[])]};status.textContent=`Exported ${name} · ${carDamageConfig.visualObjects.length} visual objects`;}
+  catch(error){console.error(error);status.textContent=`Could not export damage.ini: ${error.message}`;}
+}
+
 function exportBottomCollidersIni(){
   if(!bottomColliderMatchesOpenModel()){status.textContent="Open a model from the selected asset folder before exporting its colliders.ini file";return;}if(!bottomColliderEditsMatchProject()){status.textContent="The current colliders.ini file does not match this project's bottom-box edits. Reset the stale edits before export.";return;}
   try{const text=serializeBottomCollidersIni(bottomColliderConfig),name=bottomColliderFileName.split("/").at(-1)||"colliders.ini";downloadText(name,text,"text/plain");window.__apexLastBottomColliderExport={name,text,boxes:bottomColliderConfig.colliders.length,edits:bottomColliderProjectEditCount(),warnings:[...(bottomColliderConfig.authoredWarnings||[])]};status.textContent=`Exported ${name} · ${bottomColliderConfig.colliders.length} bottom box${bottomColliderConfig.colliders.length===1?"":"es"}`;}
@@ -948,6 +998,7 @@ async function loadEditorProject(file) {
     editorProject = loaded; undoStack = []; redoStack = [];
     if (changes.sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(changes.geometryChanged, changes.colliderChanged); }
     else if (changes.surfaceChanged) { applyProjectSurfaceEdits(); refreshTrackSurfaceAuthoring(); }
+    if (changes.damageChanged && !changes.sceneChanged) applyProjectCarDamageEdits();
     refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
     if (!selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
   } catch (error) {
@@ -1047,7 +1098,7 @@ function renderModelInspector(file, nodes, triangles) {
   inspector.className = "inspector";
   const protection = model.encryption ? `<div class="section"><h3>CSP-protected payload</h3>${kv("Format", model.encryption.format)}${kv("Payload", `${(model.encryption.payloadBytes / 1048576).toFixed(2)} MB`)}${kv("Records", model.encryption.recordCount.toLocaleString())}${kv("Protected textures", model.encryption.protectedTextures.length)}${kv("Protected meshes", model.encryption.protectedMeshes.length)}${kv("Structure", model.encryption.valid ? "Recognized" : `Invalid: ${model.encryption.error}`)}<span class="empty">The public KN5 scene is available. Protected geometry and textures remain placeholders until a compatible payload decoder is available.</span></div>` : "";
   inspector.innerHTML = `<div class="section"><h3>Model</h3>${kv("File", file.name)}${kv("Format", `KN5 v${model.version}`)}${kv("Size", `${(file.size / 1048576).toFixed(2)} MB`)}${kv("Nodes", nodes.length.toLocaleString())}${kv("Triangles", Math.round(triangles).toLocaleString())}${kv("Textures", model.textures.length)}${kv("Parsed", model.bytesRead === model.byteLength ? "Complete" : model.encryption?.valid ? "Public scene + protected payload" : `${model.bytesRead} / ${model.byteLength}`)}${kv("Authored edits", editorProjectEditCount(editorProject))}</div>${protection}${cspEvaluation ? `<div class="section"><h3>CSP configuration</h3>${kv("File", cspConfig ? cspFileName : "Apex authored edits")}${kv("Sections", activeCspConfig?.sections.length || 0)}${kv("Expanded templates", cspConfig?.expandedTemplates?.length || 0)}${kv("Matched override sections", cspEvaluation.matchedSections)}${kv("Overridden meshes", cspEvaluation.nodeOverrides.size)}${kv("Custom-emissive meshes", cspEvaluation.customEmissiveMeshes)}${kv("Matched light sections", cspEvaluation.matchedLightSections)}${kv("Light instances", cspEvaluation.lights.length)}${kv("Active light instances", cspEvaluation.lights.filter((light) => Math.max(...light.color.map(Math.abs)) > 1e-5).length)}${kv("Track light occluders", cspEvaluation.trackOccluders?.length || 0)}${kv("Unresolved includes", cspEvaluation.unresolvedIncludes.length)}${cspEvaluation.unresolvedIncludes.map((name) => `<div class="resource"><span>${escapeHtml(name)}</span></div>`).join("")}</div>${cspEvaluation.usedConditions.size ? `<div class="section"><h3>Condition preview</h3>${[...cspEvaluation.usedConditions].sort().map((name) => conditionHtml(name, cspEvaluation.conditions.get(name) ?? 0)).join("")}</div>` : ""}${cspEvaluation.usedInputs.size ? `<div class="section"><h3>Input preview</h3>${[...cspEvaluation.usedInputs].sort(([a], [b]) => a.localeCompare(b)).map(([name, input]) => inputHtml(name, input)).join("")}</div>` : ""}${cspEvaluation.lights.length ? `<div class="section"><h3>CSP lights</h3>${cspEvaluation.lights.slice(0, 16).map(lightHtml).join("")}${cspEvaluation.lights.length > 16 ? `<span class="empty">${(cspEvaluation.lights.length - 16).toLocaleString()} more light instances</span>` : ""}</div>` : ""}` : ""}<div class="section"><h3>Materials</h3>${model.materials.map((m, i) => `<div class="resource material-link" data-material="${i}"><strong>${escapeHtml(m.name)}</strong><span>${escapeHtml(m.shader)}</span></div>`).join("")}</div>`;
-  const supplementalHtml = fbxImportInspectorHtml() + workspaceInspectorHtml() + packedDataInspectorHtml() + carHierarchyInspectorHtml() + carColliderInspectorHtml() + driverInspectorHtml() + trackCameraInspectorHtml() + sceneDiagnosticsInspectorHtml() + trackValidationInspectorHtml() + shaderProfilesInspectorHtml() + vaoInspectorHtml() + seasonalInspectorHtml() + weatherLightingInspectorHtml() + reflectionCaptureInspectorHtml() + lightingInspectorHtml() + grassFxInspectorHtml() + rainFxInspectorHtml() + animationInspectorHtml() + skinMetadataInspectorHtml() + skinTextureInspectorHtml() + externalTextureInspectorHtml(), materialSection = inspector.querySelector(".section:last-child");
+  const supplementalHtml = fbxImportInspectorHtml() + workspaceInspectorHtml() + packedDataInspectorHtml() + carHierarchyInspectorHtml() + carDamageInspectorHtml() + carColliderInspectorHtml() + driverInspectorHtml() + trackCameraInspectorHtml() + sceneDiagnosticsInspectorHtml() + trackValidationInspectorHtml() + shaderProfilesInspectorHtml() + vaoInspectorHtml() + seasonalInspectorHtml() + weatherLightingInspectorHtml() + reflectionCaptureInspectorHtml() + lightingInspectorHtml() + grassFxInspectorHtml() + rainFxInspectorHtml() + animationInspectorHtml() + skinMetadataInspectorHtml() + skinTextureInspectorHtml() + externalTextureInspectorHtml(), materialSection = inspector.querySelector(".section:last-child");
   if (supplementalHtml && materialSection) materialSection.insertAdjacentHTML("beforebegin", supplementalHtml);
   inspector.querySelectorAll("[data-material]").forEach((el) => el.addEventListener("click", () => renderMaterialInspector(model.materials[Number(el.dataset.material)])));
   inspector.querySelectorAll("[data-condition]").forEach((input) => input.addEventListener("input", () => {
@@ -1069,6 +1120,7 @@ function renderModelInspector(file, nodes, triangles) {
   bindWorkspaceEditors();
   bindSurfaceEditors();
   bindSkinMetadataEditors();
+  bindCarDamageEditors();
   bindColliderEditors();
   bindBottomColliderEditors();
 }
@@ -1184,6 +1236,21 @@ function workspaceInspectorHtml() {
 function packedDataInspectorHtml() {
   if(!packedDataFileName)return "";if(packedDataError)return `<div class="section"><h3>Packed data</h3>${kv("Archive",packedDataFileName)}${kv("Status","Could not decrypt")}${kv("Error",packedDataError)}</div>`;
   const archive=packedDataArchive;if(!archive)return "";return `<div class="section"><h3>Packed data</h3>${kv("Archive",packedDataFileName)}${kv("Asset key",archive.assetName)}${kv("Entries",archive.entries.length)}${kv("Decoded bytes",archive.entries.reduce((sum,entry)=>sum+entry.size,0).toLocaleString())}${kv("Container bytes",archive.byteLength.toLocaleString())}${kv("Header",archive.header??"Legacy / absent")}${kv("Warnings",archive.warnings.length)}${archive.entries.slice(0,16).map((entry)=>`<div class="resource"><strong>${escapeHtml(entry.path)}</strong><span>${entry.size.toLocaleString()} bytes</span></div>`).join("")}${archive.entries.length>16?`<span class="empty">${archive.entries.length-16} more packed files</span>`:""}${archive.warnings.slice(0,8).map((warning)=>`<div class="resource"><span>${escapeHtml(warning)}</span></div>`).join("")}</div>`;
+}
+
+function carDamageInspectorHtml(){
+  if(!carDamageFileName)return "";
+  if(carDamageError||!carDamageConfig)return `<div class="section"><h3>Car damage configuration</h3>${kv("File",carDamageFileName)}${kv("Status","Could not parse")}${kv("Error",carDamageError||"No configuration data")}</div>`;
+  if(!carDamageMatchesOpenModel())return `<div class="section"><h3>Car damage configuration</h3>${kv("File",carDamageFileName)}${kv("Status","Waiting for matching model")}<span class="empty validation-warning">The selected asset folder does not contain the open model. Open this folder's car model before editing or exporting damage.ini.</span></div>`;
+  const count=damageProjectEditCount(),authoring=window.__apexCarDamageAuthoring||{},edits=editorProject?.damageEdits||{};
+  if(!carDamageEditsMatchProject())return `<div class="section"><h3>Car damage configuration · <span class="edit-count">${count} edits</span></h3>${kv("File",carDamageFileName)}<span class="empty validation-warning">These edits belong to a different damage.ini file. They were not applied.</span><div class="section-actions"><button class="mini" data-reset-damage-all>Reset stale damage edits</button></div></div>`;
+  const number=(section,key,label,value)=>`<label class="author-field"><span>${label}</span><input class="${edits[section]?.[key]!==undefined?"authored":""}" data-edit-damage-number="${key}" data-damage-section="${escapeHtml(section)}" value="${escapeHtml(formatEditorValue(value))}" spellcheck="false"></label>`;
+  const vector=(section,key,label,value)=>`<label class="author-field"><span>${label}</span><input class="${edits[section]?.[key]!==undefined?"authored":""}" data-edit-damage-vector="${key}" data-damage-section="${escapeHtml(section)}" value="${escapeHtml(formatEditorValue(value))}" spellcheck="false"></label>`;
+  const text=(section,key,label,value,maximum=1024)=>`<label class="author-field"><span>${label}</span><input class="${edits[section]?.[key]!==undefined?"authored":""}" data-edit-damage-text="${key}" data-damage-section="${escapeHtml(section)}" value="${escapeHtml(String(value??""))}" maxlength="${maximum}" spellcheck="false"></label>`;
+  const global=`<div class="resource"><strong>SCRATCHES</strong><span>Damage texture speed thresholds</span>${number("SCRATCHES","minSpeed","Minimum speed",carDamageConfig.scratches.minSpeed)}${number("SCRATCHES","maxSpeed","Maximum speed",carDamageConfig.scratches.maxSpeed)}<div class="section-actions"><button class="mini" data-reset-damage-section="SCRATCHES" ${edits.SCRATCHES?"":"disabled"}>Reset scratches</button></div></div><div class="resource"><strong>OSCILLATIONS</strong><span>Native visual-object oscillation switch</span><label class="author-field"><span>Enabled</span><select class="${edits.OSCILLATIONS?.enabled!==undefined?"authored":""}" data-edit-damage-boolean="enabled" data-damage-section="OSCILLATIONS"><option value="true" ${carDamageConfig.oscillations.enabled?"selected":""}>Yes</option><option value="false" ${carDamageConfig.oscillations.enabled?"":"selected"}>No</option></select></label><div class="section-actions"><button class="mini" data-reset-damage-section="OSCILLATIONS" ${edits.OSCILLATIONS?"":"disabled"}>Reset oscillations</button></div></div><div class="resource"><strong>DAMAGE</strong><span>Initial visual-damage level</span>${number("DAMAGE","initialLevel","Initial level %",carDamageConfig.damage.initialLevel)}<div class="section-actions"><button class="mini" data-reset-damage-section="DAMAGE" ${edits.DAMAGE?"":"disabled"}>Reset damage level</button></div></div>`;
+  const objects=carDamageConfig.visualObjects.map((object)=>{const section=object.section.toUpperCase(),match=(authoring.matches||[]).find((entry)=>entry.section.toUpperCase()===section),edit=edits[section];return `<div class="resource"><strong>${escapeHtml(section)} · ${escapeHtml(object.name)}</strong><span>${match?.count||0} matching nodes · ${escapeHtml(object.damageZone)} zone</span>${text(section,"name","Node name",object.name)}${vector(section,"staticRotationAxis","Static rotation axis",object.staticRotationAxis)}${number(section,"staticRotationAngle","Static rotation angle °",object.staticRotationAngle)}${number(section,"multG","G multiplier",object.multG)}${text(section,"damageZone","Damage zone",object.damageZone,64)}${number(section,"minSpeed","Minimum speed",object.minSpeed)}${number(section,"fullSpeed","Full speed",object.fullSpeed)}${vector(section,"oscillationAxis","Oscillation axis",object.oscillationAxis)}${number(section,"oscillationMinAngle","Minimum oscillation °",object.oscillationMinAngle)}${number(section,"oscillationMaxAngle","Maximum oscillation °",object.oscillationMaxAngle)}${vector(section,"allowedG","Allowed G",object.allowedG)}<div class="section-actions"><button class="mini" data-reset-damage-section="${escapeHtml(section)}" ${edit?"":"disabled"}>Reset object</button></div></div>`;}).join("");
+  const warnings=[...new Set([...(carDamageConfig.warnings||[]),...(carDamageConfig.authoredWarnings||[]),...(authoring.warnings||[])])];
+  return `<div class="section"><h3>Car damage configuration${count?` · <span class="edit-count">${count} edit${count===1?"":"s"}</span>`:""}</h3>${kv("File",carDamageFileName)}${kv("Visual objects",carDamageConfig.visualObjects.length)}${kv("Matched objects",authoring.matchedObjects||0)}${kv("Missing objects",authoring.missingObjects||0)}${kv("Warnings",warnings.length)}${global}${objects}${warnings.slice(0,12).map((warning)=>`<div class="resource validation-warning"><strong>damage.ini warning</strong><span>${escapeHtml(warning)}</span></div>`).join("")}<span class="empty">This panel edits the native configuration. Runtime deformation and oscillation simulation are not part of this preview.</span><div class="section-actions"><button class="mini" data-export-damage>Export damage.ini</button><button class="mini" data-reset-damage-all ${count?"":"disabled"}>Reset damage edits</button></div></div>`;
 }
 
 function bottomColliderAuthoringHtml(){
@@ -1454,6 +1521,28 @@ function colliderProjectState(project) {
   return JSON.stringify({asset:project?.colliderAsset||null,edits:project?.colliderEdits||{},bottomAsset:project?.bottomColliderAsset||null,bottomEdits:project?.bottomColliderEdits||{}});
 }
 
+function damageProjectEditCount(project=editorProject){return countCarDamageEdits(project?.damageEdits);}
+
+function damageProjectState(project){return JSON.stringify({asset:project?.damageAsset||null,edits:project?.damageEdits||{}});}
+
+function clearProjectDamageEdits(project){project.damageEdits=Object.create(null);project.damageAsset=null;}
+
+function bindProjectToCurrentDamage(project){
+  if(damageProjectHasEdits(project)){
+    if(!carDamageIdentity)throw new Error("The damage.ini file identity is unavailable");
+    project.damageAsset={...carDamageIdentity};
+  }else project.damageAsset=null;
+}
+
+function updateDamageEdit(project,section,mutate){
+  project.damageEdits||=Object.create(null);
+  if(damageProjectHasEdits(project)&&!carDamageEditsMatchProject(project))throw new Error("Reset stale damage edits before editing this damage.ini file");
+  const key=String(section).toUpperCase(),edit={...(project.damageEdits[key]||{})};
+  mutate(edit);
+  if(Object.keys(edit).length)project.damageEdits[key]=edit;else delete project.damageEdits[key];
+  bindProjectToCurrentDamage(project);
+}
+
 function clearProjectColliderEdits(project) {
   project.colliderEdits=Object.create(null);
   project.colliderAsset=null;
@@ -1516,6 +1605,37 @@ function updateColliderEdit(project, path, mutate) {
   if(Object.keys(edit).length)project.colliderEdits[path]=edit;
   else delete project.colliderEdits[path];
   bindProjectToCurrentCollider(project);
+}
+
+function carDamageSectionValue(section){
+  const key=String(section).toUpperCase();
+  if(key==="SCRATCHES")return carDamageConfig?.scratches;
+  if(key==="OSCILLATIONS")return carDamageConfig?.oscillations;
+  if(key==="DAMAGE")return carDamageConfig?.damage;
+  return carDamageConfig?.visualObjects.find((object)=>object.section.toUpperCase()===key);
+}
+
+function validateDamageNumber(section,key,value){
+  const maximum=3.4028234663852886e38;
+  if(!Number.isFinite(value)||Math.abs(value)>maximum)throw new Error(`${key} must fit a finite float32 value`);
+  const target=carDamageSectionValue(section),next={...target,[key]:value};
+  if(["minSpeed","maxSpeed","fullSpeed"].includes(key)&&value<0)throw new Error(`${key} cannot be negative`);
+  if(section==="SCRATCHES"&&next.maxSpeed<next.minSpeed)throw new Error("Maximum scratch speed cannot be less than minimum speed");
+  if(/^VISUAL_OBJECT_\d+$/.test(section)&&next.fullSpeed<next.minSpeed)throw new Error("Full damage speed cannot be less than minimum speed");
+  if(key==="initialLevel"&&(value<0||value>100))throw new Error("Initial damage level must be from 0 to 100");
+  if(/^VISUAL_OBJECT_\d+$/.test(section)&&next.oscillationMaxAngle<next.oscillationMinAngle)throw new Error("Maximum oscillation angle cannot be less than minimum angle");
+}
+
+function bindCarDamageEditors(){
+  if(!carDamageMatchesOpenModel()||!editorProject)return;
+  inspector.querySelectorAll("[data-reset-damage-all]").forEach((button)=>button.addEventListener("click",()=>commitEditorChange("Reset damage edits",clearProjectDamageEdits)));
+  if(!carDamageEditsMatchProject())return;
+  inspector.querySelectorAll("[data-edit-damage-number]").forEach((input)=>{const commit=()=>{try{const section=input.dataset.damageSection,key=input.dataset.editDamageNumber,value=parseEditorValue(input.value);if(Array.isArray(value))throw new Error(`${key} needs one finite number`);validateDamageNumber(section,key,value);input.classList.remove("invalid");commitEditorChange(`Set ${section} ${key}`,(project)=>updateDamageEdit(project,section,(edit)=>{edit[key]=value;}));}catch(error){input.classList.add("invalid");status.textContent=error.message;}};input.addEventListener("keydown",(event)=>{if(event.key==="Enter"){event.preventDefault();commit();}});input.addEventListener("change",commit);});
+  inspector.querySelectorAll("[data-edit-damage-vector]").forEach((input)=>{const commit=()=>{try{const section=input.dataset.damageSection,key=input.dataset.editDamageVector,value=parseEditorValue(input.value),maximum=3.4028234663852886e38;if(!Array.isArray(value)||value.length!==3||value.some((component)=>Math.abs(component)>maximum))throw new Error(`${key} needs three finite float32 numbers`);input.classList.remove("invalid");commitEditorChange(`Set ${section} ${key}`,(project)=>updateDamageEdit(project,section,(edit)=>{edit[key]=value;}));}catch(error){input.classList.add("invalid");status.textContent=error.message;}};input.addEventListener("keydown",(event)=>{if(event.key==="Enter"){event.preventDefault();commit();}});input.addEventListener("change",commit);});
+  inspector.querySelectorAll("[data-edit-damage-text]").forEach((input)=>{const commit=()=>{try{const section=input.dataset.damageSection,key=input.dataset.editDamageText,raw=input.value.trim();if(!raw||/[\r\n;]/.test(raw))throw new Error(`${key} must contain safe INI text`);const value=key==="damageZone"?raw.toUpperCase():raw;if(key==="damageZone"&&!/^[A-Z0-9_-]{1,64}$/.test(value))throw new Error("Damage zone must contain letters, numbers, underscores, or hyphens");if(key==="name"&&value.length>1024)throw new Error("Node name cannot be longer than 1024 characters");input.classList.remove("invalid");commitEditorChange(`Set ${section} ${key}`,(project)=>updateDamageEdit(project,section,(edit)=>{edit[key]=value;}));}catch(error){input.classList.add("invalid");status.textContent=error.message;}};input.addEventListener("keydown",(event)=>{if(event.key==="Enter"){event.preventDefault();commit();}});input.addEventListener("change",commit);});
+  inspector.querySelectorAll("[data-edit-damage-boolean]").forEach((select)=>select.addEventListener("change",()=>{const section=select.dataset.damageSection,key=select.dataset.editDamageBoolean;commitEditorChange(`Set ${section} ${key}`,(project)=>updateDamageEdit(project,section,(edit)=>{edit[key]=select.value==="true";}));}));
+  inspector.querySelectorAll("[data-reset-damage-section]").forEach((button)=>button.addEventListener("click",()=>{const section=button.dataset.resetDamageSection;commitEditorChange(`Reset ${section} damage edits`,(project)=>{delete project.damageEdits[section];bindProjectToCurrentDamage(project);});}));
+  inspector.querySelector("[data-export-damage]")?.addEventListener("click",exportCarDamageIni);
 }
 
 function bindColliderEditors() {

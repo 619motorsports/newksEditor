@@ -146,6 +146,11 @@ npm test
   normal rebuilding. Edits update the overlay and audit immediately. They also support
   undo, recovery, project JSON, reset, and standalone `collider.kn5` export. A SHA-256
   source identity prevents saved edits from changing a different or replaced collider.
+- Packed or unpacked `damage.ini` authoring for scratch thresholds, initial damage,
+  oscillation, and visual-object fields. The editor validates bounded input and node
+  names. Edits support undo, recovery, project JSON, reset, and standalone export.
+  A SHA-256 source identity prevents saved edits from changing a different file.
+  Runtime deformation and oscillation are not simulated in the viewport.
 - Per-LOD car hierarchy preflight for all 14 SDK-listed suspension, wheel, cockpit,
   steering, and brake-disc nodes; duplicate/null-kind diagnostics; left/right and
   +Z-forward wheel-axis checks; related-pivot and cross-LOD alignment
