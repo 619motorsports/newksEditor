@@ -37,6 +37,25 @@ export function createAssetFileIndex(files) {
   return { entries, exact, basenames };
 }
 
+function relativeFilePath(file) {
+  const path = normalizeAssetPath(filePath(file)), parts = path.split("/");
+  return parts.length > 1 ? parts.slice(1).join("/") : path;
+}
+
+function sameAssetFile(source, candidate) {
+  if (source === candidate) return true;
+  if (!source || !candidate || relativeFilePath(source).toLowerCase() !== relativeFilePath(candidate).toLowerCase()) return false;
+  if (Number(source.size) !== Number(candidate.size)) return false;
+  const sourceModified = Number(source.lastModified), candidateModified = Number(candidate.lastModified);
+  return !sourceModified || !candidateModified || sourceModified === candidateModified;
+}
+
+export function assetFolderMatchesModelFiles(index, descriptors) {
+  const modelFiles = (descriptors || []).filter((descriptor) => descriptor?.file && !descriptor.auxiliary).map((descriptor) => descriptor.file);
+  if (!modelFiles.length) return false;
+  return modelFiles.every((source) => (index?.entries || []).some((entry) => sameAssetFile(source, entry.file)));
+}
+
 function resolution(status, requestedPath, matches = [], matchedBy = "") {
   return { status, requestedPath, matches, file: matches.length === 1 ? matches[0].file : null, path: matches.length === 1 ? matches[0].path : "", matchedBy };
 }

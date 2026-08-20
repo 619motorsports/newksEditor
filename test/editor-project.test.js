@@ -61,6 +61,27 @@ test("normalizes skin metadata edits as non-CSP project fields", () => {
   assert.deepEqual(JSON.parse(serializeEditorProject(project)).skinEdits.red, { skinname: "Rosso", drivername: "Driver", country: "Italy", team: "Works", priority: 30 });
 });
 
+test("normalizes collider geometry edits as non-CSP project fields", () => {
+  const transform = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.1, -0.2, 0.3, 1];
+  const colliderAsset = { name: "collider.kn5", size: 1024, sha256: "ab".repeat(32), kn5Version: 6 };
+  const project = normalizeEditorProject({ format: "apex-editor-project", version: 1, colliderAsset, colliderEdits: { "0": { transform, removeDegenerate: true, reverseWinding: false, recalculateNormals: true }, "1": { transform: [1, 2, 3], removeDegenerate: "yes" } } });
+  assert.deepEqual(project.colliderAsset, colliderAsset);
+  assert.deepEqual(project.colliderEdits["0"], { transform, removeDegenerate: true, recalculateNormals: true });
+  assert.equal(project.colliderEdits["1"], undefined);
+  assert.equal(editorProjectEditCount(project), 3);
+  assert.equal(editorProjectCspEditCount(project), 0);
+  assert.doesNotMatch(serializeEditorCsp(project), /collider/i);
+});
+
+test("drops malformed collider identity without applying it to old projects", () => {
+  const project = normalizeEditorProject({ format: "apex-editor-project", version: 1, colliderAsset: { name: "collider.kn5", size: 10, sha256: "truncated" }, colliderEdits: { "0": { removeDegenerate: true } } });
+  assert.equal(project.colliderAsset, null);
+  assert.deepEqual(project.colliderEdits["0"], { removeDegenerate: true });
+  assert.equal(createEditorProject().colliderAsset, null);
+  const orphan = normalizeEditorProject({ format: "apex-editor-project", version: 1, colliderAsset: { name: "collider.kn5", size: 10, sha256: "ab".repeat(32) } });
+  assert.equal(orphan.colliderAsset, null);
+});
+
 test("parses and formats scalar and vector editor values", () => {
   assert.equal(parseEditorValue("0.375"), 0.375);
   assert.deepEqual(parseEditorValue("1, 0.5, 0"), [1, 0.5, 0]);
