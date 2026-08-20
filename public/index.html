@@ -25,6 +25,10 @@
       <select id="animation-select" hidden aria-label="KSANIM animation"><option value="">Bind pose</option></select>
       <label id="animation-position-control" class="toolbar-range" hidden><span>Animation</span><input id="animation-position" type="range" min="0" max="1" step="0.001" value="0"><output id="animation-position-output">0.000</output></label>
       <select id="lod-preview" hidden aria-label="Car LOD preview"><option value="auto">LOD auto (45° camera)</option></select>
+      <label id="dynamic-track-seed-control" class="toolbar-range" hidden title="Use a reproducible MSVCR120 random state for native dynamic-object sampling"><span>Object seed</span><input id="dynamic-track-seed" type="number" min="0" max="4294967295" step="1" value="1"></label>
+      <button id="dynamic-track-play" hidden disabled title="Play native dynamic-object velocity updates">Play objects</button>
+      <button id="dynamic-track-reset" hidden disabled title="Sample dynamic objects again from the selected seed">Reset objects</button>
+      <output id="dynamic-track-time" hidden>0.00 s</output>
       <select id="track-camera-select" hidden aria-label="Track camera preview"><option value="">Orbit camera</option></select>
       <label id="track-camera-position-control" class="toolbar-range" hidden><span>Camera spline</span><input id="track-camera-position" type="range" min="0" max="1" step="0.001" value="0"><output id="track-camera-position-output">0.000</output></label>
       <button id="track-camera-play" hidden disabled title="Play the selected camera spline once at SPLINE_ANIMATION_LENGTH">Play spline</button>
