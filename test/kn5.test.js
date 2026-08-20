@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import test from "node:test";
 import { computeKn5Visibility, Kn5Error, parseKn5, walkNodes } from "../src/kn5.js";
 
@@ -8,7 +9,10 @@ const carFixture = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocor
 const trackFixture = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/tracks/imola/2.kn5";
 const v5Fixture = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/cars/abarth500/collider.kn5";
 const protectedV5Fixture = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/cars/ac_friends_488_gte_imsa/ferrari_488_gte.kn5";
-const resourceSlotFixture = "/mnt/D/SteamLibrary/steamapps/common/assettocorsa/content/cars/bmw_m3_e92/bmw_m3_e92.kn5";
+const resourceSlotFixture = join(
+  process.env.ASSETTO_CORSA_ROOT || "/mnt/D/SteamLibrary/steamapps/common/assettocorsa",
+  "content", "cars", "bmw_m3_e92", "bmw_m3_e92.kn5"
+);
 
 test("parses a real Kunos collider KN5", async (t) => {
   let data;
