@@ -457,6 +457,7 @@ MirrorOffset=0.25
   assert.deepEqual(custom.mirrorDirection, [-1, 0, 0]);
   assert.equal(custom.mirrorOffset, 0.25);
   assert.deepEqual(custom.colorMasks.map((mask) => [mask.channel, mask.mirrorSide]), [[1, -1], [6, 1]]);
+  assert.deepEqual(custom.shapes.map((shape) => shape.channel), [1, 6]);
   assert.equal(custom.colorMasks[0].thresholdLevel, 0.2);
   assert.equal(custom.colorMasks[0].thresholdSharpness, 5);
   assert.deepEqual(custom.vertexMask.points, [null, null, [0.5, 0, 0], [0.8, 0, 0]]);
@@ -500,6 +501,7 @@ test("matches CSP weighted vertex masks, ties, mirroring, and composition", asyn
   const rendererSource = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   assert.match(rendererSource, /if\(i==0\)minimumDistance=vertexMasks\[i\]/);
   assert.doesNotMatch(rendererSource, /minimumDistance=1e30/);
+  assert.match(rendererSource, /const vertexChannel=baseChannelForPreview\(shape\.channel\);if\(hasVertexMask&&vertexChannel>=0&&vertexChannel<4\)vertexCoverage\[vertexChannel\]/);
 });
 
 test("bounds malformed CustomEmissive vertex points", () => {

@@ -2486,7 +2486,7 @@ function uploadCustomEmissive(gl, descriptor) {
       const coverage=sampledShapeCoverage(shape,x,y,stepX,stepY,sourceWidth,sourceHeight)*(Number(shape.opacity) || 0)*lumaOpacity,color=channelColors.get(shape.channel);
       const bounceChannel=baseChannelForPreview(shape.channel);if(bounceChannel>=0&&bounceChannel<4)bounceCoverage[bounceChannel]=Math.max(bounceCoverage[bounceChannel],coverage);
       for(let index=0;index<multiplierMasks.length;index++)if(multiplierMasks[index].channel===shape.channel)multiplierCoverage[index]=Math.max(multiplierCoverage[index],coverage);
-      if(hasVertexMask&&shape.channel>=0&&shape.channel<4)vertexCoverage[shape.channel]=Math.max(vertexCoverage[shape.channel],coverage);
+      const vertexChannel=baseChannelForPreview(shape.channel);if(hasVertexMask&&vertexChannel>=0&&vertexChannel<4)vertexCoverage[vertexChannel]=Math.max(vertexCoverage[vertexChannel],coverage);
       if(maskedChannels.has(shape.channel))continue;
       if(!color||coverage<=0)continue;
       for(let component=0;component<3;component++)rgb[component]+=(Number(color[component])||0)*coverage;
