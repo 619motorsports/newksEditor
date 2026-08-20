@@ -150,6 +150,51 @@ A production Chrome check used the installed Abarth 500. The low- and high-resol
 captures hashed to `211f7398666869ab` and `26bfc49e12d08593`. Both captures returned
 WebGL error zero, and the browser log contained no errors.
 
+### Native damage switch
+
+`ksEditor.Form1.btnDamage_Click` has token `0x060000dc` and RVA `0x74a0`.
+The handler sends `{F4}` when the scene tree contains at least one root node. It then
+queries `ksNet.ksGraphics.areGlassesBrokenShowed` and sets every component of each
+exact `damageZones` material variable to either one or zero for the pending state.
+
+`ksNet.ksGraphics.render` has token `0x06000389` and RVA `0x27388`.
+The method calls `GetAsyncKeyState(115)`. Virtual key 115 is F4.
+`damageGlassNodesTrigger.ignoreSubsequentTrue` changes the held key into one edge.
+The edge toggles `areBrokenGlassShowed` and passes the new state to
+`ksNet.showNodesWithPrefix` for these prefixes, in this order:
+
+1. `DAMAGE_GLASS_FRONT_`
+2. `DAMAGE_GLASS_REAR_`
+3. `DAMAGE_GLASS_LEFT_`
+4. `DAMAGE_GLASS_RIGHT_`
+5. `DAMAGE_GLASS_CENTER_`
+
+`ksNet.showNodesWithPrefix` has token `0x0600006f` and RVA `0x26ed4`.
+It searches recursively for each exact prefix plus a decimal suffix that starts at
+one. It stops a prefix at the first missing suffix. For each found root, it writes
+the active byte at offset 184. It also collects descendant meshes and sets an exact
+`glassDamage` material variable to one when that variable exists.
+
+The stock `ksPerPixelMultiMap_damage_dirt` pixel shader samples `txDamageMask` at
+bind point 21 and `txDamage` at bind point 4. It computes a saturated damage factor
+from `txDamage.a * dot(txDamageMask, damageZones)`. It mixes the base diffuse with
+`txDamage.rgb` by that factor. With the installed Abarth material's `dirt` value of
+zero, it also scales the specular map by `(1 - factor)` and interpolates that result
+toward the sampled normal alpha.
+
+The installed Abarth 500 has nine selected damage-glass roots: two front, one rear,
+two left, two right, and two center. All nine roots are authored inactive. Five
+materials define `damageZones`; one uses the exact stock shader and provides both
+damage textures. The portable preview applies the recovered state only during
+visibility and uniform evaluation. It does not change parsed node flags or material
+values. After either previewed F4 state, descendant broken-glass meshes evaluate
+`glassDamage` as one, matching the native one-way write. Its F4 handler ignores
+keyboard-repeat events.
+
+A production Chrome check used the installed Abarth 500. The broken and intact
+captures hashed to `f0933250113ef03a` and `2db4c74a6ad57ae8`. Both captures returned
+WebGL error zero, all 80 textures loaded, and the browser log contained no errors.
+
 ## Rendering implication
 
 The stock `.shader` containers contain ordinary D3D11 DXBC. Reflection strings show

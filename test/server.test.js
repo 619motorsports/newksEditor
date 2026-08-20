@@ -40,6 +40,9 @@ test("serves the desktop application and its explicitly allowed modules", async 
     const cockpitPreview = await fetch(`${url}/src/cockpit-preview.js`);
     assert.equal(cockpitPreview.status, 200);
     assert.match(await cockpitPreview.text(), /nativeCockpitToggle/);
+    const damagePreview = await fetch(`${url}/src/damage-preview.js`);
+    assert.equal(damagePreview.status, 200);
+    assert.match(await damagePreview.text(), /nativeDamageToggle/);
     assert.equal((await fetch(`${url}/vendor/three.module.js`)).status, 200);
     assert.equal((await fetch(`${url}/vendor/three-addons/loaders/FBXLoader.js`)).status, 200);
   });
