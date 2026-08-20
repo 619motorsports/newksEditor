@@ -11,7 +11,7 @@ const packagedThreeAddonsRoot = process.resourcesPath ? join(process.resourcesPa
 const threeAddonsRoot = packagedThreeAddonsRoot && existsSync(packagedThreeAddonsRoot) ? packagedThreeAddonsRoot : developmentThreeAddonsRoot;
 const sourceFiles = new Set([
   "acd.js", "asset-files.js", "brake-disc-shader.js", "car-validation.js", "csp-config.js",
-  "csp-noise.js", "csp-occlusion.js", "csp-wind.js", "custom-emissive.js",
+  "cockpit-preview.js", "csp-noise.js", "csp-occlusion.js", "csp-wind.js", "custom-emissive.js",
   "dds.js", "driver-workspace.js", "editor-project.js", "fbx-import.js", "file-identity.js", "geometry-authoring.js", "grass-fx.js",
   "kn5-bake.js", "kn5-workspace.js", "kn5-write.js", "kn5.js", "knh.js",
   "ksanim.js", "lighting.js", "node-authoring.js", "rain-fx.js", "reflections.js", "rim-blur.js", "seasons.js",

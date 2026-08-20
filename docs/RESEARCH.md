@@ -127,6 +127,29 @@ The portable preview keeps the parsed KN5 active flags unchanged. It applies the
 recovered state only during visibility evaluation. The F1 handler also ignores
 keyboard-repeat events, which matches the native edge trigger.
 
+### Native cockpit-resolution switch
+
+`ksEditor.Form1.btnCockpitHr_Click` has token `0x060000db` and RVA `0x747f`.
+The handler sends `{F3}` when the scene tree contains at least one root node.
+
+`ksNet.ksGraphics.render` has token `0x06000389` and RVA `0x27388`.
+The method calls `GetAsyncKeyState(114)`. Virtual key 114 is F3.
+`cockpitNodesTrigger.ignoreSubsequentTrue` changes the held key into one edge.
+
+The edge searches recursively for the exact `COCKPIT_LR` and `COCKPIT_HR` names.
+It does nothing unless both nodes exist. It reads the active byte at offset 184 from
+`COCKPIT_HR`. It writes the inverse state to `COCKPIT_HR` and the opposite state to
+`COCKPIT_LR`. Thus, one F3 edge swaps the two roots and makes them mutually exclusive.
+
+Installed Kunos Abarth 500, BMW 1M, and Porsche 917/30 models use both exact roots.
+Each model starts with `COCKPIT_HR` active and `COCKPIT_LR` inactive. The portable
+preview keeps these parsed active flags unchanged and replaces them only during
+visibility evaluation. Its F3 handler ignores keyboard-repeat events.
+
+A production Chrome check used the installed Abarth 500. The low- and high-resolution
+captures hashed to `211f7398666869ab` and `26bfc49e12d08593`. Both captures returned
+WebGL error zero, and the browser log contained no errors.
+
 ## Rendering implication
 
 The stock `.shader` containers contain ordinary D3D11 DXBC. Reflection strings show
