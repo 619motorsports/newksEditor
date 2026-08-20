@@ -292,7 +292,9 @@ npm test
   clip sphere, and the public one-sample receiver equation match the recovered path
 - All seven stock SDK weather-lighting presets with the native version-3
   RGB × intensity / 255 conversion and sun-angle interpolation, authorable sun
-  heading/height, HDR sky and sun, distance fog, an RGBA16F composition target with
+  heading/height, HDR sky and sun, distance fog, camera-relative cloud billboards,
+  all seven native cloud DDS textures, the recovered `ksClouds` pixel formula,
+  an RGBA16F composition target with
   supported MSAA, full-frame automatic or manual exposure, and the recovered embedded
   Yebis default display curve, reciprocal gamma, pre-curve saturation, quality-3
   threshold bright pass, five-level bloom core, native 15-sample separable Gaussian
@@ -323,7 +325,7 @@ composition, FBX bump-map conversion and packed material maps, arbitrary vertex 
 face editing, skinned bind-pose geometry editing,
 full local-light photometric fidelity,
 Yebis star, ghost, light-shaft, non-default max-61 Gaussian passes, controlled pixel matching,
-cloud billboards, and the remaining post-processing stack, VAO split-animation blending, normal overrides, dynamic
+the remaining post-processing stack, VAO split-animation blending, normal overrides, dynamic
 extra samples, and tree samples remain on the implementation roadmap. CSP's exact
 tree-season variation noise texture is represented by deterministic world-space preview
 noise; the recovered color transform and all non-tree fixed-variation paths are exact. See
@@ -338,6 +340,8 @@ the game-visible scene with the all-mesh authoring view. Pass `--shadows` to cap
 and compare the native-shaped directional preview with shadows disabled. Pass `--lighting`, plus
 optional `--weather`, `--sun-heading`, `--sun-height`, `--compare-sun-height`, or
 `--manual-exposure`, to verify and compare the HDR weather-lighting path. Pass
+`--clouds --csp-assets PATH` to load the stock cloud DDS folder and compare cloud
+weather with the clear preset. Pass
 `--vao FILE.vao-patch` to bind a CSP vertex-AO patch and capture its enabled and
 disabled states. Pass `--seasons --year-progress 0.07 --compare-year-progress 0.5`
 to drive seasonal conditions through the track's calendar LUTs and compare captures.

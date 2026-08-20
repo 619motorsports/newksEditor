@@ -214,13 +214,15 @@ vertical slice is only the foundation.
   all six faces, and whole-track capture includes generated GrassFX between opaque and
   transparent layers. Grass blades share HDR weather/fog lighting, receive the same
   cascades, and use their tapered instanced geometry in viewport and probe shadow maps;
+  stock weather clouds use recovered camera-relative billboard placement, native DDS
+  textures, and the exact `ksClouds` pixel formula in the viewport and cubemap capture;
   reflection sampling and refraction are disabled during capture
   to avoid recursive feedback. The default Yebis path now uses its recovered quality-3
   quarter-resolution source, five bloom levels, threshold bright pass, equal native
   composite weights, screen blend, and output-dither scale. Its separable bloom uses the
   active native 29-tap fallback, including the 15 bilinear samples, level radii, wavelength
   dispersion, and tail cutoff. Yebis star, ghost, light-shaft, non-default max-61 Gaussian,
-  non-default tone functions, cloud billboards, full local-shadow packing/scheduling, and controlled
+  non-default tone functions, full local-shadow packing/scheduling, and controlled
   game-image matching remain. GrassFX full-density GPU dispatch, moving-vehicle
   air/deformation stamps, CSP's full local-shadow atlas packing, wet cubemap
   reflection, and transparent-layer refraction feedback remain separate fidelity gates.

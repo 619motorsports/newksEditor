@@ -46,6 +46,9 @@ test("serves the desktop application and its explicitly allowed modules", async 
     const fileIdentity = await fetch(`${url}/src/file-identity.js`);
     assert.equal(fileIdentity.status, 200);
     assert.match(await fileIdentity.text(), /createFileIdentity/);
+    const clouds = await fetch(`${url}/src/clouds.js`);
+    assert.equal(clouds.status, 200);
+    assert.match(await clouds.text(), /buildKsCloudBillboards/);
     const carDamage = await fetch(`${url}/src/car-damage.js`);
     assert.equal(carDamage.status, 200);
     assert.match(await carDamage.text(), /parseCarDamageIni/);
