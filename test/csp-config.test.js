@@ -3,6 +3,7 @@ import test from "node:test";
 import { readFile } from "node:fs/promises";
 import { evaluateCspConfig, expandCspMaterialTemplates, matchesSelector, parseCspIni, parseCspValue, splitCspList } from "../src/csp-config.js";
 import { customEmissiveAtlasSize } from "../src/custom-emissive.js";
+import { assettoPath } from "./fixture-paths.js";
 
 function material(name, shader = "ksPerPixel") {
   return { name, shader, properties: [{ name: "ksAmbient", value: 0.2, value3: [0, 0, 0] }], resources: [{ slot: "txDiffuse", texture: `${name}.dds` }] };
@@ -55,7 +56,7 @@ test("exposes YEAR_PROGRESS and drives seasonal LUT conditions from it", () => {
 
 test("evaluates installed Imola seasonal conditions at native year progress", async (t) => {
   let text;
-  try { text = await readFile("/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/extension/config/tracks/loaded/imola.ini", "utf8"); }
+  try { text = await readFile(assettoPath("extension/config/tracks/loaded/imola.ini"), "utf8"); }
   catch { t.skip("Installed Imola CSP fixture is unavailable"); return; }
   const scene = model(), config = parseCspIni(text, "imola.ini");
   const midpoint = evaluateCspConfig(scene, config, { inputs: { YEAR_PROGRESS: 0.5 } });

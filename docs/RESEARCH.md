@@ -1978,7 +1978,7 @@ also imported the sphere with no JavaScript or browser-log errors.
 
 A production WebGL check used a `DOOR` null node and a same-named child mesh. The
 `DOOR` track matched one node at animation position 1. The screenshot hash was
-`eb8d0d3258937335`, and the browser log contained no warnings or errors.
+`ea00abb086e55c92`, and the browser log contained no warnings or errors.
 
 Three.js removes the directory from an external FBX image path before it loads the
 image. Apex captures the remaining filename from the loader. It resolves that name
