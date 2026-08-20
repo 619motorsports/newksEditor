@@ -12,10 +12,10 @@ const threeAddonsRoot = packagedThreeAddonsRoot && existsSync(packagedThreeAddon
 const sourceFiles = new Set([
   "acd.js", "asset-files.js", "brake-disc-shader.js", "car-validation.js", "csp-config.js",
   "cockpit-preview.js", "csp-noise.js", "csp-occlusion.js", "csp-wind.js", "custom-emissive.js",
-  "dds.js", "driver-workspace.js", "editor-project.js", "fbx-import.js", "file-identity.js", "geometry-authoring.js", "grass-fx.js",
+  "dds.js", "driver-workspace.js", "dynamic-track.js", "editor-project.js", "fbx-import.js", "file-identity.js", "geometry-authoring.js", "grass-fx.js",
   "kn5-bake.js", "kn5-workspace.js", "kn5-write.js", "kn5.js", "knh.js",
-  "ksanim.js", "lighting.js", "node-authoring.js", "rain-fx.js", "reflections.js", "rim-blur.js", "seasons.js",
-  "shader-profiles.js", "shadows.js", "skinning.js", "track-cameras.js",
+  "ksanim.js", "lighting.js", "node-authoring.js", "rain-fx.js", "reflections.js", "rim-blur.js", "scene-diagnostics.js", "seasons.js",
+  "shader-profiles.js", "shadows.js", "skin-metadata.js", "skinning.js", "track-cameras.js",
   "surface-authoring.js", "track-validation.js", "tyre-shader.js", "vao-patch.js", "workspace-authoring.js"
 ]);
 const threeBuildFiles = new Set(["three.core.js", "three.module.js"]);
