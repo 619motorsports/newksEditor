@@ -1,9 +1,10 @@
 import { SURFACE_EDIT_KEYS } from "./surface-authoring.js";
 import { normalizeFileIdentity } from "./file-identity.js";
+import { normalizeCarLodFileName } from "./kn5-workspace.js";
 
 export const PROJECT_FORMAT = "apex-editor-project";
 export const PROJECT_VERSION = 1;
-const WORKSPACE_FILE_EDIT_KEYS = ["position", "rotation", "lodIn", "lodOut", "probability", "multiplicity", "posMode", "positionCenter", "positionRange", "velMode", "velocityBase", "velocityRange", "playWav"];
+const WORKSPACE_FILE_EDIT_KEYS = ["name", "position", "rotation", "lodIn", "lodOut", "probability", "multiplicity", "posMode", "positionCenter", "positionRange", "velMode", "velocityBase", "velocityRange", "playWav"];
 
 function safeScalar(value) {
   if (typeof value === "number") return Number.isFinite(value) ? value : 0;
@@ -78,6 +79,10 @@ function cleanGeometryEdit(value) {
 function cleanWorkspaceFileEdit(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const output = {};
+  if (typeof value.name === "string") {
+    try { output.name = normalizeCarLodFileName(value.name); }
+    catch { /* Invalid project file names are dropped. */ }
+  }
   for (const key of ["position", "rotation", "positionCenter", "positionRange", "velocityBase", "velocityRange"]) {
     if (!Array.isArray(value[key]) || value[key].length !== 3) continue;
     const vector = value[key].map(Number);

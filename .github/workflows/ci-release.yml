@@ -1,0 +1,86 @@
+name: CI and release
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository fixtures
+        uses: actions/checkout@v6
+        with:
+          lfs: true
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm run test:ci
+
+  package:
+    name: package (${{ matrix.platform }})
+    if: github.event_name == 'push'
+    needs: tests
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux
+            os: ubuntu-latest
+            script: dist:linux
+          - platform: macOS
+            os: macos-latest
+            script: dist:mac
+          - platform: Windows
+            os: windows-latest
+            script: dist:windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build packages
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        run: npm run ${{ matrix.script }}
+
+      - name: Publish tagged packages
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
+        run: npm run ${{ matrix.script }} -- --publish always
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: apex-editor-${{ matrix.platform }}
+          path: release/*
+          if-no-files-found: error
+          compression-level: 0

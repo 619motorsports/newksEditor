@@ -232,9 +232,9 @@ vertical slice is only the foundation.
   wheel axes, related pivots, and cross-LOD placement. Packed-data editing/repacking,
   skin metadata/editing, animation authoring, cross-folder shared-driver access without
   a browser file grant, lights,
-  damage/dirt, instruments, steering/driver alignment, bottom-collider editing, and LOD-manifest
-  file-name authoring remain. LOD ranges and cockpit/driver distance switches now support
-  live editing, project persistence, validation, and `lods.ini` export.
+  damage/dirt, instruments, steering/driver alignment, bottom-collider editing, and remaining
+  car-workflow expansion remain. LOD file names, ranges, and cockpit/driver distance switches now
+  support live editing, project persistence, validation, and `lods.ini` export.
   Static `collider.kn5` meshes now support transforms and topology repair. These edits
   update the orange overlay and the collider audit. Project JSON stores the edits, but
   CSP export excludes them. A standalone export writes the edited `collider.kn5`.

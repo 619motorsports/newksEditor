@@ -5,7 +5,7 @@ import { cloneEditorProject, createEditorProject, editorProjectCspEditCount, edi
 import { decodeDdsRgba, inspectDds } from "/src/dds.js";
 import { assetFolderMatchesModelFiles, createAssetFileIndex, discoverAssetAnimations, discoverAssetSkins, externalResourcePaths, matchSkinTextures, normalizeAssetPath, resolveAssetFile } from "/src/asset-files.js";
 import { applyGeometryEdits, captureStaticGeometryBaselines, staticGeometryMetrics } from "/src/geometry-authoring.js";
-import { carLodDistance, carLodVisible, mergeKn5Models, parseCarLodsIni, parseModelsIni, serializeCarLodsIni, serializeModelsIni } from "/src/kn5-workspace.js";
+import { carLodDistance, carLodVisible, mergeKn5Models, normalizeCarLodFileName, parseCarLodsIni, parseModelsIni, serializeCarLodsIni, serializeModelsIni } from "/src/kn5-workspace.js";
 import { applyWorkspaceEdits, captureWorkspaceBaseline, workspaceEditCount as countWorkspaceEdits } from "/src/workspace-authoring.js";
 import { parseKsAnimation, sampleKsAnimation, serializeKsAnimation } from "/src/ksanim.js";
 import { bakeEditorProjectIntoKn5 } from "/src/kn5-bake.js";
@@ -1002,13 +1002,14 @@ function workspaceInspectorHtml() {
   const switchField = (key, label, current) => `<label class="author-field"><span>${label}</span><input class="${edits[key] !== undefined ? "authored" : ""}" data-edit-workspace-switch="${key}" value="${edits[key] ?? ""}" placeholder="Inherit: ${escapeHtml(String(current ?? "not set"))}"></label>`;
   const files = workspace.files.map((file, index) => {
     const edit = edits.files?.[String(index)], baseline = workspaceBaseline?.files?.[index], editable = !file.auxiliary && (isCar ? Boolean(file.lod) : true);
+    const fileName = () => `<label class="author-field"><span>LOD file</span><input class="${edit?.name !== undefined ? "authored" : ""}" data-edit-workspace-file-name data-workspace-file="${index}" value="${escapeHtml(edit?.name ?? "")}" placeholder="Inherit: ${escapeHtml(baseline?.name || file.name)}" maxlength="1024" spellcheck="false"></label>`;
     const vector = (key, label, value) => `<label class="author-field"><span>${label}</span><input class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-workspace-vector="${key}" data-workspace-file="${index}" value="${escapeHtml(formatEditorValue(value))}" spellcheck="false"></label>`;
     const number = (key, label, current) => `<label class="author-field"><span>${label}</span><input class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-workspace-number="${key}" data-workspace-file="${index}" value="${edit?.[key] ?? ""}" placeholder="Inherit: ${escapeHtml(String(current))}"></label>`;
     const dynamicVector = (key, label, value, length = 3) => `<label class="author-field"><span>${label}</span><input class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-workspace-dynamic-vector="${key}" data-vector-length="${length}" data-workspace-file="${index}" value="${escapeHtml(formatEditorValue(value))}" spellcheck="false"></label>`;
     const dynamicNumber = (key, label, value) => `<label class="author-field"><span>${label}</span><input class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-workspace-dynamic-number="${key}" data-workspace-file="${index}" value="${escapeHtml(String(value))}" spellcheck="false"></label>`;
     const dynamicText = (key, label, value) => `<label class="author-field"><span>${label}</span><input class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-workspace-dynamic-text="${key}" data-workspace-file="${index}" value="${escapeHtml(String(value ?? ""))}" maxlength="1024" spellcheck="false"></label>`;
     const controls = !editable ? "" : isCar
-      ? `${number("lodIn", "LOD in", baseline?.lod?.in ?? file.lod.in)}${number("lodOut", "LOD out", baseline?.lod?.out ?? file.lod.out)}`
+      ? `${fileName()}${number("lodIn", "LOD in", baseline?.lod?.in ?? file.lod.in)}${number("lodOut", "LOD out", baseline?.lod?.out ?? file.lod.out)}`
       : file.dynamic
         ? `${dynamicNumber("probability", "Probability %", file.dynamic.probability)}${dynamicVector("multiplicity", "Multiplicity min, max", file.dynamic.multiplicity, 2)}${dynamicText("posMode", "Position mode", file.dynamic.posMode)}${dynamicVector("positionCenter", "Position center", file.dynamic.positionCenter)}${dynamicVector("positionRange", "Position range ±", file.dynamic.positionRange)}${dynamicText("velMode", "Velocity mode", file.dynamic.velMode)}${dynamicVector("velocityBase", "Velocity base", file.dynamic.velocityBase)}${dynamicVector("velocityRange", "Velocity range ±", file.dynamic.velocityRange)}${dynamicText("playWav", "Audio file", file.dynamic.playWav)}`
         : `${vector("position", "Position", file.position)}${vector("rotation", "Rotation °", file.rotation)}`;
@@ -1392,6 +1393,17 @@ function bindSurfaceEditors() {
 
 function bindWorkspaceEditors() {
   if (!model?.workspace) return;
+  inspector.querySelectorAll("[data-edit-workspace-file-name]").forEach((input) => {
+    const commit = () => {
+      try {
+        const index = Number(input.dataset.workspaceFile), text = input.value.trim(), value = text ? normalizeCarLodFileName(text) : "";
+        input.classList.remove("invalid");
+        commitEditorChange(`${text ? "Set" : "Reset"} ${model.workspace.files[index].name} LOD file`, (project) => editWorkspaceFile(project, index, (edit) => { if (text) edit.name = value; else delete edit.name; }));
+      } catch (error) { input.classList.add("invalid"); status.textContent = error.message; }
+    };
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } });
+    input.addEventListener("change", commit);
+  });
   inspector.querySelectorAll("[data-edit-workspace-vector]").forEach((input) => {
     const commit = () => {
       try {
