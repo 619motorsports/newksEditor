@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   CSP_BOUNCEBACK_EXPONENT,
@@ -29,6 +30,13 @@ test("applies the diffuse color exactly once to direct bounce", () => {
   assert.deepEqual(source, [0.605, 0.46, 0.44]);
   const multiplier = customEmissiveBounceMultiplier([1, 0, 0, 0], [0.5, 0.25, 0.125], 1, { mask: [1, 0, 0, 0], intensity: 1 });
   assert.deepEqual(source.map((value, index) => value * multiplier[index]), [0.605, 0.23, 0.11]);
+});
+
+test("skips the local-light bounce lobe when custom bounce is inactive", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.match(source, /bool customBounceActive=hasCustomBounce&&abs\(customBounceIntensity\)>1e-6;/);
+  assert.match(source, /if\(customBounceActive&&cspLightFalloff\[i\]\.w<\.5\)localBounceSource\+=radiance\*pow/);
+  assert.doesNotMatch(source, /if\(cspLightFalloff\[i\]\.w<\.5\)localBounceSource\+=radiance\*pow/);
 });
 
 test("uses final procedural color-mask coverage for bounce channels", () => {

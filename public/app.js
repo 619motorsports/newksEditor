@@ -1813,7 +1813,7 @@ function createRenderer(canvas) {
       float upward=smoothstep(.2,.82,geometricNormal.y),puddlePattern=smoothstep(.54,.76,rainNoise(vWorld.xz*.095)+rainNoise(vWorld.xz*.31)*.25);float puddle=((rainBits&1)!=0?1.0:0.0)*rainWetness*upward*puddlePattern;float soaking=((rainBits&2)!=0?1.0:0.0)*rainWetness;float smoothWet=((rainBits&4)!=0?1.0:0.0)*rainWetness;float roughWet=((rainBits&8)!=0?1.0:0.0)*rainWetness;float lineWet=((rainBits&16)!=0?1.0:0.0)*rainWetness*upward;float reliefWet=((rainBits&32)!=0?1.0:0.0)*rainWetness*upward*.35;float wet=max(max(puddle,soaking*.72),max(max(smoothWet*.62,lineWet*.82),max(roughWet*.28,reliefWet)));float gloss=max(max(puddle,smoothWet*.75),lineWet*.88);texel.rgb*=mix(1.0,.48,wet);n=normalize(mix(n,geometricNormal,clamp(gloss*.68,0.0,.68)));mappedSpecular=mix(mappedSpecular,max(mappedSpecular,.9),gloss);mappedPower=mix(mappedPower,max(mappedPower,150.0),gloss);
       vec3 l=normalize(sunDirection); vec3 v=normalize(cameraPosition-vWorld); float ndl=max(dot(n,l),0.0);float shadow=sunShadow();
       float ao=vaoEnabled?vAo:1.0;vec3 diffuse=texel.rgb*(ambientColor*ambientLevel*ao+sunColor*diffuseLevel*ndl*shadow); vec3 spec=windscreenMaterial?vec3(0.0):sunColor*(pow(max(dot(n,normalize(l+v)),0.0),mappedPower)*mappedSpecular*shadow);float facing=1.0-max(dot(n,v),0.0);float frFactor=reflectionSMin(pow(facing,max(.01,fresnelPower))+max(0.0,fresnelCValue),max(0.0,fresnelLevel))*maps.b;frFactor=max(frFactor,gloss*(.035+.55*pow(facing,3.0)));float reflectionBlurBase=clamp(1.0-mappedPower/255.0,0.0,1.0),reflectionBlur=reflectionBlurBase*reflectionBlurBase*6.0;vec3 reflected=reflect(-v,n);vec3 environment=samplePortableReflection(reflected,reflectionBlur)*ao;vec3 fr=windscreenMaterial?vec3(0.0):environment*max(0.0,frFactor);if(windscreenMaterial)frFactor=0.0;
-      vec3 localLight=vec3(0.0),localBounceSource=vec3(0.0);
+      bool customBounceActive=hasCustomBounce&&abs(customBounceIntensity)>1e-6;vec3 localLight=vec3(0.0),localBounceSource=vec3(0.0);
       for(int i=0;i<MAX_CSP_LIGHTS;i++){
         if(i>=cspLightCount)break;
         float trackMode=cspLightLineColor[i].w;if(cspTrackReceiver&&trackMode>.5&&(trackMode<1.5||!cspInteriorView))continue;
@@ -1825,7 +1825,7 @@ function createRenderer(canvas) {
           vec3 lightColor=cspLightColorSpot[i].rgb+cspLightLineColor[i].rgb*clamp(lineValue,0.0,1.0);vec3 radiance=lightColor*localLightShape(i,toLight,distanceToLight,attenuation)*localLightShadow(i,toLight,n);
           vec3 specularDirection=localLineSpecularDirection(i,vWorld,n,-v,toLight);float localSpec=pow(max(dot(n,normalize(specularDirection+v)),0.0),mappedPower)*mappedSpecular*cspLightFalloff[i].y*(cspLightFalloff[i].w>.5?shapedDiffuse:1.0);
           localLight+=radiance*(texel.rgb*diffuseLevel*shapedDiffuse+vec3(localSpec));
-          if(cspLightFalloff[i].w<.5)localBounceSource+=radiance*pow(max(-dot(v,toLight),0.0),${CSP_BOUNCEBACK_EXPONENT}.0);
+          if(customBounceActive&&cspLightFalloff[i].w<.5)localBounceSource+=radiance*pow(max(-dot(v,toLight),0.0),${CSP_BOUNCEBACK_EXPONENT}.0);
         }
       }
       vec2 customUv=vUv;if(customMirrorUv.x>0.5){vec2 mirrorDirection=normalize(customMirrorUv.zw);float projected=dot(customUv,mirrorDirection);if(projected>customMirrorUv.y)customUv-=2.0*(projected-customMirrorUv.y)*mirrorDirection;}
@@ -1844,7 +1844,7 @@ function createRenderer(canvas) {
         customEmissive+=customColorMaskEmission[i].rgb*customEmissiveStrength*customColorMaskEmission[i].w*mask;
       }
       if(nearestAnchor>=0){float side=dot(vLocal,customMirrorDirection)-customMirrorOffset;vec3 vertexColor=side>0.0?customVertexMirroredEmission[nearestAnchor].rgb:customVertexEmission[nearestAnchor].rgb;customEmissive+=vertexColor*customEmissiveStrength*vertexShapes[nearestAnchor];}
-      vec3 customBounce=vec3(0.0);if(hasCustomBounce&&abs(customBounceIntensity)>1e-6){float bounceMask=clamp(dot(customBounceMap,customBounceMask),0.0,1.0);if(customBounceIntensity<0.0)bounceMask*=1.0-surfaceTexel.a;vec3 bounceMult=abs(customBounceIntensity)*bounceMask*2.0*max(surfaceTexel.rgb,vec3(0.0));vec3 bounceSource=pow(max(dot(v,l),0.0),${CSP_BOUNCEBACK_EXPONENT}.0)*sunColor*shadow+sampleBounceReflection(vec3(v.x,-v.y,-v.z))*.005+localBounceSource;customBounce=bounceSource*bounceMult;}
+      vec3 customBounce=vec3(0.0);if(customBounceActive){float bounceMask=clamp(dot(customBounceMap,customBounceMask),0.0,1.0);if(customBounceIntensity<0.0)bounceMask*=1.0-surfaceTexel.a;vec3 bounceMult=abs(customBounceIntensity)*bounceMask*2.0*max(surfaceTexel.rgb,vec3(0.0));vec3 bounceSource=pow(max(dot(v,l),0.0),${CSP_BOUNCEBACK_EXPONENT}.0)*sunColor*shadow+sampleBounceReflection(vec3(v.x,-v.y,-v.z))*.005+localBounceSource;customBounce=bounceSource*bounceMult;}
       if(customEmissiveAlpha)customEmissive*=diffuseTexel.a;
       if(customEmissiveAlphaParams.x>0.5){float span=max(.0001,customEmissiveAlphaParams.z-customEmissiveAlphaParams.y);customEmissive*=pow(clamp((diffuseTexel.a-customEmissiveAlphaParams.y)/span,0.0,1.0),max(.001,customEmissiveAlphaParams.w));}
       if(customEmissiveLuma.x>0.5){float sourceLuma=dot(diffuseTexel.rgb,vec3(.2126,.7152,.0722));float span=max(.0001,customEmissiveLuma.z-customEmissiveLuma.y);customEmissive*=pow(clamp((sourceLuma-customEmissiveLuma.y)/span,0.0,1.0),max(.001,customEmissiveLuma.w));}
