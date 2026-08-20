@@ -2124,6 +2124,35 @@ live WebGL check reduced a two-triangle mesh to one triangle. Undo, redo, and re
 preserved all three topology operations, and KN5 export completed. CSP export stayed
 disabled because CSP cannot replace source geometry.
 
+## ksEditor analog RPM evidence
+
+The inspected `ksEditor.exe` has SHA-256
+`7df6a75e7b8be9c6aae7f0ac09a66ac904a06f2a7e22fdbef635aec96c5144a0`.
+The inspected `ksNet.dll` has SHA-256
+`b38dcb826a3311d7233cf0a6a58e5da16b6c8679f8490091e7b434bf730091ca`.
+
+CLR IL for `DashBoard_RPM_Analogic.update` is at method token `0x060001b9` and
+RVA `0x1e500`. It reads `ZERO`, `MIN_VALUE`, `STEP`, and the test RPM value.
+The control accepts values from 1,000 through 15,000 RPM.
+
+`ksNet.ksGraphics.changeTempAnalogic` is at method token `0x06000399` and RVA
+`0x28654`. The RPM wrapper calls this shared method. It finds the configured node
+by its exact name and caches the original matrix on the first call.
+
+The method converts `ZERO + (input - MIN_VALUE) * STEP` from degrees to radians.
+It creates an axis-angle rotation around `(0, 0, 1)`. It passes the original matrix,
+then the rotation matrix, to the native matrix multiply call. The result replaces
+the live node matrix. The method does not clamp its input.
+
+Apex reproduces this linear transform without changing the parsed KN5 matrix.
+The installed Porsche 917/30 binds `ARROW_RPM` once and uses `ZERO=3`,
+`MIN_VALUE=1000`, and `STEP=0.02766667`. LUT mappings and other analog instrument
+types are explicitly outside this implementation.
+
+A live browser check rendered the installed Porsche needle at 1,000 and 6,000 RPM.
+The capture hashes differed. Both captures returned WebGL error zero, with no browser errors.
+The desktop check loaded all 76 textures. Node APIs remained unavailable in the renderer.
+
 ## Desktop packaging evidence
 
 The desktop shell uses Electron 43.4.1 and serves the existing application from an

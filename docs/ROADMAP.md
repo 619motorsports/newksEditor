@@ -229,16 +229,18 @@ vertical slice is only the foundation.
   ranges and game-normalized preview selection. Installed `skins/<name>` folders are
   discovered and their matching texture basenames override every LOD with live switching
   and diagnostics. The inspector now checks SDK-listed hierarchy coverage, node kinds,
-  wheel axes, related pivots, and cross-LOD placement. Packed-data editing/repacking,
-  skin metadata/editing, animation authoring, cross-folder shared-driver access without
-  a browser file grant, lights,
-  damage/dirt, instruments, steering/driver alignment, bottom-collider editing, and remaining
-  car-workflow expansion remain. LOD file names, ranges, and cockpit/driver distance switches now
+  wheel axes, related pivots, and cross-LOD placement. These items remain: packed-data
+  editing/repacking, skin metadata/editing, animation authoring, and cross-folder shared-driver
+  access without a browser file grant. Lights, damage/dirt, non-RPM instruments,
+  steering/driver alignment, bottom-collider editing, and other car-workflow items also remain.
+  LOD file names, ranges, and cockpit/driver distance switches now
   support live editing, project persistence, validation, and `lods.ini` export.
   Static `collider.kn5` meshes now support transforms and topology repair. These edits
   update the orange overlay and the collider audit. Project JSON stores the edits, but
   CSP export excludes them. A standalone export writes the edited `collider.kn5`.
   Persisted SHA-256 identity now stops those edits from crossing collider files.
+  Linear RPM indicators now load from packed or unpacked `analog_instruments.ini`.
+  The live slider applies ksEditor’s recovered local +Z needle transform.
 - Track workspace: static multi-KN5 layouts now load from ordered `models*.ini`
   manifests or manual multi-file selection, including placement transforms and
   collision diagnostics. `DYNAMIC_OBJECT_n` entries now parse and load at their
