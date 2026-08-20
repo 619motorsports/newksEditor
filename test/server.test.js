@@ -25,6 +25,9 @@ test("serves the desktop application and its explicitly allowed modules", async 
     const surfaceAuthoring = await fetch(`${url}/src/surface-authoring.js`);
     assert.equal(surfaceAuthoring.status, 200);
     assert.match(await surfaceAuthoring.text(), /applySurfaceEdits/);
+    const dynamicTrack = await fetch(`${url}/src/dynamic-track.js`);
+    assert.equal(dynamicTrack.status, 200);
+    assert.match(await dynamicTrack.text(), /sampleDynamicTrackObjects/);
     const sceneDiagnostics = await fetch(`${url}/src/scene-diagnostics.js`);
     assert.equal(sceneDiagnostics.status, 200);
     assert.match(await sceneDiagnostics.text(), /analyzeScene/);

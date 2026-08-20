@@ -1606,13 +1606,54 @@ layout geometry.
 
 Dynamic sections preserve `PROBABILITY`, `MULT`, `POS_MODE`, `RND_POS_CENTER`,
 `RND_POS_RANGE`, `VEL_MODE`, `RND_VEL_BASE`, `RND_VEL_RANGE`, and `PLAY_WAV`.
-Apex edits these native fields and writes them back to `models.ini`. The preview uses
-`RND_POS_CENTER` as the deterministic model-root position.
+Apex edits these native fields and writes them back to `models.ini`.
 
-The preview does not simulate position modes, velocity modes, or random ranges.
-Those behaviors remain a separate native-motion recovery task. A production WebGL
-test covered all nine fields, validation, undo, redo, recovery, and export.
-The serializer round-trip test also proves that audio removal omits `PLAY_WAV`.
+The installed `acs.exe` and its matching PDB identify
+`TrackAvatar::initDynamicObjects` at `1401c9840` and
+`TrackAvatar::updateDynamicObjects` at `1401ccb30`. Initialization reads contiguous
+`DYNAMIC_OBJECT_n` sections. It stops at the first missing index. A probability test
+uses `rand() / 32767 * 100 < PROBABILITY`. Accepted objects sample `MULT` as an
+inclusive integer range. Each `RANDOM` position axis uses
+`center + uniform(-range, range)`. Each `RANDOM` velocity axis uses
+`base + uniform(-range, range)`. Both vectors consume random values in Z, Y, X order.
+Other mode values leave the applicable vector at zero.
+
+The update function applies `position += deltaTime * velocity` with single-precision
+values. It writes the result to M41, M42, and M43 of the model-root transform. A
+multiplayer client also adds `serverTime * velocity` during initialization. These
+functions do not wrap positions and do not implement object lifetime or rotation.
+Apex replaces those three fields on the loaded KN5 root and preserves the other 13
+matrix values. It rejects values that cannot remain finite after float32 conversion.
+
+`Sim::Sim` at `140192070` seeds the shared random generator from
+`ksGetSystemTime`. The shipped MSVCR120 `rand` implementation uses
+`state = state * 0x343fd + 0x269ec3` and returns bits 16 through 30. Apex uses this
+generator for a reproducible seed preview. A live game can produce a different sample
+because earlier systems also consume the shared random sequence. The preview limits
+rendered instances to 256 and advances the omitted random calls. Repeated instances
+keep separate world transforms but share one GPU geometry upload for each source mesh.
+The shared upload includes the vertex, index, VAO, and vertex-AO buffers.
+
+A packaged Electron WebGL test loaded the official Barcelona `11.kn5` through a
+dynamic manifest after setting the KN5 root translation to `[1000, 2000, 3000]`.
+After two seconds, the moving instance was at `[2, 4, 6]`, not the additive
+`[1002, 2004, 3006]`. This confirms that the preview replaces the root translation.
+The captured frame hash was `fceea43cc3ccfe5d`. The test found no JavaScript or
+WebGL errors, and the desktop renderer did not expose Node.js APIs.
+
+A packaged gap-manifest test supplied `DYNAMIC_OBJECT_0` and `DYNAMIC_OBJECT_2`,
+but the second section referenced a missing file. Apex loaded only the official
+Barcelona `11.kn5` file and produced one instance. The frame hash was
+`6023febc3fb32bb6`, and WebGL returned zero errors. This result confirms that later
+sections do not resolve or render after a gap.
+
+A packaged sharing test sampled 12 copies of the official Barcelona `11.kn5`.
+The renderer created 12 render items but only one GPU geometry upload. The frame hash
+was `5741712b0f83cd89`, and WebGL returned zero errors. The browser log had no errors.
+
+The earlier production WebGL test covered all nine fields, validation, undo, redo,
+recovery, and export. The serializer round-trip test also proves that audio removal
+omits `PLAY_WAV`.
 
 The installed `acs.exe` includes matching PDB symbols. Its `TrackAvatar::init3D`
 function at `1401c8740` reads `POSITION` and `ROTATION` with `INIReader::getFloat3`,

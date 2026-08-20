@@ -101,8 +101,9 @@ npm test
   KN5 exports. Skinned bind-pose geometry remains read-only.
 - Ordered multi-KN5 track workspaces from manual selection or `models*.ini`, with
   per-file hierarchy roots, game-compatible placement transforms, material remapping,
-  deterministic texture-name replacement, collision diagnostics, and deterministic
-  center previews for dynamic objects with their random ranges and velocity metadata.
+  deterministic texture-name replacement, collision diagnostics, and native seeded
+  previews for dynamic objects with probability, multiplicity, random positions, and
+  velocity playback.
   The Model inspector reports exact parsed-scene totals, transformed world bounds,
   source-file hotspots, and the largest meshes. It also reports source-KN5,
   vertex/index, and embedded-texture payload sizes without claiming unsupported game limits.
@@ -110,7 +111,8 @@ npm test
   persistence, and `models.ini` export. Dynamic objects support edits to probability,
   multiplicity, position mode, position center and range, velocity mode, velocity base
   and range, and audio. These edits use the same undo, recovery, project, and
-  `models.ini` export paths. The preview stays at the deterministic position center.
+  `models.ini` export paths. The seed control makes previews reproducible. A live game
+  can differ because it uses one shared random sequence.
 - Packed or unpacked `data/surfaces.ini` physics inspection and assembled-layout validation
   using the game's built-in `WALL`, stock system surfaces, track override precedence,
   nonzero sector IDs, and unique substring binding; fallback and ambiguous physics
@@ -301,7 +303,7 @@ atlas refresh scheduling,
 wet cubemap reflection and negative-wetness snow response,
 transparent-layer feedback,
 general CSP template/include expansion,
-randomized dynamic-object motion, subtractive procedural-emissive
+dynamic-object audio, subtractive procedural-emissive
 composition, FBX bump-map conversion and packed material maps, arbitrary vertex and
 face editing, skinned bind-pose geometry editing,
 full local-light photometric fidelity,
