@@ -5,6 +5,7 @@ import { computeKn5Visibility, Kn5Error, parseKn5, walkNodes } from "../src/kn5.
 import { assettoPath, carColliderKn5, carMainKn5, trackMainKn5 } from "./fixture-paths.js";
 
 const protectedV5Fixture = assettoPath("content/cars/ac_friends_488_gte_imsa/ferrari_488_gte.kn5");
+const editorAxisV4Fixture = assettoPath("sdk/editor/content/objects3D/axis.kn5");
 const resourceSlotFixture = assettoPath("content/cars/bmw_m3_e92/bmw_m3_e92.kn5");
 
 test("parses the repository car collider KN5", async () => {
@@ -29,6 +30,24 @@ test("parses the repository track's KN5 v5 header without a v6 source marker", a
   assert.equal(model.source, 0);
   assert.equal(model.textures.length, 130);
   assert.equal(model.materials.length, 167);
+  assert.equal(model.bytesRead, model.byteLength);
+});
+
+test("consumes the installed editor axis KN5 v4 without a material depth field", async (t) => {
+  let data;
+  try { data = await readFile(editorAxisV4Fixture); } catch { t.skip("Assetto Corsa editor fixture is not installed"); return; }
+  const model = parseKn5(data);
+  assert.equal(model.version, 4);
+  assert.equal(model.source, 0);
+  assert.equal(model.textures.length, 1);
+  assert.equal(model.materials.length, 1);
+  assert.equal(model.materials[0].depthMode, 0);
+  assert.equal(model.root.name, "FBX: axis.fbx");
+  const nodes = walkNodes(model.root);
+  assert.equal(nodes.length, 3);
+  assert.equal(nodes[2].node.kind, "mesh");
+  assert.equal(nodes[2].node.vertices.length, 478 * 11);
+  assert.equal(nodes[2].node.indices.length, 1734);
   assert.equal(model.bytesRead, model.byteLength);
 });
 
@@ -80,6 +99,15 @@ test("rejects invalid and truncated files with offsets", () => {
   assert.throws(() => parseKn5(new TextEncoder().encode("not-kn5")), Kn5Error);
   const header = new Uint8Array([115, 99, 54, 57, 54, 57, 6, 0, 0, 0]);
   assert.throws(() => parseKn5(header), /source marker.*0xa/);
+  const truncatedV4 = new Uint8Array([
+    115, 99, 54, 57, 54, 57,
+    4, 0, 0, 0,
+    0, 0, 0, 0,
+    1, 0, 0, 0,
+    100, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  ]);
+  assert.throws(() => parseKn5(truncatedV4), /material name.*0x16/);
 });
 
 test("computes game visibility from active branches and mesh flags", () => {

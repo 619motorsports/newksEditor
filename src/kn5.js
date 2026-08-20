@@ -43,7 +43,7 @@ function saneCount(reader, count, minimumSize, label) {
   return count;
 }
 
-function readMaterial(reader) {
+function readMaterial(reader, version) {
   const name = reader.string("material name");
   const shader = reader.string("shader name");
   const alphaBlend = Boolean(reader.u8("alpha-blend flag"));
@@ -55,7 +55,7 @@ function readMaterial(reader) {
     blendMode,
     blendFlags: { alphaBlend, alphaToCoverage },
     serializedBlendMode: blendMode,
-    depthMode: reader.u32("depth mode"),
+    depthMode: version > 4 ? reader.u32("depth mode") : 0,
     properties: [],
     resources: []
   };
@@ -188,7 +188,7 @@ export function parseKn5(input, options = {}) {
   const magic = decoder.decode(reader.bytes(6, "magic"));
   if (magic !== "sc6969") throw new Kn5Error(`Not a KN5 file (magic is ${JSON.stringify(magic)})`, 0);
   const version = reader.u32("version");
-  if (version < 5 || version > 6) throw new Kn5Error(`Unsupported KN5 version ${version}`, 6);
+  if (version < 4 || version > 6) throw new Kn5Error(`Unsupported KN5 version ${version}`, 6);
   const source = version >= 6 ? reader.u32("source marker") : 0;
   const textureCount = saneCount(reader, reader.u32("texture count"), 12, "texture");
   const textures = [];
@@ -199,8 +199,8 @@ export function parseKn5(input, options = {}) {
     const data = reader.bytes(size, `texture ${name}`);
     textures.push({ active, name, size, data: options.metadataOnly ? undefined : data });
   }
-  const materialCount = saneCount(reader, reader.u32("material count"), 15, "material");
-  const materials = Array.from({ length: materialCount }, () => readMaterial(reader));
+  const materialCount = saneCount(reader, reader.u32("material count"), version > 4 ? 22 : 18, "material");
+  const materials = Array.from({ length: materialCount }, () => readMaterial(reader, version));
   const root = readNode(reader);
   const encryption = reader.offset < reader.buffer.byteLength ? inspectKn5Encryption(reader.buffer, reader.offset) : null;
   return { magic, version, source, textures, materials, root, bytesRead: reader.offset, byteLength: reader.buffer.byteLength, encryption };

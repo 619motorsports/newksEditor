@@ -16,20 +16,21 @@ The managed metadata and strings expose the original editor's major concepts:
 LOD ranges, node layers, cameras, weather, FBX loading, car projects, persistence,
 KN5 export, texture review, and track/car export modes.
 
-## KN5 v6 layout verified in this repository
+## KN5 v4-v6 layout verified in this repository
 
 Offsets and field widths were checked against Kunos' `ks_nissan_370z/collider.kn5`
 and `nissan_370z_lodD.kn5`.
 
 ```text
-v5 header:  "sc6969"[6], version:u32
+v4/v5 header: "sc6969"[6], version:u32
 v6 header:  "sc6969"[6], version:u32, source-marker:u32
 textures:   count:u32, repeated(active:u32, name:string, size:u32, bytes[size])
 materials:  count:u32, repeated material
 scene:      one recursive node
 
 string:     UTF-8 byte-count:u32, bytes[count]
-material:   name:string, shader:string, alpha-blend:u8, alpha-to-coverage:u8, depth:u32,
+material:   name:string, shader:string, alpha-blend:u8, alpha-to-coverage:u8,
+            depth:u32 (v5+ only),
             property-count:u32, properties, resource-count:u32, resources
 property:   name:string, scalar:f32, vec2:vec2, vec3:vec3, vec4:vec4
 resource:   slot:string, texture-id:u32, texture-name:string
@@ -80,6 +81,16 @@ added in v6: in v5 the texture count follows the version immediately. Treating t
 count as a source marker shifted every subsequent field and was the cause of many
 apparent mod-file failures. The corrected v5 path consumes the complete collider and
 also parses the public scene of protected v5 cars.
+
+The installed editor's `content/objects3D/axis.kn5` is version 4. PDB-guided Ghidra
+decompilation identifies `KN5IO::load` at `0x1003ade4`,
+`KN5IO::loadMaterialsBinary` at `0x1003b9de`, and `KN5IO::loadBinaryV2` at
+`0x1003b3d9`. The header loader reads the source marker only when the version is
+greater than 5. The material loader reads depth mode only when the version is
+greater than 4. The node loader reads layer and LOD fields after version 2, and it
+reads the static-mesh bounding sphere and renderable flag after version 3. Thus,
+version 4 uses the current scene layout without the material depth word. The parser
+consumes all 26,660 bytes of each of the three installed copies of this axis asset.
 
 ### Scene visibility semantics
 

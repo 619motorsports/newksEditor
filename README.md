@@ -75,7 +75,7 @@ npm test
   DDS. The inspector reports maps that have no safe stock KN5 binding. Each FBX
   animation clip is sampled into 100 local-transform frames. The timeline previews
   the result, and the export action writes the native KSANIM v2 layout.
-- KN5 v5/v6 headers, embedded texture, material, hierarchy, static and skinned-mesh
+- KN5 v4/v5/v6 headers, embedded texture, material, hierarchy, static and skinned-mesh
   parsing, including recognition of appended CSP KN5ENC v1 protected payloads
 - Stock shader parameters, texture-resource inspection, embedded BC1/2/3,
   CPU-decoded BC4/5, native BPTC BC6H/BC7 where available, generic
