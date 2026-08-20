@@ -1,4 +1,5 @@
 import { walkNodes } from "./kn5.js";
+import { normalizeCustomEmissiveMirrorDirection } from "./custom-emissive-uv.js";
 
 function stripComment(line) {
   let quote = null;
@@ -322,7 +323,7 @@ function customEmissiveDescriptor(section) {
     resolution: [Math.max(1, Number(resolution[0]) || 1), Math.max(1, Number(resolution[1]) || Number(resolution[0]) || 1)],
     shapes: [], maskShapes: [], colorMasks: [], bindings: [], unsupportedOperations: [], approximatedOperations: [], extraProperties: new Map(),
     alphaFromDiffuse: false, diffuseLuminance: null, diffuseAlpha: null,
-    vertexMask: null, bounceBack: [], mirrorUv: null, skipDiffuseMap: false,
+    vertexMask: null, bounceBack: [], mirrorUv: null, useRawUv: numberParameter(p, "USERAWUV", 0) !== 0, skipDiffuseMap: false,
     mirrorDirection: mirrorDirection.map((value) => { const component = (Number(value) || 0) / mirrorLength; return component === 0 ? 0 : component; }), mirrorOffset: numberParameter(p, "MIRROROFFSET", 0),
     colorMasksAsMultiplier: numberParameter(p, "COLORMASKSASMULTIPLIER", 0) !== 0,
     colorMasksSubtractive: numberParameter(p, "COLORMASKSSUBTRACTIVE", 0) !== 0,
@@ -412,9 +413,8 @@ function customEmissiveDescriptor(section) {
       const mask = [0, 1, 2, 3].map((index) => Number(rawMask[index]) || 0);
       descriptor.bounceBack = [{ mask, intensity: operationNumber(operation, "INTENSITY", 20) }];
     } else if (operation.upper === "CUSTOMEMISSIVE_MIRRORUV") {
-      const direction = operationVector(operation, "DIRECTION", [1, 0]), length = Math.hypot(...direction) || 1;
-      descriptor.mirrorUv = { offset: operationNumber(operation, "OFFSET", 0.5) / descriptor.resolution[0], direction: direction.slice(0, 2).map((value) => { const component = -(Number(value) || 0) / length; return component === 0 ? 0 : component; }) };
-      descriptor.approximatedOperations.push(operation.name);
+      const direction = normalizeCustomEmissiveMirrorDirection(operationVector(operation, "DIRECTION", [1, 0])).map((value) => value === 0 ? 0 : -value);
+      descriptor.mirrorUv = { offsetPixels: operationNumber(operation, "OFFSET", 0.5), direction };
     }
     else if (operation.upper === "CUSTOMEMISSIVE_SKIPDIFFUSEMAP") descriptor.skipDiffuseMap = operationNumber(operation, "SKIPDIFFUSEMAP", 1) !== 0;
     else if (operation.upper === "USEALPHAFROMTXDIFFUSES") descriptor.alphaFromDiffuse = true;
@@ -447,6 +447,7 @@ function customEmissiveDescriptor(section) {
     else if (operation.upper === "LICENSEPLATELIGHTS") descriptor.bindings.push(bindingFromOperation(operation, channel, { input: "LIGHT", color: [10, 10, 10] }));
     else descriptor.unsupportedOperations.push(operation.name);
   }
+  if (descriptor.mirrorUv) descriptor.mirrorUv = { offset: descriptor.mirrorUv.offsetPixels / descriptor.resolution[0], direction: descriptor.mirrorUv.direction };
   if (descriptor.coverChannel0 || (descriptor.maskShapes.length && !descriptor.shapes.length)) descriptor.shapes.unshift({ type: "rect", channel: 0, start: [0, 0], size: [...descriptor.resolution], cornerRadius: [0, 0], exponent: 1, sharpness: 1000, offset: 0, opacity: 1, fallback: true });
   descriptor.approximatedOperations = [...new Set(descriptor.approximatedOperations)];
   return descriptor;

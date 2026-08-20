@@ -175,11 +175,12 @@ npm test
 - Safe built-in expansion of the common CSP car-paint, glass, interior PBR,
   license-plate, and distant-emissive material templates used by installed configs
 - Safe `CustomEmissive`/`CustomEmissiveMulti` atlas preview for rectangles, circles,
-  soft polygons, color matching, mirroring, vertex-anchor approximation, multi-item
-  dashboard channels, diffuse alpha/luminance, and live vehicle inputs such as
-  reverse, brake, turn signals, lights, doors, fog lights, hazards, and RPM. The
-  preview also reproduces CSP's view-dependent emissive bounce-back for the sun,
-  reflection cube, and point or spot lights
+  soft polygons, color matching, channel mirroring, exact `MirrorUV` half-plane
+  folding, vertex-anchor approximation, multi-item dashboard channels, diffuse
+  alpha/luminance, and live vehicle inputs such as reverse, brake, turn signals,
+  lights, doors, fog lights, hazards, and RPM. The preview also reproduces CSP's
+  view-dependent emissive bounce-back for the sun, reflection cube, and point or
+  spot lights
 - CSP point/spot lights, mirrored `SelfLight` expansion, finite line lights with
   closest-segment range/diffuse, endpoint-color interpolation, and segment gloss,
   geometry-derived track `LIGHT_SERIES` preview, native packed

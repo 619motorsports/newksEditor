@@ -462,9 +462,43 @@ MirrorOffset=0.25
   assert.deepEqual(custom.vertexMask.points, [null, null, [0.5, 0, 0], [0.8, 0, 0]]);
   assert.deepEqual(custom.bounceBack, [{ mask: [0, 1, 0, 0], intensity: 4 }]);
   assert.deepEqual(custom.mirrorUv, { offset: 0.6, direction: [1, 0] });
+  assert.equal(custom.useRawUv, false);
   assert.equal(custom.skipDiffuseMap, true);
   assert.deepEqual(custom.unsupportedOperations, []);
-  assert.deepEqual(custom.approximatedOperations, ["CustomEmissive_VertexMask", "CustomEmissive_MirrorUV"]);
+  assert.deepEqual(custom.approximatedOperations, ["CustomEmissive_VertexMask"]);
+});
+
+test("normalizes the installed MirrorUV rule and bounds malformed directions", () => {
+  const display = { kind: "mesh", name: "DISPLAY", materialId: 0, children: [] };
+  const malformed = { kind: "mesh", name: "BAD", materialId: 0, children: [] };
+  const local = { kind: "mesh", name: "LOCAL", materialId: 0, children: [] };
+  const scene = { materials: [material("display")], root: { kind: "node", name: "root", children: [display, malformed, local] } };
+  const config = expandCspMaterialTemplates(parseCspIni(`[CustomEmissive]
+Meshes=DISPLAY
+Resolution=1024,512
+UseRawUV=1
+@=CustomEmissive_MirrorUV, Offset=612, Direction="-1,0,99"
+
+[CustomEmissive]
+Meshes=BAD
+Resolution=1024,512
+@=CustomEmissive_MirrorUV, Offset=invalid, Direction="nan,inf"
+
+[CustomEmissive]
+Meshes=LOCAL
+@=CustomEmissive_MirrorUV, Offset=512, Direction="-1,0"
+@MIXIN=CustomEmissive_Rect, Resolution="1024,512", Channel=0, Start="0,0", Size="1,1"
+`));
+  const result = evaluateCspConfig(scene, config);
+  const custom = result.nodeOverrides.get(display).customEmissive;
+  assert.equal(custom.useRawUv, true);
+  assert.deepEqual(custom.mirrorUv, { offset: 612 / 1024, direction: [1, 0] });
+  assert.deepEqual(custom.approximatedOperations, ["USERAWUV"]);
+  const bounded = result.nodeOverrides.get(malformed).customEmissive;
+  assert.deepEqual(bounded.mirrorUv, { offset: 0.5 / 1024, direction: [-1, 0] });
+  assert.ok(bounded.mirrorUv.direction.every(Number.isFinite));
+  assert.deepEqual(bounded.approximatedOperations, []);
+  assert.deepEqual(result.nodeOverrides.get(local).customEmissive.mirrorUv, { offset: 0.5, direction: [1, 0] });
 });
 
 test("bounds a malformed bounce-back mask to four finite channels", () => {

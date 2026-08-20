@@ -355,8 +355,29 @@ Imola's ambulance rule also exercises repeated `KEY_...`/`VALUE_...` material
 adjustment pairs. Preserving their source order applies all four `ksEmissive`
 channels to five matching meshes. With the tested flag conditions enabled, the
 complete track evaluation retains 999 overridden meshes, five custom-emissive
-meshes, and 169 bounded light instances. Less-common color-mask, vertex-mask,
-exact soft-edge, and UV-remapping operations remain unsupported or approximated.
+meshes, and 169 bounded light instances. Less-common vertex-mask, exact soft-edge,
+and raw-UV operations remain unsupported or approximated.
+
+Public CSP shader commit `4f05cc0ba26f7c363886ebb406b35f67157139d0`
+defines `MirrorUV` in `custom_objects/common/emissiveMapping.hlsl`. The file SHA-256
+is `736acc0ba6d0071dee752b02040cbe5d89b3d15eb1209af7795d6e859b8f55a2`.
+The shader first takes the fractional UV unless raw UVs are active. It reflects only
+when `dot(emMirrorUV, uv) - emMirrorUVOffset` is negative. The installed common mixin
+negates the normalized direction and divides the pixel offset by the atlas width.
+The parser resolves the final local mixin atlas resolution before it performs this
+division. Reflected coordinates outside the bounded atlas are rejected before
+sampling, which prevents WebGL's repeating sampler from wrapping into unrelated shapes.
+
+The previous preview reflected the positive half-plane. It also left the fractional
+UV conversion to texture wrapping. The renderer now applies the source equation
+before it samples every bounded emissive atlas. The raw-UV mode remains labeled as an
+approximation because the bounded atlas cannot reproduce procedural shapes beyond one repeat.
+
+A production Electron check used the repository LOD-B car and its 7,310-vertex
+`ford13_nocam` mesh. A high-contrast `MirrorUV` rule produced capture hash
+`5f33ea269e1c18d0`. The same atlas without `MirrorUV` produced
+`61abc090dcec8ffc`. Visual inspection showed the reflected emissive region on the
+source-defined half-plane. Both frames returned WebGL error zero, with no browser exceptions.
 
 Public CSP shader commit `4f05cc0ba26f7c363886ebb406b35f67157139d0`
 provides the exact `CustomEmissive_BounceBack` equations. The evidence comes from
@@ -386,7 +407,7 @@ Declarative `@MIXIN` invocations
 are processed through the same bounded operation table, including their local atlas
 resolution. No installed operation name is silently dropped. Native-only or
 incompletely inferred behavior is surfaced as an approximation: vertex-anchor
-selection, MirrorUV folding, fog/open-door cast lights, flat-normal resource
+selection, raw-UV procedural mapping, fog/open-door cast lights, flat-normal resource
 substitution, and the uncommon subtractive procedural-composition flags.
 
 The reusable `tools/browser-smoke.mjs` check was run against production assets. The
