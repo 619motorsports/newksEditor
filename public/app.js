@@ -1,6 +1,6 @@
 import { computeKn5Visibility, parseKn5, propertyValue, walkNodes } from "/src/kn5.js";
 import { evaluateCspConfig, expandCspMaterialTemplates, parseCspIni } from "/src/csp-config.js";
-import { CSP_BOUNCEBACK_EXPONENT, customEmissiveAtlasSize } from "/src/custom-emissive.js";
+import { CSP_BOUNCEBACK_EXPONENT, customEmissiveAtlasSize, customEmissiveBounceCoverage } from "/src/custom-emissive.js";
 import { classifyEditorProjectChanges, cloneEditorProject, createEditorProject, editorProjectCspEditCount, editorProjectEditCount, editorProjectKn5EditCount, formatEditorValue, normalizeEditorProject, parseEditorValue, serializeEditorCsp, serializeEditorProject } from "/src/editor-project.js";
 import { decodeDdsRgba, inspectDds } from "/src/dds.js";
 import { assetFolderMatchesModelFiles, createAssetFileIndex, discoverAssetAnimations, discoverAssetSkins, externalResourcePaths, matchSkinTextures, normalizeAssetPath, resolveAssetFile } from "/src/asset-files.js";
@@ -1825,13 +1825,13 @@ function createRenderer(canvas) {
           vec3 lightColor=cspLightColorSpot[i].rgb+cspLightLineColor[i].rgb*clamp(lineValue,0.0,1.0);vec3 radiance=lightColor*localLightShape(i,toLight,distanceToLight,attenuation)*localLightShadow(i,toLight,n);
           vec3 specularDirection=localLineSpecularDirection(i,vWorld,n,-v,toLight);float localSpec=pow(max(dot(n,normalize(specularDirection+v)),0.0),mappedPower)*mappedSpecular*cspLightFalloff[i].y*(cspLightFalloff[i].w>.5?shapedDiffuse:1.0);
           localLight+=radiance*(texel.rgb*diffuseLevel*shapedDiffuse+vec3(localSpec));
-          if(cspLightFalloff[i].w<.5)localBounceSource+=radiance*surfaceTexel.rgb*pow(max(-dot(v,toLight),0.0),${CSP_BOUNCEBACK_EXPONENT}.0);
+          if(cspLightFalloff[i].w<.5)localBounceSource+=radiance*pow(max(-dot(v,toLight),0.0),${CSP_BOUNCEBACK_EXPONENT}.0);
         }
       }
       vec2 customUv=vUv;if(customMirrorUv.x>0.5){vec2 mirrorDirection=normalize(customMirrorUv.zw);float projected=dot(customUv,mirrorDirection);if(projected>customMirrorUv.y)customUv-=2.0*(projected-customMirrorUv.y)*mirrorDirection;}
       vec3 customEmissive=hasCustomEmissive?texture(customEmissiveTexture,customUv).rgb*customEmissiveStrength:vec3(0.0);
       vec4 customColorShape=hasCustomColorShape?texture(customColorShapeTexture,customUv):vec4(1.0);
-      vec4 vertexShapes=hasCustomVertexShape?texture(customVertexShapeTexture,customUv):vec4(0.0);int nearestAnchor=-1;float nearestDistance=1e20;
+      vec4 vertexShapes=hasCustomVertexShape?texture(customVertexShapeTexture,customUv):vec4(0.0);vec4 customBounceMap=hasCustomBounce?texture(customBounceTexture,customUv):vec4(0.0);int nearestAnchor=-1;float nearestDistance=1e20;
       if(hasCustomVertexShape)for(int i=0;i<4;i++){if(customVertexAnchor[i].w>.5){float anchorDistance=distance(vLocal,customVertexAnchor[i].xyz);if(anchorDistance<nearestDistance){nearestDistance=anchorDistance;nearestAnchor=i;}}}
       for(int i=0;i<MAX_CUSTOM_COLOR_MASKS;i++){
         if(i>=customColorMaskCount)break;
@@ -1840,10 +1840,11 @@ function createRenderer(canvas) {
         float edge=1.0/max(1.0,customColorMaskParams[i].y);float mask=smoothstep(customColorMaskParams[i].x-edge,customColorMaskParams[i].x+edge,similarity);
         if(customColorMaskParams[i].w>customColorMaskParams[i].z)mask*=smoothstep(customColorMaskParams[i].z,customColorMaskParams[i].w,diffuseTexel.a);if(customColorMasksAsMultiplier&&i<4)mask*=customColorShape[i];if(nearestAnchor>=0&&int(customColorMaskBaseChannel[i]+.5)!=nearestAnchor)mask=0.0;
         float side=dot(vLocal,customColorMaskSide[i].xyz)-customMirrorOffset;if(customColorMaskSide[i].w<-.5&&side>0.0)mask=0.0;if(customColorMaskSide[i].w>.5&&side<=0.0)mask=0.0;
+        int bounceChannel=int(customColorMaskBaseChannel[i]+.5);float bounceCoverage=mask*customColorMaskEmission[i].w;if(bounceChannel==0)customBounceMap.r=max(customBounceMap.r,bounceCoverage);else if(bounceChannel==1)customBounceMap.g=max(customBounceMap.g,bounceCoverage);else if(bounceChannel==2)customBounceMap.b=max(customBounceMap.b,bounceCoverage);else if(bounceChannel==3)customBounceMap.a=max(customBounceMap.a,bounceCoverage);
         customEmissive+=customColorMaskEmission[i].rgb*customEmissiveStrength*customColorMaskEmission[i].w*mask;
       }
       if(nearestAnchor>=0){float side=dot(vLocal,customMirrorDirection)-customMirrorOffset;vec3 vertexColor=side>0.0?customVertexMirroredEmission[nearestAnchor].rgb:customVertexEmission[nearestAnchor].rgb;customEmissive+=vertexColor*customEmissiveStrength*vertexShapes[nearestAnchor];}
-      vec3 customBounce=vec3(0.0);if(hasCustomBounce&&abs(customBounceIntensity)>1e-6){vec4 bounceMap=texture(customBounceTexture,customUv);float bounceMask=clamp(dot(bounceMap,customBounceMask),0.0,1.0);if(customBounceIntensity<0.0)bounceMask*=1.0-surfaceTexel.a;vec3 bounceMult=abs(customBounceIntensity)*bounceMask*2.0*max(surfaceTexel.rgb,vec3(0.0));vec3 bounceSource=pow(max(dot(v,l),0.0),${CSP_BOUNCEBACK_EXPONENT}.0)*sunColor*surfaceTexel.rgb*shadow+sampleBounceReflection(vec3(v.x,-v.y,-v.z))*.005+localBounceSource;customBounce=bounceSource*bounceMult;}
+      vec3 customBounce=vec3(0.0);if(hasCustomBounce&&abs(customBounceIntensity)>1e-6){float bounceMask=clamp(dot(customBounceMap,customBounceMask),0.0,1.0);if(customBounceIntensity<0.0)bounceMask*=1.0-surfaceTexel.a;vec3 bounceMult=abs(customBounceIntensity)*bounceMask*2.0*max(surfaceTexel.rgb,vec3(0.0));vec3 bounceSource=pow(max(dot(v,l),0.0),${CSP_BOUNCEBACK_EXPONENT}.0)*sunColor*shadow+sampleBounceReflection(vec3(v.x,-v.y,-v.z))*.005+localBounceSource;customBounce=bounceSource*bounceMult;}
       if(customEmissiveAlpha)customEmissive*=diffuseTexel.a;
       if(customEmissiveAlphaParams.x>0.5){float span=max(.0001,customEmissiveAlphaParams.z-customEmissiveAlphaParams.y);customEmissive*=pow(clamp((diffuseTexel.a-customEmissiveAlphaParams.y)/span,0.0,1.0),max(.001,customEmissiveAlphaParams.w));}
       if(customEmissiveLuma.x>0.5){float sourceLuma=dot(diffuseTexel.rgb,vec3(.2126,.7152,.0722));float span=max(.0001,customEmissiveLuma.z-customEmissiveLuma.y);customEmissive*=pow(clamp((sourceLuma-customEmissiveLuma.y)/span,0.0,1.0),max(.001,customEmissiveLuma.w));}
@@ -2462,7 +2463,8 @@ function customEmissiveTextureKey(descriptor){
   for(let channel=0;channel<4;channel++)if(descriptor.vertexMask?.points?.[channel]){excluded.add(channel);excluded.add(mirroredChannelForPreview(channel));}
   const used=new Set((descriptor.shapes||[]).map((shape)=>shape.channel).filter((channel)=>!excluded.has(channel))),colors=new Map(descriptor.channelColors||[]);
   const signature=[...used].sort((a,b)=>a-b).map((channel)=>[channel,colors.get(channel)||[0,0,0]]);
-  return `${descriptor.source}:${descriptor.line}:${descriptor.name}:${JSON.stringify([signature,descriptor.bounceBack||[]])}`;
+  const bounceMultiplierChannels=descriptor.colorMasksAsMultiplier?(descriptor.colorMasks||[]).slice(0,4).map((mask)=>baseChannelForPreview(mask.channel)):[];
+  return `${descriptor.source}:${descriptor.line}:${descriptor.name}:${JSON.stringify([signature,descriptor.bounceBack||[],bounceMultiplierChannels])}`;
 }
 function deleteCustomEmissiveTexture(gl,baked){gl.deleteTexture(baked.texture);if(baked.colorMaskTexture)gl.deleteTexture(baked.colorMaskTexture);if(baked.vertexMaskTexture)gl.deleteTexture(baked.vertexMaskTexture);if(baked.bounceTexture)gl.deleteTexture(baked.bounceTexture);}
 
@@ -2488,12 +2490,13 @@ function uploadCustomEmissive(gl, descriptor) {
       if(!color||coverage<=0)continue;
       for(let component=0;component<3;component++)rgb[component]+=(Number(color[component])||0)*coverage;
     }
+    const finalBounceCoverage=customEmissiveBounceCoverage(bounceCoverage,[],descriptor.colorMasksAsMultiplier?multiplierMasks.map((mask)=>baseChannelForPreview(mask.channel)):[]);
     const offset=(py*width+px)*4;
     for(let component=0;component<3;component++)pixels[offset+component]=Math.round(Math.max(0,Math.min(1,rgb[component]/strength))*255);
     pixels[offset+3]=255;
     if(maskPixels){for(let component=0;component<4;component++)maskPixels[offset+component]=component<multiplierCoverage.length?(masked?Math.round(Math.max(0,Math.min(1,multiplierCoverage[component]))*255):0):255;}
     if(vertexPixels){for(let component=0;component<4;component++)vertexPixels[offset+component]=activeVertexBases.has(component)&&masked?Math.round(Math.max(0,Math.min(1,vertexCoverage[component]))*255):0;}
-    if(bouncePixels){for(let component=0;component<4;component++)bouncePixels[offset+component]=masked?Math.round(Math.max(0,Math.min(1,bounceCoverage[component]))*255):0;}
+    if(bouncePixels){for(let component=0;component<4;component++)bouncePixels[offset+component]=masked?Math.round(Math.max(0,Math.min(1,finalBounceCoverage[component]))*255):0;}
   }
   const texture=uploadRgbaTexture(gl,pixels,width,height),colorMaskTexture=maskPixels?uploadRgbaTexture(gl,maskPixels,width,height):null,vertexMaskTexture=vertexPixels?uploadRgbaTexture(gl,vertexPixels,width,height):null,bounceTexture=bouncePixels?uploadRgbaTexture(gl,bouncePixels,width,height):null;
   return {texture,colorMaskTexture,vertexMaskTexture,bounceTexture,strength,width,height};

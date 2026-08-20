@@ -33,6 +33,33 @@ export function customEmissiveBounceMultiplier(emissiveMap, diffuse, diffuseAlph
   return [0, 1, 2].map((index) => Math.abs(intensity) * channelMask * alphaMask * 2 * Math.max(0, Number(diffuse?.[index]) || 0));
 }
 
+/** Combines baked shape channels with the procedural color-mask values used by the shader. */
+export function customEmissiveBounceCoverage(emissiveMap, colorMasks = [], multiplierChannels = []) {
+  const result = [0, 1, 2, 3].map((index) => saturate(emissiveMap?.[index]));
+  for (const value of multiplierChannels) {
+    const channel = Math.trunc(Number(value));
+    if (channel >= 0 && channel < 4) result[channel] = 0;
+  }
+  for (const entry of colorMasks) {
+    const channel = Math.trunc(Number(entry?.channel));
+    if (channel < 0 || channel >= 4) continue;
+    const opacity = entry?.opacity === undefined ? 1 : Math.max(0, Number(entry.opacity) || 0);
+    result[channel] = Math.max(result[channel], saturate(entry?.coverage) * opacity);
+  }
+  return result;
+}
+
+/** CPU reference for direct bounce illumination before the diffuse material multiplier is applied. */
+export function customEmissiveBounceDirectSource(sunColor, sunLobe, shadow, reflection = [0, 0, 0], local = [0, 0, 0]) {
+  const lobe = saturate(sunLobe);
+  const visibility = saturate(shadow);
+  return [0, 1, 2].map((index) =>
+    (Number(sunColor?.[index]) || 0) * lobe * visibility
+    + (Number(reflection?.[index]) || 0)
+    + (Number(local?.[index]) || 0)
+  );
+}
+
 /** CPU reference for CSP's narrow view-to-light bounce-back lobe. */
 export function customEmissiveBounceLobe(toCamera, toLight, localLight = false) {
   const cosine = saturate(dot3(toCamera, toLight) * (localLight ? -1 : 1));
