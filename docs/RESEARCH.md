@@ -1666,6 +1666,10 @@ Apex limits metadata input to 1 MiB, requires valid UTF-8 and one JSON object, a
 reports malformed files without replacing them. The editor retains safe unknown
 fields for compatibility with other installations. It stores only the six authored
 field changes in the Apex project and exports a standalone `ui_skin.json` file.
+The browser file loader rejects an oversized file from its declared size before it
+reads the payload. A packaged WebGL check loaded the official Alfa `00_rosso`
+metadata and produced hash `ebf462b1040fd758`. The browser log and WebGL reported
+zero errors, and the sandbox exposed neither `process` nor `require`.
 
 ## ksEditor directional-shadow evidence
 

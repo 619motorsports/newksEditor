@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { createSkinMetadata, createSkinMetadataLoadGuard, MAX_SKIN_METADATA_BYTES, parseSkinMetadata, serializeSkinMetadata, SkinMetadataError } from "../src/skin-metadata.js";
+import { createSkinMetadata, createSkinMetadataLoadGuard, MAX_SKIN_METADATA_BYTES, parseSkinMetadata, readSkinMetadataFile, serializeSkinMetadata, SkinMetadataError } from "../src/skin-metadata.js";
 
 test("rejects a metadata read after a newer skin selection", async () => {
   const guard = createSkinMetadataLoadGuard();
@@ -35,6 +35,13 @@ test("rejects truncated, invalid UTF-8, oversized, and non-object metadata", () 
   assert.throws(() => parseSkinMetadata(new Uint8Array([0xff, 0xfe])), /not valid UTF-8/);
   assert.throws(() => parseSkinMetadata(new Uint8Array(MAX_SKIN_METADATA_BYTES + 1)), /byte limit/);
   assert.throws(() => parseSkinMetadata("[]"), /one JSON object/);
+});
+
+test("rejects an oversized metadata file before reading its contents", async () => {
+  let reads = 0;
+  const file = { size: MAX_SKIN_METADATA_BYTES + 1, async arrayBuffer() { reads += 1; return new ArrayBuffer(0); } };
+  await assert.rejects(readSkinMetadataFile(file, "oversized/ui_skin.json"), /byte limit/);
+  assert.equal(reads, 0);
 });
 
 test("preserves unknown fields and serializes edited standard fields", () => {

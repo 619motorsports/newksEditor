@@ -81,6 +81,14 @@ export function parseSkinMetadata(input, source = "ui_skin.json") {
   return { source, byteLength: decoded.bytes, metadata, original, warnings };
 }
 
+/** Reject oversized browser files before allocating their contents. */
+export async function readSkinMetadataFile(file, source = "ui_skin.json") {
+  if (!file || typeof file.arrayBuffer !== "function") throw new TypeError("Skin metadata file must provide arrayBuffer()");
+  if (!Number.isSafeInteger(file.size) || file.size < 0) throw new TypeError("Skin metadata file size must be a nonnegative safe integer");
+  if (file.size > MAX_SKIN_METADATA_BYTES) throw new SkinMetadataError(`${source} exceeds the ${MAX_SKIN_METADATA_BYTES}-byte limit`);
+  return parseSkinMetadata(await file.arrayBuffer(), source);
+}
+
 export function createSkinMetadata(source = "ui_skin.json") {
   const original = Object.create(null);
   for (const key of SKIN_METADATA_TEXT_FIELDS) original[key] = "";

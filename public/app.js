@@ -30,7 +30,7 @@ import { KS_EDITOR_CUBEMAP, WEBGL_CUBEMAP_FACES, reflectionBlurFromExponent, sel
 import { createCspWindParticles, CSP_WIND_MAP_FORMAT, CSP_WIND_MAP_SIZE, CSP_WIND_PARTICLE_COUNT, updateCspWindParticles } from "/src/csp-wind.js";
 import { collectFbxAnimations, parseFbxWithTextures, resolveFbxModelTextures } from "/src/fbx-import.js";
 import { applyNodeEdits, composeNodeTransform, decomposeNodeTransform, nodePathEntries } from "/src/node-authoring.js";
-import { createSkinMetadata, createSkinMetadataLoadGuard, effectiveSkinMetadata, parseSkinMetadata, serializeSkinMetadata, SKIN_METADATA_TEXT_FIELDS } from "/src/skin-metadata.js";
+import { createSkinMetadata, createSkinMetadataLoadGuard, effectiveSkinMetadata, readSkinMetadataFile, serializeSkinMetadata, SKIN_METADATA_TEXT_FIELDS } from "/src/skin-metadata.js";
 
 const $ = (selector) => document.querySelector(selector);
 const fileInput = $("#file");
@@ -355,7 +355,7 @@ async function configureSelectedSkinMetadata(skin) {
   try {
     const entry = skin.metadataFiles[0];
     const metadata = entry
-      ? parseSkinMetadata(await entry.file.arrayBuffer(), entry.relativePath)
+      ? await readSkinMetadataFile(entry.file, entry.relativePath)
       : createSkinMetadata(`${skin.path}/ui_skin.json`);
     if (!selection.isCurrent(assetSkinName)) return false;
     assetSkinMetadata = metadata;
