@@ -1839,7 +1839,7 @@ and `4be34d217367d96a`. Every state returned WebGL error zero, and the browser l
 no exception. This proves the recovered Gaussian code executes in the production
 WebGL path. It does not prove pixel equality with the native editor.
 
-## CSP vertex ambient-occlusion evidence
+## CSP VAO and normal-override evidence
 
 The installed CSP distribution contains 225 `.vao-patch` files: 22 legacy
 `Patch.data` archives, 196 `Patch_v4.data` archives, and seven `Patch_v5.data`
@@ -1848,9 +1848,11 @@ archives. Each patch is a ZIP container with optional `Config.ini`, dynamic
 checks local-entry bounds, expands only stored or Deflate entries, verifies the
 declared uncompressed size and CRC-32, and rejects encryption or unsupported methods.
 
-Ghidra analysis of the installed 64-bit `dwrite.dll` resolves CSP's loader at
-`FUN_18110f450` (`0x18110f450`) and its application path at `FUN_181110cb0`
-(`0x181110cb0`). The loader prefers v5, then v4, v3, and legacy payloads. Each
+The analyzed `dwrite.dll` has SHA-256
+`3f73a60cc623688a58170ea954a22102695638e4e34ce37d5a98de75503693dd`.
+Ghidra resolves its VAO loader at `FUN_181100760` (`0x181100760`). The application
+path is `FUN_181101fc0` (`0x181101fc0`). The loader prefers v5, then v4, v3, and
+legacy payloads. Each
 ordinary record is a length-prefixed mesh name, a 32-bit record type, three float32
 identity coordinates, a 32-bit vertex count, and encoded per-vertex data. Types 1
 and 3 carry a scalar AO channel; the application writes them to two separate vertex
@@ -1858,7 +1860,7 @@ bytes at offsets `0x28` and `0x29`. Installed car patches commonly carry both,
 while track patches generally use the primary type-1 channel. Legacy type 0 carries
 three half-float color components and type 2 carries a half-float normal vector.
 
-`FUN_1811123e0` at `0x1811123e0` confirms the binding key. CSP first requires the
+`FUN_181103710` at `0x181103710` confirms the binding key. CSP first requires the
 record's vertex count to equal the candidate mesh count, then compares the record XYZ
 with the candidate's first vertex and accepts only a squared distance below exactly
 `0.01`. Record names prefixed with `@@__ALT@:` are stripped and treated as alternative
@@ -1866,7 +1868,7 @@ states. Apex uses the same case-sensitive name, count, and `< 0.01` first-positi
 test and retains alternate records for diagnostics rather than binding them as the
 default state.
 
-The scalar decoder at `FUN_181110890` (`0x181110890`) distinguishes payload versions.
+The scalar decoder at `FUN_181101ba0` (`0x181101ba0`) distinguishes payload versions.
 Version 5 copies its byte directly. Version 4 copies the byte and then computes
 `trunc(sqrt(byte / 255) × 255)`. Legacy/v3 payloads decode IEEE-754 half floats,
 apply `[LIGHTING]` opacity, brightness, and gamma, quantize to a byte, and apply the
@@ -1880,6 +1882,22 @@ directional shadows, CSP local lights, specular, and emissive terms remain indep
 This corresponds to vertex ambient occlusion rather than treating it as another
 shadow map.
 
+The type-2 vector reader is `FUN_181101980` (`0x181101980`). Legacy and v3 records
+contain three IEEE-754 half floats. Modern records contain three bytes divided by
+255. Version 5 squares each component. The function then normalizes every vector.
+`FUN_181101fc0` writes each result directly to the vertex normal at offset `0x0c`.
+It updates both observed vertex layouts and then refreshes the GPU resource.
+
+The application gate is `FUN_1810bf780` (`0x1810bf780`). It rejects special `AC_`
+runtime object names and ordinary names that contain digits. `AC_SEMAPHORE` is an
+explicit exception. The installed type-2 patches use eligible track names.
+
+An audit of all 225 installed archives found type-2 records in eight legacy patches.
+Those patches contain 1,062 normal records and 4,171,165 normal vectors. No installed
+v4 or v5 archive contains type-2 data. Barcelona's first matching patched normal differs
+from the KN5 normal, but both vectors remain near unit length. This confirms that the
+record replaces the mesh normal instead of supplying a diagnostic value.
+
 The [official CSP bakery](https://github.com/ac-custom-shaders-patch/acc-bakeryoptix/blob/master/bakeryoptix/baked_data.cpp)
 stores primary and secondary AO in a float pair. Its first animation bake updates only
 the primary value; the secondary value remains at the bind pose. CSP's public
@@ -1889,8 +1907,8 @@ then evaluates
 the animation channel, and a mix of one selects the bind-pose channel. Apex uploads both
 bytes and applies the equivalent blend with a primary-channel amount.
 
-The installed `dwrite.dll` parser at `FUN_181169ae0` (`0x181169ae0`) reads the
-`[SPLIT_AO]` section. It uses default exponents of two for doors and headlights and one
+The installed `dwrite.dll` reads the `[SPLIT_AO]` section. It uses default exponents
+of two for doors and headlights and one
 for wing animations. It also reads cockpit, door, headlight, steering-wheel, and up to
 100 contiguous wing node lists. The
 [official bakery mappings](https://github.com/ac-custom-shaders-patch/acc-bakeryoptix/blob/master/bakeryoptix/main.cpp)
@@ -1906,9 +1924,10 @@ native runtime rule.
 The native CPU function that converts animation position to `vaoSecondaryMix` is not
 yet recovered. Apex therefore labels `position^EXP` as a power preview; it does not
 claim that curve is exact. Steering-wheel split AO also remains at the bind pose until
-the native steering input and conversion are recovered. Legacy normal-override type-2
-records, `@@__ALT@:` states, embedded v1 extra samples, v2 `ExtraSamples.data`, and tree
-samples are diagnosed but not yet applied.
+the native steering input and conversion are recovered. Apex applies matching type-2
+normals in the viewport and reflection material path. It rejects truncated, zero-length,
+and non-finite normal data. Alternate states, extra samples, and tree samples remain
+diagnostics.
 
 Production Chrome proofs covered both asset scales. The Nissan 370Z patch supplied
 908 records; 416 default records bound both channels on 201 meshes, with 174 alternate
@@ -1922,6 +1941,19 @@ Both scenes retained complete texture coverage, RGBA16F with 4× MSAA, direction
 shadows and weather lighting, returned WebGL error zero for every state, and logged no
 browser exception. These comparisons prove the portable primary-channel path and its
 toggle, not the remaining animated or spatial extra-sample behavior.
+
+A production Electron run loaded Barcelona's 313.1 MB base KN5 and its GP patch.
+All 190 textures loaded. The native identity key bound 450 type-2 records and
+854,598 normal vectors without an unmatched normal record. The selected patched mesh
+contained 2,924 vertices. Its VAO-enabled frame hash was `935823e518160c85`; the
+disabled frame hash was `606082cd2910f2be`. Both states returned WebGL error zero,
+and the browser logged no error. The comparison also includes the primary AO channel.
+It therefore proves the normal upload and toggle path, but it does not isolate normal
+changes from AO changes.
+
+The same desktop run loaded 1,482 meshes and kept all renderer Node.js APIs undefined.
+It served the loopback application with its content security policy and rejected an
+external popup. This checks the cross-platform desktop boundary for the new path.
 
 A packaged Electron follow-up loaded the full Nissan 370Z, its v4 VAO patch, and
 `animations/car_door_L.ksanim`. All 201 matched meshes had primary and secondary AO.

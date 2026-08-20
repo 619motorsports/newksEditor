@@ -20,6 +20,24 @@ test("decodes legacy half-float AO with lighting controls", () => {
   assert.deepEqual([...patch.records[0].values], [0, 179, 255]);
 });
 
+test("decodes and normalizes native VAO normal overrides", () => {
+  const legacy = parseVaoData(vaoRecord("legacy", 2, [0, 0, 0], 2, halfBytes([1, 1, 0, 0, 1, 0])), { version: 1 });
+  assert.deepEqual([...legacy.records[0].values].map((value) => Number(value.toFixed(6))), [.707107, .707107, 0, 0, 1, 0]);
+
+  const modern = parseVaoData(vaoRecord("modern", 2, [0, 0, 0], 1, Uint8Array.of(255, 128, 0)), { version: 5 });
+  const expectedX = 1 / Math.hypot(1, (128 / 255) ** 2), expectedY = (128 / 255) ** 2 / Math.hypot(1, (128 / 255) ** 2);
+  assert.ok(Math.abs(modern.records[0].values[0] - expectedX) < 1e-6);
+  assert.ok(Math.abs(modern.records[0].values[1] - expectedY) < 1e-6);
+  assert.equal(modern.records[0].values[2], 0);
+});
+
+test("rejects malformed VAO normal payloads", () => {
+  const payload = vaoRecord("mesh", 2, [0, 0, 0], 1, halfBytes([1, 0, 0]));
+  assert.throws(() => parseVaoData(payload.subarray(0, payload.length - 1), { version: 1, source: "truncated.data" }), /truncated\.data: truncated record mesh/);
+  assert.throws(() => parseVaoData(vaoRecord("mesh", 2, [0, 0, 0], 1, halfBytes([0, 0, 0])), { version: 1, source: "zero.data" }), /zero\.data: invalid normal for mesh at vertex 0/);
+  assert.throws(() => parseVaoData(vaoRecord("mesh", 2, [0, 0, 0], 1, halfWords([0x7c00, 0, 0])), { version: 1, source: "infinite.data" }), /infinite\.data: invalid normal for mesh at vertex 0/);
+});
+
 test("binds records by exact name, vertex count, and first-position tolerance", () => {
   const node = mesh("body", [[1, 2, 3], [4, 5, 6]]), model = { root: { kind: "node", name: "root", active: true, children: [node] } };
   const match = { name: "body", type: 1, channel: "primary", alternate: false, firstVertex: [1.05, 2, 3], vertexCount: 2, values: Uint8Array.of(100, 200) };
@@ -28,6 +46,19 @@ test("binds records by exact name, vertex count, and first-position tolerance", 
   assert.ok((.05 ** 2) < CSP_VAO_BIND_DISTANCE_SQUARED);
   const miss = bindVaoPatch(model, { records: [{ ...match, firstVertex: [1.1, 2, 3] }], recordCount: 1 });
   assert.equal(miss.matchedMeshes, 0);
+});
+
+test("binds normal overrides with the native mesh identity key", () => {
+  const node = mesh("road", [[1, 2, 3], [4, 5, 6]]), model = { root: { kind: "node", name: "root", active: true, children: [node] } };
+  const values = Float32Array.of(0, 1, 0, 0, 1, 0), normal = { name: "road", type: 2, channel: "normal", alternate: false, firstVertex: [1, 2, 3], vertexCount: 2, values };
+  const result = bindVaoPatch(model, { records: [normal], recordCount: 1 });
+  assert.equal(result.matchedMeshes, 1);
+  assert.equal(result.normalRecords, 1);
+  assert.equal(result.matchedNormalRecords, 1);
+  assert.equal(result.unmatchedNormalRecords, 0);
+  assert.equal(result.normalMeshes, 1);
+  assert.equal(result.normalVertices, 2);
+  assert.equal(result.bindings.get(node).normal, values);
 });
 
 test("parses native split-AO groups and contiguous wing animations", () => {
@@ -111,6 +142,8 @@ test("parses installed CSP legacy, v4, and v5 ZIP fixtures", async (t) => {
   catch { t.skip("Installed CSP VAO fixtures are unavailable"); return; }
   const barcelona = await parseVaoPatch(legacy, "ks_barcelona__layout_gp.vao-patch"), nissan = await parseVaoPatch(v4, "ks_nissan_370z.vao-patch"), bmw = await parseVaoPatch(v5, "ks_bmw_m4_akrapovic.vao-patch");
   assert.equal(barcelona.version, 1); assert.equal(barcelona.recordCount, 1945); assert.deepEqual([...barcelona.records[0].values.slice(8, 12)], [231, 203, 247, 217]);
+  const barcelonaNormal = barcelona.records.find((record) => record.channel === "normal");
+  assert.ok(barcelonaNormal); assert.equal(barcelonaNormal.values.length, barcelonaNormal.vertexCount * 3); assert.ok(Math.abs(Math.hypot(...barcelonaNormal.values.slice(0, 3)) - 1) < 1e-6);
   assert.equal(nissan.version, 4); assert.equal(nissan.recordCount, 908); assert.deepEqual([...nissan.records[0].values.slice(0, 4)], [234, 235, 228, 223]);
   assert.equal(nissan.splitAo.present, true); assert.equal(nissan.splitAo.door.exponent, 2); assert.equal(nissan.splitAo.wings[0].name, "car_rear_wing.ksanim");
   assert.equal(bmw.version, 5); assert.ok(bmw.recordCount > 100); assert.equal(bmw.entry, "Patch_v5.data");
@@ -146,4 +179,5 @@ function vaoRecord(name, type, first, count, payload) {
   view.setUint32(offset, count, true); offset += 4; bytes.set(payload, offset); return bytes;
 }
 function halfBytes(values) { const bytes = new Uint8Array(values.length * 2), view = new DataView(bytes.buffer); values.forEach((value, index) => view.setUint16(index * 2, value === 0 ? 0 : value === .5 ? 0x3800 : 0x3c00, true)); return bytes; }
+function halfWords(values) { const bytes = new Uint8Array(values.length * 2), view = new DataView(bytes.buffer); values.forEach((value, index) => view.setUint16(index * 2, value, true)); return bytes; }
 function mesh(name, positions) { const stride = 11, vertices = new Float32Array(positions.length * stride); positions.forEach((position, index) => vertices.set(position, index * stride)); return { kind: "mesh", name, active: true, visible: true, renderable: true, vertexStride: stride, vertices, indices: new Uint16Array(), children: [] }; }

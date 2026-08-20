@@ -62,7 +62,25 @@ export function parseVaoData(input, options = {}) {
     const componentBytes = version >= 4 ? 1 : 2, payloadBytes = vertexCount * components * componentBytes;
     need(bytes, offset, payloadBytes, source, `record ${name}`);
     let values = null;
-    if (type !== 2) {
+    if (type === 2) {
+      values = new Float32Array(vertexCount * 3);
+      for (let vertex = 0; vertex < vertexCount; vertex++) {
+        let x, y, z;
+        if (version >= 4) {
+          const sampleOffset = offset + vertex * 3;
+          x = bytes[sampleOffset] / 255; y = bytes[sampleOffset + 1] / 255; z = bytes[sampleOffset + 2] / 255;
+          if (version === 5) { x *= x; y *= y; z *= z; }
+        } else {
+          const sampleOffset = offset + vertex * 6;
+          x = halfToFloat(view.getUint16(sampleOffset, true));
+          y = halfToFloat(view.getUint16(sampleOffset + 2, true));
+          z = halfToFloat(view.getUint16(sampleOffset + 4, true));
+        }
+        const length = Math.hypot(x, y, z);
+        if (!Number.isFinite(length) || length === 0) throw new Error(`${source}: invalid normal for ${name} at vertex ${vertex}`);
+        values[vertex * 3] = x / length; values[vertex * 3 + 1] = y / length; values[vertex * 3 + 2] = z / length;
+      }
+    } else {
       values = new Uint8Array(vertexCount);
       for (let vertex = 0; vertex < vertexCount; vertex++) {
         let sample;
@@ -96,26 +114,29 @@ export function bindVaoPatch(model, patch) {
   const byName = new Map();
   for (const node of meshes) { const list = byName.get(node.name) || []; list.push(node); byName.set(node.name, list); }
   const bindings = new Map(), unmatched = [], alternate = [];
-  let matchedRecords = 0, normalRecords = 0;
+  let matchedRecords = 0, normalRecords = 0, matchedNormalRecords = 0;
   for (const record of patch?.records || []) {
-    if (record.channel === "normal") { normalRecords++; continue; }
-    if (record.alternate) { alternate.push(record); continue; }
+    const normal = record.channel === "normal";
+    if (normal) normalRecords++;
+    if (record.alternate) { if (!normal) alternate.push(record); continue; }
     const candidates = byName.get(record.name) || [];
     const node = candidates.find((candidate) => {
       if (candidate.vertices.length / candidate.vertexStride !== record.vertexCount) return false;
       const dx = candidate.vertices[0] - record.firstVertex[0], dy = candidate.vertices[1] - record.firstVertex[1], dz = candidate.vertices[2] - record.firstVertex[2];
       return dx * dx + dy * dy + dz * dz < CSP_VAO_BIND_DISTANCE_SQUARED;
     });
-    if (!node) { unmatched.push(record); continue; }
-    const binding = bindings.get(node) || { node, nodeNames: nodePaths.get(node) || Object.freeze([node.name]), primary: null, secondary: null, records: [] };
-    binding[record.channel] = record.values; binding.records.push(record); bindings.set(node, binding); matchedRecords++;
+    if (!node) { if (!normal) unmatched.push(record); continue; }
+    const binding = bindings.get(node) || { node, nodeNames: nodePaths.get(node) || Object.freeze([node.name]), primary: null, secondary: null, normal: null, records: [] };
+    binding[record.channel] = record.values; binding.records.push(record); bindings.set(node, binding);
+    if (record.channel === "normal") matchedNormalRecords++; else matchedRecords++;
   }
-  let vertices = 0, sum = 0, minimum = 255, maximum = 0, primaryMeshes = 0, secondaryMeshes = 0;
+  let vertices = 0, normalVertices = 0, sum = 0, minimum = 255, maximum = 0, primaryMeshes = 0, secondaryMeshes = 0, normalMeshes = 0;
   for (const binding of bindings.values()) {
     if (binding.primary) { primaryMeshes++;vertices += binding.primary.length;for (const value of binding.primary) { sum += value;minimum = Math.min(minimum, value);maximum = Math.max(maximum, value); } }
     if (binding.secondary) secondaryMeshes++;
+    if (binding.normal) { normalMeshes++; normalVertices += binding.normal.length / 3; }
   }
-  return { bindings, patchRecords: patch?.recordCount || patch?.records?.length || 0, matchedRecords, unmatchedRecords: unmatched.length, alternateRecords: alternate.length, normalRecords, matchedMeshes: bindings.size, primaryMeshes, secondaryMeshes, vertices, minimum: vertices ? minimum : 255, maximum: vertices ? maximum : 255, mean: vertices ? sum / vertices : 255, unmatched: unmatched.slice(0, 32), alternate: alternate.slice(0, 32) };
+  return { bindings, patchRecords: patch?.recordCount || patch?.records?.length || 0, matchedRecords, unmatchedRecords: unmatched.length, alternateRecords: alternate.length, normalRecords, matchedNormalRecords, unmatchedNormalRecords: normalRecords - matchedNormalRecords, matchedMeshes: bindings.size, primaryMeshes, secondaryMeshes, normalMeshes, vertices, normalVertices, minimum: vertices ? minimum : 255, maximum: vertices ? maximum : 255, mean: vertices ? sum / vertices : 255, unmatched: unmatched.slice(0, 32), alternate: alternate.slice(0, 32) };
 }
 
 /** Parse the CSP node groups and curves used to blend split vertex AO. */

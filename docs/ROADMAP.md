@@ -96,13 +96,14 @@ vertical slice is only the foundation.
   template-expanded `SelfLight` defaults. Local shadows use the recovered four-sample
   resolve and separable 7-tap or 15-tap filters. Native occluder cell/BVH ordering,
   32-slot atlas packing, dynamic refresh scheduling, and photometric behavior remain.
-- Complete VAO split-animation blending, legacy normal overrides, dynamic-object
-  extra samples, and tree samples; add higher-fidelity car
+- Complete VAO split-animation blending, dynamic-object extra samples, and tree
+  samples; add higher-fidelity car
   paint/glass/interior rendering. Installed legacy/v3/v4/v5 `.vao-patch` containers
   now have a bounds- and CRC-checked portable loader. It reproduces native payload
   conversion and exact mesh identity matching, feeds primary per-vertex AO into
-  indirect lighting, preserves the second car channel, and reports alternate states,
-  normal overrides, dynamic samples, and tree samples without silently approximating them.
+  indirect lighting and preserves the second car channel. Recovered type-2 decoding
+  and exact identity binding now replace matching mesh normals in WebGL. The loader
+  reports alternate states, dynamic samples, and tree samples without approximating them.
   Seasonal material adjustment is now implemented from CSP's public shader source and
   the installed DLL behavior: `YEAR_PROGRESS` drives the config LUTs, `seasonAutumn`
   and `seasonWinter` use the native diffuse transform, and compatibility-only

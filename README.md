@@ -303,8 +303,10 @@ composition, FBX bump-map conversion and packed material maps, arbitrary vertex 
 face editing, skinned bind-pose geometry editing,
 full local-light photometric fidelity,
 Yebis star, ghost, light-shaft, non-default max-61 Gaussian passes, controlled pixel matching,
-cloud billboards, and the remaining post-processing stack, VAO split-animation blending, normal overrides, dynamic
-extra samples, and tree samples remain on the implementation roadmap. CSP's exact
+cloud billboards, and the remaining post-processing stack, VAO split-animation blending, dynamic
+extra samples, and tree samples remain on the implementation roadmap. Legacy VAO
+normal overrides now use the recovered decoder, identity key, and normalized WebGL
+vertex input. CSP's exact
 tree-season variation noise texture is represented by deterministic world-space preview
 noise; the recovered color transform and all non-tree fixed-variation paths are exact. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full goal and completion gates.
@@ -318,7 +320,7 @@ the game-visible scene with the all-mesh authoring view. Pass `--shadows` to cap
 and compare the native-shaped directional preview with shadows disabled. Pass `--lighting`, plus
 optional `--weather`, `--sun-heading`, `--sun-height`, `--compare-sun-height`, or
 `--manual-exposure`, to verify and compare the HDR weather-lighting path. Pass
-`--vao FILE.vao-patch` to bind a CSP vertex-AO patch and capture its enabled and
+`--vao FILE.vao-patch` to bind a CSP VAO patch and capture its enabled and
 disabled states. Pass `--seasons --year-progress 0.07 --compare-year-progress 0.5`
 to drive seasonal conditions through the track's calendar LUTs and compare captures.
 Pass `--reflection-compare` to capture and hash the live scene-cubemap and procedural
