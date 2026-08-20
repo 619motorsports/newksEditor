@@ -46,6 +46,7 @@ test("discovers immediate skin texture folders and matches KN5 texture basenames
   const skins = discoverAssetSkins(createAssetFileIndex(files));
   assert.deepEqual(skins.map((skin) => skin.name), ["02_red", "10_blue"]);
   assert.deepEqual(skins[0].files.map((entry) => entry.basename), ["body.dds", "Plate_D.dds", "preview.jpg"]);
+  assert.deepEqual(skins[1].metadataFiles.map((entry) => entry.basename), ["ui_skin.json"]);
   const matched = matchSkinTextures(skins[0].files, new Set(["textures/BODY.DDS", "Plate_D.dds", "metal_detail.dds"]));
   assert.deepEqual(matched.files.map((entry) => entry.name), ["body.dds", "plate_d.dds"]);
   assert.deepEqual(matched.missing, ["metal_detail.dds"]);
@@ -56,6 +57,17 @@ test("reports case-colliding skin texture files as ambiguous", () => {
   const matched = matchSkinTextures(skin.files, ["body.dds"]);
   assert.equal(matched.files.length, 0);
   assert.equal(matched.ambiguous[0].entries.length, 2);
+});
+
+test("discovers metadata-only skins and retains ambiguous metadata files", () => {
+  const skins = discoverAssetSkins(createAssetFileIndex([
+    file("car/skins/metadata_only/ui_skin.json"),
+    file("car/skins/ambiguous/ui_skin.json"),
+    file("car/skins/ambiguous/UI_SKIN.JSON")
+  ]));
+  assert.deepEqual(skins.map((skin) => [skin.name, skin.files.length, skin.metadataFiles.length]), [
+    ["ambiguous", 0, 2], ["metadata_only", 0, 1]
+  ]);
 });
 
 test("discovers animation files anywhere inside an asset folder", () => {

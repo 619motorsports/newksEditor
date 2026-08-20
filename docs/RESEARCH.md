@@ -1653,6 +1653,20 @@ other KN5 textures remained inherited. Chrome 151 produced a visibly darker gold
 than the embedded-texture preview and a distinct capture hash, with no unsupported
 skin texture, JavaScript exception, or WebGL error.
 
+An installed-data audit found 15,067 `ui_skin.json` files. After accepting the UTF-8
+BOM in 44 files, 14,971 files had readable JSON and 96 were malformed. The strict
+parser accepted 14,960 files. It rejected 11 additional files with invalid UTF-8.
+The readable objects used only six top-level keys. `skinname` occurred in every file.
+The `drivername`, `country`, `team`, and `number` fields occurred in most files. A
+numeric car number occurred in 1,591 files, so Apex accepts it and writes it as text.
+The optional integer `priority` field occurred in 4,497 files. Values ranged from
+0 through 35.
+
+Apex limits metadata input to 1 MiB, requires valid UTF-8 and one JSON object, and
+reports malformed files without replacing them. The editor retains safe unknown
+fields for compatibility with other installations. It stores only the six authored
+field changes in the Apex project and exports a standalone `ui_skin.json` file.
+
 ## ksEditor directional-shadow evidence
 
 The installed SDK editor configuration fixes `SHADOW_MAP_SIZE=2048` in

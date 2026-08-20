@@ -30,6 +30,7 @@ import { KS_EDITOR_CUBEMAP, WEBGL_CUBEMAP_FACES, reflectionBlurFromExponent, sel
 import { createCspWindParticles, CSP_WIND_MAP_FORMAT, CSP_WIND_MAP_SIZE, CSP_WIND_PARTICLE_COUNT, updateCspWindParticles } from "/src/csp-wind.js";
 import { collectFbxAnimations, parseFbxWithTextures, resolveFbxModelTextures } from "/src/fbx-import.js";
 import { applyNodeEdits, composeNodeTransform, decomposeNodeTransform, nodePathEntries } from "/src/node-authoring.js";
+import { createSkinMetadata, effectiveSkinMetadata, parseSkinMetadata, serializeSkinMetadata, SKIN_METADATA_TEXT_FIELDS } from "/src/skin-metadata.js";
 
 const $ = (selector) => document.querySelector(selector);
 const fileInput = $("#file");
@@ -69,6 +70,8 @@ let cspTextureFolderName = "";
 let cspTextureFolderFiles = [];
 let assetSkins = [];
 let assetSkinName = "";
+let assetSkinMetadata = null;
+let assetSkinMetadataError = "";
 let assetAnimations = [];
 let importedFbxAnimations = [];
 let activeAnimation = null;
@@ -162,7 +165,7 @@ $("#skin-select").addEventListener("change", async (event) => {
   const skin = assetSkins.find((candidate) => candidate.name === event.target.value);
   assetSkinName = skin?.name || "";
   status.textContent = assetSkinName ? `Loading skin ${assetSkinName}…` : modelStatusText();
-  await renderer?.setSkinFiles(skin?.files || [], assetSkinName);
+  await Promise.all([renderer?.setSkinFiles(skin?.files || [], assetSkinName), configureSelectedSkinMetadata(skin)]);
   if (modelFile) status.textContent = modelStatusText();
   if (model && !selectedNode) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
 });
@@ -328,11 +331,33 @@ function configureLayoutChoices() {
 function configureSkinChoices() {
   assetSkins = discoverAssetSkins(assetFileIndex);
   assetSkinName = "";
+  assetSkinMetadata = null;
+  assetSkinMetadataError = "";
+  window.__apexSkinMetadata = null;
   const select = $("#skin-select");
   select.replaceChildren(new Option("Embedded textures", ""), ...assetSkins.map((skin) => new Option(`Skin · ${skin.name}`, skin.name)));
   select.hidden = !assetSkins.length;
   select.value = "";
   select.title = assetSkins.length ? `${assetSkins.length} skin folders discovered` : "No skin folders discovered";
+}
+
+async function configureSelectedSkinMetadata(skin) {
+  assetSkinMetadata = null; assetSkinMetadataError = ""; window.__apexSkinMetadata = null;
+  if (!skin) return;
+  if (skin.metadataFiles.length > 1) {
+    assetSkinMetadataError = `${skin.path}/ui_skin.json is ambiguous because ${skin.metadataFiles.length} case-insensitive files match`;
+    return;
+  }
+  try {
+    const entry = skin.metadataFiles[0];
+    assetSkinMetadata = entry
+      ? parseSkinMetadata(await entry.file.arrayBuffer(), entry.relativePath)
+      : createSkinMetadata(`${skin.path}/ui_skin.json`);
+    window.__apexSkinMetadata = assetSkinMetadata;
+  } catch (error) {
+    console.error(error);
+    assetSkinMetadataError = error.message;
+  }
 }
 
 function configureAnimationChoices() {
@@ -677,23 +702,23 @@ function commitEditorChange(label, mutate) {
   const normalized = normalizeEditorProject(next), after = serializeEditorProject(normalized);
   if (after === before) return false;
   const geometryChanged = JSON.stringify(normalized.geometryEdits) !== JSON.stringify(editorProject.geometryEdits);
-  const sceneChanged = geometryChanged || JSON.stringify(normalized.nodeEdits) !== JSON.stringify(editorProject.nodeEdits) || JSON.stringify(normalized.workspaceEdits) !== JSON.stringify(editorProject.workspaceEdits) || JSON.stringify(normalized.surfaceEdits) !== JSON.stringify(editorProject.surfaceEdits);
+  const sceneChanged = geometryChanged || JSON.stringify(normalized.nodeEdits) !== JSON.stringify(editorProject.nodeEdits) || JSON.stringify(normalized.workspaceEdits) !== JSON.stringify(editorProject.workspaceEdits) || JSON.stringify(normalized.surfaceEdits) !== JSON.stringify(editorProject.surfaceEdits), skinChanged = JSON.stringify(normalized.skinEdits) !== JSON.stringify(editorProject.skinEdits);
   undoStack.push({ label, snapshot: before });
   if (undoStack.length > 100) undoStack.shift();
   redoStack = [];
   editorProject = normalized;
   if (sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged); }
   refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
-  if (sceneChanged && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
+  if ((sceneChanged || skinChanged) && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
   return true;
 }
 
 function restoreEditorSnapshot(snapshot) {
-  const restored = normalizeEditorProject(JSON.parse(snapshot)), geometryChanged = JSON.stringify(restored.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits), sceneChanged = geometryChanged || JSON.stringify(restored.nodeEdits) !== JSON.stringify(editorProject?.nodeEdits) || JSON.stringify(restored.workspaceEdits) !== JSON.stringify(editorProject?.workspaceEdits) || JSON.stringify(restored.surfaceEdits) !== JSON.stringify(editorProject?.surfaceEdits);
+  const restored = normalizeEditorProject(JSON.parse(snapshot)), geometryChanged = JSON.stringify(restored.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits), sceneChanged = geometryChanged || JSON.stringify(restored.nodeEdits) !== JSON.stringify(editorProject?.nodeEdits) || JSON.stringify(restored.workspaceEdits) !== JSON.stringify(editorProject?.workspaceEdits) || JSON.stringify(restored.surfaceEdits) !== JSON.stringify(editorProject?.surfaceEdits), skinChanged = JSON.stringify(restored.skinEdits) !== JSON.stringify(editorProject?.skinEdits);
   editorProject = restored;
   if (sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged); }
   refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
-  if (sceneChanged && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
+  if ((sceneChanged || skinChanged) && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
 }
 
 function undoEditorChange() {
@@ -866,7 +891,7 @@ function renderModelInspector(file, nodes, triangles) {
   inspector.className = "inspector";
   const protection = model.encryption ? `<div class="section"><h3>CSP-protected payload</h3>${kv("Format", model.encryption.format)}${kv("Payload", `${(model.encryption.payloadBytes / 1048576).toFixed(2)} MB`)}${kv("Records", model.encryption.recordCount.toLocaleString())}${kv("Protected textures", model.encryption.protectedTextures.length)}${kv("Protected meshes", model.encryption.protectedMeshes.length)}${kv("Structure", model.encryption.valid ? "Recognized" : `Invalid: ${model.encryption.error}`)}<span class="empty">The public KN5 scene is available. Protected geometry and textures remain placeholders until a compatible payload decoder is available.</span></div>` : "";
   inspector.innerHTML = `<div class="section"><h3>Model</h3>${kv("File", file.name)}${kv("Format", `KN5 v${model.version}`)}${kv("Size", `${(file.size / 1048576).toFixed(2)} MB`)}${kv("Nodes", nodes.length.toLocaleString())}${kv("Triangles", Math.round(triangles).toLocaleString())}${kv("Textures", model.textures.length)}${kv("Parsed", model.bytesRead === model.byteLength ? "Complete" : model.encryption?.valid ? "Public scene + protected payload" : `${model.bytesRead} / ${model.byteLength}`)}${kv("Authored edits", editorProjectEditCount(editorProject))}</div>${protection}${cspEvaluation ? `<div class="section"><h3>CSP configuration</h3>${kv("File", cspConfig ? cspFileName : "Apex authored edits")}${kv("Sections", activeCspConfig?.sections.length || 0)}${kv("Expanded templates", cspConfig?.expandedTemplates?.length || 0)}${kv("Matched override sections", cspEvaluation.matchedSections)}${kv("Overridden meshes", cspEvaluation.nodeOverrides.size)}${kv("Custom-emissive meshes", cspEvaluation.customEmissiveMeshes)}${kv("Matched light sections", cspEvaluation.matchedLightSections)}${kv("Light instances", cspEvaluation.lights.length)}${kv("Active light instances", cspEvaluation.lights.filter((light) => Math.max(...light.color.map(Math.abs)) > 1e-5).length)}${kv("Track light occluders", cspEvaluation.trackOccluders?.length || 0)}${kv("Unresolved includes", cspEvaluation.unresolvedIncludes.length)}${cspEvaluation.unresolvedIncludes.map((name) => `<div class="resource"><span>${escapeHtml(name)}</span></div>`).join("")}</div>${cspEvaluation.usedConditions.size ? `<div class="section"><h3>Condition preview</h3>${[...cspEvaluation.usedConditions].sort().map((name) => conditionHtml(name, cspEvaluation.conditions.get(name) ?? 0)).join("")}</div>` : ""}${cspEvaluation.usedInputs.size ? `<div class="section"><h3>Input preview</h3>${[...cspEvaluation.usedInputs].sort(([a], [b]) => a.localeCompare(b)).map(([name, input]) => inputHtml(name, input)).join("")}</div>` : ""}${cspEvaluation.lights.length ? `<div class="section"><h3>CSP lights</h3>${cspEvaluation.lights.slice(0, 16).map(lightHtml).join("")}${cspEvaluation.lights.length > 16 ? `<span class="empty">${(cspEvaluation.lights.length - 16).toLocaleString()} more light instances</span>` : ""}</div>` : ""}` : ""}<div class="section"><h3>Materials</h3>${model.materials.map((m, i) => `<div class="resource material-link" data-material="${i}"><strong>${escapeHtml(m.name)}</strong><span>${escapeHtml(m.shader)}</span></div>`).join("")}</div>`;
-  const supplementalHtml = fbxImportInspectorHtml() + workspaceInspectorHtml() + packedDataInspectorHtml() + carHierarchyInspectorHtml() + carColliderInspectorHtml() + driverInspectorHtml() + trackCameraInspectorHtml() + trackValidationInspectorHtml() + shaderProfilesInspectorHtml() + vaoInspectorHtml() + seasonalInspectorHtml() + weatherLightingInspectorHtml() + reflectionCaptureInspectorHtml() + lightingInspectorHtml() + grassFxInspectorHtml() + rainFxInspectorHtml() + animationInspectorHtml() + skinTextureInspectorHtml() + externalTextureInspectorHtml(), materialSection = inspector.querySelector(".section:last-child");
+  const supplementalHtml = fbxImportInspectorHtml() + workspaceInspectorHtml() + packedDataInspectorHtml() + carHierarchyInspectorHtml() + carColliderInspectorHtml() + driverInspectorHtml() + trackCameraInspectorHtml() + trackValidationInspectorHtml() + shaderProfilesInspectorHtml() + vaoInspectorHtml() + seasonalInspectorHtml() + weatherLightingInspectorHtml() + reflectionCaptureInspectorHtml() + lightingInspectorHtml() + grassFxInspectorHtml() + rainFxInspectorHtml() + animationInspectorHtml() + skinMetadataInspectorHtml() + skinTextureInspectorHtml() + externalTextureInspectorHtml(), materialSection = inspector.querySelector(".section:last-child");
   if (supplementalHtml && materialSection) materialSection.insertAdjacentHTML("beforebegin", supplementalHtml);
   inspector.querySelectorAll("[data-material]").forEach((el) => el.addEventListener("click", () => renderMaterialInspector(model.materials[Number(el.dataset.material)])));
   inspector.querySelectorAll("[data-condition]").forEach((input) => input.addEventListener("input", () => {
@@ -887,6 +912,7 @@ function renderModelInspector(file, nodes, triangles) {
   }));
   bindWorkspaceEditors();
   bindSurfaceEditors();
+  bindSkinMetadataEditors();
 }
 
 function renderMaterialInspector(material) {
@@ -940,6 +966,17 @@ function skinTextureInspectorHtml() {
   const skin = renderer?.skinTextureStatus;
   if (!assetSkins.length && !skin?.name) return "";
   return `<div class="section"><h3>Skin textures</h3>${kv("Discovered skins", assetSkins.length)}${kv("Selected", skin?.name || "Embedded textures")}${skin?.name ? `${kv("Files in skin", skin.available)}${kv("Matched KN5 textures", skin.matched)}${kv("Loaded", skin.ready)}${kv("Pending", skin.pending)}${kv("Inherited from KN5", skin.inherited)}${kv("Ambiguous", skin.ambiguous)}${kv("Unsupported", skin.unsupported)}${skin.replacedNames.map((name) => `<div class="resource"><span>${escapeHtml(name)}</span></div>`).join("")}` : ""}</div>`;
+}
+
+function skinMetadataInspectorHtml() {
+  if (!assetSkinName) return "";
+  if (assetSkinMetadataError) return `<div class="section"><h3>Skin metadata</h3>${kv("Selected", assetSkinName)}<div class="resource validation-error"><strong>ui_skin.json</strong><span>${escapeHtml(assetSkinMetadataError)}</span></div></div>`;
+  if (!assetSkinMetadata) return "";
+  const match = matchingProjectEdit(editorProject?.skinEdits, assetSkinName), edit = match?.value || {}, metadata = effectiveSkinMetadata(assetSkinMetadata, edit), sourceExists = assetSkinMetadata.byteLength > 0;
+  const labels = { skinname: "Skin name", drivername: "Driver", country: "Country", team: "Team", number: "Number" };
+  const fields = SKIN_METADATA_TEXT_FIELDS.map((key) => `<div class="author-field skin-metadata-field"><span>${labels[key]}</span><input aria-label="${labels[key]}" class="${edit[key] !== undefined ? "authored" : ""}" data-edit-skin-text="${key}" value="${escapeAttribute(metadata[key])}" maxlength="4096"><button class="mini" data-reset-skin-field="${key}" ${edit[key] !== undefined ? "" : "disabled"}>Reset</button></div>`).join("");
+  const priority = metadata.priority === null ? "" : String(metadata.priority);
+  return `<div class="section"><h3>Skin metadata${Object.keys(edit).length ? ` · <span class="edit-count">${Object.keys(edit).length} edits</span>` : ""}</h3>${kv("Selected", assetSkinName)}${kv("Source", sourceExists ? assetSkinMetadata.source : "New ui_skin.json")}${fields}<div class="author-field skin-metadata-field"><span>Priority</span><input aria-label="Priority" class="${edit.priority !== undefined ? "authored" : ""}" data-edit-skin-priority type="number" min="0" step="1" value="${escapeAttribute(priority)}" placeholder="Not set"><button class="mini" data-reset-skin-field="priority" ${edit.priority !== undefined ? "" : "disabled"}>Reset</button></div>${assetSkinMetadata.warnings.map((warning) => `<div class="resource"><strong>Metadata warning</strong><span>${escapeHtml(warning)}</span></div>`).join("")}<span class="empty">Unknown source fields are retained. Metadata exports separately from KN5 and CSP files.</span><div class="section-actions"><button class="mini" data-export-skin-metadata>Export ui_skin.json</button><button class="mini" data-reset-skin-metadata ${Object.keys(edit).length ? "" : "disabled"}>Reset metadata edits</button></div></div>`;
 }
 
 function updateAnimationUi(value) {
@@ -1252,6 +1289,53 @@ function editSurface(project, position, mutate) {
   mutate(edit); project.surfaceEdits[key] = edit;
 }
 
+function editSkinMetadata(project, skinName, mutate) {
+  project.skinEdits ||= Object.create(null);
+  const existing = matchingProjectEdit(project.skinEdits, skinName), key = existing?.key || skinName, edit = existing?.value || {};
+  mutate(edit);
+  project.skinEdits[key] = edit;
+}
+
+function bindSkinMetadataEditors() {
+  if (!assetSkinName || !assetSkinMetadata || assetSkinMetadataError) return;
+  inspector.querySelectorAll("[data-edit-skin-text]").forEach((input) => {
+    const commit = () => {
+      const key = input.dataset.editSkinText, value = input.value;
+      commitEditorChange(`Set ${assetSkinName} ${key}`, (project) => editSkinMetadata(project, assetSkinName, (edit) => { edit[key] = value; }));
+    };
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } });
+    input.addEventListener("change", commit);
+  });
+  inspector.querySelector("[data-edit-skin-priority]")?.addEventListener("change", (event) => {
+    try {
+      const text = event.target.value.trim();
+      if (!text) {
+        commitEditorChange(`Reset ${assetSkinName} priority`, (project) => editSkinMetadata(project, assetSkinName, (edit) => { delete edit.priority; }));
+        return;
+      }
+      const value = Number(text);
+      if (!Number.isSafeInteger(value) || value < 0) throw new Error("Skin priority must be a nonnegative integer");
+      commitEditorChange(`Set ${assetSkinName} priority`, (project) => editSkinMetadata(project, assetSkinName, (edit) => { edit.priority = value; }));
+    } catch (error) { event.target.classList.add("invalid"); status.textContent = error.message; }
+  });
+  inspector.querySelectorAll("[data-reset-skin-field]").forEach((button) => button.addEventListener("click", () => {
+    const key = button.dataset.resetSkinField;
+    commitEditorChange(`Reset ${assetSkinName} ${key}`, (project) => editSkinMetadata(project, assetSkinName, (edit) => { delete edit[key]; }));
+  }));
+  inspector.querySelector("[data-reset-skin-metadata]")?.addEventListener("click", () => commitEditorChange(`Reset ${assetSkinName} metadata`, (project) => {
+    const existing = matchingProjectEdit(project.skinEdits, assetSkinName);
+    if (existing) delete project.skinEdits[existing.key];
+  }));
+  inspector.querySelector("[data-export-skin-metadata]")?.addEventListener("click", () => {
+    try {
+      const edit = matchingProjectEdit(editorProject?.skinEdits, assetSkinName)?.value, text = serializeSkinMetadata(assetSkinMetadata, edit);
+      downloadText("ui_skin.json", text, "application/json");
+      window.__apexLastSkinMetadataExport = { name: "ui_skin.json", skin: assetSkinName, text, metadata: JSON.parse(text) };
+      status.textContent = `Exported ${assetSkinName}/ui_skin.json`;
+    } catch (error) { console.error(error); status.textContent = `Could not export ui_skin.json: ${error.message}`; }
+  });
+}
+
 function bindSurfaceEditors() {
   if (!trackSurfaceConfig) return;
   inspector.querySelectorAll("[data-edit-surface-number]").forEach((input) => {
@@ -1456,6 +1540,7 @@ function bindMaterialEditors(material) {
 function kv(key, value) { return `<div class="kv"><span>${escapeHtml(String(key))}</span><span>${escapeHtml(String(value))}</span></div>`; }
 function format(value) { return Number.isFinite(value) ? Number(value.toFixed(4)).toString() : "—"; }
 function escapeHtml(value) { const el = document.createElement("span"); el.textContent = value; return el.innerHTML; }
+function escapeAttribute(value) { return escapeHtml(String(value)).replaceAll('"', "&quot;").replaceAll("'", "&#39;"); }
 
 function createRenderer(canvas) {
   const gl = canvas.getContext("webgl2", { antialias: true, alpha: false });

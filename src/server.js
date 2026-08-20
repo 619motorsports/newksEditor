@@ -15,7 +15,7 @@ const sourceFiles = new Set([
   "dds.js", "driver-workspace.js", "editor-project.js", "fbx-import.js", "geometry-authoring.js", "grass-fx.js",
   "kn5-bake.js", "kn5-workspace.js", "kn5-write.js", "kn5.js", "knh.js",
   "ksanim.js", "lighting.js", "node-authoring.js", "rain-fx.js", "reflections.js", "seasons.js",
-  "shader-profiles.js", "shadows.js", "skinning.js", "track-cameras.js",
+  "shader-profiles.js", "shadows.js", "skin-metadata.js", "skinning.js", "track-cameras.js",
   "surface-authoring.js", "track-validation.js", "vao-patch.js", "workspace-authoring.js"
 ]);
 const threeBuildFiles = new Set(["three.core.js", "three.module.js"]);

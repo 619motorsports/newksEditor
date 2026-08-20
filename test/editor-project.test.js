@@ -34,6 +34,18 @@ test("normalizes track surface edits as non-CSP project fields", () => {
   assert.equal(editorProjectCspEditCount(project), 0);
 });
 
+test("normalizes skin metadata edits as non-CSP project fields", () => {
+  const project = normalizeEditorProject({ format: "apex-editor-project", version: 1, skinEdits: {
+    red: { skinname: "Rosso", drivername: "Driver", country: "Italy", team: "Works", number: 7, priority: 30, ignored: true },
+    blue: { skinname: "Blue", priority: -1 }
+  } });
+  assert.deepEqual({ ...project.skinEdits.red }, { skinname: "Rosso", drivername: "Driver", country: "Italy", team: "Works", priority: 30 });
+  assert.deepEqual({ ...project.skinEdits.blue }, { skinname: "Blue" });
+  assert.equal(editorProjectEditCount(project), 6);
+  assert.equal(editorProjectCspEditCount(project), 0);
+  assert.deepEqual(JSON.parse(serializeEditorProject(project)).skinEdits.red, { skinname: "Rosso", drivername: "Driver", country: "Italy", team: "Works", priority: 30 });
+});
+
 test("parses and formats scalar and vector editor values", () => {
   assert.equal(parseEditorValue("0.375"), 0.375);
   assert.deepEqual(parseEditorValue("1, 0.5, 0"), [1, 0.5, 0]);

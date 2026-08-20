@@ -32,7 +32,11 @@ For a car, edit each LOD range and the cockpit or driver distance switch. Press 
 The preview, undo history, recovery data, and project file use the same values. Select **Export models.ini** or **Export lods.ini** to download the manifest.
 Discovered
 `skins/<name>` folders can replace matching KN5 texture basenames just as they do in
-the game. Discovered `.ksanim` files can be sampled on a normalized timeline with
+the game. Select a skin and open the **Model** inspector to edit its `ui_skin.json`
+name, driver, country, team, number, and priority. Skin metadata edits use the same
+undo, recovery, and project history as other edits. Export writes a separate
+`ui_skin.json` file and retains safe unknown source fields. Discovered `.ksanim`
+files can be sampled on a normalized timeline with
 their matching KN5 hierarchy transforms applied live. Imported FBX clips use the
 same timeline. You can export a selected clip as a KSANIM v2 file. The same asset folder
 resolves case-insensitive external CSP texture paths and reports missing or ambiguous
@@ -136,7 +140,9 @@ npm test
   steering, and brake-disc nodes; duplicate/null-kind diagnostics; left/right and
   +Z-forward wheel-axis checks; related-pivot and cross-LOD alignment
 - Car and track skin discovery with live selection, case-insensitive KN5-basename
-  replacement, sparse inheritance, per-LOD texture scoping, and ambiguity/load diagnostics
+  replacement, sparse inheritance, per-LOD texture scoping, and ambiguity/load diagnostics.
+  Bounded `ui_skin.json` parsing and editing covers all six installed metadata fields,
+  project persistence, undo, recovery, unknown-field preservation, and standalone export.
 - KSANIM v1 matrix and v2 quaternion/position/scale parsing, exact runtime frame
   sampling, v2 serialization, hierarchical node binding, live timeline preview,
   and match diagnostics

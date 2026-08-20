@@ -1,4 +1,5 @@
 import { SURFACE_EDIT_KEYS } from "./surface-authoring.js";
+import { normalizeSkinMetadataEdit, SKIN_METADATA_FIELDS } from "./skin-metadata.js";
 
 export const PROJECT_FORMAT = "apex-editor-project";
 export const PROJECT_VERSION = 1;
@@ -130,7 +131,8 @@ export function createEditorProject(asset = {}) {
     nodeEdits: Object.create(null),
     geometryEdits: Object.create(null),
     workspaceEdits: { files: Object.create(null) },
-    surfaceEdits: Object.create(null)
+    surfaceEdits: Object.create(null),
+    skinEdits: Object.create(null)
   };
 }
 
@@ -144,6 +146,7 @@ export function normalizeEditorProject(value) {
   project.geometryEdits = safeRecord(value.geometryEdits, (item) => cleanGeometryEdit(item));
   project.workspaceEdits = cleanWorkspaceEdits(value.workspaceEdits);
   project.surfaceEdits = safeRecord(value.surfaceEdits, (item) => cleanSurfaceEdit(item));
+  project.skinEdits = safeRecord(value.skinEdits, (item) => normalizeSkinMetadataEdit(item));
   return project;
 }
 
@@ -172,7 +175,8 @@ export function editorProjectEditCount(project) {
   const workspaceFiles = Object.values(project?.workspaceEdits?.files || {}).reduce((count, edit) => count + WORKSPACE_FILE_EDIT_KEYS.filter((key) => edit[key] !== undefined).length, 0);
   const workspace = workspaceFiles + ["cockpitHrDistance", "driverHrDistance"].filter((key) => project?.workspaceEdits?.[key] !== undefined).length;
   const surfaces = Object.values(project?.surfaceEdits || {}).reduce((count, edit) => count + SURFACE_EDIT_KEYS.filter((key) => edit?.[key] !== undefined).length, 0);
-  return materials + meshes + nodes + geometry + workspace + surfaces;
+  const skins = Object.values(project?.skinEdits || {}).reduce((count, edit) => count + SKIN_METADATA_FIELDS.filter((key) => edit?.[key] !== undefined).length, 0);
+  return materials + meshes + nodes + geometry + workspace + surfaces + skins;
 }
 
 export function editorProjectCspEditCount(project) {
@@ -182,7 +186,8 @@ export function editorProjectCspEditCount(project) {
   const workspaceFiles = Object.values(project?.workspaceEdits?.files || {}).reduce((count, edit) => count + WORKSPACE_FILE_EDIT_KEYS.filter((key) => edit[key] !== undefined).length, 0);
   const workspace = workspaceFiles + ["cockpitHrDistance", "driverHrDistance"].filter((key) => project?.workspaceEdits?.[key] !== undefined).length;
   const surfaces = Object.values(project?.surfaceEdits || {}).reduce((count, edit) => count + SURFACE_EDIT_KEYS.filter((key) => edit?.[key] !== undefined).length, 0);
-  return total - nodes - geometry - workspace - surfaces;
+  const skins = Object.values(project?.skinEdits || {}).reduce((count, edit) => count + SKIN_METADATA_FIELDS.filter((key) => edit?.[key] !== undefined).length, 0);
+  return total - nodes - geometry - workspace - surfaces - skins;
 }
 
 function quoteListItem(value) {
