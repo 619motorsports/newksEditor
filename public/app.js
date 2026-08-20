@@ -12,7 +12,7 @@ import { bakeEditorProjectIntoKn5 } from "/src/kn5-bake.js";
 import { serializeKn5 } from "/src/kn5-write.js";
 import { auditTrackModel, parseSurfacesIni, resolveTrackSurface, serializeSurfacesIni } from "/src/track-validation.js";
 import { applySurfaceEdits, captureSurfaceBaseline, surfaceEditCount as countSurfaceEdits } from "/src/surface-authoring.js";
-import { findAcdEntry, parseAcd } from "/src/acd.js";
+import { findAcdEntry, parseAcd, serializeAcd } from "/src/acd.js";
 import { auditCarCollider, auditCarHierarchy, parseBottomCollidersIni } from "/src/car-validation.js";
 import { parseKnh } from "/src/knh.js";
 import { applyDriverBasePose, auditDriverHiddenObjects, auditDriverRig, findDriverModelAsset, parseDriver3dIni } from "/src/driver-workspace.js";
@@ -255,7 +255,7 @@ async function load(files, workspaceOptions = {}) {
       entries.push({ name: descriptor.name || file.name, size: file.size, model: parsed, position: descriptor.position, rotation: descriptor.rotation, lod: descriptor.lod, manifestIndex: descriptor.manifestIndex, auxiliary:descriptor.auxiliary, dynamic: descriptor.dynamic });
     }
     const forceWorkspace = workspaceOptions.forceWorkspace || entries.length > 1 || entries.some((entry) => [...(entry.position || []), ...(entry.rotation || [])].some((value) => Number(value) !== 0));
-    model = forceWorkspace ? mergeKn5Models(entries, { name: displayName, kind: workspaceOptions.kind, manifest: workspaceOptions.manifest, warnings: workspaceOptions.warnings, cockpitHrDistance: workspaceOptions.cockpitHrDistance, driverHrDistance: workspaceOptions.driverHrDistance }) : entries[0].model;
+    model = forceWorkspace ? mergeKn5Models(entries, { name: displayName, kind: workspaceOptions.kind, manifest: workspaceOptions.manifest, packedManifest: workspaceOptions.packedManifest, warnings: workspaceOptions.warnings, cockpitHrDistance: workspaceOptions.cockpitHrDistance, driverHrDistance: workspaceOptions.driverHrDistance }) : entries[0].model;
     loadedModelDescriptors=descriptors.map((descriptor,index)=>({...descriptor,model:entries[index].model}));loadedWorkspaceOptions={...workspaceOptions,name:displayName};
     const totalSize = descriptors.reduce((sum, descriptor) => sum + (Number(descriptor.file.size) || 0), 0);
     modelFile = forceWorkspace ? { name: displayName, size: totalSize, workspaceKey: descriptors.map((descriptor, index) => `${descriptor.file.webkitRelativePath || descriptor.file.name}:${descriptor.file.size}:${entries[index].position || ""}:${entries[index].rotation || ""}:${entries[index].lod ? `${entries[index].lod.index},${entries[index].lod.in},${entries[index].lod.out}` : ""}`).join("|") } : descriptors[0].file;
@@ -380,7 +380,7 @@ function playTrackCameraSpline(now){const choice=trackCameraChoices.find((item)=
 function applyTrackCameraPreview(){const choice=trackCameraChoices.find((item)=>item.key===$("#track-camera-select").value)||null,control=$("#track-camera-position-control"),play=$("#track-camera-play"),hasSpline=Boolean(choice?.camera.splineData);control.hidden=!hasSpline;play.hidden=!hasSpline;play.disabled=!hasSpline;if(!choice){renderer?.setTrackCamera(null);return;}const camera=choice.camera,offset=hasSpline?sampleCameraSpline(camera.splineData.points,trackCameraPosition):[0,0,0];renderer?.setTrackCamera({...camera,position:camera.position.map((value,index)=>value+offset[index]),basePosition:[...camera.position],splinePreviewPosition:trackCameraPosition,splineOffset:offset});}
 
 async function configurePackedData() {
-  packedDataArchive=null;packedDataFileName="";packedDataError="";window.__apexPackedData=null;
+  packedDataArchive=null;packedDataFileName="";packedDataError="";window.__apexPackedData=null;window.__apexLastAcdExport=null;
   const candidates=assetFileIndex.entries.filter((entry)=>/(^|\/)data\.acd$/i.test(entry.relativePath)),entry=candidates.find((candidate)=>/^data\.acd$/i.test(candidate.relativePath))||(candidates.length===1?candidates[0]:null);
   if(!entry)return;
   try{packedDataArchive=parseAcd(await entry.file.arrayBuffer(),assetFolderName,entry.relativePath);packedDataFileName=entry.relativePath;window.__apexPackedData=packedDataArchive;}
@@ -526,7 +526,7 @@ async function loadSelectedCarLods(manifestEntry) {
     if (!descriptors.length) throw new Error("The selected lods.ini has no resolvable LOD_n files");
     if (unresolved.length) throw new Error(`Could not resolve ${unresolved.length} car LOD file${unresolved.length === 1 ? "" : "s"}: ${unresolved.slice(0, 5).join(", ")}`);
     const displayName = base.split("/").at(-1) || assetFolderName || "Car LOD workspace";
-    await load(descriptors, { name: displayName, kind: "carLods", manifest: manifestEntry.relativePath, warnings: manifest.warnings, cockpitHrDistance: manifest.cockpitHrDistance, driverHrDistance: manifest.driverHrDistance, forceWorkspace: true });
+    await load(descriptors, { name: displayName, kind: "carLods", manifest: manifestEntry.relativePath, packedManifest: Boolean(manifestEntry.packed), warnings: manifest.warnings, cockpitHrDistance: manifest.cockpitHrDistance, driverHrDistance: manifest.driverHrDistance, forceWorkspace: true });
   } catch (error) {
     console.error(error); status.textContent = `Could not open car LODs: ${error.message}`;
   }
@@ -755,6 +755,12 @@ function projectBaseName() {
 
 function downloadText(name, text, type) {
   const url = URL.createObjectURL(new Blob([text], { type })), anchor = document.createElement("a");
+  anchor.href = url; anchor.download = name; anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function downloadBytes(name, bytes, type = "application/octet-stream") {
+  const url = URL.createObjectURL(new Blob([bytes], { type })), anchor = document.createElement("a");
   anchor.href = url; anchor.download = name; anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
@@ -1016,12 +1022,13 @@ function workspaceInspectorHtml() {
         : `${vector("position", "Position", file.position)}${vector("rotation", "Rotation °", file.rotation)}`;
     return `<div class="resource"><strong>${file.auxiliary === "driver" ? "Driver · " : file.auxiliary === "reflectionEnvironment" ? "Reflection environment · " : isCar && file.lod ? `LOD ${file.lod.index} · ` : file.dynamic ? `Dynamic ${file.dynamic.index} · ` : ""}${escapeHtml(file.name)}</strong><span>${isCar && file.lod ? `${format(file.lod.in)} ≤ distance &lt; ${format(file.lod.out)} m · ` : file.auxiliary === "reflectionEnvironment" ? "Cubemap capture subtree · " : file.auxiliary ? "Shared auxiliary · " : ""}KN5 v${file.version} · ${(file.size / 1048576).toFixed(2)} MB · ${file.materials} materials · ${file.textures} textures${file.position.some((value) => value !== 0) || file.rotation.some((value) => value !== 0) ? ` · position ${file.position.map(format).join(", ")} · rotation ${file.rotation.map(format).join(", ")}` : ""}${file.dynamic ? ` · deterministic center preview · ${format(file.dynamic.probability)}% · velocity ${file.dynamic.velocityBase.map(format).join(", ")} ± ${file.dynamic.velocityRange.map(format).join(", ")}` : ""}</span>${controls}${editable ? `<div class="section-actions"><button class="mini" data-reset-workspace-file="${index}" ${edit ? "" : "disabled"}>Reset file edits</button></div>` : ""}</div>`;
   }).join("");
-  return `<div class="section"><h3>${isCar ? "Car LOD workspace" : "Track workspace"}${count ? ` · <span class="edit-count">${count} edit${count === 1 ? "" : "s"}</span>` : ""}</h3>${kv("Manifest", workspace.manifest || "Manual selection")}${kv("Files", workspace.files.length)}${!isCar ? kv("Dynamic objects", workspace.files.filter((file) => file.dynamic).length) : ""}${kv("Versions", workspace.versions.join(", "))}${isCar ? `${switchField("cockpitHrDistance", "Cockpit HR", workspaceBaseline?.cockpitHrDistance)}${switchField("driverHrDistance", "Driver HR", workspaceBaseline?.driverHrDistance)}` : ""}${kv("Texture name collisions", workspace.textureCollisions.length)}${kv("Protected files", workspace.protectedFiles.length)}${kv("Warnings", warnings.length)}${files}${warnings.slice(0, 8).map((warning) => `<div class="resource validation-warning"><strong>Manifest warning</strong><span>${escapeHtml(warning)}</span></div>`).join("")}<div class="section-actions"><button class="mini" data-export-workspace>Export ${isCar ? "lods.ini" : "models.ini"}</button><button class="mini" data-reset-workspace ${count ? "" : "disabled"}>Reset manifest edits</button></div></div>`;
+  const packedExport=isCar&&workspace.packedManifest&&packedDataArchive?`<button class="mini" data-export-packed-workspace ${packedDataArchive.warnings.length?`disabled title="Unsafe or duplicate archive paths must be corrected before repacking"`:""}>Export data.acd</button>`:"";
+  return `<div class="section"><h3>${isCar ? "Car LOD workspace" : "Track workspace"}${count ? ` · <span class="edit-count">${count} edit${count === 1 ? "" : "s"}</span>` : ""}</h3>${kv("Manifest", workspace.manifest || "Manual selection")}${kv("Files", workspace.files.length)}${!isCar ? kv("Dynamic objects", workspace.files.filter((file) => file.dynamic).length) : ""}${kv("Versions", workspace.versions.join(", "))}${isCar ? `${switchField("cockpitHrDistance", "Cockpit HR", workspaceBaseline?.cockpitHrDistance)}${switchField("driverHrDistance", "Driver HR", workspaceBaseline?.driverHrDistance)}` : ""}${kv("Texture name collisions", workspace.textureCollisions.length)}${kv("Protected files", workspace.protectedFiles.length)}${kv("Warnings", warnings.length)}${files}${warnings.slice(0, 8).map((warning) => `<div class="resource validation-warning"><strong>Manifest warning</strong><span>${escapeHtml(warning)}</span></div>`).join("")}<div class="section-actions"><button class="mini" data-export-workspace>Export ${isCar ? "lods.ini" : "models.ini"}</button>${packedExport}<button class="mini" data-reset-workspace ${count ? "" : "disabled"}>Reset manifest edits</button></div></div>`;
 }
 
 function packedDataInspectorHtml() {
   if(!packedDataFileName)return "";if(packedDataError)return `<div class="section"><h3>Packed data</h3>${kv("Archive",packedDataFileName)}${kv("Status","Could not decrypt")}${kv("Error",packedDataError)}</div>`;
-  const archive=packedDataArchive;if(!archive)return "";return `<div class="section"><h3>Packed data</h3>${kv("Archive",packedDataFileName)}${kv("Asset key",archive.assetName)}${kv("Entries",archive.entries.length)}${kv("Decoded bytes",archive.entries.reduce((sum,entry)=>sum+entry.size,0).toLocaleString())}${kv("Container bytes",archive.byteLength.toLocaleString())}${kv("Header",archive.header??"Legacy / absent")}${kv("Warnings",archive.warnings.length)}${archive.entries.slice(0,16).map((entry)=>`<div class="resource"><strong>${escapeHtml(entry.path)}</strong><span>${entry.size.toLocaleString()} bytes</span></div>`).join("")}${archive.entries.length>16?`<span class="empty">${archive.entries.length-16} more packed files</span>`:""}${archive.warnings.slice(0,8).map((warning)=>`<div class="resource"><span>${escapeHtml(warning)}</span></div>`).join("")}</div>`;
+  const archive=packedDataArchive;if(!archive)return "";return `<div class="section"><h3>Packed data</h3>${kv("Archive",packedDataFileName)}${kv("Asset key",archive.assetName)}${kv("Entries",archive.entries.length)}${kv("Decoded bytes",archive.entries.reduce((sum,entry)=>sum+entry.size,0).toLocaleString())}${kv("Container bytes",archive.byteLength.toLocaleString())}${kv("Header",archive.header??"Legacy / absent")}${kv("Repacking",archive.warnings.length?"Blocked by archive path warnings":"Existing files can be replaced safely")}${kv("Warnings",archive.warnings.length)}${archive.entries.slice(0,16).map((entry)=>`<div class="resource"><strong>${escapeHtml(entry.path)}</strong><span>${entry.size.toLocaleString()} bytes</span></div>`).join("")}${archive.entries.length>16?`<span class="empty">${archive.entries.length-16} more packed files</span>`:""}${archive.warnings.slice(0,8).map((warning)=>`<div class="resource"><span>${escapeHtml(warning)}</span></div>`).join("")}</div>`;
 }
 
 function carColliderInspectorHtml() {
@@ -1488,6 +1495,14 @@ function bindWorkspaceEditors() {
       window.__apexLastManifestExport = { name, text, warnings: [...(model.workspace.authoredWarnings || [])] };
       status.textContent = `Exported ${name} · ${model.workspace.files.filter((file) => !file.auxiliary).length} entries`;
     } catch (error) { console.error(error); status.textContent = `Could not export manifest: ${error.message}`; }
+  });
+  inspector.querySelector("[data-export-packed-workspace]")?.addEventListener("click", () => {
+    try {
+      const text=serializeCarLodsIni(model.workspace),replacement=new TextEncoder().encode(text),bytes=serializeAcd(packedDataArchive,new Map([["lods.ini",replacement]])),name=packedDataFileName.split("/").at(-1)||"data.acd";
+      downloadBytes(name,bytes);
+      window.__apexLastAcdExport={name,bytes:bytes.byteLength,sourceBytes:packedDataArchive.byteLength,replaced:"lods.ini",decodedBytes:replacement.byteLength,text};
+      status.textContent=`Exported ${name} with edited lods.ini · ${(bytes.byteLength/1024).toFixed(1)} KiB`;
+    } catch (error) { console.error(error); status.textContent=`Could not export data.acd: ${error.message}`; }
   });
 }
 

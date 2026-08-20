@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { AcdError, createAcdKey, findAcdEntry, parseAcd } from "../src/acd.js";
+import { AcdError, createAcdKey, decryptAcdPayload, encryptAcdPayload, findAcdEntry, parseAcd, serializeAcd } from "../src/acd.js";
 import { assettoPath } from "./fixture-paths.js";
 
 function int32Bytes(value) { const data = new Uint8Array(4); new DataView(data.buffer).setInt32(0, value, true); return data; }
@@ -31,6 +31,42 @@ test("reads headered and unheadered ACD records as bytes", () => {
     assert.deepEqual(findAcdEntry(archive, "sub\\file.bin").data, new Uint8Array([0, 255, 17]));
     assert.equal(archive.bytesRead, archive.byteLength);
   }
+});
+
+test("writes 32-bit encrypted payload values", () => {
+  const data = new Uint8Array([255, 0, 17]), stored = encryptAcdPayload(data, "9"), view = new DataView(stored.buffer);
+  assert.deepEqual([view.getInt32(0, true), view.getInt32(4, true), view.getInt32(8, true)], [312, 57, 74]);
+  assert.deepEqual(decryptAcdPayload(stored, data.length, "9"), data);
+});
+
+test("replaces one ACD entry and preserves untouched record bytes", () => {
+  const source = pack("example_car", { "car.ini": "original", "sub/file.bin": new Uint8Array([0, 255, 17]) }, 243591);
+  const sourceArchive = parseAcd(source, "example_car");
+  source[sourceArchive.entries[1].payloadOffset + 1] = 0x7a;
+  const archive = parseAcd(source, "example_car"), replacement = new TextEncoder().encode("updated value\n");
+
+  assert.deepEqual(serializeAcd(archive), source);
+  const output = serializeAcd(archive, new Map([["CAR.INI", replacement]])), reparsed = parseAcd(output, "example_car");
+  assert.equal(reparsed.header, 243591);
+  assert.deepEqual(reparsed.entries.map((entry) => entry.path), ["car.ini", "sub/file.bin"]);
+  assert.deepEqual(findAcdEntry(reparsed, "car.ini").data, replacement);
+  assert.deepEqual(findAcdEntry(reparsed, "sub/file.bin").data, findAcdEntry(archive, "sub/file.bin").data);
+  assert.deepEqual(findAcdEntry(reparsed, "sub/file.bin").storedData, findAcdEntry(archive, "sub/file.bin").storedData);
+});
+
+test("rejects ambiguous, unsafe, unknown, and oversized ACD replacements", () => {
+  const clean = parseAcd(pack("example_car", { "car.ini": "value" }), "example_car");
+  assert.throws(() => serializeAcd(clean, new Map([["missing.ini", new Uint8Array()]])), /was not found/);
+  assert.throws(() => serializeAcd(clean, new Map([["car.ini", new Uint8Array()], ["CAR.INI", new Uint8Array()]])), /Duplicate ACD replacement/);
+  assert.throws(() => serializeAcd(clean, new Map([["../car.ini", new Uint8Array()]])), /Unsafe ACD replacement/);
+
+  const unsafe = parseAcd(pack("example_car", { "../escape.ini": "bad", "car.ini": "value" }), "example_car");
+  assert.throws(() => serializeAcd(unsafe, new Map([["car.ini", new Uint8Array()]])), /Cannot repack unsafe ACD path/);
+  const duplicate = parseAcd(pack("example_car", { "Car.ini": "first", "car.ini": "second" }), "example_car");
+  assert.throws(() => serializeAcd(duplicate, new Map([["car.ini", new Uint8Array()]])), /Cannot repack duplicate ACD path/);
+
+  clean.entries[0].nameBytes = new Uint8Array(4097);
+  assert.throws(() => serializeAcd(clean, new Map([["car.ini", new Uint8Array()]])), /must use 1 to 4096 bytes/);
 });
 
 test("does not index unsafe or duplicate archive paths", () => {

@@ -271,6 +271,6 @@ export function mergeKn5Models(entries, options = {}) {
     root: { kind: "node", name: options.name || "KN5 workspace", active: true, transform: [...IDENTITY], children },
     bytesRead,
     byteLength,
-    workspace: { name: options.name || "KN5 workspace", kind: options.kind || "track", manifest: options.manifest || "", files, versions: [...versions].sort((a, b) => a - b), textureCollisions, protectedFiles, warnings: [...(options.warnings || [])], cockpitHrDistance: options.cockpitHrDistance ?? null, driverHrDistance: options.driverHrDistance ?? null, scopeResources }
+    workspace: { name: options.name || "KN5 workspace", kind: options.kind || "track", manifest: options.manifest || "", packedManifest: Boolean(options.packedManifest), files, versions: [...versions].sort((a, b) => a - b), textureCollisions, protectedFiles, warnings: [...(options.warnings || [])], cockpitHrDistance: options.cockpitHrDistance ?? null, driverHrDistance: options.driverHrDistance ?? null, scopeResources }
   };
 }

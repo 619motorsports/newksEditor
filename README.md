@@ -123,7 +123,9 @@ npm test
   interpolation and spline-specific minimum-FOV rule; normalized scrubbing and
   one-shot playback use `SPLINE_ANIMATION_LENGTH`
 - Packed `data.acd` browsing with bounds checks, unsafe-path rejection, duplicate
-  diagnostics, and virtual read-only INI files; packed or unpacked car `data/lods.ini`
+  diagnostics, and virtual INI files. Authored packed `lods.ini` changes can be
+  exported in a replacement archive; untouched records keep their original bytes.
+  Packed or unpacked car `data/lods.ini`
   workspaces with contiguous `LOD_n` loading, `IN`/`OUT`
   range validation, cockpit/driver distance-switch inspection, engine-compatible
   FOV-normalized automatic selection, and forced per-LOD inspection. LOD ranges and

@@ -9,6 +9,7 @@ function option(name, fallback = "") {
 const modelPath = option("model");
 const layoutName = option("workspace", option("layout"));
 const lodChoice = option("lod", "auto");
+const editLodOut = option("edit-lod-out");
 const skinName = option("skin");
 const animationName = option("animation");
 const configPath = option("config");
@@ -36,6 +37,7 @@ const reflectionCompare = process.argv.includes("--reflection-compare");
 const lighting = process.argv.includes("--lighting");
 const seasons = process.argv.includes("--seasons");
 const showHidden = process.argv.includes("--show-hidden");
+const exportAcd = process.argv.includes("--export-acd");
 const weatherName = option("weather");
 const sunHeading = option("sun-heading");
 const sunHeight = option("sun-height");
@@ -55,7 +57,7 @@ const conditionChanges = process.argv.flatMap((argument, index) => argument === 
   return [entry.slice(0, separator).toUpperCase(), Number(entry.slice(separator + 1))];
 });
 const animationPositions = process.argv.flatMap((argument, index) => argument === "--animation-position" ? [Number(process.argv[index + 1])] : []);
-if ((!modelPath && !layoutName) || !meshName || (layoutName && !assetsPath)) throw new Error("Usage: node tools/browser-smoke.mjs (--model FILE.kn5 | --workspace MANIFEST.ini --assets FOLDER) --mesh NAME [--assembled --show-hidden] [--csp-assets assettocorsa/extension/textures] [--reflection-environment SHOWROOM.kn5 --reflection-root NODE] [--seasons --year-progress 0.5 --compare-year-progress 0] [--vao FILE.vao-patch] [--lighting --weather PRESET --sun-heading 40 --sun-height 55 --compare-sun-height 10 --manual-exposure 0.35] [--shadows] [--reflection-compare] [--surface-overlay] [--grass-fx] [--rain-fx --rain-wetness 1] [--track-camera LABEL --track-camera-position 0.5 --play-track-camera] [--driver FILE.kn5 --driver-cockpit] [--skin NAME] [--animation NAME --animation-position 0.5] [--lod auto|INDEX] [--config FILE.ini] [--input NAME=VALUE] [--port 9222] [--app-port 4173]");
+if ((!modelPath && !layoutName) || !meshName || (layoutName && !assetsPath)) throw new Error("Usage: node tools/browser-smoke.mjs (--model FILE.kn5 | --workspace MANIFEST.ini --assets FOLDER) --mesh NAME [--assembled --show-hidden] [--csp-assets assettocorsa/extension/textures] [--reflection-environment SHOWROOM.kn5 --reflection-root NODE] [--seasons --year-progress 0.5 --compare-year-progress 0] [--vao FILE.vao-patch] [--lighting --weather PRESET --sun-heading 40 --sun-height 55 --compare-sun-height 10 --manual-exposure 0.35] [--shadows] [--reflection-compare] [--surface-overlay] [--grass-fx] [--rain-fx --rain-wetness 1] [--track-camera LABEL --track-camera-position 0.5 --play-track-camera] [--driver FILE.kn5 --driver-cockpit] [--skin NAME] [--animation NAME --animation-position 0.5] [--lod auto|INDEX] [--edit-lod-out METERS --export-acd] [--config FILE.ini] [--input NAME=VALUE] [--port 9222] [--app-port 4173]");
 
 const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
 const page = pages.find((item) => item.type === "page");
@@ -132,7 +134,7 @@ if (layoutName) {
   await waitFor(`[...document.querySelector('#layout-select').options].some(option=>option.textContent.endsWith(${JSON.stringify(layoutName)})||option.value.endsWith(${JSON.stringify(layoutName)}))`);
   const opened = await evaluate(`(()=>{const select=document.querySelector('#layout-select'),option=[...select.options].find(option=>option.textContent.endsWith(${JSON.stringify(layoutName)})||option.value.endsWith(${JSON.stringify(layoutName)}));if(!option)return false;select.value=option.value;document.querySelector('#open-layout').click();return true;})()`);
   if (!opened) throw new Error(`Layout manifest was not discovered: ${layoutName}`);
-  await waitFor(`document.querySelector('#status').textContent.includes('KN5 files')`, 120000);
+  await waitFor(`/\\b(?:KN5|model) files\\b/.test(document.querySelector('#status').textContent)`, 120000);
   trace("workspace loaded");
   if (driverPath) {
     await setFile("#driver-model-file", driverPath);
@@ -143,6 +145,16 @@ if (layoutName) {
   if (lodChoice !== "auto") {
     const selectedLod = await evaluate(`(()=>{const select=document.querySelector('#lod-preview'),option=[...select.options].find(option=>option.value===${JSON.stringify(lodChoice)});if(!option)return false;select.value=option.value;select.dispatchEvent(new Event('change',{bubbles:true}));return true;})()`);
     if (!selectedLod) throw new Error(`Car LOD was not available: ${lodChoice}`);
+  }
+  if (editLodOut !== "") {
+    const edited = await evaluate(`(()=>{const input=document.querySelector('[data-edit-workspace-number="lodOut"][data-workspace-file="0"]');if(!input)return false;input.value=${JSON.stringify(editLodOut)};input.dispatchEvent(new Event('change',{bubbles:true}));return true;})()`);
+    if (!edited) throw new Error("The first car LOD OUT field was not available");
+    await waitFor(`document.querySelector('[data-edit-workspace-number="lodOut"][data-workspace-file="0"]')?.classList.contains('authored')`);
+  }
+  if (exportAcd) {
+    const exported = await evaluate(`(()=>{const button=document.querySelector('[data-export-packed-workspace]');if(!button||button.disabled)return false;button.click();return true;})()`);
+    if (!exported) throw new Error("Packed data.acd export was not available");
+    await waitFor(`Boolean(window.__apexLastAcdExport)&&document.querySelector('#status').textContent.includes('Exported data.acd')`);
   }
 } else {
   await setFile("#file", modelPath);
@@ -242,6 +254,6 @@ for (const [name, value] of conditionChanges) {
   } else states[`${name}=${value}`] = null;
   if (present) await setCondition(name, 0);
 }
-const summary = await evaluate(`({pipeline:document.querySelector('#pipeline').textContent,status:document.querySelector('#status').textContent,textures:window.__apexRenderer?.textureStatus,fbx:window.__apexFbx?{sourceName:window.__apexFbx.sourceName,format:window.__apexFbx.format,version:window.__apexFbx.version,textureSummary:window.__apexFbx.textureSummary,references:window.__apexFbx.textureReferences.map(reference=>({material:reference.material,slot:reference.slot,source:reference.source,status:reference.status,matchedBy:reference.matchedBy,path:reference.path,format:reference.format,output:reference.output})),warnings:window.__apexFbx.warnings}:null,skinTextures:window.__apexRenderer?.skinTextureStatus,externalTextures:window.__apexRenderer?.externalTextureStatus,animation:window.__apexRenderer?.animationStatus,packedData:window.__apexPackedData?{source:window.__apexPackedData.source,assetName:window.__apexPackedData.assetName,entries:window.__apexPackedData.entries.length,warnings:window.__apexPackedData.warnings}:null,carHierarchyAudit:window.__apexCarHierarchyAudit,colliderAudit:window.__apexColliderAudit,bottomColliders:window.__apexBottomColliders,driverAudit:window.__apexDriverAudit,trackCameras:window.__apexTrackCameras?{sets:window.__apexTrackCameras.length,cameras:window.__apexTrackCameras.reduce((sum,set)=>sum+set.cameras.length,0),warnings:window.__apexTrackCameras.reduce((sum,set)=>sum+set.warnings.length,0)}:null,trackAudit:window.__apexTrackAudit,grass:window.__apexRenderer?.grassStatus,rain:window.__apexRenderer?.rainStatus,shadows:window.__apexRenderer?.shadowStatus,lighting:window.__apexRenderer?.lightingStatus,shaderProfiles:window.__apexRenderer?.shaderProfileStatus,vao:window.__apexRenderer?.vaoStatus,seasons:window.__apexRenderer?.seasonalStatus,scene:window.__apexRenderer?.sceneStatus,workspaceLod:window.__apexRenderer?.workspaceLodStatus})`);
+const summary = await evaluate(`({pipeline:document.querySelector('#pipeline').textContent,status:document.querySelector('#status').textContent,textures:window.__apexRenderer?.textureStatus,fbx:window.__apexFbx?{sourceName:window.__apexFbx.sourceName,format:window.__apexFbx.format,version:window.__apexFbx.version,textureSummary:window.__apexFbx.textureSummary,references:window.__apexFbx.textureReferences.map(reference=>({material:reference.material,slot:reference.slot,source:reference.source,status:reference.status,matchedBy:reference.matchedBy,path:reference.path,format:reference.format,output:reference.output})),warnings:window.__apexFbx.warnings}:null,skinTextures:window.__apexRenderer?.skinTextureStatus,externalTextures:window.__apexRenderer?.externalTextureStatus,animation:window.__apexRenderer?.animationStatus,packedData:window.__apexPackedData?{source:window.__apexPackedData.source,assetName:window.__apexPackedData.assetName,entries:window.__apexPackedData.entries.length,warnings:window.__apexPackedData.warnings}:null,acdExport:window.__apexLastAcdExport||null,carHierarchyAudit:window.__apexCarHierarchyAudit,colliderAudit:window.__apexColliderAudit,bottomColliders:window.__apexBottomColliders,driverAudit:window.__apexDriverAudit,trackCameras:window.__apexTrackCameras?{sets:window.__apexTrackCameras.length,cameras:window.__apexTrackCameras.reduce((sum,set)=>sum+set.cameras.length,0),warnings:window.__apexTrackCameras.reduce((sum,set)=>sum+set.warnings.length,0)}:null,trackAudit:window.__apexTrackAudit,grass:window.__apexRenderer?.grassStatus,rain:window.__apexRenderer?.rainStatus,shadows:window.__apexRenderer?.shadowStatus,lighting:window.__apexRenderer?.lightingStatus,shaderProfiles:window.__apexRenderer?.shaderProfileStatus,vao:window.__apexRenderer?.vaoStatus,seasons:window.__apexRenderer?.seasonalStatus,scene:window.__apexRenderer?.sceneStatus,workspaceLod:window.__apexRenderer?.workspaceLodStatus})`);
 console.log(JSON.stringify({ summary, sceneBeforeShowHidden, selected, states, errors }, null, 2));
 socket.close();

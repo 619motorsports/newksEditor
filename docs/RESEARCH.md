@@ -1398,10 +1398,29 @@ ASCII characters are subtracted cyclically from the selected container bytes.
 The implementation preserves C# signed 32-bit overflow and truncating division in
 that derivation, checks every length before allocation, retains decoded values as
 bytes, rejects unsafe virtual paths, and diagnoses duplicates rather than guessing.
-It does not write or replace archives. The installed official
+The writer replaces existing safe entries only. It keeps every untouched path and
+four-byte encrypted payload group byte-for-byte. It preserves the optional header
+and record order. It writes replacement values as little-endian 32-bit sums.
+It rejects unsafe or duplicate source paths instead of producing an ambiguous
+archive. It also limits entry counts, path bytes, decoded entry sizes, and total
+container size before allocation. The installed official
 `ks_nissan_370z/data.acd` consumes all 164,326 container bytes, yields 46 files and
 40,817 decoded bytes, and exposes readable `car.ini` and `lods.ini`. A second
 installed archive's decoded `lods.ini` matches its unpacked copy byte-for-byte.
+
+The car LOD workspace can replace `lods.ini` and download a new `data.acd`. Synthetic
+headered and legacy archives round-trip exactly when unchanged. Replacement tests
+reparse the output, verify the new plaintext, and compare untouched encrypted groups.
+The generated archive still needs an in-game write validation when the official car
+installation is available again.
+
+A production Chrome run opened a synthetic packed archive with the four repository
+car LODs, changed `LOD_0.OUT` from 15 to 16, and exported a 1,239-byte archive whose
+decoded replacement contains `OUT=16`. It loaded all 63 textures and reported no
+unsupported textures or browser exceptions. The packaged Electron app also parsed
+the two-entry archive with no warnings. Its empty-scene boundary check returned WebGL
+error zero, exposed no Node.js API, blocked external navigation, and retained the
+loopback content-security policy.
 
 A production Chrome run selected the Nissan directory, discovered the virtual
 `data/lods.ini`, assembled four KN5 files (43.5 MB), loaded all 82 textures, and

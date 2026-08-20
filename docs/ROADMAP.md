@@ -229,8 +229,10 @@ vertical slice is only the foundation.
   ranges and game-normalized preview selection. Installed `skins/<name>` folders are
   discovered and their matching texture basenames override every LOD with live switching
   and diagnostics. The inspector now checks SDK-listed hierarchy coverage, node kinds,
-  wheel axes, related pivots, and cross-LOD placement. Packed-data editing/repacking,
-  skin metadata/editing, animation authoring, cross-folder shared-driver access without
+  wheel axes, related pivots, and cross-LOD placement. Packed LOD manifests can now
+  be replaced in a bounded `data.acd` export while untouched records retain their
+  original bytes. Other packed-data authoring, skin metadata/editing, animation
+  authoring, cross-folder shared-driver access without
   a browser file grant, lights,
   damage/dirt, instruments, steering/driver alignment, bottom-collider editing, and remaining
   car-workflow expansion remain. LOD file names, ranges, and cockpit/driver distance switches now

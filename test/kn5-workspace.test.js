@@ -213,8 +213,9 @@ test("preserves car LOD ranges on merged workspace roots", () => {
   const merged = mergeKn5Models([
     { name: "car.kn5", model: model("a", "body", "shared.dds"), lod: { index: 0, in: 0, out: 15 } },
     { name: "car_lod_b.kn5", model: model("longer", "body_lod", "shared.dds"), lod: { index: 1, in: 15, out: 45 } }
-  ], { name: "car", kind: "carLods", manifest: "data/lods.ini", cockpitHrDistance: 6, driverHrDistance: 25 });
+  ], { name: "car", kind: "carLods", manifest: "data/lods.ini", packedManifest: true, cockpitHrDistance: 6, driverHrDistance: 25 });
   assert.equal(merged.workspace.kind, "carLods");
+  assert.equal(merged.workspace.packedManifest, true);
   assert.deepEqual(merged.root.children.map((node) => node.workspaceLod), [{ index: 0, in: 0, out: 15 }, { index: 1, in: 15, out: 45 }]);
   assert.deepEqual(merged.workspace.files.map((file) => file.lod), [{ index: 0, in: 0, out: 15 }, { index: 1, in: 15, out: 45 }]);
   assert.equal(merged.workspace.cockpitHrDistance, 6);
