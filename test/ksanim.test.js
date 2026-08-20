@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import test from "node:test";
-import { ksAnimationMatrix, parseKsAnimation, sampleKsAnimationTrack, serializeKsAnimation } from "../src/ksanim.js";
+import { animationTransformForNode, ksAnimationMatrix, parseKsAnimation, sampleKsAnimationTrack, serializeKsAnimation } from "../src/ksanim.js";
+import { assettoPath, carFixtureRoot } from "./fixture-paths.js";
 
-const priusAnimations = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/cars/traffic_toyota_prius/animations";
-const legacyAnimation = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/cars/619_gen6_fusion13_nsc/animations/gascap.ksanim";
+const fixtureAnimations = join(carFixtureRoot, "animations");
+const legacyAnimation = assettoPath("content/cars/619_gen6_fusion13_nsc/animations/gascap.ksanim");
 
 function version2(tracks) {
   const chunks = [], u32 = (value) => { const bytes = Buffer.alloc(4); bytes.writeUInt32LE(value); chunks.push(bytes); }, f32 = (value) => { const bytes = Buffer.alloc(4); bytes.writeFloatLE(value); chunks.push(bytes); };
@@ -56,6 +58,15 @@ test("samples with the game's frameCount times normalized-position rule", () => 
   assert.equal(sampleKsAnimationTrack(track, 1)[12], 20);
 });
 
+test("applies a track only to a KN5 transform node with the same mesh name", () => {
+  const animated = ksAnimationMatrix(frame([1, 0, 0])), transforms = new Map([["DOOR", animated]]);
+  const transformNode = { kind: "node", name: "DOOR", transform: ksAnimationMatrix(frame([0, 0, 0])) };
+  const meshNode = { kind: "mesh", name: "DOOR" };
+
+  assert.equal(animationTransformForNode(transformNode, transforms), animated);
+  assert.equal(animationTransformForNode(meshNode, transforms), undefined);
+});
+
 test("slerps DirectX row-major quaternions and linearly blends scale", () => {
   const track = { frames: [frame([0, 0, 0]), frame([0, 0, 0], [0, 0, 1, 0], [3, 1, 1])] };
   const matrix = sampleKsAnimationTrack(track, 0.25);
@@ -76,15 +87,13 @@ test("round-trips a decomposable version 1 matrix through quatpos", async (t) =>
   assert.ok(ksAnimationMatrix(first).every(Number.isFinite));
 });
 
-test("parses complete installed steering and shift animations", async (t) => {
-  let steerBytes, shiftBytes;
-  try { [steerBytes, shiftBytes] = await Promise.all([readFile(`${priusAnimations}/steer.ksanim`), readFile(`${priusAnimations}/shift.ksanim`)]); }
-  catch { t.skip("Prius animation fixtures are not installed"); return; }
-  const steer = parseKsAnimation(steerBytes, "steer.ksanim"), shift = parseKsAnimation(shiftBytes, "shift.ksanim");
-  assert.deepEqual([steer.version, steer.tracks.length, steer.frameCount, steer.bytesRead], [2, 54, 100, steer.byteLength]);
-  assert.deepEqual([shift.version, shift.tracks.length, shift.frameCount, shift.bytesRead], [2, 25, 100, shift.byteLength]);
+test("parses complete repository steering and gas-cap animations", async () => {
+  const [steerBytes, gascapBytes] = await Promise.all([readFile(join(fixtureAnimations,"steer.ksanim")), readFile(join(fixtureAnimations,"gascap.ksanim"))]);
+  const steer = parseKsAnimation(steerBytes, "steer.ksanim"), gascap = parseKsAnimation(gascapBytes, "gascap.ksanim");
+  assert.deepEqual([steer.version, steer.tracks.length, steer.frameCount, steer.bytesRead], [2, 60, 100, steer.byteLength]);
+  assert.deepEqual([gascap.version, gascap.tracks.length, gascap.frameCount, gascap.bytesRead], [2, 5, 100, gascap.byteLength]);
   assert.ok(steer.tracks.some((track) => track.animated));
-  assert.ok(shift.tracks.some((track) => track.animated));
+  assert.ok(gascap.tracks.some((track) => track.animated));
 });
 
 test("rejects unsupported and truncated animation files with offsets", () => {

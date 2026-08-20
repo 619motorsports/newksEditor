@@ -8,8 +8,9 @@ import { parseKsAnimation, serializeKsAnimation } from "../src/ksanim.js";
 import { parseKn5, walkNodes } from "../src/kn5.js";
 import { mergeKn5Models } from "../src/kn5-workspace.js";
 import { serializeKn5 } from "../src/kn5-write.js";
+import { assettoPath } from "./fixture-paths.js";
 
-const sdk = "/mnt/D/SteamLibrary/steamapps/common/assettocorsa/sdk";
+const sdk = assettoPath("sdk");
 
 test("recognizes binary and ASCII FBX headers", () => {
   const binary = new Uint8Array(27);
@@ -98,6 +99,20 @@ test("keeps distinct same-named FBX material objects", () => {
   assert.deepEqual(meshes.map((mesh) => mesh.materialId), [0, 1]);
   const pixels = model.textures.map((texture) => [...decodeDdsRgba(texture.data, inspectDds(texture.data))[0].pixels]);
   assert.deepEqual(pixels, [[255, 0, 0, 255], [0, 0, 255, 255]]);
+});
+
+test("uses shader resource slots across FBX materials", async () => {
+  const scene = new Group(), body = new MeshPhongMaterial({ name: "Body" }), trim = new MeshPhongMaterial({ name: "Trim" });
+  body.map = Object.assign(new Texture(), { name: "body.png" });
+  trim.map = Object.assign(new Texture(), { name: "trim.png" });
+  body.map.userData.apexFbxSource = "textures/body.png"; trim.map.userData.apexFbxSource = "textures/trim.png";
+  scene.add(new Mesh(triangleGeometry(3), body), new Mesh(triangleGeometry(3), trim));
+  const model = convertFbxScene(scene);
+
+  assert.deepEqual(model.materials.map((material) => material.resources[0].textureId), [0, 0]);
+  await resolveFbxTextures(model, [sourceFile("body.png", "source/textures/body.png", onePixelPng), sourceFile("trim.png", "source/textures/trim.png", onePixelPng)]);
+  assert.deepEqual(model.materials.map((material) => material.resources[0].textureId), [0, 0]);
+  assert.deepEqual(parseKn5(serializeKn5(model)).materials.map((material) => material.resources[0].textureId), [0, 0]);
 });
 
 test("splits a shared FBX material into static and skinned variants", () => {
@@ -292,7 +307,7 @@ test("maps a selected DDS source texture in the official GT40 FBX", async (t) =>
   let fbxBytes, greyBytes;
   try {
     fbxBytes = await readFile(`${sdk}/dev/car_pipeline_2.0rev/Scene templates/GT40_animated_suspension_example_fbx.FBX`);
-    greyBytes = await readFile("/mnt/D/SteamLibrary/steamapps/common/assettocorsa/content/cars/COT_suspension_testing_platform/unp_roy_cot_ford.kn5/texture/Grey.dds");
+    greyBytes = await readFile(assettoPath("content/cars/COT_suspension_testing_platform/unp_roy_cot_ford.kn5/texture/Grey.dds"));
   } catch { t.skip("The SDK GT40 FBX or a matching installed Grey.dds is not available"); return; }
   const grey = new Uint8Array(greyBytes.buffer, greyBytes.byteOffset, greyBytes.byteLength);
   const model = await parseFbxWithTextures(fbxBytes, "GT40.FBX", [sourceFile("Grey.dds", "source/texture/Grey.dds", grey)]);
@@ -306,7 +321,7 @@ test("maps a selected DDS source texture in the official GT40 FBX", async (t) =>
 });
 
 test("preserves normal-map connections from an installed production FBX", async (t) => {
-  const source = "/mnt/D/SteamLibrary/steamapps/common/assettocorsa/content/cars/619_nextgen_mustang/nextgen_commonnewhires.fbx";
+  const source = assettoPath("content/cars/619_nextgen_mustang/nextgen_commonnewhires.fbx");
   let bytes;
   try { bytes = await readFile(source); }
   catch { t.skip("The production normal-mapped FBX fixture is not installed"); return; }

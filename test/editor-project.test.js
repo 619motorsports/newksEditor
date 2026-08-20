@@ -27,6 +27,19 @@ test("normalizes dynamic track manifest edits as non-CSP project fields", () => 
   assert.equal(editorProjectCspEditCount(project), 0);
 });
 
+test("normalizes portable car LOD file-name edits and drops malformed names", () => {
+  const project = normalizeEditorProject({ format: "apex-editor-project", version: 1, workspaceEdits: { files: {
+    "0": { name: "..\\shared_car\\body lod.kn5" },
+    "1": { name: "C:\\cars\\body.kn5" },
+    "2": { name: "body.fbx" }
+  } } });
+  assert.deepEqual(project.workspaceEdits.files["0"], { name: "../shared_car/body lod.kn5" });
+  assert.equal(project.workspaceEdits.files["1"], undefined);
+  assert.equal(project.workspaceEdits.files["2"], undefined);
+  assert.equal(editorProjectEditCount(project), 1);
+  assert.equal(editorProjectCspEditCount(project), 0);
+});
+
 test("normalizes track surface edits as non-CSP project fields", () => {
   const project = normalizeEditorProject({ format: "apex-editor-project", version: 1, surfaceEdits: { "0": { key: "tarmac", friction: "1.05", damping: 0.02, dirtAdditive: 0.1, blackFlagTime: 3, isValidTrack: true, isPitlane: false, sinHeight: 0.001, sinLength: 2.5, vibrationGain: 0.15, vibrationLength: 0.4, wav: null, wavPitch: 1.2, ffEffect: "GRAIN" } } });
   assert.deepEqual(project.surfaceEdits["0"], { key: "TARMAC", friction: 1.05, damping: 0.02, dirtAdditive: 0.1, blackFlagTime: 3, isValidTrack: true, isPitlane: false, sinHeight: 0.001, sinLength: 2.5, vibrationGain: 0.15, vibrationLength: 0.4, wav: null, wavPitch: 1.2, ffEffect: "GRAIN" });
@@ -37,9 +50,30 @@ test("normalizes track surface edits as non-CSP project fields", () => {
 test("classifies surface edits without marking scene geometry as changed", () => {
   const before = createEditorProject({ name: "track.kn5", size: 42, kn5Version: 6 }), surface = cloneEditorProject(before);
   surface.surfaceEdits["0"] = { friction: 1.05 };
-  assert.deepEqual(classifyEditorProjectChanges(before, surface), { geometryChanged: false, nodeChanged: false, workspaceChanged: false, surfaceChanged: true, sceneChanged: false });
+  assert.deepEqual(classifyEditorProjectChanges(before, surface), { geometryChanged: false, nodeChanged: false, workspaceChanged: false, surfaceChanged: true, colliderChanged: false, sceneChanged: false });
   const node = cloneEditorProject(surface); node.nodeEdits["0"] = { active: false };
-  assert.deepEqual(classifyEditorProjectChanges(surface, node), { geometryChanged: false, nodeChanged: true, workspaceChanged: false, surfaceChanged: false, sceneChanged: true });
+  assert.deepEqual(classifyEditorProjectChanges(surface, node), { geometryChanged: false, nodeChanged: true, workspaceChanged: false, surfaceChanged: false, colliderChanged: false, sceneChanged: true });
+});
+
+test("normalizes collider geometry edits as non-CSP project fields", () => {
+  const transform = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.1, -0.2, 0.3, 1];
+  const colliderAsset = { name: "collider.kn5", size: 1024, sha256: "ab".repeat(32), kn5Version: 6 };
+  const project = normalizeEditorProject({ format: "apex-editor-project", version: 1, colliderAsset, colliderEdits: { "0": { transform, removeDegenerate: true, reverseWinding: false, recalculateNormals: true }, "1": { transform: [1, 2, 3], removeDegenerate: "yes" } } });
+  assert.deepEqual(project.colliderAsset, colliderAsset);
+  assert.deepEqual(project.colliderEdits["0"], { transform, removeDegenerate: true, recalculateNormals: true });
+  assert.equal(project.colliderEdits["1"], undefined);
+  assert.equal(editorProjectEditCount(project), 3);
+  assert.equal(editorProjectCspEditCount(project), 0);
+  assert.doesNotMatch(serializeEditorCsp(project), /collider/i);
+});
+
+test("drops malformed collider identity without applying it to old projects", () => {
+  const project = normalizeEditorProject({ format: "apex-editor-project", version: 1, colliderAsset: { name: "collider.kn5", size: 10, sha256: "truncated" }, colliderEdits: { "0": { removeDegenerate: true } } });
+  assert.equal(project.colliderAsset, null);
+  assert.deepEqual(project.colliderEdits["0"], { removeDegenerate: true });
+  assert.equal(createEditorProject().colliderAsset, null);
+  const orphan = normalizeEditorProject({ format: "apex-editor-project", version: 1, colliderAsset: { name: "collider.kn5", size: 10, sha256: "ab".repeat(32) } });
+  assert.equal(orphan.colliderAsset, null);
 });
 
 test("parses and formats scalar and vector editor values", () => {

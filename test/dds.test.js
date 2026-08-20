@@ -3,9 +3,9 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { decodeDdsRgba, inspectDds } from "../src/dds.js";
 import { parseKn5 } from "../src/kn5.js";
+import { assettoPath, carMainKn5 } from "./fixture-paths.js";
 
-const abarthFixture = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/cars/ks_abarth500_assetto_corse/abarth500_assetto_corse.kn5";
-const hangarFixture = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/showroom/Hangar/hangar.kn5";
+const hangarFixture = assettoPath("content/showroom/Hangar/hangar.kn5");
 
 function rawDds(width, height, bits, masks, pixels, flags = 0x40, pitch = width * bits / 8) {
   const bytes = new Uint8Array(128 + pixels.length), view = new DataView(bytes.buffer);
@@ -69,14 +69,12 @@ test("recognizes legacy D3D9 float panorama textures",()=>{const bytes=legacyFlo
 
 test("recognizes the installed Hangar HDR panorama",async(t)=>{let data;try{data=await readFile(hangarFixture);}catch{t.skip("Assetto Corsa showroom fixture is not installed");return;}const model=parseKn5(data),texture=model.textures.find((entry)=>entry.name==="Old_Hangar4.dds"),descriptor=inspectDds(texture?.data);assert.ok(texture);assert.equal(descriptor.format,"RGBA32F");assert.equal(descriptor.width,6000);assert.equal(descriptor.height,3000);assert.equal(texture.size,128+6000*3000*16);});
 
-test("decodes a real Kunos raw DDS and identifies its embedded PNGs", async (t) => {
-  let data;
-  try { data = await readFile(abarthFixture); } catch { t.skip("Assetto Corsa fixture is not installed"); return; }
-  const model = parseKn5(data), raw = model.textures.find((texture) => texture.name.toLowerCase() === "500abarth_racing_mechanics.dds"), png = model.textures.find((texture) => texture.name === "500_Abarth_Racing_GRID_White_D.png");
-  assert.ok(raw); assert.ok(png);
+test("decodes repository car raw and block-compressed DDS textures", async () => {
+  const model = parseKn5(await readFile(carMainKn5)), raw = model.textures.find((texture) => texture.name === "rim_maps.dds"), compressed = model.textures.find((texture) => texture.name === "skin.dds");
+  assert.ok(raw); assert.ok(compressed);
   const descriptor = inspectDds(raw.data), [level] = decodeDdsRgba(raw.data, descriptor);
   assert.equal(descriptor.format, "RAW_24");
   assert.equal(level.pixels.length, descriptor.width * descriptor.height * 4);
   assert.ok(new Set(level.pixels.filter((_, index) => index % 4 !== 3)).size > 32);
-  assert.deepEqual([...png.data.slice(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  assert.equal(inspectDds(compressed.data).format,"BC1");
 });

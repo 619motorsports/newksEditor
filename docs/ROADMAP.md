@@ -232,9 +232,13 @@ vertical slice is only the foundation.
   wheel axes, related pivots, and cross-LOD placement. Packed-data editing/repacking,
   skin metadata/editing, animation authoring, cross-folder shared-driver access without
   a browser file grant, lights,
-  damage/dirt, instruments, steering/driver alignment, collider editing, and LOD-manifest
-  file-name authoring remain. LOD ranges and cockpit/driver distance switches now support
-  live editing, project persistence, validation, and `lods.ini` export.
+  damage/dirt, instruments, steering/driver alignment, bottom-collider editing, and remaining
+  car-workflow expansion remain. LOD file names, ranges, and cockpit/driver distance switches now
+  support live editing, project persistence, validation, and `lods.ini` export.
+  Static `collider.kn5` meshes now support transforms and topology repair. These edits
+  update the orange overlay and the collider audit. Project JSON stores the edits, but
+  CSP export excludes them. A standalone export writes the edited `collider.kn5`.
+  Persisted SHA-256 identity now stops those edits from crossing collider files.
 - Track workspace: static multi-KN5 layouts now load from ordered `models*.ini`
   manifests or manual multi-file selection, including placement transforms and
   collision diagnostics. `DYNAMIC_OBJECT_n` entries now parse and load at their
@@ -288,6 +292,7 @@ vertical slice is only the foundation.
   real WebGL browser. Hierarchy checks also prove recursive visibility updates and
   keep CSP export disabled for hierarchy-only projects. Static geometry checks prove
   live bounds updates, topology repair, invalid-scale rejection, recovery, and
-  KN5-only export.
+  KN5-only export. Collider checks prove the same operations on the separate collision
+  model. They also prove live overlay refresh and standalone collider serialization.
 - Verify generated KN5/config outputs in Assetto Corsa and document unsupported CSP
   features. Completion requires passing all these gates, not merely launching the UI.
