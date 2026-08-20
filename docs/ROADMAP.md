@@ -179,8 +179,9 @@ vertical slice is only the foundation.
   resolve and separable 7-tap or 15-tap filters run before receiver sampling. GrassFX
   uses CSP's 10 cm lowered receiver. Full unsampled compute density,
   moving-vehicle air/deformation stamping, 32-slot packing, dynamic/car atlas refresh scheduling,
-  wet cubemap reflection,
-  negative-wetness snow, and the rest of CSP's game-only lighting integration remain.
+  wet cubemap reflection, and the rest of CSP's game-only lighting integration remain.
+  Negative wetness now applies the exact height-weighted snow whitening from CSP's
+  public GrassFX pixel shader. This control does not invent snow on track materials.
   RainFX now classifies puddle, soaking, smooth, rough, line, relief, and stream
   config entries and applies a wet-material authoring preview with adjustable
   intensity. Native accumulation/drainage, height-field puddles, rain occlusion,

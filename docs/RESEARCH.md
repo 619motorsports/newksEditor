@@ -2067,3 +2067,29 @@ The Linux build produced these unsigned artifacts:
 
 The artifacts prove the Linux package path. They do not prove Windows or macOS
 packaging, code signing, or installer behavior.
+
+## GrassFX negative-wetness snow evidence
+
+The public CSP shader checkout is at commit
+`4f05cc0ba26f7c363886ebb406b35f67157139d0`. Its
+`custom/grass/flgGrass_ps.fx` file has SHA-256
+`6b446f52b35a6477d3a8b7a64318526e1e5fae6582d892c7b57c0a42092e5753`.
+The pixel shader interpolates the finished grass color toward white. Its blend is
+`pow(pin.PosY, 2) * saturate(-gWetK)`.
+
+Apex uses the normalized blade-height coordinate for `pin.PosY`. The shared
+viewport and reflection-probe GrassFX program applies the same squared-height blend.
+The RainFX control now covers −1 through 1. Positive values retain wet darkening and
+specular gain. Negative values set those wet terms to zero and apply snow only to
+GrassFX. The ordinary RainFX material preview clamps its input to the positive range.
+
+A packaged Linux WebGL check used a bounded 16 m square fixture with 540 generated
+grass fins. Snow mode produced capture hash `451694bba6759fce`. Zero weather input
+produced `728118b45943ea26` with the same grass geometry. Both states returned WebGL
+error zero, and the browser reported no errors. The full portable suite passed 232
+tests and skipped 25 installed-game checks.
+
+A second packaged check removed GrassFX and kept one RainFX soaking surface. Its
+negative-input and disabled captures both produced `33fd34445afbf573`. This proves
+that snow input does not extrapolate the wet-material approximation. Visual inspection
+of the snow capture showed the expected white tips and green roots.
