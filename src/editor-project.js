@@ -141,12 +141,12 @@ export function normalizeEditorProject(value) {
   if (!value || typeof value !== "object" || value.format !== PROJECT_FORMAT) throw new Error("Not an Apex Editor project");
   if (Number(value.version) !== PROJECT_VERSION) throw new Error(`Unsupported Apex Editor project version ${value.version}`);
   const project = createEditorProject(value.asset || {});
-  project.colliderAsset = normalizeFileIdentity(value.colliderAsset);
   project.materialEdits = safeRecord(value.materialEdits, (item) => cleanEdit(item));
   project.meshEdits = safeRecord(value.meshEdits, (item) => cleanMeshEdit(item));
   project.nodeEdits = safeRecord(value.nodeEdits, (item) => cleanNodeEdit(item));
   project.geometryEdits = safeRecord(value.geometryEdits, (item) => cleanGeometryEdit(item));
   project.colliderEdits = safeRecord(value.colliderEdits, (item) => cleanGeometryEdit(item));
+  project.colliderAsset = Object.keys(project.colliderEdits).length ? normalizeFileIdentity(value.colliderAsset) : null;
   project.workspaceEdits = cleanWorkspaceEdits(value.workspaceEdits);
   project.surfaceEdits = safeRecord(value.surfaceEdits, (item) => cleanSurfaceEdit(item));
   return project;

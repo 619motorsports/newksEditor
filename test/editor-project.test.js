@@ -51,6 +51,8 @@ test("drops malformed collider identity without applying it to old projects", ()
   assert.equal(project.colliderAsset, null);
   assert.deepEqual(project.colliderEdits["0"], { removeDegenerate: true });
   assert.equal(createEditorProject().colliderAsset, null);
+  const orphan = normalizeEditorProject({ format: "apex-editor-project", version: 1, colliderAsset: { name: "collider.kn5", size: 10, sha256: "ab".repeat(32) } });
+  assert.equal(orphan.colliderAsset, null);
 });
 
 test("parses and formats scalar and vector editor values", () => {
