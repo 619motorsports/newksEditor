@@ -47,6 +47,21 @@ bone:       name:string, inverse-bind-transform:mat4
 skin vertex:position:vec3, normal:vec3, uv:vec2, tangent:vec3, weights/indices:8 floats
 ```
 
+The material `texture-id` stores the shader resource bind point. It does not store
+an index into the model texture array. The native pixel shader reflection for
+`ksPerPixelMultiMap_damage_dirt` reports bind point 21 for `txDamageMask`.
+
+The official `bmw_m3_e92.kn5` stores 21 for this resource. Its texture has model
+index 18 and material resource index 6. Four official car families supplied 16 KN5
+files for a wider audit. None of the 868 decisive records matched the model texture
+index. Of these records, 849 matched their material resource position. The other 19
+records were `txDamageMask` records with bind point 21.
+
+The shipped `ksNet.pdb` identifies `KN5IO::loadMaterialsBinary` at `0x1003b9de` and
+`KN5IO::saveMaterialsBinary` at `0x1003d273`. The native save loop writes the first
+integer from each 56-byte `MaterialResource` before the texture name. The load loop
+reads this integer after the resource name and finds the material resource by name.
+
 For the collider fixture, this consumes all 1,838 bytes, yielding 3 nodes, 28
 vertices, and 156 indices. The larger LOD-D file validates the material record:
 three materials and shader properties such as `ksAmbient`, `ksDiffuse`,
