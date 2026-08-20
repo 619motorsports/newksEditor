@@ -100,6 +100,25 @@ test("keeps distinct same-named FBX material objects", () => {
   assert.deepEqual(pixels, [[255, 0, 0, 255], [0, 0, 255, 255]]);
 });
 
+test("uses global texture indices for resources from later materials", async () => {
+  const scene = new Group();
+  const first = new MeshPhongMaterial({ name: "First" }), second = new MeshPhongMaterial({ name: "Second" });
+  first.map = Object.assign(new Texture(), { name: "first.png" });
+  second.map = Object.assign(new Texture(), { name: "second.png" });
+  first.map.userData.apexFbxSource = "textures/first.png";
+  second.map.userData.apexFbxSource = "textures/second.png";
+  scene.add(new Mesh(triangleGeometry(3), first), new Mesh(triangleGeometry(3), second));
+  const model = convertFbxScene(scene);
+  await resolveFbxTextures(model, [
+    sourceFile("first.png", "source/textures/first.png", onePixelPng),
+    sourceFile("second.png", "source/textures/second.png", onePixelPng)
+  ]);
+  const reparsed = parseKn5(serializeKn5(model));
+  assert.deepEqual(model.materials.map((material) => material.resources[0].textureId), [0, 1]);
+  assert.deepEqual(reparsed.materials.map((material) => material.resources[0].textureId), [0, 1]);
+  assert.deepEqual(reparsed.materials.map((material) => material.resources[0].texture), model.textures.map((texture) => texture.name));
+});
+
 test("splits a shared FBX material into static and skinned variants", () => {
   const scene = new Group(), material = new MeshPhongMaterial({ name: "Shared" }), staticMesh = new Mesh(triangleGeometry(3), material), skinnedMesh = markSkinned(new Mesh(triangleGeometry(3), material));
   scene.add(staticMesh, skinnedMesh);
@@ -299,7 +318,7 @@ test("maps a selected DDS source texture in the official GT40 FBX", async (t) =>
   assert.deepEqual(model.fbx.textureSummary, { referenced: 2, resolved: 1, embedded: 0, missing: 1, ambiguous: 0, unsupported: 0, error: 0 });
   const spring = model.materials.find((material) => material.name === "SPRING"), texture = model.textures.find((entry) => entry.name.endsWith("_Grey.dds"));
   assert.equal(spring.resources[0].texture, texture.name);
-  assert.equal(spring.resources[0].textureId, 0);
+  assert.equal(spring.resources[0].textureId, model.textures.indexOf(texture));
   assert.deepEqual(texture.data, grey);
   const reparsed = parseKn5(serializeKn5(model));
   assert.equal(reparsed.materials.find((material) => material.name === "SPRING").resources[0].texture, texture.name);
