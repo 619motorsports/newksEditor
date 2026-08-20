@@ -1,7 +1,28 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { createSkinMetadata, MAX_SKIN_METADATA_BYTES, parseSkinMetadata, serializeSkinMetadata, SkinMetadataError } from "../src/skin-metadata.js";
+import { createSkinMetadata, createSkinMetadataLoadGuard, MAX_SKIN_METADATA_BYTES, parseSkinMetadata, serializeSkinMetadata, SkinMetadataError } from "../src/skin-metadata.js";
+
+test("rejects a metadata read after a newer skin selection", async () => {
+  const guard = createSkinMetadataLoadGuard();
+  let releaseSlow;
+  const slowBytes = new Promise((resolve) => { releaseSlow = resolve; });
+  let selectedName = "slow", metadata = null;
+  const slowSelection = guard.start(selectedName);
+  const slowLoad = slowBytes.then((bytes) => {
+    const parsed = parseSkinMetadata(bytes);
+    if (slowSelection.isCurrent(selectedName)) metadata = parsed;
+  });
+
+  selectedName = "fast";
+  const fastSelection = guard.start(selectedName);
+  const fastMetadata = parseSkinMetadata('{"skinname":"Fast"}');
+  if (fastSelection.isCurrent(selectedName)) metadata = fastMetadata;
+  releaseSlow(new TextEncoder().encode('{"skinname":"Slow"}'));
+  await slowLoad;
+
+  assert.equal(metadata.metadata.skinname, "Fast");
+});
 
 test("parses official skin metadata field types and a UTF-8 BOM", () => {
   const parsed = parseSkinMetadata(new TextEncoder().encode('\uFEFF{"skinname":"Rosso","drivername":"","country":"Italy","team":"","number":33,"priority":30}'), "ui_skin.json");

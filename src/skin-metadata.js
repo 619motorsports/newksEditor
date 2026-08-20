@@ -11,6 +11,18 @@ export class SkinMetadataError extends Error {
   }
 }
 
+/** Keep asynchronous metadata reads attached to the latest selected skin. */
+export function createSkinMetadataLoadGuard() {
+  let generation = 0;
+  return {
+    invalidate() { generation += 1; },
+    start(skinName) {
+      const token = ++generation, expectedName = String(skinName || "");
+      return { isCurrent: (currentName) => token === generation && String(currentName || "") === expectedName };
+    }
+  };
+}
+
 function inputText(input, source) {
   if (typeof input === "string") {
     const bytes = new TextEncoder().encode(input);

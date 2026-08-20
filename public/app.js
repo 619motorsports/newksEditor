@@ -30,7 +30,7 @@ import { KS_EDITOR_CUBEMAP, WEBGL_CUBEMAP_FACES, reflectionBlurFromExponent, sel
 import { createCspWindParticles, CSP_WIND_MAP_FORMAT, CSP_WIND_MAP_SIZE, CSP_WIND_PARTICLE_COUNT, updateCspWindParticles } from "/src/csp-wind.js";
 import { collectFbxAnimations, parseFbxWithTextures, resolveFbxModelTextures } from "/src/fbx-import.js";
 import { applyNodeEdits, composeNodeTransform, decomposeNodeTransform, nodePathEntries } from "/src/node-authoring.js";
-import { createSkinMetadata, effectiveSkinMetadata, parseSkinMetadata, serializeSkinMetadata, SKIN_METADATA_TEXT_FIELDS } from "/src/skin-metadata.js";
+import { createSkinMetadata, createSkinMetadataLoadGuard, effectiveSkinMetadata, parseSkinMetadata, serializeSkinMetadata, SKIN_METADATA_TEXT_FIELDS } from "/src/skin-metadata.js";
 
 const $ = (selector) => document.querySelector(selector);
 const fileInput = $("#file");
@@ -72,6 +72,7 @@ let assetSkins = [];
 let assetSkinName = "";
 let assetSkinMetadata = null;
 let assetSkinMetadataError = "";
+const assetSkinMetadataLoadGuard = createSkinMetadataLoadGuard();
 let assetAnimations = [];
 let importedFbxAnimations = [];
 let activeAnimation = null;
@@ -165,7 +166,8 @@ $("#skin-select").addEventListener("change", async (event) => {
   const skin = assetSkins.find((candidate) => candidate.name === event.target.value);
   assetSkinName = skin?.name || "";
   status.textContent = assetSkinName ? `Loading skin ${assetSkinName}…` : modelStatusText();
-  await Promise.all([renderer?.setSkinFiles(skin?.files || [], assetSkinName), configureSelectedSkinMetadata(skin)]);
+  const [, metadataCurrent] = await Promise.all([renderer?.setSkinFiles(skin?.files || [], assetSkinName), configureSelectedSkinMetadata(skin)]);
+  if (!metadataCurrent) return;
   if (modelFile) status.textContent = modelStatusText();
   if (model && !selectedNode) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
 });
@@ -330,6 +332,7 @@ function configureLayoutChoices() {
 
 function configureSkinChoices() {
   assetSkins = discoverAssetSkins(assetFileIndex);
+  assetSkinMetadataLoadGuard.invalidate();
   assetSkinName = "";
   assetSkinMetadata = null;
   assetSkinMetadataError = "";
@@ -342,22 +345,27 @@ function configureSkinChoices() {
 }
 
 async function configureSelectedSkinMetadata(skin) {
+  const selection = assetSkinMetadataLoadGuard.start(skin?.name || "");
   assetSkinMetadata = null; assetSkinMetadataError = ""; window.__apexSkinMetadata = null;
-  if (!skin) return;
+  if (!skin) return selection.isCurrent(assetSkinName);
   if (skin.metadataFiles.length > 1) {
     assetSkinMetadataError = `${skin.path}/ui_skin.json is ambiguous because ${skin.metadataFiles.length} case-insensitive files match`;
-    return;
+    return selection.isCurrent(assetSkinName);
   }
   try {
     const entry = skin.metadataFiles[0];
-    assetSkinMetadata = entry
+    const metadata = entry
       ? parseSkinMetadata(await entry.file.arrayBuffer(), entry.relativePath)
       : createSkinMetadata(`${skin.path}/ui_skin.json`);
+    if (!selection.isCurrent(assetSkinName)) return false;
+    assetSkinMetadata = metadata;
     window.__apexSkinMetadata = assetSkinMetadata;
   } catch (error) {
+    if (!selection.isCurrent(assetSkinName)) return false;
     console.error(error);
     assetSkinMetadataError = error.message;
   }
+  return true;
 }
 
 function configureAnimationChoices() {
