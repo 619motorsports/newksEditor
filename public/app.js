@@ -3,11 +3,11 @@ import { evaluateCspConfig, expandCspMaterialTemplates, parseCspIni } from "/src
 import { CSP_BOUNCEBACK_EXPONENT, customEmissiveAtlasSize } from "/src/custom-emissive.js";
 import { cloneEditorProject, createEditorProject, editorProjectCspEditCount, editorProjectEditCount, formatEditorValue, normalizeEditorProject, parseEditorValue, serializeEditorCsp, serializeEditorProject } from "/src/editor-project.js";
 import { decodeDdsRgba, inspectDds } from "/src/dds.js";
-import { createAssetFileIndex, discoverAssetAnimations, discoverAssetSkins, externalResourcePaths, matchSkinTextures, normalizeAssetPath, resolveAssetFile } from "/src/asset-files.js";
+import { assetFolderMatchesModelFiles, createAssetFileIndex, discoverAssetAnimations, discoverAssetSkins, externalResourcePaths, matchSkinTextures, normalizeAssetPath, resolveAssetFile } from "/src/asset-files.js";
 import { applyGeometryEdits, captureStaticGeometryBaselines, staticGeometryMetrics } from "/src/geometry-authoring.js";
 import { carLodDistance, carLodVisible, mergeKn5Models, normalizeCarLodFileName, parseCarLodsIni, parseModelsIni, serializeCarLodsIni, serializeModelsIni } from "/src/kn5-workspace.js";
 import { applyWorkspaceEdits, captureWorkspaceBaseline, workspaceEditCount as countWorkspaceEdits } from "/src/workspace-authoring.js";
-import { parseKsAnimation, sampleKsAnimation, serializeKsAnimation } from "/src/ksanim.js";
+import { animationTransformForNode, parseKsAnimation, sampleKsAnimation, serializeKsAnimation } from "/src/ksanim.js";
 import { bakeEditorProjectIntoKn5 } from "/src/kn5-bake.js";
 import { serializeKn5 } from "/src/kn5-write.js";
 import { auditTrackModel, parseSurfacesIni, resolveTrackSurface, serializeSurfacesIni } from "/src/track-validation.js";
@@ -23,13 +23,14 @@ import { evaluateRainFx } from "/src/rain-fx.js";
 import { computeDirectionalProbeShadowCascades, computeDirectionalShadowCascades, computeLocalLightShadow, cspLocalShadowFilter, CSP_LOCAL_SHADOW_ATLAS_SIZE, CSP_LOCAL_SHADOW_CELL_SIZE, CSP_LOCAL_SHADOW_LIMIT, CSP_LOCAL_SHADOW_SAMPLES, KS_SHADOW_BIASES, KS_SHADOW_MAP_SIZE, KS_SHADOW_SPLITS, shadowCasterEnabled } from "/src/shadows.js";
 import { cspLightDistanceFade, cspLightReceiverVisible, cspLineClosestPoint, cspSecondarySpotPacking, cspSpotConePacking, cspSpotEdgePacking, evaluateKsLighting, ksEditorAutoExposure, ksEditorBloomCompositeScale, ksEditorBloomGaussianKernel, KS_EDITOR_DEFAULT_WEATHER, KS_EDITOR_EXPOSURE, KS_EDITOR_GLARE, KS_EDITOR_TONEMAP, STOCK_WEATHER_PRESETS, sunDirectionFromAngles } from "/src/lighting.js";
 import { cspTrackOccluded } from "/src/csp-occlusion.js";
-import { bindVaoPatch, parseVaoPatch } from "/src/vao-patch.js";
+import { bindVaoPatch, parseVaoPatch, resolveSplitAoAnimation, splitAoAnimationNodeScope, splitAoBindingAmount } from "/src/vao-patch.js";
 import { adjustCspSeasonColor, analyzeCspSeasonalOverrides } from "/src/seasons.js";
 import { auditMaterialShaderProfiles, resolveMaterialRenderProfile } from "/src/shader-profiles.js";
 import { KS_EDITOR_CUBEMAP, WEBGL_CUBEMAP_FACES, reflectionBlurFromExponent, selectReflectionCaptureItems } from "/src/reflections.js";
 import { createCspWindParticles, CSP_WIND_MAP_FORMAT, CSP_WIND_MAP_SIZE, CSP_WIND_PARTICLE_COUNT, updateCspWindParticles } from "/src/csp-wind.js";
+import { createFileIdentity, fileIdentityMatches } from "/src/file-identity.js";
 import { collectFbxAnimations, parseFbxWithTextures, resolveFbxModelTextures } from "/src/fbx-import.js";
-import { applyNodeEdits, composeNodeTransform, decomposeNodeTransform, nodePathEntries } from "/src/node-authoring.js";
+import { applyNodeEdits, composeNodeTransform, decomposeNodeTransform, nodeAtPath, nodePathEntries } from "/src/node-authoring.js";
 
 const $ = (selector) => document.querySelector(selector);
 const fileInput = $("#file");
@@ -95,6 +96,8 @@ let carColliderModel = null;
 let carColliderAudit = null;
 let carColliderFileName = "";
 let carColliderError = "";
+let carColliderIdentity = null;
+let colliderGeometryBaselines = new Map();
 let bottomColliderConfig = null;
 let bottomColliderFileName = "";
 let carHierarchyAudit = null;
@@ -283,7 +286,7 @@ async function load(files, workspaceOptions = {}) {
     configureAnimationChoices();
     status.textContent = modelStatusText();
     renderTree();
-    renderer?.setModel(model);configureReflectionCaptureChoices();applyVaoPatch();renderer?.setSurfaceBindings(trackSurfaceBindings);configureSurfaceOverlay();
+    renderer?.setModel(model);refreshCarColliderPreview();configureReflectionCaptureChoices();applyVaoPatch();renderer?.setSurfaceBindings(trackSurfaceBindings);configureSurfaceOverlay();
     renderer?.setDriverCockpitMode(driverCockpitView,driverConfig?.hideObjects||[]);
     configureLodPreview();
     configureDriverViewButton();
@@ -385,19 +388,39 @@ async function configurePackedData() {
 }
 
 async function configureCarCollider() {
-  carColliderModel=null;carColliderAudit=null;carColliderFileName="";carColliderError="";bottomColliderConfig=null;bottomColliderFileName="";window.__apexColliderAudit=null;window.__apexBottomColliders=null;
+  carColliderModel=null;carColliderAudit=null;carColliderFileName="";carColliderError="";carColliderIdentity=null;colliderGeometryBaselines=new Map();bottomColliderConfig=null;bottomColliderFileName="";window.__apexColliderAudit=null;window.__apexColliderAuthoring=null;window.__apexBottomColliders=null;
   const candidates=assetFileIndex.entries.filter((entry)=>/(^|\/)collider\.kn5$/i.test(entry.relativePath)),entry=candidates.find((candidate)=>/^collider\.kn5$/i.test(candidate.relativePath))||(candidates.length===1?candidates[0]:null);
-  if(entry){carColliderFileName=entry.relativePath;try{carColliderModel=parseKn5(await entry.file.arrayBuffer());}catch(error){console.error(error);carColliderError=error.message;}}
+  if(entry){carColliderFileName=entry.relativePath;try{const bytes=new Uint8Array(await entry.file.arrayBuffer()),parsed=parseKn5(bytes),identity=await createFileIdentity(entry.relativePath,bytes,{kn5Version:parsed.version});carColliderModel=parsed;carColliderIdentity=identity;colliderGeometryBaselines=captureStaticGeometryBaselines(carColliderModel.root);}catch(error){console.error(error);carColliderError=error.message;}}
   const configs=assetFileIndex.entries.filter((candidate)=>/(^|\/)data\/colliders\.ini$/i.test(candidate.relativePath)),configEntry=configs.find((candidate)=>/^data\/colliders\.ini$/i.test(candidate.relativePath))||(configs.length===1?configs[0]:null)||virtualAcdAssetEntry("colliders.ini");
   if(configEntry){bottomColliderFileName=configEntry.relativePath;try{bottomColliderConfig=parseBottomCollidersIni(await configEntry.file.text(),configEntry.relativePath);window.__apexBottomColliders=bottomColliderConfig;}catch(error){console.error(error);carColliderError=carColliderError||error.message;}}
-  renderer?.setCollider(carColliderModel);configureColliderOverlay();
+  applyProjectColliderEdits();refreshCarColliderPreview();
+}
+
+function applyProjectColliderEdits() {
+  const warnings=[],assetMatch=carColliderMatchesOpenModel(),colliderMatch=carColliderEditsMatchProject();
+  if(carColliderModel?.root&&!assetMatch)warnings.push("The selected asset folder does not contain the open model. The app did not apply collider edits.");
+  if(carColliderModel?.root&&assetMatch&&!colliderMatch)warnings.push("The current collider does not match this project's collider edits. The app did not apply them.");
+  const edits=assetMatch&&colliderMatch?editorProject?.colliderEdits:{};
+  const applied=carColliderModel?.root?applyGeometryEdits(carColliderModel.root,edits,colliderGeometryBaselines,warnings):0;
+  window.__apexColliderAuthoring={edits:Object.keys(editorProject?.colliderEdits||{}).length,applied,warnings,assetMatch,colliderMatch};
+}
+
+function carColliderMatchesOpenModel(){return Boolean(model&&carColliderModel&&assetFolderMatchesModelFiles(assetFileIndex,loadedModelDescriptors));}
+function colliderProjectHasEdits(project=editorProject){return Boolean(Object.keys(project?.colliderEdits||{}).length);}
+function carColliderEditsMatchProject(project=editorProject){return !colliderProjectHasEdits(project)||fileIdentityMatches(project?.colliderAsset,carColliderIdentity);}
+
+function refreshCarColliderPreview() {
+  const available=carColliderMatchesOpenModel(),visible=available&&Boolean(renderer?.colliderVisible);
+  renderer?.setCollider(available?carColliderModel:null);
+  if(renderer&&visible){renderer.colliderVisible=true;renderer.draw();}
+  configureColliderOverlay();
 }
 
 function refreshCarColliderAudit() {
-  carColliderAudit=carColliderModel&&model?auditCarCollider(carColliderModel,model):null;window.__apexColliderAudit=carColliderAudit;configureColliderOverlay();
+  carColliderAudit=carColliderMatchesOpenModel()?auditCarCollider(carColliderModel,model):null;window.__apexColliderAudit=carColliderAudit;configureColliderOverlay();
 }
 
-function configureColliderOverlay(){const button=$("#collider-overlay"),available=Boolean(model&&carColliderModel);button.hidden=!available;button.disabled=!available;if(!available){button.classList.remove("active");if(renderer)renderer.colliderVisible=false;}}
+function configureColliderOverlay(){const button=$("#collider-overlay"),available=carColliderMatchesOpenModel();button.hidden=!available;button.disabled=!available;button.classList.toggle("active",available&&Boolean(renderer?.colliderVisible));if(!available&&renderer)renderer.colliderVisible=false;}
 function configureSurfaceOverlay(){const button=$("#surface-overlay"),available=Boolean(model?.workspace?.kind==="track"&&trackSurfaceBindings.size);button.hidden=!available;button.disabled=!available;button.classList.toggle("active",available&&Boolean(renderer?.surfaceOverlay));if(!available&&renderer)renderer.surfaceOverlay=false;}
 
 function virtualAcdAssetEntry(path) {
@@ -611,9 +634,10 @@ function applyProjectSceneEdits() {
   const warnings = [];
   const applied = model?.root ? applyGeometryEdits(model.root, editorProject?.geometryEdits, geometryBaselines, warnings) : 0;
   window.__apexGeometryAuthoring = { edits: Object.keys(editorProject?.geometryEdits || {}).length, applied, warnings };
+  applyProjectColliderEdits();
 }
 
-function refreshHierarchyAuthoring(geometryChanged = false) {
+function refreshHierarchyAuthoring(geometryChanged = false, colliderChanged = false) {
   if (!model) return;
   const nodes = walkNodes(model.root), meshes = nodes.filter(({ node }) => node.kind === "mesh" || node.kind === "skinnedMesh");
   sceneVisibility = computeKn5Visibility(model.root);
@@ -629,7 +653,9 @@ function refreshHierarchyAuthoring(geometryChanged = false) {
   renderTree($("#search").value);
   if (geometryChanged) renderer?.refreshGeometry(); else renderer?.refreshHierarchy();
   renderer?.setSurfaceBindings(trackSurfaceBindings);
-  if (geometryChanged) { refreshCarColliderAudit(); applyVaoPatch(); }
+  if (colliderChanged) refreshCarColliderPreview();
+  if (geometryChanged || colliderChanged) refreshCarColliderAudit();
+  if (geometryChanged) applyVaoPatch();
   configureSurfaceOverlay();
   configureLodPreview(true);
   configureReflectionCaptureChoices();
@@ -677,21 +703,22 @@ function commitEditorChange(label, mutate) {
   const normalized = normalizeEditorProject(next), after = serializeEditorProject(normalized);
   if (after === before) return false;
   const geometryChanged = JSON.stringify(normalized.geometryEdits) !== JSON.stringify(editorProject.geometryEdits);
-  const sceneChanged = geometryChanged || JSON.stringify(normalized.nodeEdits) !== JSON.stringify(editorProject.nodeEdits) || JSON.stringify(normalized.workspaceEdits) !== JSON.stringify(editorProject.workspaceEdits) || JSON.stringify(normalized.surfaceEdits) !== JSON.stringify(editorProject.surfaceEdits);
+  const colliderChanged = colliderProjectState(normalized) !== colliderProjectState(editorProject);
+  const sceneChanged = geometryChanged || colliderChanged || JSON.stringify(normalized.nodeEdits) !== JSON.stringify(editorProject.nodeEdits) || JSON.stringify(normalized.workspaceEdits) !== JSON.stringify(editorProject.workspaceEdits) || JSON.stringify(normalized.surfaceEdits) !== JSON.stringify(editorProject.surfaceEdits);
   undoStack.push({ label, snapshot: before });
   if (undoStack.length > 100) undoStack.shift();
   redoStack = [];
   editorProject = normalized;
-  if (sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged); }
+  if (sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged,colliderChanged); }
   refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
   if (sceneChanged && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
   return true;
 }
 
 function restoreEditorSnapshot(snapshot) {
-  const restored = normalizeEditorProject(JSON.parse(snapshot)), geometryChanged = JSON.stringify(restored.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits), sceneChanged = geometryChanged || JSON.stringify(restored.nodeEdits) !== JSON.stringify(editorProject?.nodeEdits) || JSON.stringify(restored.workspaceEdits) !== JSON.stringify(editorProject?.workspaceEdits) || JSON.stringify(restored.surfaceEdits) !== JSON.stringify(editorProject?.surfaceEdits);
+  const restored = normalizeEditorProject(JSON.parse(snapshot)), geometryChanged = JSON.stringify(restored.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits), colliderChanged = colliderProjectState(restored) !== colliderProjectState(editorProject), sceneChanged = geometryChanged || colliderChanged || JSON.stringify(restored.nodeEdits) !== JSON.stringify(editorProject?.nodeEdits) || JSON.stringify(restored.workspaceEdits) !== JSON.stringify(editorProject?.workspaceEdits) || JSON.stringify(restored.surfaceEdits) !== JSON.stringify(editorProject?.surfaceEdits);
   editorProject = restored;
-  if (sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged); }
+  if (sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged,colliderChanged); }
   refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
   if (sceneChanged && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
 }
@@ -711,7 +738,7 @@ function redoEditorChange() {
 }
 
 function updateEditorButtons() {
-  const edits = editorProjectEditCount(editorProject), cspEdits = editorProjectCspEditCount(editorProject), available = Boolean(editorProject && model);
+  const edits = editorProjectEditCount(editorProject), cspEdits = editorProjectCspEditCount(editorProject), kn5Edits=edits-colliderProjectEditCount(editorProject), available = Boolean(editorProject && model);
   $("#undo").disabled = !undoStack.length; $("#undo").title = undoStack.length ? `Undo ${undoStack.at(-1).label}` : "Nothing to undo";
   $("#redo").disabled = !redoStack.length; $("#redo").title = redoStack.length ? `Redo ${redoStack.at(-1).label}` : "Nothing to redo";
   $("#save-project").disabled = !available;
@@ -719,7 +746,7 @@ function updateEditorButtons() {
   $("#export-csp").disabled = !available || !cspEdits;
   $("#export-csp").textContent = cspEdits ? `Export CSP (${cspEdits})` : "Export CSP";
   const kn5Blocked=model?.encryption?"CSP-protected KN5 files cannot be safely rewritten":model?.workspace?"Export each source model separately; assembled workspaces are not a single source asset":model?.fbx?"Export the imported FBX scene as a game-compatible KN5":"Export a game-compatible KN5 copy with compatible authored edits baked in";
-  $("#export-kn5").disabled=!available||Boolean(model?.encryption)||Boolean(model?.workspace);$("#export-kn5").title=kn5Blocked;$("#export-kn5").textContent=edits?`Export KN5 (${edits})`:model?.fbx?"Export KN5":"Export KN5 copy";
+  $("#export-kn5").disabled=!available||Boolean(model?.encryption)||Boolean(model?.workspace);$("#export-kn5").title=kn5Blocked;$("#export-kn5").textContent=kn5Edits?`Export KN5 (${kn5Edits})`:model?.fbx?"Export KN5":"Export KN5 copy";
 }
 
 function projectBaseName() {
@@ -759,15 +786,22 @@ function exportBakedKn5() {
   finally{applyProjectSceneEdits();}
 }
 
+function exportColliderKn5() {
+  if(!carColliderMatchesOpenModel()){status.textContent="Open a model from the selected asset folder before exporting its collider";return;}
+  if(!carColliderEditsMatchProject()){status.textContent="The current collider does not match this project's collider edits. Reset the stale edits before export.";return;}
+  try{const bytes=serializeKn5(carColliderModel),url=URL.createObjectURL(new Blob([bytes],{type:"application/octet-stream"})),anchor=document.createElement("a");window.__apexLastColliderExport={name:"collider.kn5",bytes:bytes.byteLength,edits:Object.keys(editorProject?.colliderEdits||{}).length,errors:carColliderAudit?.errors||0,warnings:carColliderAudit?.warnings||0};status.textContent=`Exported collider.kn5 · ${carColliderAudit?.triangles?.toLocaleString()||0} triangles · ${carColliderAudit?.errors||0} validation errors`;anchor.href=url;anchor.download="collider.kn5";anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+  catch(error){console.error(error);status.textContent=`Could not export collider.kn5: ${error.message}`;}
+}
+
 async function loadEditorProject(file) {
   if (!file || !model) return;
   try {
     const loaded = normalizeEditorProject(JSON.parse(await file.text()));
     if (loaded.asset.size && loaded.asset.size !== modelFile.size) throw new Error(`Project expects a ${loaded.asset.size}-byte KN5, but ${modelFile.name} is ${modelFile.size} bytes`);
     if (loaded.asset.kn5Version && loaded.asset.kn5Version !== model.version) throw new Error(`Project expects KN5 v${loaded.asset.kn5Version}, but this model is v${model.version}`);
-    const geometryChanged = JSON.stringify(loaded.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits);
+    const geometryChanged = JSON.stringify(loaded.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits), colliderChanged = colliderProjectState(loaded) !== colliderProjectState(editorProject);
     editorProject = loaded; undoStack = []; redoStack = [];
-    applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged); refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
+    applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged,colliderChanged); refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
     if (!selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
   } catch (error) {
     console.error(error); status.textContent = `Could not open project: ${error.message}`;
@@ -803,8 +837,8 @@ async function loadVaoPatch(file){
 }
 function applyVaoPatch(){
   vaoBinding=model&&vaoPatch?bindVaoPatch(model,vaoPatch):null;
-  const summary=vaoBinding?{source:vaoFileName,version:vaoPatch.version,entry:vaoPatch.entry,records:vaoPatch.recordCount,matchedRecords:vaoBinding.matchedRecords,unmatchedRecords:vaoBinding.unmatchedRecords,alternateRecords:vaoBinding.alternateRecords,normalRecords:vaoBinding.normalRecords,matchedMeshes:vaoBinding.matchedMeshes,primaryMeshes:vaoBinding.primaryMeshes,secondaryMeshes:vaoBinding.secondaryMeshes,vertices:vaoBinding.vertices,minimum:vaoBinding.minimum,maximum:vaoBinding.maximum,mean:vaoBinding.mean,extraSamples:vaoPatch.extraSamples,treeSamples:vaoPatch.treeSamples}:{};
-  renderer?.setVaoBindings(vaoBinding?.bindings||new Map(),summary);window.__apexVaoAudit=vaoBinding?{...summary,enabled:renderer?.vaoEnabled}:null;configureVaoButton();if(model)status.textContent=modelStatusText();
+  const summary=vaoBinding?{source:vaoFileName,version:vaoPatch.version,entry:vaoPatch.entry,records:vaoPatch.recordCount,matchedRecords:vaoBinding.matchedRecords,unmatchedRecords:vaoBinding.unmatchedRecords,alternateRecords:vaoBinding.alternateRecords,normalRecords:vaoBinding.normalRecords,matchedMeshes:vaoBinding.matchedMeshes,primaryMeshes:vaoBinding.primaryMeshes,secondaryMeshes:vaoBinding.secondaryMeshes,vertices:vaoBinding.vertices,minimum:vaoBinding.minimum,maximum:vaoBinding.maximum,mean:vaoBinding.mean,splitAo:vaoPatch.splitAo,splitAoWarnings:vaoPatch.splitAo.warnings.length,extraSamples:vaoPatch.extraSamples,treeSamples:vaoPatch.treeSamples}:{};
+  renderer?.setVaoBindings(vaoBinding?.bindings||new Map(),summary);window.__apexVaoAudit=vaoBinding?renderer?.vaoStatus:null;configureVaoButton();if(model)status.textContent=modelStatusText();
 }
 function configureVaoButton(){const button=$("#vao-toggle"),fileButton=$("#vao-file-button"),available=Boolean(vaoBinding?.matchedMeshes);button.hidden=!vaoPatch&&!vaoError;button.disabled=!available;button.classList.toggle("active",available&&Boolean(renderer?.vaoEnabled));fileButton.childNodes[0].nodeValue=vaoFileName?`VAO: ${vaoFileName}`:"Open VAO patch";fileButton.title=vaoError?vaoError:vaoBinding?`${vaoBinding.matchedRecords}/${vaoPatch.recordCount} default records bind to ${vaoBinding.matchedMeshes} loaded meshes`:vaoPatch?"VAO patch loaded; open its matching car or track geometry":"Open a CSP vertex ambient-occlusion patch for this car or track";$("#pipeline").textContent=pipelineLabel();}
 
@@ -887,6 +921,7 @@ function renderModelInspector(file, nodes, triangles) {
   }));
   bindWorkspaceEditors();
   bindSurfaceEditors();
+  bindColliderEditors();
 }
 
 function renderMaterialInspector(material) {
@@ -944,6 +979,7 @@ function skinTextureInspectorHtml() {
 
 function updateAnimationUi(value) {
   const select = $("#animation-select");
+  if(vaoBinding)window.__apexVaoAudit=renderer?.vaoStatus;
   if (!select || !value) return;
   select.title = value.name ? `${value.matchedTracks}/${value.animatedTracks} animated tracks matched ${value.matchedNodes} KN5 nodes` : `${importedFbxAnimations.length} FBX clips · ${assetAnimations.length} KSANIM files`;
   $("#pipeline").textContent = pipelineLabel();
@@ -989,8 +1025,19 @@ function packedDataInspectorHtml() {
 }
 
 function carColliderInspectorHtml() {
-  if(!carColliderFileName&&!bottomColliderFileName)return "";if(carColliderError&&!carColliderAudit&&!bottomColliderConfig)return `<div class="section"><h3>Car collision validation</h3>${kv("Status","Could not parse")}${kv("Error",carColliderError)}</div>`;const audit=carColliderAudit,dimensions=audit?.bounds?.size.map((value)=>`${format(value)} m`).join(" × ")||"Unavailable",boxes=bottomColliderConfig?.colliders||[];
-  return `<div class="section"><h3>Car collision validation</h3>${carColliderFileName?kv("3D collider",carColliderFileName):kv("3D collider","Not available")}${audit?`${kv("Meshes",audit.meshes)}${kv("Vertices",audit.vertices)}${kv("Triangles",audit.triangles)}${kv("Dimensions",dimensions)}${kv("Textures",audit.textures)}${kv("Closed manifold",audit.topology.closed?"Yes":"No")}${kv("Boundary edges",audit.topology.boundaryEdges)}${kv("Non-manifold edges",audit.topology.nonManifoldEdges)}${kv("Errors",audit.errors)}${kv("Warnings",audit.warnings)}${audit.findings.map((finding)=>`<div class="resource ${finding.severity==="error"?"validation-error":""}"><strong>${finding.severity==="error"?"Error":"Warning"}</strong><span>${escapeHtml(finding.message)}</span></div>`).join("")}`:""}${bottomColliderFileName?`${kv("Bottom boxes",`${boxes.length} · ${bottomColliderFileName}`)}${boxes.map((box)=>`<div class="resource"><strong>COLLIDER_${box.index}${box.groundEnabled?" · ground":" · disabled"}</strong><span>centre ${box.centre.map(format).join(", ")} m · size ${box.size.map(format).join(" × ")} m</span></div>`).join("")}${(bottomColliderConfig?.warnings||[]).map((warning)=>`<div class="resource"><strong>Warning</strong><span>${escapeHtml(warning)}</span></div>`).join("")}`:""}<span class="empty">Floor-plane placement needs visual verification; the lowest render-LOD vertex is only a conservative comparison.</span></div>`;
+  if(!carColliderFileName&&!bottomColliderFileName)return "";if(carColliderError&&!carColliderAudit&&!bottomColliderConfig)return `<div class="section"><h3>Car collision validation</h3>${kv("Status","Could not parse")}${kv("Error",carColliderError)}</div>`;if(model&&!assetFolderMatchesModelFiles(assetFileIndex,loadedModelDescriptors))return `<div class="section"><h3>Car collision validation</h3>${kv("Status","Waiting for matching model")}<span class="empty validation-warning">The selected asset folder does not contain the open model. Open this folder's car model before previewing, editing, validating, or exporting its collider.</span></div>`;const audit=carColliderAudit,dimensions=audit?.bounds?.size.map((value)=>`${format(value)} m`).join(" × ")||"Unavailable",boxes=bottomColliderConfig?.colliders||[];
+  return `<div class="section"><h3>Car collision validation</h3>${carColliderFileName?kv("3D collider",carColliderFileName):kv("3D collider","Not available")}${audit?`${kv("Meshes",audit.meshes)}${kv("Vertices",audit.vertices)}${kv("Triangles",audit.triangles)}${kv("Dimensions",dimensions)}${kv("Textures",audit.textures)}${kv("Closed manifold",audit.topology.closed?"Yes":"No")}${kv("Boundary edges",audit.topology.boundaryEdges)}${kv("Non-manifold edges",audit.topology.nonManifoldEdges)}${kv("Errors",audit.errors)}${kv("Warnings",audit.warnings)}${audit.findings.map((finding)=>`<div class="resource ${finding.severity==="error"?"validation-error":""}"><strong>${finding.severity==="error"?"Error":"Warning"}</strong><span>${escapeHtml(finding.message)}</span></div>`).join("")}`:""}${colliderAuthoringHtml()}${bottomColliderFileName?`${kv("Bottom boxes",`${boxes.length} · ${bottomColliderFileName}`)}${boxes.map((box)=>`<div class="resource"><strong>COLLIDER_${box.index}${box.groundEnabled?" · ground":" · disabled"}</strong><span>centre ${box.centre.map(format).join(", ")} m · size ${box.size.map(format).join(" × ")} m</span></div>`).join("")}${(bottomColliderConfig?.warnings||[]).map((warning)=>`<div class="resource"><strong>Warning</strong><span>${escapeHtml(warning)}</span></div>`).join("")}`:""}<span class="empty">Floor-plane placement needs visual verification; the lowest render-LOD vertex is only a conservative comparison.</span></div>`;
+}
+
+function colliderAuthoringHtml() {
+  if(!carColliderModel?.root||!editorProject)return "";
+  const meshes=nodePathEntries(carColliderModel.root).filter(({node,path})=>node.kind==="mesh"&&node.vertexStride===11&&colliderGeometryBaselines.has(path)),count=colliderProjectEditCount();
+  if(!carColliderEditsMatchProject())return `${kv("Collider edits",count)}<span class="empty validation-warning">These edits belong to a different collider file. They were not applied. Reset them before editing or exporting this collider.</span><div class="section-actions"><button class="mini" data-reset-colliders>Reset stale collider edits</button></div>`;
+  const controls=meshes.map(({node,path})=>{const baseline=colliderGeometryBaselines.get(path),edit=editorProject.colliderEdits?.[path],source=staticGeometryMetrics({...node,vertices:baseline.vertices,indices:baseline.indices}),current=staticGeometryMetrics(node),components=edit?.transform?decomposeNodeTransform(edit.transform):{position:[0,0,0],rotation:[0,0,0],scale:[1,1,1],decomposable:true};
+    const vector=(key,label,value,title="")=>`<label class="author-field"><span>${label}</span><input class="${edit?.transform?"authored":""}" data-edit-collider-transform="${key}" data-collider-path="${escapeHtml(path)}" value="${escapeHtml(formatEditorValue(value))}" spellcheck="false"${title?` title="${escapeHtml(title)}"`:""}></label>`;
+    const operation=(key,label,title)=>`<label class="author-field"><span>${label}</span><select class="${edit?.[key]?"authored":""}" data-edit-collider-operation="${key}" data-collider-path="${escapeHtml(path)}" title="${escapeHtml(title)}"><option value="">Keep source</option><option value="true" ${edit?.[key]?"selected":""}>Apply</option></select></label>`;
+    return `<div class="resource"><strong>${escapeHtml(node.name)} · ${escapeHtml(path)}</strong><span>Pivot ${source.center.map(format).join(", ")} · source ${source.size.map(format).join(" × ")} m · ${source.triangles.toLocaleString()} triangles${edit?` · current ${current.size.map(format).join(" × ")} m · ${current.triangles.toLocaleString()} triangles`:""}</span>${vector("position","Vertex offset",components.position)}${vector("rotation","Rotation °",components.rotation,"Euler XYZ degrees")}${vector("scale","Vertex scale",components.scale)}${components.decomposable?"":`<span class="empty validation-warning">This transform cannot be represented as standard position, rotation, and scale.</span>`}${operation("removeDegenerate","Remove degenerate","Remove repeated-index and zero-area triangles")}${operation("reverseWinding","Reverse faces","Reverse triangle winding and vertex normals")}${operation("recalculateNormals","Rebuild normals","Build area-weighted normals from the edited triangle winding")}<div class="section-actions"><button class="mini" data-reset-collider="${escapeHtml(path)}" ${edit?"":"disabled"}>Reset mesh</button></div></div>`;}).join("");
+  return `${kv("Collider edits",count)}${controls}<span class="empty">Transforms use each source mesh bounds center. Export writes the edited standalone collider without changing the visual car KN5.</span><div class="section-actions"><button class="mini" data-export-collider>Export collider.kn5</button><button class="mini" data-reset-colliders ${count?"":"disabled"}>Reset collider edits</button></div>`;
 }
 
 function carHierarchyInspectorHtml(){const audit=carHierarchyAudit;if(!audit)return "";return `<div class="section"><h3>Car hierarchy validation</h3>${kv("Required nodes per LOD",audit.requiredNodes)}${kv("Errors",audit.errors)}${kv("Warnings",audit.warnings)}${audit.lods.map((lod)=>`<div class="resource"><strong>LOD ${lod.index} · ${escapeHtml(lod.file)}</strong><span>${lod.requiredPresent}/${audit.requiredNodes} required · ${lod.nodes.toLocaleString()} nodes · ${lod.uniqueNames.toLocaleString()} unique names</span></div>`).join("")}${audit.findings.map((finding)=>`<div class="resource ${finding.severity==="error"?"validation-error":""}"><strong>${finding.severity==="error"?"Error":"Warning"} · ${escapeHtml(finding.file)}</strong><span>${escapeHtml(finding.message)}</span></div>`).join("")}</div>`;}
@@ -1001,7 +1048,7 @@ function trackCameraInspectorHtml(){if(!trackCameraSets.length&&!trackCameraErro
 
 function grassFxInspectorHtml(){const value=renderer?.grassStatus;if(!grassFxEvaluation)return "";const configurations=value?.configurationCounts||{},groups=value?.groupInstances||[],mapped=value?.mappedMeshes||[],trims=Object.entries(value?.trimStates||{}).filter(([,state])=>state.period),blur=["none","low","medium","high"][grassFxEvaluation.maskBlur]||String(grassFxEvaluation.maskBlur),passes=value?.generationPasses||[];return `<div class="section"><h3>GrassFX</h3>${kv("Config",`${grassFxEvaluation.source}:${grassFxEvaluation.line}`)}${kv("Source selector",grassFxEvaluation.grassMaterials||"None")}${kv("Source meshes",grassFxEvaluation.sourceMeshes)}${kv("Source triangles",grassFxEvaluation.sourceTriangles.toLocaleString())}${kv("Occluder meshes",grassFxEvaluation.occluderMeshes)}${kv("Generation",value?.generationMode||"Not generated")}${value?.nativeCandidateCount?kv("Native dispatch",`${value.nativeCandidateCount.toLocaleString()} threads · five 32×32 compute passes`):""}${value?.generationCandidateBudget?kv("CPU ring samples",`${(value.candidateCount||0).toLocaleString()} / ${value.nativeCandidateCount.toLocaleString()} · ${format(value.generationSamplingRate*100)}%`):kv("Sample candidates",(value?.candidateCount||0).toLocaleString())}${passes.length?kv("Camera rings",passes.map((pass)=>`P${pass.passId} ${pass.width} m · ${pass.candidates.toLocaleString()}→${pass.instances.toLocaleString()}`).join(" · ")):""}${value?.generationFallbackReason?kv("Camera fallback",value.generationFallbackReason):""}${kv("Preview blades",(value?.instanceCount||0).toLocaleString())}${kv("Eligible area",`${format(value?.totalArea||0)} m²`)}${kv("Mask rejects",(value?.rejectedByMask||0).toLocaleString())}${kv("Mask equation",value?.maskMode||"No texture sample")}${kv("Surface target",`${value?.surfaceTargetMode||"None"} · ${(value?.surfaceTargetTiles||0).toLocaleString()} tiles · ${(value?.surfaceTargetPixels||0).toLocaleString()} px`)}${kv("Surface ownership rejects",(value?.rejectedBySurfaceOwnership||0).toLocaleString())}${kv("Depth discontinuity rejects",(value?.rejectedByDepthDiscontinuity||0).toLocaleString())}${value?.rejectedByNoSurface?kv("No-surface rejects",value.rejectedByNoSurface.toLocaleString()):""}${value?.rejectedByFrustum?kv("Frustum rejects",value.rejectedByFrustum.toLocaleString()):""}${value?.distanceFadeMode!=="none"?kv("Distance fade",`${(value.rejectedByDistanceFade||0).toLocaleString()} rejects · ${format(value.fadeMin)}–${format(value.fadeMax)} A2C`):""}${value?.rejectedByConfiguredOcclusion?kv("Legacy occluder rejects",value.rejectedByConfiguredOcclusion.toLocaleString()):""}${kv("Surface samplers",`${value?.surfaceSamplers||0} decoded · ${value?.multilayerSurfaceSamplers||0} multilayer`)}${kv("Surface normals",`${value?.normalMapSamplers||0} tangent-map samplers · ${(value?.normalMapSamples||0).toLocaleString()} samples`)}${kv("Color sample mip",grassFxEvaluation.colorSampleMipLevel)}${kv("Adjustment map",`${value?.adjustmentMapMode||`direct-${blur}`} · ${value?.adjustmentSamplers||0} decoded samplers`)}${value?.adjustmentTargetTiles?kv("Adjustment target",`${value.adjustmentTargetTiles.toLocaleString()} raw tiles · ${(value?.adjustmentFinalTexels||0).toLocaleString()} filtered texels · ${(value?.adjustmentBlurSamples||0).toLocaleString()} taps`):""}${value?.adjustmentRules?kv("Adjustment draws",`${value.adjustmentRules} ordered rules · ${value.adjustmentPieces||0} world pieces (${value.adjustmentPieceSamplers||0} textured) · ${value.adjustmentExtraAreas||0} ellipse extras`):""}${kv("Shape rejects",(value?.rejectedByShape||0).toLocaleString())}${kv("Shape noise",value?.noiseMode||"Preview fallback")}${kv("Height multiplier",grassFxEvaluation.heightMult)}${kv("Area modifiers",grassFxEvaluation.areas.length)}${kv("Configurations",Object.entries(configurations).filter(([,count])=>count).map(([name,count])=>`${name} ${count.toLocaleString()}`).join(" · ")||"BASE")}${kv("Mapped meshes",mapped.map((count,index)=>count?`${"ABCD"[index]} ${count}`:"").filter(Boolean).join(" · ")||"None")}${trims.length?kv("Trim cycle",trims.map(([name,state])=>`${name} ${state.period} · ${format(state.phase)} · size ${format(state.shapeSize)}`).join(" · ")):""}${kv("Atlas",value?.atlasReady?`Loaded · ${value.texture}`:`Procedural fallback · ${value?.texture||GRASS_FX_DEFAULT_TEXTURE}`)}${kv("Atlas grid",value?.textureGrid?.length?value.textureGrid.join(" × "):"16 × 1")}${kv("Atlas routing",`${(value?.baseInstances||0).toLocaleString()} base${groups.some(Boolean)?` · ${groups.map((count,index)=>count?`G${index} ${count.toLocaleString()}`:"").filter(Boolean).join(" · ")}`:""}`)}${kv("Piece wind",`${format(value?.windMin||0)}–${format(value?.windMax||0)} response`)}${kv("Wind field",`${value?.windMapSize||64}² ${value?.windMapMode||"unavailable"} · ${value?.windParticles||32} pulses · ${(value?.windUpdates||0).toLocaleString()} updates`)}${kv("Atmospheric wind",`${format(value?.windSpeed||0)} m/s · ${format(value?.windHeading||0)}°`)}${kv("Vehicle air map",value?.airMapMode||"Unavailable")}${kv("Texture brightness",value?.textureBrightness??1)}${value?.unsupportedAdjustments?kv("Complex adjustments",`${value.unsupportedAdjustments} preserved as base`):""}${kv("Lighting",value?.weatherLit?"Weather HDR · directional backlight · fog · cascade receiver":"Preview color")}${kv("Bound local lights",(value?.localLights||0).toLocaleString())}${kv("Local-light path","Packed linear spot cone · substrate diffuse · 52.8 gloss · strongest backlight · radial ESM atlas")}${kv("Local shadow atlas",`${value?.localShadowLights||0} lights · ${value?.localShadowCasters||0} scene casters · ${value?.localShadowAtlasMode||"1024² / 4×512 ESM"}`)}${kv("Shadow caster",value?.castsShadows?`${value.instanceCount.toLocaleString()} blades`:"Disabled")}${kv("Preview",renderer?.grassVisible?"Visible":"Hidden")}<span class="empty">Local generation reproduces CSP’s five medium-profile camera rings: 32/64/128/256/512 m coverage, 0.25/0.125/0.5/0.5/1 m steps, two-metre window snapping, native PCG position jitter, depth-derived placement, frustum rejection, the pass-width distance fade, alpha-to-coverage, and far-fin ground sinking. The portable CPU preview samples 25,000 positions evenly across the exact 868,352-thread schedule; when an assembled scene frames the camera completely outside GrassFX source bounds, it explicitly falls back to the full-source editor sampler. Decoded diffuse and multilayer material passes feed CSP’s continuous color-threshold, stochastic acceptance, and fin-size equations. Supported ksPerPixel normal-mapped terrain shaders decode packed KN5 tangents and perturb the interpolated substrate normal before seasonal color and fin lean; ksMultilayer and object-space normal modes retain their geometric normal. Direct and multilayer-mask adjustments render in native rule order into a sparse 0.5 m RGBA8 world target. Rotated CENTER/SIZE texture pieces and up to eight sequential elliptical extras use CSP’s native UV, range-fade, aspect, angle, opacity, and overwrite equations; four raw mip levels and the selected MASK_BLUR kernel feed quantized bilinear configuration weights. COLOR_SAMPLE_MIP_LEVEL selects decoded material mips. A sparse 0.25 m world-space surface target applies CSP’s top-down depth ownership, bilinearly gathers four depth texels with the native 1.92 m discontinuity cutoff, applies later occluder writes, and builds the 2×2 alpha mip chain without allocating a full-track bitmap. Area modifiers, weighted atlas groups and pieces, native piece width/height scaling and wind defaults, date-driven trim behavior, and the shared 32×32 RGBA8 noise texture with native mip-0 linear wrapping are applied. Visible and shadow passes share CSP’s 64×64 ping-pong atmospheric wind field, two-frequency spatial sampling, per-atlas phase, saturated horizontal bend, and vertical length compensation. Native host tracing confirms that local-specular, cubemap-reflection, saturation, and configurable-backlight padding values are zero in this CSP build; the still-active built-in directional backlight is reproduced. Active CSP lights add the public GrassFX substrate-normal concentrated diffuse, fixed-exponent gloss, strongest-light backlighting, fake-shadow detail response, and packed linear spotlight cones in the viewport and reflection probe. A bounded static atlas shadows up to four authored spotlights with CSP’s radial exponential encode, automatic or authored shadow boost, normal-dependent receiver bias, optional extra filtering, and 10 cm GrassFX receiver offset. Dynamic/car refresh scheduling remains game-only. The editor has no moving cars, so CSP’s separate 50 m vehicle-air target is exactly zero.</span></div>`;}
 function rainFxInspectorHtml(){const value=renderer?.rainStatus,binding=selectedNode&&rainFxEvaluation?.nodeBindings.get(selectedNode);if(!rainFxEvaluation)return "";return `<div class="section"><h3>RainFX</h3>${kv("Config",`${rainFxEvaluation.source}:${rainFxEvaluation.line}`)}${kv("Matched meshes",rainFxEvaluation.matchedMeshes.toLocaleString())}${kv("Puddles",rainFxEvaluation.counts.puddles.toLocaleString())}${kv("Soaking",rainFxEvaluation.counts.soaking.toLocaleString())}${kv("Smooth",rainFxEvaluation.counts.smooth.toLocaleString())}${kv("Rough",rainFxEvaluation.counts.rough.toLocaleString())}${kv("Lines",rainFxEvaluation.counts.lines.toLocaleString())}${kv("Relief",rainFxEvaluation.counts.relief.toLocaleString())}${kv("Streams",`${rainFxEvaluation.streamEdges} edges · ${rainFxEvaluation.streamPoints} points`)}${binding?kv("Selected categories",binding.categories.join(", ")||"Filter only"):""}${kv("Wetness",format(value?.wetness||0))}${kv("Preview",value?.visible?"Visible":"Hidden")}<span class="empty">Wet darkening, category-specific gloss, deterministic puddle breakup, and configured stream positions are an authoring preview. Native drainage, dynamic accumulation, occlusion, spray, rain hits, and windscreen effects are not simulated.</span></div>`;}
-function vaoInspectorHtml(){if(!vaoFileName)return "";if(vaoError)return `<div class="section"><h3>CSP vertex AO</h3>${kv("Patch",vaoFileName)}${kv("Status","Could not parse")}${kv("Error",vaoError)}</div>`;if(!vaoPatch)return "";const audit=vaoBinding,value=renderer?.vaoStatus,selected=audit&&selectedNode?audit.bindings.get(selectedNode):null,range=(values)=>{if(!values)return "Not present";let minimum=255,maximum=0;for(const sample of values){minimum=Math.min(minimum,sample);maximum=Math.max(maximum,sample);}return `${minimum}–${maximum} / 255`;};return `<div class="section"><h3>CSP vertex AO</h3>${kv("Patch",vaoFileName)}${kv("Format",`Patch v${vaoPatch.version} · ${vaoPatch.entry}`)}${kv("Preview",value?.enabled?"Enabled":"Disabled")}${kv("Records",vaoPatch.recordCount.toLocaleString())}${audit?`${kv("Matched records",audit.matchedRecords.toLocaleString())}${kv("Unmatched records",audit.unmatchedRecords.toLocaleString())}${kv("Alternate-state records",audit.alternateRecords.toLocaleString())}${audit.normalRecords?kv("Normal-override records",`${audit.normalRecords.toLocaleString()} · diagnosed only`):""}${kv("Matched meshes",audit.matchedMeshes.toLocaleString())}${kv("Primary / split meshes",`${audit.primaryMeshes.toLocaleString()} / ${audit.secondaryMeshes.toLocaleString()}`)}${kv("AO vertices",audit.vertices.toLocaleString())}${kv("AO byte range",`${audit.minimum}–${audit.maximum} · mean ${format(audit.mean)}`)}`:""}${selected?`${kv("Selected primary",range(selected.primary))}${kv("Selected split channel",range(selected.secondary))}`:""}${vaoPatch.extraSamples?kv("Dynamic extra samples",`${vaoPatch.extraSamples.version===2?"v2":"v1"} · ${vaoPatch.extraSamples.bytes.toLocaleString()} bytes · diagnosed only`):""}${vaoPatch.treeSamples?kv("Tree samples",`${vaoPatch.treeSamples.bytes.toLocaleString()} bytes · diagnosed only`):""}<span class="empty">CSP’s exact name, vertex-count, and first-position binding key is used. Patch v4 bytes receive the native square-root conversion; v5 bytes remain linear. Primary AO attenuates indirect ambient and environment light. Split animation states, normal overrides, extra dynamic samples, and tree samples are retained as explicit diagnostics.</span></div>`;}
+function vaoInspectorHtml(){if(!vaoFileName)return "";if(vaoError)return `<div class="section"><h3>CSP vertex AO</h3>${kv("Patch",vaoFileName)}${kv("Status","Could not parse")}${kv("Error",vaoError)}</div>`;if(!vaoPatch)return "";const audit=vaoBinding,value=renderer?.vaoStatus,selected=audit&&selectedNode?audit.bindings.get(selectedNode):null,range=(values)=>{if(!values)return "Not present";let minimum=255,maximum=0;for(const sample of values){minimum=Math.min(minimum,sample);maximum=Math.max(maximum,sample);}return `${minimum}–${maximum} / 255`;},splitLabel=value?.splitAoKind&&value.splitAoKind!=="bind-pose"?`${value.splitAoKind} · ${format(value.splitAoAmount)} @ ${format(value.splitAoPosition)}`:"Bind pose";return `<div class="section"><h3>CSP vertex AO</h3>${kv("Patch",vaoFileName)}${kv("Format",`Patch v${vaoPatch.version} · ${vaoPatch.entry}`)}${kv("Preview",value?.enabled?"Enabled":"Disabled")}${kv("Records",vaoPatch.recordCount.toLocaleString())}${audit?`${kv("Matched records",audit.matchedRecords.toLocaleString())}${kv("Unmatched records",audit.unmatchedRecords.toLocaleString())}${kv("Alternate-state records",audit.alternateRecords.toLocaleString())}${audit.normalRecords?kv("Normal-override records",`${audit.normalRecords.toLocaleString()} · diagnosed only`):""}${kv("Matched meshes",audit.matchedMeshes.toLocaleString())}${kv("Primary / split meshes",`${audit.primaryMeshes.toLocaleString()} / ${audit.secondaryMeshes.toLocaleString()}`)}${kv("AO vertices",audit.vertices.toLocaleString())}${kv("AO byte range",`${audit.minimum}–${audit.maximum} · mean ${format(audit.mean)}`)}`:""}${vaoPatch.splitAo.present?`${kv("Split state",splitLabel)}${kv("Split meshes",`${value?.splitAoMeshes||0} / ${audit?.secondaryMeshes||0}`)}${kv("Split curve",`${format(value?.splitAoExponent||1)} power preview`)}${kv("Split config warnings",vaoPatch.splitAo.warnings.length)}${vaoPatch.splitAo.warnings.slice(0,8).map((warning)=>`<div class="resource validation-warning"><strong>Split AO warning</strong><span>${escapeHtml(warning)}</span></div>`).join("")}`:""}${selected?`${kv("Selected primary",range(selected.primary))}${kv("Selected bind pose",range(selected.secondary))}`:""}${vaoPatch.extraSamples?kv("Dynamic extra samples",`${vaoPatch.extraSamples.version===2?"v2":"v1"} · ${vaoPatch.extraSamples.bytes.toLocaleString()} bytes · diagnosed only`):""}${vaoPatch.treeSamples?kv("Tree samples",`${vaoPatch.treeSamples.bytes.toLocaleString()} bytes · diagnosed only`):""}<span class="empty">CSP’s exact name, vertex-count, and first-position binding key is used. Patch v4 bytes receive the native square-root conversion; v5 bytes remain linear. The secondary channel supplies bind-pose AO, and configured door, headlight, and wing animations blend it toward the primary channel. The shader channel mix is exact; the position-to-mix power curve is a labeled preview inferred from each *_EXP key. Steering-wheel split AO stays at the bind pose until its runtime steering input is recovered. Normal overrides, alternate records, extra dynamic samples, and tree samples remain diagnostics.</span></div>`;}
 function seasonalInspectorHtml(){const value=renderer?.seasonalStatus;if(!value||(!value.affectedMeshes&&!value.legacySummerMeshes))return "";return `<div class="section"><h3>CSP seasonal materials</h3>${kv("Year progress",value.yearProgress===null?"Direct conditions":format(value.yearProgress))}${kv("Color-adjusted meshes",value.affectedMeshes.toLocaleString())}${kv("Autumn",`${value.autumnMeshes.toLocaleString()} meshes · peak ${format(value.peakAutumn)}`)}${kv("Winter",`${value.winterMeshes.toLocaleString()} meshes · peak ${format(value.peakWinter)}`)}${value.legacySummerMeshes?kv("Legacy summer",`${value.legacySummerMeshes.toLocaleString()} meshes · accepted no-op`):""}<span class="empty">Autumn yellowing and winter desaturation/brightness use CSP’s green-channel mask and upward-normal snow coverage. Tree variation uses deterministic world-space preview noise. Current CSP accepts seasonSummer for legacy configs but does not bind it to the shader.</span></div>`;}
 function shaderProfilesInspectorHtml(){const value=renderer?.shaderProfileStatus;if(!value)return "";return `<div class="section"><h3>Stock shader profiles</h3>${kv("Known shipped shaders",`${value.knownStock.toLocaleString()} / ${value.materials.toLocaleString()} materials`)}${kv("Alpha blend",value.alphaBlend.toLocaleString())}${kv("Alpha-to-coverage",value.alphaToCoverage.toLocaleString())}${kv("Cutout shadow pass",value.shadowCutout.toLocaleString())}${kv("Windscreens",value.windscreens.toLocaleString())}${kv("Reflection glass",value.reflectionGlass.toLocaleString())}${kv("Refractive-capable",value.refractive.toLocaleString())}${kv("Shader package defaults",value.packageDefaults.toLocaleString())}${kv("Serialized overrides",value.serializedOverrides.toLocaleString())}${kv("Unknown shader names",value.unknownShaders.length)}${value.unknownShaders.slice(0,10).map((name)=>`<div class="resource"><span>${escapeHtml(name)}</span></div>`).join("")}${value.unknownShaders.length>10?`<span class="empty">${value.unknownShaders.length-10} more extension shaders</span>`:""}<span class="empty">Shipped alpha-tested shader packages default to multisample alpha-to-coverage. KN5 alpha-blend and alpha-to-coverage flags override that package default in native load order; every non-opaque native mode uses the cutout shadow shader.</span></div>`;}
 function lightingInspectorHtml(){const value=renderer?.shadowStatus;if(!value)return "";return `<div class="section"><h3>Directional shadows</h3>${kv("Preview",value.enabled?"Enabled":"Disabled")}${kv("Shadow maps",`${value.cascades} × ${value.mapSize}²`)}${kv("Camera splits",value.splits.map((split)=>`${split} m`).join(" · "))}${kv("Native biases",value.biases.map((bias)=>bias.toExponential()).join(" · "))}${kv("Mesh casters",value.casters.toLocaleString())}${value.grassInstances?kv("GrassFX casters",value.grassInstances.toLocaleString()):""}${kv("Caster triangles",value.triangles.toLocaleString())}<span class="empty">Three camera-space cascades reproduce ksEditor’s shipped 2/12/50 m split endpoints, 2048 map size, per-cascade bias, mesh cast-shadow flags, diffuse-alpha cutouts, and tapered instanced GrassFX blades.</span></div>`;}
@@ -1210,6 +1257,26 @@ function geometryEditCount(edit) {
   return ["transform", "removeDegenerate", "reverseWinding", "recalculateNormals"].filter((key) => edit?.[key] !== undefined).length;
 }
 
+function colliderProjectEditCount(project=editorProject) {
+  return Object.values(project?.colliderEdits||{}).reduce((sum,edit)=>sum+geometryEditCount(edit),0);
+}
+
+function colliderProjectState(project) {
+  return JSON.stringify({asset:project?.colliderAsset||null,edits:project?.colliderEdits||{}});
+}
+
+function clearProjectColliderEdits(project) {
+  project.colliderEdits=Object.create(null);
+  project.colliderAsset=null;
+}
+
+function bindProjectToCurrentCollider(project) {
+  if(colliderProjectHasEdits(project)) {
+    if(!carColliderIdentity)throw new Error("The collider file identity is unavailable");
+    project.colliderAsset={...carColliderIdentity};
+  } else project.colliderAsset=null;
+}
+
 function updateGeometryEdit(project, path, mutate) {
   const edit = { ...(project.geometryEdits[path] || {}) };
   mutate(edit);
@@ -1238,6 +1305,29 @@ function bindGeometryEditors(node) {
     commitEditorChange(`${enabled ? "Apply" : "Reset"} ${node.name} ${key}`, (project) => updateGeometryEdit(project, path, (edit) => { if (enabled) edit[key] = true; else delete edit[key]; }));
   }));
   inspector.querySelector("[data-reset-geometry]")?.addEventListener("click", () => commitEditorChange(`Reset ${node.name} geometry`, (project) => { delete project.geometryEdits[path]; }));
+}
+
+function updateColliderEdit(project, path, mutate) {
+  project.colliderEdits ||= Object.create(null);
+  if(colliderProjectHasEdits(project)&&!carColliderEditsMatchProject(project))throw new Error("Reset stale collider edits before editing this collider");
+  const edit={...(project.colliderEdits[path]||{})};
+  mutate(edit);
+  if(Object.keys(edit).length)project.colliderEdits[path]=edit;
+  else delete project.colliderEdits[path];
+  bindProjectToCurrentCollider(project);
+}
+
+function bindColliderEditors() {
+  if(!carColliderMatchesOpenModel()||!editorProject)return;
+  inspector.querySelector("[data-reset-colliders]")?.addEventListener("click",()=>commitEditorChange("Reset collider edits",clearProjectColliderEdits));
+  if(!carColliderEditsMatchProject())return;
+  inspector.querySelectorAll("[data-edit-collider-transform]").forEach((input)=>{
+    const commit=()=>{try{const path=input.dataset.colliderPath,key=input.dataset.editColliderTransform,node=nodeAtPath(carColliderModel.root,path);if(!node)throw new Error(`Collider mesh ${path} is unavailable`);const value=parseNodeVector(input,key[0].toUpperCase()+key.slice(1));if(key==="scale"&&value.some((component)=>Math.abs(component)<1e-6))throw new Error("Collider scale cannot collapse an axis");const existing=editorProject.colliderEdits?.[path],current=existing?.transform?decomposeNodeTransform(existing.transform):{position:[0,0,0],rotation:[0,0,0],scale:[1,1,1]},transform=composeNodeTransform({position:key==="position"?value:current.position,rotation:key==="rotation"?value:current.rotation,scale:key==="scale"?value:current.scale});input.classList.remove("invalid");const changed=commitEditorChange(`Set ${node.name} collider ${key}`,(project)=>updateColliderEdit(project,path,(edit)=>{if(geometryTransformIsIdentity(transform))delete edit.transform;else edit.transform=transform;}));if(!changed)status.textContent=modelStatusText();}catch(error){input.classList.add("invalid");status.textContent=error.message;}};
+    input.addEventListener("keydown",(event)=>{if(event.key==="Enter"){event.preventDefault();commit();}});input.addEventListener("change",commit);
+  });
+  inspector.querySelectorAll("[data-edit-collider-operation]").forEach((select)=>select.addEventListener("change",()=>{const path=select.dataset.colliderPath,key=select.dataset.editColliderOperation,node=nodeAtPath(carColliderModel.root,path),enabled=select.value==="true";commitEditorChange(`${enabled?"Apply":"Reset"} ${node?.name||path} collider ${key}`,(project)=>updateColliderEdit(project,path,(edit)=>{if(enabled)edit[key]=true;else delete edit[key];}));}));
+  inspector.querySelectorAll("[data-reset-collider]").forEach((button)=>button.addEventListener("click",()=>{const path=button.dataset.resetCollider,node=nodeAtPath(carColliderModel.root,path);commitEditorChange(`Reset ${node?.name||path} collider edits`,(project)=>{delete project.colliderEdits[path];bindProjectToCurrentCollider(project);});}));
+  inspector.querySelector("[data-export-collider]")?.addEventListener("click",exportColliderKn5);
 }
 
 function editWorkspaceFile(project, index, mutate) {
@@ -1478,9 +1568,9 @@ function createRenderer(canvas) {
   const description = gl.getParameter(gl.RENDERER);
   const hdrEnabled=Boolean(gl.getExtension("EXT_color_buffer_float")),floatLinear=Boolean(gl.getExtension("OES_texture_float_linear")),hdrFormat=hdrEnabled?gl.RGBA16F:gl.RGBA8,hdrSampleOptions=Array.from(gl.getInternalformatParameter(gl.RENDERBUFFER,hdrFormat,gl.SAMPLES)||[]),hdrSamples=Math.max(1,...hdrSampleOptions.filter((value)=>value<=4));
   const program = link(gl, `#version 300 es
-    precision highp float; layout(location=0) in vec3 position; layout(location=1) in vec3 normal; layout(location=2) in vec2 uv; layout(location=3) in vec3 tangent; layout(location=4) in float vertexAo;
-    uniform mat4 world; uniform mat4 viewProjection; out vec3 vNormal; out vec3 vTangent; out vec3 vBitangent; out vec3 vWorld; out vec3 vLocal; out vec2 vUv; out float vAo;
-    void main(){ vec4 p=world*vec4(position,1.0); mat3 world3=mat3(world); vWorld=p.xyz; vLocal=position; vNormal=world3*normal; vTangent=world3*tangent; vBitangent=world3*cross(tangent,normal); vUv=uv; vAo=vertexAo; gl_Position=viewProjection*p; }`, `#version 300 es
+    precision highp float; layout(location=0) in vec3 position; layout(location=1) in vec3 normal; layout(location=2) in vec2 uv; layout(location=3) in vec3 tangent; layout(location=4) in float vertexAo; layout(location=5) in float vertexAoSecondary;
+    uniform mat4 world; uniform mat4 viewProjection; uniform float splitAoFactor; out vec3 vNormal; out vec3 vTangent; out vec3 vBitangent; out vec3 vWorld; out vec3 vLocal; out vec2 vUv; out float vAo;
+    void main(){ vec4 p=world*vec4(position,1.0); mat3 world3=mat3(world); vWorld=p.xyz; vLocal=position; vNormal=world3*normal; vTangent=world3*tangent; vBitangent=world3*cross(tangent,normal); vUv=uv; vAo=mix(vertexAoSecondary,vertexAo,splitAoFactor); gl_Position=viewProjection*p; }`, `#version 300 es
     precision highp float; in vec3 vNormal; in vec3 vTangent; in vec3 vBitangent; in vec3 vWorld; in vec3 vLocal; in vec2 vUv; in float vAo; uniform mat4 world; uniform vec3 cameraPosition; uniform vec3 baseColor; uniform sampler2D diffuseTexture; uniform bool hasDiffuseTexture; uniform bool vaoEnabled;
     uniform sampler2D normalTexture; uniform sampler2D mapsTexture; uniform sampler2D detailTexture; uniform sampler2D normalDetailTexture; uniform bool hasNormalTexture; uniform bool hasMapsTexture; uniform bool hasDetailTexture; uniform bool hasNormalDetailTexture; uniform bool normalObjectSpace; uniform float useDetail; uniform float detailUvMultiplier; uniform float detailNormalBlend;
     uniform sampler2D multiMaskTexture; uniform sampler2D multiDetailRTexture; uniform sampler2D multiDetailGTexture; uniform sampler2D multiDetailBTexture; uniform sampler2D multiDetailATexture; uniform sampler2D multiDetailNormalTexture; uniform bool hasMultiLayer; uniform vec4 multiDetailMultipliers; uniform vec2 multiDetailAMultiplier; uniform vec2 multiDetailNormalMultiplier;
@@ -1549,7 +1639,7 @@ function createRenderer(canvas) {
       if(customEmissiveLuma.x>0.5){float sourceLuma=dot(diffuseTexel.rgb,vec3(.2126,.7152,.0722));float span=max(.0001,customEmissiveLuma.z-customEmissiveLuma.y);customEmissive*=pow(clamp((sourceLuma-customEmissiveLuma.y)/span,0.0,1.0),max(.001,customEmissiveLuma.w));}
       vec3 c=diffuse+spec+fr+texel.rgb*emissiveColor+customEmissive+customBounce+localLight;if(surfaceOverlayMix<.9){float fogAmount=pow(clamp(distance(cameraPosition,vWorld)/max(1.0,fogDistance),0.0,1.0),max(.05,fogBlend));c=mix(c,fogColor,fogAmount);}c=mix(c,surfaceOverlayColor,surfaceOverlayMix);float outputAlpha=reflectionAlphaMaterial&&!reflectionCapturePass?mix(texel.a,1.0,clamp(frFactor,0.0,1.0)):texel.a;if(windscreenMaterial&&texel.a<.5)outputAlpha=texel.a*max(dot(v,l),0.0)*shadow;if(brokenGlassMaterial){float damageAlpha=clamp(glassDamage*normalTextureAlpha,0.0,1.0);if(damageAlpha<.05)discard;outputAlpha=clamp(damageAlpha*4.0,0.0,1.0);}bool useRefraction=!reflectionCapturePass&&refractiveMaterial&&sceneColorReady&&(!brokenGlassMaterial||abs(dot(n,v))<.5);if(useRefraction){vec2 refractionDirection=vec2(dot(n,cameraRight),dot(n,cameraUp));float distanceScale=cameraTangent/max(.1,distance(cameraPosition,vWorld));vec2 offset=refractionDirection*refractionStrength*distanceScale*mix(1.0,.5,abs(dot(v,n)));offset.x*=viewportSize.y/max(1.0,viewportSize.x);vec2 screenUv=gl_FragCoord.xy/max(viewportSize,vec2(1.0));vec3 background=textureLod(sceneColorTexture,clamp(screenUv+offset,vec2(0.001),vec2(.999)),max(0.0,refractionBlur)).rgb;c=mix(background,c,clamp(outputAlpha,0.0,1.0));outputAlpha=1.0;}else if(brokenGlassMaterial){c*=outputAlpha/.1;outputAlpha=.1;}if(selected&&!reflectionCapturePass)c=mix(c,vec3(1.0,.57,.08),.28);color=vec4(max(c,vec3(0.0)),outputAlpha);
     }`);
-  const locations = Object.fromEntries(["world","viewProjection","cameraPosition","baseColor","diffuseTexture","hasDiffuseTexture","normalTexture","mapsTexture","detailTexture","normalDetailTexture","hasNormalTexture","hasMapsTexture","hasDetailTexture","hasNormalDetailTexture","normalObjectSpace","useDetail","detailUvMultiplier","detailNormalBlend","multiMaskTexture","multiDetailRTexture","multiDetailGTexture","multiDetailBTexture","multiDetailATexture","multiDetailNormalTexture","hasMultiLayer","multiDetailMultipliers","multiDetailAMultiplier","multiDetailNormalMultiplier","customEmissiveTexture","customColorShapeTexture","customVertexShapeTexture","customBounceTexture","hasCustomEmissive","hasCustomColorShape","hasCustomVertexShape","hasCustomBounce","customColorMasksAsMultiplier","customEmissiveStrength","customEmissiveAlpha","customEmissiveLuma","customEmissiveAlphaParams","customSkipDiffuseMap","customMirrorUv","customBounceMask","customBounceIntensity","customColorMaskCount","customMirrorDirection","customMirrorOffset","ambientLevel","diffuseLevel","specularLevel","specularPower","fresnelCValue","fresnelPower","fresnelLevel","alphaRef","emissiveColor","windscreenMaterial","brokenGlassMaterial","glassDamage","reflectionAlphaMaterial","refractiveMaterial","reflectionCapturePass","reflectionCubeReady","reflectionCubeTexture","sceneColorReady","sceneColorTexture","viewportSize","cameraRight","cameraUp","cameraTangent","refractionStrength","refractionBlur","selected","surfaceOverlayColor","surfaceOverlayMix","rainWetness","rainBits","seasonAutumn","seasonWinter","seasonTreeVariation","vaoEnabled","cspLightCount","shadowsEnabled","shadowMap0","shadowMap1","shadowMap2","shadowMatrix0","shadowMatrix1","shadowMatrix2","shadowSplits","shadowBiases","cameraForward","sunDirection","sunColor","ambientColor","horizonColor","skyColor","fogColor","fogDistance","fogBlend"].map((name) => [name, gl.getUniformLocation(program, name)]));
+  const locations = Object.fromEntries(["world","viewProjection","splitAoFactor","cameraPosition","baseColor","diffuseTexture","hasDiffuseTexture","normalTexture","mapsTexture","detailTexture","normalDetailTexture","hasNormalTexture","hasMapsTexture","hasDetailTexture","hasNormalDetailTexture","normalObjectSpace","useDetail","detailUvMultiplier","detailNormalBlend","multiMaskTexture","multiDetailRTexture","multiDetailGTexture","multiDetailBTexture","multiDetailATexture","multiDetailNormalTexture","hasMultiLayer","multiDetailMultipliers","multiDetailAMultiplier","multiDetailNormalMultiplier","customEmissiveTexture","customColorShapeTexture","customVertexShapeTexture","customBounceTexture","hasCustomEmissive","hasCustomColorShape","hasCustomVertexShape","hasCustomBounce","customColorMasksAsMultiplier","customEmissiveStrength","customEmissiveAlpha","customEmissiveLuma","customEmissiveAlphaParams","customSkipDiffuseMap","customMirrorUv","customBounceMask","customBounceIntensity","customColorMaskCount","customMirrorDirection","customMirrorOffset","ambientLevel","diffuseLevel","specularLevel","specularPower","fresnelCValue","fresnelPower","fresnelLevel","alphaRef","emissiveColor","windscreenMaterial","brokenGlassMaterial","glassDamage","reflectionAlphaMaterial","refractiveMaterial","reflectionCapturePass","reflectionCubeReady","reflectionCubeTexture","sceneColorReady","sceneColorTexture","viewportSize","cameraRight","cameraUp","cameraTangent","refractionStrength","refractionBlur","selected","surfaceOverlayColor","surfaceOverlayMix","rainWetness","rainBits","seasonAutumn","seasonWinter","seasonTreeVariation","vaoEnabled","cspLightCount","shadowsEnabled","shadowMap0","shadowMap1","shadowMap2","shadowMatrix0","shadowMatrix1","shadowMatrix2","shadowSplits","shadowBiases","cameraForward","sunDirection","sunColor","ambientColor","horizonColor","skyColor","fogColor","fogDistance","fogBlend"].map((name) => [name, gl.getUniformLocation(program, name)]));
   locations.cspTrackReceiver=gl.getUniformLocation(program,"cspTrackReceiver");locations.cspInteriorView=gl.getUniformLocation(program,"cspInteriorView");
   locations.customColorMaskTarget = gl.getUniformLocation(program, "customColorMaskTarget[0]");
   locations.customColorMaskParams = gl.getUniformLocation(program, "customColorMaskParams[0]");
@@ -1661,10 +1751,10 @@ function createRenderer(canvas) {
   };
   gl.bindVertexArray(grassVao);gl.bindBuffer(gl.ARRAY_BUFFER,grassInstanceBuffer);gl.vertexAttribPointer(9,3,gl.FLOAT,false,grassInstanceStride,84);gl.enableVertexAttribArray(9);gl.vertexAttribDivisor(9,1);gl.vertexAttribPointer(10,2,gl.FLOAT,false,grassInstanceStride,96);gl.enableVertexAttribArray(10);gl.vertexAttribDivisor(10,1);gl.bindVertexArray(null);
   let items = [], itemByNode = new WeakMap(), sceneRoot = null,sceneModel=null, textures = [], textureLookup = new Map(), embeddedTextureNames = new Set(), solidTextures = new Map(), cspTextures = new Map(), cspTextureCache = new Map(), colliderItems = [], surfaceBindings=new Map(), selected = null, cspState = null,grassFx=null,grassStatus={instanceCount:0,sourceMeshes:0,sourceTriangles:0,rejectedByMask:0,rejectedByShape:0,rejectedByOcclusion:0,totalArea:0,density:0,shapeWidth:1},grassSurfaceMapCenter=null,grassRebuildTimer=0,rainFx=null,rainStatus={matchedMeshes:0,lineVertices:0,pointVertices:0},shadowStatus={enabled:true,mapSize:KS_SHADOW_MAP_SIZE,cascades:3,splits:[...KS_SHADOW_SPLITS],biases:[...KS_SHADOW_BIASES],casters:0,triangles:0},lightingStatus={name:KS_EDITOR_DEFAULT_WEATHER.name,source:KS_EDITOR_DEFAULT_WEATHER.source,heading:40,height:55,angleMix:0,sunColor:[0,0,0],ambientColor:[0,0,0],skyColor:[0,0,0],fogDistance:KS_EDITOR_DEFAULT_WEATHER.fogDistance,fogBlend:KS_EDITOR_DEFAULT_WEATHER.fogBlend,autoExposure:true,effectiveExposure:.35,exposureMin:KS_EDITOR_EXPOSURE.min,exposureMax:KS_EDITOR_EXPOSURE.max,toneMap:"Yebis default · function −1",hdr:hdrEnabled,samples:hdrSamples,glareEnabled:hdrEnabled,glareQuality:KS_EDITOR_GLARE.quality,bloomLevels:hdrEnabled?KS_EDITOR_GLARE.levels:0,bloomSourceScale:KS_EDITOR_GLARE.sourceScale,bloomThreshold:KS_EDITOR_GLARE.threshold,bloomCompositeScale:ksEditorBloomCompositeScale(),bloomKernel:"Yebis max-29 fallback",bloomKernelSamples:bloomKernels.map((kernel)=>kernel.sampleCount),bloomKernelSigmas:bloomKernels.map((kernel)=>kernel.sigma),dither:true}, workspaceLodIndex = null, driverCockpitMode=false, driverHiddenNames=new Set(), trackCamera=null, bounds = { center: [0,0,0], radius: 1 }, yaw = .7, pitch = .35, distance = 5, target = [0,0,0], dragging = null, modelGeneration = 0, textureStatus = { total: 0, ready: 0, pending: 0, unsupported: 0, protected: 0, formats: {} }, sceneStatus = { total: 0, visible: 0, hidden: 0 };
-  let vaoBindings=new Map(),vaoStatus={source:"",version:0,records:0,matchedRecords:0,unmatchedRecords:0,alternateRecords:0,normalRecords:0,matchedMeshes:0,primaryMeshes:0,secondaryMeshes:0,vertices:0,minimum:255,maximum:255,mean:255},seasonalStatus={affectedMeshes:0,autumnMeshes:0,winterMeshes:0,legacySummerMeshes:0,peakAutumn:0,peakWinter:0,peakSummer:0},shaderProfileStatus=null;
+  let vaoBindings=new Map(),splitAoState=resolveSplitAoAnimation(null,"",0),vaoStatus={source:"",version:0,records:0,matchedRecords:0,unmatchedRecords:0,alternateRecords:0,normalRecords:0,matchedMeshes:0,primaryMeshes:0,secondaryMeshes:0,vertices:0,minimum:255,maximum:255,mean:255,splitAo:null,splitAoWarnings:0,splitAoKind:"bind-pose",splitAoAmount:0,splitAoMeshes:0},seasonalStatus={affectedMeshes:0,autumnMeshes:0,winterMeshes:0,legacySummerMeshes:0,peakAutumn:0,peakWinter:0,peakSummer:0},shaderProfileStatus=null;
   let reflectionCaptureStatus={enabled:true,ready:false,size:KS_EDITOR_CUBEMAP.size,faces:0,draws:0,triangles:0,farPlane:KS_EDITOR_CUBEMAP.farPlane,captureMilliseconds:0};
   let reflectionCubeInitialized=false,reflectionNextFace=0,reflectionCaptureRoot=null;
-  let currentAnimation = null, currentAnimationName = "", currentAnimationPosition = 0, animationTransforms = new Map(), animationStatus = { name:"",position:0,version:0,frameCount:0,tracks:0,animatedTracks:0,matchedTracks:0,matchedNodes:0,unmatchedTracks:[] };
+  let currentAnimation = null, currentAnimationName = "", currentAnimationPosition = 0, animationTransforms = new Map(), splitAoAnimationScope=splitAoAnimationNodeScope(null,null), animationStatus = { name:"",position:0,version:0,frameCount:0,tracks:0,animatedTracks:0,matchedTracks:0,matchedNodes:0,unmatchedTracks:[] };
   let externalFileIndex=createAssetFileIndex([]),externalTextures=new Map(),externalCpuTextures=new Map(),externalGpuTextures=new Set(),externalGeneration=0,externalRequirementSignature="",externalTextureStatus={selected:0,requested:0,ready:0,pending:0,missing:0,ambiguous:0,unsupported:0,formats:{},missingPaths:[],ambiguousPaths:[]};
   let selectedSkinFiles=[],selectedSkinName="",skinTextures=new Map(),skinGpuTextures=new Set(),skinGeneration=0,skinTextureStatus={name:"",available:0,matched:0,ready:0,pending:0,inherited:0,ambiguous:0,unsupported:0,formats:{},replacedNames:[]};
   const windParticles=createCspWindParticles();let windTargetIndex=0,windLastTime=0,windAccumulator=0,windUpdateCount=0,windRandomState=0x6d2b79f5,windAnimationTimer=0;
@@ -1808,18 +1898,25 @@ function createRenderer(canvas) {
   }
 
   function setVaoBindings(value,status={}){
-    vaoBindings=value instanceof Map?value:new Map();vaoStatus={source:"",version:0,records:0,matchedRecords:0,unmatchedRecords:0,alternateRecords:0,normalRecords:0,matchedMeshes:0,primaryMeshes:0,secondaryMeshes:0,vertices:0,minimum:255,maximum:255,mean:255,...status};
-    for(const item of items){const binding=vaoBindings.get(item.node),count=item.node.vertices.length/item.node.vertexStride,values=binding?.primary&&binding.primary.length===count?binding.primary:new Uint8Array(count).fill(255);gl.bindBuffer(gl.ARRAY_BUFFER,item.vaoAo);gl.bufferData(gl.ARRAY_BUFFER,values,gl.DYNAMIC_DRAW);item.vaoBound=Boolean(binding?.primary);}
+    vaoBindings=value instanceof Map?value:new Map();vaoStatus={source:"",version:0,records:0,matchedRecords:0,unmatchedRecords:0,alternateRecords:0,normalRecords:0,matchedMeshes:0,primaryMeshes:0,secondaryMeshes:0,vertices:0,minimum:255,maximum:255,mean:255,splitAo:null,splitAoWarnings:0,splitAoKind:"bind-pose",splitAoAmount:0,splitAoPosition:0,splitAoExponent:1,splitAoMeshes:0,splitAoNodes:0,...status};
+    for(const item of items){const binding=vaoBindings.get(item.node),count=item.node.vertices.length/item.node.vertexStride,primary=binding?.primary&&binding.primary.length===count?binding.primary:new Uint8Array(count).fill(255),secondary=binding?.secondary&&binding.secondary.length===count?binding.secondary:primary;gl.bindBuffer(gl.ARRAY_BUFFER,item.vaoAo);gl.bufferData(gl.ARRAY_BUFFER,primary,gl.DYNAMIC_DRAW);gl.bindBuffer(gl.ARRAY_BUFFER,item.vaoAoSecondary);gl.bufferData(gl.ARRAY_BUFFER,secondary,gl.DYNAMIC_DRAW);item.vaoBound=Boolean(binding?.primary);}
+    updateSplitAoState();
     draw();
+  }
+
+  function updateSplitAoState(){
+    splitAoState=resolveSplitAoAnimation(vaoStatus.splitAo,currentAnimationName,currentAnimationPosition,splitAoAnimationScope.tracks,splitAoAnimationScope.related,splitAoAnimationScope.paths);
+    let splitAoMeshes=0;for(const item of items){const amount=splitAoBindingAmount(vaoBindings.get(item.node),splitAoState);item.splitAoFactor=amount;if(amount>0)splitAoMeshes++;}
+    vaoStatus={...vaoStatus,splitAoKind:splitAoState.kind,splitAoAmount:splitAoState.amount,splitAoPosition:splitAoState.position,splitAoExponent:splitAoState.exponent,splitAoMeshes,splitAoNodes:splitAoState.nodes.size};
   }
 
   function setModel(model) {
     const generation = ++modelGeneration;
     grassSurfaceMapCenter=null;
     sceneModel=model;shaderProfileStatus=auditMaterialShaderProfiles(model.materials);reflectionCaptureRoot=null;reflectionCubeInitialized=false;reflectionNextFace=0;
-    items.forEach((x) => { gl.deleteBuffer(x.vertex); gl.deleteBuffer(x.index);gl.deleteBuffer(x.vaoAo); gl.deleteVertexArray(x.vao); });
+    items.forEach((x) => { gl.deleteBuffer(x.vertex); gl.deleteBuffer(x.index);gl.deleteBuffer(x.vaoAo);gl.deleteBuffer(x.vaoAoSecondary); gl.deleteVertexArray(x.vao); });
     textures.forEach((texture) => gl.deleteTexture(texture));
-    items = []; itemByNode = new WeakMap(); sceneRoot = model.root; textures = []; textureLookup = new Map(); embeddedTextureNames = new Set(); solidTextures = new Map();
+    items = []; itemByNode = new WeakMap(); sceneRoot = model.root; splitAoAnimationScope=splitAoAnimationNodeScope(sceneRoot,currentAnimation); textures = []; textureLookup = new Map(); embeddedTextureNames = new Set(); solidTextures = new Map();
     const textureMap = new Map();
     textureStatus={total:model.textures.length,ready:0,pending:0,unsupported:0,protected:model.encryption?.protectedTextures.length||0,formats:{}};
     for (const texture of model.textures) {
@@ -1836,13 +1933,14 @@ function createRenderer(canvas) {
       const workspaceLod = node.workspaceLod || parentWorkspaceLod;
       const workspaceAuxiliary=node.workspaceAuxiliary||parentWorkspaceAuxiliary,workspaceFile=node.workspaceFile||parentWorkspaceFile,reflectionAncestors=[...parentReflectionAncestors,node],driverPath=workspaceAuxiliary==="driver"?[...parentDriverPath,node.name.toUpperCase()]:[];
       if (node.kind === "mesh" || node.kind === "skinnedMesh") {
-        const vao = gl.createVertexArray(), vertex = gl.createBuffer(), index = gl.createBuffer(),vaoAo=gl.createBuffer();
+        const vao = gl.createVertexArray(), vertex = gl.createBuffer(), index = gl.createBuffer(),vaoAo=gl.createBuffer(),vaoAoSecondary=gl.createBuffer();
         gl.bindVertexArray(vao); gl.bindBuffer(gl.ARRAY_BUFFER, vertex); gl.bufferData(gl.ARRAY_BUFFER, node.vertices, gl.STATIC_DRAW);
         gl.vertexAttribPointer(0, 3, gl.FLOAT, false, node.vertexStride * 4, 0); gl.enableVertexAttribArray(0);
         gl.vertexAttribPointer(1, 3, gl.FLOAT, false, node.vertexStride * 4, 12); gl.enableVertexAttribArray(1);
         gl.vertexAttribPointer(2, 2, gl.FLOAT, false, node.vertexStride * 4, 24); gl.enableVertexAttribArray(2);
         gl.vertexAttribPointer(3, 3, gl.FLOAT, false, node.vertexStride * 4, 32); gl.enableVertexAttribArray(3);
         gl.bindBuffer(gl.ARRAY_BUFFER,vaoAo);gl.bufferData(gl.ARRAY_BUFFER,new Uint8Array(node.vertices.length/node.vertexStride).fill(255),gl.DYNAMIC_DRAW);gl.vertexAttribPointer(4,1,gl.UNSIGNED_BYTE,true,1,0);gl.enableVertexAttribArray(4);
+        gl.bindBuffer(gl.ARRAY_BUFFER,vaoAoSecondary);gl.bufferData(gl.ARRAY_BUFFER,new Uint8Array(node.vertices.length/node.vertexStride).fill(255),gl.DYNAMIC_DRAW);gl.vertexAttribPointer(5,1,gl.UNSIGNED_BYTE,true,1,0);gl.enableVertexAttribArray(5);
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, index); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, node.indices, gl.STATIC_DRAW);
         const material = model.materials[node.materialId];
         const resourceNames=Object.fromEntries((material?.resources||[]).map((resource)=>[resource.slot.toLowerCase(),normalizeAssetPath(resource.texture).split("/").at(-1).toLowerCase()]));
@@ -1851,7 +1949,7 @@ function createRenderer(canvas) {
         for (let i = 0; i < node.vertices.length; i += node.vertexStride) {
           for (let axis=0;axis<3;axis++){const value=node.vertices[i+axis];localMin[axis]=Math.min(localMin[axis],value);localMax[axis]=Math.max(localMax[axis],value);}
         }
-        const sceneVisible=Boolean(branchActive&&node.visible&&node.renderable),item={ node, world, branchActive,sceneVisible, workspaceLod, workspaceAuxiliary,workspaceFile,reflectionAncestors, driverPath, material, resourceNames, texture: resourceTexture("txdiffuse"), normalTexture:resourceTexture("txnormal"), mapsTexture:resourceTexture("txmaps"), detailTexture:resourceTexture("txdetail"), normalDetailTexture:resourceTexture("txnormaldetail")||resourceTexture("txdetailnm"), multiMaskTexture:resourceTexture("txmask"),multiDetailRTexture:resourceTexture("txdetailr"),multiDetailGTexture:resourceTexture("txdetailg"),multiDetailBTexture:resourceTexture("txdetailb"),multiDetailATexture:resourceTexture("txdetaila"),multiDetailNormalTexture:resourceTexture("txdetailnm"), vao, vertex, index,vaoAo,vaoBound:false, localMin, localMax, center:[0,0,0] };items.push(item);itemByNode.set(node,item);
+        const sceneVisible=Boolean(branchActive&&node.visible&&node.renderable),item={ node, world, branchActive,sceneVisible, workspaceLod, workspaceAuxiliary,workspaceFile,reflectionAncestors, driverPath, material, resourceNames, texture: resourceTexture("txdiffuse"), normalTexture:resourceTexture("txnormal"), mapsTexture:resourceTexture("txmaps"), detailTexture:resourceTexture("txdetail"), normalDetailTexture:resourceTexture("txnormaldetail")||resourceTexture("txdetailnm"), multiMaskTexture:resourceTexture("txmask"),multiDetailRTexture:resourceTexture("txdetailr"),multiDetailGTexture:resourceTexture("txdetailg"),multiDetailBTexture:resourceTexture("txdetailb"),multiDetailATexture:resourceTexture("txdetaila"),multiDetailNormalTexture:resourceTexture("txdetailnm"), vao, vertex, index,vaoAo,vaoAoSecondary,vaoBound:false,splitAoFactor:0, localMin, localMax, center:[0,0,0] };items.push(item);itemByNode.set(node,item);
       }
       for (const child of node.children) visit(child, world, branchActive, workspaceLod, workspaceAuxiliary, driverPath,workspaceFile,reflectionAncestors);
     };
@@ -1861,12 +1959,13 @@ function createRenderer(canvas) {
 
   function setAnimation(animation, position = 0, name = "") {
     currentAnimation=animation||null;currentAnimationName=String(name||animation?.source||"");currentAnimationPosition=Math.max(0,Math.min(1,Number(position)||0));
+    splitAoAnimationScope=splitAoAnimationNodeScope(sceneRoot,currentAnimation);
     animationTransforms=currentAnimation?sampleKsAnimation(currentAnimation,currentAnimationPosition):new Map();
     refreshAnimationWorlds();draw();
   }
 
   function refreshHierarchy() {
-    refreshAnimationWorlds(); reflectionCubeInitialized=false; reflectionNextFace=0; scheduleGrassRebuild(); draw();
+    splitAoAnimationScope=splitAoAnimationNodeScope(sceneRoot,currentAnimation);refreshAnimationWorlds(); reflectionCubeInitialized=false; reflectionNextFace=0; scheduleGrassRebuild(); draw();
   }
 
   function refreshGeometry() {
@@ -1889,7 +1988,7 @@ function createRenderer(canvas) {
   function refreshAnimationWorlds() {
     const min=[Infinity,Infinity,Infinity],max=[-Infinity,-Infinity,-Infinity],matchedTracks=new Set(),worldByName=new Map();let matchedNodes=0;
     const visit=(node,parentWorld,parentActive)=>{
-      const animated=animationTransforms.get(node.name);if(animated){matchedTracks.add(node.name);matchedNodes++;}
+      const animated=animationTransformForNode(node,animationTransforms);if(animated){matchedTracks.add(node.name);matchedNodes++;}
       const local=animated||node.transform,world=local?multiply(parentWorld,local):parentWorld,item=itemByNode.get(node),branchActive=parentActive&&node.active;if(!worldByName.has(node.name))worldByName.set(node.name,world);
       if(item){item.world=world;item.branchActive=branchActive;item.sceneVisible=Boolean(branchActive&&node.visible&&node.renderable);const itemBounds=transformBounds(item.localMin,item.localMax,world);item.center=itemBounds.min.map((value,index)=>(value+itemBounds.max[index])/2);if(itemPreviewVisible(item))for(let axis=0;axis<3;axis++){min[axis]=Math.min(min[axis],itemBounds.min[axis]);max[axis]=Math.max(max[axis],itemBounds.max[axis]);}}
       for(const child of node.children)visit(child,world,branchActive);
@@ -1899,6 +1998,7 @@ function createRenderer(canvas) {
     const center=min[0]===Infinity?[0,0,0]:min.map((value,index)=>(value+max[index])/2);bounds={center,radius:min[0]===Infinity?1:Math.hypot(...sub(max,center))};
     const animatedTracks=currentAnimation?.tracks.filter((track)=>track.animated)||[];
     animationStatus={name:currentAnimationName,position:currentAnimationPosition,version:currentAnimation?.version||0,frameCount:currentAnimation?.frameCount||0,tracks:currentAnimation?.tracks.length||0,animatedTracks:animatedTracks.length,matchedTracks:matchedTracks.size,matchedNodes,skinnedMeshes,skinnedVertices,maxSkinnedDisplacement,unmatchedTracks:animatedTracks.map((track)=>track.name).filter((name)=>!matchedTracks.has(name))};
+    updateSplitAoState();
     api.onAnimationStatus?.(api.animationStatus);
   }
   function frame(node = null) {
@@ -1917,7 +2017,7 @@ function createRenderer(canvas) {
   function bindMainMaterial(rendered,{capturePass=false}={}){
     const item=rendered.item,m=item.material,override=rendered.override,custom=override?.customEmissive,color=hashColor(m?.name||item.node.name);
     applyItemRenderState(gl,rendered.profile,rendered.transparent);if(capturePass&&rendered.profile.alphaToCoverage)gl.disable(gl.SAMPLE_ALPHA_TO_COVERAGE);
-    gl.uniformMatrix4fv(locations.world,false,item.world);gl.uniform3fv(locations.baseColor,color);gl.uniform1i(locations.cspTrackReceiver,itemUsesTrackReceiver(item));gl.uniform1i(locations.cspInteriorView,driverCockpitMode);
+    gl.uniformMatrix4fv(locations.world,false,item.world);gl.uniform1f(locations.splitAoFactor,item.splitAoFactor||0);gl.uniform3fv(locations.baseColor,color);gl.uniform1i(locations.cspTrackReceiver,itemUsesTrackReceiver(item));gl.uniform1i(locations.cspInteriorView,driverCockpitMode);
     gl.uniform3fv(locations.surfaceOverlayColor,!capturePass&&api.surfaceOverlay?surfaceOverlayColor(surfaceBindings.get(item.node)):[0,0,0]);gl.uniform1f(locations.surfaceOverlayMix,!capturePass&&api.surfaceOverlay?0.94:0);
     const rainBinding=rainFx?.nodeBindings.get(item.node);gl.uniform1i(locations.rainBits,rainBinding?.bits||0);gl.uniform1f(locations.rainWetness,api.rainVisible&&!api.surfaceOverlay?api.rainWetness:0);
     gl.uniform1i(locations.vaoEnabled,api.vaoEnabled&&item.vaoBound&&!api.surfaceOverlay);
@@ -2031,7 +2131,7 @@ function createRenderer(canvas) {
     if(!grassRendered)drawGeneratedGrass(vp,grassDrawOptions);
     if(api.rainVisible&&!api.surfaceOverlay&&api.rainWetness>0&&(rainStatus.lineVertices||rainStatus.pointVertices)){gl.useProgram(rainStreamProgram);gl.uniformMatrix4fv(rainStreamLocations.viewProjection,false,vp);gl.uniform1f(rainStreamLocations.pointSize,7);gl.uniform4f(rainStreamLocations.color,.1,.72,1,.9);gl.disable(gl.DEPTH_TEST);gl.depthMask(false);gl.disable(gl.SAMPLE_ALPHA_TO_COVERAGE);gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);gl.bindVertexArray(rainStreamVao);if(rainStatus.lineVertices)gl.drawArrays(gl.LINES,0,rainStatus.lineVertices);if(rainStatus.pointVertices)gl.drawArrays(gl.POINTS,rainStatus.lineVertices,rainStatus.pointVertices);gl.useProgram(program);}
     if(api.colliderVisible&&colliderItems.length){
-      gl.disable(gl.BLEND);gl.disable(gl.SAMPLE_ALPHA_TO_COVERAGE);gl.disable(gl.CULL_FACE);gl.disable(gl.DEPTH_TEST);gl.depthMask(false);gl.uniform1i(locations.shadowsEnabled,0);gl.uniform1i(locations.vaoEnabled,0);gl.uniform1i(locations.cspLightCount,0);gl.uniform1i(locations.rainBits,0);gl.uniform1f(locations.rainWetness,0);gl.uniform1f(locations.seasonAutumn,0);gl.uniform1f(locations.seasonWinter,0);gl.uniform1i(locations.seasonTreeVariation,0);gl.uniform3f(locations.baseColor,1,.18,.015);gl.uniform3f(locations.surfaceOverlayColor,0,0,0);gl.uniform1f(locations.surfaceOverlayMix,0);gl.uniform1f(locations.ambientLevel,1);gl.uniform1f(locations.diffuseLevel,.15);gl.uniform1f(locations.specularLevel,0);gl.uniform1f(locations.specularPower,1);gl.uniform1f(locations.fresnelCValue,0);gl.uniform1f(locations.fresnelPower,1);gl.uniform1f(locations.fresnelLevel,0);gl.uniform1f(locations.alphaRef,0);gl.uniform3f(locations.emissiveColor,.85,.08,0);gl.uniform1i(locations.windscreenMaterial,0);gl.uniform1i(locations.brokenGlassMaterial,0);gl.uniform1f(locations.glassDamage,0);gl.uniform1i(locations.reflectionAlphaMaterial,0);gl.uniform1i(locations.refractiveMaterial,0);gl.uniform1i(locations.selected,0);gl.uniform1i(locations.hasDiffuseTexture,0);gl.uniform1i(locations.hasNormalTexture,0);gl.uniform1i(locations.hasMapsTexture,0);gl.uniform1i(locations.hasDetailTexture,0);gl.uniform1i(locations.hasNormalDetailTexture,0);gl.uniform1i(locations.hasMultiLayer,0);gl.uniform1i(locations.hasCustomEmissive,0);gl.uniform1i(locations.hasCustomColorShape,0);gl.uniform1i(locations.hasCustomVertexShape,0);gl.uniform1i(locations.hasCustomBounce,0);gl.uniform1i(locations.customColorMaskCount,0);gl.uniform1i(locations.customEmissiveAlpha,0);gl.uniform4f(locations.customEmissiveLuma,0,0,1,1);gl.uniform4f(locations.customEmissiveAlphaParams,0,0,1,1);gl.uniform1i(locations.customSkipDiffuseMap,0);gl.uniform4f(locations.customMirrorUv,0,0,0,0);gl.uniform4f(locations.customBounceMask,0,0,0,0);gl.uniform1f(locations.customBounceIntensity,0);
+      gl.disable(gl.BLEND);gl.disable(gl.SAMPLE_ALPHA_TO_COVERAGE);gl.disable(gl.CULL_FACE);gl.disable(gl.DEPTH_TEST);gl.depthMask(false);gl.uniform1i(locations.shadowsEnabled,0);gl.uniform1i(locations.vaoEnabled,0);gl.uniform1f(locations.splitAoFactor,0);gl.uniform1i(locations.cspLightCount,0);gl.uniform1i(locations.rainBits,0);gl.uniform1f(locations.rainWetness,0);gl.uniform1f(locations.seasonAutumn,0);gl.uniform1f(locations.seasonWinter,0);gl.uniform1i(locations.seasonTreeVariation,0);gl.uniform3f(locations.baseColor,1,.18,.015);gl.uniform3f(locations.surfaceOverlayColor,0,0,0);gl.uniform1f(locations.surfaceOverlayMix,0);gl.uniform1f(locations.ambientLevel,1);gl.uniform1f(locations.diffuseLevel,.15);gl.uniform1f(locations.specularLevel,0);gl.uniform1f(locations.specularPower,1);gl.uniform1f(locations.fresnelCValue,0);gl.uniform1f(locations.fresnelPower,1);gl.uniform1f(locations.fresnelLevel,0);gl.uniform1f(locations.alphaRef,0);gl.uniform3f(locations.emissiveColor,.85,.08,0);gl.uniform1i(locations.windscreenMaterial,0);gl.uniform1i(locations.brokenGlassMaterial,0);gl.uniform1f(locations.glassDamage,0);gl.uniform1i(locations.reflectionAlphaMaterial,0);gl.uniform1i(locations.refractiveMaterial,0);gl.uniform1i(locations.selected,0);gl.uniform1i(locations.hasDiffuseTexture,0);gl.uniform1i(locations.hasNormalTexture,0);gl.uniform1i(locations.hasMapsTexture,0);gl.uniform1i(locations.hasDetailTexture,0);gl.uniform1i(locations.hasNormalDetailTexture,0);gl.uniform1i(locations.hasMultiLayer,0);gl.uniform1i(locations.hasCustomEmissive,0);gl.uniform1i(locations.hasCustomColorShape,0);gl.uniform1i(locations.hasCustomVertexShape,0);gl.uniform1i(locations.hasCustomBounce,0);gl.uniform1i(locations.customColorMaskCount,0);gl.uniform1i(locations.customEmissiveAlpha,0);gl.uniform4f(locations.customEmissiveLuma,0,0,1,1);gl.uniform4f(locations.customEmissiveAlphaParams,0,0,1,1);gl.uniform1i(locations.customSkipDiffuseMap,0);gl.uniform4f(locations.customMirrorUv,0,0,0,0);gl.uniform4f(locations.customBounceMask,0,0,0,0);gl.uniform1f(locations.customBounceIntensity,0);
       for(const item of colliderItems){gl.uniformMatrix4fv(locations.world,false,item.world);gl.bindVertexArray(item.vao);gl.drawElements(gl.LINES,item.count,gl.UNSIGNED_SHORT,0);}
     }
     gl.depthMask(true);gl.disable(gl.BLEND);resolveExposureAndPresent();scheduleWindAnimation();
