@@ -25,6 +25,9 @@ test("serves the desktop application and its explicitly allowed modules", async 
     const surfaceAuthoring = await fetch(`${url}/src/surface-authoring.js`);
     assert.equal(surfaceAuthoring.status, 200);
     assert.match(await surfaceAuthoring.text(), /applySurfaceEdits/);
+    const bottomColliderAuthoring = await fetch(`${url}/src/bottom-collider-authoring.js`);
+    assert.equal(bottomColliderAuthoring.status, 200);
+    assert.match(await bottomColliderAuthoring.text(), /applyBottomColliderEdits/);
     const fileIdentity = await fetch(`${url}/src/file-identity.js`);
     assert.equal(fileIdentity.status, 200);
     assert.match(await fileIdentity.text(), /createFileIdentity/);

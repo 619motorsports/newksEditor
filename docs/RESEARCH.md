@@ -1429,6 +1429,20 @@ The renderer uploads this separate model to an independent edge buffer. It draws
 orange cage over any automatic or forced car LOD. The collider stays separate from
 the visual car scene and its KN5 export.
 
+The same cage includes every parsed `COLLIDER_n` bottom-contact box. Each box keeps
+its section index, centre, size, and `GROUND_ENABLE` flag. The editor applies project
+edits to an immutable parsed baseline, recalculates bounds, and blocks stale edits
+with the file path, byte size, and SHA-256 digest. It rejects non-finite vectors and
+non-positive sizes before project storage or export. The reader caps the source at
+1 MiB and uses fatal UTF-8 decoding. Standalone export writes only `colliders.ini`;
+these car-physics edits do not enter KN5 or CSP output.
+
+A packaged software-WebGL run used the repository car's production LOD-D and bottom
+box. It changed the overlay hash from `78990e81cf782f2b` to `882c01655277409f` after
+centre and size edits. It also confirmed the ground flag, undo, redo, recovery,
+identity binding, standalone export, and disabled CSP export. Every capture returned
+WebGL error zero, and the browser reported no exception.
+
 Apex now stores static collider edits by stable root-relative node path. Each edit
 starts from copied source vertices and indices. Mesh controls apply offset, rotation,
 scale, degenerate-face removal, face reversal, and area-weighted normal rebuilding.

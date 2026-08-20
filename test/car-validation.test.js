@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
-import { auditCarCollider, auditCarHierarchy, parseBottomCollidersIni, requiredCarNodes } from "../src/car-validation.js";
+import { auditCarCollider, auditCarHierarchy, parseBottomCollidersIni, requiredCarNodes, serializeBottomCollidersIni } from "../src/car-validation.js";
 import { parseKn5 } from "../src/kn5.js";
 import { applyGeometryEdits, captureStaticGeometryBaselines } from "../src/geometry-authoring.js";
 import { mergeKn5Models, parseCarLodsIni } from "../src/kn5-workspace.js";
@@ -20,9 +20,15 @@ test("writes authored collider geometry as a parseable closed KN5",()=>{const co
 
 test("audits the repository car collider",async()=>{const [collider,car]=await Promise.all([readFile(carColliderKn5),readFile(carMainKn5)]),audit=auditCarCollider(parseKn5(collider),parseKn5(car));assert.equal(audit.triangles,60);assert.equal(audit.textures,0);assert.equal(audit.topology.closed,true);assert.equal(audit.errors,0);});
 
-test("parses ordered bottom collision boxes and diagnoses invalid sections",()=>{const parsed=parseBottomCollidersIni(`[COLLIDER_0]\nCENTRE=0,-0.2,0\nSIZE=1.8,0.1,3.8\nGROUND_ENABLE=1\n[COLLIDER_2]\nCENTRE=bad\nSIZE=1,-1,2\n`);assert.equal(parsed.colliders.length,1);assert.deepEqual(parsed.colliders[0].bounds,{min:[-.9,-.25,-1.9],max:[.9,-.15000000000000002,1.9]});assert.match(parsed.warnings.join("\n"),/CENTRE must contain three finite numbers/);});
+test("parses ordered bottom collision boxes and diagnoses invalid sections",()=>{const parsed=parseBottomCollidersIni(`[COLLIDER_0]\nCENTRE=0,-0.2,0\nSIZE=1.8,0.1,3.8\nGROUND_ENABLE=1\n[COLLIDER_2]\nCENTRE=bad\nSIZE=1,-1,2\n`);assert.equal(parsed.colliders.length,1);assert.deepEqual(parsed.colliders[0].bounds,{min:[-.9,-.25,-1.9],max:[.9,-.15000000000000002,1.9]});assert.match(parsed.warnings.join("\n"),/CENTRE must contain three finite float32 numbers/);});
+
+test("rejects truncated and unsafe bottom collision boxes",()=>{const parsed=parseBottomCollidersIni(`[COLLIDER_0]\nCENTRE=0,0,0\n[COLLIDER_1]\nCENTRE=1e100,0,0\nSIZE=1,1,1\n[COLLIDER_2]\nCENTRE=0,0,0\nSIZE=1,-1,1\n`);assert.equal(parsed.colliders.length,0);assert.match(parsed.warnings.join("\n"),/SIZE must contain three finite float32 numbers/);assert.match(parsed.warnings.join("\n"),/CENTRE must contain three finite float32 numbers/);assert.match(parsed.warnings.join("\n"),/SIZE components must be positive/);});
 
 test("parses the repository car's bottom collider",async()=>{const path=join(carFixtureRoot,"data","colliders.ini"),parsed=parseBottomCollidersIni(await readFile(path,"utf8"),path);assert.equal(parsed.colliders.length,1);assert.deepEqual(parsed.colliders[0].centre,[0,-.29,.66]);assert.deepEqual(parsed.colliders[0].size,[1.9,.05,3.355]);assert.deepEqual(parsed.warnings,[]);});
+
+test("serializes bottom collision boxes for a lossless parsed round trip",()=>{const source=parseBottomCollidersIni(`[COLLIDER_0]\nCENTRE=0,-0.2,0.5\nSIZE=1.8,0.1,3.8\nGROUND_ENABLE=0\n[COLLIDER_1]\nCENTRE=0,0,0\nSIZE=1,1,1\n`),text=serializeBottomCollidersIni(source),parsed=parseBottomCollidersIni(text);assert.deepEqual(parsed.colliders.map(({index,centre,size,groundEnabled})=>({index,centre,size,groundEnabled})),source.colliders.map(({index,centre,size,groundEnabled})=>({index,centre,size,groundEnabled})));assert.deepEqual(parsed.warnings,[]);});
+
+test("rejects malformed bottom-collider output",()=>{assert.throws(()=>serializeBottomCollidersIni([]),/at least one/);assert.throws(()=>serializeBottomCollidersIni([{index:0,centre:[0,0,0],size:[1,-1,1],groundEnabled:true}]),/positive finite/);assert.throws(()=>serializeBottomCollidersIni([{index:0,centre:[1e100,0,0],size:[1,1,1]}]),/finite float32/);assert.throws(()=>serializeBottomCollidersIni([{index:0,centre:[0,0,0],size:[1,1,1]},{index:0,centre:[0,0,0],size:[1,1,1]}]),/duplicated/);});
 
 function hierarchyModel(omit=""){const positions={LF:[.8,.35,1.3],LR:[.8,.35,-1.2],RF:[-.8,.35,1.3],RR:[-.8,.35,-1.2]},children=requiredCarNodes.filter((name)=>name!==omit).map((name)=>{const corner=name.match(/_(LF|LR|RF|RR)$/)?.[1],position=corner?positions[corner]:[0,0,0];return {kind:"node",name,active:true,transform:[1,0,0,0,0,1,0,0,0,0,1,0,...position,1],children:[]};});children.push({kind:"node",name:"COCKPIT_HR",active:true,transform:[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],children:[]},{kind:"node",name:"STEER_HR",active:true,transform:[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],children:[]});return {root:{kind:"node",name:"car",active:true,transform:[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],children}};}
 
