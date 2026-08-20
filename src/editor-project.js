@@ -179,15 +179,20 @@ export function editorProjectEditCount(project) {
   return materials + meshes + nodes + geometry + workspace + surfaces + skins;
 }
 
-export function editorProjectCspEditCount(project) {
+export function editorProjectKn5EditCount(project) {
   const total = editorProjectEditCount(project);
-  const nodes = Object.values(project?.nodeEdits || {}).reduce((count, edit) => count + ["name", "active", "transform"].filter((key) => edit[key] !== undefined).length, 0);
-  const geometry = Object.values(project?.geometryEdits || {}).reduce((count, edit) => count + ["transform", "removeDegenerate", "reverseWinding", "recalculateNormals"].filter((key) => edit[key] !== undefined).length, 0);
   const workspaceFiles = Object.values(project?.workspaceEdits?.files || {}).reduce((count, edit) => count + WORKSPACE_FILE_EDIT_KEYS.filter((key) => edit[key] !== undefined).length, 0);
   const workspace = workspaceFiles + ["cockpitHrDistance", "driverHrDistance"].filter((key) => project?.workspaceEdits?.[key] !== undefined).length;
   const surfaces = Object.values(project?.surfaceEdits || {}).reduce((count, edit) => count + SURFACE_EDIT_KEYS.filter((key) => edit?.[key] !== undefined).length, 0);
   const skins = Object.values(project?.skinEdits || {}).reduce((count, edit) => count + SKIN_METADATA_FIELDS.filter((key) => edit?.[key] !== undefined).length, 0);
-  return total - nodes - geometry - workspace - surfaces - skins;
+  return total - workspace - surfaces - skins;
+}
+
+export function editorProjectCspEditCount(project) {
+  const total = editorProjectKn5EditCount(project);
+  const nodes = Object.values(project?.nodeEdits || {}).reduce((count, edit) => count + ["name", "active", "transform"].filter((key) => edit[key] !== undefined).length, 0);
+  const geometry = Object.values(project?.geometryEdits || {}).reduce((count, edit) => count + ["transform", "removeDegenerate", "reverseWinding", "recalculateNormals"].filter((key) => edit[key] !== undefined).length, 0);
+  return total - nodes - geometry;
 }
 
 function quoteListItem(value) {
