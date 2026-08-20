@@ -2022,6 +2022,11 @@ skeleton, and null attributes. It evaluates each accepted node in local space.
 The native sample step is one percent of the selected animation time span. The loop
 stops before the end time. As a result, each nonempty animation contains 100 frames.
 
+KN5 null nodes contain local transforms. KN5 mesh records do not contain local
+transforms. The native SDK `sphere.kn5` gives its null node and child mesh the same
+`Sphere001` name. Apex therefore applies a matching animation track only to the null
+node. It does not create a second local transform for the same-named mesh.
+
 `Animation::save` at `0x10043dd0` writes version 2, the track count, and each UTF-8
 track name. It then writes the frame count and 40 bytes for each frame. A frame contains
 one quaternion, one position, and one scale.
@@ -2039,6 +2044,10 @@ tracks with 100 frames, which matches the native object-selection rule.
 Both scenes serialize to KN5 v6 and parse again. A live Electron run loaded all
 generated DDS textures and returned WebGL error zero. The packaged Linux application
 also imported the sphere with no JavaScript or browser-log errors.
+
+A production WebGL check used a `DOOR` null node and a same-named child mesh. The
+`DOOR` track matched one node at animation position 1. The screenshot hash was
+`ea00abb086e55c92`, and the browser log contained no warnings or errors.
 
 Three.js removes the directory from an external FBX image path before it loads the
 image. Apex captures the remaining filename from the loader. It resolves that name
