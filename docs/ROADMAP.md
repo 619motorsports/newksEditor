@@ -257,8 +257,12 @@ vertical slice is only the foundation.
   spline CSVs resolve and use the game's world-Y rotation and normalized sampling for
   manual path-position preview and configured-duration playback; live focused-car
   targeting remains. Static layout positions and rotations now support live editing,
-  project persistence, validation, and `models.ini` export. Exact environment matching, remaining shaders
-  and CSP effects, and performance/spatial diagnostics remain.
+  project persistence, validation, and `models.ini` export. The inspector now computes
+  exact parsed hierarchy, mesh, vertex, triangle, material, texture, and payload totals.
+  It reports transformed scene bounds, each source-file hotspot, and the largest meshes,
+  including repeated placements as separate layout entries. These measurements do not
+  invent unverified game-performance budgets. Exact environment matching, remaining
+  shaders, and CSP effects remain.
 - Search, material editing, direct hierarchy editing, and static-mesh geometry transforms
   now form a tested vertical slice. Hierarchy edits use stable node paths and support names, active states,
   local position, XYZ rotation, and scale. The preview, 100-step undo history,

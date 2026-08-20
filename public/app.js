@@ -1,7 +1,7 @@
 import { computeKn5Visibility, parseKn5, propertyValue, walkNodes } from "/src/kn5.js";
 import { evaluateCspConfig, expandCspMaterialTemplates, parseCspIni } from "/src/csp-config.js";
 import { customEmissiveAtlasSize } from "/src/custom-emissive.js";
-import { cloneEditorProject, createEditorProject, editorProjectCspEditCount, editorProjectEditCount, formatEditorValue, normalizeEditorProject, parseEditorValue, serializeEditorCsp, serializeEditorProject } from "/src/editor-project.js";
+import { classifyEditorProjectChanges, cloneEditorProject, createEditorProject, editorProjectCspEditCount, editorProjectEditCount, formatEditorValue, normalizeEditorProject, parseEditorValue, serializeEditorCsp, serializeEditorProject } from "/src/editor-project.js";
 import { decodeDdsRgba, inspectDds } from "/src/dds.js";
 import { assetFolderMatchesModelFiles, createAssetFileIndex, discoverAssetAnimations, discoverAssetSkins, externalResourcePaths, matchSkinTextures, normalizeAssetPath, resolveAssetFile } from "/src/asset-files.js";
 import { applyGeometryEdits, captureStaticGeometryBaselines, staticGeometryMetrics } from "/src/geometry-authoring.js";
@@ -31,6 +31,7 @@ import { createCspWindParticles, CSP_WIND_MAP_FORMAT, CSP_WIND_MAP_SIZE, CSP_WIN
 import { createFileIdentity, fileIdentityMatches } from "/src/file-identity.js";
 import { collectFbxAnimations, parseFbxWithTextures, resolveFbxModelTextures } from "/src/fbx-import.js";
 import { applyNodeEdits, composeNodeTransform, decomposeNodeTransform, nodeAtPath, nodePathEntries } from "/src/node-authoring.js";
+import { analyzeScene } from "/src/scene-diagnostics.js";
 
 const $ = (selector) => document.querySelector(selector);
 const fileInput = $("#file");
@@ -81,6 +82,8 @@ let trackSurfaceConfig = null;
 let trackSurfaceBaseline = null;
 let trackSurfaceFileName = "";
 let trackAudit = null;
+let sceneDiagnostics = null;
+let sceneDiagnosticsRuns = 0;
 let trackSurfaceBindings = new Map();
 let trackCameraSets = [];
 let trackCameraChoices = [];
@@ -275,6 +278,7 @@ async function load(files, workspaceOptions = {}) {
     const previewMeshes = meshes.filter(({ node }) => sceneVisibility.get(node));
     const triangles = meshes.reduce((sum, { node }) => sum + node.indices.length / 3, 0);
     modelSummary = { nodes, meshes, previewMeshes, triangles };window.__apexFbx=model.fbx||null;
+    refreshSceneDiagnostics();
     trackAudit = model.workspace?.kind === "track" ? auditTrackModel(model, trackSurfaceConfig) : null;trackSurfaceBindings=trackAudit?new Map(meshes.map(({node})=>[node,resolveTrackSurface(node.name,trackSurfaceConfig)])):new Map();window.__apexTrackAudit=trackAudit;carHierarchyAudit=model.workspace?.kind==="carLods"?auditCarHierarchy(model):null;window.__apexCarHierarchyAudit=carHierarchyAudit;refreshCarColliderAudit();
     $("#welcome").hidden = true;
     $("#stats").hidden = false;
@@ -637,26 +641,31 @@ function applyProjectSceneEdits() {
   applyProjectColliderEdits();
 }
 
+function refreshTrackSurfaceAuthoring(meshes = modelSummary?.meshes || []) {
+  trackAudit = model?.workspace?.kind === "track" ? auditTrackModel(model, trackSurfaceConfig) : null;
+  trackSurfaceBindings = trackAudit ? new Map(meshes.map(({ node }) => [node, resolveTrackSurface(node.name, trackSurfaceConfig)])) : new Map();
+  window.__apexTrackAudit = trackAudit;
+  renderer?.setSurfaceBindings(trackSurfaceBindings);
+  configureSurfaceOverlay();
+}
+
 function refreshHierarchyAuthoring(geometryChanged = false, colliderChanged = false) {
   if (!model) return;
   const nodes = walkNodes(model.root), meshes = nodes.filter(({ node }) => node.kind === "mesh" || node.kind === "skinnedMesh");
   sceneVisibility = computeKn5Visibility(model.root);
   const previewMeshes = meshes.filter(({ node }) => sceneVisibility.get(node)), triangles = meshes.reduce((sum, { node }) => sum + node.indices.length / 3, 0);
   modelSummary = { nodes, meshes, previewMeshes, triangles };
-  trackAudit = model.workspace?.kind === "track" ? auditTrackModel(model, trackSurfaceConfig) : null;
-  trackSurfaceBindings = trackAudit ? new Map(meshes.map(({ node }) => [node, resolveTrackSurface(node.name, trackSurfaceConfig)])) : new Map();
-  window.__apexTrackAudit = trackAudit;
+  refreshSceneDiagnostics();
+  refreshTrackSurfaceAuthoring(meshes);
   carHierarchyAudit = model.workspace?.kind === "carLods" ? auditCarHierarchy(model) : null;
   window.__apexCarHierarchyAudit = carHierarchyAudit;
   $("#stats").innerHTML = `${previewMeshes.length.toLocaleString()} renderable / ${meshes.length.toLocaleString()} meshes<br>${Math.round(triangles).toLocaleString()} triangle${Math.round(triangles) === 1 ? "" : "s"}<br>${model.materials.length} materials${model.workspace ? `<br>${model.workspace.files.length} KN5 files` : ""}`;
   $("#node-count").textContent = nodes.length;
   renderTree($("#search").value);
   if (geometryChanged) renderer?.refreshGeometry(); else renderer?.refreshHierarchy();
-  renderer?.setSurfaceBindings(trackSurfaceBindings);
   if (colliderChanged) refreshCarColliderPreview();
   if (geometryChanged || colliderChanged) refreshCarColliderAudit();
   if (geometryChanged) applyVaoPatch();
-  configureSurfaceOverlay();
   configureLodPreview(true);
   configureReflectionCaptureChoices();
 }
@@ -702,25 +711,25 @@ function commitEditorChange(label, mutate) {
   mutate(next);
   const normalized = normalizeEditorProject(next), after = serializeEditorProject(normalized);
   if (after === before) return false;
-  const geometryChanged = JSON.stringify(normalized.geometryEdits) !== JSON.stringify(editorProject.geometryEdits);
-  const colliderChanged = colliderProjectState(normalized) !== colliderProjectState(editorProject);
-  const sceneChanged = geometryChanged || colliderChanged || JSON.stringify(normalized.nodeEdits) !== JSON.stringify(editorProject.nodeEdits) || JSON.stringify(normalized.workspaceEdits) !== JSON.stringify(editorProject.workspaceEdits) || JSON.stringify(normalized.surfaceEdits) !== JSON.stringify(editorProject.surfaceEdits);
+  const changes = classifyEditorProjectChanges(editorProject, normalized);
   undoStack.push({ label, snapshot: before });
   if (undoStack.length > 100) undoStack.shift();
   redoStack = [];
   editorProject = normalized;
-  if (sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged,colliderChanged); }
+  if (changes.sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(changes.geometryChanged, changes.colliderChanged); }
+  else if (changes.surfaceChanged) { applyProjectSurfaceEdits(); refreshTrackSurfaceAuthoring(); }
   refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
-  if (sceneChanged && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
+  if ((changes.sceneChanged || changes.surfaceChanged) && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
   return true;
 }
 
 function restoreEditorSnapshot(snapshot) {
-  const restored = normalizeEditorProject(JSON.parse(snapshot)), geometryChanged = JSON.stringify(restored.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits), colliderChanged = colliderProjectState(restored) !== colliderProjectState(editorProject), sceneChanged = geometryChanged || colliderChanged || JSON.stringify(restored.nodeEdits) !== JSON.stringify(editorProject?.nodeEdits) || JSON.stringify(restored.workspaceEdits) !== JSON.stringify(editorProject?.workspaceEdits) || JSON.stringify(restored.surfaceEdits) !== JSON.stringify(editorProject?.surfaceEdits);
+  const restored = normalizeEditorProject(JSON.parse(snapshot)), changes = classifyEditorProjectChanges(editorProject, restored);
   editorProject = restored;
-  if (sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged,colliderChanged); }
+  if (changes.sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(changes.geometryChanged, changes.colliderChanged); }
+  else if (changes.surfaceChanged) { applyProjectSurfaceEdits(); refreshTrackSurfaceAuthoring(); }
   refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
-  if (sceneChanged && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
+  if ((changes.sceneChanged || changes.surfaceChanged) && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
 }
 
 function undoEditorChange() {
@@ -799,9 +808,11 @@ async function loadEditorProject(file) {
     const loaded = normalizeEditorProject(JSON.parse(await file.text()));
     if (loaded.asset.size && loaded.asset.size !== modelFile.size) throw new Error(`Project expects a ${loaded.asset.size}-byte KN5, but ${modelFile.name} is ${modelFile.size} bytes`);
     if (loaded.asset.kn5Version && loaded.asset.kn5Version !== model.version) throw new Error(`Project expects KN5 v${loaded.asset.kn5Version}, but this model is v${model.version}`);
-    const geometryChanged = JSON.stringify(loaded.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits), colliderChanged = colliderProjectState(loaded) !== colliderProjectState(editorProject);
+    const changes = classifyEditorProjectChanges(editorProject, loaded);
     editorProject = loaded; undoStack = []; redoStack = [];
-    applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged,colliderChanged); refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
+    if (changes.sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(changes.geometryChanged, changes.colliderChanged); }
+    else if (changes.surfaceChanged) { applyProjectSurfaceEdits(); refreshTrackSurfaceAuthoring(); }
+    refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
     if (!selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
   } catch (error) {
     console.error(error); status.textContent = `Could not open project: ${error.message}`;
@@ -900,7 +911,7 @@ function renderModelInspector(file, nodes, triangles) {
   inspector.className = "inspector";
   const protection = model.encryption ? `<div class="section"><h3>CSP-protected payload</h3>${kv("Format", model.encryption.format)}${kv("Payload", `${(model.encryption.payloadBytes / 1048576).toFixed(2)} MB`)}${kv("Records", model.encryption.recordCount.toLocaleString())}${kv("Protected textures", model.encryption.protectedTextures.length)}${kv("Protected meshes", model.encryption.protectedMeshes.length)}${kv("Structure", model.encryption.valid ? "Recognized" : `Invalid: ${model.encryption.error}`)}<span class="empty">The public KN5 scene is available. Protected geometry and textures remain placeholders until a compatible payload decoder is available.</span></div>` : "";
   inspector.innerHTML = `<div class="section"><h3>Model</h3>${kv("File", file.name)}${kv("Format", `KN5 v${model.version}`)}${kv("Size", `${(file.size / 1048576).toFixed(2)} MB`)}${kv("Nodes", nodes.length.toLocaleString())}${kv("Triangles", Math.round(triangles).toLocaleString())}${kv("Textures", model.textures.length)}${kv("Parsed", model.bytesRead === model.byteLength ? "Complete" : model.encryption?.valid ? "Public scene + protected payload" : `${model.bytesRead} / ${model.byteLength}`)}${kv("Authored edits", editorProjectEditCount(editorProject))}</div>${protection}${cspEvaluation ? `<div class="section"><h3>CSP configuration</h3>${kv("File", cspConfig ? cspFileName : "Apex authored edits")}${kv("Sections", activeCspConfig?.sections.length || 0)}${kv("Expanded templates", cspConfig?.expandedTemplates?.length || 0)}${kv("Matched override sections", cspEvaluation.matchedSections)}${kv("Overridden meshes", cspEvaluation.nodeOverrides.size)}${kv("Custom-emissive meshes", cspEvaluation.customEmissiveMeshes)}${kv("Matched light sections", cspEvaluation.matchedLightSections)}${kv("Light instances", cspEvaluation.lights.length)}${kv("Active light instances", cspEvaluation.lights.filter((light) => Math.max(...light.color.map(Math.abs)) > 1e-5).length)}${kv("Track light occluders", cspEvaluation.trackOccluders?.length || 0)}${kv("Unresolved includes", cspEvaluation.unresolvedIncludes.length)}${cspEvaluation.unresolvedIncludes.map((name) => `<div class="resource"><span>${escapeHtml(name)}</span></div>`).join("")}</div>${cspEvaluation.usedConditions.size ? `<div class="section"><h3>Condition preview</h3>${[...cspEvaluation.usedConditions].sort().map((name) => conditionHtml(name, cspEvaluation.conditions.get(name) ?? 0)).join("")}</div>` : ""}${cspEvaluation.usedInputs.size ? `<div class="section"><h3>Input preview</h3>${[...cspEvaluation.usedInputs].sort(([a], [b]) => a.localeCompare(b)).map(([name, input]) => inputHtml(name, input)).join("")}</div>` : ""}${cspEvaluation.lights.length ? `<div class="section"><h3>CSP lights</h3>${cspEvaluation.lights.slice(0, 16).map(lightHtml).join("")}${cspEvaluation.lights.length > 16 ? `<span class="empty">${(cspEvaluation.lights.length - 16).toLocaleString()} more light instances</span>` : ""}</div>` : ""}` : ""}<div class="section"><h3>Materials</h3>${model.materials.map((m, i) => `<div class="resource material-link" data-material="${i}"><strong>${escapeHtml(m.name)}</strong><span>${escapeHtml(m.shader)}</span></div>`).join("")}</div>`;
-  const supplementalHtml = fbxImportInspectorHtml() + workspaceInspectorHtml() + packedDataInspectorHtml() + carHierarchyInspectorHtml() + carColliderInspectorHtml() + driverInspectorHtml() + trackCameraInspectorHtml() + trackValidationInspectorHtml() + shaderProfilesInspectorHtml() + vaoInspectorHtml() + seasonalInspectorHtml() + weatherLightingInspectorHtml() + reflectionCaptureInspectorHtml() + lightingInspectorHtml() + grassFxInspectorHtml() + rainFxInspectorHtml() + animationInspectorHtml() + skinTextureInspectorHtml() + externalTextureInspectorHtml(), materialSection = inspector.querySelector(".section:last-child");
+  const supplementalHtml = fbxImportInspectorHtml() + workspaceInspectorHtml() + packedDataInspectorHtml() + carHierarchyInspectorHtml() + carColliderInspectorHtml() + driverInspectorHtml() + trackCameraInspectorHtml() + sceneDiagnosticsInspectorHtml() + trackValidationInspectorHtml() + shaderProfilesInspectorHtml() + vaoInspectorHtml() + seasonalInspectorHtml() + weatherLightingInspectorHtml() + reflectionCaptureInspectorHtml() + lightingInspectorHtml() + grassFxInspectorHtml() + rainFxInspectorHtml() + animationInspectorHtml() + skinTextureInspectorHtml() + externalTextureInspectorHtml(), materialSection = inspector.querySelector(".section:last-child");
   if (supplementalHtml && materialSection) materialSection.insertAdjacentHTML("beforebegin", supplementalHtml);
   inspector.querySelectorAll("[data-material]").forEach((el) => el.addEventListener("click", () => renderMaterialInspector(model.materials[Number(el.dataset.material)])));
   inspector.querySelectorAll("[data-condition]").forEach((input) => input.addEventListener("input", () => {
@@ -1054,6 +1065,22 @@ function shaderProfilesInspectorHtml(){const value=renderer?.shaderProfileStatus
 function lightingInspectorHtml(){const value=renderer?.shadowStatus;if(!value)return "";return `<div class="section"><h3>Directional shadows</h3>${kv("Preview",value.enabled?"Enabled":"Disabled")}${kv("Shadow maps",`${value.cascades} × ${value.mapSize}²`)}${kv("Camera splits",value.splits.map((split)=>`${split} m`).join(" · "))}${kv("Native biases",value.biases.map((bias)=>bias.toExponential()).join(" · "))}${kv("Mesh casters",value.casters.toLocaleString())}${value.grassInstances?kv("GrassFX casters",value.grassInstances.toLocaleString()):""}${kv("Caster triangles",value.triangles.toLocaleString())}<span class="empty">Three camera-space cascades reproduce ksEditor’s shipped 2/12/50 m split endpoints, 2048 map size, per-cascade bias, mesh cast-shadow flags, diffuse-alpha cutouts, and tapered instanced GrassFX blades.</span></div>`;}
 function weatherLightingInspectorHtml(){const value=renderer?.lightingStatus;if(!value)return "";return `<div class="section"><h3>Weather lighting</h3>${kv("Preset",value.name)}${kv("Source",value.source)}${kv("Sun",`${format(value.heading)}° heading · ${format(value.height)}° height`)}${kv("Curve blend",format(value.angleMix))}${kv("Sun HDR",value.sunColor.map(format).join(", "))}${kv("Ambient HDR",value.ambientColor.map(format).join(", "))}${kv("Sky HDR",value.skyColor.map(format).join(", "))}${kv("Fog",`${value.fogDistance.toLocaleString()} m · ${format(value.fogBlend)} blend`)}${kv("Exposure",value.autoExposure?`${format(value.effectiveExposure)} auto · ${value.exposureMin}–${value.exposureMax}`:`${format(value.effectiveExposure)} manual`)}${kv("Display",value.toneMap)}${kv("Glare",value.glareEnabled?`Yebis quality ${value.glareQuality} · ${value.bloomLevels} bloom levels · threshold ${format(value.bloomThreshold)}`:"Disabled on RGBA8 fallback")}${kv("Bloom source",`${format((value.bloomSourceScale||0)*100)}% · composite ${format(value.bloomCompositeScale||0)}`)}${kv("Bloom kernel",`${value.bloomKernel} · ${value.bloomKernelSamples.join("/")} samples · σ ${value.bloomKernelSigmas.map(format).join("/")}`)}${kv("Dither",value.dither?"Recovered 8-bit output scale":"Disabled")}${kv("HDR target",value.hdr?`${value.samples}× MSAA · RGBA16F`:"RGBA8 fallback")}<span class="empty">Version-3 curve colors use the engine’s RGB × intensity / 255 conversion and native sun-angle interpolation. The Yebis path measures exposure before glare, then applies threshold bloom, the display curve, screen composition, reciprocal gamma, and output dither.</span></div>`;}
 function reflectionCaptureInspectorHtml(){const value=renderer?.sceneStatus?.reflections;if(!value)return "";const preview=!value.enabled?"Procedural fallback · live capture disabled":value.ready?"Live scene cubemap":"Procedural fallback",mode={environment:"Showroom environment",explicit:"Selected subtree",scene:"Whole scene",fallback:"Automatic fallback",disabled:"Disabled"}[value.selectionMode]||"Automatic";return `<div class="section"><h3>Scene reflections</h3>${kv("Preview",preview)}${kv("Capture selection",value.rootName?`${mode} · ${value.rootName}`:mode)}${kv("Capture target",`${value.size}² · ${value.faces||0}/6 valid faces`)}${value.ready?`${kv("Material path",value.materialPath||"Shared viewport shader")}${kv("Capture meshes",`${value.opaqueMeshes||0} opaque · ${value.transparentMeshes||0} transparent`)}${kv("Probe shadows",value.directionalShadows?`3 cascades · ${value.shadowCasters||0} mesh casters`:"Disabled")}${kv("GrassFX",value.grassFx?`${(value.grassInstances||0).toLocaleString()} lit instances${value.grassCastsShadows?" · cast/receive shadows":""}`:"Not in selected subtree")}${kv("Latest update",`${value.updatedFaces} face${value.updatedFaces===1?"":"s"} · next ${value.nextFace}`)}${kv("Capture geometry",`${value.draws.toLocaleString()} draws · ${Math.round(value.triangles).toLocaleString()} triangles`)}${kv("CSP lights",value.cspLights||0)}${kv("Clip range",`${KS_EDITOR_CUBEMAP.nearPlane}–${value.farPlane} m`)}${kv("CPU submission",`${format(value.captureMilliseconds)} ms`)}`:""}${value.reason?kv("Fallback reason",value.reason):""}<span class="empty">The capture follows ksEditor’s 512², 90° six-face camera at the active view position, initializes all faces, then refreshes one face per draw. It uses the viewport material path, probe-centered directional cascades, and weather-lit whole-track GrassFX with instanced shadow casting. Reflection sampling and refraction are disabled to prevent recursive feedback.</span></div>`;}
+
+function refreshSceneDiagnostics() {
+  sceneDiagnostics = model?.workspace?.kind === "track" ? analyzeScene(model, { sourceName: modelFile?.name, excludeAuxiliary: true }) : null;
+  if (sceneDiagnostics) sceneDiagnosticsRuns++;
+  window.__apexSceneDiagnostics = sceneDiagnostics;
+  window.__apexSceneDiagnosticsRuns = sceneDiagnosticsRuns;
+}
+
+function sceneDiagnosticsInspectorHtml() {
+  if (!sceneDiagnostics) return "";
+  const value = sceneDiagnostics, totals = value.totals, bounds = value.bounds;
+  const vector = (items) => items?.map((item) => `${format(item)} m`).join(" × ") || "No geometry";
+  const files = value.files.slice(0, 12).map((file) => `<div class="resource"><strong>${escapeHtml(file.name)}</strong><span>${file.meshes.toLocaleString()} mesh records · ${file.triangles.toLocaleString()} triangles · ${file.vertices.toLocaleString()} vertices · ${formatBytes(file.geometryBytes)} vertex/index data · ${formatBytes(file.textureBytes)} textures · span ${vector(file.bounds?.size)}</span></div>`).join("");
+  const meshes = value.largestMeshes.slice(0, 10).map((mesh) => `<div class="resource"><strong>${escapeHtml(mesh.name)} · ${escapeHtml(mesh.file)}</strong><span>${mesh.triangles.toLocaleString()} triangles · ${mesh.vertices.toLocaleString()} vertices · ${formatBytes(mesh.geometryBytes)} · ${escapeHtml(mesh.material)} · farthest point ${format(mesh.furthestDistance)} m</span></div>`).join("");
+  return `<div class="section"><h3>Track scene diagnostics</h3>${kv("Source files",value.files.length.toLocaleString())}${kv("Hierarchy nodes",totals.nodes.toLocaleString())}${kv("Mesh records",`${totals.visibleMeshes.toLocaleString()} active-branch visible / ${totals.meshes.toLocaleString()} total`)}${kv("Static / skinned",`${totals.staticMeshes.toLocaleString()} / ${totals.skinnedMeshes.toLocaleString()}`)}${kv("Vertices",totals.vertices.toLocaleString())}${kv("Triangles",totals.triangles.toLocaleString())}${kv("Materials",`${totals.usedMaterials.toLocaleString()} used / ${totals.materials.toLocaleString()} loaded`)}${kv("Embedded textures",`${totals.textures.toLocaleString()} source / ${totals.effectiveTextures.toLocaleString()} effective`)}${kv("Vertex/index payload",formatBytes(totals.geometryBytes))}${kv("Texture payload",formatBytes(totals.textureBytes))}${kv("Source KN5 payload",formatBytes(totals.sourceBytes))}${kv("Hierarchy depth",totals.maxDepth.toLocaleString())}${kv("World span",vector(bounds?.size))}${kv("World centre",bounds ? bounds.center.map((item) => `${format(item)} m`).join(", ") : "No geometry")}${kv("Centre from origin",bounds ? `${format(bounds.centerDistance)} m` : "No geometry")}${totals.emptyMeshes?kv("Empty mesh records",totals.emptyMeshes.toLocaleString()):""}${totals.invalidMaterialMeshes?kv("Invalid material links",totals.invalidMaterialMeshes.toLocaleString()):""}<h3>File hotspots</h3>${files}${value.files.length>12?`<span class="empty">${value.files.length-12} more source files</span>`:""}<h3>Largest meshes</h3>${meshes}<span class="empty">Counts and bounds come from parsed track KN5 records after workspace and hierarchy transforms. Auxiliary showrooms are excluded. These are measurements, not unsupported game-performance limits.</span></div>`;
+}
 
 function trackValidationInspectorHtml() {
   if (!trackAudit) return "";
@@ -1557,6 +1584,12 @@ function bindMaterialEditors(material) {
 
 function kv(key, value) { return `<div class="kv"><span>${escapeHtml(String(key))}</span><span>${escapeHtml(String(value))}</span></div>`; }
 function format(value) { return Number.isFinite(value) ? Number(value.toFixed(4)).toString() : "—"; }
+function formatBytes(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes < 1024) return `${bytes.toLocaleString()} B`;
+  if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / 1048576).toFixed(2)} MiB`;
+}
 function escapeHtml(value) { const el = document.createElement("span"); el.textContent = value; return el.innerHTML; }
 
 function createRenderer(canvas) {
