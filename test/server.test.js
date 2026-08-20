@@ -28,6 +28,9 @@ test("serves the desktop application and its explicitly allowed modules", async 
     const customEmissiveUv = await fetch(`${url}/src/custom-emissive-uv.js`);
     assert.equal(customEmissiveUv.status, 200);
     assert.match(await customEmissiveUv.text(), /customEmissiveUv/);
+    const fileIdentity = await fetch(`${url}/src/file-identity.js`);
+    assert.equal(fileIdentity.status, 200);
+    assert.match(await fileIdentity.text(), /createFileIdentity/);
     assert.equal((await fetch(`${url}/vendor/three.module.js`)).status, 200);
     assert.equal((await fetch(`${url}/vendor/three-addons/loaders/FBXLoader.js`)).status, 200);
   });
