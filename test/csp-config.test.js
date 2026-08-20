@@ -445,6 +445,7 @@ MirrorOffset=0.25
 @=CustomEmissive_Rect, Channel=1, Mirror, Start=0, Size=1
 @=CustomEmissive_Color, Channel=1, Mirror, Color="1,0.5,0", Threshold="0.2,5", Opacity=0.75
 @=CustomEmissive_VertexMask, Point2="0.5,0,0", Point3="0.8,0,0"
+@=CustomEmissive_BounceBack, Mask="1,0,0,0", Intensity=2
 @=CustomEmissive_BounceBack, Channel=1, Intensity=4
 @=CustomEmissive_MirrorUV, Offset=0.6, Direction="-1,0"
 @=CustomEmissive_SkipDiffuseMap
@@ -464,13 +465,14 @@ MirrorOffset=0.25
   assert.equal(custom.useRawUv, false);
   assert.equal(custom.skipDiffuseMap, true);
   assert.deepEqual(custom.unsupportedOperations, []);
-  assert.deepEqual(custom.approximatedOperations, ["CustomEmissive_VertexMask", "CustomEmissive_BounceBack"]);
+  assert.deepEqual(custom.approximatedOperations, ["CustomEmissive_VertexMask"]);
 });
 
 test("normalizes the installed MirrorUV rule and bounds malformed directions", () => {
   const display = { kind: "mesh", name: "DISPLAY", materialId: 0, children: [] };
   const malformed = { kind: "mesh", name: "BAD", materialId: 0, children: [] };
-  const scene = { materials: [material("display")], root: { kind: "node", name: "root", children: [display, malformed] } };
+  const local = { kind: "mesh", name: "LOCAL", materialId: 0, children: [] };
+  const scene = { materials: [material("display")], root: { kind: "node", name: "root", children: [display, malformed, local] } };
   const config = expandCspMaterialTemplates(parseCspIni(`[CustomEmissive]
 Meshes=DISPLAY
 Resolution=1024,512
@@ -481,6 +483,11 @@ UseRawUV=1
 Meshes=BAD
 Resolution=1024,512
 @=CustomEmissive_MirrorUV, Offset=invalid, Direction="nan,inf"
+
+[CustomEmissive]
+Meshes=LOCAL
+@=CustomEmissive_MirrorUV, Offset=512, Direction="-1,0"
+@MIXIN=CustomEmissive_Rect, Resolution="1024,512", Channel=0, Start="0,0", Size="1,1"
 `));
   const result = evaluateCspConfig(scene, config);
   const custom = result.nodeOverrides.get(display).customEmissive;
@@ -491,6 +498,18 @@ Resolution=1024,512
   assert.deepEqual(bounded.mirrorUv, { offset: 0.5 / 1024, direction: [-1, 0] });
   assert.ok(bounded.mirrorUv.direction.every(Number.isFinite));
   assert.deepEqual(bounded.approximatedOperations, []);
+  assert.deepEqual(result.nodeOverrides.get(local).customEmissive.mirrorUv, { offset: 0.5, direction: [1, 0] });
+});
+
+test("bounds a malformed bounce-back mask to four finite channels", () => {
+  const lamp = { kind: "mesh", name: "LAMP", materialId: 0, children: [] };
+  const scene = { materials: [material("lamp")], root: { kind: "node", name: "root", children: [lamp] } };
+  const config = expandCspMaterialTemplates(parseCspIni(`[CustomEmissive]
+Meshes=LAMP
+@=CustomEmissive_BounceBack, Mask="1,broken"
+`));
+  const custom = evaluateCspConfig(scene, config).nodeOverrides.get(lamp).customEmissive;
+  assert.deepEqual(custom.bounceBack, [{ mask: [1, 1, 1, 1], intensity: 20 }]);
 });
 
 test("keeps normalized emissive atlases editable and bounds authored atlases", () => {

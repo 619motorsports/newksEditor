@@ -195,7 +195,7 @@ if (manualExposure !== "") {
   await waitFor(`window.__apexRenderer?.lightingStatus?.autoExposure===false`);
 }
 if(grassFx){await waitFor(`window.__apexRenderer?.grassStatus.instanceCount>0&&window.__apexRenderer?.grassStatus.weatherLit===true${cspAssetsPath?"&&window.__apexRenderer?.grassStatus.atlasReady===true":""}`,120000);trace("GrassFX instances generated");}
-if(rainFx){await waitFor(`window.__apexRenderer?.rainStatus.matchedMeshes>0`,120000);await evaluate(`(()=>{const e=document.querySelector('#rain-wetness');e.value=${JSON.stringify(rainWetness)};e.dispatchEvent(new Event('input',{bubbles:true}));})()`);await waitFor(`window.__apexRenderer?.rainStatus.wetness===${JSON.stringify(rainWetness)}`);trace("RainFX preview enabled");}
+if(rainFx){await waitFor(`window.__apexRenderer?.rainStatus.matchedMeshes>0`,120000);await evaluate(`(()=>{const e=document.querySelector('#rain-wetness');e.value=${JSON.stringify(rainWetness)};e.dispatchEvent(new Event('input',{bubbles:true}));})()`);await waitFor(`window.__apexRenderer?.rainStatus.wetness===${JSON.stringify(rainWetness)}`);if(grassFx&&rainWetness<0)await waitFor(`window.__apexRenderer?.grassStatus.snowAmount===${JSON.stringify(Math.min(1,-rainWetness))}`);trace("RainFX preview enabled");}
 const selected = await evaluate(`(()=>{
   window.__apexInputs=Object.fromEntries([...document.querySelectorAll('[data-input]')].map(e=>[e.dataset.input,e]));
   window.__apexConditions=Object.fromEntries([...document.querySelectorAll('[data-condition]')].map(e=>[e.dataset.condition,e]));

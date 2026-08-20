@@ -30,3 +30,10 @@ export function customEmissiveUv(uv, mirrorUv = null, useRawUv = false) {
     mapped[1] - 2 * signedDistance * direction[1]
   ];
 }
+
+/** Returns true when a mapped UV can sample the bounded emissive atlas without wrapping. */
+export function customEmissiveUvInBounds(uv) {
+  const x = Number(uv?.[0]);
+  const y = Number(uv?.[1]);
+  return Number.isFinite(x) && Number.isFinite(y) && x >= 0 && x < 1 && y >= 0 && y < 1;
+}

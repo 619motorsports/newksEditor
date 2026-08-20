@@ -65,13 +65,13 @@ vertical slice is only the foundation.
   families already have a tested implementation. The same safe path now covers the
   common `CustomEmissive` and `CustomEmissiveMulti` atlas shapes, mirrored channels,
   dashboard items, and vehicle-input bindings.
-- Complete the remaining custom-emissive color/vertex-mask/bounce-back operations,
+- Complete the remaining custom-emissive color and vertex-mask operations,
   UV transforms, and exact shader channel-composition behavior. Installed color masks,
-  normalized/soft atlases, vehicle bindings, and declarative `@MIXIN` calls now work.
-  Source-backed `MirrorUV` folding uses fractional UVs, the normalized direction,
-  the resolution-scaled offset, and the negative half-plane reflection. Vertex masks,
-  bounce-back, raw UVs, fog/door light casting, and subtractive modes are explicitly
-  labeled approximations.
+  normalized/soft atlases, vehicle bindings, declarative `@MIXIN` calls, and exact
+  view-dependent bounce-back now work. Source-backed `MirrorUV` folding uses
+  fractional UVs, the normalized direction, the final resolution-scaled offset,
+  and negative-half-plane reflection without atlas wrapping. Vertex masks, raw UVs,
+  fog/door light casting, and subtractive modes are explicitly labeled approximations.
 - Complete CSP light shadows, occlusion, binding, fade/visibility behavior, and
   photometric matching. Point/spot lights, mirrored self-lights, finite line lights,
   geometry-derived track series, live conditions, the recovered
@@ -181,8 +181,9 @@ vertical slice is only the foundation.
   resolve and separable 7-tap or 15-tap filters run before receiver sampling. GrassFX
   uses CSP's 10 cm lowered receiver. Full unsampled compute density,
   moving-vehicle air/deformation stamping, 32-slot packing, dynamic/car atlas refresh scheduling,
-  wet cubemap reflection,
-  negative-wetness snow, and the rest of CSP's game-only lighting integration remain.
+  wet cubemap reflection, and the rest of CSP's game-only lighting integration remain.
+  Negative wetness now applies the exact height-weighted snow whitening from CSP's
+  public GrassFX pixel shader. This control does not invent snow on track materials.
   RainFX now classifies puddle, soaking, smooth, rough, line, relief, and stream
   config entries and applies a wet-material authoring preview with adjustable
   intensity. Native accumulation/drainage, height-field puddles, rain occlusion,

@@ -177,8 +177,10 @@ npm test
 - Safe `CustomEmissive`/`CustomEmissiveMulti` atlas preview for rectangles, circles,
   soft polygons, color matching, channel mirroring, exact `MirrorUV` half-plane
   folding, vertex-anchor approximation, multi-item dashboard channels, diffuse
-  alpha/luminance, and live vehicle inputs such as
-  reverse, brake, turn signals, lights, doors, fog lights, hazards, and RPM
+  alpha/luminance, and live vehicle inputs such as reverse, brake, turn signals,
+  lights, doors, fog lights, hazards, and RPM. The preview also reproduces CSP's
+  view-dependent emissive bounce-back for the sun, reflection cube, and point or
+  spot lights
 - CSP point/spot lights, mirrored `SelfLight` expansion, finite line lights with
   closest-segment range/diffuse, endpoint-color interpolation, and segment gloss,
   geometry-derived track `LIGHT_SERIES` preview, native packed
@@ -259,8 +261,9 @@ npm test
   a cached 1024² static-editor radial exponential-shadow atlas for up to four authored
   spotlights, using four 512² cells, CSP's exponent/normal-bias/boost resolve,
   optional extra filtering, clip sphere, and 10 cm lowered grass receiver,
-  RainFX-driven wet-grass albedo darkening and near-field substrate-specular
-  direction gain, and a live visibility toggle
+  RainFX-driven wet-grass albedo darkening, near-field substrate-specular
+  direction gain, CSP's exact height-weighted negative-wetness snow whitening,
+  and a live visibility toggle
 - RainFX material/mesh classification for puddles, soaking, smooth, rough, line,
   and relief surfaces, with adjustable wet darkening/gloss, deterministic puddle
   breakup, configured stream-edge/point diagnostics, and per-mesh inspection
@@ -307,7 +310,7 @@ A portable BC6H/BC7 fallback for systems without BPTC, dynamic RainFX accumulati
 drainage, spray and occlusion, GrassFX's full 868,352-thread density rather than the
 portable CPU sampling budget, CSP's full 32-slot local-shadow packing and dynamic/car
 atlas refresh scheduling,
-wet cubemap reflection and negative-wetness snow response,
+wet cubemap reflection and ground-snow response,
 transparent-layer feedback,
 general CSP template/include expansion,
 dynamic-object audio, subtractive procedural-emissive
