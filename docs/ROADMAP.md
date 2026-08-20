@@ -65,13 +65,13 @@ vertical slice is only the foundation.
   families already have a tested implementation. The same safe path now covers the
   common `CustomEmissive` and `CustomEmissiveMulti` atlas shapes, mirrored channels,
   dashboard items, and vehicle-input bindings.
-- Complete the remaining custom-emissive color and vertex-mask operations,
-  UV transforms, and exact shader channel-composition behavior. Installed color masks,
-  normalized/soft atlases, vehicle bindings, declarative `@MIXIN` calls, and exact
-  view-dependent bounce-back now work. Source-backed `MirrorUV` folding uses
-  fractional UVs, the normalized direction, the final resolution-scaled offset,
-  and negative-half-plane reflection without atlas wrapping. Vertex masks, raw UVs,
-  fog/door light casting, and subtractive modes are explicitly labeled approximations.
+- Complete the remaining custom-emissive color operations, UV transforms, and exact
+  shader channel composition. Installed color masks, weighted vertex masks,
+  normalized atlases, vehicle bindings, declarative `@MIXIN` calls, and exact
+  view-dependent bounce-back now work. Source-backed `MirrorUV` uses fractional UVs,
+  the normalized direction, the final resolution-scaled offset, and negative-half-plane
+  reflection without atlas wrapping. Raw UVs, soft edges, fog/door light casting, and
+  uncommon procedural modes are explicitly labeled approximations.
 - Complete CSP light shadows, occlusion, binding, fade/visibility behavior, and
   photometric matching. Point/spot lights, mirrored self-lights, finite line lights,
   geometry-derived track series, live conditions, the recovered

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
 import { evaluateCspConfig, expandCspMaterialTemplates, matchesSelector, parseCspIni, parseCspValue, splitCspList } from "../src/csp-config.js";
-import { customEmissiveAtlasSize } from "../src/custom-emissive.js";
+import { applyCustomEmissiveVertexMask, customEmissiveAtlasSize, customEmissiveVertexMask } from "../src/custom-emissive.js";
 import { assettoPath } from "./fixture-paths.js";
 
 function material(name, shader = "ksPerPixel") {
@@ -444,7 +444,7 @@ MirrorDir=-1,0,0
 MirrorOffset=0.25
 @=CustomEmissive_Rect, Channel=1, Mirror, Start=0, Size=1
 @=CustomEmissive_Color, Channel=1, Mirror, Color="1,0.5,0", Threshold="0.2,5", Opacity=0.75
-@=CustomEmissive_VertexMask, Point2="0.5,0,0", Point3="0.8,0,0"
+@=CustomEmissive_VertexMask, Point2="0.5,0,0,2", Point3="0.8,0,0"
 @=CustomEmissive_BounceBack, Mask="1,0,0,0", Intensity=2
 @=CustomEmissive_BounceBack, Channel=1, Intensity=4
 @=CustomEmissive_MirrorUV, Offset=0.6, Direction="-1,0"
@@ -457,15 +457,62 @@ MirrorOffset=0.25
   assert.deepEqual(custom.mirrorDirection, [-1, 0, 0]);
   assert.equal(custom.mirrorOffset, 0.25);
   assert.deepEqual(custom.colorMasks.map((mask) => [mask.channel, mask.mirrorSide]), [[1, -1], [6, 1]]);
+  assert.deepEqual(custom.shapes.map((shape) => shape.channel), [1, 6]);
   assert.equal(custom.colorMasks[0].thresholdLevel, 0.2);
   assert.equal(custom.colorMasks[0].thresholdSharpness, 5);
   assert.deepEqual(custom.vertexMask.points, [null, null, [0.5, 0, 0], [0.8, 0, 0]]);
+  assert.deepEqual(custom.vertexMask.areas, [
+    { position: [0, 0, 0], weight: 0, set: false },
+    { position: [0, 0, 0], weight: 0, set: false },
+    { position: [0.5, 0, 0], weight: 2, set: true },
+    { position: [0.8, 0, 0], weight: 1, set: true }
+  ]);
   assert.deepEqual(custom.bounceBack, [{ mask: [0, 1, 0, 0], intensity: 4 }]);
   assert.deepEqual(custom.mirrorUv, { offset: 0.6, direction: [1, 0] });
   assert.equal(custom.useRawUv, false);
   assert.equal(custom.skipDiffuseMap, true);
   assert.deepEqual(custom.unsupportedOperations, []);
-  assert.deepEqual(custom.approximatedOperations, ["CustomEmissive_VertexMask"]);
+  assert.deepEqual(custom.approximatedOperations, []);
+});
+
+test("matches CSP weighted vertex masks, ties, mirroring, and composition", async () => {
+  const areas = [
+    { position: [0, 0, 0], weight: 0 },
+    { position: [0, 0, 0], weight: 0 },
+    { position: [1, 0, 0], weight: 4 },
+    { position: [3, 0, 0], weight: 1 }
+  ];
+  const weighted = customEmissiveVertexMask([2, 0, 0], areas, [1, 0, 0], 0);
+  assert.deepEqual(weighted.mask, [1, 1, 1, 0]);
+  assert.ok(Math.abs(weighted.distances[0] - 400000) < 1e-9);
+  assert.ok(Math.abs(weighted.distances[1] - 400000) < 1e-9);
+  assert.deepEqual(weighted.distances.slice(2), [0.25, 1]);
+  const tied = customEmissiveVertexMask([2.5, 0, 0], [areas[0], areas[1], { position: [2, 0, 0], weight: 1 }, { position: [3, 0, 0], weight: 1 }]);
+  assert.deepEqual(tied.mask, [1, 1, 1, 1]);
+  const mirrored = customEmissiveVertexMask([-2, 0, 0], areas, [1, 0, 0], 0);
+  assert.equal(mirrored.mirrored, true);
+  assert.deepEqual(mirrored.position, [2, 0, 0]);
+  const distant = customEmissiveVertexMask([1e16, 0, 0], [0, 2e15, 4e15, 6e15].map((x) => ({ position: [x, 0, 0], weight: 1 })));
+  assert.ok(distant.distances.every((distance) => distance > 1e30));
+  assert.deepEqual(distant.mask, [0, 0, 0, 1]);
+  assert.deepEqual(applyCustomEmissiveVertexMask([0.2, 0.4, 0.6, 0.8], [0, 1, 0, 1]), [0, 0.4, 0, 0.8]);
+  assert.deepEqual(applyCustomEmissiveVertexMask([0.2, 0.4, 0.6, 0.8], [0, 1, 0, 1], "add"), [0.2, 1, 0.6, 1]);
+  assert.deepEqual(applyCustomEmissiveVertexMask([0.2, 0.4, 0.6, 0.8], [0, 1, 0, 1], "subtract"), [0.2, 0, 0.6, 0]);
+  const rendererSource = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.match(rendererSource, /if\(i==0\)minimumDistance=vertexMasks\[i\]/);
+  assert.doesNotMatch(rendererSource, /minimumDistance=1e30/);
+  assert.match(rendererSource, /const vertexChannel=baseChannelForPreview\(shape\.channel\);if\(hasVertexMask&&vertexChannel>=0&&vertexChannel<4\)vertexCoverage\[vertexChannel\]/);
+});
+
+test("bounds malformed CustomEmissive vertex points", () => {
+  const lamp = { kind: "mesh", name: "LAMP", materialId: 0, children: [] };
+  const scene = { materials: [material("lamp")], root: { kind: "node", name: "root", children: [lamp] } };
+  const config = expandCspMaterialTemplates(parseCspIni("[CustomEmissive]\nMeshes=LAMP\n@=CustomEmissive_VertexMask, Point0=not-a-vector, Point1=1e999, Point2=\"1,2,3,-4\""));
+  const areas = evaluateCspConfig(scene, config).nodeOverrides.get(lamp).customEmissive.vertexMask.areas;
+  assert.deepEqual(areas[0], { position: [0, 0, 0], weight: 1, set: true });
+  assert.deepEqual(areas[1], { position: [0, 0, 0], weight: 1, set: true });
+  assert.deepEqual(areas[2], { position: [1, 2, 3], weight: -4, set: true });
+  assert.deepEqual(areas[3], { position: [0, 0, 0], weight: 0, set: false });
 });
 
 test("normalizes the installed MirrorUV rule and bounds malformed directions", () => {

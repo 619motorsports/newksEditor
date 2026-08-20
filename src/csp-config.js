@@ -395,11 +395,13 @@ function customEmissiveDescriptor(section) {
         descriptor.colorMasks.push({ ...base, channel: mirroredChannel(channel), mirrorSide: 1 });
       } else descriptor.colorMasks.push(base);
     } else if (operation.upper === "CUSTOMEMISSIVE_VERTEXMASK") {
-      descriptor.vertexMask = { points: ["POINT0", "POINT1", "POINT2", "POINT3"].map((name) => {
+      const areas = ["POINT0", "POINT1", "POINT2", "POINT3"].map((name) => {
         const value = operationValue(operation, name, "");
-        return value === "" ? null : operationVector(operation, name, [0, 0, 0]).slice(0, 3);
-      }), additive: numberParameter(p, "VERTEXMASKADDITIVE", 0) !== 0, subtractive: numberParameter(p, "VERTEXMASKSUBTRACTIVE", 0) !== 0 };
-      descriptor.approximatedOperations.push(operation.name);
+        if (value === "") return { position: [0, 0, 0], weight: 0, set: false };
+        const vector = operationVector(operation, name, [0, 0, 0, 1]);
+        return { position: [0, 1, 2].map((index) => Number.isFinite(Number(vector[index])) ? Number(vector[index]) : 0), weight: Number.isFinite(Number(vector[3])) ? Number(vector[3]) : 1, set: true };
+      });
+      descriptor.vertexMask = { areas, points: areas.map((area) => area.set ? [...area.position] : null), additive: numberParameter(p, "VERTEXMASKADDITIVE", 0) !== 0, subtractive: numberParameter(p, "VERTEXMASKSUBTRACTIVE", 0) !== 0 };
     } else if (operation.upper === "ALPHAFROMTXDIFFUSE") descriptor.alphaFromDiffuse = true;
     else if (operation.upper === "CUSTOMEMISSIVE_ALPHA") descriptor.alphaFromDiffuse = operationNumber(operation, "FROMDIFFUSEMAP", 0) !== 0;
     else if (operation.upper === "CUSTOMEMISSIVE_USEDIFFUSELUMINOCITY") {
