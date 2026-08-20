@@ -94,12 +94,17 @@ export function discoverAssetSkins(index) {
   const groups = new Map();
   for (const entry of index?.entries || []) {
     const match = entry.relativePath.match(/^skins\/([^/]+)\/([^/]+)$/i);
-    if (!match || !SKIN_TEXTURE_EXTENSION.test(match[2])) continue;
+    if (!match || (!SKIN_TEXTURE_EXTENSION.test(match[2]) && !/^ui_skin\.json$/i.test(match[2]))) continue;
     const name = match[1], key = name.toLowerCase();
-    if (!groups.has(key)) groups.set(key, { name, path: `skins/${name}`, files: [] });
-    groups.get(key).files.push({ ...entry, basename: match[2] });
+    if (!groups.has(key)) groups.set(key, { name, path: `skins/${name}`, files: [], metadataFiles: [] });
+    const target = /^ui_skin\.json$/i.test(match[2]) ? groups.get(key).metadataFiles : groups.get(key).files;
+    target.push({ ...entry, basename: match[2] });
   }
-  return [...groups.values()].map((skin) => ({ ...skin, files: skin.files.sort((a, b) => a.basename.localeCompare(b.basename)) })).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  return [...groups.values()].map((skin) => ({
+    ...skin,
+    files: skin.files.sort((a, b) => a.basename.localeCompare(b.basename)),
+    metadataFiles: skin.metadataFiles.sort((a, b) => a.path.localeCompare(b.path))
+  })).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
 }
 
 export function discoverAssetAnimations(index) {
