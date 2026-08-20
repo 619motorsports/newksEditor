@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createEditorProject, editorProjectCspEditCount, editorProjectEditCount, editorProjectKn5EditCount, formatEditorValue, normalizeEditorProject, parseEditorValue, serializeEditorCsp, serializeEditorProject } from "../src/editor-project.js";
+import { classifyEditorProjectChanges, cloneEditorProject, createEditorProject, editorProjectCspEditCount, editorProjectEditCount, editorProjectKn5EditCount, formatEditorValue, normalizeEditorProject, parseEditorValue, serializeEditorCsp, serializeEditorProject } from "../src/editor-project.js";
 import { evaluateCspConfig, parseCspIni } from "../src/csp-config.js";
 
 test("normalizes portable projects and rejects incompatible input", () => {
@@ -58,7 +58,16 @@ test("normalizes skin metadata edits as non-CSP project fields", () => {
   assert.equal(editorProjectEditCount(project), 6);
   assert.equal(editorProjectKn5EditCount(project), 0);
   assert.equal(editorProjectCspEditCount(project), 0);
+  assert.equal(classifyEditorProjectChanges(createEditorProject(), project).skinChanged, true);
   assert.deepEqual(JSON.parse(serializeEditorProject(project)).skinEdits.red, { skinname: "Rosso", drivername: "Driver", country: "Italy", team: "Works", priority: 30 });
+});
+
+test("classifies surface edits without marking scene geometry as changed", () => {
+  const before = createEditorProject({ name: "track.kn5", size: 42, kn5Version: 6 }), surface = cloneEditorProject(before);
+  surface.surfaceEdits["0"] = { friction: 1.05 };
+  assert.deepEqual(classifyEditorProjectChanges(before, surface), { geometryChanged: false, nodeChanged: false, workspaceChanged: false, surfaceChanged: true, skinChanged: false, colliderChanged: false, sceneChanged: false });
+  const node = cloneEditorProject(surface); node.nodeEdits["0"] = { active: false };
+  assert.deepEqual(classifyEditorProjectChanges(surface, node), { geometryChanged: false, nodeChanged: true, workspaceChanged: false, surfaceChanged: false, skinChanged: false, colliderChanged: false, sceneChanged: true });
 });
 
 test("normalizes collider geometry edits as non-CSP project fields", () => {
