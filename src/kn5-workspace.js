@@ -231,17 +231,17 @@ export function mergeKn5Models(entries, options = {}) {
     const model = entry.model;
     if (!model?.root || !Array.isArray(model.materials) || !Array.isArray(model.textures)) throw new Error(`${entry.name || "Workspace entry"} is not a parsed KN5 model`);
     const materialOffset = materials.length;
-    materials.push(...model.materials.map((material) => scopeResources ? { ...material, workspaceFile: entry.name || "" } : material));
+    materials.push(...model.materials.map((material) => scopeResources ? { ...material, workspaceFile: entry.name || "", workspaceFileIndex: files.length } : material));
     for (const texture of model.textures) {
       const key = texture.name.toLowerCase(), previous = textureMap.get(key);
       if (previous) textureCollisions.push({ name: texture.name, previousFile: previous.file, replacementFile: entry.name, sizesDiffer: previous.texture.size !== texture.size });
       textureMap.set(key, { texture, file: entry.name });
-      if (scopeResources) scopedTextures.push({ ...texture, workspaceFile: entry.name || "" });
+      if (scopeResources) scopedTextures.push({ ...texture, workspaceFile: entry.name || "", workspaceFileIndex: files.length });
     }
     const root = remapNode(model.root, materialOffset), transform = modelPlacementMatrix(entry.position, entry.rotation);
     const workspaceLod = entry.lod ? { index: Number(entry.lod.index), in: Number(entry.lod.in) || 0, out: Number(entry.lod.out) || 0 } : null;
-    children.push({ kind: "node", name: entry.name || `MODEL_${files.length}`, active: true, transform, children: [root], workspaceFile: entry.name || "", workspaceLod, workspaceAuxiliary:entry.auxiliary||null });
-    files.push({ name: entry.name || "", size: Math.max(0, Number(entry.size) || model.byteLength || 0), version: model.version, materialOffset, materials: model.materials.length, textures: model.textures.length, position: entry.position || [0, 0, 0], rotation: entry.rotation || [0, 0, 0], lod: workspaceLod, manifestIndex:Number.isInteger(entry.manifestIndex)?entry.manifestIndex:null, auxiliary:entry.auxiliary||null, dynamic: entry.dynamic || null, protected: Boolean(model.encryption) });
+    children.push({ kind: "node", name: entry.name || `MODEL_${files.length}`, active: true, transform, children: [root], workspaceFile: entry.name || "", workspaceFileIndex: files.length, workspaceLod, workspaceAuxiliary:entry.auxiliary||null });
+    files.push({ name: entry.name || "", size: Math.max(0, Number(entry.size) || model.byteLength || 0), version: model.version, materialOffset, materials: model.materials.length, textures: model.textures.length, textureBytes: model.textures.reduce((sum, texture) => sum + Math.max(0, Number(texture.size) || 0), 0), position: entry.position || [0, 0, 0], rotation: entry.rotation || [0, 0, 0], lod: workspaceLod, manifestIndex:Number.isInteger(entry.manifestIndex)?entry.manifestIndex:null, auxiliary:entry.auxiliary||null, dynamic: entry.dynamic || null, protected: Boolean(model.encryption) });
     if (model.encryption) protectedFiles.push({ name: entry.name || "", encryption: model.encryption });
     bytesRead += model.bytesRead || 0; byteLength += model.byteLength || 0; source = Math.max(source, model.source || 0); versions.add(model.version);
   }
