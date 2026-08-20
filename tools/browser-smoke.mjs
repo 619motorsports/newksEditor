@@ -36,6 +36,7 @@ const reflectionCompare = process.argv.includes("--reflection-compare");
 const lighting = process.argv.includes("--lighting");
 const seasons = process.argv.includes("--seasons");
 const showHidden = process.argv.includes("--show-hidden");
+const requireSharedGeometry = process.argv.includes("--require-shared-geometry");
 const weatherName = option("weather");
 const sunHeading = option("sun-heading");
 const sunHeight = option("sun-height");
@@ -56,7 +57,7 @@ const conditionChanges = process.argv.flatMap((argument, index) => argument === 
   return [entry.slice(0, separator).toUpperCase(), Number(entry.slice(separator + 1))];
 });
 const animationPositions = process.argv.flatMap((argument, index) => argument === "--animation-position" ? [Number(process.argv[index + 1])] : []);
-if ((!modelPath && !layoutName) || !meshName || (layoutName && !assetsPath)) throw new Error("Usage: node tools/browser-smoke.mjs (--model FILE.kn5 | --workspace MANIFEST.ini --assets FOLDER) --mesh NAME [--assembled --show-hidden] [--dynamic-advance 2] [--csp-assets assettocorsa/extension/textures] [--reflection-environment SHOWROOM.kn5 --reflection-root NODE] [--seasons --year-progress 0.5 --compare-year-progress 0] [--vao FILE.vao-patch] [--lighting --weather PRESET --sun-heading 40 --sun-height 55 --compare-sun-height 10 --manual-exposure 0.35] [--shadows] [--reflection-compare] [--surface-overlay] [--grass-fx] [--rain-fx --rain-wetness 1] [--track-camera LABEL --track-camera-position 0.5 --play-track-camera] [--driver FILE.kn5 --driver-cockpit] [--skin NAME] [--animation NAME --animation-position 0.5] [--lod auto|INDEX] [--config FILE.ini] [--input NAME=VALUE] [--port 9222] [--app-port 4173]");
+if ((!modelPath && !layoutName) || !meshName || (layoutName && !assetsPath)) throw new Error("Usage: node tools/browser-smoke.mjs (--model FILE.kn5 | --workspace MANIFEST.ini --assets FOLDER) --mesh NAME [--assembled --show-hidden] [--dynamic-advance 2] [--require-shared-geometry] [--csp-assets assettocorsa/extension/textures] [--reflection-environment SHOWROOM.kn5 --reflection-root NODE] [--seasons --year-progress 0.5 --compare-year-progress 0] [--vao FILE.vao-patch] [--lighting --weather PRESET --sun-heading 40 --sun-height 55 --compare-sun-height 10 --manual-exposure 0.35] [--shadows] [--reflection-compare] [--surface-overlay] [--grass-fx] [--rain-fx --rain-wetness 1] [--track-camera LABEL --track-camera-position 0.5 --play-track-camera] [--driver FILE.kn5 --driver-cockpit] [--skin NAME] [--animation NAME --animation-position 0.5] [--lod auto|INDEX] [--config FILE.ini] [--input NAME=VALUE] [--port 9222] [--app-port 4173]");
 
 const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
 const page = pages.find((item) => item.type === "page");
@@ -171,6 +172,7 @@ if (animationName) {
   trace("animation loaded");
 }
 await waitFor(`window.__apexRenderer?.textureStatus.pending===0`);
+if(requireSharedGeometry){await waitFor(`window.__apexRenderer?.sceneStatus.sharedGeometryInstances>0`);const sharing=await evaluate(`({renderItems:window.__apexRenderer.sceneStatus.total,gpuGeometries:window.__apexRenderer.sceneStatus.gpuGeometries,sharedGeometryInstances:window.__apexRenderer.sceneStatus.sharedGeometryInstances})`);if(sharing.gpuGeometries>=sharing.renderItems)throw new Error(`GPU geometry was not shared: ${JSON.stringify(sharing)}`);trace(`shared GPU geometry ${JSON.stringify(sharing)}`);}
 if (configPath) {
   await setFile("#csp-file", configPath);
   await waitFor(`document.querySelector('#pipeline').textContent.includes('CSP')`);

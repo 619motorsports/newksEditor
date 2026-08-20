@@ -1046,7 +1046,7 @@ function workspaceInspectorHtml() {
     const dynamicResult=file.dynamic?dynamicStatus?.results.find((result)=>result.fileIndex===index):null;
     return `<div class="resource"><strong>${file.auxiliary === "driver" ? "Driver · " : file.auxiliary === "reflectionEnvironment" ? "Reflection environment · " : isCar && file.lod ? `LOD ${file.lod.index} · ` : file.dynamic ? `Dynamic ${file.dynamic.index} · ` : ""}${escapeHtml(file.name)}</strong><span>${isCar && file.lod ? `${format(file.lod.in)} ≤ distance &lt; ${format(file.lod.out)} m · ` : file.auxiliary === "reflectionEnvironment" ? "Cubemap capture subtree · " : file.auxiliary ? "Shared auxiliary · " : ""}KN5 v${file.version} · ${(file.size / 1048576).toFixed(2)} MB · ${file.materials} materials · ${file.textures} textures${file.position.some((value) => value !== 0) || file.rotation.some((value) => value !== 0) ? ` · position ${file.position.map(format).join(", ")} · rotation ${file.rotation.map(format).join(", ")}` : ""}${file.dynamic ? ` · native seed sample ${dynamicResult?.accepted?`${dynamicResult.previewMultiplicity}/${dynamicResult.sampledMultiplicity} instances`:"not spawned"} · ${format(file.dynamic.probability)}% · velocity ${file.dynamic.velocityBase.map(format).join(", ")} ± ${file.dynamic.velocityRange.map(format).join(", ")}` : ""}</span>${controls}${editable ? `<div class="section-actions"><button class="mini" data-reset-workspace-file="${index}" ${edit ? "" : "disabled"}>Reset file edits</button></div>` : ""}</div>`;
   }).join("");
-  const dynamicSummary=!isCar&&dynamicStatus?.active?`${kv("Dynamic seed",dynamicStatus.seed)}${kv("Spawned instances",`${dynamicStatus.previewInstances} preview / ${dynamicStatus.nativeInstances} native`)}${kv("Moving instances",dynamicStatus.movingInstances)}${kv("Motion time",`${format(dynamicStatus.elapsed)} s`)}${dynamicStatus.warnings.map((warning)=>`<div class="resource validation-warning"><strong>Preview limit</strong><span>${escapeHtml(warning)}</span></div>`).join("")}<span class="empty">The preview uses the native MSVCR120 generator and movement equations. A game session can use a different sample because earlier systems share the global random sequence.</span>`:"";
+  const dynamicSummary=!isCar&&dynamicStatus?.active?`${kv("Dynamic seed",dynamicStatus.seed)}${kv("Spawned instances",`${dynamicStatus.previewInstances} preview / ${dynamicStatus.nativeInstances} native`)}${kv("Moving instances",dynamicStatus.movingInstances)}${kv("Shared GPU geometry",`${dynamicStatus.gpuGeometries} uploads / ${dynamicStatus.renderItems} render items`)}${kv("Motion time",`${format(dynamicStatus.elapsed)} s`)}${dynamicStatus.warnings.map((warning)=>`<div class="resource validation-warning"><strong>Preview limit</strong><span>${escapeHtml(warning)}</span></div>`).join("")}<span class="empty">The preview uses the native MSVCR120 generator and movement equations. A game session can use a different sample because earlier systems share the global random sequence.</span>`:"";
   return `<div class="section"><h3>${isCar ? "Car LOD workspace" : "Track workspace"}${count ? ` · <span class="edit-count">${count} edit${count === 1 ? "" : "s"}</span>` : ""}</h3>${kv("Manifest", workspace.manifest || "Manual selection")}${kv("Files", workspace.files.length)}${!isCar ? kv("Dynamic objects", workspace.files.filter((file) => file.dynamic).length) : ""}${dynamicSummary}${kv("Versions", workspace.versions.join(", "))}${isCar ? `${switchField("cockpitHrDistance", "Cockpit HR", workspaceBaseline?.cockpitHrDistance)}${switchField("driverHrDistance", "Driver HR", workspaceBaseline?.driverHrDistance)}` : ""}${kv("Texture name collisions", workspace.textureCollisions.length)}${kv("Protected files", workspace.protectedFiles.length)}${kv("Warnings", warnings.length)}${files}${warnings.slice(0, 8).map((warning) => `<div class="resource validation-warning"><strong>Manifest warning</strong><span>${escapeHtml(warning)}</span></div>`).join("")}<div class="section-actions"><button class="mini" data-export-workspace>Export ${isCar ? "lods.ini" : "models.ini"}</button><button class="mini" data-reset-workspace ${count ? "" : "disabled"}>Reset manifest edits</button></div></div>`;
 }
 
@@ -1725,8 +1725,8 @@ function createRenderer(canvas) {
     bptc: gl.getExtension("EXT_texture_compression_bptc")
   };
   gl.bindVertexArray(grassVao);gl.bindBuffer(gl.ARRAY_BUFFER,grassInstanceBuffer);gl.vertexAttribPointer(9,3,gl.FLOAT,false,grassInstanceStride,84);gl.enableVertexAttribArray(9);gl.vertexAttribDivisor(9,1);gl.vertexAttribPointer(10,2,gl.FLOAT,false,grassInstanceStride,96);gl.enableVertexAttribArray(10);gl.vertexAttribDivisor(10,1);gl.bindVertexArray(null);
-  let items = [], itemByNode = new WeakMap(), sceneRoot = null,sceneModel=null, textures = [], textureLookup = new Map(), embeddedTextureNames = new Set(), solidTextures = new Map(), cspTextures = new Map(), cspTextureCache = new Map(), colliderItems = [], surfaceBindings=new Map(), selected = null, cspState = null,grassFx=null,grassStatus={instanceCount:0,sourceMeshes:0,sourceTriangles:0,rejectedByMask:0,rejectedByShape:0,rejectedByOcclusion:0,totalArea:0,density:0,shapeWidth:1},grassSurfaceMapCenter=null,grassRebuildTimer=0,rainFx=null,rainStatus={matchedMeshes:0,lineVertices:0,pointVertices:0},shadowStatus={enabled:true,mapSize:KS_SHADOW_MAP_SIZE,cascades:3,splits:[...KS_SHADOW_SPLITS],biases:[...KS_SHADOW_BIASES],casters:0,triangles:0},lightingStatus={name:KS_EDITOR_DEFAULT_WEATHER.name,source:KS_EDITOR_DEFAULT_WEATHER.source,heading:40,height:55,angleMix:0,sunColor:[0,0,0],ambientColor:[0,0,0],skyColor:[0,0,0],fogDistance:KS_EDITOR_DEFAULT_WEATHER.fogDistance,fogBlend:KS_EDITOR_DEFAULT_WEATHER.fogBlend,autoExposure:true,effectiveExposure:.35,exposureMin:KS_EDITOR_EXPOSURE.min,exposureMax:KS_EDITOR_EXPOSURE.max,toneMap:"Yebis default · function −1",hdr:hdrEnabled,samples:hdrSamples,glareEnabled:hdrEnabled,glareQuality:KS_EDITOR_GLARE.quality,bloomLevels:hdrEnabled?KS_EDITOR_GLARE.levels:0,bloomSourceScale:KS_EDITOR_GLARE.sourceScale,bloomThreshold:KS_EDITOR_GLARE.threshold,bloomCompositeScale:ksEditorBloomCompositeScale(),bloomKernel:"Yebis max-29 fallback",bloomKernelSamples:bloomKernels.map((kernel)=>kernel.sampleCount),bloomKernelSigmas:bloomKernels.map((kernel)=>kernel.sigma),dither:true}, workspaceLodIndex = null, driverCockpitMode=false, driverHiddenNames=new Set(), trackCamera=null, bounds = { center: [0,0,0], radius: 1 }, yaw = .7, pitch = .35, distance = 5, target = [0,0,0], dragging = null, modelGeneration = 0, textureStatus = { total: 0, ready: 0, pending: 0, unsupported: 0, protected: 0, formats: {} }, sceneStatus = { total: 0, visible: 0, hidden: 0 };
-  let dynamicTrackSeed=1,dynamicTrackState=null,dynamicRootFiles=new WeakMap(),dynamicTrackStatus={active:false,seed:1,elapsed:0,objects:0,nativeInstances:0,previewInstances:0,movingInstances:0,warnings:[]};
+  let items = [], itemByNode = new WeakMap(), gpuGeometryByNode = new WeakMap(), gpuGeometries = new Set(), sceneRoot = null,sceneModel=null, textures = [], textureLookup = new Map(), embeddedTextureNames = new Set(), solidTextures = new Map(), cspTextures = new Map(), cspTextureCache = new Map(), colliderItems = [], surfaceBindings=new Map(), selected = null, cspState = null,grassFx=null,grassStatus={instanceCount:0,sourceMeshes:0,sourceTriangles:0,rejectedByMask:0,rejectedByShape:0,rejectedByOcclusion:0,totalArea:0,density:0,shapeWidth:1},grassSurfaceMapCenter=null,grassRebuildTimer=0,rainFx=null,rainStatus={matchedMeshes:0,lineVertices:0,pointVertices:0},shadowStatus={enabled:true,mapSize:KS_SHADOW_MAP_SIZE,cascades:3,splits:[...KS_SHADOW_SPLITS],biases:[...KS_SHADOW_BIASES],casters:0,triangles:0},lightingStatus={name:KS_EDITOR_DEFAULT_WEATHER.name,source:KS_EDITOR_DEFAULT_WEATHER.source,heading:40,height:55,angleMix:0,sunColor:[0,0,0],ambientColor:[0,0,0],skyColor:[0,0,0],fogDistance:KS_EDITOR_DEFAULT_WEATHER.fogDistance,fogBlend:KS_EDITOR_DEFAULT_WEATHER.fogBlend,autoExposure:true,effectiveExposure:.35,exposureMin:KS_EDITOR_EXPOSURE.min,exposureMax:KS_EDITOR_EXPOSURE.max,toneMap:"Yebis default · function −1",hdr:hdrEnabled,samples:hdrSamples,glareEnabled:hdrEnabled,glareQuality:KS_EDITOR_GLARE.quality,bloomLevels:hdrEnabled?KS_EDITOR_GLARE.levels:0,bloomSourceScale:KS_EDITOR_GLARE.sourceScale,bloomThreshold:KS_EDITOR_GLARE.threshold,bloomCompositeScale:ksEditorBloomCompositeScale(),bloomKernel:"Yebis max-29 fallback",bloomKernelSamples:bloomKernels.map((kernel)=>kernel.sampleCount),bloomKernelSigmas:bloomKernels.map((kernel)=>kernel.sigma),dither:true}, workspaceLodIndex = null, driverCockpitMode=false, driverHiddenNames=new Set(), trackCamera=null, bounds = { center: [0,0,0], radius: 1 }, yaw = .7, pitch = .35, distance = 5, target = [0,0,0], dragging = null, modelGeneration = 0, textureStatus = { total: 0, ready: 0, pending: 0, unsupported: 0, protected: 0, formats: {} }, sceneStatus = { total: 0, visible: 0, hidden: 0 };
+  let dynamicTrackSeed=1,dynamicTrackState=null,dynamicRootFiles=new WeakMap(),dynamicTrackStatus={active:false,seed:1,elapsed:0,objects:0,nativeInstances:0,previewInstances:0,movingInstances:0,renderItems:0,gpuGeometries:0,warnings:[]};
   let vaoBindings=new Map(),vaoStatus={source:"",version:0,records:0,matchedRecords:0,unmatchedRecords:0,alternateRecords:0,normalRecords:0,matchedMeshes:0,primaryMeshes:0,secondaryMeshes:0,vertices:0,minimum:255,maximum:255,mean:255},seasonalStatus={affectedMeshes:0,autumnMeshes:0,winterMeshes:0,legacySummerMeshes:0,peakAutumn:0,peakWinter:0,peakSummer:0},shaderProfileStatus=null;
   let reflectionCaptureStatus={enabled:true,ready:false,size:KS_EDITOR_CUBEMAP.size,faces:0,draws:0,triangles:0,farPlane:KS_EDITOR_CUBEMAP.farPlane,captureMilliseconds:0};
   let reflectionCubeInitialized=false,reflectionNextFace=0,reflectionCaptureRoot=null;
@@ -1740,7 +1740,7 @@ function createRenderer(canvas) {
 
   function itemPreviewVisible(item){return (api.showHidden||item.sceneVisible)&&!(driverCockpitMode&&item.workspaceAuxiliary==="driver"&&item.driverPath.some((name)=>driverHiddenNames.has(name)));}
   function setDriverCockpitMode(value,names=[]){driverCockpitMode=Boolean(value);driverHiddenNames=new Set((names||[]).map((name)=>String(name||"").trim().toUpperCase()).filter(Boolean));refreshAnimationWorlds();draw();}
-  function refreshDynamicTrackStatus(){const instances=(dynamicTrackState?.results||[]).flatMap((result)=>result.instances);dynamicTrackStatus={active:Boolean(dynamicTrackState?.results.length),seed:dynamicTrackSeed,elapsed:dynamicTrackState?.elapsed||0,objects:dynamicTrackState?.results.length||0,nativeInstances:dynamicTrackState?.nativeInstances||0,previewInstances:dynamicTrackState?.previewInstances||0,movingInstances:instances.filter((instance)=>instance.velocity.some((value)=>value!==0)).length,warnings:[...(dynamicTrackState?.warnings||[])]};api.onDynamicTrackStatus?.(api.dynamicTrackStatus);}
+  function refreshDynamicTrackStatus(){const instances=(dynamicTrackState?.results||[]).flatMap((result)=>result.instances);dynamicTrackStatus={active:Boolean(dynamicTrackState?.results.length),seed:dynamicTrackSeed,elapsed:dynamicTrackState?.elapsed||0,objects:dynamicTrackState?.results.length||0,nativeInstances:dynamicTrackState?.nativeInstances||0,previewInstances:dynamicTrackState?.previewInstances||0,movingInstances:instances.filter((instance)=>instance.velocity.some((value)=>value!==0)).length,renderItems:items.length,gpuGeometries:gpuGeometries.size,warnings:[...(dynamicTrackState?.warnings||[])]};api.onDynamicTrackStatus?.(api.dynamicTrackStatus);}
   function setDynamicTrackSeed(value,rebuild=true){dynamicTrackSeed=Number(value)>>>0;if(rebuild&&sceneModel)setModel(sceneModel);else refreshDynamicTrackStatus();return api.dynamicTrackStatus;}
   function advanceDynamicTrack(deltaTime){if(!dynamicTrackState)return api.dynamicTrackStatus;advanceDynamicTrackObjects(dynamicTrackState,deltaTime);refreshAnimationWorlds();reflectionCubeInitialized=false;reflectionNextFace=0;refreshDynamicTrackStatus();draw();return api.dynamicTrackStatus;}
   function setTrackCamera(value){const next=value||null,changed=trackCamera!==next;if(!changed)return;trackCamera=next;scheduleGrassRebuild();draw();}
@@ -1876,9 +1876,31 @@ function createRenderer(canvas) {
       for(const child of node.children||[])visit(child,world);};visit(value.root,identity());draw();
   }
 
+  function gpuGeometryFor(node){
+    let geometry=gpuGeometryByNode.get(node);if(geometry)return geometry;
+    const vao=gl.createVertexArray(),vertex=gl.createBuffer(),index=gl.createBuffer(),vaoAo=gl.createBuffer();
+    gl.bindVertexArray(vao);gl.bindBuffer(gl.ARRAY_BUFFER,vertex);gl.bufferData(gl.ARRAY_BUFFER,node.vertices,gl.STATIC_DRAW);
+    gl.vertexAttribPointer(0,3,gl.FLOAT,false,node.vertexStride*4,0);gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(1,3,gl.FLOAT,false,node.vertexStride*4,12);gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(2,2,gl.FLOAT,false,node.vertexStride*4,24);gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(3,3,gl.FLOAT,false,node.vertexStride*4,32);gl.enableVertexAttribArray(3);
+    const vertexCount=node.vertices.length/node.vertexStride,vaoBinding=vaoBindings.get(node),vaoValues=vaoBinding?.primary&&vaoBinding.primary.length===vertexCount?vaoBinding.primary:new Uint8Array(vertexCount).fill(255);
+    gl.bindBuffer(gl.ARRAY_BUFFER,vaoAo);gl.bufferData(gl.ARRAY_BUFFER,vaoValues,gl.DYNAMIC_DRAW);gl.vertexAttribPointer(4,1,gl.UNSIGNED_BYTE,true,1,0);gl.enableVertexAttribArray(4);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,index);gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,node.indices,gl.STATIC_DRAW);
+    const localMin=[Infinity,Infinity,Infinity],localMax=[-Infinity,-Infinity,-Infinity];
+    for(let offset=0;offset<node.vertices.length;offset+=node.vertexStride)for(let axis=0;axis<3;axis++){const value=node.vertices[offset+axis];localMin[axis]=Math.min(localMin[axis],value);localMax[axis]=Math.max(localMax[axis],value);}
+    geometry={node,vao,vertex,index,vaoAo,vaoBound:Boolean(vaoBinding?.primary),localMin,localMax};gpuGeometryByNode.set(node,geometry);gpuGeometries.add(geometry);return geometry;
+  }
+
+  function releaseGpuGeometries(){
+    for(const geometry of gpuGeometries){gl.deleteBuffer(geometry.vertex);gl.deleteBuffer(geometry.index);gl.deleteBuffer(geometry.vaoAo);gl.deleteVertexArray(geometry.vao);}
+    gpuGeometryByNode=new WeakMap();gpuGeometries=new Set();
+  }
+
   function setVaoBindings(value,status={}){
     vaoBindings=value instanceof Map?value:new Map();vaoStatus={source:"",version:0,records:0,matchedRecords:0,unmatchedRecords:0,alternateRecords:0,normalRecords:0,matchedMeshes:0,primaryMeshes:0,secondaryMeshes:0,vertices:0,minimum:255,maximum:255,mean:255,...status};
-    for(const item of items){const binding=vaoBindings.get(item.node),count=item.node.vertices.length/item.node.vertexStride,values=binding?.primary&&binding.primary.length===count?binding.primary:new Uint8Array(count).fill(255);gl.bindBuffer(gl.ARRAY_BUFFER,item.vaoAo);gl.bufferData(gl.ARRAY_BUFFER,values,gl.DYNAMIC_DRAW);item.vaoBound=Boolean(binding?.primary);}
+    for(const geometry of gpuGeometries){const binding=vaoBindings.get(geometry.node),count=geometry.node.vertices.length/geometry.node.vertexStride,values=binding?.primary&&binding.primary.length===count?binding.primary:new Uint8Array(count).fill(255);gl.bindBuffer(gl.ARRAY_BUFFER,geometry.vaoAo);gl.bufferData(gl.ARRAY_BUFFER,values,gl.DYNAMIC_DRAW);geometry.vaoBound=Boolean(binding?.primary);}
+    for(const item of items)item.vaoBound=item.geometry.vaoBound;
     draw();
   }
 
@@ -1891,7 +1913,7 @@ function createRenderer(canvas) {
     dynamicTrackState=workspaceFiles.some((file)=>file.dynamic)?sampleDynamicTrackObjects(workspaceFiles,dynamicTrackSeed):null;
     const dynamicResults=new Map((dynamicTrackState?.results||[]).map((result)=>[result.fileIndex,result]));
     for(let fileIndex=0;fileIndex<workspaceFiles.length;fileIndex++){const root=model.root.children?.[fileIndex],file=workspaceFiles[fileIndex],result=dynamicResults.get(fileIndex);if(root&&file.dynamic)dynamicRootFiles.set(root,{fileIndex,file,result:result||{instances:[]}});}
-    items.forEach((x) => { gl.deleteBuffer(x.vertex); gl.deleteBuffer(x.index);gl.deleteBuffer(x.vaoAo); gl.deleteVertexArray(x.vao); });
+    releaseGpuGeometries();
     textures.forEach((texture) => gl.deleteTexture(texture));
     items = []; itemByNode = new WeakMap(); sceneRoot = model.root; textures = []; textureLookup = new Map(); embeddedTextureNames = new Set(); solidTextures = new Map();
     const textureMap = new Map();
@@ -1912,27 +1934,15 @@ function createRenderer(canvas) {
       const workspaceLod = node.workspaceLod || parentWorkspaceLod;
       const workspaceAuxiliary=node.workspaceAuxiliary||parentWorkspaceAuxiliary,workspaceFile=node.workspaceFile||parentWorkspaceFile,reflectionAncestors=[...parentReflectionAncestors,node],driverPath=workspaceAuxiliary==="driver"?[...parentDriverPath,node.name.toUpperCase()]:[];
       if (node.kind === "mesh" || node.kind === "skinnedMesh") {
-        const vao = gl.createVertexArray(), vertex = gl.createBuffer(), index = gl.createBuffer(),vaoAo=gl.createBuffer();
-        gl.bindVertexArray(vao); gl.bindBuffer(gl.ARRAY_BUFFER, vertex); gl.bufferData(gl.ARRAY_BUFFER, node.vertices, gl.STATIC_DRAW);
-        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, node.vertexStride * 4, 0); gl.enableVertexAttribArray(0);
-        gl.vertexAttribPointer(1, 3, gl.FLOAT, false, node.vertexStride * 4, 12); gl.enableVertexAttribArray(1);
-        gl.vertexAttribPointer(2, 2, gl.FLOAT, false, node.vertexStride * 4, 24); gl.enableVertexAttribArray(2);
-        gl.vertexAttribPointer(3, 3, gl.FLOAT, false, node.vertexStride * 4, 32); gl.enableVertexAttribArray(3);
-        const vertexCount=node.vertices.length/node.vertexStride,vaoBinding=vaoBindings.get(node),vaoValues=vaoBinding?.primary&&vaoBinding.primary.length===vertexCount?vaoBinding.primary:new Uint8Array(vertexCount).fill(255);
-        gl.bindBuffer(gl.ARRAY_BUFFER,vaoAo);gl.bufferData(gl.ARRAY_BUFFER,vaoValues,gl.DYNAMIC_DRAW);gl.vertexAttribPointer(4,1,gl.UNSIGNED_BYTE,true,1,0);gl.enableVertexAttribArray(4);
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, index); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, node.indices, gl.STATIC_DRAW);
+        const geometry=gpuGeometryFor(node),{vao,vertex,index,vaoAo,localMin,localMax}=geometry;
         const material = model.materials[node.materialId];
         const resourceNames=Object.fromEntries((material?.resources||[]).map((resource)=>[resource.slot.toLowerCase(),normalizeAssetPath(resource.texture).split("/").at(-1).toLowerCase()]));
         const resourceTexture=(slot)=>{const name=material?.resources.find((resource)=>resource.slot.toLowerCase()===slot)?.texture.toLowerCase();return textureMap.get(`${String(material?.workspaceFile||"").toLowerCase()}\0${name}`)||textureMap.get(name);};
-        const localMin=[Infinity,Infinity,Infinity],localMax=[-Infinity,-Infinity,-Infinity];
-        for (let i = 0; i < node.vertices.length; i += node.vertexStride) {
-          for (let axis=0;axis<3;axis++){const value=node.vertices[i+axis];localMin[axis]=Math.min(localMin[axis],value);localMax[axis]=Math.max(localMax[axis],value);}
-        }
-        const sceneVisible=Boolean(branchActive&&node.visible&&node.renderable),item={ node, world, branchActive,sceneVisible, workspaceLod, workspaceAuxiliary,workspaceFile,reflectionAncestors, driverPath,dynamicInstanceIndex, material, resourceNames, texture: resourceTexture("txdiffuse"), normalTexture:resourceTexture("txnormal"), mapsTexture:resourceTexture("txmaps"), detailTexture:resourceTexture("txdetail"), normalDetailTexture:resourceTexture("txnormaldetail")||resourceTexture("txdetailnm"), multiMaskTexture:resourceTexture("txmask"),multiDetailRTexture:resourceTexture("txdetailr"),multiDetailGTexture:resourceTexture("txdetailg"),multiDetailBTexture:resourceTexture("txdetailb"),multiDetailATexture:resourceTexture("txdetaila"),multiDetailNormalTexture:resourceTexture("txdetailnm"), vao, vertex, index,vaoAo,vaoBound:Boolean(vaoBinding?.primary), localMin, localMax, center:[0,0,0] };items.push(item);let nodeItems=itemByNode.get(node);if(!nodeItems){nodeItems=new Map();itemByNode.set(node,nodeItems);}nodeItems.set(dynamicInstanceIndex,item);
+        const sceneVisible=Boolean(branchActive&&node.visible&&node.renderable),item={ node, geometry, world, branchActive,sceneVisible, workspaceLod, workspaceAuxiliary,workspaceFile,reflectionAncestors, driverPath,dynamicInstanceIndex, material, resourceNames, texture: resourceTexture("txdiffuse"), normalTexture:resourceTexture("txnormal"), mapsTexture:resourceTexture("txmaps"), detailTexture:resourceTexture("txdetail"), normalDetailTexture:resourceTexture("txnormaldetail")||resourceTexture("txdetailnm"), multiMaskTexture:resourceTexture("txmask"),multiDetailRTexture:resourceTexture("txdetailr"),multiDetailGTexture:resourceTexture("txdetailg"),multiDetailBTexture:resourceTexture("txdetailb"),multiDetailATexture:resourceTexture("txdetaila"),multiDetailNormalTexture:resourceTexture("txdetailnm"), vao, vertex, index,vaoAo,vaoBound:geometry.vaoBound, localMin, localMax, center:[0,0,0] };items.push(item);let nodeItems=itemByNode.get(node);if(!nodeItems){nodeItems=new Map();itemByNode.set(node,nodeItems);}nodeItems.set(dynamicInstanceIndex,item);
       }
       for (const child of node.children) visit(child, world, branchActive, workspaceLod, workspaceAuxiliary, driverPath,workspaceFile,reflectionAncestors,dynamicInstanceIndex);
     };
-    visit(model.root, identity(), true);sceneStatus={total:items.length,visible:items.filter((item)=>item.sceneVisible).length,hidden:items.filter((item)=>!item.sceneVisible).length};
+    visit(model.root, identity(), true);sceneStatus={total:items.length,visible:items.filter((item)=>item.sceneVisible).length,hidden:items.filter((item)=>!item.sceneVisible).length,gpuGeometries:gpuGeometries.size,sharedGeometryInstances:Math.max(0,items.length-gpuGeometries.size)};
     refreshAnimationWorlds();refreshDynamicTrackStatus();frame();
   }
 
@@ -1947,16 +1957,16 @@ function createRenderer(canvas) {
   }
 
   function refreshGeometry() {
-    for (const item of items) {
-      gl.bindBuffer(gl.ARRAY_BUFFER, item.vertex);
-      gl.bufferData(gl.ARRAY_BUFFER, item.node.vertices, gl.STATIC_DRAW);
-      gl.bindVertexArray(item.vao);
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, item.index);
-      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, item.node.indices, gl.STATIC_DRAW);
-      item.localMin = [Infinity, Infinity, Infinity]; item.localMax = [-Infinity, -Infinity, -Infinity];
-      for (let offset = 0; offset < item.node.vertices.length; offset += item.node.vertexStride) for (let axis = 0; axis < 3; axis++) {
-        const value = item.node.vertices[offset + axis];
-        item.localMin[axis] = Math.min(item.localMin[axis], value); item.localMax[axis] = Math.max(item.localMax[axis], value);
+    for (const geometry of gpuGeometries) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, geometry.vertex);
+      gl.bufferData(gl.ARRAY_BUFFER, geometry.node.vertices, gl.STATIC_DRAW);
+      gl.bindVertexArray(geometry.vao);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, geometry.index);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, geometry.node.indices, gl.STATIC_DRAW);
+      geometry.localMin.fill(Infinity); geometry.localMax.fill(-Infinity);
+      for (let offset = 0; offset < geometry.node.vertices.length; offset += geometry.node.vertexStride) for (let axis = 0; axis < 3; axis++) {
+        const value = geometry.node.vertices[offset + axis];
+        geometry.localMin[axis] = Math.min(geometry.localMin[axis], value); geometry.localMax[axis] = Math.max(geometry.localMax[axis], value);
       }
     }
     gl.bindVertexArray(null);
@@ -1973,7 +1983,7 @@ function createRenderer(canvas) {
       if(item){item.world=world;item.branchActive=branchActive;item.sceneVisible=Boolean(branchActive&&node.visible&&node.renderable);const itemBounds=transformBounds(item.localMin,item.localMax,world);item.center=itemBounds.min.map((value,index)=>(value+itemBounds.max[index])/2);if(itemPreviewVisible(item))for(let axis=0;axis<3;axis++){min[axis]=Math.min(min[axis],itemBounds.min[axis]);max[axis]=Math.max(max[axis],itemBounds.max[axis]);}}
       for(const child of node.children)visit(child,world,branchActive,dynamicInstanceIndex);
     };
-    let skinnedMeshes=0,skinnedVertices=0,maxSkinnedDisplacement=0;if(sceneRoot)visit(sceneRoot,identity(),true);for(const item of items)if(item.node.kind==="skinnedMesh"){const skinned=currentAnimation?skinMeshVertices(item.node,worldByName,item.world):item.node.vertices;skinnedMeshes++;skinnedVertices+=item.node.vertices.length/item.node.vertexStride;if(currentAnimation)for(let offset=0;offset<skinned.length;offset+=item.node.vertexStride)maxSkinnedDisplacement=Math.max(maxSkinnedDisplacement,Math.hypot(skinned[offset]-item.node.vertices[offset],skinned[offset+1]-item.node.vertices[offset+1],skinned[offset+2]-item.node.vertices[offset+2]));gl.bindBuffer(gl.ARRAY_BUFFER,item.vertex);gl.bufferSubData(gl.ARRAY_BUFFER,0,skinned);}
+    const updatedSkinnedGeometries=new Set();let skinnedMeshes=0,skinnedVertices=0,maxSkinnedDisplacement=0;if(sceneRoot)visit(sceneRoot,identity(),true);for(const item of items)if(item.node.kind==="skinnedMesh"){skinnedMeshes++;skinnedVertices+=item.node.vertices.length/item.node.vertexStride;if(updatedSkinnedGeometries.has(item.geometry))continue;updatedSkinnedGeometries.add(item.geometry);const skinned=currentAnimation?skinMeshVertices(item.node,worldByName,item.world):item.node.vertices;if(currentAnimation)for(let offset=0;offset<skinned.length;offset+=item.node.vertexStride)maxSkinnedDisplacement=Math.max(maxSkinnedDisplacement,Math.hypot(skinned[offset]-item.node.vertices[offset],skinned[offset+1]-item.node.vertices[offset+1],skinned[offset+2]-item.node.vertices[offset+2]));gl.bindBuffer(gl.ARRAY_BUFFER,item.vertex);gl.bufferSubData(gl.ARRAY_BUFFER,0,skinned);}
     sceneStatus={...sceneStatus,total:items.length,visible:items.filter((item)=>item.sceneVisible).length,hidden:items.filter((item)=>!item.sceneVisible).length};
     const center=min[0]===Infinity?[0,0,0]:min.map((value,index)=>(value+max[index])/2);bounds={center,radius:min[0]===Infinity?1:Math.hypot(...sub(max,center))};
     const animatedTracks=currentAnimation?.tracks.filter((track)=>track.animated)||[];
