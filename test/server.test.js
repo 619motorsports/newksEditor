@@ -28,6 +28,12 @@ test("serves the desktop application and its explicitly allowed modules", async 
     const bottomColliderAuthoring = await fetch(`${url}/src/bottom-collider-authoring.js`);
     assert.equal(bottomColliderAuthoring.status, 200);
     assert.match(await bottomColliderAuthoring.text(), /applyBottomColliderEdits/);
+    const bc7Decoder = await fetch(`${url}/src/bc7-decoder.js`);
+    assert.equal(bc7Decoder.status, 200);
+    assert.match(await bc7Decoder.text(), /decodeBc7Block/);
+    const customEmissiveUv = await fetch(`${url}/src/custom-emissive-uv.js`);
+    assert.equal(customEmissiveUv.status, 200);
+    assert.match(await customEmissiveUv.text(), /customEmissiveUv/);
     const skinMetadata = await fetch(`${url}/src/skin-metadata.js`);
     assert.equal(skinMetadata.status, 200);
     assert.match(await skinMetadata.text(), /parseSkinMetadata/);
