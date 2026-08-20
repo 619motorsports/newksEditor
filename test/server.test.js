@@ -28,6 +28,15 @@ test("serves the desktop application and its explicitly allowed modules", async 
     const bottomColliderAuthoring = await fetch(`${url}/src/bottom-collider-authoring.js`);
     assert.equal(bottomColliderAuthoring.status, 200);
     assert.match(await bottomColliderAuthoring.text(), /applyBottomColliderEdits/);
+    const skinMetadata = await fetch(`${url}/src/skin-metadata.js`);
+    assert.equal(skinMetadata.status, 200);
+    assert.match(await skinMetadata.text(), /parseSkinMetadata/);
+    const dynamicTrack = await fetch(`${url}/src/dynamic-track.js`);
+    assert.equal(dynamicTrack.status, 200);
+    assert.match(await dynamicTrack.text(), /sampleDynamicTrackObjects/);
+    const sceneDiagnostics = await fetch(`${url}/src/scene-diagnostics.js`);
+    assert.equal(sceneDiagnostics.status, 200);
+    assert.match(await sceneDiagnostics.text(), /analyzeScene/);
     const fileIdentity = await fetch(`${url}/src/file-identity.js`);
     assert.equal(fileIdentity.status, 200);
     assert.match(await fileIdentity.text(), /createFileIdentity/);
