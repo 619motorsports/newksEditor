@@ -1814,7 +1814,7 @@ function createRenderer(canvas) {
   }
 
   function updateSplitAoState(){
-    splitAoState=resolveSplitAoAnimation(vaoStatus.splitAo,currentAnimationName,currentAnimationPosition,splitAoAnimationScope.tracks,splitAoAnimationScope.related);
+    splitAoState=resolveSplitAoAnimation(vaoStatus.splitAo,currentAnimationName,currentAnimationPosition,splitAoAnimationScope.tracks,splitAoAnimationScope.related,splitAoAnimationScope.paths);
     let splitAoMeshes=0;for(const item of items){const amount=splitAoBindingAmount(vaoBindings.get(item.node),splitAoState);item.splitAoFactor=amount;if(amount>0)splitAoMeshes++;}
     vaoStatus={...vaoStatus,splitAoKind:splitAoState.kind,splitAoAmount:splitAoState.amount,splitAoPosition:splitAoState.position,splitAoExponent:splitAoState.exponent,splitAoMeshes,splitAoNodes:splitAoState.nodes.size};
   }

@@ -167,24 +167,24 @@ export function parseSplitAoConfig(text) {
   });
 }
 
-/** Collect animated track names and their transform ancestors for split-AO selection. */
+/** Collect animated track names, root paths, and transform ancestors for split-AO selection. */
 export function splitAoAnimationNodeScope(root, animation) {
   const tracks = [...new Set((animation?.tracks || [])
     .filter((track) => track?.animated && track.frames?.length)
     .map((track) => String(track.name || "").trim().toLowerCase())
     .filter(Boolean))];
-  const trackNames = new Set(tracks), related = new Set(tracks), stack = root ? [{ node: root, path: [] }] : [];
+  const trackNames = new Set(tracks), related = new Set(tracks), paths = [], stack = root ? [{ node: root, path: [] }] : [];
   while (stack.length) {
     const { node, path } = stack.pop(), name = String(node?.name || "").trim().toLowerCase(), nodePath = name ? [...path, name] : path;
-    if (trackNames.has(name)) for (const ancestor of nodePath) related.add(ancestor);
+    if (trackNames.has(name)) { paths.push(Object.freeze(nodePath)); for (const ancestor of nodePath) related.add(ancestor); }
     const children = node?.children || [];
     for (let index = children.length - 1; index >= 0; index--) stack.push({ node: children[index], path: nodePath });
   }
-  return Object.freeze({ tracks: Object.freeze(tracks), related: Object.freeze([...related]) });
+  return Object.freeze({ tracks: Object.freeze(tracks), related: Object.freeze([...related]), paths: Object.freeze(paths) });
 }
 
 /** Resolve the split-AO node set for one active KSANIM state. */
-export function resolveSplitAoAnimation(splitAo, animationName, position, animatedNodeNames = [], relatedNodeNames = animatedNodeNames) {
+export function resolveSplitAoAnimation(splitAo, animationName, position, animatedNodeNames = [], relatedNodeNames = animatedNodeNames, animatedNodePaths = []) {
   const basename = String(animationName || "").replace(/\\/g, "/").split("/").at(-1).toLowerCase();
   let kind = "bind-pose", exponent = 1, configuredNodes = [];
   if (basename === "lights.ksanim") { kind = "headlights"; exponent = splitAo?.headlights?.exponent ?? 2; configuredNodes = splitAo?.headlights?.nodes || []; }
@@ -193,18 +193,30 @@ export function resolveSplitAoAnimation(splitAo, animationName, position, animat
     const wing = splitAo?.wings?.find((entry) => String(entry.name).replace(/\\/g, "/").split("/").at(-1).toLowerCase() === basename);
     if (wing) { kind = `wing-${wing.index}`; exponent = wing.exponent; configuredNodes = wing.nodes; }
   }
-  const automatic = animatedNodeNames.map((name) => String(name || "").trim()).filter(Boolean), related = new Set(relatedNodeNames.map((name) => String(name || "").trim().toLowerCase()).filter(Boolean)), nodes = new Set();
+  const automatic = animatedNodeNames.map((name) => String(name || "").trim()).filter(Boolean), related = new Set(relatedNodeNames.map((name) => String(name || "").trim().toLowerCase()).filter(Boolean)), nodes = new Set(), branches = [];
+  const paths = animatedNodePaths.map((path) => path.map((name) => String(name || "").trim().toLowerCase()).filter(Boolean)).filter((path) => path.length);
+  const addBranch = (path) => { if (!branches.some((candidate) => candidate.length === path.length && candidate.every((name, index) => name === path[index]))) branches.push(Object.freeze(path)); };
   for (const name of configuredNodes) {
-    if (name.toUpperCase() === "@AUTO") for (const automaticName of automatic) nodes.add(automaticName.toLowerCase());
-    else if (kind !== "door" || related.has(name.toLowerCase())) nodes.add(name.toLowerCase());
+    if (name.toUpperCase() === "@AUTO") {
+      for (const automaticName of automatic) nodes.add(automaticName.toLowerCase());
+      if (kind === "door") for (const path of paths) addBranch(path);
+    } else {
+      const normalizedName = name.toLowerCase();
+      if (kind !== "door" || related.has(normalizedName)) nodes.add(normalizedName);
+      if (kind === "door") for (const path of paths) if (path.includes(normalizedName)) addBranch(path);
+    }
   }
   const normalized = Math.max(0, Math.min(1, Number(position) || 0));
-  return Object.freeze({ kind, animation: basename, position: normalized, exponent, amount: kind === "bind-pose" ? 0 : Math.pow(normalized, exponent), nodes });
+  return Object.freeze({ kind, animation: basename, position: normalized, exponent, amount: kind === "bind-pose" ? 0 : Math.pow(normalized, exponent), nodes, branches: Object.freeze(branches) });
 }
 
 /** Get the split-AO blend for a bound mesh and its transform ancestors. */
 export function splitAoBindingAmount(binding, state) {
   if (!binding?.secondary || !state?.nodes?.size) return 0;
+  if (state.branches?.length) {
+    const path = binding.nodeNames?.map((name) => String(name || "").trim().toLowerCase()).filter(Boolean) || [];
+    return state.branches.some((branch) => branch.length <= path.length && branch.every((name, index) => name === path[index])) ? state.amount : 0;
+  }
   return binding.nodeNames?.some((name) => state.nodes.has(String(name || "").toLowerCase())) ? state.amount : 0;
 }
 

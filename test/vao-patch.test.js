@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { parseKn5 } from "../src/kn5.js";
+import { parseKsAnimation } from "../src/ksanim.js";
 import { bindVaoPatch, CSP_VAO_BIND_DISTANCE_SQUARED, parseSplitAoConfig, parseVaoData, parseVaoPatch, resolveSplitAoAnimation, splitAoAnimationNodeScope, splitAoBindingAmount } from "../src/vao-patch.js";
 
 test("decodes native v4 square-root AO and v5 linear AO bytes", () => {
@@ -76,14 +77,29 @@ test("restricts shared door split AO to the selected animated subtree", () => {
     { name: "DOOR_L", animated: true, frames: [{}] },
     { name: "DOOR_R", animated: false, frames: [{}] }
   ] });
-  const split = parseSplitAoConfig("[SPLIT_AO]\nDOOR_NODES=DOOR_L,DOOR_R"), state = resolveSplitAoAnimation(split, "car_door_L.ksanim", .5, scope.tracks, scope.related);
+  const split = parseSplitAoConfig("[SPLIT_AO]\nDOOR_NODES=DOOR_L,DOOR_R"), state = resolveSplitAoAnimation(split, "car_door_L.ksanim", .5, scope.tracks, scope.related, scope.paths);
   const leftBinding = { secondary: Uint8Array.of(20), nodeNames: ["COCKPIT_HR", "DOOR_L", "LEFT_MESH"] };
   const rightBinding = { secondary: Uint8Array.of(20), nodeNames: ["COCKPIT_HR", "DOOR_R", "RIGHT_MESH"] };
 
-  assert.deepEqual(scope, { tracks: ["door_l"], related: ["door_l", "cockpit_hr"] });
+  assert.deepEqual(scope, { tracks: ["door_l"], related: ["door_l", "cockpit_hr"], paths: [["cockpit_hr", "door_l"]] });
   assert.deepEqual([...state.nodes], ["door_l"]);
+  assert.deepEqual(state.branches, [["cockpit_hr", "door_l"]]);
   assert.equal(splitAoBindingAmount(leftBinding, state), .25);
   assert.equal(splitAoBindingAmount(rightBinding, state), 0);
+});
+
+test("does not apply shared-ancestor door AO to sibling branches", () => {
+  const left = { kind: "node", name: "DOOR_L", children: [mesh("LEFT_MESH", [[0, 0, 0]])] };
+  const right = { kind: "node", name: "DOOR_R", children: [mesh("RIGHT_MESH", [[0, 0, 0]])] };
+  const root = { kind: "node", name: "COCKPIT_HR", children: [left, right, mesh("DASH", [[0, 0, 0]])] };
+  const scope = splitAoAnimationNodeScope(root, { tracks: [{ name: "DOOR_L", animated: true, frames: [{}] }] });
+  const split = parseSplitAoConfig("[SPLIT_AO]\nDOOR_NODES=COCKPIT_HR");
+  const state = resolveSplitAoAnimation(split, "car_door_L.ksanim", .5, scope.tracks, scope.related, scope.paths);
+
+  assert.deepEqual(state.branches, [["cockpit_hr", "door_l"]]);
+  assert.equal(splitAoBindingAmount({ secondary: Uint8Array.of(20), nodeNames: ["COCKPIT_HR", "DOOR_L", "LEFT_MESH"] }, state), .25);
+  assert.equal(splitAoBindingAmount({ secondary: Uint8Array.of(20), nodeNames: ["COCKPIT_HR", "DOOR_R", "RIGHT_MESH"] }, state), 0);
+  assert.equal(splitAoBindingAmount({ secondary: Uint8Array.of(20), nodeNames: ["COCKPIT_HR", "DASH"] }, state), 0);
 });
 
 test("parses installed CSP legacy, v4, and v5 ZIP fixtures", async (t) => {
@@ -100,13 +116,19 @@ test("parses installed CSP legacy, v4, and v5 ZIP fixtures", async (t) => {
 
 test("binds an installed CSP car VAO patch to production KN5 geometry", async (t) => {
   const car = "/mnt/D/SteamLibrary/steamapps/common/assettocorsa/content/cars/ks_nissan_370z", patchPath = "/mnt/D/SteamLibrary/steamapps/common/assettocorsa/extension/vao-patches-cars/ks_nissan_370z.vao-patch";
-  let patchBytes, kn5Bytes;
-  try { [patchBytes, kn5Bytes] = await Promise.all([readFile(patchPath), readFile(`${car}/nissan_370z.kn5`)]); }
+  let patchBytes, kn5Bytes, animationBytes;
+  try { [patchBytes, kn5Bytes, animationBytes] = await Promise.all([readFile(patchPath), readFile(`${car}/nissan_370z.kn5`), readFile(`${car}/animations/car_door_L.ksanim`)]); }
   catch { t.skip("Installed Nissan VAO/KN5 fixtures are unavailable"); return; }
-  const patch = await parseVaoPatch(patchBytes, "ks_nissan_370z.vao-patch"), binding = bindVaoPatch(parseKn5(kn5Bytes), patch);
+  const patch = await parseVaoPatch(patchBytes, "ks_nissan_370z.vao-patch"), model = parseKn5(kn5Bytes), binding = bindVaoPatch(model, patch);
   assert.ok(binding.matchedMeshes > 100); assert.equal(binding.unmatchedRecords + binding.matchedRecords + binding.alternateRecords + binding.normalRecords, patch.recordCount);
   assert.ok(binding.secondaryMeshes > 100); assert.ok([...binding.bindings.values()].some((entry) => entry.secondary && entry.nodeNames.includes("COCKPIT_HR")));
   assert.ok(binding.minimum < binding.maximum); assert.ok(binding.mean > 0 && binding.mean < 255);
+  const animation = parseKsAnimation(animationBytes), scope = splitAoAnimationNodeScope(model.root, animation);
+  const state = resolveSplitAoAnimation(patch.splitAo, "car_door_L.ksanim", .5, scope.tracks, scope.related, scope.paths);
+  const active = [...binding.bindings.values()].filter((entry) => splitAoBindingAmount(entry, state) > 0);
+  assert.equal(active.length, 17);
+  assert.ok(active.some((entry) => entry.nodeNames.includes("DOOR_L")));
+  assert.ok(active.every((entry) => !entry.nodeNames.some((name) => /^DOOR_R(?:_|$)/i.test(name))));
 });
 
 function vaoRecord(name, type, first, count, payload) {
