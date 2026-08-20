@@ -104,6 +104,9 @@ npm test
   deterministic texture-name replacement, collision diagnostics, and native seeded
   previews for dynamic objects with probability, multiplicity, random positions, and
   velocity playback.
+  The Model inspector reports exact parsed-scene totals, transformed world bounds,
+  source-file hotspots, and the largest meshes. It also reports source-KN5,
+  vertex/index, and embedded-texture payload sizes without claiming unsupported game limits.
   Static model positions and rotations support live editing, undo, recovery, project
   persistence, and `models.ini` export. Dynamic objects support edits to probability,
   multiplicity, position mode, position center and range, velocity mode, velocity base

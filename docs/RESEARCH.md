@@ -1590,6 +1590,13 @@ one mesh from fallback physics to an exact match. The same test covered all fiel
 invalid input, undo, redo, recovery, the surface overlay, and export. A serializer
 round trip preserved every field and rejected unsafe INI text.
 
+A packaged Imola performance check used the 398.5 MB assembled layout with
+3,465,927 vertices. The scene-diagnostic counter remained at one during a friction
+edit, undo, and redo. These actions completed in 50 ms or less on the check system.
+The surface overlay remained coherent and produced hash `030135e0c231ce45`.
+WebGL returned zero, the browser log stayed empty, and the renderer exposed no
+Node.js API.
+
 ## Track layout assembly evidence
 
 Installed tracks use ordered `[MODEL_n]` sections in `models*.ini`, with `FILE`,

@@ -37,6 +37,7 @@ const lighting = process.argv.includes("--lighting");
 const seasons = process.argv.includes("--seasons");
 const showHidden = process.argv.includes("--show-hidden");
 const requireSharedGeometry = process.argv.includes("--require-shared-geometry");
+const requireDynamicShadowRefresh = process.argv.includes("--require-dynamic-shadow-refresh");
 const weatherName = option("weather");
 const sunHeading = option("sun-heading");
 const sunHeight = option("sun-height");
@@ -57,7 +58,8 @@ const conditionChanges = process.argv.flatMap((argument, index) => argument === 
   return [entry.slice(0, separator).toUpperCase(), Number(entry.slice(separator + 1))];
 });
 const animationPositions = process.argv.flatMap((argument, index) => argument === "--animation-position" ? [Number(process.argv[index + 1])] : []);
-if ((!modelPath && !layoutName) || !meshName || (layoutName && !assetsPath)) throw new Error("Usage: node tools/browser-smoke.mjs (--model FILE.kn5 | --workspace MANIFEST.ini --assets FOLDER) --mesh NAME [--assembled --show-hidden] [--dynamic-advance 2] [--require-shared-geometry] [--csp-assets assettocorsa/extension/textures] [--reflection-environment SHOWROOM.kn5 --reflection-root NODE] [--seasons --year-progress 0.5 --compare-year-progress 0] [--vao FILE.vao-patch] [--lighting --weather PRESET --sun-heading 40 --sun-height 55 --compare-sun-height 10 --manual-exposure 0.35] [--shadows] [--reflection-compare] [--surface-overlay] [--grass-fx] [--rain-fx --rain-wetness 1] [--track-camera LABEL --track-camera-position 0.5 --play-track-camera] [--driver FILE.kn5 --driver-cockpit] [--skin NAME] [--animation NAME --animation-position 0.5] [--lod auto|INDEX] [--config FILE.ini] [--input NAME=VALUE] [--port 9222] [--app-port 4173]");
+if ((!modelPath && !layoutName) || !meshName || (layoutName && !assetsPath)) throw new Error("Usage: node tools/browser-smoke.mjs (--model FILE.kn5 | --workspace MANIFEST.ini --assets FOLDER) --mesh NAME [--assembled --show-hidden] [--dynamic-advance 2] [--require-shared-geometry] [--require-dynamic-shadow-refresh] [--csp-assets assettocorsa/extension/textures] [--reflection-environment SHOWROOM.kn5 --reflection-root NODE] [--seasons --year-progress 0.5 --compare-year-progress 0] [--vao FILE.vao-patch] [--lighting --weather PRESET --sun-heading 40 --sun-height 55 --compare-sun-height 10 --manual-exposure 0.35] [--shadows] [--reflection-compare] [--surface-overlay] [--grass-fx] [--rain-fx --rain-wetness 1] [--track-camera LABEL --track-camera-position 0.5 --play-track-camera] [--driver FILE.kn5 --driver-cockpit] [--skin NAME] [--animation NAME --animation-position 0.5] [--lod auto|INDEX] [--config FILE.ini] [--input NAME=VALUE] [--port 9222] [--app-port 4173]");
+if (requireDynamicShadowRefresh && dynamicAdvance === "") throw new Error("--require-dynamic-shadow-refresh requires --dynamic-advance");
 
 const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
 const page = pages.find((item) => item.type === "page");
@@ -209,7 +211,21 @@ if(shadows)await waitFor(`window.__apexRenderer?.shadowStatus.enabled&&window.__
 if(grassFx&&shadows)await waitFor(`window.__apexRenderer?.shadowStatus.grassInstances>0&&window.__apexRenderer?.grassStatus.castsShadows===true&&window.__apexRenderer?.grassStatus.receivesShadows===true`,120000);
 if(reflectionCompare&&shadows)await waitFor(`window.__apexRenderer?.sceneStatus.reflections.directionalShadows===true&&window.__apexRenderer?.sceneStatus.reflections.shadowCasters>0`,120000);
 if(reflectionCompare&&grassFx)await waitFor(`window.__apexRenderer?.sceneStatus.reflections.selectionMode!=='scene'||(window.__apexRenderer?.sceneStatus.reflections.grassFx===true&&window.__apexRenderer?.sceneStatus.reflections.grassInstances>0${shadows?"&&window.__apexRenderer?.sceneStatus.reflections.grassCastsShadows===true&&window.__apexRenderer?.sceneStatus.reflections.grassReceivesShadows===true":""})`,120000);
-if(dynamicAdvance!==""){await waitFor(`window.__apexRenderer?.dynamicTrackStatus.active===true`,120000);await evaluate(`window.__apexRenderer.advanceDynamicTrack(${JSON.stringify(Number(dynamicAdvance))})`);trace(`dynamic track advanced ${dynamicAdvance} seconds`);}
+if(dynamicAdvance!==""){
+  await waitFor(`window.__apexRenderer?.dynamicTrackStatus.active===true`,120000);
+  let localShadowUpdatesBefore=null;
+  if(requireDynamicShadowRefresh){
+    await waitFor(`window.__apexRenderer?.dynamicTrackStatus.movingInstances>0&&window.__apexRenderer?.grassStatus.localShadowLights>0&&window.__apexRenderer?.grassStatus.localShadowCasters>0&&window.__apexRenderer?.grassStatus.localShadowUpdates>0`,120000);
+    localShadowUpdatesBefore=await evaluate(`window.__apexRenderer.grassStatus.localShadowUpdates`);
+  }
+  await evaluate(`window.__apexRenderer.advanceDynamicTrack(${JSON.stringify(Number(dynamicAdvance))})`);
+  if(requireDynamicShadowRefresh){
+    const localShadowUpdatesAfter=await evaluate(`window.__apexRenderer.grassStatus.localShadowUpdates`);
+    if(!(localShadowUpdatesAfter>localShadowUpdatesBefore))throw new Error(`Dynamic caster movement did not refresh the local-shadow atlas (${localShadowUpdatesBefore} -> ${localShadowUpdatesAfter})`);
+    trace(`local-shadow atlas refreshed ${localShadowUpdatesBefore} -> ${localShadowUpdatesAfter}`);
+  }
+  trace(`dynamic track advanced ${dynamicAdvance} seconds`);
+}
 const sceneBeforeShowHidden = await evaluate(`window.__apexRenderer?.sceneStatus`);
 const states = { [surfaceOverlay ? "surface-overlay" : grassFx ? "grass-fx" : rainFx ? "rain-fx" : seasons ? `year-progress=${yearProgress}` : vaoPath ? "vao" : reflectionCompare ? "reflections" : lighting ? "lighting" : shadows ? "shadows" : animationName ? "animation=0" : dynamicAdvance!=="" ? `dynamic=${dynamicAdvance}` : "off"]: await screenshotState(screenshotPath) };
 if(showHidden){const enabled=await evaluate(`(()=>{const button=document.querySelector('#show-hidden');if(!button||button.disabled)return false;if(!button.classList.contains('active'))button.click();return true;})()`);if(!enabled)throw new Error("Show hidden mode was not available");await waitFor(`window.__apexRenderer?.sceneStatus.showHidden===true`);const sceneAfterShowHidden=await evaluate(`window.__apexRenderer?.sceneStatus`);if(sceneAfterShowHidden.gameVisible!==sceneBeforeShowHidden.gameVisible||sceneAfterShowHidden.gameHidden!==sceneBeforeShowHidden.gameHidden)throw new Error("Show hidden changed the parsed KN5 visibility counts");if(sceneAfterShowHidden.previewVisible<sceneBeforeShowHidden.previewVisible)throw new Error("Show hidden removed preview meshes");states["hidden-shown"]=await screenshotState();trace("hidden KN5 meshes shown");}
