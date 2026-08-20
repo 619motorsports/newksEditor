@@ -132,6 +132,24 @@ captures hashed to `197e3148237ea966` and `2db4c74a6ad57ae8`. All 80 textures lo
 both captures returned WebGL error zero, and the browser log contained no errors.
 The grid remained visible through the car, which confirms the recovered depth-off state.
 
+### Native view-axis marker
+
+`ksEditor.Form1.viewAxisMenuItem_Click` has token `0x060000a4` and RVA `0x60e4`.
+The handler toggles its checked state. It passes three for the checked state and zero
+for the unchecked state to `ksGraphics.setRenderAxisMode`.
+
+`ksGraphics.setRenderAxisMode` has token `0x060003d3` and RVA `0x20cc8`. The method
+ignores its argument. It toggles `Camera.axisRenderingMode` at byte offset `0x6c`
+between `eAxisNone` (zero) and `eAxisAfter3d` (two). The PDB enum also identifies
+before-3D line mode and two model modes, but the old editor menu does not select them.
+
+PDB-guided Ghidra decompilation identifies `Camera::renderAxis` at `0x10064788` and
+`CameraShadowMapped::renderPass` at `0x1005e681`. The main render pass draws the
+view axis after opaque geometry and before transparent geometry. After-3D mode turns
+depth off and uses an identity world matrix. It emits one-meter lines from the world
+origin to +X, +Y, and +Z. The immediate colors are `(3, 0, 0)`, `(0, 3, 0)`, and
+`(0, 0, 3)`. The renderer restores normal depth mode after this marker.
+
 ### Native selected-node axis marker
 
 `ksNet.ksGraphics.render` has token `0x06000389` and RVA `0x27388`. After the grid

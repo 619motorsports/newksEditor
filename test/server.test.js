@@ -49,6 +49,9 @@ test("serves the desktop application and its explicitly allowed modules", async 
     const selectionAxis = await fetch(`${url}/src/selection-axis.js`);
     assert.equal(selectionAxis.status, 200);
     assert.match(await selectionAxis.text(), /nativeSelectionAxis/);
+    const viewAxis = await fetch(`${url}/src/view-axis.js`);
+    assert.equal(viewAxis.status, 200);
+    assert.match(await viewAxis.text(), /nativeViewAxisVertices/);
     assert.equal((await fetch(`${url}/vendor/three.module.js`)).status, 200);
     assert.equal((await fetch(`${url}/vendor/three-addons/loaders/FBXLoader.js`)).status, 200);
   });

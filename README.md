@@ -92,6 +92,8 @@ npm test
   Dimmed hierarchy rows remain selectable, and **Show hidden** exposes all such
   geometry explicitly for authoring inspection. The optional grid reproduces the
   old editor's 11 by 11-line magenta authoring overlay across a 10 m square.
+  **View axis** reproduces the native one-meter red +X, green +Y, and blue +Z
+  marker at the world origin. It draws after opaque geometry with depth disabled.
   A selected hierarchy node shows the native one-meter red X, green Y, and blue
   negative-Z world-axis marker through scene geometry.
 - Direct hierarchy authoring for node names, active states, and local transforms.
@@ -332,6 +334,8 @@ fallback states independently. Use `--reflection-environment SHOWROOM.kn5` and,
 optionally, `--reflection-root NODE` to verify showroom assembly and subtree selection.
 Pass `--selection-axis` to require the native selected-node marker and capture a
 comparison after the tool clears the selection.
+Pass `--view-axis` to require the native world-origin marker and capture its on and
+off states.
 
 The authoring round-trip has its own production-browser check:
 
