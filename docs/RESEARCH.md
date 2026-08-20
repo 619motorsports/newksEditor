@@ -341,8 +341,27 @@ adjustment pairs. Preserving their source order applies all four `ksEmissive`
 channels to five matching meshes. With the tested flag conditions enabled, the
 complete track evaluation retains 999 overridden meshes, five custom-emissive
 meshes, and 169 bounded light instances. Less-common color-mask, vertex-mask,
-bounce-back, exact soft-edge, and UV-remapping operations remain unsupported or
-approximated.
+exact soft-edge, and UV-remapping operations remain unsupported or approximated.
+
+Public CSP shader commit `4f05cc0ba26f7c363886ebb406b35f67157139d0`
+provides the exact `CustomEmissive_BounceBack` equations. The evidence comes from
+`lightingBounceBack.hlsl`, `ksPerPixelMultiMap_emissive_ps.fx`, `utils_ps.fx`, and
+`ext_lightingfx/_include_ps.fx`. Their SHA-256 values start with `6ed90463`,
+`24dd348f`, `9d34aba4`, and `3a5050a4`.
+
+The rule saturates the dot product of `emissiveMap` and `extBounceBackMask`. It
+multiplies this value by the absolute intensity and twice the diffuse color. A
+negative intensity also multiplies the result by one minus diffuse alpha. The
+gamma-space shader uses exponent 80 for the view lobe. Apex uses this variant
+because its stock material path samples gamma-space texture values. The separate
+gamma-fixed CSP variant uses exponent 400.
+
+The base shader adds a shadowed sun lobe and reflection-cube mip 3 at `0.005`.
+Lighting FX adds point and spot lights when the light direction opposes the view.
+The public line-light bounce code is disabled, so Apex excludes line lights. The
+last bounce-back mixin wins because each mixin writes the same material properties.
+Public config commit `4dbf2bb909f44ac440414aec55f8c84e5e6b8c97` confirms the
+channel mask and default intensity of 20.
 
 An audit of all 236 installed loaded car and track configs currently finds 501
 recognized custom-emissive descriptors across 126 configs and 2,509 expanded
@@ -351,9 +370,9 @@ vertex-mask descriptors, 32 bounce-back rules, and one active MirrorUV rule.
 Declarative `@MIXIN` invocations
 are processed through the same bounded operation table, including their local atlas
 resolution. No installed operation name is silently dropped. Native-only or
-incompletely inferred behavior is surfaced as an approximation: bounce-back,
-vertex-anchor selection, MirrorUV folding, fog/open-door cast lights, flat-normal
-resource substitution, and the uncommon subtractive procedural-composition flags.
+incompletely inferred behavior is surfaced as an approximation: vertex-anchor
+selection, MirrorUV folding, fog/open-door cast lights, flat-normal resource
+substitution, and the uncommon subtractive procedural-composition flags.
 
 The reusable `tools/browser-smoke.mjs` check was run against production assets. The
 Nissan 370Z changes independently for reverse and both rear turn channels; the AE86

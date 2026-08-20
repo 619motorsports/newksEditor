@@ -408,9 +408,9 @@ function customEmissiveDescriptor(section) {
       descriptor.diffuseAlpha = { from: operationNumber(operation, "FROM", 0), to: operationNumber(operation, "TO", 1), exponent: operationNumber(operation, "EXPONENT", 1), opacity: operationNumber(operation, "OPACITY", 1) };
       descriptor.skipDiffuseMap = operationNumber(operation, "SKIPDIFFUSEMAP", 1) !== 0;
     } else if (operation.upper === "CUSTOMEMISSIVE_BOUNCEBACK") {
-      const mask = operationValue(operation, "CHANNEL", "") !== "" ? [0, 1, 2, 3].map((index) => index === channel ? 1 : 0) : operationVector(operation, "MASK", [1, 1, 1, 1]);
-      descriptor.bounceBack.push({ mask, intensity: operationNumber(operation, "INTENSITY", 20) });
-      descriptor.approximatedOperations.push(operation.name);
+      const rawMask = operationValue(operation, "CHANNEL", "") !== "" ? [0, 1, 2, 3].map((index) => index === channel ? 1 : 0) : operationVector(operation, "MASK", [1, 1, 1, 1]);
+      const mask = [0, 1, 2, 3].map((index) => Number(rawMask[index]) || 0);
+      descriptor.bounceBack = [{ mask, intensity: operationNumber(operation, "INTENSITY", 20) }];
     } else if (operation.upper === "CUSTOMEMISSIVE_MIRRORUV") {
       const direction = operationVector(operation, "DIRECTION", [1, 0]), length = Math.hypot(...direction) || 1;
       descriptor.mirrorUv = { offset: operationNumber(operation, "OFFSET", 0.5) / descriptor.resolution[0], direction: direction.slice(0, 2).map((value) => { const component = -(Number(value) || 0) / length; return component === 0 ? 0 : component; }) };

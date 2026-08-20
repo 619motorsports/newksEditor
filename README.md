@@ -162,7 +162,9 @@ npm test
 - Safe `CustomEmissive`/`CustomEmissiveMulti` atlas preview for rectangles, circles,
   soft polygons, color matching, mirroring, vertex-anchor approximation, multi-item
   dashboard channels, diffuse alpha/luminance, and live vehicle inputs such as
-  reverse, brake, turn signals, lights, doors, fog lights, hazards, and RPM
+  reverse, brake, turn signals, lights, doors, fog lights, hazards, and RPM. The
+  preview also reproduces CSP's view-dependent emissive bounce-back for the sun,
+  reflection cube, and point or spot lights
 - CSP point/spot lights, mirrored `SelfLight` expansion, finite line lights with
   closest-segment range/diffuse, endpoint-color interpolation, and segment gloss,
   geometry-derived track `LIGHT_SERIES` preview, native packed
