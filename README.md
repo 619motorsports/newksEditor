@@ -83,7 +83,9 @@ npm test
   PNG/JPEG/WebP,
   tangent-space normal maps, packed maps channels, diffuse/normal detail maps, and
   world-space four-layer track materials. The preview also reproduces the recovered
-  five-texture blur and dirt path for `ksTyres` and `newStefano_ksTyres`.
+  five-texture blur and dirt path for `ksTyres` and `newStefano_ksTyres`. Stock
+  `ksBrakeDisc` materials use their diffuse, normal, glow, blur, and blurred-normal
+  textures. Live controls show the recovered temperature target and static blur state.
 - Car- and track-scale orbit preview, hierarchy filtering, selected-mesh framing,
   isolation, and wireframe. Normal preview follows recursive KN5 game visibility:
   an inactive ancestor or a mesh with `visible`/`renderable` disabled stays hidden.

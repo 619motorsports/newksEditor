@@ -191,6 +191,51 @@ Electron check loaded the Porsche model with all 76 textures. It also kept Node.
 APIs unavailable, rejected external popups, served the content policy, and returned
 WebGL error zero.
 
+### Stock brake-disc shader evidence
+
+The installed `ksBrakeDisc.shader` container is 15,102 bytes. Its SHA-256 value is
+`6627743f61ac4ca4d92213cf42edac8742d795df25d9190e915d46d2efd856ca`.
+The pixel DXBC begins at byte 4,390 and is 10,708 bytes. Its SHA-256 value is
+`b9f4cabe71df18c21d0de21f0cbf60a2ac5a55ebc15fba1d835bff00bd581527`.
+
+DXBC reflection defines five material resources. They are `txDiffuse` at t0,
+`txNormal` at t1, `txGlow` at t2, `txBlur` at t3, and `txNormalBlur` at t4. The
+32-byte `cbTyre` buffer stores `blurLevel`, `glowLevel`, `fresnelC`, and
+`fresnelEXP` at offsets 0, 4, 8, and 12. It stores `isAdditive` and
+`fresnelMaxLevel` at offsets 16 and 20.
+
+The pixel disassembly blends the diffuse and blur RGBA samples with `blurLevel`.
+It decodes and normalizes both tangent-frame normals separately. It then blends
+those world normals with `blurLevel` and does not normalize the result. The shader
+adds `base.rgb * txGlow.rgb * glowLevel` to the lit result. Glow texture alpha is
+unused. Direct specular uses base alpha and `max(ksSpecularEXP, 1)`. Fresnel uses
+the hard cap `min(fresnelC + facing^fresnelEXP, fresnelMaxLevel)`. The additive
+branch adds the cubemap result. The other branch blends toward it. Both branches
+write output alpha one. The shader does not saturate `blurLevel` or `glowLevel`.
+
+Ghidra recovery of `FUN_18051ab30` gives the runtime target for each wheel:
+`maxGlow * carStateMultiplier * saturate((abs(brakeTemperature) - 10) / 150)`.
+The next glow value is `lerp(current, target, saturate(deltaTime * lag))`. The game
+selects `LAG_HOT` when the target is at least the current value. It selects
+`LAG_COOL` otherwise. The same function computes blur as a wheel-state magnitude
+times 0.1, followed by saturation.
+
+The old ksEditor writes `DISC_LF`, `DISC_RF`, `DISC_LR`, `DISC_RR`,
+`FRONT_MAX_GLOW`, `REAR_MAX_GLOW`, `LAG_HOT`, and `LAG_COOL` in
+`[DISCS_GRAPHICS]`. This section is optional in shipped content. The installed
+Porsche 917/30 and Nissan 370Z omit it. Apex maps their conventional disc-node
+suffixes and keeps manual maximum-glow controls available. The static editor shows
+the recovered steady-state target. It does not claim to simulate wheel speed, time,
+or hot and cool lag.
+
+The installed Porsche binds all five resources to one `ksBrakeDisc` material. Four
+wheel meshes use it. A production Chrome check loaded all 76 embedded textures and
+isolated `LOD_A_DISC_LF`. Temperature 160 °C with maximum glow 64 produced hash
+`ffe5cc9fe5bbbd9e`. Temperature 10 °C produced `234327240eeadf14`.
+At 10 °C, blur levels zero and one produced `234327240eeadf14` and
+`f6967ed96c1b6c45`. All four captures returned WebGL error zero. The browser log
+contained no warnings or errors.
+
 ### Reflection environment evidence
 
 An audit of official Kunos car, track, and showroom KN5 textures found no DDS with

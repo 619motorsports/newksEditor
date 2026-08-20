@@ -31,6 +31,9 @@ test("serves the desktop application and its explicitly allowed modules", async 
     const tyreShader = await fetch(`${url}/src/tyre-shader.js`);
     assert.equal(tyreShader.status, 200);
     assert.match(await tyreShader.text(), /stockTyreTexel/);
+    const brakeDiscShader = await fetch(`${url}/src/brake-disc-shader.js`);
+    assert.equal(brakeDiscShader.status, 200);
+    assert.match(await brakeDiscShader.text(), /brakeDiscGlowTarget/);
     assert.equal((await fetch(`${url}/vendor/three.module.js`)).status, 200);
     assert.equal((await fetch(`${url}/vendor/three-addons/loaders/FBXLoader.js`)).status, 200);
   });
