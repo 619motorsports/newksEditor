@@ -1850,10 +1850,33 @@ The renderer uploads the primary result as one normalized unsigned byte per matc
 KN5 vertex and attenuates ambient diffuse and environment response. Direct sun,
 directional shadows, CSP local lights, specular, and emissive terms remain independent.
 This corresponds to vertex ambient occlusion rather than treating it as another
-shadow map. The secondary car channel is preserved and reported, but correct blending
-for `SPLIT_AO` door, steering, headlight, and wing animation states remains. Legacy
-normal-override type-2 records, `@@__ALT@:` states, embedded v1 extra samples, v2
-`ExtraSamples.data`, and tree samples are also diagnosed but not yet applied.
+shadow map.
+
+The [official CSP bakery](https://github.com/ac-custom-shaders-patch/acc-bakeryoptix/blob/master/bakeryoptix/baked_data.cpp)
+stores primary and secondary AO in a float pair. Its first animation bake updates only
+the primary value; the secondary value remains at the bind pose. CSP's public
+[`ext_vao/_include_vs.fx`](https://gitlab.com/ac-custom-shaders-patch/public/acc-shaders/-/blob/master/recreated/include_new/ext_vao/_include_vs.fx)
+then evaluates
+`lerp(vsLoadAo0(...), vsLoadAo1(...), vaoSecondaryMix)`. Thus, a zero native mix selects
+the animation channel, and a mix of one selects the bind-pose channel. Apex uploads both
+bytes and applies the equivalent blend with a primary-channel amount.
+
+The installed `dwrite.dll` parser at `FUN_181169ae0` (`0x181169ae0`) reads the
+`[SPLIT_AO]` section. It uses default exponents of two for doors and headlights and one
+for wing animations. It also reads cockpit, door, headlight, steering-wheel, and up to
+100 contiguous wing node lists. The
+[official bakery mappings](https://github.com/ac-custom-shaders-patch/acc-bakeryoptix/blob/master/bakeryoptix/main.cpp)
+map `lights.ksanim`,
+`car_door_L.ksanim`, `car_door_R.ksanim`, and named wing animations to those lists. It
+expands `@AUTO` to animation track names before it writes the patch configuration.
+Apex follows those mappings and matches a configured transform ancestor for each mesh.
+
+The native CPU function that converts animation position to `vaoSecondaryMix` is not
+yet recovered. Apex therefore labels `position^EXP` as a power preview; it does not
+claim that curve is exact. Steering-wheel split AO also remains at the bind pose until
+the native steering input and conversion are recovered. Legacy normal-override type-2
+records, `@@__ALT@:` states, embedded v1 extra samples, v2 `ExtraSamples.data`, and tree
+samples are diagnosed but not yet applied.
 
 Production Chrome proofs covered both asset scales. The Nissan 370Z patch supplied
 908 records; 416 default records bound both channels on 201 meshes, with 174 alternate
@@ -1867,6 +1890,15 @@ Both scenes retained complete texture coverage, RGBA16F with 4× MSAA, direction
 shadows and weather lighting, returned WebGL error zero for every state, and logged no
 browser exception. These comparisons prove the portable primary-channel path and its
 toggle, not the remaining animated or spatial extra-sample behavior.
+
+A packaged Electron follow-up loaded the full Nissan 370Z, its v4 VAO patch, and
+`animations/car_door_L.ksanim`. All 201 matched meshes had primary and secondary AO.
+At animation position 0.5, the configured power preview produced a primary amount of
+0.25 on 103 meshes; position one produced an amount of one. Bind, half-open, and open
+frames hashed to `2353b0371a4cc8df`, `fa1ae266319c15be`, and `2c5d55dec93b04a4`.
+The production renderer returned WebGL error zero, exposed no Node.js API, and logged no
+browser error. This proves that split buffers, node routing, and per-draw mixing execute
+in the packaged WebGL path. It does not make the labeled power curve native evidence.
 
 ## CSP seasonal-material evidence
 
