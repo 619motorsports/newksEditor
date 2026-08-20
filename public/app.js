@@ -30,7 +30,7 @@ import { KS_EDITOR_CUBEMAP, WEBGL_CUBEMAP_FACES, reflectionBlurFromExponent, sel
 import { createCspWindParticles, CSP_WIND_MAP_FORMAT, CSP_WIND_MAP_SIZE, CSP_WIND_PARTICLE_COUNT, updateCspWindParticles } from "/src/csp-wind.js";
 import { collectFbxAnimations, parseFbxWithTextures, resolveFbxModelTextures } from "/src/fbx-import.js";
 import { applyNodeEdits, composeNodeTransform, decomposeNodeTransform, nodePathEntries } from "/src/node-authoring.js";
-import { createSkinMetadata, createSkinMetadataLoadGuard, effectiveSkinMetadata, readSkinMetadataFile, serializeSkinMetadata, SKIN_METADATA_TEXT_FIELDS } from "/src/skin-metadata.js";
+import { captureSkinMetadataEditorTarget, createSkinMetadata, createSkinMetadataLoadGuard, effectiveSkinMetadata, readSkinMetadataFile, serializeSkinMetadata, SKIN_METADATA_TEXT_FIELDS } from "/src/skin-metadata.js";
 
 const $ = (selector) => document.querySelector(selector);
 const fileInput = $("#file");
@@ -166,7 +166,9 @@ $("#skin-select").addEventListener("change", async (event) => {
   const skin = assetSkins.find((candidate) => candidate.name === event.target.value);
   assetSkinName = skin?.name || "";
   status.textContent = assetSkinName ? `Loading skin ${assetSkinName}…` : modelStatusText();
-  const [, metadataCurrent] = await Promise.all([renderer?.setSkinFiles(skin?.files || [], assetSkinName), configureSelectedSkinMetadata(skin)]);
+  const textureLoad = renderer?.setSkinFiles(skin?.files || [], assetSkinName), metadataLoad = configureSelectedSkinMetadata(skin);
+  if (model && !selectedNode) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
+  const [, metadataCurrent] = await Promise.all([textureLoad, metadataLoad]);
   if (!metadataCurrent) return;
   if (modelFile) status.textContent = modelStatusText();
   if (model && !selectedNode) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
@@ -1306,11 +1308,13 @@ function editSkinMetadata(project, skinName, mutate) {
 }
 
 function bindSkinMetadataEditors() {
-  if (!assetSkinName || !assetSkinMetadata || assetSkinMetadataError) return;
+  if (assetSkinMetadataError) return;
+  const target = captureSkinMetadataEditorTarget(assetSkinName, assetSkinMetadata);
+  if (!target) return;
   inspector.querySelectorAll("[data-edit-skin-text]").forEach((input) => {
     const commit = () => {
       const key = input.dataset.editSkinText, value = input.value;
-      commitEditorChange(`Set ${assetSkinName} ${key}`, (project) => editSkinMetadata(project, assetSkinName, (edit) => { edit[key] = value; }));
+      commitEditorChange(`Set ${target.name} ${key}`, (project) => editSkinMetadata(project, target.name, (edit) => { edit[key] = value; }));
     };
     input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } });
     input.addEventListener("change", commit);
@@ -1319,28 +1323,28 @@ function bindSkinMetadataEditors() {
     try {
       const text = event.target.value.trim();
       if (!text) {
-        commitEditorChange(`Reset ${assetSkinName} priority`, (project) => editSkinMetadata(project, assetSkinName, (edit) => { delete edit.priority; }));
+        commitEditorChange(`Reset ${target.name} priority`, (project) => editSkinMetadata(project, target.name, (edit) => { delete edit.priority; }));
         return;
       }
       const value = Number(text);
       if (!Number.isSafeInteger(value) || value < 0) throw new Error("Skin priority must be a nonnegative integer");
-      commitEditorChange(`Set ${assetSkinName} priority`, (project) => editSkinMetadata(project, assetSkinName, (edit) => { edit.priority = value; }));
+      commitEditorChange(`Set ${target.name} priority`, (project) => editSkinMetadata(project, target.name, (edit) => { edit.priority = value; }));
     } catch (error) { event.target.classList.add("invalid"); status.textContent = error.message; }
   });
   inspector.querySelectorAll("[data-reset-skin-field]").forEach((button) => button.addEventListener("click", () => {
     const key = button.dataset.resetSkinField;
-    commitEditorChange(`Reset ${assetSkinName} ${key}`, (project) => editSkinMetadata(project, assetSkinName, (edit) => { delete edit[key]; }));
+    commitEditorChange(`Reset ${target.name} ${key}`, (project) => editSkinMetadata(project, target.name, (edit) => { delete edit[key]; }));
   }));
-  inspector.querySelector("[data-reset-skin-metadata]")?.addEventListener("click", () => commitEditorChange(`Reset ${assetSkinName} metadata`, (project) => {
-    const existing = matchingProjectEdit(project.skinEdits, assetSkinName);
+  inspector.querySelector("[data-reset-skin-metadata]")?.addEventListener("click", () => commitEditorChange(`Reset ${target.name} metadata`, (project) => {
+    const existing = matchingProjectEdit(project.skinEdits, target.name);
     if (existing) delete project.skinEdits[existing.key];
   }));
   inspector.querySelector("[data-export-skin-metadata]")?.addEventListener("click", () => {
     try {
-      const edit = matchingProjectEdit(editorProject?.skinEdits, assetSkinName)?.value, text = serializeSkinMetadata(assetSkinMetadata, edit);
+      const edit = matchingProjectEdit(editorProject?.skinEdits, target.name)?.value, text = serializeSkinMetadata(target.metadata, edit);
       downloadText("ui_skin.json", text, "application/json");
-      window.__apexLastSkinMetadataExport = { name: "ui_skin.json", skin: assetSkinName, text, metadata: JSON.parse(text) };
-      status.textContent = `Exported ${assetSkinName}/ui_skin.json`;
+      window.__apexLastSkinMetadataExport = { name: "ui_skin.json", skin: target.name, text, metadata: JSON.parse(text) };
+      status.textContent = `Exported ${target.name}/ui_skin.json`;
     } catch (error) { console.error(error); status.textContent = `Could not export ui_skin.json: ${error.message}`; }
   });
 }

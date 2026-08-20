@@ -23,6 +23,13 @@ export function createSkinMetadataLoadGuard() {
   };
 }
 
+/** Keep editor controls attached to the skin and metadata that rendered them. */
+export function captureSkinMetadataEditorTarget(skinName, metadata) {
+  const name = String(skinName || "");
+  if (!name || !metadata) return null;
+  return Object.freeze({ name, metadata });
+}
+
 function inputText(input, source) {
   if (typeof input === "string") {
     const bytes = new TextEncoder().encode(input);

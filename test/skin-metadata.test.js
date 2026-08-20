@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { createSkinMetadata, createSkinMetadataLoadGuard, MAX_SKIN_METADATA_BYTES, parseSkinMetadata, readSkinMetadataFile, serializeSkinMetadata, SkinMetadataError } from "../src/skin-metadata.js";
+import { captureSkinMetadataEditorTarget, createSkinMetadata, createSkinMetadataLoadGuard, MAX_SKIN_METADATA_BYTES, parseSkinMetadata, readSkinMetadataFile, serializeSkinMetadata, SkinMetadataError } from "../src/skin-metadata.js";
 
 test("rejects a metadata read after a newer skin selection", async () => {
   const guard = createSkinMetadataLoadGuard();
@@ -22,6 +22,19 @@ test("rejects a metadata read after a newer skin selection", async () => {
   await slowLoad;
 
   assert.equal(metadata.metadata.skinname, "Fast");
+});
+
+test("keeps visible metadata controls attached to their rendered skin", () => {
+  let selectedName = "red";
+  let selectedMetadata = parseSkinMetadata('{"skinname":"Red"}');
+  const target = captureSkinMetadataEditorTarget(selectedName, selectedMetadata);
+
+  selectedName = "blue";
+  selectedMetadata = parseSkinMetadata('{"skinname":"Blue"}');
+
+  assert.equal(target.name, "red");
+  assert.equal(target.metadata.metadata.skinname, "Red");
+  assert.equal(captureSkinMetadataEditorTarget("", selectedMetadata), null);
 });
 
 test("parses official skin metadata field types and a UTF-8 BOM", () => {
