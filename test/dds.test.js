@@ -97,6 +97,11 @@ test("decodes clipped BC7 edge blocks and rejects malformed data", () => {
   assert.throws(() => decodeDdsRgba(new Uint8Array(16), { compressed: true, cpu: "bc7", dataOffset: 0, width: 32768, height: 32768, mipCount: 1 }), /decoded texture exceeds/);
 });
 
+test("caps partial software-decoded mip chains before enabling mip filtering", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.match(source, /if\(levels\.length>1\)gl\.texParameteri\(gl\.TEXTURE_2D,gl\.TEXTURE_MAX_LEVEL,levels\.length-1\);textureParameters\(gl,levels\.length>1\)/);
+});
+
 test("recognizes legacy D3D9 float panorama textures",()=>{const bytes=legacyFloatDds(2,1,116,new Float32Array([.1,.2,.3,1,.4,.5,.6,1])),descriptor=inspectDds(bytes);assert.equal(descriptor.format,"RGBA32F");assert.equal(descriptor.compressed,false);assert.equal(descriptor.float,true);assert.equal(descriptor.channels,4);assert.equal(descriptor.bitsPerPixel,128);});
 
 test("recognizes the installed Hangar HDR panorama",async(t)=>{let data;try{data=await readFile(hangarFixture);}catch{t.skip("Assetto Corsa showroom fixture is not installed");return;}const model=parseKn5(data),texture=model.textures.find((entry)=>entry.name==="Old_Hangar4.dds"),descriptor=inspectDds(texture?.data);assert.ok(texture);assert.equal(descriptor.format,"RGBA32F");assert.equal(descriptor.width,6000);assert.equal(descriptor.height,3000);assert.equal(texture.size,128+6000*3000*16);});

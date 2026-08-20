@@ -370,9 +370,49 @@ Imola's ambulance rule also exercises repeated `KEY_...`/`VALUE_...` material
 adjustment pairs. Preserving their source order applies all four `ksEmissive`
 channels to five matching meshes. With the tested flag conditions enabled, the
 complete track evaluation retains 999 overridden meshes, five custom-emissive
-meshes, and 169 bounded light instances. Less-common color-mask, vertex-mask,
-bounce-back, exact soft-edge, and UV-remapping operations remain unsupported or
-approximated.
+meshes, and 169 bounded light instances. Less-common vertex-mask, exact soft-edge,
+and raw-UV operations remain unsupported or approximated.
+
+Public CSP shader commit `4f05cc0ba26f7c363886ebb406b35f67157139d0`
+defines `MirrorUV` in `custom_objects/common/emissiveMapping.hlsl`. The file SHA-256
+is `736acc0ba6d0071dee752b02040cbe5d89b3d15eb1209af7795d6e859b8f55a2`.
+The shader first takes the fractional UV unless raw UVs are active. It reflects only
+when `dot(emMirrorUV, uv) - emMirrorUVOffset` is negative. The installed common mixin
+negates the normalized direction and divides the pixel offset by the atlas width.
+The parser resolves the final local mixin atlas resolution before it performs this
+division. Reflected coordinates outside the bounded atlas are rejected before
+sampling, which prevents WebGL's repeating sampler from wrapping into unrelated shapes.
+
+The previous preview reflected the positive half-plane. It also left the fractional
+UV conversion to texture wrapping. The renderer now applies the source equation
+before it samples every bounded emissive atlas. The raw-UV mode remains labeled as an
+approximation because the bounded atlas cannot reproduce procedural shapes beyond one repeat.
+
+A production Electron check used the repository LOD-B car and its 7,310-vertex
+`ford13_nocam` mesh. A high-contrast `MirrorUV` rule produced capture hash
+`5f33ea269e1c18d0`. The same atlas without `MirrorUV` produced
+`61abc090dcec8ffc`. Visual inspection showed the reflected emissive region on the
+source-defined half-plane. Both frames returned WebGL error zero, with no browser exceptions.
+
+Public CSP shader commit `4f05cc0ba26f7c363886ebb406b35f67157139d0`
+provides the exact `CustomEmissive_BounceBack` equations. The evidence comes from
+`lightingBounceBack.hlsl`, `ksPerPixelMultiMap_emissive_ps.fx`, `utils_ps.fx`, and
+`ext_lightingfx/_include_ps.fx`. Their SHA-256 values start with `6ed90463`,
+`24dd348f`, `9d34aba4`, and `3a5050a4`.
+
+The rule saturates the dot product of `emissiveMap` and `extBounceBackMask`. It
+multiplies this value by the absolute intensity and twice the diffuse color. A
+negative intensity also multiplies the result by one minus diffuse alpha. The
+gamma-space shader uses exponent 80 for the view lobe. Apex uses this variant
+because its stock material path samples gamma-space texture values. The separate
+gamma-fixed CSP variant uses exponent 400.
+
+The base shader adds a shadowed sun lobe and reflection-cube mip 3 at `0.005`.
+Lighting FX adds point and spot lights when the light direction opposes the view.
+The public line-light bounce code is disabled, so Apex excludes line lights. The
+last bounce-back mixin wins because each mixin writes the same material properties.
+Public config commit `4dbf2bb909f44ac440414aec55f8c84e5e6b8c97` confirms the
+channel mask and default intensity of 20.
 
 An audit of all 236 installed loaded car and track configs currently finds 501
 recognized custom-emissive descriptors across 126 configs and 2,509 expanded
@@ -381,9 +421,9 @@ vertex-mask descriptors, 32 bounce-back rules, and one active MirrorUV rule.
 Declarative `@MIXIN` invocations
 are processed through the same bounded operation table, including their local atlas
 resolution. No installed operation name is silently dropped. Native-only or
-incompletely inferred behavior is surfaced as an approximation: bounce-back,
-vertex-anchor selection, MirrorUV folding, fog/open-door cast lights, flat-normal
-resource substitution, and the uncommon subtractive procedural-composition flags.
+incompletely inferred behavior is surfaced as an approximation: vertex-anchor
+selection, raw-UV procedural mapping, fog/open-door cast lights, flat-normal resource
+substitution, and the uncommon subtractive procedural-composition flags.
 
 The reusable `tools/browser-smoke.mjs` check was run against production assets. The
 Nissan 370Z changes independently for reverse and both rear turn channels; the AE86
@@ -769,9 +809,9 @@ near-field specular factor as `saturate(extSceneWetness * 100) * AO * 0.5`, then
 multiplies the substrate-specular direction term by `lerp(1, 2, factor)`. Supported
 terrain shaders write AO one to the normal/AO target, so Apex can reproduce both
 terms directly from the live RainFX wetness slider. The same wet uniform is used by
-the viewport and non-recursive scene-probe grass draw. The source's negative-wetness
-snow whitening, local-light specular and cubemap-reflection extension remain outside
-this editor subset.
+the viewport and non-recursive scene-probe grass draw. Both draws also apply the
+source's negative-wetness, squared-height snow whitening. The disabled experimental
+cubemap-reflection extension remains outside this editor subset.
 
 GrassFX has a separate active LightingFX path that is independent of the zeroed
 experimental padding aliases above. Public `custom/grass/flgGrass_vs.fx` selects
@@ -2226,3 +2266,29 @@ The Linux build produced these unsigned artifacts:
 
 The artifacts prove the Linux package path. They do not prove Windows or macOS
 packaging, code signing, or installer behavior.
+
+## GrassFX negative-wetness snow evidence
+
+The public CSP shader checkout is at commit
+`4f05cc0ba26f7c363886ebb406b35f67157139d0`. Its
+`custom/grass/flgGrass_ps.fx` file has SHA-256
+`6b446f52b35a6477d3a8b7a64318526e1e5fae6582d892c7b57c0a42092e5753`.
+The pixel shader interpolates the finished grass color toward white. Its blend is
+`pow(pin.PosY, 2) * saturate(-gWetK)`.
+
+Apex uses the normalized blade-height coordinate for `pin.PosY`. The shared
+viewport and reflection-probe GrassFX program applies the same squared-height blend.
+The RainFX control now covers −1 through 1. Positive values retain wet darkening and
+specular gain. Negative values set those wet terms to zero and apply snow only to
+GrassFX. The ordinary RainFX material preview clamps its input to the positive range.
+
+A packaged Linux WebGL check used a bounded 16 m square fixture with 540 generated
+grass fins. Snow mode produced capture hash `69bbb4d406be3bde`. Zero weather input
+produced `7aa7c1780fa0b195` with the same grass geometry. Both states returned WebGL
+error zero, and the browser reported no errors. The full portable suite passed 248
+tests and skipped 27 installed-game checks.
+
+A second packaged check removed GrassFX and kept one RainFX soaking surface. Its
+negative-input and disabled captures both produced `22fa65aa1df02d53`. This proves
+that snow input does not extrapolate the wet-material approximation. Visual inspection
+of the snow capture showed the expected white tips and green roots.
