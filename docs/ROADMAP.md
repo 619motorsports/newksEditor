@@ -230,9 +230,12 @@ vertical slice is only the foundation.
   virtual `data/lods.ini` follows the same path as unpacked data. All contiguous LODs load with validated
   ranges and game-normalized preview selection. Installed `skins/<name>` folders are
   discovered and their matching texture basenames override every LOD with live switching
-  and diagnostics. The inspector now checks SDK-listed hierarchy coverage, node kinds,
+  and diagnostics. Selected skins expose bounded `ui_skin.json` parsing and editing for
+  name, driver, country, team, number, and priority. Edits support undo, recovery,
+  project persistence, safe unknown-field preservation, and standalone export. The
+  inspector now checks SDK-listed hierarchy coverage, node kinds,
   wheel axes, related pivots, and cross-LOD placement. Packed-data editing/repacking,
-  skin metadata/editing, animation authoring, cross-folder shared-driver access without
+  skin texture creation and preview-image authoring, animation authoring, cross-folder shared-driver access without
   a browser file grant, lights,
   damage/dirt, instruments, steering/driver alignment, bottom-collider editing, and remaining
   car-workflow expansion remain. LOD file names, ranges, and cockpit/driver distance switches now
@@ -244,10 +247,11 @@ vertical slice is only the foundation.
 - Track workspace: static multi-KN5 layouts now load from ordered `models*.ini`
   manifests or manual multi-file selection, including placement transforms and
   collision diagnostics. `DYNAMIC_OBJECT_n` entries now parse and load at their
-  deterministic range centers with probability, multiplicity, velocity, and audio
-  diagnostics. Their native manifest fields now support live editing, undo, recovery,
-  project persistence, validation, and `models.ini` export. The preview uses the
-  deterministic position center. Randomized motion playback remains. Packed or unpacked `surfaces.ini` physics,
+  native seeded positions with probability, inclusive multiplicity, velocity, and
+  audio diagnostics. Their native manifest fields now support live editing, undo,
+  recovery, project persistence, validation, and `models.ini` export. The preview
+  reproduces the MSVCR120 generator, native random-call order, and float velocity
+  updates. A live game can differ because it uses one shared random sequence. Packed or unpacked `surfaces.ini` physics,
   the runtime `WALL` plus system/track definition merge, exact nonzero-sector and
   unique-substring physical-mesh bindings, contiguous starts/pits, timing-gate pairs,
   and hotlap markers now have an assembled-layout audit and spatial physics overlay.
@@ -259,8 +263,12 @@ vertical slice is only the foundation.
   spline CSVs resolve and use the game's world-Y rotation and normalized sampling for
   manual path-position preview and configured-duration playback; live focused-car
   targeting remains. Static layout positions and rotations now support live editing,
-  project persistence, validation, and `models.ini` export. Exact environment matching, remaining shaders
-  and CSP effects, and performance/spatial diagnostics remain.
+  project persistence, validation, and `models.ini` export. The inspector now computes
+  exact parsed hierarchy, mesh, vertex, triangle, material, texture, and payload totals.
+  It reports transformed scene bounds, each source-file hotspot, and the largest meshes,
+  including repeated placements as separate layout entries. These measurements do not
+  invent unverified game-performance budgets. Exact environment matching, remaining
+  shaders, and CSP effects remain.
 - Search, material editing, direct hierarchy editing, and static-mesh geometry transforms
   now form a tested vertical slice. Hierarchy edits use stable node paths and support names, active states,
   local position, XYZ rotation, and scale. The preview, 100-step undo history,
