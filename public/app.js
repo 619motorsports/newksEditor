@@ -14,7 +14,7 @@ import { auditTrackModel, parseSurfacesIni, resolveTrackSurface, serializeSurfac
 import { applySurfaceEdits, captureSurfaceBaseline, surfaceEditCount as countSurfaceEdits } from "/src/surface-authoring.js";
 import { findAcdEntry, parseAcd } from "/src/acd.js";
 import { auditCarCollider, auditCarHierarchy, parseBottomCollidersIni, serializeBottomCollidersIni } from "/src/car-validation.js";
-import { applyBottomColliderEdits, bottomColliderEditCount as countBottomColliderEdits, captureBottomColliderBaseline } from "/src/bottom-collider-authoring.js";
+import { applyBottomColliderEdits, bottomColliderEditCount as countBottomColliderEdits, captureBottomColliderBaseline, validateBottomColliderVector } from "/src/bottom-collider-authoring.js";
 import { parseKnh } from "/src/knh.js";
 import { applyDriverBasePose, auditDriverHiddenObjects, auditDriverRig, findDriverModelAsset, parseDriver3dIni } from "/src/driver-workspace.js";
 import { skinMeshVertices } from "/src/skinning.js";
@@ -219,7 +219,7 @@ $("#dynamic-track-reset").addEventListener("click", () => {
 $("#track-camera-select").addEventListener("change",()=>{stopTrackCameraPlayback();setTrackCameraPosition(0);applyTrackCameraPreview();if(model&&!selectedNode)renderModelInspector(modelFile,modelSummary.nodes,modelSummary.triangles);});
 $("#track-camera-position").addEventListener("input",(event)=>{stopTrackCameraPlayback();setTrackCameraPosition(Number(event.target.value)||0);applyTrackCameraPreview();if(model&&!selectedNode)renderModelInspector(modelFile,modelSummary.nodes,modelSummary.triangles);});
 $("#track-camera-play").addEventListener("click",()=>{if(trackCameraPlayFrame){stopTrackCameraPlayback();return;}const choice=trackCameraChoices.find((item)=>item.key===$("#track-camera-select").value);if(!choice?.camera.splineData)return;if(trackCameraPosition>=1)setTrackCameraPosition(0);trackCameraPlayLast=performance.now();$("#track-camera-play").textContent="Pause spline";$("#track-camera-play").classList.add("active");trackCameraPlayFrame=requestAnimationFrame(playTrackCameraSpline);});
-$("#collider-overlay").addEventListener("click",(event)=>{if(!renderer||!carColliderModel)return;renderer.colliderVisible=!renderer.colliderVisible;event.target.classList.toggle("active",renderer.colliderVisible);renderer.draw();});
+$("#collider-overlay").addEventListener("click",(event)=>{if(!renderer||(!carColliderMatchesOpenModel()&&!bottomColliderMatchesOpenModel()))return;renderer.colliderVisible=!renderer.colliderVisible;event.target.classList.toggle("active",renderer.colliderVisible);renderer.draw();});
 $("#surface-overlay").addEventListener("click",(event)=>{if(!renderer||!trackSurfaceBindings.size)return;renderer.surfaceOverlay=!renderer.surfaceOverlay;event.target.classList.toggle("active",renderer.surfaceOverlay);renderer.draw();if(model&&!selectedNode)renderModelInspector(modelFile,modelSummary.nodes,modelSummary.triangles);});
 $("#grass-fx-toggle").addEventListener("click",(event)=>{if(!renderer||!grassFxEvaluation)return;renderer.grassVisible=!renderer.grassVisible;event.target.classList.toggle("active",renderer.grassVisible);renderer.draw();});
 $("#rain-fx-toggle").addEventListener("click",(event)=>{if(!renderer||!rainFxEvaluation)return;renderer.rainVisible=!renderer.rainVisible;event.target.classList.toggle("active",renderer.rainVisible);renderer.draw();if(model&&!selectedNode)renderModelInspector(modelFile,modelSummary.nodes,modelSummary.triangles);});
@@ -1535,7 +1535,7 @@ function updateBottomColliderEdit(project,position,mutate){
   project.bottomColliderEdits||=Object.create(null);if(bottomColliderProjectHasEdits(project)&&!bottomColliderEditsMatchProject(project))throw new Error("Reset stale bottom-box edits before editing this colliders.ini file");const key=String(position),edit={...(project.bottomColliderEdits[key]||{})};mutate(edit);if(Object.keys(edit).length)project.bottomColliderEdits[key]=edit;else delete project.bottomColliderEdits[key];bindProjectToCurrentBottomCollider(project);
 }
 
-function parseBottomColliderVector(input,key){const value=parseEditorValue(input.value),label=key==="centre"?"Centre":"Size",float32Maximum=3.4028234663852886e38;if(!Array.isArray(value)||value.length!==3)throw new Error(`${label} needs three finite numbers`);if(value.some((component)=>Math.abs(component)>float32Maximum))throw new Error(`${label} components must fit a finite float32 value`);if(key==="size"&&value.some((component)=>component<=0))throw new Error("Size components must be positive");return value;}
+function parseBottomColliderVector(input,key){return validateBottomColliderVector(parseEditorValue(input.value),key);}
 
 function bindBottomColliderEditors(){
   if(!bottomColliderMatchesOpenModel()||!editorProject)return;inspector.querySelector("[data-reset-bottom-colliders]")?.addEventListener("click",()=>commitEditorChange("Reset bottom-box edits",clearProjectBottomColliderEdits));if(!bottomColliderEditsMatchProject())return;

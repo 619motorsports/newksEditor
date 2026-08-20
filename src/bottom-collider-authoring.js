@@ -1,4 +1,15 @@
 export const BOTTOM_COLLIDER_EDIT_KEYS = ["centre", "size", "groundEnabled"];
+const FLOAT32_MAXIMUM = 3.4028234663852886e38;
+
+export function validateBottomColliderVector(value, key) {
+  const label = key === "centre" ? "Centre" : "Size";
+  if (!Array.isArray(value) || value.length !== 3) throw new Error(`${label} needs three finite numbers`);
+  const vector = value.map(Number);
+  if (vector.some((component) => !Number.isFinite(component))) throw new Error(`${label} needs three finite numbers`);
+  if (vector.some((component) => Math.abs(component) > FLOAT32_MAXIMUM)) throw new Error(`${label} components must fit a finite float32 value`);
+  if (key === "size" && vector.some((component) => component <= 0 || Math.fround(component) <= 0)) throw new Error("Size components must be positive float32 values");
+  return vector;
+}
 
 function cloneCollider(collider) {
   const centre = [...collider.centre], size = [...collider.size];

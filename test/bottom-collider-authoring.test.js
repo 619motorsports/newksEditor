@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { applyBottomColliderEdits, bottomColliderEditCount, captureBottomColliderBaseline } from "../src/bottom-collider-authoring.js";
+import { applyBottomColliderEdits, bottomColliderEditCount, captureBottomColliderBaseline, validateBottomColliderVector } from "../src/bottom-collider-authoring.js";
 
 function config() {
   return { source: "data/colliders.ini", colliders: [{
@@ -30,4 +31,14 @@ test("ignores edits for invalid and unavailable collider positions", () => {
   const source = config(), baseline = captureBottomColliderBaseline(source);
   assert.equal(applyBottomColliderEdits(source, { bad: { centre: [1, 2, 3] }, "4": { size: [1, 1, 1] } }, baseline), 0);
   assert.deepEqual(source, config());
+});
+
+test("rejects bottom-collider sizes that underflow float32", () => {
+  assert.throws(() => validateBottomColliderVector([1e-50, 1, 1], "size"), /positive float32/);
+  assert.deepEqual(validateBottomColliderVector([1e-7, 1, 1], "size"), [1e-7, 1, 1]);
+});
+
+test("allows the collider overlay when only bottom boxes are available", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.match(source, /if\(!renderer\|\|\(!carColliderMatchesOpenModel\(\)&&!bottomColliderMatchesOpenModel\(\)\)\)return/);
 });

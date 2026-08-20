@@ -1,5 +1,5 @@
 import { SURFACE_EDIT_KEYS } from "./surface-authoring.js";
-import { BOTTOM_COLLIDER_EDIT_KEYS } from "./bottom-collider-authoring.js";
+import { BOTTOM_COLLIDER_EDIT_KEYS, validateBottomColliderVector } from "./bottom-collider-authoring.js";
 import { normalizeSkinMetadataEdit, SKIN_METADATA_FIELDS } from "./skin-metadata.js";
 import { normalizeFileIdentity } from "./file-identity.js";
 import { normalizeCarLodFileName } from "./kn5-workspace.js";
@@ -126,11 +126,10 @@ function cleanSurfaceEdit(value) {
 
 function cleanBottomColliderEdit(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const output = {}, float32Maximum = 3.4028234663852886e38;
+  const output = {};
   for (const key of ["centre", "size"]) {
-    if (!Array.isArray(value[key]) || value[key].length !== 3) continue;
-    const vector = value[key].map(Number);
-    if (vector.every((component) => Number.isFinite(component) && Math.abs(component) <= float32Maximum) && (key !== "size" || vector.every((component) => component > 0))) output[key] = vector;
+    try { output[key] = validateBottomColliderVector(value[key], key); }
+    catch { /* Invalid persisted collider vectors are dropped. */ }
   }
   if (typeof value.groundEnabled === "boolean") output.groundEnabled = value.groundEnabled;
   return Object.keys(output).length ? output : null;

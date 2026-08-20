@@ -95,7 +95,7 @@ test("normalizes bottom-collider edits as separate non-CSP project fields", () =
   const bottomColliderAsset = { name: "data/colliders.ini", size: 95, sha256: "cd".repeat(32) };
   const project = normalizeEditorProject({ format: "apex-editor-project", version: 1, bottomColliderAsset, bottomColliderEdits: {
     "0": { centre: [0.1, -0.3, 0.6], size: [1.9, 0.2, 4], groundEnabled: false },
-    "1": { centre: [1e999, 0, 0], size: [1, -1, 1], groundEnabled: "no" }
+    "1": { centre: [1e999, 0, 0], size: [1e-50, 1, 1], groundEnabled: "no" }
   } });
   assert.deepEqual(project.bottomColliderAsset, bottomColliderAsset);
   assert.deepEqual(project.bottomColliderEdits["0"], { centre: [0.1, -0.3, 0.6], size: [1.9, 0.2, 4], groundEnabled: false });
