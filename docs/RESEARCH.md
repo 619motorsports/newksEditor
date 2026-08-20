@@ -1571,13 +1571,40 @@ layout geometry.
 
 Dynamic sections preserve `PROBABILITY`, `MULT`, `POS_MODE`, `RND_POS_CENTER`,
 `RND_POS_RANGE`, `VEL_MODE`, `RND_VEL_BASE`, `RND_VEL_RANGE`, and `PLAY_WAV`.
-Apex edits these native fields and writes them back to `models.ini`. The preview uses
-`RND_POS_CENTER` as the deterministic model-root position.
+Apex edits these native fields and writes them back to `models.ini`.
 
-The preview does not simulate position modes, velocity modes, or random ranges.
-Those behaviors remain a separate native-motion recovery task. A production WebGL
-test covered all nine fields, validation, undo, redo, recovery, and export.
-The serializer round-trip test also proves that audio removal omits `PLAY_WAV`.
+The installed `acs.exe` and its matching PDB identify
+`TrackAvatar::initDynamicObjects` at `1401c9840` and
+`TrackAvatar::updateDynamicObjects` at `1401ccb30`. Initialization reads contiguous
+`DYNAMIC_OBJECT_n` sections. It stops at the first missing index. A probability test
+uses `rand() / 32767 * 100 < PROBABILITY`. Accepted objects sample `MULT` as an
+inclusive integer range. Each `RANDOM` position axis uses
+`center + uniform(-range, range)`. Each `RANDOM` velocity axis uses
+`base + uniform(-range, range)`. Both vectors consume random values in Z, Y, X order.
+Other mode values leave the applicable vector at zero.
+
+The update function applies `position += deltaTime * velocity` with single-precision
+values. It writes the result to M41, M42, and M43 of the model-root transform. A
+multiplayer client also adds `serverTime * velocity` during initialization. These
+functions do not wrap positions and do not implement object lifetime or rotation.
+
+`Sim::Sim` at `140192070` seeds the shared random generator from
+`ksGetSystemTime`. The shipped MSVCR120 `rand` implementation uses
+`state = state * 0x343fd + 0x269ec3` and returns bits 16 through 30. Apex uses this
+generator for a reproducible seed preview. A live game can produce a different sample
+because earlier systems also consume the shared random sequence. The preview limits
+rendered instances to 256 and advances the omitted random calls. This limit prevents
+an untrusted manifest from causing an excessive allocation.
+
+A packaged Electron WebGL test loaded the official Barcelona `11.kn5` through a
+two-instance dynamic manifest. Seed 1 produced two moving render instances. A
+two-second update matched the native single-precision equation on all six position
+components. The test also found no JavaScript or WebGL errors, kept Node.js APIs out
+of the renderer, and confirmed the seed, play, and reset controls.
+
+The earlier production WebGL test covered all nine fields, validation, undo, redo,
+recovery, and export. The serializer round-trip test also proves that audio removal
+omits `PLAY_WAV`.
 
 The installed `acs.exe` includes matching PDB symbols. Its `TrackAvatar::init3D`
 function at `1401c8740` reads `POSITION` and `ROTATION` with `INIReader::getFloat3`,

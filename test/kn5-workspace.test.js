@@ -81,7 +81,7 @@ test("quotes manifest file names without removing apostrophes", () => {
   ] }), /both quote characters/);
 });
 
-test("parses installed Kunos dynamic track objects",async(t)=>{let text;try{text=await readFile("/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/tracks/ks_barcelona/models_layout_gp.ini","utf8");}catch{t.skip("Assetto Corsa dynamic track fixture is not installed");return;}const parsed=parseModelsIni(text,"models_layout_gp.ini");assert.equal(parsed.models.length,9);assert.equal(parsed.dynamicObjects.length,2);assert.deepEqual(parsed.dynamicObjects[0].positionCenter,[-320,160,1400]);assert.deepEqual(parsed.dynamicObjects[0].velocityRange,[2,0,2]);assert.equal(parsed.dynamicObjects[0].probability,75);});
+test("parses installed Kunos dynamic track objects",async(t)=>{let text;try{text=await readFile("/mnt/D/SteamLibrary/steamapps/common/assettocorsa/content/tracks/ks_barcelona/models_layout_gp.ini","utf8");}catch{t.skip("Assetto Corsa dynamic track fixture is not installed");return;}const parsed=parseModelsIni(text,"models_layout_gp.ini");assert.equal(parsed.models.length,9);assert.equal(parsed.dynamicObjects.length,2);assert.deepEqual(parsed.dynamicObjects[0].positionCenter,[-320,160,1400]);assert.deepEqual(parsed.dynamicObjects[0].velocityRange,[2,0,2]);assert.equal(parsed.dynamicObjects[0].probability,75);});
 
 test("builds heading, pitch, roll placement matrices with translation", () => {
   const matrix = modelPlacementMatrix([10, 20, 30], [90, 0, 0]);

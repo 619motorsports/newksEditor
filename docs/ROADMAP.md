@@ -238,10 +238,11 @@ vertical slice is only the foundation.
 - Track workspace: static multi-KN5 layouts now load from ordered `models*.ini`
   manifests or manual multi-file selection, including placement transforms and
   collision diagnostics. `DYNAMIC_OBJECT_n` entries now parse and load at their
-  deterministic range centers with probability, multiplicity, velocity, and audio
-  diagnostics. Their native manifest fields now support live editing, undo, recovery,
-  project persistence, validation, and `models.ini` export. The preview uses the
-  deterministic position center. Randomized motion playback remains. Packed or unpacked `surfaces.ini` physics,
+  native seeded positions with probability, inclusive multiplicity, velocity, and
+  audio diagnostics. Their native manifest fields now support live editing, undo,
+  recovery, project persistence, validation, and `models.ini` export. The preview
+  reproduces the MSVCR120 generator, native random-call order, and float velocity
+  updates. A live game can differ because it uses one shared random sequence. Packed or unpacked `surfaces.ini` physics,
   the runtime `WALL` plus system/track definition merge, exact nonzero-sector and
   unique-substring physical-mesh bindings, contiguous starts/pits, timing-gate pairs,
   and hotlap markers now have an assembled-layout audit and spatial physics overlay.
