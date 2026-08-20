@@ -25,6 +25,9 @@ test("serves the desktop application and its explicitly allowed modules", async 
     const surfaceAuthoring = await fetch(`${url}/src/surface-authoring.js`);
     assert.equal(surfaceAuthoring.status, 200);
     assert.match(await surfaceAuthoring.text(), /applySurfaceEdits/);
+    const bottomColliderAuthoring = await fetch(`${url}/src/bottom-collider-authoring.js`);
+    assert.equal(bottomColliderAuthoring.status, 200);
+    assert.match(await bottomColliderAuthoring.text(), /applyBottomColliderEdits/);
     const bc7Decoder = await fetch(`${url}/src/bc7-decoder.js`);
     assert.equal(bc7Decoder.status, 200);
     assert.match(await bc7Decoder.text(), /decodeBc7Block/);
