@@ -178,3 +178,8 @@ export function sampleKsAnimation(animation, position) {
   for (const track of animation?.tracks || []) if (track.animated) result.set(track.name, sampleKsAnimationTrack(track, position));
   return result;
 }
+
+/** KN5 animation tracks replace transforms on null nodes. Mesh records have no local transform. */
+export function animationTransformForNode(node, transforms) {
+  return node?.kind === "node" ? transforms?.get(node.name) : undefined;
+}

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { ksAnimationMatrix, parseKsAnimation, sampleKsAnimationTrack, serializeKsAnimation } from "../src/ksanim.js";
+import { animationTransformForNode, ksAnimationMatrix, parseKsAnimation, sampleKsAnimationTrack, serializeKsAnimation } from "../src/ksanim.js";
 
 const priusAnimations = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/cars/traffic_toyota_prius/animations";
 const legacyAnimation = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/cars/619_gen6_fusion13_nsc/animations/gascap.ksanim";
@@ -54,6 +54,15 @@ test("samples with the game's frameCount times normalized-position rule", () => 
   assert.equal(sampleKsAnimationTrack(track, 0.5)[12], 15);
   assert.equal(sampleKsAnimationTrack(track, 2 / 3)[12], 20);
   assert.equal(sampleKsAnimationTrack(track, 1)[12], 20);
+});
+
+test("applies a track only to a KN5 transform node with the same mesh name", () => {
+  const animated = ksAnimationMatrix(frame([1, 0, 0])), transforms = new Map([["DOOR", animated]]);
+  const transformNode = { kind: "node", name: "DOOR", transform: ksAnimationMatrix(frame([0, 0, 0])) };
+  const meshNode = { kind: "mesh", name: "DOOR" };
+
+  assert.equal(animationTransformForNode(transformNode, transforms), animated);
+  assert.equal(animationTransformForNode(meshNode, transforms), undefined);
 });
 
 test("slerps DirectX row-major quaternions and linearly blends scale", () => {
