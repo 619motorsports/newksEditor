@@ -1443,6 +1443,28 @@ test parses this output again and confirms that its topology stays closed. A pro
 WebKit run used a synthetic car and closed collider. It confirmed live cage movement,
 zero audit findings, invalid-scale rejection, undo, redo, recovery, and overlay retention.
 
+## Car damage configuration evidence
+
+The repository car fixture contains packed and unpacked `damage.ini` data. Its sections
+define scratch-speed thresholds, an oscillation switch, an initial damage level, and
+two visual objects. Each visual object names a KN5 node and defines rotation, speed,
+damage-zone, oscillation, and allowed-G fields.
+
+Apex accepts at most 1 MiB and decodes UTF-8 in fatal mode. The parser requires finite
+float32 values, three-component vectors, ordered nonnegative speeds, ordered oscillation
+angles, safe names, and safe damage-zone tokens. It diagnoses duplicate and missing
+visual-object indices. Malformed input produces controlled warnings or a controlled load
+error. The serializer retains safe unknown entries and sections.
+
+Project edits use the file path, byte size, and SHA-256 digest. The app blocks stale edits
+when a selected file has a different identity. Undo, redo, local recovery, project JSON,
+reset, and standalone `damage.ini` export use the same normalized edit data. Node-name
+diagnostics compare each configured visual object with the open car hierarchy.
+
+This work does not claim a recovered runtime deformation formula. The viewport does not
+simulate collision damage or object oscillation. Those visible behaviors need separate
+native or CSP evidence and a production rendering comparison.
+
 ## Car hierarchy evidence
 
 Pages 13–14 of the installed car-pipeline guide list 14 hierarchy nodes that should
