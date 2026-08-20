@@ -4,9 +4,9 @@ import test from "node:test";
 import { findAcdEntry, parseAcd } from "../src/acd.js";
 import { carLodDistance, carLodVisible, mergeKn5Models, modelPlacementMatrix, normalizeCarLodFileName, parseCarLodsIni, parseModelsIni, serializeCarLodsIni, serializeModelsIni } from "../src/kn5-workspace.js";
 import { parseKn5, walkNodes } from "../src/kn5.js";
+import { assettoPath, carFixtureRoot } from "./fixture-paths.js";
 
-const hickoryFixture = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/tracks/hickory";
-const priusFixture = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/cars/traffic_toyota_prius";
+const hickoryFixture = assettoPath("content/tracks/hickory");
 
 function model(name, materialName, textureName, materialId = 0) {
   return {
@@ -81,7 +81,7 @@ test("quotes manifest file names without removing apostrophes", () => {
   ] }), /both quote characters/);
 });
 
-test("parses installed Kunos dynamic track objects",async(t)=>{let text;try{text=await readFile("/mnt/D/SteamLibrary/steamapps/common/assettocorsa/content/tracks/ks_barcelona/models_layout_gp.ini","utf8");}catch{t.skip("Assetto Corsa dynamic track fixture is not installed");return;}const parsed=parseModelsIni(text,"models_layout_gp.ini");assert.equal(parsed.models.length,9);assert.equal(parsed.dynamicObjects.length,2);assert.deepEqual(parsed.dynamicObjects[0].positionCenter,[-320,160,1400]);assert.deepEqual(parsed.dynamicObjects[0].velocityRange,[2,0,2]);assert.equal(parsed.dynamicObjects[0].probability,75);});
+test("parses installed Kunos dynamic track objects",async(t)=>{let text;try{text=await readFile(assettoPath("content/tracks/ks_barcelona/models_layout_gp.ini"),"utf8");}catch{t.skip("Assetto Corsa dynamic track fixture is not installed");return;}const parsed=parseModelsIni(text,"models_layout_gp.ini");assert.equal(parsed.models.length,9);assert.equal(parsed.dynamicObjects.length,2);assert.deepEqual(parsed.dynamicObjects[0].positionCenter,[-320,160,1400]);assert.deepEqual(parsed.dynamicObjects[0].velocityRange,[2,0,2]);assert.equal(parsed.dynamicObjects[0].probability,75);});
 
 test("builds heading, pitch, roll placement matrices with translation", () => {
   const matrix = modelPlacementMatrix([10, 20, 30], [90, 0, 0]);
@@ -152,7 +152,7 @@ test("quotes authored car LOD file names and rejects malformed output", () => {
 });
 
 test("accepts every installed car LOD file name", async (t) => {
-  const root = "/mnt/D/SteamLibrary/steamapps/common/assettocorsa/content/cars";
+  const root = assettoPath("content/cars");
   let names;
   try { names = await readdir(root); }
   catch { t.skip("Installed Assetto Corsa car archives are unavailable"); return; }
@@ -257,19 +257,17 @@ test("assembles a complete installed multi-KN5 track manifest", async (t) => {
   assert.equal(merged.bytesRead, merged.byteLength);
 });
 
-test("assembles a complete installed four-level car LOD manifest", async (t) => {
-  let manifestText;
-  try { manifestText = await readFile(`${priusFixture}/data/lods.ini`, "utf8"); }
-  catch { t.skip("Assetto Corsa multi-LOD car fixture is not installed"); return; }
+test("assembles the complete repository four-level car LOD manifest", async () => {
+  const manifestText = await readFile(`${carFixtureRoot}/data/lods.ini`, "utf8");
   const manifest = parseCarLodsIni(manifestText, "data/lods.ini"), entries = [];
   for (const lod of manifest.lods) {
-    const data = await readFile(`${priusFixture}/${lod.file}`), parsed = parseKn5(data);
+    const data = await readFile(`${carFixtureRoot}/${lod.file}`), parsed = parseKn5(data);
     entries.push({ name: lod.file, size: data.byteLength, model: parsed, lod });
   }
-  const merged = mergeKn5Models(entries, { name: "traffic_toyota_prius", kind: "carLods", manifest: "data/lods.ini", warnings: manifest.warnings, cockpitHrDistance: manifest.cockpitHrDistance });
+  const merged = mergeKn5Models(entries, { name: "619_gen6_arca_base", kind: "carLods", manifest: "data/lods.ini", warnings: manifest.warnings, cockpitHrDistance: manifest.cockpitHrDistance });
   assert.equal(merged.workspace.files.length, 4);
   assert.deepEqual(merged.workspace.files.map((file) => [file.lod.in, file.lod.out]), [[0, 15], [15, 45], [45, 201], [201, 2000]]);
-  assert.equal(merged.workspace.cockpitHrDistance, 70);
+  assert.equal(merged.workspace.cockpitHrDistance, 25);
   assert.equal(merged.workspace.warnings.length, 0);
   assert.equal(merged.bytesRead, merged.byteLength);
   assert.ok(walkNodes(merged.root).filter(({ node }) => node.kind === "mesh" || node.kind === "skinnedMesh").every(({ node }) => node.materialId >= 0 && node.materialId < merged.materials.length));

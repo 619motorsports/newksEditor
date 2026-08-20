@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { parseCameraSplineCsv, parseTrackCamerasIni, rotateCameraSpline, sampleCameraSpline } from "../src/track-cameras.js";
+import { trackFixtureRoot } from "./fixture-paths.js";
 
 test("parses a normalized track camera and its optical metadata",()=>{const set=parseTrackCamerasIni(`[HEADER]\nVERSION=3\nCAMERA_COUNT=1\nSET_NAME=TV\n[CAMERA_0]\nNAME=Finish\nPOSITION=1,2,3\nFORWARD=0,0,-1\nUP=0,1,0\nMIN_FOV=10\nMAX_FOV=20\nIN_POINT=.9\nOUT_POINT=1\nNEAR_PLANE=.5\nFAR_PLANE=5000\nMIN_EXPOSURE=.3\nMAX_EXPOSURE=.6\nDOF_FACTOR=2\nDOF_RANGE=100\nDOF_FOCUS=50\nDOF_MANUAL=1\nSPLINE=follow.csv\nSPLINE_ROTATION=30\nSPLINE_ANIMATION_LENGTH=12\nFOV_GAMMA=.5\nIS_FIXED=0\n`);assert.equal(set.version,3);assert.equal(set.name,"TV");assert.equal(set.cameras.length,1);assert.deepEqual(set.cameras[0].position,[1,2,3]);assert.equal(set.cameras[0].spline,"follow.csv");assert.equal(set.cameras[0].dofManual,true);assert.deepEqual(set.warnings,[]);});
 
@@ -11,4 +13,4 @@ test("parses, rotates, and samples camera spline offsets with the game endpoint 
 
 test("accepts whitespace spline rows and diagnoses malformed coordinates",()=>{const spline=parseCameraSplineCsv("0 0 0\ninvalid\n0 1 0\n","space.csv");assert.deepEqual(spline.points,[[0,0,0],[0,1,0]]);assert.equal(spline.warnings.length,1);});
 
-test("parses the installed Kunos Imola camera sets",async(t)=>{const directory="/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/tracks/imola/data";let tv,start;try{[tv,start]=await Promise.all([readFile(`${directory}/cameras.ini`,"utf8"),readFile(`${directory}/cameras_start.ini`,"utf8")]);}catch{t.skip("Assetto Corsa camera fixtures are not installed");return;}const tvSet=parseTrackCamerasIni(tv,"imola/data/cameras.ini"),startSet=parseTrackCamerasIni(start,"imola/data/cameras_start.ini");assert.equal(tvSet.version,3);assert.equal(tvSet.cameras.length,12);assert.equal(tvSet.declaredCount,12);assert.equal(startSet.cameras.length,6);assert.ok(startSet.cameras.every((camera)=>camera.fixed&&camera.inPoint===-1&&camera.outPoint===-1));assert.deepEqual(tvSet.warnings,[]);assert.deepEqual(startSet.warnings,[]);});
+test("parses the repository Sepang camera set",async()=>{const path=join(trackFixtureRoot,"data","cameras.ini"),tvSet=parseTrackCamerasIni(await readFile(path,"utf8"),"sepang/data/cameras.ini");assert.equal(tvSet.version,3);assert.equal(tvSet.name,"TV 1");assert.equal(tvSet.cameras.length,21);assert.equal(tvSet.declaredCount,21);assert.equal(tvSet.cameras.filter((camera)=>camera.fixed).length,4);assert.deepEqual(tvSet.warnings,[]);});

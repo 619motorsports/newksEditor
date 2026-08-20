@@ -1,2 +1,14 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Keep the production-sized test assets out of normal Git object storage.
+test/content/**/*.kn5 filter=lfs diff=lfs merge=lfs -text
+test/content/**/*.ksanim filter=lfs diff=lfs merge=lfs -text
+test/content/**/*.vao-patch filter=lfs diff=lfs merge=lfs -text
+test/content/**/*.bank filter=lfs diff=lfs merge=lfs -text
+test/content/**/*.dds filter=lfs diff=lfs merge=lfs -text
+test/content/**/*.ai filter=lfs diff=lfs merge=lfs -text
+test/content/**/*.bin filter=lfs diff=lfs merge=lfs -text
+test/content/**/*.png filter=lfs diff=lfs merge=lfs -text
+test/content/**/*.jpg filter=lfs diff=lfs merge=lfs -text
+test/content/**/*.rar filter=lfs diff=lfs merge=lfs -text
