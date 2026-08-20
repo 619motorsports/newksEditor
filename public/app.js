@@ -2211,7 +2211,7 @@ function uploadDds(gl, compression, bytes) {
     if(descriptor.float){if(uploadFloatDds(gl,bytes,descriptor))return texture;}
     const gpu=gpuFormats[descriptor.format];
     if(gpu){let offset=descriptor.dataOffset,width=descriptor.width,height=descriptor.height;for(let level=0;level<descriptor.mipCount;level++){const size=Math.max(1,Math.ceil(width/4))*Math.max(1,Math.ceil(height/4))*gpu[1];if(offset+size>bytes.byteLength)throw new Error(`DDS mip ${level} exceeds texture data`);gl.compressedTexImage2D(gl.TEXTURE_2D,level,gpu[0],width,height,0,bytes.subarray(offset,offset+size));offset+=size;width=Math.max(1,width>>1);height=Math.max(1,height>>1);}textureParameters(gl,descriptor.mipCount>1);return texture;}
-    if(!descriptor.compressed||descriptor.cpu||descriptor.cpuFallback){const levels=decodeDdsRgba(bytes,descriptor);for(let level=0;level<levels.length;level++){const item=levels[level];gl.texImage2D(gl.TEXTURE_2D,level,gl.RGBA,item.width,item.height,0,gl.RGBA,gl.UNSIGNED_BYTE,item.pixels);}textureParameters(gl,levels.length>1);return texture;}
+    if(!descriptor.compressed||descriptor.cpu||descriptor.cpuFallback){const levels=decodeDdsRgba(bytes,descriptor),internalFormat=descriptor.format.endsWith("_SRGB")?gl.SRGB8_ALPHA8:gl.RGBA;for(let level=0;level<levels.length;level++){const item=levels[level];gl.texImage2D(gl.TEXTURE_2D,level,internalFormat,item.width,item.height,0,gl.RGBA,gl.UNSIGNED_BYTE,item.pixels);}textureParameters(gl,levels.length>1);return texture;}
   } catch(error){console.warn(`Could not decode ${descriptor.format} DDS`,error);}
   gl.deleteTexture(texture);return null;
 }

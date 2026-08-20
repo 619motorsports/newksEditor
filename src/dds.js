@@ -1,3 +1,5 @@
+import { decodeBc7Block } from "./bc7-decoder.js";
+
 const DDS_MAGIC = 0x20534444;
 const DDPF_FOURCC = 0x4;
 const DDPF_LUMINANCE = 0x20000;
@@ -46,7 +48,7 @@ const dxgiFormats = new Map([
   [87, { format: "BGRA8", compressed: false, bitsPerPixel: 32, masks: [0xff0000, 0xff00, 0xff, 0xff000000] }],
   [91, { format: "BGRA8_SRGB", compressed: false, bitsPerPixel: 32, masks: [0xff0000, 0xff00, 0xff, 0xff000000] }],
   [95, { format: "BC6H_UF16", compressed: true, blockBytes: 16 }], [96, { format: "BC6H_SF16", compressed: true, blockBytes: 16 }],
-  [98, { format: "BC7", compressed: true, blockBytes: 16 }], [99, { format: "BC7_SRGB", compressed: true, blockBytes: 16 }]
+  [98, { format: "BC7", compressed: true, blockBytes: 16, cpu: "bc7" }], [99, { format: "BC7_SRGB", compressed: true, blockBytes: 16, cpu: "bc7" }]
 ]);
 
 export function inspectDds(input) {
@@ -157,6 +159,29 @@ function bcLevels(bytes, descriptor) {
   return levels;
 }
 
+function bc7Levels(bytes, descriptor) {
+  const levels = [], blockPixels = new Uint8Array(64);
+  let offset = descriptor.dataOffset, width = descriptor.width, height = descriptor.height;
+  for (let level = 0; level < descriptor.mipCount; level++) {
+    const blocksWide = Math.max(1, Math.ceil(width / 4)), blocksHigh = Math.max(1, Math.ceil(height / 4)), size = blocksWide * blocksHigh * 16;
+    if (offset + size > bytes.byteLength) throw new Error(`DDS mip ${level} exceeds texture data`);
+    const pixels = new Uint8Array(width * height * 4);
+    for (let blockY = 0; blockY < blocksHigh; blockY++) for (let blockX = 0; blockX < blocksWide; blockX++) {
+      const block = offset + (blockY * blocksWide + blockX) * 16;
+      try { decodeBc7Block(bytes, block, blockPixels); }
+      catch (error) { throw new Error(`DDS mip ${level} has an invalid BC7 block at ${blockX},${blockY}`, { cause: error }); }
+      const copyWidth = Math.min(4, width - blockX * 4), copyHeight = Math.min(4, height - blockY * 4);
+      for (let row = 0; row < copyHeight; row++) {
+        const source = row * 16, target = ((blockY * 4 + row) * width + blockX * 4) * 4;
+        pixels.set(blockPixels.subarray(source, source + copyWidth * 4), target);
+      }
+    }
+    levels.push({ width, height, pixels });
+    offset += size; width = Math.max(1, width >> 1); height = Math.max(1, height >> 1);
+  }
+  return levels;
+}
+
 function rgb565(value){const red=(value>>11)&31,green=(value>>5)&63,blue=value&31;return [Math.round(red*255/31),Math.round(green*255/63),Math.round(blue*255/31)];}
 function mixRgb(a,b,aWeight,divisor){return a.map((value,index)=>Math.round((value*aWeight+b[index]*(divisor-aWeight))/divisor));}
 
@@ -182,6 +207,7 @@ export function decodeDdsRgba(input, descriptor = inspectDds(input)) {
   if (!descriptor) throw new Error("Not a supported DDS header");
   const bytes = bytesOf(input);
   if (!descriptor.compressed) return rawLevels(bytes, descriptor);
+  if (descriptor.cpu === "bc7") return bc7Levels(bytes, descriptor);
   if (descriptor.cpu === "bc4" || descriptor.cpu === "bc5") return bcLevels(bytes, descriptor);
   if (descriptor.cpuFallback) return bcColorLevels(bytes,descriptor);
   throw new Error(`DDS ${descriptor.format} should use a GPU compressed-texture path`);
