@@ -355,9 +355,19 @@ Imola's ambulance rule also exercises repeated `KEY_...`/`VALUE_...` material
 adjustment pairs. Preserving their source order applies all four `ksEmissive`
 channels to five matching meshes. With the tested flag conditions enabled, the
 complete track evaluation retains 999 overridden meshes, five custom-emissive
-meshes, and 169 bounded light instances. Less-common color-mask, vertex-mask,
-bounce-back, exact soft-edge, and UV-remapping operations remain unsupported or
-approximated.
+meshes, and 169 bounded light instances. Less-common bounce-back, exact soft-edge,
+and UV-remapping operations remain unsupported or approximated.
+
+Weighted vertex selection now follows the public CSP shader source. The reference
+is [`emissiveMapping.hlsl`](https://gitlab.com/ac-custom-shaders-patch/public/acc-shaders/-/blob/4f05cc0ba26f7c363886ebb406b35f67157139d0/custom_objects/common/emissiveMapping.hlsl)
+at commit `4f05cc0ba26f7c363886ebb406b35f67157139d0`. Its SHA-256 is
+`736acc0ba6d0071dee752b02040cbe5d89b3d15eb1209af7795d6e859b8f55a2`.
+The renderer mirrors the local position before it calculates each squared distance.
+It divides that distance by `max(weight, 0.00001)`. It selects every tied minimum
+and every zero-weight channel. Multiply, add, and subtract composition use the same
+mask. The public [`custom_emissive.ini`](https://github.com/ac-custom-shaders-patch/acc-extension-config/blob/4dbf2bb909f44ac440414aec55f8c84e5e6b8c97/config/cars/common/custom_emissive.ini)
+template confirms the optional fourth weight and its default value of one. That file
+has SHA-256 `2c6aff18067eaed7911bacac28e2d81875c469f11e4de66cbc9a4d060c6f3f7d`.
 
 An audit of all 236 installed loaded car and track configs currently finds 501
 recognized custom-emissive descriptors across 126 configs and 2,509 expanded
@@ -367,8 +377,8 @@ Declarative `@MIXIN` invocations
 are processed through the same bounded operation table, including their local atlas
 resolution. No installed operation name is silently dropped. Native-only or
 incompletely inferred behavior is surfaced as an approximation: bounce-back,
-vertex-anchor selection, MirrorUV folding, fog/open-door cast lights, flat-normal
-resource substitution, and the uncommon subtractive procedural-composition flags.
+MirrorUV folding, fog/open-door cast lights, flat-normal resource substitution, and
+the remaining uncommon procedural-composition flags.
 
 The reusable `tools/browser-smoke.mjs` check was run against production assets. The
 Nissan 370Z changes independently for reverse and both rear turn channels; the AE86
@@ -380,6 +390,11 @@ The same verifier now exercises the Nissan fabric-seat normal/detail material,
 Imola's four-way masked curb material, and the Yellowbird's solid-color `txMaps`
 replacement. All these checks completed with WebGL error zero and no browser
 exception.
+
+A packaged Linux WebGL check also exercised weighted vertex anchors on the
+repository car. Enabling the left-turn input changed the capture from
+`da2866f211ce1139` to `4647658e9b4faf36`. Both captures returned WebGL error zero,
+and the browser reported no exception.
 
 Visual inspection, rather than hashes alone, exposed a Direct3D-to-WebGL winding
 difference: copying the stock clockwise rasterizer state verbatim removed upward
