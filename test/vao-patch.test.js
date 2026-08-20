@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { parseKn5 } from "../src/kn5.js";
-import { bindVaoPatch, CSP_VAO_BIND_DISTANCE_SQUARED, parseSplitAoConfig, parseVaoData, parseVaoPatch, resolveSplitAoAnimation, splitAoBindingAmount } from "../src/vao-patch.js";
+import { bindVaoPatch, CSP_VAO_BIND_DISTANCE_SQUARED, parseSplitAoConfig, parseVaoData, parseVaoPatch, resolveSplitAoAnimation, splitAoAnimationNodeScope, splitAoBindingAmount } from "../src/vao-patch.js";
 
 test("decodes native v4 square-root AO and v5 linear AO bytes", () => {
   const payload = vaoRecord("mesh", 1, [1, 2, 3], 3, Uint8Array.of(0, 64, 255));
@@ -58,7 +58,7 @@ test("uses safe split-AO defaults for malformed configuration values", () => {
 });
 
 test("previews the configured power curve from secondary bind-pose AO to primary animation AO", () => {
-  const split = parseSplitAoConfig("[SPLIT_AO]\nDOOR_EXP=2\nDOOR_NODES=DOOR_ROOT,@AUTO"), state = resolveSplitAoAnimation(split, "animations/car_door_L.ksanim", .5, ["AUTO_CHILD"]);
+  const split = parseSplitAoConfig("[SPLIT_AO]\nDOOR_EXP=2\nDOOR_NODES=DOOR_ROOT,@AUTO"), state = resolveSplitAoAnimation(split, "animations/car_door_L.ksanim", .5, ["AUTO_CHILD"], ["DOOR_ROOT", "AUTO_CHILD"]);
   const binding = { secondary: Uint8Array.of(20), primary: Uint8Array.of(220), nodeNames: ["ROOT", "DOOR_ROOT", "MESH"] };
   assert.equal(state.kind, "door");
   assert.equal(state.amount, .25);
@@ -66,6 +66,24 @@ test("previews the configured power curve from secondary bind-pose AO to primary
   assert.equal(splitAoBindingAmount(binding, state), .25);
   assert.equal(splitAoBindingAmount({ ...binding, nodeNames: ["ROOT", "OTHER"] }, state), 0);
   assert.equal(resolveSplitAoAnimation(split, "animations/car_shift.ksanim", 1).amount, 0);
+});
+
+test("restricts shared door split AO to the selected animated subtree", () => {
+  const leftMesh = mesh("LEFT_MESH", [[0, 0, 0]]), rightMesh = mesh("RIGHT_MESH", [[0, 0, 0]]);
+  const left = { kind: "node", name: "DOOR_L", children: [leftMesh] }, right = { kind: "node", name: "DOOR_R", children: [rightMesh] };
+  const root = { kind: "node", name: "COCKPIT_HR", children: [left, right] };
+  const scope = splitAoAnimationNodeScope(root, { tracks: [
+    { name: "DOOR_L", animated: true, frames: [{}] },
+    { name: "DOOR_R", animated: false, frames: [{}] }
+  ] });
+  const split = parseSplitAoConfig("[SPLIT_AO]\nDOOR_NODES=DOOR_L,DOOR_R"), state = resolveSplitAoAnimation(split, "car_door_L.ksanim", .5, scope.tracks, scope.related);
+  const leftBinding = { secondary: Uint8Array.of(20), nodeNames: ["COCKPIT_HR", "DOOR_L", "LEFT_MESH"] };
+  const rightBinding = { secondary: Uint8Array.of(20), nodeNames: ["COCKPIT_HR", "DOOR_R", "RIGHT_MESH"] };
+
+  assert.deepEqual(scope, { tracks: ["door_l"], related: ["door_l", "cockpit_hr"] });
+  assert.deepEqual([...state.nodes], ["door_l"]);
+  assert.equal(splitAoBindingAmount(leftBinding, state), .25);
+  assert.equal(splitAoBindingAmount(rightBinding, state), 0);
 });
 
 test("parses installed CSP legacy, v4, and v5 ZIP fixtures", async (t) => {

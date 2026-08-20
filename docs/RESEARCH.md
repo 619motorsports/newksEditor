@@ -1870,6 +1870,10 @@ map `lights.ksanim`,
 `car_door_L.ksanim`, `car_door_R.ksanim`, and named wing animations to those lists. It
 expands `@AUTO` to animation track names before it writes the patch configuration.
 Apex follows those mappings and matches a configured transform ancestor for each mesh.
+For door previews, it intersects explicit configured roots with the selected animated
+track and its ancestors. This prevents a shared left-and-right list from changing the
+stationary door. This selection guard is portable preview behavior, not a recovered
+native runtime rule.
 
 The native CPU function that converts animation position to `vaoSecondaryMix` is not
 yet recovered. Apex therefore labels `position^EXP` as a power preview; it does not
@@ -1893,9 +1897,10 @@ toggle, not the remaining animated or spatial extra-sample behavior.
 
 A packaged Electron follow-up loaded the full Nissan 370Z, its v4 VAO patch, and
 `animations/car_door_L.ksanim`. All 201 matched meshes had primary and secondary AO.
-At animation position 0.5, the configured power preview produced a primary amount of
-0.25 on 103 meshes; position one produced an amount of one. Bind, half-open, and open
-frames hashed to `2353b0371a4cc8df`, `fa1ae266319c15be`, and `2c5d55dec93b04a4`.
+The selected animation reduced five configured door roots to four related roots. At
+animation position 0.5, the configured power preview produced a primary amount of
+0.25 on 99 meshes; position one produced an amount of one. Bind, half-open, and open
+frames hashed to `b9e7cfe52798e522`, `be5efdead1bad346`, and `9384439999715ba9`.
 The production renderer returned WebGL error zero, exposed no Node.js API, and logged no
 browser error. This proves that split buffers, node routing, and per-draw mixing execute
 in the packaged WebGL path. It does not make the labeled power curve native evidence.

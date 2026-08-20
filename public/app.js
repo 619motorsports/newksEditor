@@ -23,7 +23,7 @@ import { evaluateRainFx } from "/src/rain-fx.js";
 import { computeDirectionalProbeShadowCascades, computeDirectionalShadowCascades, computeLocalLightShadow, cspLocalShadowFilter, CSP_LOCAL_SHADOW_ATLAS_SIZE, CSP_LOCAL_SHADOW_CELL_SIZE, CSP_LOCAL_SHADOW_LIMIT, CSP_LOCAL_SHADOW_SAMPLES, KS_SHADOW_BIASES, KS_SHADOW_MAP_SIZE, KS_SHADOW_SPLITS, shadowCasterEnabled } from "/src/shadows.js";
 import { cspLightDistanceFade, cspLightReceiverVisible, cspLineClosestPoint, cspSecondarySpotPacking, cspSpotConePacking, cspSpotEdgePacking, evaluateKsLighting, ksEditorAutoExposure, ksEditorBloomCompositeScale, ksEditorBloomGaussianKernel, KS_EDITOR_DEFAULT_WEATHER, KS_EDITOR_EXPOSURE, KS_EDITOR_GLARE, KS_EDITOR_TONEMAP, STOCK_WEATHER_PRESETS, sunDirectionFromAngles } from "/src/lighting.js";
 import { cspTrackOccluded } from "/src/csp-occlusion.js";
-import { bindVaoPatch, parseVaoPatch, resolveSplitAoAnimation, splitAoBindingAmount } from "/src/vao-patch.js";
+import { bindVaoPatch, parseVaoPatch, resolveSplitAoAnimation, splitAoAnimationNodeScope, splitAoBindingAmount } from "/src/vao-patch.js";
 import { adjustCspSeasonColor, analyzeCspSeasonalOverrides } from "/src/seasons.js";
 import { auditMaterialShaderProfiles, resolveMaterialRenderProfile } from "/src/shader-profiles.js";
 import { KS_EDITOR_CUBEMAP, WEBGL_CUBEMAP_FACES, reflectionBlurFromExponent, selectReflectionCaptureItems } from "/src/reflections.js";
@@ -1663,7 +1663,7 @@ function createRenderer(canvas) {
   let vaoBindings=new Map(),splitAoState=resolveSplitAoAnimation(null,"",0),vaoStatus={source:"",version:0,records:0,matchedRecords:0,unmatchedRecords:0,alternateRecords:0,normalRecords:0,matchedMeshes:0,primaryMeshes:0,secondaryMeshes:0,vertices:0,minimum:255,maximum:255,mean:255,splitAo:null,splitAoWarnings:0,splitAoKind:"bind-pose",splitAoAmount:0,splitAoMeshes:0},seasonalStatus={affectedMeshes:0,autumnMeshes:0,winterMeshes:0,legacySummerMeshes:0,peakAutumn:0,peakWinter:0,peakSummer:0},shaderProfileStatus=null;
   let reflectionCaptureStatus={enabled:true,ready:false,size:KS_EDITOR_CUBEMAP.size,faces:0,draws:0,triangles:0,farPlane:KS_EDITOR_CUBEMAP.farPlane,captureMilliseconds:0};
   let reflectionCubeInitialized=false,reflectionNextFace=0,reflectionCaptureRoot=null;
-  let currentAnimation = null, currentAnimationName = "", currentAnimationPosition = 0, animationTransforms = new Map(), animationStatus = { name:"",position:0,version:0,frameCount:0,tracks:0,animatedTracks:0,matchedTracks:0,matchedNodes:0,unmatchedTracks:[] };
+  let currentAnimation = null, currentAnimationName = "", currentAnimationPosition = 0, animationTransforms = new Map(), splitAoAnimationScope=splitAoAnimationNodeScope(null,null), animationStatus = { name:"",position:0,version:0,frameCount:0,tracks:0,animatedTracks:0,matchedTracks:0,matchedNodes:0,unmatchedTracks:[] };
   let externalFileIndex=createAssetFileIndex([]),externalTextures=new Map(),externalCpuTextures=new Map(),externalGpuTextures=new Set(),externalGeneration=0,externalRequirementSignature="",externalTextureStatus={selected:0,requested:0,ready:0,pending:0,missing:0,ambiguous:0,unsupported:0,formats:{},missingPaths:[],ambiguousPaths:[]};
   let selectedSkinFiles=[],selectedSkinName="",skinTextures=new Map(),skinGpuTextures=new Set(),skinGeneration=0,skinTextureStatus={name:"",available:0,matched:0,ready:0,pending:0,inherited:0,ambiguous:0,unsupported:0,formats:{},replacedNames:[]};
   const windParticles=createCspWindParticles();let windTargetIndex=0,windLastTime=0,windAccumulator=0,windUpdateCount=0,windRandomState=0x6d2b79f5,windAnimationTimer=0;
@@ -1814,8 +1814,7 @@ function createRenderer(canvas) {
   }
 
   function updateSplitAoState(){
-    const animatedNodeNames=(currentAnimation?.tracks||[]).filter((track)=>track.frames?.length).map((track)=>track.name);
-    splitAoState=resolveSplitAoAnimation(vaoStatus.splitAo,currentAnimationName,currentAnimationPosition,animatedNodeNames);
+    splitAoState=resolveSplitAoAnimation(vaoStatus.splitAo,currentAnimationName,currentAnimationPosition,splitAoAnimationScope.tracks,splitAoAnimationScope.related);
     let splitAoMeshes=0;for(const item of items){const amount=splitAoBindingAmount(vaoBindings.get(item.node),splitAoState);item.splitAoFactor=amount;if(amount>0)splitAoMeshes++;}
     vaoStatus={...vaoStatus,splitAoKind:splitAoState.kind,splitAoAmount:splitAoState.amount,splitAoPosition:splitAoState.position,splitAoExponent:splitAoState.exponent,splitAoMeshes,splitAoNodes:splitAoState.nodes.size};
   }
@@ -1826,7 +1825,7 @@ function createRenderer(canvas) {
     sceneModel=model;shaderProfileStatus=auditMaterialShaderProfiles(model.materials);reflectionCaptureRoot=null;reflectionCubeInitialized=false;reflectionNextFace=0;
     items.forEach((x) => { gl.deleteBuffer(x.vertex); gl.deleteBuffer(x.index);gl.deleteBuffer(x.vaoAo);gl.deleteBuffer(x.vaoAoSecondary); gl.deleteVertexArray(x.vao); });
     textures.forEach((texture) => gl.deleteTexture(texture));
-    items = []; itemByNode = new WeakMap(); sceneRoot = model.root; textures = []; textureLookup = new Map(); embeddedTextureNames = new Set(); solidTextures = new Map();
+    items = []; itemByNode = new WeakMap(); sceneRoot = model.root; splitAoAnimationScope=splitAoAnimationNodeScope(sceneRoot,currentAnimation); textures = []; textureLookup = new Map(); embeddedTextureNames = new Set(); solidTextures = new Map();
     const textureMap = new Map();
     textureStatus={total:model.textures.length,ready:0,pending:0,unsupported:0,protected:model.encryption?.protectedTextures.length||0,formats:{}};
     for (const texture of model.textures) {
@@ -1869,12 +1868,13 @@ function createRenderer(canvas) {
 
   function setAnimation(animation, position = 0, name = "") {
     currentAnimation=animation||null;currentAnimationName=String(name||animation?.source||"");currentAnimationPosition=Math.max(0,Math.min(1,Number(position)||0));
+    splitAoAnimationScope=splitAoAnimationNodeScope(sceneRoot,currentAnimation);
     animationTransforms=currentAnimation?sampleKsAnimation(currentAnimation,currentAnimationPosition):new Map();
     refreshAnimationWorlds();draw();
   }
 
   function refreshHierarchy() {
-    refreshAnimationWorlds(); reflectionCubeInitialized=false; reflectionNextFace=0; scheduleGrassRebuild(); draw();
+    splitAoAnimationScope=splitAoAnimationNodeScope(sceneRoot,currentAnimation);refreshAnimationWorlds(); reflectionCubeInitialized=false; reflectionNextFace=0; scheduleGrassRebuild(); draw();
   }
 
   function refreshGeometry() {
