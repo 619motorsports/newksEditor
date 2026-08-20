@@ -28,6 +28,7 @@ import { adjustCspSeasonColor, analyzeCspSeasonalOverrides } from "/src/seasons.
 import { auditMaterialShaderProfiles, resolveMaterialRenderProfile } from "/src/shader-profiles.js";
 import { KS_EDITOR_CUBEMAP, WEBGL_CUBEMAP_FACES, reflectionBlurFromExponent, selectReflectionCaptureItems } from "/src/reflections.js";
 import { createCspWindParticles, CSP_WIND_MAP_FORMAT, CSP_WIND_MAP_SIZE, CSP_WIND_PARTICLE_COUNT, updateCspWindParticles } from "/src/csp-wind.js";
+import { createFileIdentity, fileIdentityMatches } from "/src/file-identity.js";
 import { collectFbxAnimations, parseFbxWithTextures, resolveFbxModelTextures } from "/src/fbx-import.js";
 import { applyNodeEdits, composeNodeTransform, decomposeNodeTransform, nodeAtPath, nodePathEntries } from "/src/node-authoring.js";
 
@@ -95,6 +96,7 @@ let carColliderModel = null;
 let carColliderAudit = null;
 let carColliderFileName = "";
 let carColliderError = "";
+let carColliderIdentity = null;
 let colliderGeometryBaselines = new Map();
 let bottomColliderConfig = null;
 let bottomColliderFileName = "";
@@ -386,22 +388,26 @@ async function configurePackedData() {
 }
 
 async function configureCarCollider() {
-  carColliderModel=null;carColliderAudit=null;carColliderFileName="";carColliderError="";colliderGeometryBaselines=new Map();bottomColliderConfig=null;bottomColliderFileName="";window.__apexColliderAudit=null;window.__apexColliderAuthoring=null;window.__apexBottomColliders=null;
+  carColliderModel=null;carColliderAudit=null;carColliderFileName="";carColliderError="";carColliderIdentity=null;colliderGeometryBaselines=new Map();bottomColliderConfig=null;bottomColliderFileName="";window.__apexColliderAudit=null;window.__apexColliderAuthoring=null;window.__apexBottomColliders=null;
   const candidates=assetFileIndex.entries.filter((entry)=>/(^|\/)collider\.kn5$/i.test(entry.relativePath)),entry=candidates.find((candidate)=>/^collider\.kn5$/i.test(candidate.relativePath))||(candidates.length===1?candidates[0]:null);
-  if(entry){carColliderFileName=entry.relativePath;try{carColliderModel=parseKn5(await entry.file.arrayBuffer());colliderGeometryBaselines=captureStaticGeometryBaselines(carColliderModel.root);}catch(error){console.error(error);carColliderError=error.message;}}
+  if(entry){carColliderFileName=entry.relativePath;try{const bytes=new Uint8Array(await entry.file.arrayBuffer()),parsed=parseKn5(bytes),identity=await createFileIdentity(entry.relativePath,bytes,{kn5Version:parsed.version});carColliderModel=parsed;carColliderIdentity=identity;colliderGeometryBaselines=captureStaticGeometryBaselines(carColliderModel.root);}catch(error){console.error(error);carColliderError=error.message;}}
   const configs=assetFileIndex.entries.filter((candidate)=>/(^|\/)data\/colliders\.ini$/i.test(candidate.relativePath)),configEntry=configs.find((candidate)=>/^data\/colliders\.ini$/i.test(candidate.relativePath))||(configs.length===1?configs[0]:null)||virtualAcdAssetEntry("colliders.ini");
   if(configEntry){bottomColliderFileName=configEntry.relativePath;try{bottomColliderConfig=parseBottomCollidersIni(await configEntry.file.text(),configEntry.relativePath);window.__apexBottomColliders=bottomColliderConfig;}catch(error){console.error(error);carColliderError=carColliderError||error.message;}}
   applyProjectColliderEdits();refreshCarColliderPreview();
 }
 
 function applyProjectColliderEdits() {
-  const warnings=[],assetMatch=carColliderMatchesOpenModel();
+  const warnings=[],assetMatch=carColliderMatchesOpenModel(),colliderMatch=carColliderEditsMatchProject();
   if(carColliderModel?.root&&!assetMatch)warnings.push("The selected asset folder does not contain the open model. The app did not apply collider edits.");
-  const applied=carColliderModel?.root&&assetMatch?applyGeometryEdits(carColliderModel.root,editorProject?.colliderEdits,colliderGeometryBaselines,warnings):0;
-  window.__apexColliderAuthoring={edits:Object.keys(editorProject?.colliderEdits||{}).length,applied,warnings,assetMatch};
+  if(carColliderModel?.root&&assetMatch&&!colliderMatch)warnings.push("The current collider does not match this project's collider edits. The app did not apply them.");
+  const edits=assetMatch&&colliderMatch?editorProject?.colliderEdits:{};
+  const applied=carColliderModel?.root?applyGeometryEdits(carColliderModel.root,edits,colliderGeometryBaselines,warnings):0;
+  window.__apexColliderAuthoring={edits:Object.keys(editorProject?.colliderEdits||{}).length,applied,warnings,assetMatch,colliderMatch};
 }
 
 function carColliderMatchesOpenModel(){return Boolean(model&&carColliderModel&&assetFolderMatchesModelFiles(assetFileIndex,loadedModelDescriptors));}
+function colliderProjectHasEdits(project=editorProject){return Boolean(Object.keys(project?.colliderEdits||{}).length);}
+function carColliderEditsMatchProject(project=editorProject){return !colliderProjectHasEdits(project)||fileIdentityMatches(project?.colliderAsset,carColliderIdentity);}
 
 function refreshCarColliderPreview() {
   const available=carColliderMatchesOpenModel(),visible=available&&Boolean(renderer?.colliderVisible);
@@ -697,7 +703,7 @@ function commitEditorChange(label, mutate) {
   const normalized = normalizeEditorProject(next), after = serializeEditorProject(normalized);
   if (after === before) return false;
   const geometryChanged = JSON.stringify(normalized.geometryEdits) !== JSON.stringify(editorProject.geometryEdits);
-  const colliderChanged = JSON.stringify(normalized.colliderEdits) !== JSON.stringify(editorProject.colliderEdits);
+  const colliderChanged = colliderProjectState(normalized) !== colliderProjectState(editorProject);
   const sceneChanged = geometryChanged || colliderChanged || JSON.stringify(normalized.nodeEdits) !== JSON.stringify(editorProject.nodeEdits) || JSON.stringify(normalized.workspaceEdits) !== JSON.stringify(editorProject.workspaceEdits) || JSON.stringify(normalized.surfaceEdits) !== JSON.stringify(editorProject.surfaceEdits);
   undoStack.push({ label, snapshot: before });
   if (undoStack.length > 100) undoStack.shift();
@@ -710,7 +716,7 @@ function commitEditorChange(label, mutate) {
 }
 
 function restoreEditorSnapshot(snapshot) {
-  const restored = normalizeEditorProject(JSON.parse(snapshot)), geometryChanged = JSON.stringify(restored.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits), colliderChanged = JSON.stringify(restored.colliderEdits) !== JSON.stringify(editorProject?.colliderEdits), sceneChanged = geometryChanged || colliderChanged || JSON.stringify(restored.nodeEdits) !== JSON.stringify(editorProject?.nodeEdits) || JSON.stringify(restored.workspaceEdits) !== JSON.stringify(editorProject?.workspaceEdits) || JSON.stringify(restored.surfaceEdits) !== JSON.stringify(editorProject?.surfaceEdits);
+  const restored = normalizeEditorProject(JSON.parse(snapshot)), geometryChanged = JSON.stringify(restored.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits), colliderChanged = colliderProjectState(restored) !== colliderProjectState(editorProject), sceneChanged = geometryChanged || colliderChanged || JSON.stringify(restored.nodeEdits) !== JSON.stringify(editorProject?.nodeEdits) || JSON.stringify(restored.workspaceEdits) !== JSON.stringify(editorProject?.workspaceEdits) || JSON.stringify(restored.surfaceEdits) !== JSON.stringify(editorProject?.surfaceEdits);
   editorProject = restored;
   if (sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged,colliderChanged); }
   refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
@@ -782,6 +788,7 @@ function exportBakedKn5() {
 
 function exportColliderKn5() {
   if(!carColliderMatchesOpenModel()){status.textContent="Open a model from the selected asset folder before exporting its collider";return;}
+  if(!carColliderEditsMatchProject()){status.textContent="The current collider does not match this project's collider edits. Reset the stale edits before export.";return;}
   try{const bytes=serializeKn5(carColliderModel),url=URL.createObjectURL(new Blob([bytes],{type:"application/octet-stream"})),anchor=document.createElement("a");window.__apexLastColliderExport={name:"collider.kn5",bytes:bytes.byteLength,edits:Object.keys(editorProject?.colliderEdits||{}).length,errors:carColliderAudit?.errors||0,warnings:carColliderAudit?.warnings||0};status.textContent=`Exported collider.kn5 · ${carColliderAudit?.triangles?.toLocaleString()||0} triangles · ${carColliderAudit?.errors||0} validation errors`;anchor.href=url;anchor.download="collider.kn5";anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
   catch(error){console.error(error);status.textContent=`Could not export collider.kn5: ${error.message}`;}
 }
@@ -792,7 +799,7 @@ async function loadEditorProject(file) {
     const loaded = normalizeEditorProject(JSON.parse(await file.text()));
     if (loaded.asset.size && loaded.asset.size !== modelFile.size) throw new Error(`Project expects a ${loaded.asset.size}-byte KN5, but ${modelFile.name} is ${modelFile.size} bytes`);
     if (loaded.asset.kn5Version && loaded.asset.kn5Version !== model.version) throw new Error(`Project expects KN5 v${loaded.asset.kn5Version}, but this model is v${model.version}`);
-    const geometryChanged = JSON.stringify(loaded.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits), colliderChanged = JSON.stringify(loaded.colliderEdits) !== JSON.stringify(editorProject?.colliderEdits);
+    const geometryChanged = JSON.stringify(loaded.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits), colliderChanged = colliderProjectState(loaded) !== colliderProjectState(editorProject);
     editorProject = loaded; undoStack = []; redoStack = [];
     applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged,colliderChanged); refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
     if (!selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
@@ -1023,6 +1030,7 @@ function carColliderInspectorHtml() {
 function colliderAuthoringHtml() {
   if(!carColliderModel?.root||!editorProject)return "";
   const meshes=nodePathEntries(carColliderModel.root).filter(({node,path})=>node.kind==="mesh"&&node.vertexStride===11&&colliderGeometryBaselines.has(path)),count=colliderProjectEditCount();
+  if(!carColliderEditsMatchProject())return `${kv("Collider edits",count)}<span class="empty validation-warning">These edits belong to a different collider file. They were not applied. Reset them before editing or exporting this collider.</span><div class="section-actions"><button class="mini" data-reset-colliders>Reset stale collider edits</button></div>`;
   const controls=meshes.map(({node,path})=>{const baseline=colliderGeometryBaselines.get(path),edit=editorProject.colliderEdits?.[path],source=staticGeometryMetrics({...node,vertices:baseline.vertices,indices:baseline.indices}),current=staticGeometryMetrics(node),components=edit?.transform?decomposeNodeTransform(edit.transform):{position:[0,0,0],rotation:[0,0,0],scale:[1,1,1],decomposable:true};
     const vector=(key,label,value,title="")=>`<label class="author-field"><span>${label}</span><input class="${edit?.transform?"authored":""}" data-edit-collider-transform="${key}" data-collider-path="${escapeHtml(path)}" value="${escapeHtml(formatEditorValue(value))}" spellcheck="false"${title?` title="${escapeHtml(title)}"`:""}></label>`;
     const operation=(key,label,title)=>`<label class="author-field"><span>${label}</span><select class="${edit?.[key]?"authored":""}" data-edit-collider-operation="${key}" data-collider-path="${escapeHtml(path)}" title="${escapeHtml(title)}"><option value="">Keep source</option><option value="true" ${edit?.[key]?"selected":""}>Apply</option></select></label>`;
@@ -1251,6 +1259,22 @@ function colliderProjectEditCount(project=editorProject) {
   return Object.values(project?.colliderEdits||{}).reduce((sum,edit)=>sum+geometryEditCount(edit),0);
 }
 
+function colliderProjectState(project) {
+  return JSON.stringify({asset:project?.colliderAsset||null,edits:project?.colliderEdits||{}});
+}
+
+function clearProjectColliderEdits(project) {
+  project.colliderEdits=Object.create(null);
+  project.colliderAsset=null;
+}
+
+function bindProjectToCurrentCollider(project) {
+  if(colliderProjectHasEdits(project)) {
+    if(!carColliderIdentity)throw new Error("The collider file identity is unavailable");
+    project.colliderAsset={...carColliderIdentity};
+  } else project.colliderAsset=null;
+}
+
 function updateGeometryEdit(project, path, mutate) {
   const edit = { ...(project.geometryEdits[path] || {}) };
   mutate(edit);
@@ -1283,21 +1307,24 @@ function bindGeometryEditors(node) {
 
 function updateColliderEdit(project, path, mutate) {
   project.colliderEdits ||= Object.create(null);
+  if(colliderProjectHasEdits(project)&&!carColliderEditsMatchProject(project))throw new Error("Reset stale collider edits before editing this collider");
   const edit={...(project.colliderEdits[path]||{})};
   mutate(edit);
   if(Object.keys(edit).length)project.colliderEdits[path]=edit;
   else delete project.colliderEdits[path];
+  bindProjectToCurrentCollider(project);
 }
 
 function bindColliderEditors() {
   if(!carColliderMatchesOpenModel()||!editorProject)return;
+  inspector.querySelector("[data-reset-colliders]")?.addEventListener("click",()=>commitEditorChange("Reset collider edits",clearProjectColliderEdits));
+  if(!carColliderEditsMatchProject())return;
   inspector.querySelectorAll("[data-edit-collider-transform]").forEach((input)=>{
     const commit=()=>{try{const path=input.dataset.colliderPath,key=input.dataset.editColliderTransform,node=nodeAtPath(carColliderModel.root,path);if(!node)throw new Error(`Collider mesh ${path} is unavailable`);const value=parseNodeVector(input,key[0].toUpperCase()+key.slice(1));if(key==="scale"&&value.some((component)=>Math.abs(component)<1e-6))throw new Error("Collider scale cannot collapse an axis");const existing=editorProject.colliderEdits?.[path],current=existing?.transform?decomposeNodeTransform(existing.transform):{position:[0,0,0],rotation:[0,0,0],scale:[1,1,1]},transform=composeNodeTransform({position:key==="position"?value:current.position,rotation:key==="rotation"?value:current.rotation,scale:key==="scale"?value:current.scale});input.classList.remove("invalid");const changed=commitEditorChange(`Set ${node.name} collider ${key}`,(project)=>updateColliderEdit(project,path,(edit)=>{if(geometryTransformIsIdentity(transform))delete edit.transform;else edit.transform=transform;}));if(!changed)status.textContent=modelStatusText();}catch(error){input.classList.add("invalid");status.textContent=error.message;}};
     input.addEventListener("keydown",(event)=>{if(event.key==="Enter"){event.preventDefault();commit();}});input.addEventListener("change",commit);
   });
   inspector.querySelectorAll("[data-edit-collider-operation]").forEach((select)=>select.addEventListener("change",()=>{const path=select.dataset.colliderPath,key=select.dataset.editColliderOperation,node=nodeAtPath(carColliderModel.root,path),enabled=select.value==="true";commitEditorChange(`${enabled?"Apply":"Reset"} ${node?.name||path} collider ${key}`,(project)=>updateColliderEdit(project,path,(edit)=>{if(enabled)edit[key]=true;else delete edit[key];}));}));
-  inspector.querySelectorAll("[data-reset-collider]").forEach((button)=>button.addEventListener("click",()=>{const path=button.dataset.resetCollider,node=nodeAtPath(carColliderModel.root,path);commitEditorChange(`Reset ${node?.name||path} collider edits`,(project)=>{delete project.colliderEdits[path];});}));
-  inspector.querySelector("[data-reset-colliders]")?.addEventListener("click",()=>commitEditorChange("Reset collider edits",(project)=>{project.colliderEdits=Object.create(null);}));
+  inspector.querySelectorAll("[data-reset-collider]").forEach((button)=>button.addEventListener("click",()=>{const path=button.dataset.resetCollider,node=nodeAtPath(carColliderModel.root,path);commitEditorChange(`Reset ${node?.name||path} collider edits`,(project)=>{delete project.colliderEdits[path];bindProjectToCurrentCollider(project);});}));
   inspector.querySelector("[data-export-collider]")?.addEventListener("click",exportColliderKn5);
 }
 

@@ -25,6 +25,9 @@ test("serves the desktop application and its explicitly allowed modules", async 
     const surfaceAuthoring = await fetch(`${url}/src/surface-authoring.js`);
     assert.equal(surfaceAuthoring.status, 200);
     assert.match(await surfaceAuthoring.text(), /applySurfaceEdits/);
+    const fileIdentity = await fetch(`${url}/src/file-identity.js`);
+    assert.equal(fileIdentity.status, 200);
+    assert.match(await fileIdentity.text(), /createFileIdentity/);
     assert.equal((await fetch(`${url}/vendor/three.module.js`)).status, 200);
     assert.equal((await fetch(`${url}/vendor/three-addons/loaders/FBXLoader.js`)).status, 200);
   });

@@ -134,7 +134,8 @@ npm test
   and a non-destructive orange edge overlay on the active car LOD. Each static collider
   mesh supports offset, rotation, scale, degenerate-face removal, face reversal, and
   normal rebuilding. Edits update the overlay and audit immediately. They also support
-  undo, recovery, project JSON, reset, and standalone `collider.kn5` export.
+  undo, recovery, project JSON, reset, and standalone `collider.kn5` export. A SHA-256
+  source identity prevents saved edits from changing a different or replaced collider.
 - Per-LOD car hierarchy preflight for all 14 SDK-listed suspension, wheel, cockpit,
   steering, and brake-disc nodes; duplicate/null-kind diagnostics; left/right and
   +Z-forward wheel-axis checks; related-pivot and cross-LOD alignment
@@ -359,6 +360,15 @@ also include `name`, `position`, `rotation`, and `scale`. Use `--node NODE` inst
 of `--mesh MESH` to edit the transform of a non-mesh node.
 The check verifies rendering, undo, redo, autosave recovery, portable-project reopen,
 project state, generated CSP, JavaScript errors, and WebGL errors.
+
+Collider identity has a focused production-browser check. The matching and replacement
+folders must contain the same visual KN5. The different-car folder must not match it:
+
+```sh
+node tools/browser-collider-identity-smoke.mjs --model car-a/car.kn5 \
+  --matching-assets car-a --different-car-assets car-c \
+  --replacement-assets car-b --screenshot collider-identity.png
+```
 
 The packaged desktop application has a separate production check:
 

@@ -238,6 +238,7 @@ vertical slice is only the foundation.
   Static `collider.kn5` meshes now support transforms and topology repair. These edits
   update the orange overlay and the collider audit. Project JSON stores the edits, but
   CSP export excludes them. A standalone export writes the edited `collider.kn5`.
+  Persisted SHA-256 identity now stops those edits from crossing collider files.
 - Track workspace: static multi-KN5 layouts now load from ordered `models*.ini`
   manifests or manual multi-file selection, including placement transforms and
   collision diagnostics. `DYNAMIC_OBJECT_n` entries now parse and load at their

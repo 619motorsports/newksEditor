@@ -1,4 +1,5 @@
 import { SURFACE_EDIT_KEYS } from "./surface-authoring.js";
+import { normalizeFileIdentity } from "./file-identity.js";
 
 export const PROJECT_FORMAT = "apex-editor-project";
 export const PROJECT_VERSION = 1;
@@ -125,6 +126,7 @@ export function createEditorProject(asset = {}) {
       size: Math.max(0, Number(asset.size) || 0),
       kn5Version: Math.max(0, Number(asset.kn5Version) || 0)
     },
+    colliderAsset: null,
     materialEdits: Object.create(null),
     meshEdits: Object.create(null),
     nodeEdits: Object.create(null),
@@ -139,6 +141,7 @@ export function normalizeEditorProject(value) {
   if (!value || typeof value !== "object" || value.format !== PROJECT_FORMAT) throw new Error("Not an Apex Editor project");
   if (Number(value.version) !== PROJECT_VERSION) throw new Error(`Unsupported Apex Editor project version ${value.version}`);
   const project = createEditorProject(value.asset || {});
+  project.colliderAsset = normalizeFileIdentity(value.colliderAsset);
   project.materialEdits = safeRecord(value.materialEdits, (item) => cleanEdit(item));
   project.meshEdits = safeRecord(value.meshEdits, (item) => cleanMeshEdit(item));
   project.nodeEdits = safeRecord(value.nodeEdits, (item) => cleanNodeEdit(item));
