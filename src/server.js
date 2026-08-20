@@ -12,7 +12,7 @@ const threeAddonsRoot = packagedThreeAddonsRoot && existsSync(packagedThreeAddon
 const sourceFiles = new Set([
   "acd.js", "asset-files.js", "bc7-decoder.js", "car-validation.js", "csp-config.js",
   "csp-noise.js", "csp-occlusion.js", "csp-wind.js", "custom-emissive.js",
-  "dds.js", "driver-workspace.js", "editor-project.js", "fbx-import.js", "geometry-authoring.js", "grass-fx.js",
+  "dds.js", "driver-workspace.js", "editor-project.js", "fbx-import.js", "file-identity.js", "geometry-authoring.js", "grass-fx.js",
   "kn5-bake.js", "kn5-workspace.js", "kn5-write.js", "kn5.js", "knh.js",
   "ksanim.js", "lighting.js", "node-authoring.js", "rain-fx.js", "reflections.js", "seasons.js",
   "shader-profiles.js", "shadows.js", "skinning.js", "track-cameras.js",

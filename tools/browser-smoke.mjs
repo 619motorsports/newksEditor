@@ -36,6 +36,7 @@ const reflectionCompare = process.argv.includes("--reflection-compare");
 const lighting = process.argv.includes("--lighting");
 const seasons = process.argv.includes("--seasons");
 const showHidden = process.argv.includes("--show-hidden");
+const disableBptc = process.argv.includes("--disable-bptc");
 const weatherName = option("weather");
 const sunHeading = option("sun-heading");
 const sunHeight = option("sun-height");
@@ -116,6 +117,7 @@ async function setCondition(name, value) {
 }
 
 await command("Runtime.enable"); await command("Log.enable"); await command("Page.enable"); await command("Network.enable"); await command("Network.setCacheDisabled", { cacheDisabled: true });
+if(disableBptc)await command("Page.addScriptToEvaluateOnNewDocument",{source:`(()=>{const original=WebGL2RenderingContext.prototype.getExtension;WebGL2RenderingContext.prototype.getExtension=function(name){return name==="EXT_texture_compression_bptc"?null:original.call(this,name);};})();`});
 trace("connected");
 await command("Page.navigate", { url: `http://127.0.0.1:${appPort}` });
 captureErrors = true;
@@ -243,5 +245,5 @@ for (const [name, value] of conditionChanges) {
   if (present) await setCondition(name, 0);
 }
 const summary = await evaluate(`({pipeline:document.querySelector('#pipeline').textContent,status:document.querySelector('#status').textContent,textures:window.__apexRenderer?.textureStatus,fbx:window.__apexFbx?{sourceName:window.__apexFbx.sourceName,format:window.__apexFbx.format,version:window.__apexFbx.version,textureSummary:window.__apexFbx.textureSummary,references:window.__apexFbx.textureReferences.map(reference=>({material:reference.material,slot:reference.slot,source:reference.source,status:reference.status,matchedBy:reference.matchedBy,path:reference.path,format:reference.format,output:reference.output})),warnings:window.__apexFbx.warnings}:null,skinTextures:window.__apexRenderer?.skinTextureStatus,externalTextures:window.__apexRenderer?.externalTextureStatus,animation:window.__apexRenderer?.animationStatus,packedData:window.__apexPackedData?{source:window.__apexPackedData.source,assetName:window.__apexPackedData.assetName,entries:window.__apexPackedData.entries.length,warnings:window.__apexPackedData.warnings}:null,carHierarchyAudit:window.__apexCarHierarchyAudit,colliderAudit:window.__apexColliderAudit,bottomColliders:window.__apexBottomColliders,driverAudit:window.__apexDriverAudit,trackCameras:window.__apexTrackCameras?{sets:window.__apexTrackCameras.length,cameras:window.__apexTrackCameras.reduce((sum,set)=>sum+set.cameras.length,0),warnings:window.__apexTrackCameras.reduce((sum,set)=>sum+set.warnings.length,0)}:null,trackAudit:window.__apexTrackAudit,grass:window.__apexRenderer?.grassStatus,rain:window.__apexRenderer?.rainStatus,shadows:window.__apexRenderer?.shadowStatus,lighting:window.__apexRenderer?.lightingStatus,shaderProfiles:window.__apexRenderer?.shaderProfileStatus,vao:window.__apexRenderer?.vaoStatus,seasons:window.__apexRenderer?.seasonalStatus,scene:window.__apexRenderer?.sceneStatus,workspaceLod:window.__apexRenderer?.workspaceLodStatus})`);
-console.log(JSON.stringify({ summary, sceneBeforeShowHidden, selected, states, errors }, null, 2));
+console.log(JSON.stringify({ bptcAvailable:await evaluate(`Boolean(document.querySelector('#view').getContext('webgl2').getExtension('EXT_texture_compression_bptc'))`), summary, sceneBeforeShowHidden, selected, states, errors }, null, 2));
 socket.close();

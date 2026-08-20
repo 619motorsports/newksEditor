@@ -91,6 +91,10 @@ test("decodes clipped BC7 edge blocks and rejects malformed data", () => {
   assert.deepEqual([...pixels.slice(16, 20)], [53, 53, 205, 113]);
   assert.throws(() => decodeDdsRgba(dx10Dds(4, 4, 98, new Uint8Array(15))), /mip 0 exceeds texture data/);
   assert.throws(() => decodeDdsRgba(dx10Dds(4, 4, 98, new Uint8Array(16))), /invalid BC7 block at 0,0/);
+  const excessiveMips = dx10Dds(4, 4, 98, block);
+  new DataView(excessiveMips.buffer).setUint32(28, 99, true);
+  assert.equal(inspectDds(excessiveMips), null);
+  assert.throws(() => decodeDdsRgba(new Uint8Array(16), { compressed: true, cpu: "bc7", dataOffset: 0, width: 32768, height: 32768, mipCount: 1 }), /decoded texture exceeds/);
 });
 
 test("recognizes legacy D3D9 float panorama textures",()=>{const bytes=legacyFloatDds(2,1,116,new Float32Array([.1,.2,.3,1,.4,.5,.6,1])),descriptor=inspectDds(bytes);assert.equal(descriptor.format,"RGBA32F");assert.equal(descriptor.compressed,false);assert.equal(descriptor.float,true);assert.equal(descriptor.channels,4);assert.equal(descriptor.bitsPerPixel,128);});
