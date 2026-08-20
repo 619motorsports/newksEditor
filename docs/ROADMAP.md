@@ -30,7 +30,10 @@ vertical slice is only the foundation.
   car materials now distinguish the stock windscreen alpha rule, Fresnel-raised
   reflection-glass alpha, and `ksBrokenGlass` damage-mask/additive behavior. CSP
   refraction reads a mipmapped opaque HDR scene resolve with the recovered projected-
-  normal offset. It does not yet feed earlier transparent layers back into later ones.
+  normal offset. The stock `ksTyres` and `newStefano_ksTyres` path now binds all five
+  textures. It also previews the recovered blur, dirt, normal, specular, Fresnel-cap,
+  and additive-reflection operations.
+  Refraction does not yet feed earlier transparent layers back into later ones.
 - The portable FBX importer now reads binary and ASCII FBX scenes through Three.js.
   It imports static and skinned geometry, material groups, transforms, normals, UVs,
   skin weights, bone inverse-bind matrices, original names, and animation clips. It
@@ -232,7 +235,8 @@ vertical slice is only the foundation.
   wheel axes, related pivots, and cross-LOD placement. Packed-data editing/repacking,
   skin metadata/editing, animation authoring, cross-folder shared-driver access without
   a browser file grant, lights,
-  damage/dirt, instruments, steering/driver alignment, bottom-collider editing, and remaining
+  damage, persistent dirt authoring, instruments, steering/driver alignment,
+  bottom-collider editing, and remaining
   car-workflow expansion remain. LOD file names, ranges, and cockpit/driver distance switches now
   support live editing, project persistence, validation, and `lods.ini` export.
   Static `collider.kn5` meshes now support transforms and topology repair. These edits
