@@ -56,13 +56,56 @@ test("software-decodes BC1 colors and transparent palette entries",()=>{const op
 
 test("software-decodes BC2 and BC3 alpha blocks",()=>{const color=[0x00,0xf8,0xe0,0x07,0,0,0,0],bc2=legacyBcDds("DXT3",[0x0f,0,0,0,0,0,0,0,...color]),bc3=legacyBcDds("DXT5",[255,0,1,0,0,0,0,0,...color]);assert.deepEqual([...decodeDdsRgba(bc2)[0].pixels.slice(3,8)],[255,255,0,0,0]);assert.equal(decodeDdsRgba(bc3)[0].pixels[3],0);});
 
-test("decodes DX10 RGBA8 and recognizes BC7 GPU blocks", () => {
-  const rgba = dx10Dds(1, 1, 28, [10, 20, 30, 40]), bc7 = dx10Dds(4, 4, 98, new Uint8Array(16));
+test("decodes DX10 RGBA8 and recognizes BC7 blocks", () => {
+  const rgba = dx10Dds(1, 1, 28, [10, 20, 30, 40]), bc7 = dx10Dds(4, 4, 98, Uint8Array.from(Buffer.from("c0caaeb233af63672412324397a9dcfe", "hex")));
   assert.equal(inspectDds(rgba).format, "RGBA8");
   assert.deepEqual([...decodeDdsRgba(rgba)[0].pixels], [10, 20, 30, 40]);
   const descriptor = inspectDds(bc7);
   assert.equal(descriptor.format, "BC7");
   assert.equal(descriptor.blockBytes, 16);
+  assert.equal(descriptor.cpu, "bc7");
+});
+
+test("software-decodes all eight BC7 block modes", () => {
+  const vectors = [
+    ["9f999997999997999bb71d11144cd7c9", "cbcbcbffcececeffceced0ffceced3ffc6c6c6ffc9c9c9ffccccccffcececeffc3c3c3ffc5c5c5ffc8c8c8ffcbcbcbffc0c0c0ffc2c2c2ffc3c3c3ffc7c7c7ff"],
+    ["16f7aef739aff7f7aef734809a5eceee", "dfe7dfffe4eae4ffe9e9e9ffe9e9e9ffe6ece6ffecececffeeeeeeffecececffedf1edfff2f2f2fff0f0f0ffeeeeeefff3f3f3fff3f3f3fff2f2f2ffeeeeeeff"],
+    ["14b5ced9669d678659e7995fb6686959", "d6d6d6ffd6ceceffcebebeffce9c9cffd6d6d6ffd6d3d3ffcececeffc6b6b3ffd6d6d6ffd6d3d3ffcececeffc6b6b3ffd6d6d6ffcececeffc6b6b3ffb5847bff"],
+    ["d8dce17afc1daec7dfeb7a7ccf81d4a1", "eaeaedffeaeaedffe5e5ecffe0e0eaffefefefffefefefffefefefffeaeaedfff2f2f2fff2f2f2fff2f2f2fff1f1f1fff5f5f5fff5f5f5fff4f4f4fff4f4f4ff"],
+    ["10000000000000000000000000000000", "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"],
+    ["a0801f6000f803fc01000080010000c0", "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007e7fff06"],
+    ["c0caaeb233af63672412324397a9dcfe", "3535cd713535cd713535cd712f2fcd693535cd713939ce783939ce783e3ecf7f4e4ed1955757d2a25757d2a25d5dd3ab6767d4b86b6bd5bf7171d5c77676d6ce"],
+    ["80009813803901f81f003100e0e1e119", "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000009a9afb109a9afb189a9afb18"]
+  ];
+  for (const [block, expected] of vectors) {
+    const dds = dx10Dds(4, 4, 98, Uint8Array.from(Buffer.from(block, "hex")));
+    assert.equal(Buffer.from(decodeDdsRgba(dds)[0].pixels).toString("hex"), expected);
+  }
+});
+
+test("reuses fixed BC7 decoder scratch storage across blocks", async () => {
+  const source = await readFile(new URL("../src/bc7-decoder.js", import.meta.url), "utf8");
+  assert.match(source, /const DECODER_SCRATCH = \{[\s\S]*endpoints: new Uint16Array\(24\)[\s\S]*indices: new Uint8Array\(16\)[\s\S]*export function decodeBc7Block/);
+  assert.doesNotMatch(source, /Array\.from\(|function readerFor|const partitionSetAt =/);
+});
+
+test("decodes clipped BC7 edge blocks and rejects malformed data", () => {
+  const block = Uint8Array.from(Buffer.from("c0caaeb233af63672412324397a9dcfe", "hex"));
+  const pixels = decodeDdsRgba(dx10Dds(5, 3, 99, new Uint8Array([...block, ...block])))[0].pixels;
+  assert.equal(pixels.length, 5 * 3 * 4);
+  assert.deepEqual([...pixels.slice(0, 4)], [53, 53, 205, 113]);
+  assert.deepEqual([...pixels.slice(16, 20)], [53, 53, 205, 113]);
+  assert.throws(() => decodeDdsRgba(dx10Dds(4, 4, 98, new Uint8Array(15))), /mip 0 exceeds texture data/);
+  assert.throws(() => decodeDdsRgba(dx10Dds(4, 4, 98, new Uint8Array(16))), /invalid BC7 block at 0,0/);
+  const excessiveMips = dx10Dds(4, 4, 98, block);
+  new DataView(excessiveMips.buffer).setUint32(28, 99, true);
+  assert.equal(inspectDds(excessiveMips), null);
+  assert.throws(() => decodeDdsRgba(new Uint8Array(16), { compressed: true, cpu: "bc7", dataOffset: 0, width: 32768, height: 32768, mipCount: 1 }), /decoded texture exceeds/);
+});
+
+test("caps partial software-decoded mip chains before enabling mip filtering", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.match(source, /if\(levels\.length>1\)gl\.texParameteri\(gl\.TEXTURE_2D,gl\.TEXTURE_MAX_LEVEL,levels\.length-1\);textureParameters\(gl,levels\.length>1\)/);
 });
 
 test("recognizes legacy D3D9 float panorama textures",()=>{const bytes=legacyFloatDds(2,1,116,new Float32Array([.1,.2,.3,1,.4,.5,.6,1])),descriptor=inspectDds(bytes);assert.equal(descriptor.format,"RGBA32F");assert.equal(descriptor.compressed,false);assert.equal(descriptor.float,true);assert.equal(descriptor.channels,4);assert.equal(descriptor.bitsPerPixel,128);});

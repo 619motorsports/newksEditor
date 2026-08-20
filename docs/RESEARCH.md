@@ -271,6 +271,21 @@ and DX10 sRGB and uncompressed RGBA/BGRA/R8 mappings are recognized. A 144.5 MB
 Dallara IR18 fixture loaded 60 of 60 textures, including eight BC7 images, and its
 isolated Firestone sidewall rendered legibly without WebGL or JavaScript errors.
 
+When `EXT_texture_compression_bptc` is unavailable, Apex decodes BC7 to RGBA8 in
+software. The JavaScript decoder is based on `bcdec` commit
+`93628fe5627102fe5187b7eeb99122dec6612c36` under its MIT license. Tests cover all
+eight BC7 modes, clipped edge blocks, missing bytes, and an invalid mode. An
+independent ImageMagick 7.1.2-29 decode of the upstream 800×600 `dice_bc7.dds`
+matched Apex byte-for-byte across all 1,920,000 RGBA bytes. Both decodes have SHA-256
+`7f9bd5c018d7c8872e8b4c04ba724df08627d9b771877b56e2ee55a7a02b173f`.
+In development Electron and the packaged Linux application, a synthetic KN5 rendered
+the same BC7 material with BPTC enabled and with `EXT_texture_compression_bptc`
+forced unavailable. Both
+screenshots have SHA-256
+`39ff6b48044997d05c6cc72d35893963fe6f303faa387520f5b41b9d99ae38ec`.
+The software run loaded one of one textures, returned WebGL error zero, and reported
+no JavaScript or browser-log errors.
+
 After correcting the v5 header, both 100-file baseline groups audit with zero parse
 failures. A separate 300-file mixed-car slice also has zero texture-table failures
 and contains 4,477 textures, including the 49 BC7 images and 1,218 embedded PNGs.
@@ -355,8 +370,8 @@ Imola's ambulance rule also exercises repeated `KEY_...`/`VALUE_...` material
 adjustment pairs. Preserving their source order applies all four `ksEmissive`
 channels to five matching meshes. With the tested flag conditions enabled, the
 complete track evaluation retains 999 overridden meshes, five custom-emissive
-meshes, and 169 bounded light instances. Less-common bounce-back, exact soft-edge,
-and UV-remapping operations remain unsupported or approximated.
+meshes, and 169 bounded light instances. Exact soft-edge and raw-UV operations
+remain approximations.
 
 Weighted vertex selection now follows the public CSP shader source. The reference
 is [`emissiveMapping.hlsl`](https://gitlab.com/ac-custom-shaders-patch/public/acc-shaders/-/blob/4f05cc0ba26f7c363886ebb406b35f67157139d0/custom_objects/common/emissiveMapping.hlsl)
@@ -369,6 +384,47 @@ mask. The public [`custom_emissive.ini`](https://github.com/ac-custom-shaders-pa
 template confirms the optional fourth weight and its default value of one. That file
 has SHA-256 `2c6aff18067eaed7911bacac28e2d81875c469f11e4de66cbc9a4d060c6f3f7d`.
 
+Public CSP shader commit `4f05cc0ba26f7c363886ebb406b35f67157139d0`
+defines `MirrorUV` in `custom_objects/common/emissiveMapping.hlsl`. The file SHA-256
+is `736acc0ba6d0071dee752b02040cbe5d89b3d15eb1209af7795d6e859b8f55a2`.
+The shader first takes the fractional UV unless raw UVs are active. It reflects only
+when `dot(emMirrorUV, uv) - emMirrorUVOffset` is negative. The installed common mixin
+negates the normalized direction and divides the pixel offset by the atlas width.
+The parser resolves the final local mixin atlas resolution before it performs this
+division. Reflected coordinates outside the bounded atlas are rejected before
+sampling, which prevents WebGL's repeating sampler from wrapping into unrelated shapes.
+
+The previous preview reflected the positive half-plane. It also left the fractional
+UV conversion to texture wrapping. The renderer now applies the source equation
+before it samples every bounded emissive atlas. The raw-UV mode remains labeled as an
+approximation because the bounded atlas cannot reproduce procedural shapes beyond one repeat.
+
+A production Electron check used the repository LOD-B car and its 7,310-vertex
+`ford13_nocam` mesh. A high-contrast `MirrorUV` rule produced capture hash
+`5f33ea269e1c18d0`. The same atlas without `MirrorUV` produced
+`61abc090dcec8ffc`. Visual inspection showed the reflected emissive region on the
+source-defined half-plane. Both frames returned WebGL error zero, with no browser exceptions.
+
+Public CSP shader commit `4f05cc0ba26f7c363886ebb406b35f67157139d0`
+provides the exact `CustomEmissive_BounceBack` equations. The evidence comes from
+`lightingBounceBack.hlsl`, `ksPerPixelMultiMap_emissive_ps.fx`, `utils_ps.fx`, and
+`ext_lightingfx/_include_ps.fx`. Their SHA-256 values start with `6ed90463`,
+`24dd348f`, `9d34aba4`, and `3a5050a4`.
+
+The rule saturates the dot product of `emissiveMap` and `extBounceBackMask`. It
+multiplies this value by the absolute intensity and twice the diffuse color. A
+negative intensity also multiplies the result by one minus diffuse alpha. The
+gamma-space shader uses exponent 80 for the view lobe. Apex uses this variant
+because its stock material path samples gamma-space texture values. The separate
+gamma-fixed CSP variant uses exponent 400.
+
+The base shader adds a shadowed sun lobe and reflection-cube mip 3 at `0.005`.
+Lighting FX adds point and spot lights when the light direction opposes the view.
+The public line-light bounce code is disabled, so Apex excludes line lights. The
+last bounce-back mixin wins because each mixin writes the same material properties.
+Public config commit `4dbf2bb909f44ac440414aec55f8c84e5e6b8c97` confirms the
+channel mask and default intensity of 20.
+
 An audit of all 236 installed loaded car and track configs currently finds 501
 recognized custom-emissive descriptors across 126 configs and 2,509 expanded
 shapes, masks, and input bindings. This includes 152 color-mask instances, six
@@ -376,9 +432,9 @@ vertex-mask descriptors, 32 bounce-back rules, and one active MirrorUV rule.
 Declarative `@MIXIN` invocations
 are processed through the same bounded operation table, including their local atlas
 resolution. No installed operation name is silently dropped. Native-only or
-incompletely inferred behavior is surfaced as an approximation: bounce-back,
-MirrorUV folding, fog/open-door cast lights, flat-normal resource substitution, and
-the remaining uncommon procedural-composition flags.
+incompletely inferred behavior is surfaced as an approximation: raw-UV procedural
+mapping, fog/open-door cast lights, flat-normal resource substitution, and uncommon
+procedural-composition flags.
 
 The reusable `tools/browser-smoke.mjs` check was run against production assets. The
 Nissan 370Z changes independently for reverse and both rear turn channels; the AE86
@@ -769,9 +825,9 @@ near-field specular factor as `saturate(extSceneWetness * 100) * AO * 0.5`, then
 multiplies the substrate-specular direction term by `lerp(1, 2, factor)`. Supported
 terrain shaders write AO one to the normal/AO target, so Apex can reproduce both
 terms directly from the live RainFX wetness slider. The same wet uniform is used by
-the viewport and non-recursive scene-probe grass draw. The source's negative-wetness
-snow whitening, local-light specular and cubemap-reflection extension remain outside
-this editor subset.
+the viewport and non-recursive scene-probe grass draw. Both draws also apply the
+source's negative-wetness, squared-height snow whitening. The disabled experimental
+cubemap-reflection extension remains outside this editor subset.
 
 GrassFX has a separate active LightingFX path that is independent of the zeroed
 experimental padding aliases above. Public `custom/grass/flgGrass_vs.fx` selects
@@ -1605,6 +1661,13 @@ one mesh from fallback physics to an exact match. The same test covered all fiel
 invalid input, undo, redo, recovery, the surface overlay, and export. A serializer
 round trip preserved every field and rejected unsafe INI text.
 
+A packaged Imola performance check used the 398.5 MB assembled layout with
+3,465,927 vertices. The scene-diagnostic counter remained at one during a friction
+edit, undo, and redo. These actions completed in 50 ms or less on the check system.
+The surface overlay remained coherent and produced hash `030135e0c231ce45`.
+WebGL returned zero, the browser log stayed empty, and the renderer exposed no
+Node.js API.
+
 ## Track layout assembly evidence
 
 Installed tracks use ordered `[MODEL_n]` sections in `models*.ini`, with `FILE`,
@@ -1614,13 +1677,54 @@ layout geometry.
 
 Dynamic sections preserve `PROBABILITY`, `MULT`, `POS_MODE`, `RND_POS_CENTER`,
 `RND_POS_RANGE`, `VEL_MODE`, `RND_VEL_BASE`, `RND_VEL_RANGE`, and `PLAY_WAV`.
-Apex edits these native fields and writes them back to `models.ini`. The preview uses
-`RND_POS_CENTER` as the deterministic model-root position.
+Apex edits these native fields and writes them back to `models.ini`.
 
-The preview does not simulate position modes, velocity modes, or random ranges.
-Those behaviors remain a separate native-motion recovery task. A production WebGL
-test covered all nine fields, validation, undo, redo, recovery, and export.
-The serializer round-trip test also proves that audio removal omits `PLAY_WAV`.
+The installed `acs.exe` and its matching PDB identify
+`TrackAvatar::initDynamicObjects` at `1401c9840` and
+`TrackAvatar::updateDynamicObjects` at `1401ccb30`. Initialization reads contiguous
+`DYNAMIC_OBJECT_n` sections. It stops at the first missing index. A probability test
+uses `rand() / 32767 * 100 < PROBABILITY`. Accepted objects sample `MULT` as an
+inclusive integer range. Each `RANDOM` position axis uses
+`center + uniform(-range, range)`. Each `RANDOM` velocity axis uses
+`base + uniform(-range, range)`. Both vectors consume random values in Z, Y, X order.
+Other mode values leave the applicable vector at zero.
+
+The update function applies `position += deltaTime * velocity` with single-precision
+values. It writes the result to M41, M42, and M43 of the model-root transform. A
+multiplayer client also adds `serverTime * velocity` during initialization. These
+functions do not wrap positions and do not implement object lifetime or rotation.
+Apex replaces those three fields on the loaded KN5 root and preserves the other 13
+matrix values. It rejects values that cannot remain finite after float32 conversion.
+
+`Sim::Sim` at `140192070` seeds the shared random generator from
+`ksGetSystemTime`. The shipped MSVCR120 `rand` implementation uses
+`state = state * 0x343fd + 0x269ec3` and returns bits 16 through 30. Apex uses this
+generator for a reproducible seed preview. A live game can produce a different sample
+because earlier systems also consume the shared random sequence. The preview limits
+rendered instances to 256 and advances the omitted random calls. Repeated instances
+keep separate world transforms but share one GPU geometry upload for each source mesh.
+The shared upload includes the vertex, index, VAO, and vertex-AO buffers.
+
+A packaged Electron WebGL test loaded the official Barcelona `11.kn5` through a
+dynamic manifest after setting the KN5 root translation to `[1000, 2000, 3000]`.
+After two seconds, the moving instance was at `[2, 4, 6]`, not the additive
+`[1002, 2004, 3006]`. This confirms that the preview replaces the root translation.
+The captured frame hash was `fceea43cc3ccfe5d`. The test found no JavaScript or
+WebGL errors, and the desktop renderer did not expose Node.js APIs.
+
+A packaged gap-manifest test supplied `DYNAMIC_OBJECT_0` and `DYNAMIC_OBJECT_2`,
+but the second section referenced a missing file. Apex loaded only the official
+Barcelona `11.kn5` file and produced one instance. The frame hash was
+`6023febc3fb32bb6`, and WebGL returned zero errors. This result confirms that later
+sections do not resolve or render after a gap.
+
+A packaged sharing test sampled 12 copies of the official Barcelona `11.kn5`.
+The renderer created 12 render items but only one GPU geometry upload. The frame hash
+was `5741712b0f83cd89`, and WebGL returned zero errors. The browser log had no errors.
+
+The earlier production WebGL test covered all nine fields, validation, undo, redo,
+recovery, and export. The serializer round-trip test also proves that audio removal
+omits `PLAY_WAV`.
 
 The installed `acs.exe` includes matching PDB symbols. Its `TrackAvatar::init3D`
 function at `1401c8740` reads `POSITION` and `ROTATION` with `INIReader::getFloat3`,
@@ -1702,6 +1806,24 @@ The installed four-LOD Prius fixture has eight generated skins. Selecting
 other KN5 textures remained inherited. Chrome 151 produced a visibly darker gold body
 than the embedded-texture preview and a distinct capture hash, with no unsupported
 skin texture, JavaScript exception, or WebGL error.
+
+An installed-data audit found 15,067 `ui_skin.json` files. After accepting the UTF-8
+BOM in 44 files, 14,971 files had readable JSON and 96 were malformed. The strict
+parser accepted 14,960 files. It rejected 11 additional files with invalid UTF-8.
+The readable objects used only six top-level keys. `skinname` occurred in every file.
+The `drivername`, `country`, `team`, and `number` fields occurred in most files. A
+numeric car number occurred in 1,591 files, so Apex accepts it and writes it as text.
+The optional integer `priority` field occurred in 4,497 files. Values ranged from
+0 through 35.
+
+Apex limits metadata input to 1 MiB, requires valid UTF-8 and one JSON object, and
+reports malformed files without replacing them. The editor retains safe unknown
+fields for compatibility with other installations. It stores only the six authored
+field changes in the Apex project and exports a standalone `ui_skin.json` file.
+The browser file loader rejects an oversized file from its declared size before it
+reads the payload. A packaged WebGL check loaded the official Alfa `00_rosso`
+metadata and produced hash `ebf462b1040fd758`. The browser log and WebGL reported
+zero errors, and the sandbox exposed neither `process` nor `require`.
 
 ## ksEditor directional-shadow evidence
 
@@ -2160,3 +2282,29 @@ The Linux build produced these unsigned artifacts:
 
 The artifacts prove the Linux package path. They do not prove Windows or macOS
 packaging, code signing, or installer behavior.
+
+## GrassFX negative-wetness snow evidence
+
+The public CSP shader checkout is at commit
+`4f05cc0ba26f7c363886ebb406b35f67157139d0`. Its
+`custom/grass/flgGrass_ps.fx` file has SHA-256
+`6b446f52b35a6477d3a8b7a64318526e1e5fae6582d892c7b57c0a42092e5753`.
+The pixel shader interpolates the finished grass color toward white. Its blend is
+`pow(pin.PosY, 2) * saturate(-gWetK)`.
+
+Apex uses the normalized blade-height coordinate for `pin.PosY`. The shared
+viewport and reflection-probe GrassFX program applies the same squared-height blend.
+The RainFX control now covers −1 through 1. Positive values retain wet darkening and
+specular gain. Negative values set those wet terms to zero and apply snow only to
+GrassFX. The ordinary RainFX material preview clamps its input to the positive range.
+
+A packaged Linux WebGL check used a bounded 16 m square fixture with 540 generated
+grass fins. Snow mode produced capture hash `69bbb4d406be3bde`. Zero weather input
+produced `7aa7c1780fa0b195` with the same grass geometry. Both states returned WebGL
+error zero, and the browser reported no errors. The full portable suite passed 248
+tests and skipped 27 installed-game checks.
+
+A second packaged check removed GrassFX and kept one RainFX soaking surface. Its
+negative-input and disabled captures both produced `22fa65aa1df02d53`. This proves
+that snow input does not extrapolate the wet-material approximation. Visual inspection
+of the snow capture showed the expected white tips and green roots.

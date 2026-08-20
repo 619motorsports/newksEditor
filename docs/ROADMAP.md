@@ -20,8 +20,8 @@ vertical slice is only the foundation.
   bounded legacy D3D9 R/RG/RGBA 16/32-bit float DDS,
   embedded PNG/JPEG/WebP, and native BPTC BC6H/BC7, tangent normals, packed MultiMap specular/gloss/reflection,
   diffuse/normal detail maps, and stock four-way world-space track multilayers are
-  decoded and rendered. BC6H/BC7 still need a software fallback when BPTC is
-  unavailable; other DX10 variants and the remaining shader families still need exact
+  decoded and rendered. BC7 has a software fallback when BPTC is unavailable.
+  BC6H, other DX10 variants, and the remaining shader families still need exact
   paths. Track/environment workspaces now use a recovered 512² runtime scene cubemap:
   six faces initialize from the active camera and one face refreshes per draw. The
   portable reflection fallback now uses
@@ -65,11 +65,13 @@ vertical slice is only the foundation.
   families already have a tested implementation. The same safe path now covers the
   common `CustomEmissive` and `CustomEmissiveMulti` atlas shapes, mirrored channels,
   dashboard items, and vehicle-input bindings.
-- Complete the remaining custom-emissive bounce-back operations,
-  UV transforms, and exact shader channel-composition behavior. Installed color masks,
-  weighted vertex masks, normalized/soft atlases, vehicle bindings, and declarative
-  `@MIXIN` calls now work. Bounce-back, MirrorUV, fog/door light casting, and the
-  remaining subtractive modes are explicitly labeled approximations.
+- Complete the remaining custom-emissive color operations, UV transforms, and exact
+  shader channel composition. Installed color masks, weighted vertex masks,
+  normalized atlases, vehicle bindings, declarative `@MIXIN` calls, and exact
+  view-dependent bounce-back now work. Source-backed `MirrorUV` uses fractional UVs,
+  the normalized direction, the final resolution-scaled offset, and negative-half-plane
+  reflection without atlas wrapping. Raw UVs, soft edges, fog/door light casting, and
+  uncommon procedural modes are explicitly labeled approximations.
 - Complete CSP light shadows, occlusion, binding, fade/visibility behavior, and
   photometric matching. Point/spot lights, mirrored self-lights, finite line lights,
   geometry-derived track series, live conditions, the recovered
@@ -179,8 +181,9 @@ vertical slice is only the foundation.
   resolve and separable 7-tap or 15-tap filters run before receiver sampling. GrassFX
   uses CSP's 10 cm lowered receiver. Full unsampled compute density,
   moving-vehicle air/deformation stamping, 32-slot packing, dynamic/car atlas refresh scheduling,
-  wet cubemap reflection,
-  negative-wetness snow, and the rest of CSP's game-only lighting integration remain.
+  wet cubemap reflection, and the rest of CSP's game-only lighting integration remain.
+  Negative wetness now applies the exact height-weighted snow whitening from CSP's
+  public GrassFX pixel shader. This control does not invent snow on track materials.
   RainFX now classifies puddle, soaking, smooth, rough, line, relief, and stream
   config entries and applies a wet-material authoring preview with adjustable
   intensity. Native accumulation/drainage, height-field puddles, rain occlusion,
@@ -228,9 +231,12 @@ vertical slice is only the foundation.
   virtual `data/lods.ini` follows the same path as unpacked data. All contiguous LODs load with validated
   ranges and game-normalized preview selection. Installed `skins/<name>` folders are
   discovered and their matching texture basenames override every LOD with live switching
-  and diagnostics. The inspector now checks SDK-listed hierarchy coverage, node kinds,
+  and diagnostics. Selected skins expose bounded `ui_skin.json` parsing and editing for
+  name, driver, country, team, number, and priority. Edits support undo, recovery,
+  project persistence, safe unknown-field preservation, and standalone export. The
+  inspector now checks SDK-listed hierarchy coverage, node kinds,
   wheel axes, related pivots, and cross-LOD placement. Packed-data editing/repacking,
-  skin metadata/editing, animation authoring, cross-folder shared-driver access without
+  skin texture creation and preview-image authoring, animation authoring, cross-folder shared-driver access without
   a browser file grant, lights,
   damage/dirt, instruments, steering/driver alignment, bottom-collider editing, and remaining
   car-workflow expansion remain. LOD file names, ranges, and cockpit/driver distance switches now
@@ -242,10 +248,11 @@ vertical slice is only the foundation.
 - Track workspace: static multi-KN5 layouts now load from ordered `models*.ini`
   manifests or manual multi-file selection, including placement transforms and
   collision diagnostics. `DYNAMIC_OBJECT_n` entries now parse and load at their
-  deterministic range centers with probability, multiplicity, velocity, and audio
-  diagnostics. Their native manifest fields now support live editing, undo, recovery,
-  project persistence, validation, and `models.ini` export. The preview uses the
-  deterministic position center. Randomized motion playback remains. Packed or unpacked `surfaces.ini` physics,
+  native seeded positions with probability, inclusive multiplicity, velocity, and
+  audio diagnostics. Their native manifest fields now support live editing, undo,
+  recovery, project persistence, validation, and `models.ini` export. The preview
+  reproduces the MSVCR120 generator, native random-call order, and float velocity
+  updates. A live game can differ because it uses one shared random sequence. Packed or unpacked `surfaces.ini` physics,
   the runtime `WALL` plus system/track definition merge, exact nonzero-sector and
   unique-substring physical-mesh bindings, contiguous starts/pits, timing-gate pairs,
   and hotlap markers now have an assembled-layout audit and spatial physics overlay.
@@ -257,8 +264,12 @@ vertical slice is only the foundation.
   spline CSVs resolve and use the game's world-Y rotation and normalized sampling for
   manual path-position preview and configured-duration playback; live focused-car
   targeting remains. Static layout positions and rotations now support live editing,
-  project persistence, validation, and `models.ini` export. Exact environment matching, remaining shaders
-  and CSP effects, and performance/spatial diagnostics remain.
+  project persistence, validation, and `models.ini` export. The inspector now computes
+  exact parsed hierarchy, mesh, vertex, triangle, material, texture, and payload totals.
+  It reports transformed scene bounds, each source-file hotspot, and the largest meshes,
+  including repeated placements as separate layout entries. These measurements do not
+  invent unverified game-performance budgets. Exact environment matching, remaining
+  shaders, and CSP effects remain.
 - Search, material editing, direct hierarchy editing, and static-mesh geometry transforms
   now form a tested vertical slice. Hierarchy edits use stable node paths and support names, active states,
   local position, XYZ rotation, and scale. The preview, 100-step undo history,

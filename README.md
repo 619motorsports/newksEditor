@@ -32,7 +32,11 @@ For a car, edit each LOD file name and range, or the cockpit or driver distance 
 The preview, undo history, recovery data, and project file use the same values. Select **Export models.ini** or **Export lods.ini** to download the manifest.
 Discovered
 `skins/<name>` folders can replace matching KN5 texture basenames just as they do in
-the game. Discovered `.ksanim` files can be sampled on a normalized timeline with
+the game. Select a skin and open the **Model** inspector to edit its `ui_skin.json`
+name, driver, country, team, number, and priority. Skin metadata edits use the same
+undo, recovery, and project history as other edits. Export writes a separate
+`ui_skin.json` file and retains safe unknown source fields. Discovered `.ksanim`
+files can be sampled on a normalized timeline with
 their matching KN5 hierarchy transforms applied live. Imported FBX clips use the
 same timeline. You can export a selected clip as a KSANIM v2 file. The same asset folder
 resolves case-insensitive external CSP texture paths and reports missing or ambiguous
@@ -78,7 +82,7 @@ npm test
 - KN5 v5/v6 headers, embedded texture, material, hierarchy, static and skinned-mesh
   parsing, including recognition of appended CSP KN5ENC v1 protected payloads
 - Stock shader parameters, texture-resource inspection, embedded BC1/2/3,
-  CPU-decoded BC4/5, native BPTC BC6H/BC7 where available, generic
+  CPU-decoded BC4/5/7, native BPTC BC6H/BC7 where available, generic
   8/16/24/32-bit masked DDS, bounded legacy D3D9 R/RG/RGBA 16/32-bit float DDS,
   PNG/JPEG/WebP,
   tangent-space normal maps, packed maps channels, diffuse/normal detail maps, and
@@ -101,13 +105,18 @@ npm test
   KN5 exports. Skinned bind-pose geometry remains read-only.
 - Ordered multi-KN5 track workspaces from manual selection or `models*.ini`, with
   per-file hierarchy roots, game-compatible placement transforms, material remapping,
-  deterministic texture-name replacement, collision diagnostics, and deterministic
-  center previews for dynamic objects with their random ranges and velocity metadata.
+  deterministic texture-name replacement, collision diagnostics, and native seeded
+  previews for dynamic objects with probability, multiplicity, random positions, and
+  velocity playback.
+  The Model inspector reports exact parsed-scene totals, transformed world bounds,
+  source-file hotspots, and the largest meshes. It also reports source-KN5,
+  vertex/index, and embedded-texture payload sizes without claiming unsupported game limits.
   Static model positions and rotations support live editing, undo, recovery, project
   persistence, and `models.ini` export. Dynamic objects support edits to probability,
   multiplicity, position mode, position center and range, velocity mode, velocity base
   and range, and audio. These edits use the same undo, recovery, project, and
-  `models.ini` export paths. The preview stays at the deterministic position center.
+  `models.ini` export paths. The seed control makes previews reproducible. A live game
+  can differ because it uses one shared random sequence.
 - Packed or unpacked `data/surfaces.ini` physics inspection and assembled-layout validation
   using the game's built-in `WALL`, stock system surfaces, track override precedence,
   nonzero sector IDs, and unique substring binding; fallback and ambiguous physics
@@ -141,7 +150,9 @@ npm test
   steering, and brake-disc nodes; duplicate/null-kind diagnostics; left/right and
   +Z-forward wheel-axis checks; related-pivot and cross-LOD alignment
 - Car and track skin discovery with live selection, case-insensitive KN5-basename
-  replacement, sparse inheritance, per-LOD texture scoping, and ambiguity/load diagnostics
+  replacement, sparse inheritance, per-LOD texture scoping, and ambiguity/load diagnostics.
+  Bounded `ui_skin.json` parsing and editing covers all six installed metadata fields,
+  project persistence, undo, recovery, unknown-field preservation, and standalone export.
 - KSANIM v1 matrix and v2 quaternion/position/scale parsing, exact runtime frame
   sampling, v2 serialization, hierarchical node binding, live timeline preview,
   and match diagnostics
@@ -164,9 +175,12 @@ npm test
 - Safe built-in expansion of the common CSP car-paint, glass, interior PBR,
   license-plate, and distant-emissive material templates used by installed configs
 - Safe `CustomEmissive`/`CustomEmissiveMulti` atlas preview for rectangles, circles,
-  soft polygons, color matching, mirroring, vertex-anchor approximation, multi-item
-  dashboard channels, diffuse alpha/luminance, and live vehicle inputs such as
-  reverse, brake, turn signals, lights, doors, fog lights, hazards, and RPM
+  soft polygons, color matching, channel mirroring, exact `MirrorUV` half-plane
+  folding, vertex-anchor approximation, multi-item dashboard channels, diffuse
+  alpha/luminance, and live vehicle inputs such as reverse, brake, turn signals,
+  lights, doors, fog lights, hazards, and RPM. The preview also reproduces CSP's
+  view-dependent emissive bounce-back for the sun, reflection cube, and point or
+  spot lights
 - CSP point/spot lights, mirrored `SelfLight` expansion, finite line lights with
   closest-segment range/diffuse, endpoint-color interpolation, and segment gloss,
   geometry-derived track `LIGHT_SERIES` preview, native packed
@@ -247,8 +261,9 @@ npm test
   a cached 1024² static-editor radial exponential-shadow atlas for up to four authored
   spotlights, using four 512² cells, CSP's exponent/normal-bias/boost resolve,
   optional extra filtering, clip sphere, and 10 cm lowered grass receiver,
-  RainFX-driven wet-grass albedo darkening and near-field substrate-specular
-  direction gain, and a live visibility toggle
+  RainFX-driven wet-grass albedo darkening, near-field substrate-specular
+  direction gain, CSP's exact height-weighted negative-wetness snow whitening,
+  and a live visibility toggle
 - RainFX material/mesh classification for puddles, soaking, smooth, rough, line,
   and relief surfaces, with adjustable wet darkening/gloss, deterministic puddle
   breakup, configured stream-edge/point diagnostics, and per-mesh inspection
@@ -291,14 +306,14 @@ npm test
   aspect-, FOV-, strength-, and blur-dependent offsets
 - Defensive bounds checks and explicit errors for unsupported node layouts
 
-A portable BC6H/BC7 fallback for systems without BPTC, dynamic RainFX accumulation,
+A portable BC6H fallback for systems without BPTC, dynamic RainFX accumulation,
 drainage, spray and occlusion, GrassFX's full 868,352-thread density rather than the
 portable CPU sampling budget, CSP's full 32-slot local-shadow packing and dynamic/car
 atlas refresh scheduling,
-wet cubemap reflection and negative-wetness snow response,
+wet cubemap reflection and ground-snow response,
 transparent-layer feedback,
 general CSP template/include expansion,
-randomized dynamic-object motion, subtractive procedural-emissive
+dynamic-object audio, subtractive procedural-emissive
 composition, FBX bump-map conversion and packed material maps, arbitrary vertex and
 face editing, skinned bind-pose geometry editing,
 full local-light photometric fidelity,
