@@ -34,6 +34,23 @@ function iniFile(value) {
   throw new TypeError(`Manifest file name cannot contain spaces and both quote characters: ${file}`);
 }
 
+export function normalizeCarLodFileName(value) {
+  const file = String(value || "").trim().replaceAll("\\", "/");
+  if (!file) throw new TypeError("A car LOD file name is required");
+  if (file.length > 1024) throw new TypeError("A car LOD file name cannot exceed 1024 characters");
+  if (file.startsWith("/") || /^[a-z]:\//i.test(file)) throw new TypeError("A car LOD file name must be relative");
+  const parts = file.split("/");
+  if (parts.some((part) => !part || part === ".")) throw new TypeError("A car LOD file name contains an empty path component");
+  const invalid = /[<>:"|?*\x00-\x1f\x7f]/;
+  const reserved = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
+  for (const part of parts) {
+    if (part === "..") continue;
+    if (invalid.test(part) || /[. ]$/.test(part) || reserved.test(part)) throw new TypeError(`A car LOD file name is not portable: ${file}`);
+  }
+  if (parts.at(-1) === ".." || !/\.kn5$/i.test(parts.at(-1))) throw new TypeError("A car LOD file name must end with .kn5");
+  return file;
+}
+
 function finiteNumber(section, key, fallback, warnings, source, required = false) {
   const raw = lastValue(section, key);
   if (raw === "") {
@@ -174,7 +191,7 @@ export function serializeCarLodsIni(workspace) {
   const lods = files.filter((file) => file.lod && !file.auxiliary).sort((a, b) => a.lod.index - b.lod.index);
   if (!lods.length) throw new TypeError("A car LOD manifest needs at least one LOD file");
   for (const file of lods) sections.push([
-    `[LOD_${file.lod.index}]`, `FILE=${iniFile(file.name)}`,
+    `[LOD_${file.lod.index}]`, `FILE=${iniFile(normalizeCarLodFileName(file.name))}`,
     `IN=${iniNumber(file.lod.in)}`, `OUT=${iniNumber(file.lod.out)}`
   ].join("\n"));
   return `${sections.join("\n\n")}\n`;

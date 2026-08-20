@@ -28,7 +28,7 @@ bands. The car preview can follow camera distance or force an individual LOD. Us
 file-scoped and its subtree becomes the automatic live-reflection source. The reflection
 selector can instead supply any single named scene subtree, matching ksEditor.
 Open the **Model** inspector to edit the active workspace manifest. For a track, edit each static model position and rotation.
-For a car, edit each LOD range and the cockpit or driver distance switch. Press Enter to save a field.
+For a car, edit each LOD file name and range, or the cockpit or driver distance switch. Press Enter to save a field.
 The preview, undo history, recovery data, and project file use the same values. Select **Export models.ini** or **Export lods.ini** to download the manifest.
 Discovered
 `skins/<name>` folders can replace matching KN5 texture basenames just as they do in
@@ -127,7 +127,8 @@ npm test
   workspaces with contiguous `LOD_n` loading, `IN`/`OUT`
   range validation, cockpit/driver distance-switch inspection, engine-compatible
   FOV-normalized automatic selection, and forced per-LOD inspection. LOD ranges and
-  distance switches support live editing, undo, recovery, project persistence, and `lods.ini` export.
+  file names, distance switches, and ranges support live editing, undo, recovery,
+  project persistence, and `lods.ini` export.
 - Car collision validation for `collider.kn5` texture/material rules, SDK triangle
   budget, origin transform, dimensions, degenerate triangles, welded boundary and
   non-manifold edges, plus packed or unpacked `colliders.ini` bottom-box inspection

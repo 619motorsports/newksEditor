@@ -27,6 +27,19 @@ test("normalizes dynamic track manifest edits as non-CSP project fields", () => 
   assert.equal(editorProjectCspEditCount(project), 0);
 });
 
+test("normalizes portable car LOD file-name edits and drops malformed names", () => {
+  const project = normalizeEditorProject({ format: "apex-editor-project", version: 1, workspaceEdits: { files: {
+    "0": { name: "..\\shared_car\\body lod.kn5" },
+    "1": { name: "C:\\cars\\body.kn5" },
+    "2": { name: "body.fbx" }
+  } } });
+  assert.deepEqual(project.workspaceEdits.files["0"], { name: "../shared_car/body lod.kn5" });
+  assert.equal(project.workspaceEdits.files["1"], undefined);
+  assert.equal(project.workspaceEdits.files["2"], undefined);
+  assert.equal(editorProjectEditCount(project), 1);
+  assert.equal(editorProjectCspEditCount(project), 0);
+});
+
 test("normalizes track surface edits as non-CSP project fields", () => {
   const project = normalizeEditorProject({ format: "apex-editor-project", version: 1, surfaceEdits: { "0": { key: "tarmac", friction: "1.05", damping: 0.02, dirtAdditive: 0.1, blackFlagTime: 3, isValidTrack: true, isPitlane: false, sinHeight: 0.001, sinLength: 2.5, vibrationGain: 0.15, vibrationLength: 0.4, wav: null, wavPitch: 1.2, ffEffect: "GRAIN" } } });
   assert.deepEqual(project.surfaceEdits["0"], { key: "TARMAC", friction: 1.05, damping: 0.02, dirtAdditive: 0.1, blackFlagTime: 3, isValidTrack: true, isPitlane: false, sinHeight: 0.001, sinLength: 2.5, vibrationGain: 0.15, vibrationLength: 0.4, wav: null, wavPitch: 1.2, ffEffect: "GRAIN" });
