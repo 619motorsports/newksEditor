@@ -1,0 +1,26 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { customEmissiveUv, normalizeCustomEmissiveMirrorDirection } from "../src/custom-emissive-uv.js";
+
+test("reproduces CSP MirrorUV reflection on the negative half-plane", () => {
+  const mirror = { offset: 0.6, direction: [1, 0] };
+  assert.deepEqual(customEmissiveUv([0.2, 0.25], mirror), [1, 0.25]);
+  assert.deepEqual(customEmissiveUv([0.8, 0.25], mirror), [0.8, 0.25]);
+});
+
+test("takes fractional UVs before the normal MirrorUV path", () => {
+  const mirror = { offset: 0.6, direction: [1, 0] };
+  assert.deepEqual(customEmissiveUv([1.2, -0.75], mirror), [1, 0.25]);
+  assert.deepEqual(customEmissiveUv([1.2, -0.75], mirror, true), [1.2, -0.75]);
+});
+
+test("supports arbitrary two-dimensional MirrorUV planes", () => {
+  const mirror = { offset: 0.5, direction: [0, 2] };
+  assert.deepEqual(customEmissiveUv([0.25, 0.2], mirror), [0.25, 0.8]);
+});
+
+test("bounds malformed MirrorUV directions without non-finite output", () => {
+  assert.deepEqual(normalizeCustomEmissiveMirrorDirection([0, 0, 99]), [0, 0]);
+  assert.deepEqual(normalizeCustomEmissiveMirrorDirection([Number.NaN, Number.POSITIVE_INFINITY]), [0, 0]);
+  assert.deepEqual(customEmissiveUv([Number.NaN, Number.NEGATIVE_INFINITY], { offset: Number.NaN, direction: [0, 0] }), [0, 0]);
+});

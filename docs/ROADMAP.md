@@ -67,9 +67,11 @@ vertical slice is only the foundation.
   dashboard items, and vehicle-input bindings.
 - Complete the remaining custom-emissive color/vertex-mask/bounce-back operations,
   UV transforms, and exact shader channel-composition behavior. Installed color masks,
-  normalized/soft atlases, vehicle bindings, and declarative `@MIXIN` calls now work;
-  vertex masks, bounce-back, MirrorUV, fog/door light casting, and subtractive modes
-  are explicitly labeled approximations.
+  normalized/soft atlases, vehicle bindings, and declarative `@MIXIN` calls now work.
+  Source-backed `MirrorUV` folding uses fractional UVs, the normalized direction,
+  the resolution-scaled offset, and the negative half-plane reflection. Vertex masks,
+  bounce-back, raw UVs, fog/door light casting, and subtractive modes are explicitly
+  labeled approximations.
 - Complete CSP light shadows, occlusion, binding, fade/visibility behavior, and
   photometric matching. Point/spot lights, mirrored self-lights, finite line lights,
   geometry-derived track series, live conditions, the recovered
