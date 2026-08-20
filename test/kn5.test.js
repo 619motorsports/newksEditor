@@ -8,6 +8,7 @@ const carFixture = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocor
 const trackFixture = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/tracks/imola/2.kn5";
 const v5Fixture = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/cars/abarth500/collider.kn5";
 const protectedV5Fixture = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/cars/ac_friends_488_gte_imsa/ferrari_488_gte.kn5";
+const resourceSlotFixture = "/mnt/D/SteamLibrary/steamapps/common/assettocorsa/content/cars/bmw_m3_e92/bmw_m3_e92.kn5";
 
 test("parses a real Kunos collider KN5", async (t) => {
   let data;
@@ -60,6 +61,18 @@ test("consumes a complete textured car KN5 with skinned nodes", async (t) => {
   assert.ok(nodes.some(({ node }) => node.kind === "mesh"));
   assert.ok(nodes.some(({ node }) => node.kind === "skinnedMesh"));
   assert.equal(model.bytesRead, model.byteLength);
+});
+
+test("reads native shader resource slots independently of texture indices", async (t) => {
+  let data;
+  try { data = await readFile(resourceSlotFixture); } catch { t.skip("The Kunos BMW M3 E92 fixture is not installed"); return; }
+  const model = parseKn5(data, { metadataOnly: true }), textureIndices = new Map(model.textures.map((texture, index) => [texture.name.toLowerCase(), index]));
+  const lights = model.materials.find((material) => material.name === "CAR_lights"), chassis = model.materials.find((material) => material.name === "CAR_chassis");
+
+  assert.deepEqual(lights.resources.map((resource) => resource.textureId), [0, 1, 2, 3]);
+  assert.deepEqual(lights.resources.map((resource) => textureIndices.get(resource.texture.toLowerCase())), [5, 6, 7, 5]);
+  assert.deepEqual(chassis.resources[6], { slot: "txDamageMask", textureId: 21, texture: "damage_mask.dds" });
+  assert.equal(textureIndices.get(chassis.resources[6].texture), 18);
 });
 
 test("consumes a complete track KN5", async (t) => {
