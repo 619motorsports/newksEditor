@@ -83,6 +83,12 @@ test("software-decodes all eight BC7 block modes", () => {
   }
 });
 
+test("reuses fixed BC7 decoder scratch storage across blocks", async () => {
+  const source = await readFile(new URL("../src/bc7-decoder.js", import.meta.url), "utf8");
+  assert.match(source, /const DECODER_SCRATCH = \{[\s\S]*endpoints: new Uint16Array\(24\)[\s\S]*indices: new Uint8Array\(16\)[\s\S]*export function decodeBc7Block/);
+  assert.doesNotMatch(source, /Array\.from\(|function readerFor|const partitionSetAt =/);
+});
+
 test("decodes clipped BC7 edge blocks and rejects malformed data", () => {
   const block = Uint8Array.from(Buffer.from("c0caaeb233af63672412324397a9dcfe", "hex"));
   const pixels = decodeDdsRgba(dx10Dds(5, 3, 99, new Uint8Array([...block, ...block])))[0].pixels;
