@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import test from "node:test";
-import { mergeKn5Models, parseModelsIni } from "../src/kn5-workspace.js";
 import { parseKn5 } from "../src/kn5.js";
 import { auditTrackModel, parseSurfacesIni, resolveTrackSurface, serializeSurfacesIni } from "../src/track-validation.js";
+import { trackFixtureRoot, trackMainKn5 } from "./fixture-paths.js";
 
 test("parses stock surface physics and diagnoses malformed values",()=>{const parsed=parseSurfacesIni("[SURFACE_0]\nKEY=ROAD\nFRICTION=0.98\nIS_VALID_TRACK=1\n[SURFACE_1]\nKEY=ROAD\nDAMPING=nope\n[SURFACE_1]\nKEY=GRASS");assert.equal(parsed.surfaces[0].friction,.98);assert.equal(parsed.surfaces[0].isValidTrack,true);assert.ok(parsed.warnings.some((warning)=>/duplicate surface KEY/.test(warning)));assert.ok(parsed.warnings.some((warning)=>/duplicate SURFACE_1/.test(warning)));assert.ok(parsed.warnings.some((warning)=>/DAMPING must be finite/.test(warning)));});
 
@@ -23,4 +24,4 @@ test("reports the game's ambiguous substring surface matches",()=>{const leaf=(n
 
 test("resolves individual meshes for spatial surface overlays",()=>{const surfaces=parseSurfacesIni("[SURFACE_0]\nKEY=TARMAC-A","track/data/surfaces.ini");assert.equal(resolveTrackSurface("21TARMAC-A019",surfaces).surface.key,"TARMAC-A");assert.equal(resolveTrackSurface("0ROAD_visual",surfaces).status,"not-physics");assert.equal(resolveTrackSurface("2MUD",surfaces).status,"fallback");});
 
-test("audits a complete installed unpacked track layout",async(t)=>{const base="/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/tracks/nukedrop_rainier_raceway";let manifestText,surfaceText;try{[manifestText,surfaceText]=await Promise.all([readFile(`${base}/models_layout_gp.ini`,"utf8"),readFile(`${base}/layout_gp/data/surfaces.ini`,"utf8")]);}catch{t.skip("Unpacked track validation fixture is not installed");return;}const manifest=parseModelsIni(manifestText),entries=[];for(const item of manifest.models){const bytes=await readFile(`${base}/${item.file}`);entries.push({name:item.file,size:bytes.length,model:parseKn5(bytes),position:item.position,rotation:item.rotation});}const audit=auditTrackModel(mergeKn5Models(entries),parseSurfacesIni(surfaceText));assert.equal(audit.starts,52);assert.equal(audit.pits,52);assert.equal(audit.timeGates,3);assert.equal(audit.hotlap,true);assert.equal(audit.errors,0);assert.ok(audit.surfaceMatches.find((surface)=>surface.key==="KERB").count>0);});
+test("audits the complete repository track",async()=>{const [modelBytes,surfaceText]=await Promise.all([readFile(trackMainKn5),readFile(join(trackFixtureRoot,"data","surfaces.ini"),"utf8")]),audit=auditTrackModel(parseKn5(modelBytes),parseSurfacesIni(surfaceText,"sepang/data/surfaces.ini"));assert.equal(audit.starts,26);assert.equal(audit.pits,26);assert.equal(audit.timeGates,3);assert.equal(audit.hotlap,true);assert.equal(audit.errors,0);assert.ok(audit.surfaceMatches.find((surface)=>surface.key==="KERB").count>0);});

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseModelsIni, serializeModelsIni } from "../src/kn5-workspace.js";
+import { parseCarLodsIni, parseModelsIni, serializeCarLodsIni, serializeModelsIni } from "../src/kn5-workspace.js";
 import { applyWorkspaceEdits, captureWorkspaceBaseline, workspaceEditCount } from "../src/workspace-authoring.js";
 
 const identity = () => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
@@ -72,4 +72,18 @@ test("round-trips authored dynamic fields through models.ini", () => {
     section: "DYNAMIC_OBJECT_2",
     line: 6
   });
+});
+
+test("applies, exports, and restores an authored car LOD file name", () => {
+  const source = {
+    root: { children: [{ transform: identity(), workspaceLod: { index: 0, in: 0, out: 50 } }] },
+    workspace: { cockpitHrDistance: null, driverHrDistance: null, files: [{ name: "car.kn5", position: [0, 0, 0], rotation: [0, 0, 0], lod: { index: 0, in: 0, out: 50 }, dynamic: null }] }
+  };
+  const baseline = captureWorkspaceBaseline(source), edits = { files: { "0": { name: "car_lod_a.kn5" } } };
+  assert.equal(workspaceEditCount(edits), 1);
+  assert.equal(applyWorkspaceEdits(source, edits, baseline), 1);
+  assert.equal(source.workspace.files[0].name, "car_lod_a.kn5");
+  assert.equal(parseCarLodsIni(serializeCarLodsIni(source.workspace)).lods[0].file, "car_lod_a.kn5");
+  applyWorkspaceEdits(source, {}, baseline);
+  assert.equal(source.workspace.files[0].name, "car.kn5");
 });

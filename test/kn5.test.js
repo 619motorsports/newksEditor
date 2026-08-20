@@ -1,43 +1,34 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import test from "node:test";
 import { computeKn5Visibility, Kn5Error, parseKn5, walkNodes } from "../src/kn5.js";
+import { assettoPath, carColliderKn5, carMainKn5, trackMainKn5 } from "./fixture-paths.js";
 
-const fixture = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/cars/ks_nissan_370z/collider.kn5";
-const carFixture = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/cars/ks_nissan_370z/nissan_370z.kn5";
-const trackFixture = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/tracks/imola/2.kn5";
-const v5Fixture = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/cars/abarth500/collider.kn5";
-const protectedV5Fixture = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/cars/ac_friends_488_gte_imsa/ferrari_488_gte.kn5";
-const resourceSlotFixture = join(
-  process.env.ASSETTO_CORSA_ROOT || "/mnt/D/SteamLibrary/steamapps/common/assettocorsa",
-  "content", "cars", "bmw_m3_e92", "bmw_m3_e92.kn5"
-);
+const protectedV5Fixture = assettoPath("content/cars/ac_friends_488_gte_imsa/ferrari_488_gte.kn5");
+const resourceSlotFixture = assettoPath("content/cars/bmw_m3_e92/bmw_m3_e92.kn5");
 
-test("parses a real Kunos collider KN5", async (t) => {
-  let data;
-  try { data = await readFile(fixture); } catch { t.skip("Assetto Corsa fixture is not installed"); return; }
+test("parses the repository car collider KN5", async () => {
+  const data = await readFile(carColliderKn5);
   const model = parseKn5(data);
   assert.equal(model.version, 6);
   assert.equal(model.materials.length, 1);
-  assert.equal(model.materials[0].name, "GL");
-  assert.equal(model.root.name, "FBX: collider.FBX");
+  assert.equal(model.materials[0].name, "UPG0");
+  assert.equal(model.root.name, "FBX: collider.fbx");
   const nodes = walkNodes(model.root);
   assert.equal(nodes.length, 3);
   assert.equal(nodes[2].node.kind, "mesh");
-  assert.equal(nodes[2].node.vertices.length, 28 * 11);
-  assert.equal(nodes[2].node.indices.length, 156);
+  assert.equal(nodes[2].node.vertices.length, 32 * 11);
+  assert.equal(nodes[2].node.indices.length, 180);
   assert.equal(model.bytesRead, model.byteLength);
 });
 
-test("parses the KN5 v5 header without a v6 source marker", async (t) => {
-  let data;
-  try { data = await readFile(v5Fixture); } catch { t.skip("Assetto Corsa v5 fixture is not installed"); return; }
+test("parses the repository track's KN5 v5 header without a v6 source marker", async () => {
+  const data = await readFile(trackMainKn5);
   const model = parseKn5(data);
   assert.equal(model.version, 5);
   assert.equal(model.source, 0);
-  assert.equal(model.textures.length, 0);
-  assert.equal(model.materials[0].name, "CAR_Cerchione");
+  assert.equal(model.textures.length, 130);
+  assert.equal(model.materials.length, 167);
   assert.equal(model.bytesRead, model.byteLength);
 });
 
@@ -55,15 +46,14 @@ test("recognizes a CSP KN5ENC v1 payload after a complete public v5 scene", asyn
   assert.equal(model.encryption.payloadOffset, model.bytesRead);
 });
 
-test("consumes a complete textured car KN5 with skinned nodes", async (t) => {
-  let data;
-  try { data = await readFile(carFixture); } catch { t.skip("Assetto Corsa car fixture is not installed"); return; }
+test("consumes the complete repository car KN5", async () => {
+  const data = await readFile(carMainKn5);
   const model = parseKn5(data);
   const nodes = walkNodes(model.root);
   assert.ok(model.textures.length > 0);
   assert.ok(model.materials.length > 0);
   assert.ok(nodes.some(({ node }) => node.kind === "mesh"));
-  assert.ok(nodes.some(({ node }) => node.kind === "skinnedMesh"));
+  assert.equal(nodes.length, 281);
   assert.equal(model.bytesRead, model.byteLength);
 });
 
@@ -79,11 +69,10 @@ test("reads native shader resource slots independently of texture indices", asyn
   assert.equal(textureIndices.get(chassis.resources[6].texture), 18);
 });
 
-test("consumes a complete track KN5", async (t) => {
-  let data;
-  try { data = await readFile(trackFixture); } catch { t.skip("Assetto Corsa track fixture is not installed"); return; }
+test("consumes the complete repository track KN5", async () => {
+  const data = await readFile(trackMainKn5);
   const model = parseKn5(data);
-  assert.ok(walkNodes(model.root).filter(({ node }) => node.kind === "mesh").length >= 2);
+  assert.equal(walkNodes(model.root).filter(({ node }) => node.kind === "mesh").length, 1070);
   assert.equal(model.bytesRead, model.byteLength);
 });
 

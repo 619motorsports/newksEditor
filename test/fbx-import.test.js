@@ -8,8 +8,9 @@ import { parseKsAnimation, serializeKsAnimation } from "../src/ksanim.js";
 import { parseKn5, walkNodes } from "../src/kn5.js";
 import { mergeKn5Models } from "../src/kn5-workspace.js";
 import { serializeKn5 } from "../src/kn5-write.js";
+import { assettoPath } from "./fixture-paths.js";
 
-const sdk = "/mnt/D/SteamLibrary/steamapps/common/assettocorsa/sdk";
+const sdk = assettoPath("sdk");
 
 test("recognizes binary and ASCII FBX headers", () => {
   const binary = new Uint8Array(27);
@@ -306,7 +307,7 @@ test("maps a selected DDS source texture in the official GT40 FBX", async (t) =>
   let fbxBytes, greyBytes;
   try {
     fbxBytes = await readFile(`${sdk}/dev/car_pipeline_2.0rev/Scene templates/GT40_animated_suspension_example_fbx.FBX`);
-    greyBytes = await readFile("/mnt/D/SteamLibrary/steamapps/common/assettocorsa/content/cars/COT_suspension_testing_platform/unp_roy_cot_ford.kn5/texture/Grey.dds");
+    greyBytes = await readFile(assettoPath("content/cars/COT_suspension_testing_platform/unp_roy_cot_ford.kn5/texture/Grey.dds"));
   } catch { t.skip("The SDK GT40 FBX or a matching installed Grey.dds is not available"); return; }
   const grey = new Uint8Array(greyBytes.buffer, greyBytes.byteOffset, greyBytes.byteLength);
   const model = await parseFbxWithTextures(fbxBytes, "GT40.FBX", [sourceFile("Grey.dds", "source/texture/Grey.dds", grey)]);
@@ -320,7 +321,7 @@ test("maps a selected DDS source texture in the official GT40 FBX", async (t) =>
 });
 
 test("preserves normal-map connections from an installed production FBX", async (t) => {
-  const source = "/mnt/D/SteamLibrary/steamapps/common/assettocorsa/content/cars/619_nextgen_mustang/nextgen_commonnewhires.fbx";
+  const source = assettoPath("content/cars/619_nextgen_mustang/nextgen_commonnewhires.fbx");
   let bytes;
   try { bytes = await readFile(source); }
   catch { t.skip("The production normal-mapped FBX fixture is not installed"); return; }
