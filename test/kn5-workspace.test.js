@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
-import { carLodDistance, carLodVisible, mergeKn5Models, modelPlacementMatrix, parseCarLodsIni, parseModelsIni, serializeCarLodsIni, serializeModelsIni } from "../src/kn5-workspace.js";
+import { findAcdEntry, parseAcd } from "../src/acd.js";
+import { carLodDistance, carLodVisible, mergeKn5Models, modelPlacementMatrix, normalizeCarLodFileName, parseCarLodsIni, parseModelsIni, serializeCarLodsIni, serializeModelsIni } from "../src/kn5-workspace.js";
 import { parseKn5, walkNodes } from "../src/kn5.js";
 
 const hickoryFixture = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/tracks/hickory";
@@ -129,6 +130,46 @@ test("serializes contiguous car LOD ranges and distance switches", () => {
   assert.equal(parsed.cockpitHrDistance, 6);
   assert.equal(parsed.driverHrDistance, 25);
   assert.deepEqual(parsed.warnings, []);
+});
+
+test("normalizes portable car LOD file names without rejecting game-used relative paths", () => {
+  assert.equal(normalizeCarLodFileName(" NASCAR Craftsman Truck Series.kn5 "), "NASCAR Craftsman Truck Series.kn5");
+  assert.equal(normalizeCarLodFileName("..\\shared_car\\body_lod_b.kn5"), "../shared_car/body_lod_b.kn5");
+  for (const value of ["", "/car.kn5", "C:\\cars\\car.kn5", "car.fbx", "folder//car.kn5", "folder/./car.kn5", "CON.kn5", "car?.kn5", "car.kn5\n[LOD_1]"]) {
+    assert.throws(() => normalizeCarLodFileName(value), /car LOD file name/i);
+  }
+});
+
+test("quotes authored car LOD file names and rejects malformed output", () => {
+  const workspace = { files: [{ name: "Car LOD A.kn5", lod: { index: 0, in: 0, out: 50 } }] };
+  const text = serializeCarLodsIni(workspace);
+  assert.match(text, /FILE='Car LOD A\.kn5'/);
+  assert.equal(parseCarLodsIni(text).lods[0].file, "Car LOD A.kn5");
+  workspace.files[0].name = "../shared/car_lod.kn5";
+  assert.match(serializeCarLodsIni(workspace), /FILE=\.\.\/shared\/car_lod\.kn5/);
+  workspace.files[0].name = "car?.kn5";
+  assert.throws(() => serializeCarLodsIni(workspace), /not portable/);
+});
+
+test("accepts every installed car LOD file name", async (t) => {
+  const root = "/mnt/D/SteamLibrary/steamapps/common/assettocorsa/content/cars";
+  let names;
+  try { names = await readdir(root); }
+  catch { t.skip("Installed Assetto Corsa car archives are unavailable"); return; }
+  let archives = 0, entries = 0;
+  for (const name of names) {
+    let archive;
+    try { archive = parseAcd(await readFile(`${root}/${name}/data.acd`), name); }
+    catch { continue; }
+    const entry = findAcdEntry(archive, "lods.ini");
+    if (!entry) continue;
+    archives++;
+    for (const lod of parseCarLodsIni(new TextDecoder().decode(entry.data), `${name}/lods.ini`).lods) {
+      assert.doesNotThrow(() => normalizeCarLodFileName(lod.file), `${name}: ${lod.file}`);
+      entries++;
+    }
+  }
+  assert.ok(archives > 0 && entries > 0);
 });
 
 test("diagnoses car LOD gaps and overlaps and uses half-open preview ranges", () => {
