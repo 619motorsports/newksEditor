@@ -1,0 +1,22 @@
+{
+  "name": "Sepang",
+  "description": "Sepang International Circuit",
+  "tags": [
+    "circuit",
+    "original",
+    "Sepang"
+  ],
+  "geotags": [
+    "2° 41′ 27″ N",
+    "101° 45′ 04″ E"
+  ],
+  "country": "Malaysia",
+  "city": "Sepang",
+  "length": "5.543m",
+  "width": "16m",
+  "pitboxes": "26",
+  "run": "clockwise",
+  "author": null,
+  "version": null,
+  "url": null
+}
