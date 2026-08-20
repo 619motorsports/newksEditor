@@ -20,8 +20,8 @@ vertical slice is only the foundation.
   bounded legacy D3D9 R/RG/RGBA 16/32-bit float DDS,
   embedded PNG/JPEG/WebP, and native BPTC BC6H/BC7, tangent normals, packed MultiMap specular/gloss/reflection,
   diffuse/normal detail maps, and stock four-way world-space track multilayers are
-  decoded and rendered. BC6H/BC7 still need a software fallback when BPTC is
-  unavailable; other DX10 variants and the remaining shader families still need exact
+  decoded and rendered. BC7 has a software fallback when BPTC is unavailable.
+  BC6H, other DX10 variants, and the remaining shader families still need exact
   paths. Track/environment workspaces now use a recovered 512² runtime scene cubemap:
   six faces initialize from the active camera and one face refreshes per draw. The
   portable reflection fallback now uses
@@ -65,11 +65,13 @@ vertical slice is only the foundation.
   families already have a tested implementation. The same safe path now covers the
   common `CustomEmissive` and `CustomEmissiveMulti` atlas shapes, mirrored channels,
   dashboard items, and vehicle-input bindings.
-- Complete the remaining custom-emissive color/vertex-mask/bounce-back operations,
-  UV transforms, and exact shader channel-composition behavior. Installed color masks,
-  normalized/soft atlases, vehicle bindings, and declarative `@MIXIN` calls now work;
-  vertex masks, bounce-back, MirrorUV, fog/door light casting, and subtractive modes
-  are explicitly labeled approximations.
+- Complete the remaining custom-emissive color operations, UV transforms, and exact
+  shader channel composition. Installed color masks, weighted vertex masks,
+  normalized atlases, vehicle bindings, declarative `@MIXIN` calls, and exact
+  view-dependent bounce-back now work. Source-backed `MirrorUV` uses fractional UVs,
+  the normalized direction, the final resolution-scaled offset, and negative-half-plane
+  reflection without atlas wrapping. Raw UVs, soft edges, fog/door light casting, and
+  uncommon procedural modes are explicitly labeled approximations.
 - Complete CSP light shadows, occlusion, binding, fade/visibility behavior, and
   photometric matching. Point/spot lights, mirrored self-lights, finite line lights,
   geometry-derived track series, live conditions, the recovered
@@ -179,8 +181,9 @@ vertical slice is only the foundation.
   resolve and separable 7-tap or 15-tap filters run before receiver sampling. GrassFX
   uses CSP's 10 cm lowered receiver. Full unsampled compute density,
   moving-vehicle air/deformation stamping, 32-slot packing, dynamic/car atlas refresh scheduling,
-  wet cubemap reflection,
-  negative-wetness snow, and the rest of CSP's game-only lighting integration remain.
+  wet cubemap reflection, and the rest of CSP's game-only lighting integration remain.
+  Negative wetness now applies the exact height-weighted snow whitening from CSP's
+  public GrassFX pixel shader. This control does not invent snow on track materials.
   RainFX now classifies puddle, soaking, smooth, rough, line, relief, and stream
   config entries and applies a wet-material authoring preview with adjustable
   intensity. Native accumulation/drainage, height-field puddles, rain occlusion,
@@ -237,13 +240,18 @@ vertical slice is only the foundation.
   wheel axes, related pivots, and cross-LOD placement. Packed-data editing/repacking,
   skin texture creation and preview-image authoring, animation authoring, cross-folder shared-driver access without
   a browser file grant, lights,
-  damage/dirt, instruments, steering/driver alignment, bottom-collider editing, and remaining
+  damage-material and dirt preview, instruments, steering/driver alignment, and remaining
   car-workflow expansion remain. LOD file names, ranges, and cockpit/driver distance switches now
   support live editing, project persistence, validation, and `lods.ini` export.
+  Packed or unpacked `damage.ini` files now support validated authoring and standalone export.
+  These edits include scratch thresholds, initial damage, oscillation, and visual-object fields.
   Static `collider.kn5` meshes now support transforms and topology repair. These edits
   update the orange overlay and the collider audit. Project JSON stores the edits, but
   CSP export excludes them. A standalone export writes the edited `collider.kn5`.
   Persisted SHA-256 identity now stops those edits from crossing collider files.
+  Bottom-contact boxes from packed or unpacked `colliders.ini` now support live
+  centre, size, and ground-flag editing. The orange overlay, undo, recovery, project
+  JSON, validation, identity checks, and standalone export use the edited values.
 - Track workspace: static multi-KN5 layouts now load from ordered `models*.ini`
   manifests or manual multi-file selection, including placement transforms and
   collision diagnostics. `DYNAMIC_OBJECT_n` entries now parse and load at their

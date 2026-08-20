@@ -64,6 +64,36 @@ export function buildKsCloudBillboards(value, { worldDetail = 5, textureCount = 
   return Object.freeze(clouds);
 }
 
+/** Group only adjacent clouds so alpha blending keeps construction order. */
+export function buildKsCloudTextureRuns(clouds = []) {
+  const runs = [];
+  for (const cloud of Array.isArray(clouds) ? clouds : []) {
+    const texture = Math.floor(finite(cloud?.texture, -1));
+    if (texture < 0 || texture >= KS_CLOUD_TEXTURE_PATHS.length) continue;
+    const previous = runs.at(-1);
+    if (previous?.texture === texture) previous.clouds.push(cloud);
+    else runs.push({ texture, clouds: [cloud] });
+  }
+  return Object.freeze(runs.map((run) => Object.freeze({ texture: run.texture, clouds: Object.freeze(run.clouds) })));
+}
+
+/** Apply each generated speed as a bounded vertical-axis motion preview. */
+export function ksCloudPositionAtTime(cloud, elapsedSeconds = 0) {
+  const position = Array.isArray(cloud?.position) ? cloud.position : [];
+  const x = finite(position[0], 0), y = finite(position[1], 0), z = finite(position[2], 0);
+  const angle = (bounded(cloud?.speed, 0, 0, 1) * Math.max(0, finite(elapsedSeconds, 0))) % (Math.PI * 2);
+  const cosine = Math.cos(angle), sine = Math.sin(angle);
+  return Object.freeze([x * cosine - z * sine, y, x * sine + z * cosine]);
+}
+
+/** Identify cloud changes that require all six reflection faces to be recaptured. */
+export function ksCloudCaptureSignature(value = {}, readyTextures = []) {
+  const settings = normalizeKsCloudSettings(value);
+  const ready = Array.from({ length: KS_CLOUD_TEXTURE_PATHS.length }, (_, index) => Boolean(readyTextures?.[index]) ? "1" : "0").join("");
+  return [value?.id || "", settings.width, settings.height, settings.radius, settings.count, settings.baseSpeed,
+    bounded(value?.cloudCover, 0, 0, 1), bounded(value?.cloudCutoff, 0, 0, 1), bounded(value?.cloudColor, 0, 0, 1000), ready].join(":");
+}
+
 export function ksCloudShaderSample({ textureRed = 0, textureAlpha = 1, lightDirection = [0, -1, 0], lightColor = [1, 1, 1], ambientColor = [0, 0, 0], fogDistance = 12000, cloudCover = 1, cloudCutoff = 0.7, cloudColor = 1 } = {}) {
   const fog = Math.max(0, Math.min(1, 900 / Math.max(Number.EPSILON, finite(fogDistance, 12000))));
   const lightDot = -(finite(lightDirection?.[1], -1));
