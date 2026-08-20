@@ -1425,10 +1425,23 @@ reports zero collider errors or warnings and also exposes its packed bottom box.
 A wider audit parsed 124 installed `ks_*` colliders. It showed that many shipping
 Kunos cars exceed the older guide's polygon budget, so budget excess remains a
 warning; material, texture, and open/non-manifold topology violations remain errors.
-The renderer can upload this separate model to an independent edge buffer and draw
-an orange, always-visible cage over any automatic or forced car LOD without adding
-the collider to the editable/exportable scene. The retained overlay capture is
-coherent and completes with WebGL error zero.
+The renderer uploads this separate model to an independent edge buffer. It draws an
+orange cage over any automatic or forced car LOD. The collider stays separate from
+the visual car scene and its KN5 export.
+
+Apex now stores static collider edits by stable root-relative node path. Each edit
+starts from copied source vertices and indices. Mesh controls apply offset, rotation,
+scale, degenerate-face removal, face reversal, and area-weighted normal rebuilding.
+The same edit refreshes the edge buffer and reruns the collider audit. Project JSON,
+local recovery, undo, and redo keep these edits separate from CSP output. The first
+edit also stores the collider path, byte size, KN5 version, and SHA-256 digest. The app
+restores source geometry and blocks editing and export if the selected collider does
+not match that identity. This also detects replacements with unchanged names and sizes.
+
+Standalone export serializes the edited collision model as `collider.kn5`. A writer
+test parses this output again and confirms that its topology stays closed. A production
+WebKit run used a synthetic car and closed collider. It confirmed live cage movement,
+zero audit findings, invalid-scale rejection, undo, redo, recovery, and overlay retention.
 
 ## Car hierarchy evidence
 
