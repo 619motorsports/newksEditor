@@ -28,6 +28,9 @@ test("serves the desktop application and its explicitly allowed modules", async 
     const dynamicTrack = await fetch(`${url}/src/dynamic-track.js`);
     assert.equal(dynamicTrack.status, 200);
     assert.match(await dynamicTrack.text(), /sampleDynamicTrackObjects/);
+    const fileIdentity = await fetch(`${url}/src/file-identity.js`);
+    assert.equal(fileIdentity.status, 200);
+    assert.match(await fileIdentity.text(), /createFileIdentity/);
     assert.equal((await fetch(`${url}/vendor/three.module.js`)).status, 200);
     assert.equal((await fetch(`${url}/vendor/three-addons/loaders/FBXLoader.js`)).status, 200);
   });
