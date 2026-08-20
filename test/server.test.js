@@ -34,6 +34,9 @@ test("serves the desktop application and its explicitly allowed modules", async 
     const brakeDiscShader = await fetch(`${url}/src/brake-disc-shader.js`);
     assert.equal(brakeDiscShader.status, 200);
     assert.match(await brakeDiscShader.text(), /brakeDiscGlowTarget/);
+    const rimBlur = await fetch(`${url}/src/rim-blur.js`);
+    assert.equal(rimBlur.status, 200);
+    assert.match(await rimBlur.text(), /nativeRimBlurToggle/);
     assert.equal((await fetch(`${url}/vendor/three.module.js`)).status, 200);
     assert.equal((await fetch(`${url}/vendor/three-addons/loaders/FBXLoader.js`)).status, 200);
   });

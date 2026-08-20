@@ -101,6 +101,32 @@ returned WebGL error zero with no browser exception. The renderer diagnostics re
 both `gameVisible`/`gameHidden` and current `previewVisible`/`previewHidden` counts so
 the inspection override cannot be mistaken for source visibility.
 
+### Native blurred-rim switch
+
+`ksEditor.Form1.btnBlurred_Click` has token `0x060000da` and RVA `0x7460`.
+The handler sends `{F1}` when the scene tree contains at least one root node.
+
+`ksNet.ksGraphics.render` has token `0x06000389` and RVA `0x27388`.
+The method calls `GetAsyncKeyState(112)`. Virtual key 112 is F1.
+`blurNodesTrigger.ignoreSubsequentTrue` changes the held key into one edge.
+
+The edge searches recursively for `RIM_LF`, `RIM_RF`, `RIM_LR`, and `RIM_RR`.
+It then searches for the matching `RIM_BLUR_*` names in the same corner order.
+Missing names do not enter the two result vectors.
+
+The method reads the active byte at offset 184 from the first regular rim.
+It writes the inverse state to each found regular rim. It writes the source state
+to each found blurred rim. Thus, one F1 edge selects a canonical regular or blurred
+set without changing mesh or material data.
+
+`ksNet.ksGraphics.areBlurredRimsVisible` has token `0x0600038b` and RVA `0x271b8`.
+This method returns the active byte from the first found blurred rim. It returns
+false when no blurred rim exists.
+
+The portable preview keeps the parsed KN5 active flags unchanged. It applies the
+recovered state only during visibility evaluation. The F1 handler also ignores
+keyboard-repeat events, which matches the native edge trigger.
+
 ## Rendering implication
 
 The stock `.shader` containers contain ordinary D3D11 DXBC. Reflection strings show
