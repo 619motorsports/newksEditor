@@ -1746,6 +1746,29 @@ convention. `WeatherGenerator::loadPreset` at `0x10062940` loads cloud cover,
 cutoff, and color plus fog color, blend, and distance, and substitutes one metre for
 a zero fog distance.
 
+PDB-guided Ghidra decompilation resolves `SkyBox::SkyBox` at `0x10060bdb` and
+`SkyBox::renderClouds` at `0x10061b32`. The constructor reads cloud width, height,
+radius, count, and base speed from `weather.ini`. World detail five keeps the complete
+configured count because the native multiplier is `worldDetail × 0.2`.
+
+The constructor loads every DDS file from `content/texture/clouds`. It places each
+quad on a camera-relative sphere with the recovered `phi`, `theta`, and radius
+formulas. The editor uses the process-global Visual C++ `rand()` sequence. Apex uses
+the same random generator with a fixed local seed, which gives repeatable previews.
+
+The native cloud pass culls front faces, disables depth, and uses alpha blending.
+Each quad faces the camera and keeps the local normal `(0, -1, 0)`. The recovered
+`ksClouds` pixel program uses texture red for lighting and texture alpha for cover.
+It combines `ksLightColor`, remote ambient, cutoff, cloud color, and `900 / ksFogLinear`.
+The recreated pixel and vertex source hashes are `31cda90f3239d561e62fe837b3caeacb5145d0bb570c2c97d673222ae855f07a`
+and `c64f6d0057bdaebccb72cb0d65b632a214873b7d892af67eaadbeebebb6f8a0f`.
+
+A production Chrome check loaded all seven installed cloud textures as `RAW_32` DDS.
+The light-cloud preset drew 50 billboards in seven draws and 100 triangles. Its frame
+hash was `c32f6f659d7838db`, compared with `c29e2972e101d933` for clear weather.
+Both frames returned WebGL error zero and no browser errors. A live environment
+cubemap also captured the cloud pass on all six initialized faces.
+
 Apex evaluates that native curve model once per frame and feeds one linear-HDR path:
 procedural horizon/sky gradient and sun disc, weather ambient and direct light,
 environment response, emissive and CSP local lights, and distance fog. It resolves a

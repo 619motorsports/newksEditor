@@ -28,6 +28,9 @@ test("serves the desktop application and its explicitly allowed modules", async 
     const fileIdentity = await fetch(`${url}/src/file-identity.js`);
     assert.equal(fileIdentity.status, 200);
     assert.match(await fileIdentity.text(), /createFileIdentity/);
+    const clouds = await fetch(`${url}/src/clouds.js`);
+    assert.equal(clouds.status, 200);
+    assert.match(await clouds.text(), /buildKsCloudBillboards/);
     assert.equal((await fetch(`${url}/vendor/three.module.js`)).status, 200);
     assert.equal((await fetch(`${url}/vendor/three-addons/loaders/FBXLoader.js`)).status, 200);
   });
