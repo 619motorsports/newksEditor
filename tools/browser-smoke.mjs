@@ -36,6 +36,7 @@ const reflectionCompare = process.argv.includes("--reflection-compare");
 const lighting = process.argv.includes("--lighting");
 const seasons = process.argv.includes("--seasons");
 const showHidden = process.argv.includes("--show-hidden");
+const disableBptc = process.argv.includes("--disable-bptc");
 const requireSharedGeometry = process.argv.includes("--require-shared-geometry");
 const requireDynamicShadowRefresh = process.argv.includes("--require-dynamic-shadow-refresh");
 const weatherName = option("weather");
@@ -120,6 +121,7 @@ async function setCondition(name, value) {
 }
 
 await command("Runtime.enable"); await command("Log.enable"); await command("Page.enable"); await command("Network.enable"); await command("Network.setCacheDisabled", { cacheDisabled: true });
+if(disableBptc)await command("Page.addScriptToEvaluateOnNewDocument",{source:`(()=>{const original=WebGL2RenderingContext.prototype.getExtension;WebGL2RenderingContext.prototype.getExtension=function(name){return name==="EXT_texture_compression_bptc"?null:original.call(this,name);};})();`});
 trace("connected");
 await command("Page.navigate", { url: `http://127.0.0.1:${appPort}` });
 captureErrors = true;
@@ -195,7 +197,7 @@ if (manualExposure !== "") {
   await waitFor(`window.__apexRenderer?.lightingStatus?.autoExposure===false`);
 }
 if(grassFx){await waitFor(`window.__apexRenderer?.grassStatus.instanceCount>0&&window.__apexRenderer?.grassStatus.weatherLit===true${cspAssetsPath?"&&window.__apexRenderer?.grassStatus.atlasReady===true":""}`,120000);trace("GrassFX instances generated");}
-if(rainFx){await waitFor(`window.__apexRenderer?.rainStatus.matchedMeshes>0`,120000);await evaluate(`(()=>{const e=document.querySelector('#rain-wetness');e.value=${JSON.stringify(rainWetness)};e.dispatchEvent(new Event('input',{bubbles:true}));})()`);await waitFor(`window.__apexRenderer?.rainStatus.wetness===${JSON.stringify(rainWetness)}`);trace("RainFX preview enabled");}
+if(rainFx){await waitFor(`window.__apexRenderer?.rainStatus.matchedMeshes>0`,120000);await evaluate(`(()=>{const e=document.querySelector('#rain-wetness');e.value=${JSON.stringify(rainWetness)};e.dispatchEvent(new Event('input',{bubbles:true}));})()`);await waitFor(`window.__apexRenderer?.rainStatus.wetness===${JSON.stringify(rainWetness)}`);if(grassFx&&rainWetness<0)await waitFor(`window.__apexRenderer?.grassStatus.snowAmount===${JSON.stringify(Math.min(1,-rainWetness))}`);trace("RainFX preview enabled");}
 const selected = await evaluate(`(()=>{
   window.__apexInputs=Object.fromEntries([...document.querySelectorAll('[data-input]')].map(e=>[e.dataset.input,e]));
   window.__apexConditions=Object.fromEntries([...document.querySelectorAll('[data-condition]')].map(e=>[e.dataset.condition,e]));
@@ -263,5 +265,5 @@ for (const [name, value] of conditionChanges) {
   if (present) await setCondition(name, 0);
 }
 const summary = await evaluate(`({pipeline:document.querySelector('#pipeline').textContent,status:document.querySelector('#status').textContent,textures:window.__apexRenderer?.textureStatus,fbx:window.__apexFbx?{sourceName:window.__apexFbx.sourceName,format:window.__apexFbx.format,version:window.__apexFbx.version,textureSummary:window.__apexFbx.textureSummary,references:window.__apexFbx.textureReferences.map(reference=>({material:reference.material,slot:reference.slot,source:reference.source,status:reference.status,matchedBy:reference.matchedBy,path:reference.path,format:reference.format,output:reference.output})),warnings:window.__apexFbx.warnings}:null,skinTextures:window.__apexRenderer?.skinTextureStatus,externalTextures:window.__apexRenderer?.externalTextureStatus,animation:window.__apexRenderer?.animationStatus,dynamicTrack:window.__apexRenderer?.dynamicTrackStatus,packedData:window.__apexPackedData?{source:window.__apexPackedData.source,assetName:window.__apexPackedData.assetName,entries:window.__apexPackedData.entries.length,warnings:window.__apexPackedData.warnings}:null,carHierarchyAudit:window.__apexCarHierarchyAudit,colliderAudit:window.__apexColliderAudit,bottomColliders:window.__apexBottomColliders,driverAudit:window.__apexDriverAudit,trackCameras:window.__apexTrackCameras?{sets:window.__apexTrackCameras.length,cameras:window.__apexTrackCameras.reduce((sum,set)=>sum+set.cameras.length,0),warnings:window.__apexTrackCameras.reduce((sum,set)=>sum+set.warnings.length,0)}:null,trackAudit:window.__apexTrackAudit,grass:window.__apexRenderer?.grassStatus,rain:window.__apexRenderer?.rainStatus,shadows:window.__apexRenderer?.shadowStatus,lighting:window.__apexRenderer?.lightingStatus,shaderProfiles:window.__apexRenderer?.shaderProfileStatus,vao:window.__apexRenderer?.vaoStatus,seasons:window.__apexRenderer?.seasonalStatus,scene:window.__apexRenderer?.sceneStatus,workspaceLod:window.__apexRenderer?.workspaceLodStatus})`);
-console.log(JSON.stringify({ summary, sceneBeforeShowHidden, selected, states, errors }, null, 2));
+console.log(JSON.stringify({ bptcAvailable:await evaluate(`Boolean(document.querySelector('#view').getContext('webgl2').getExtension('EXT_texture_compression_bptc'))`), summary, sceneBeforeShowHidden, selected, states, errors }, null, 2));
 socket.close();

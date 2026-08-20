@@ -2,6 +2,7 @@ import { lastValue, parseCspIni } from "./csp-config.js";
 
 const FLOAT32_MAXIMUM = 3.4028234663852886e38;
 const MAXIMUM_VISUAL_OBJECTS = 1024;
+export const MAXIMUM_CAR_DAMAGE_BYTES = 1048576;
 const SECTION_KEYS = Object.freeze({
   SCRATCHES: Object.freeze(["minSpeed", "maxSpeed"]),
   OSCILLATIONS: Object.freeze(["enabled"]),
@@ -35,8 +36,8 @@ export function damageEditKeys(section) {
 }
 
 function finiteNumber(section, key, fallback, warnings, source) {
-  const raw = lastValue(section, key, String(fallback)), value = Number(raw);
-  if (!Number.isFinite(value) || Math.abs(value) > FLOAT32_MAXIMUM) {
+  const raw = String(lastValue(section, key, String(fallback))).trim(), value = Number(raw);
+  if (!raw || !Number.isFinite(value) || Math.abs(value) > FLOAT32_MAXIMUM) {
     warnings.push(`${source}:${section?.line || 1}: ${section?.name || "damage.ini"} ${key} must be a finite float32 number`);
     return fallback;
   }
@@ -45,8 +46,8 @@ function finiteNumber(section, key, fallback, warnings, source) {
 
 function finiteVector(section, key, fallback, warnings, source) {
   const raw = lastValue(section, key, fallback.join(","));
-  const values = raw.split(",").map((value) => Number(value.trim()));
-  if (values.length !== 3 || values.some((value) => !Number.isFinite(value) || Math.abs(value) > FLOAT32_MAXIMUM)) {
+  const components = raw.split(",").map((value) => value.trim()), values = components.map(Number);
+  if (values.length !== 3 || components.some((value) => !value) || values.some((value) => !Number.isFinite(value) || Math.abs(value) > FLOAT32_MAXIMUM)) {
     warnings.push(`${source}:${section?.line || 1}: ${section?.name || "damage.ini"} ${key} must contain three finite float32 numbers`);
     return [...fallback];
   }
@@ -151,15 +152,25 @@ export function parseCarDamageIni(text, source = "data/damage.ini") {
   const indices = new Set(visualObjects.map((object) => object.index));
   for (let index = 0; index < (visualObjects.at(-1)?.index || 0); index++) if (!indices.has(index)) warnings.push(`${source}: VISUAL_OBJECT_${index} is missing`);
 
-  const recognized = new Set(["SCRATCHES", "OSCILLATIONS", "DAMAGE", ...[...seenIndices].map((index) => `VISUAL_OBJECT_${index}`)]);
-  for (const section of ini.sections) if (!recognized.has(section.name.toUpperCase())) extraSections.push({ name: section.name, entries: cloneEntries(section.entries) });
+  const recognized = new Set(["SCRATCHES", "OSCILLATIONS", "DAMAGE"]);
+  for (const section of ini.sections) if (!recognized.has(section.name.toUpperCase()) && !/^VISUAL_OBJECT_\d+$/i.test(section.name)) extraSections.push({ name: section.name, entries: cloneEntries(section.entries) });
   return { source, scratches, oscillations, damage, visualObjects, extraSections, warnings };
+}
+
+export async function readCarDamageFile(file, source = "data/damage.ini") {
+  if (!file || typeof file.arrayBuffer !== "function") throw new TypeError(`${source} is not a readable file`);
+  if (Number(file.size) > MAXIMUM_CAR_DAMAGE_BYTES) throw new Error(`${source} is larger than the 1 MiB input limit`);
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (bytes.byteLength > MAXIMUM_CAR_DAMAGE_BYTES) throw new Error(`${source} is larger than the 1 MiB input limit`);
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  return { bytes, config: parseCarDamageIni(text, source) };
 }
 
 function damageNumber(value, label) {
   const number = Number(value);
   if (!Number.isFinite(number) || Math.abs(number) > FLOAT32_MAXIMUM) throw new TypeError(`${label} must fit a finite float32 value`);
-  return Number(number.toFixed(6)).toString();
+  const rounded = Number(number.toPrecision(9));
+  return Math.abs(rounded) <= FLOAT32_MAXIMUM ? rounded.toString() : number.toString();
 }
 
 function damageVector(value, label) {
