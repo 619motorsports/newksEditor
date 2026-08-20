@@ -43,6 +43,9 @@ test("serves the desktop application and its explicitly allowed modules", async 
     const damagePreview = await fetch(`${url}/src/damage-preview.js`);
     assert.equal(damagePreview.status, 200);
     assert.match(await damagePreview.text(), /nativeDamageToggle/);
+    const gridPreview = await fetch(`${url}/src/grid-preview.js`);
+    assert.equal(gridPreview.status, 200);
+    assert.match(await gridPreview.text(), /nativeGridVertices/);
     assert.equal((await fetch(`${url}/vendor/three.module.js`)).status, 200);
     assert.equal((await fetch(`${url}/vendor/three-addons/loaders/FBXLoader.js`)).status, 200);
   });

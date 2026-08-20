@@ -90,7 +90,8 @@ npm test
   isolation, and wireframe. Normal preview follows recursive KN5 game visibility:
   an inactive ancestor or a mesh with `visible`/`renderable` disabled stays hidden.
   Dimmed hierarchy rows remain selectable, and **Show hidden** exposes all such
-  geometry explicitly for authoring inspection
+  geometry explicitly for authoring inspection. The optional grid reproduces the
+  old editor's 11 by 11-line magenta authoring overlay across a 10 m square.
 - Direct hierarchy authoring for node names, active states, and local transforms.
   Transform controls use position, XYZ rotation in degrees, and scale. Stable
   root-relative paths keep duplicate names independent. Edits update the preview,

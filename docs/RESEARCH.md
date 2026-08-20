@@ -101,6 +101,26 @@ returned WebGL error zero with no browser exception. The renderer diagnostics re
 both `gameVisible`/`gameHidden` and current `previewVisible`/`previewHidden` counts so
 the inspection override cannot be mistaken for source visibility.
 
+### Native authoring grid
+
+`ksEditor.Form1.btnShowGrid_Click` has token `0x060000e0` and RVA `0x766c`.
+The handler reads `ksGraphics.getGridVisibility`, inverts the value, and passes it to
+`ksGraphics.setGridVisibility`. Those methods read and write the static
+`isGridVisible` field. The `ksGraphics` static constructor does not initialize that
+field, so the grid starts hidden.
+
+`ksNet.ksGraphics.render` has token `0x06000389` and RVA `0x27388`. When
+`isGridVisible` is true, it selects depth mode `eOff`, whose enum value is two. It
+sets the immediate renderer color to `(1, 0, 1)`. It then emits 11 lines in each
+axis from −5 m through +5 m at 1 m intervals. All vertices use Y = 0. Thus, the 22
+magenta segments form an 11 by 11-line XZ grid across a 10 m square. Apex stores the
+toggle as preview state and does not add grid geometry to the opened model.
+
+A production Chrome check used the installed Abarth 500. The grid-on and grid-off
+captures hashed to `197e3148237ea966` and `2db4c74a6ad57ae8`. All 80 textures loaded,
+both captures returned WebGL error zero, and the browser log contained no errors.
+The grid remained visible through the car, which confirms the recovered depth-off state.
+
 ### Native blurred-rim switch
 
 `ksEditor.Form1.btnBlurred_Click` has token `0x060000da` and RVA `0x7460`.
