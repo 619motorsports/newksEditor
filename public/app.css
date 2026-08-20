@@ -32,6 +32,11 @@ main { height: calc(100% - 82px); display: grid; grid-template-columns: 270px mi
 .tree { flex: 1; min-height: 0; overflow: auto; padding: 5px 7px 15px; font-size: 12px; }
 .empty { padding: 20px; color: var(--muted); line-height: 1.6; }
 .node-row { height: 25px; display: flex; align-items: center; gap: 6px; padding-right: 5px; border-radius: 3px; cursor: pointer; white-space: nowrap; }
+.node-depth-0 { padding-left: 5px; }.node-depth-1 { padding-left: 19px; }.node-depth-2 { padding-left: 33px; }.node-depth-3 { padding-left: 47px; }.node-depth-4 { padding-left: 61px; }
+.node-depth-5 { padding-left: 75px; }.node-depth-6 { padding-left: 89px; }.node-depth-7 { padding-left: 103px; }.node-depth-8 { padding-left: 117px; }.node-depth-9 { padding-left: 131px; }
+.node-depth-10 { padding-left: 145px; }.node-depth-11 { padding-left: 159px; }.node-depth-12 { padding-left: 173px; }.node-depth-13 { padding-left: 187px; }.node-depth-14 { padding-left: 201px; }
+.node-depth-15 { padding-left: 215px; }.node-depth-16 { padding-left: 229px; }.node-depth-17 { padding-left: 243px; }.node-depth-18 { padding-left: 257px; }.node-depth-19 { padding-left: 271px; }
+.node-depth-20 { padding-left: 285px; }.node-depth-21 { padding-left: 299px; }.node-depth-22 { padding-left: 313px; }.node-depth-23 { padding-left: 327px; }.node-depth-24 { padding-left: 341px; }
 .node-row:hover { background: #24282c; }.node-row.selected { background: #3a3020; color: #ffd98a; }
 .node-icon { color: #707981; width: 14px; text-align: center; }.node-row.mesh .node-icon { color: var(--accent); }
 .node-name { overflow: hidden; text-overflow: ellipsis; }.node-off { opacity: .48; }

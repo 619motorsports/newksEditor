@@ -1,7 +1,45 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { cspLightDistanceFade, cspLightReceiverVisible, cspLineClosestPoint, cspLineLightSample, cspSecondarySpotAttenuation, cspSecondarySpotPacking, cspSpotConeFactor, cspSpotConePacking, cspSpotEdgeFactors, cspSpotEdgePacking, CSP_SPOT_HALF_ANGLE_MAX, CSP_SPOT_SHARPNESS_MAX, evaluateKsLighting, KS_EDITOR_DEFAULT_WEATHER, parseKsWeatherLighting, STOCK_WEATHER_PRESETS, sunDirectionFromAngles } from "../src/lighting.js";
+import { cspLightDistanceFade, cspLightReceiverVisible, cspLineClosestPoint, cspLineLightSample, cspSecondarySpotAttenuation, cspSecondarySpotPacking, cspSpotConeFactor, cspSpotConePacking, cspSpotEdgeFactors, cspSpotEdgePacking, CSP_SPOT_HALF_ANGLE_MAX, CSP_SPOT_SHARPNESS_MAX, evaluateKsLighting, ksEditorAutoExposure, ksEditorBloomCompositeScale, ksEditorBloomGaussianKernel, ksEditorGlareBrightPass, ksEditorYebisToneMap, KS_EDITOR_DEFAULT_WEATHER, KS_EDITOR_GLARE, KS_EDITOR_TONEMAP, parseKsWeatherLighting, STOCK_WEATHER_PRESETS, sunDirectionFromAngles } from "../src/lighting.js";
+
+test("matches the initialized default Yebis display curve and reciprocal gamma", () => {
+  assert.deepEqual(KS_EDITOR_TONEMAP, { function: -1, mappingFactor: 32, characteristicCurve: 0.5, curveScale: 2.6581413745880127, curveShoulder: 0.6653175950050354, inputFloor: 1 / 16384, outputEpsilon: 1 / 4194304 });
+  const neutral = ksEditorYebisToneMap([1, 1, 1], 1, { gamma: 1.2, saturation: 0.95 });
+  const decay = Math.exp(-KS_EDITOR_TONEMAP.curveScale);
+  const expectedCurve = (1 - decay) * Math.pow(1 - decay * KS_EDITOR_TONEMAP.curveShoulder, 2);
+  const expected = Math.pow(expectedCurve + 1 / 4194304, 1 / 1.2);
+  assert.ok(neutral.every((value) => Math.abs(value - expected) < 1e-12));
+  const colored = ksEditorYebisToneMap([1, 0.25, 0.05], 0.5);
+  assert.ok(colored[0] > colored[1] && colored[1] > colored[2]);
+  assert.ok(colored.every((value) => Number.isFinite(value) && value >= 0 && value <= 1));
+});
+
+test("clamps full-frame automatic exposure to the installed editor range", () => {
+  assert.equal(ksEditorAutoExposure(1), 0.32);
+  assert.equal(ksEditorAutoExposure(10), 0.2);
+  assert.equal(ksEditorAutoExposure(0.01), 0.5);
+  assert.equal(ksEditorAutoExposure(Number.NaN), 0.5);
+});
+
+test("matches the default Yebis threshold bright pass and bloom scale", () => {
+  assert.deepEqual(KS_EDITOR_GLARE, { enabled: true, quality: 3, sourceScale: 0.25, levels: 5, luminance: 1.6, threshold: 5, brightPassType: 1, brightPassRemap: 1, bloomFilterThreshold: 0.002, bloomGaussianRadiusScale: 0.95, bloomSourceLevel: 2, bloomRadiusDisplayScale: 2.2, bloomKernelSamples: 15, bloomDispersion: [1, 5.399999736e-7 / 6.149999763e-7, 4.649999994e-7 / 6.149999763e-7, 0], bloomLuminanceGamma: 2, generationRangeScale: 1, shapeLuminance: 5, shapeBloomLuminance: 0.038, compositeBase: 0.035, ditherScale: 1 / 255, ditherOffset: -0.5 / 255 });
+  assert.deepEqual(ksEditorGlareBrightPass([2, 10, 20], 0.5), [0, 0, 5]);
+  assert.deepEqual(ksEditorGlareBrightPass([200000, -1, Number.NaN], 1, 0, 2), [64000, 0, 0]);
+  assert.ok(Math.abs(ksEditorBloomCompositeScale() - 0.01064) < 1e-12);
+});
+
+test("reproduces the active Yebis 29-tap bilinear bloom kernels", () => {
+  const kernels = Array.from({ length: 5 }, (_, level) => ksEditorBloomGaussianKernel(level));
+  assert.deepEqual(kernels.map(({ sigma }) => sigma), [1.045, 2.09, 4.18, 8.36, 16.72]);
+  assert.deepEqual(kernels.map(({ sampleCount }) => sampleCount), [5, 7, 13, 15, 15]);
+  assert.ok(Math.abs(kernels[0].channelSigmas[1] - 0.9175609661108861) < 1e-12);
+  assert.ok(Math.abs(kernels[0].channelSigmas[2] - 0.7901219806486033) < 1e-12);
+  assert.deepEqual(kernels[0].offsets.slice(0, 5).map((value) => Number(value.toFixed(6))), [0, 1.357276, -1.357276, 3.264512, -3.264512]);
+  assert.deepEqual(kernels[0].weights.slice(0, 5).map((value) => Number(value.toFixed(6))), [0.381763, 0.302666, 0.302666, 0.006448, 0.006448]);
+  assert.ok(Math.abs(kernels[0].weights.slice(0, kernels[0].sampleCount).reduce((sum, value) => sum + value, 0) - 0.9999917882170541) < 1e-12);
+  assert.ok(Math.abs(kernels[4].weights.reduce((sum, value) => sum + value, 0) - 1) < 1e-12);
+});
 
 test("ships all seven stock SDK weather-lighting presets", () => {
   assert.equal(STOCK_WEATHER_PRESETS.length, 7);

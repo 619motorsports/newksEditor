@@ -1,10 +1,116 @@
 export const KS_EDITOR_EXPOSURE = Object.freeze({ min: 0.2, max: 0.5, target: 0.32, gamma: 1.2, saturation: 0.95 });
+export const KS_EDITOR_TONEMAP = Object.freeze({
+  function: -1,
+  mappingFactor: 32,
+  characteristicCurve: 0.5,
+  curveScale: 2.6581413745880127,
+  curveShoulder: 0.6653175950050354,
+  inputFloor: 1 / 16384,
+  outputEpsilon: 1 / 4194304
+});
+export const KS_EDITOR_GLARE = Object.freeze({
+  enabled: true,
+  quality: 3,
+  sourceScale: 0.25,
+  levels: 5,
+  luminance: 1.6,
+  threshold: 5,
+  brightPassType: 1,
+  brightPassRemap: 1,
+  bloomFilterThreshold: 0.002,
+  bloomGaussianRadiusScale: 0.95,
+  bloomSourceLevel: 2,
+  bloomRadiusDisplayScale: 2.2,
+  bloomKernelSamples: 15,
+  bloomDispersion: Object.freeze([1, 5.399999736e-7 / 6.149999763e-7, 4.649999994e-7 / 6.149999763e-7, 0]),
+  bloomLuminanceGamma: 2,
+  generationRangeScale: 1,
+  shapeLuminance: 5,
+  shapeBloomLuminance: 0.038,
+  compositeBase: 0.035,
+  ditherScale: 1 / 255,
+  ditherOffset: -0.5 / 255
+});
 export const CSP_LIGHT_FADE_AT_DEFAULT = 200;
 export const CSP_LIGHT_FADE_SMOOTH_DEFAULT = 80;
 export const CSP_SPOT_DEGREES_TO_RADIANS = 0.017453294;
 export const CSP_SPOT_ANGLE_MIN_RADIANS = 0.01;
 export const CSP_SPOT_HALF_ANGLE_MAX = 3.1414182;
 export const CSP_SPOT_SHARPNESS_MAX = 0.999;
+
+export function ksEditorAutoExposure(luminance, target = KS_EDITOR_EXPOSURE.target, minimum = KS_EDITOR_EXPOSURE.min, maximum = KS_EDITOR_EXPOSURE.max) {
+  const measured = Math.max(0.0001, Number(luminance) || 0);
+  const low = Math.max(0, Number(minimum) || 0), high = Math.max(low, Number(maximum) || 0);
+  return Math.max(low, Math.min(high, (Number(target) || 0) / measured));
+}
+
+export function ksEditorYebisToneMap(rgb, exposure = 1, { gamma = KS_EDITOR_EXPOSURE.gamma, saturation = KS_EDITOR_EXPOSURE.saturation, curveScale = KS_EDITOR_TONEMAP.curveScale, curveShoulder = KS_EDITOR_TONEMAP.curveShoulder } = {}) {
+  const source = Array.isArray(rgb) ? rgb.slice(0, 3).map((value) => Math.max(0, Number(value) || 0)) : [0, 0, 0];
+  while (source.length < 3) source.push(0);
+  const luminance = source[0] * 0.2126 + source[1] * 0.7152 + source[2] * 0.0722;
+  const colored = source.map((value) => Math.max(KS_EDITOR_TONEMAP.inputFloor, (luminance + (value - luminance) * saturation) * Math.max(0, Number(exposure) || 0)));
+  const exponent = 1 / Math.max(Number.EPSILON, Number(gamma) || 1);
+  return colored.map((value) => {
+    const decay = Math.exp(-value * curveScale);
+    const shoulder = 1 - decay * curveShoulder;
+    const curve = Math.max(0, Math.min(1, (1 - decay) * shoulder * shoulder));
+    return Math.pow(Math.min(1, curve + KS_EDITOR_TONEMAP.outputEpsilon), exponent);
+  });
+}
+
+export function ksEditorGlareBrightPass(rgb, exposure = 1, threshold = KS_EDITOR_GLARE.threshold, remap = KS_EDITOR_GLARE.brightPassRemap) {
+  const source = Array.isArray(rgb) ? rgb.slice(0, 3).map((value) => Math.max(0, Number(value) || 0)) : [0, 0, 0];
+  while (source.length < 3) source.push(0);
+  const gain = Math.max(0, Number(exposure) || 0), cutoff = Math.max(0, Number(threshold) || 0), scale = Math.max(0, Number(remap) || 0);
+  return source.map((value) => Math.min(64000, Math.max(0, value * gain - cutoff) * scale));
+}
+
+export function ksEditorBloomCompositeScale({ range = KS_EDITOR_GLARE.generationRangeScale, glareLuminance = KS_EDITOR_GLARE.luminance, shapeLuminance = KS_EDITOR_GLARE.shapeLuminance, bloomLuminance = KS_EDITOR_GLARE.shapeBloomLuminance } = {}) {
+  return Math.max(0, Number(range) || 0) * KS_EDITOR_GLARE.compositeBase * Math.max(0, Number(shapeLuminance) || 0) * Math.max(0, Number(glareLuminance) || 0) * Math.max(0, Number(bloomLuminance) || 0);
+}
+
+function yebisGauss29(sigma) {
+  const radius = Math.max(1e-8, Number(sigma) || 0);
+  const gaussian = Array.from({ length: 15 }, (_, index) => Math.exp(-(index * index) / (2 * radius * radius)));
+  const total = gaussian[0] + 2 * gaussian.slice(1).reduce((sum, value) => sum + value, 0);
+  const offsets = [0], weights = [gaussian[0] / total];
+  for (let pair = 0; pair < 7; pair++) {
+    const odd = pair * 2 + 1, even = odd + 1, pairWeight = gaussian[odd] + gaussian[even];
+    const offset = pairWeight > 0 ? (gaussian[odd] * odd + gaussian[even] * even) / pairWeight : even;
+    offsets.push(offset, -offset);
+    weights.push(pairWeight / total, pairWeight / total);
+  }
+  return { offsets, weights };
+}
+
+export function ksEditorBloomGaussianKernel(level = 0, {
+  threshold = KS_EDITOR_GLARE.bloomFilterThreshold,
+  radiusScale = KS_EDITOR_GLARE.bloomGaussianRadiusScale,
+  sourceLevel = KS_EDITOR_GLARE.bloomSourceLevel,
+  displayScale = KS_EDITOR_GLARE.bloomRadiusDisplayScale,
+  dispersion = KS_EDITOR_GLARE.bloomDispersion
+} = {}) {
+  const index = Math.max(0, Math.floor(Number(level) || 0));
+  const sigma = 2 ** index * 2 ** (1 - Math.max(0, Math.floor(Number(sourceLevel) || 0))) * Math.max(0, Number(radiusScale) || 0) * Math.max(0, Number(displayScale) || 0);
+  const channelSigmas = Array.from({ length: 4 }, (_, channel) => sigma * Math.max(0, Number(dispersion?.[channel]) || 0));
+  const channels = channelSigmas.map(yebisGauss29);
+  const offsets = Array.from({ length: KS_EDITOR_GLARE.bloomKernelSamples }, (_, sample) => channels.reduce((sum, channel) => sum + channel.offsets[sample], 0) * 0.25);
+  const weights = [...channels[0].weights];
+  const normalizer = Math.sqrt(2 * Math.PI) * Math.max(1e-8, sigma);
+  let cutoff = KS_EDITOR_GLARE.bloomKernelSamples;
+  for (let rawTap = 2; rawTap < KS_EDITOR_GLARE.bloomKernelSamples; rawTap++) {
+    const density = Math.exp(-(rawTap * rawTap) / (2 * sigma * sigma)) / normalizer;
+    if (density < Math.max(0, Number(threshold) || 0)) { cutoff = rawTap; break; }
+  }
+  const sampleCount = Math.min(KS_EDITOR_GLARE.bloomKernelSamples, Math.floor(cutoff / 2) * 2 + 1);
+  return Object.freeze({
+    sigma,
+    channelSigmas: Object.freeze(channelSigmas),
+    sampleCount,
+    offsets: Object.freeze(offsets),
+    weights: Object.freeze(weights)
+  });
+}
 
 export function cspLineClosestPoint(from, to, position) {
   const a = Array.isArray(from) ? from.slice(0, 3).map(Number) : [], b = Array.isArray(to) ? to.slice(0, 3).map(Number) : [], p = Array.isArray(position) ? position.slice(0, 3).map(Number) : [];

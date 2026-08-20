@@ -1,32 +1,61 @@
 # Apex Editor
 
 Apex Editor is an early cross-platform replacement for Assetto Corsa's Windows-only
-ksEditor. It reads KN5 files directly in the browser, preserves the scene hierarchy
-and material model, and renders static and animated skinned car and track meshes with
-a WebGL 2 preview.
+ksEditor. It reads KN5 files and imports FBX source scenes directly in the browser.
+It preserves the scene hierarchy and material model. It renders static and skinned
+car and track meshes with a WebGL 2 preview.
 
 ## Run
 
-Node.js 20 or newer is the only runtime dependency.
+Install Node.js 20 or newer. Then install the locked dependencies.
+
+```sh
+npm ci
+```
+
+Start the browser version.
 
 ```sh
 npm start
 ```
 
-Open <http://127.0.0.1:4173>, choose one or more `.kn5` files, and optionally open a
-CSP `.ini` configuration. Use **Open asset folder** to discover track `models*.ini`
+Open <http://127.0.0.1:4173>, then choose one or more `.kn5` or `.fbx` files.
+You can also open a CSP `.ini` configuration. Use **Open asset folder** to discover track `models*.ini`
 layouts or a car's unpacked `data/lods.ini` or packed `data.acd`. Apex assembles static track models with
 their positions and rotations, or the car's contiguous LOD set with its exact distance
 bands. The car preview can follow camera distance or force an individual LOD. Use
 **Open showroom** to add a separate showroom/environment KN5; its resources remain
 file-scoped and its subtree becomes the automatic live-reflection source. The reflection
 selector can instead supply any single named scene subtree, matching ksEditor.
+Open the **Model** inspector to edit the active workspace manifest. For a track, edit each static model position and rotation.
+For a car, edit each LOD range and the cockpit or driver distance switch. Press Enter to save a field.
+The preview, undo history, recovery data, and project file use the same values. Select **Export models.ini** or **Export lods.ini** to download the manifest.
 Discovered
 `skins/<name>` folders can replace matching KN5 texture basenames just as they do in
 the game. Discovered `.ksanim` files can be sampled on a normalized timeline with
-their matching KN5 hierarchy transforms applied live. The same asset folder
+their matching KN5 hierarchy transforms applied live. Imported FBX clips use the
+same timeline. You can export a selected clip as a KSANIM v2 file. The same asset folder
 resolves case-insensitive external CSP texture paths and reports missing or ambiguous
-files. Files stay on the local machine; the app does not upload them.
+files. For FBX import, select the source folder before or after you open the FBX.
+Apex embeds each resolved supported diffuse texture in the exported KN5. Files stay
+on the local machine. The app does not upload them.
+
+Start the desktop version during development.
+
+```sh
+npm run desktop
+```
+
+Create a package for the current operating system.
+
+```sh
+npm run dist:linux
+npm run dist:windows
+npm run dist:mac
+```
+
+The build writes packages to `release/`. Windows and macOS packages are not signed.
+Run their package commands on their target operating systems before distribution.
 
 ```sh
 npm test
@@ -34,6 +63,18 @@ npm test
 
 ## Current scope
 
+- Binary or ASCII FBX import through the portable Three.js loader. The importer
+  triangulates geometry and splits meshes by material. It preserves node transforms,
+  original object names, UV seams, normals, skin weights, and bone inverse-bind matrices.
+  It flips the UV V coordinate to match ksEditor. It also limits each KN5 mesh to
+  65,535 vertices. The importer preserves supported embedded PNG, JPEG, and WebP
+  textures. It also resolves external DDS, PNG, JPEG, and WebP textures.
+  A relative path, suffix, or basename must resolve to one file. Missing, ambiguous,
+  and unsupported diffuse textures use an embedded one-pixel DDS color. Static normal
+  maps use `ksPerPixelNM` and `txNormal`. Missing normal maps use an embedded flat-normal
+  DDS. The inspector reports maps that have no safe stock KN5 binding. Each FBX
+  animation clip is sampled into 100 local-transform frames. The timeline previews
+  the result, and the export action writes the native KSANIM v2 layout.
 - KN5 v5/v6 headers, embedded texture, material, hierarchy, static and skinned-mesh
   parsing, including recognition of appended CSP KN5ENC v1 protected payloads
 - Stock shader parameters, texture-resource inspection, embedded BC1/2/3,
@@ -43,16 +84,38 @@ npm test
   tangent-space normal maps, packed maps channels, diffuse/normal detail maps, and
   world-space four-layer track materials
 - Car- and track-scale orbit preview, hierarchy filtering, selected-mesh framing,
-  isolation, and wireframe
+  isolation, and wireframe. Normal preview follows recursive KN5 game visibility:
+  an inactive ancestor or a mesh with `visible`/`renderable` disabled stays hidden.
+  Dimmed hierarchy rows remain selectable, and **Show hidden** exposes all such
+  geometry explicitly for authoring inspection
+- Direct hierarchy authoring for node names, active states, and local transforms.
+  Transform controls use position, XYZ rotation in degrees, and scale. Stable
+  root-relative paths keep duplicate names independent. Edits update the preview,
+  support undo and recovery, save in project JSON, and bake into KN5 exports.
+- Static-mesh geometry authoring for vertex position, rotation, and scale around the
+  source bounds center. Edits update positions, inverse-transpose normals, tangents,
+  GPU buffers, preview bounds, GrassFX, reflections, and the KN5 bounding sphere.
+  Topology repair removes degenerate triangles, reverses faces, and rebuilds
+  area-weighted normals.
+  Stable node paths keep the edits in undo history, recovery data, project JSON, and
+  KN5 exports. Skinned bind-pose geometry remains read-only.
 - Ordered multi-KN5 track workspaces from manual selection or `models*.ini`, with
   per-file hierarchy roots, game-compatible placement transforms, material remapping,
   deterministic texture-name replacement, collision diagnostics, and deterministic
-  center previews for dynamic objects with their random ranges and velocity metadata
+  center previews for dynamic objects with their random ranges and velocity metadata.
+  Static model positions and rotations support live editing, undo, recovery, project
+  persistence, and `models.ini` export. Dynamic objects support edits to probability,
+  multiplicity, position mode, position center and range, velocity mode, velocity base
+  and range, and audio. These edits use the same undo, recovery, project, and
+  `models.ini` export paths. The preview stays at the deterministic position center.
 - Packed or unpacked `data/surfaces.ini` physics inspection and assembled-layout validation
   using the game's built-in `WALL`, stock system surfaces, track override precedence,
   nonzero sector IDs, and unique substring binding; fallback and ambiguous physics
   meshes, contiguous starts and pits, paired timing gates, and the hotlap marker are
-  diagnosed, with an exact-binding surface-physics viewport overlay
+  diagnosed, with an exact-binding surface-physics viewport overlay. Local surfaces
+  expose all 14 parsed physics fields for live editing. Edits support validation,
+  undo, recovery, project persistence, binding refresh, and `surfaces.ini` export.
+  Packed input stays read-only and exports a standalone file.
 - Version-3 `cameras*.ini` inspection with count, basis, FOV, lap-interval, and
   clip-plane diagnostics, plus fixed track-camera preview using the configured
   position, orientation, FOV, and near/far planes. Referenced camera-spline CSVs are
@@ -63,7 +126,8 @@ npm test
   diagnostics, and virtual read-only INI files; packed or unpacked car `data/lods.ini`
   workspaces with contiguous `LOD_n` loading, `IN`/`OUT`
   range validation, cockpit/driver distance-switch inspection, engine-compatible
-  FOV-normalized automatic selection, and forced per-LOD inspection
+  FOV-normalized automatic selection, and forced per-LOD inspection. LOD ranges and
+  distance switches support live editing, undo, recovery, project persistence, and `lods.ini` export.
 - Car collision validation for `collider.kn5` texture/material rules, SDK triangle
   budget, origin transform, dimensions, degenerate triangles, welded boundary and
   non-manifold edges, plus packed or unpacked `colliders.ini` bottom-box inspection
@@ -74,7 +138,8 @@ npm test
 - Car and track skin discovery with live selection, case-insensitive KN5-basename
   replacement, sparse inheritance, per-LOD texture scoping, and ambiguity/load diagnostics
 - KSANIM v1 matrix and v2 quaternion/position/scale parsing, exact runtime frame
-  sampling, hierarchical node binding, live timeline preview, and match diagnostics
+  sampling, v2 serialization, hierarchical node binding, live timeline preview,
+  and match diagnostics
 - Recursive `driver_base_pos.knh` parsing plus packed `driver3d.ini` inspection,
   steering/shift timing, shared-driver reference, hidden-object metadata, and exact
   KSANIM-to-base-rig coverage diagnostics; a selected shared driver KN5 is posed from
@@ -203,7 +268,10 @@ npm test
 - All seven stock SDK weather-lighting presets with the native version-3
   RGB × intensity / 255 conversion and sun-angle interpolation, authorable sun
   heading/height, HDR sky and sun, distance fog, an RGBA16F composition target with
-  supported MSAA, full-frame automatic or manual exposure, and display tone mapping
+  supported MSAA, full-frame automatic or manual exposure, and the recovered embedded
+  Yebis default display curve, reciprocal gamma, pre-curve saturation, quality-3
+  threshold bright pass, five-level bloom core, native 15-sample separable Gaussian
+  kernels, screen composition, and output dither
 - Decoded Kunos/CSP smooth-capped Fresnel response, native gloss-to-reflection-mip
   heuristic, a ksEditor-shaped 512² runtime scene cubemap with six-face initialization
   and one-face-per-draw refresh, explicit single-subtree selection, separately loaded
@@ -220,15 +288,17 @@ npm test
 
 A portable BC6H/BC7 fallback for systems without BPTC, dynamic RainFX accumulation,
 drainage, spray and occlusion, GrassFX's full 868,352-thread density rather than the
-portable CPU sampling budget, CSP's exact Gaussian local-shadow prefilter and
-dynamic/car atlas refresh scheduling,
+portable CPU sampling budget, CSP's full 32-slot local-shadow packing and dynamic/car
+atlas refresh scheduling,
 wet cubemap reflection and negative-wetness snow response,
 transparent-layer feedback,
 general CSP template/include expansion,
 randomized dynamic-object motion, subtractive procedural-emissive
-composition, new-geometry/FBX import and writing, full local-light photometric fidelity,
-exact Yebis tone mapping and temporal exposure behavior, cloud billboards, and the
-remaining post-processing stack, VAO split-animation blending, normal overrides, dynamic
+composition, FBX bump-map conversion and packed material maps, arbitrary vertex and
+face editing, skinned bind-pose geometry editing,
+full local-light photometric fidelity,
+Yebis star, ghost, light-shaft, non-default max-61 Gaussian passes, controlled pixel matching,
+cloud billboards, and the remaining post-processing stack, VAO split-animation blending, normal overrides, dynamic
 extra samples, and tree samples remain on the implementation roadmap. CSP's exact
 tree-season variation noise texture is represented by deterministic world-space preview
 noise; the recovered color transform and all non-tree fixed-variation paths are exact. See
@@ -238,8 +308,9 @@ For repeatable GPU checks, launch Chrome with a remote-debugging port and run
 `node tools/browser-smoke.mjs --model … --config … --mesh … --assets … --csp-assets … --input NAME=VALUE`.
 The tool isolates or assembles the selected mesh, hashes browser captures, and
 reports JavaScript and WebGL errors. Pass `--screenshot FILE.png` to retain the
-initial capture for visual inspection. Pass `--shadows` to capture and compare the
-native-shaped directional preview with shadows disabled. Pass `--lighting`, plus
+initial capture for visual inspection. Pass `--assembled --show-hidden` to compare
+the game-visible scene with the all-mesh authoring view. Pass `--shadows` to capture
+and compare the native-shaped directional preview with shadows disabled. Pass `--lighting`, plus
 optional `--weather`, `--sun-heading`, `--sun-height`, `--compare-sun-height`, or
 `--manual-exposure`, to verify and compare the HDR weather-lighting path. Pass
 `--vao FILE.vao-patch` to bind a CSP vertex-AO patch and capture its enabled and
@@ -280,5 +351,18 @@ node tools/browser-smoke.mjs --model car.kn5 --assets path/to/car \
 
 Use `--resource txDiffuse --resource-value 'color: 1, 0, 0, 1'` to exercise a
 resource override, or `--mesh-field lodOut --mesh-value 25` for a mesh adjustment.
+Use `--node-field active --node-value false` for a hierarchy edit. The node fields
+also include `name`, `position`, `rotation`, and `scale`. Use `--node NODE` instead
+of `--mesh MESH` to edit the transform of a non-mesh node.
 The check verifies rendering, undo, redo, autosave recovery, portable-project reopen,
 project state, generated CSP, JavaScript errors, and WebGL errors.
+
+The packaged desktop application has a separate production check:
+
+```sh
+node tools/desktop-smoke.mjs --model car.kn5 --assets path/to/car \
+  --mesh BODY --screenshot desktop.png
+```
+
+This check connects to the Electron application through the Chrome DevTools Protocol.
+It checks the renderer sandbox, navigation policy, CSP, model load, and WebGL state.

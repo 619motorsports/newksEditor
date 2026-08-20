@@ -1,5 +1,8 @@
+import { SURFACE_EDIT_KEYS } from "./surface-authoring.js";
+
 export const PROJECT_FORMAT = "apex-editor-project";
 export const PROJECT_VERSION = 1;
+const WORKSPACE_FILE_EDIT_KEYS = ["position", "rotation", "lodIn", "lodOut", "probability", "multiplicity", "posMode", "positionCenter", "positionRange", "velMode", "velocityBase", "velocityRange", "playWav"];
 
 function safeScalar(value) {
   if (typeof value === "number") return Number.isFinite(value) ? value : 0;
@@ -48,6 +51,71 @@ function cleanMeshEdit(value) {
   return Object.keys(output).length ? output : null;
 }
 
+function cleanNodeEdit(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const output = {};
+  if (typeof value.name === "string" && value.name.trim()) output.name = value.name.trim().slice(0, 1024);
+  if (typeof value.active === "boolean") output.active = value.active;
+  if (Array.isArray(value.transform) && value.transform.length === 16) {
+    const transform = value.transform.map(Number);
+    if (transform.every(Number.isFinite)) output.transform = transform;
+  }
+  return Object.keys(output).length ? output : null;
+}
+
+function cleanGeometryEdit(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const output = {};
+  if (Array.isArray(value.transform) && value.transform.length === 16) {
+    const transform = value.transform.map(Number);
+    if (transform.every(Number.isFinite)) output.transform = transform;
+  }
+  for (const key of ["removeDegenerate", "reverseWinding", "recalculateNormals"]) if (value[key] === true) output[key] = true;
+  return Object.keys(output).length ? output : null;
+}
+
+function cleanWorkspaceFileEdit(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const output = {};
+  for (const key of ["position", "rotation", "positionCenter", "positionRange", "velocityBase", "velocityRange"]) {
+    if (!Array.isArray(value[key]) || value[key].length !== 3) continue;
+    const vector = value[key].map(Number);
+    if (vector.every(Number.isFinite)) output[key] = vector;
+  }
+  if (Array.isArray(value.multiplicity) && value.multiplicity.length === 2) {
+    const multiplicity = value.multiplicity.map(Number);
+    if (multiplicity.every(Number.isFinite)) output.multiplicity = multiplicity;
+  }
+  for (const key of ["lodIn", "lodOut", "probability"]) if (value[key] !== null && value[key] !== undefined && value[key] !== "" && Number.isFinite(Number(value[key]))) output[key] = Number(value[key]);
+  for (const key of ["posMode", "velMode"]) if (typeof value[key] === "string" && value[key].trim()) output[key] = value[key].trim().toUpperCase().slice(0, 128);
+  if (value.playWav === null) output.playWav = null;
+  else if (typeof value.playWav === "string") output.playWav = value.playWav.trim().slice(0, 1024) || null;
+  return Object.keys(output).length ? output : null;
+}
+
+function cleanWorkspaceEdits(value) {
+  const output = { files: Object.create(null) };
+  if (!value || typeof value !== "object" || Array.isArray(value)) return output;
+  output.files = safeRecord(value.files, (item) => cleanWorkspaceFileEdit(item));
+  for (const key of ["cockpitHrDistance", "driverHrDistance"]) if (value[key] !== null && value[key] !== undefined && value[key] !== "" && Number.isFinite(Number(value[key]))) output[key] = Number(value[key]);
+  return output;
+}
+
+function cleanSurfaceEdit(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const output = {};
+  for (const key of ["friction", "damping", "dirtAdditive", "blackFlagTime", "sinHeight", "sinLength", "vibrationGain", "vibrationLength", "wavPitch"]) {
+    if (value[key] !== null && value[key] !== undefined && value[key] !== "" && Number.isFinite(Number(value[key]))) output[key] = Number(value[key]);
+  }
+  for (const key of ["isValidTrack", "isPitlane"]) if (typeof value[key] === "boolean") output[key] = value[key];
+  if (typeof value.key === "string" && value.key.trim()) output.key = value.key.trim().toUpperCase().slice(0, 128);
+  for (const key of ["wav", "ffEffect"]) {
+    if (value[key] === null) output[key] = null;
+    else if (typeof value[key] === "string") output[key] = value[key].trim().slice(0, 1024) || null;
+  }
+  return Object.keys(output).length ? output : null;
+}
+
 export function createEditorProject(asset = {}) {
   return {
     format: PROJECT_FORMAT,
@@ -58,7 +126,11 @@ export function createEditorProject(asset = {}) {
       kn5Version: Math.max(0, Number(asset.kn5Version) || 0)
     },
     materialEdits: Object.create(null),
-    meshEdits: Object.create(null)
+    meshEdits: Object.create(null),
+    nodeEdits: Object.create(null),
+    geometryEdits: Object.create(null),
+    workspaceEdits: { files: Object.create(null) },
+    surfaceEdits: Object.create(null)
   };
 }
 
@@ -68,6 +140,10 @@ export function normalizeEditorProject(value) {
   const project = createEditorProject(value.asset || {});
   project.materialEdits = safeRecord(value.materialEdits, (item) => cleanEdit(item));
   project.meshEdits = safeRecord(value.meshEdits, (item) => cleanMeshEdit(item));
+  project.nodeEdits = safeRecord(value.nodeEdits, (item) => cleanNodeEdit(item));
+  project.geometryEdits = safeRecord(value.geometryEdits, (item) => cleanGeometryEdit(item));
+  project.workspaceEdits = cleanWorkspaceEdits(value.workspaceEdits);
+  project.surfaceEdits = safeRecord(value.surfaceEdits, (item) => cleanSurfaceEdit(item));
   return project;
 }
 
@@ -91,7 +167,22 @@ export function formatEditorValue(value) {
 export function editorProjectEditCount(project) {
   const materials = Object.values(project?.materialEdits || {}).reduce((count, edit) => count + Object.keys(edit.properties || {}).length + Object.keys(edit.resources || {}).length + ["shader", "blendMode", "depthMode", "cullMode"].filter((key) => edit[key]).length, 0);
   const meshes = Object.values(project?.meshEdits || {}).reduce((count, edit) => count + ["isTransparent", "castShadows", "layer", "lodIn", "lodOut"].filter((key) => edit[key] !== undefined).length, 0);
-  return materials + meshes;
+  const nodes = Object.values(project?.nodeEdits || {}).reduce((count, edit) => count + ["name", "active", "transform"].filter((key) => edit[key] !== undefined).length, 0);
+  const geometry = Object.values(project?.geometryEdits || {}).reduce((count, edit) => count + ["transform", "removeDegenerate", "reverseWinding", "recalculateNormals"].filter((key) => edit[key] !== undefined).length, 0);
+  const workspaceFiles = Object.values(project?.workspaceEdits?.files || {}).reduce((count, edit) => count + WORKSPACE_FILE_EDIT_KEYS.filter((key) => edit[key] !== undefined).length, 0);
+  const workspace = workspaceFiles + ["cockpitHrDistance", "driverHrDistance"].filter((key) => project?.workspaceEdits?.[key] !== undefined).length;
+  const surfaces = Object.values(project?.surfaceEdits || {}).reduce((count, edit) => count + SURFACE_EDIT_KEYS.filter((key) => edit?.[key] !== undefined).length, 0);
+  return materials + meshes + nodes + geometry + workspace + surfaces;
+}
+
+export function editorProjectCspEditCount(project) {
+  const total = editorProjectEditCount(project);
+  const nodes = Object.values(project?.nodeEdits || {}).reduce((count, edit) => count + ["name", "active", "transform"].filter((key) => edit[key] !== undefined).length, 0);
+  const geometry = Object.values(project?.geometryEdits || {}).reduce((count, edit) => count + ["transform", "removeDegenerate", "reverseWinding", "recalculateNormals"].filter((key) => edit[key] !== undefined).length, 0);
+  const workspaceFiles = Object.values(project?.workspaceEdits?.files || {}).reduce((count, edit) => count + WORKSPACE_FILE_EDIT_KEYS.filter((key) => edit[key] !== undefined).length, 0);
+  const workspace = workspaceFiles + ["cockpitHrDistance", "driverHrDistance"].filter((key) => project?.workspaceEdits?.[key] !== undefined).length;
+  const surfaces = Object.values(project?.surfaceEdits || {}).reduce((count, edit) => count + SURFACE_EDIT_KEYS.filter((key) => edit?.[key] !== undefined).length, 0);
+  return total - nodes - geometry - workspace - surfaces;
 }
 
 function quoteListItem(value) {

@@ -6,15 +6,16 @@
   <title>Apex Editor</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="app.css">
+  <script type="importmap">{"imports":{"three":"/vendor/three.module.js","three/addons/":"/vendor/three-addons/"}}</script>
 </head>
 <body>
   <header>
     <div class="brand"><span class="mark">A</span><div><strong>Apex Editor</strong><small>Assetto Corsa workspace</small></div></div>
     <div class="toolbar">
-      <label class="button primary">Open KN5<input id="file" type="file" accept=".kn5" multiple hidden></label>
+      <label class="button primary">Open model<input id="file" type="file" accept=".kn5,.fbx" multiple hidden></label>
       <label class="button">Open CSP config<input id="csp-file" type="file" accept=".ini,.txt" hidden></label>
       <label id="vao-file-button" class="button" title="Open a CSP vertex ambient-occlusion patch for this car or track">Open VAO patch<input id="vao-file" type="file" accept=".vao-patch" hidden></label>
-      <label id="asset-folder-button" class="button" title="Choose the car or track folder to resolve project-relative CSP textures">Open asset folder<input id="asset-folder" type="file" webkitdirectory directory multiple hidden></label>
+      <label id="asset-folder-button" class="button" title="Choose the car, track, or FBX source folder to resolve project-relative textures">Open asset folder<input id="asset-folder" type="file" webkitdirectory directory multiple hidden></label>
       <label id="csp-texture-folder-button" class="button" title="Choose assettocorsa/extension/textures to resolve shared CSP assets such as GrassFX atlases">Open CSP textures<input id="csp-texture-folder" type="file" webkitdirectory directory multiple hidden></label>
       <label id="reflection-environment-button" class="button" hidden title="Add a showroom or other KN5 environment and use only its subtree for live reflections">Open showroom<input id="reflection-environment-file" type="file" accept=".kn5" hidden></label>
       <select id="reflection-root" hidden aria-label="Reflection capture subtree"><option value="">Reflections · automatic</option></select>
@@ -52,8 +53,10 @@
       <input id="project-file" type="file" accept=".json,.apex.json" hidden>
       <button id="export-csp" disabled>Export CSP</button>
       <button id="export-kn5" disabled>Export KN5 copy</button>
+      <button id="export-ksanim" hidden disabled title="Select an imported FBX clip to export it">Export KSANIM</button>
       <button id="frame" disabled>Frame scene</button>
       <button id="isolate" disabled>Isolate selection</button>
+      <button id="show-hidden" disabled title="Show inactive, invisible, and non-renderable KN5 meshes for authoring inspection">Show hidden</button>
       <button id="wireframe" disabled>Wireframe</button>
     </div>
     <div id="status" class="status">No model loaded</div>
@@ -62,17 +65,17 @@
     <aside class="left panel">
       <div class="panel-title"><span>Scene</span><span id="node-count" class="badge">0</span></div>
       <input id="search" class="search" placeholder="Filter nodes…" disabled>
-      <div id="tree" class="tree empty">Open a car or track KN5 to inspect it.</div>
+      <div id="tree" class="tree empty">Open a car or track KN5, or import an FBX source scene.</div>
     </aside>
     <section class="viewport">
       <canvas id="view"></canvas>
       <div class="view-hint">Drag to orbit · Shift+drag to pan · Wheel to zoom</div>
-      <div id="loading" class="loading" hidden><div class="spinner"></div><span>Reading KN5…</span></div>
+      <div id="loading" class="loading" hidden><div class="spinner"></div><span>Reading model…</span></div>
       <div id="welcome" class="welcome">
-        <div class="welcome-icon">KN5</div>
+        <div class="welcome-icon">3D</div>
         <h1>See the asset, not the guesswork.</h1>
-        <p>Inspect real Assetto Corsa geometry, materials, hierarchy and embedded textures on any desktop platform.</p>
-        <label class="button primary large">Choose KN5 files<input type="file" accept=".kn5" multiple hidden data-file-mirror></label>
+        <p>Inspect real Assetto Corsa geometry, materials, hierarchy and embedded textures, or turn an FBX source scene into a game-ready KN5.</p>
+        <label class="button primary large">Choose KN5 or FBX files<input type="file" accept=".kn5,.fbx" multiple hidden data-file-mirror></label>
       </div>
       <div id="stats" class="stats" hidden></div>
     </section>

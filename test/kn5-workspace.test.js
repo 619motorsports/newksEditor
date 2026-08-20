@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { carLodDistance, carLodVisible, mergeKn5Models, modelPlacementMatrix, parseCarLodsIni, parseModelsIni } from "../src/kn5-workspace.js";
+import { carLodDistance, carLodVisible, mergeKn5Models, modelPlacementMatrix, parseCarLodsIni, parseModelsIni, serializeCarLodsIni, serializeModelsIni } from "../src/kn5-workspace.js";
 import { parseKn5, walkNodes } from "../src/kn5.js";
 
 const hickoryFixture = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/tracks/hickory";
@@ -44,6 +44,42 @@ FILE=main.kn5
   assert.equal(parsed.ignoredSections, 0);
 });
 
+test("serializes track manifests without losing static or dynamic fields", () => {
+  const workspace = { files: [
+    { name: "main.kn5", manifestIndex: 0, position: [0, 1.5, 0], rotation: [0, 90, 0] },
+    { name: "plane.kn5", position: [-10, 20, 30], dynamic: { index: 2, probability: 75, multiplicity: [1, 3], posMode: "RANDOM", positionCenter: [-10, 20, 30], positionRange: [4, 5, 6], velMode: "RANDOM", velocityBase: [1, 2, 3], velocityRange: [7, 8, 9], playWav: "fly by.wav" } }
+  ] };
+  const text = serializeModelsIni(workspace), parsed = parseModelsIni(text);
+  assert.deepEqual(parsed.models[0], { index: 0, file: "main.kn5", position: [0, 1.5, 0], rotation: [0, 90, 0], section: "MODEL_0", line: 1 });
+  assert.equal(parsed.dynamicObjects[0].index, 2);
+  assert.equal(parsed.dynamicObjects[0].probability, 75);
+  assert.deepEqual(parsed.dynamicObjects[0].positionRange, [4, 5, 6]);
+  assert.deepEqual(parsed.dynamicObjects[0].velocityRange, [7, 8, 9]);
+  assert.equal(parsed.dynamicObjects[0].playWav, "fly by.wav");
+  assert.deepEqual(parsed.warnings, []);
+});
+
+test("assigns independent fallback indices to manual static and dynamic track entries", () => {
+  const parsed = parseModelsIni(serializeModelsIni({ files: [
+    { name: "main.kn5", manifestIndex: 1, position: [0, 0, 0], rotation: [0, 0, 0] },
+    { name: "balloon.kn5", dynamic: { index: 1, probability: 100 } },
+    { name: "details.kn5", position: [0, 0, 0], rotation: [0, 0, 0] },
+    { name: "plane.kn5", dynamic: { probability: 50 } }
+  ] }));
+  assert.deepEqual(parsed.models.map((entry) => [entry.index, entry.file]), [[0, "details.kn5"], [1, "main.kn5"]]);
+  assert.deepEqual(parsed.dynamicObjects.map((entry) => [entry.index, entry.file]), [[0, "plane.kn5"], [1, "balloon.kn5"]]);
+});
+
+test("quotes manifest file names without removing apostrophes", () => {
+  const parsed = parseModelsIni(serializeModelsIni({ files: [
+    { name: "O'Brien main.kn5", position: [0, 0, 0], rotation: [0, 0, 0] }
+  ] }));
+  assert.equal(parsed.models[0].file, "O'Brien main.kn5");
+  assert.throws(() => serializeModelsIni({ files: [
+    { name: `both ' and " quotes.kn5`, position: [0, 0, 0], rotation: [0, 0, 0] }
+  ] }), /both quote characters/);
+});
+
 test("parses installed Kunos dynamic track objects",async(t)=>{let text;try{text=await readFile("/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/tracks/ks_barcelona/models_layout_gp.ini","utf8");}catch{t.skip("Assetto Corsa dynamic track fixture is not installed");return;}const parsed=parseModelsIni(text,"models_layout_gp.ini");assert.equal(parsed.models.length,9);assert.equal(parsed.dynamicObjects.length,2);assert.deepEqual(parsed.dynamicObjects[0].positionCenter,[-320,160,1400]);assert.deepEqual(parsed.dynamicObjects[0].velocityRange,[2,0,2]);assert.equal(parsed.dynamicObjects[0].probability,75);});
 
 test("builds heading, pitch, roll placement matrices with translation", () => {
@@ -82,6 +118,19 @@ OUT=5000
   assert.ok(parsed.warnings.some((warning) => /LOD_3 is ignored.*missing LOD_2/.test(warning)));
 });
 
+test("serializes contiguous car LOD ranges and distance switches", () => {
+  const workspace = { cockpitHrDistance: 6, driverHrDistance: 25, files: [
+    { name: "car.kn5", lod: { index: 0, in: 0, out: 15 } },
+    { name: "car_lod_b.kn5", lod: { index: 1, in: 15, out: 45 } },
+    { name: "Driver.kn5", auxiliary: "driver" }
+  ] };
+  const text = serializeCarLodsIni(workspace), parsed = parseCarLodsIni(text);
+  assert.deepEqual(parsed.lods.map((lod) => [lod.file, lod.in, lod.out]), [["car.kn5", 0, 15], ["car_lod_b.kn5", 15, 45]]);
+  assert.equal(parsed.cockpitHrDistance, 6);
+  assert.equal(parsed.driverHrDistance, 25);
+  assert.deepEqual(parsed.warnings, []);
+});
+
 test("diagnoses car LOD gaps and overlaps and uses half-open preview ranges", () => {
   const gap = parseCarLodsIni("[LOD_0]\nFILE=a.kn5\nIN=0\nOUT=10\n[LOD_1]\nFILE=b.kn5\nIN=12\nOUT=20");
   const overlap = parseCarLodsIni("[LOD_0]\nFILE=a.kn5\nIN=0\nOUT=15\n[LOD_1]\nFILE=b.kn5\nIN=10\nOUT=20");
@@ -108,6 +157,15 @@ test("merges KN5 scenes and remaps material IDs without mutating inputs", () => 
   assert.equal(second.root.children[0].materialId, 0);
   assert.deepEqual(merged.root.children[1].transform.slice(12, 15), [4, 5, 6]);
   assert.equal(merged.bytesRead, 200);
+});
+
+test("preserves track manifest indices in merged workspace metadata", () => {
+  const merged = mergeKn5Models([
+    { name: "main.kn5", model: model("main", "road", "road.dds"), manifestIndex: 0 },
+    { name: "details.kn5", model: model("details", "signs", "signs.dds"), manifestIndex: 3 }
+  ]);
+  assert.deepEqual(merged.workspace.files.map((file) => file.manifestIndex), [0, 3]);
+  assert.deepEqual(parseModelsIni(serializeModelsIni(merged.workspace)).models.map((entry) => entry.index), [0, 3]);
 });
 
 test("preserves car LOD ranges on merged workspace roots", () => {

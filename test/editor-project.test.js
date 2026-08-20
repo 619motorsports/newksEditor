@@ -1,14 +1,37 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createEditorProject, editorProjectEditCount, formatEditorValue, normalizeEditorProject, parseEditorValue, serializeEditorCsp, serializeEditorProject } from "../src/editor-project.js";
+import { createEditorProject, editorProjectCspEditCount, editorProjectEditCount, formatEditorValue, normalizeEditorProject, parseEditorValue, serializeEditorCsp, serializeEditorProject } from "../src/editor-project.js";
 import { evaluateCspConfig, parseCspIni } from "../src/csp-config.js";
 
 test("normalizes portable projects and rejects incompatible input", () => {
-  const project = normalizeEditorProject({ format: "apex-editor-project", version: 1, asset: { name: "car.kn5", size: 42, kn5Version: 6 }, materialEdits: { body: { shader: "smCarPaint", properties: { ksDiffuse: 0.5, ksEmissive: [1, 0, 0] }, resources: { txMaps: { color: [1, 1, 1, 1] } } } }, meshEdits: { BODY: { isTransparent: false, layer: 3 } } });
+  const project = normalizeEditorProject({ format: "apex-editor-project", version: 1, asset: { name: "car.kn5", size: 42, kn5Version: 6 }, materialEdits: { body: { shader: "smCarPaint", properties: { ksDiffuse: 0.5, ksEmissive: [1, 0, 0] }, resources: { txMaps: { color: [1, 1, 1, 1] } } } }, meshEdits: { BODY: { isTransparent: false, layer: 3 } }, nodeEdits: { "0": { name: "BODY_RENAMED", active: false, transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 2, 3, 4, 1] } }, geometryEdits: { "0/0": { transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -1, 2, 3, 1], removeDegenerate: true, recalculateNormals: true } }, workspaceEdits: { files: { "1": { lodIn: 15, lodOut: 45 } }, cockpitHrDistance: 6 } });
   assert.equal(project.asset.name, "car.kn5");
-  assert.equal(editorProjectEditCount(project), 6);
+  assert.equal(editorProjectEditCount(project), 15);
+  assert.equal(editorProjectCspEditCount(project), 6);
+  assert.equal(project.nodeEdits["0"].name, "BODY_RENAMED");
+  assert.equal(project.nodeEdits["0"].active, false);
+  assert.deepEqual(project.nodeEdits["0"].transform.slice(12, 15), [2, 3, 4]);
+  assert.deepEqual(project.geometryEdits["0/0"].transform.slice(12, 15), [-1, 2, 3]);
+  assert.equal(project.geometryEdits["0/0"].removeDegenerate, true);
+  assert.equal(project.geometryEdits["0/0"].recalculateNormals, true);
+  assert.deepEqual(project.workspaceEdits.files["1"], { lodIn: 15, lodOut: 45 });
+  assert.equal(project.workspaceEdits.cockpitHrDistance, 6);
   assert.throws(() => normalizeEditorProject({ format: "other", version: 1 }), /Not an Apex Editor project/);
   assert.throws(() => normalizeEditorProject({ format: "apex-editor-project", version: 99 }), /Unsupported/);
+});
+
+test("normalizes dynamic track manifest edits as non-CSP project fields", () => {
+  const project = normalizeEditorProject({ format: "apex-editor-project", version: 1, workspaceEdits: { files: { "2": { probability: 25, multiplicity: [2, 5], posMode: "fixed", positionCenter: [-10, 40, 50], positionRange: [1, 2, 3], velMode: "linear", velocityBase: [8, 9, 10], velocityRange: [0, 1, 2], playWav: null } } } });
+  assert.deepEqual(project.workspaceEdits.files["2"], { probability: 25, multiplicity: [2, 5], posMode: "FIXED", positionCenter: [-10, 40, 50], positionRange: [1, 2, 3], velMode: "LINEAR", velocityBase: [8, 9, 10], velocityRange: [0, 1, 2], playWav: null });
+  assert.equal(editorProjectEditCount(project), 9);
+  assert.equal(editorProjectCspEditCount(project), 0);
+});
+
+test("normalizes track surface edits as non-CSP project fields", () => {
+  const project = normalizeEditorProject({ format: "apex-editor-project", version: 1, surfaceEdits: { "0": { key: "tarmac", friction: "1.05", damping: 0.02, dirtAdditive: 0.1, blackFlagTime: 3, isValidTrack: true, isPitlane: false, sinHeight: 0.001, sinLength: 2.5, vibrationGain: 0.15, vibrationLength: 0.4, wav: null, wavPitch: 1.2, ffEffect: "GRAIN" } } });
+  assert.deepEqual(project.surfaceEdits["0"], { key: "TARMAC", friction: 1.05, damping: 0.02, dirtAdditive: 0.1, blackFlagTime: 3, isValidTrack: true, isPitlane: false, sinHeight: 0.001, sinLength: 2.5, vibrationGain: 0.15, vibrationLength: 0.4, wav: null, wavPitch: 1.2, ffEffect: "GRAIN" });
+  assert.equal(editorProjectEditCount(project), 14);
+  assert.equal(editorProjectCspEditCount(project), 0);
 });
 
 test("parses and formats scalar and vector editor values", () => {

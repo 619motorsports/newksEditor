@@ -7,6 +7,9 @@ vertical slice is only the foundation.
 ## 1. Asset fidelity
 
 - Complete and fixture-test static, skinned, and version-specific KN5 node layouts.
+  Recursive active-branch, mesh-visible, and renderable flags now control the normal
+  preview, while an explicit authoring toggle reveals hidden geometry without changing
+  its parsed game state.
 - Complete embedded texture coverage, normal maps, maps channels, detail maps,
   UV multipliers, blending, depth modes, two-sided rendering, and all commonly used
   stock car/track shaders. The seven shipped cutout-package flags, native shader-default
@@ -28,10 +31,22 @@ vertical slice is only the foundation.
   reflection-glass alpha, and `ksBrokenGlass` damage-mask/additive behavior. CSP
   refraction reads a mipmapped opaque HDR scene resolve with the recovered projected-
   normal offset. It does not yet feed earlier transparent layers back into later ones.
-- Parse FBX input or integrate a cross-platform importer. The KN5 v5/v6 writer now
-  round-trips real static, textured, and skinned assets byte-for-byte and can bake
-  compatible authored edits into an unprotected single-file copy; new geometry,
-  hierarchy authoring, protected-payload preservation, and in-game output validation remain.
+- The portable FBX importer now reads binary and ASCII FBX scenes through Three.js.
+  It imports static and skinned geometry, material groups, transforms, normals, UVs,
+  skin weights, bone inverse-bind matrices, original names, and animation clips. It
+  applies the recovered ksEditor V-coordinate sign change and writes a KN5 v6 file.
+  Generated one-pixel DDS textures preserve FBX material colors. The importer captures
+  external texture references. It preserves supported DDS, PNG, JPEG, or WebP files
+  that resolve uniquely in a selected source folder. It also preserves supported
+  embedded images. Static normal maps use `ksPerPixelNM` and `txNormal`. Missing
+  normal maps keep a generated flat-normal DDS. The inspector reports map types that
+  have no safe stock binding. The importer samples each clip into 100 local-transform frames.
+  The editor previews these frames and exports the native KSANIM v2 layout.
+  Bump-map conversion, packed material-map composition, arbitrary vertex and face
+  editing, skinned bind-pose geometry editing,
+  protected-payload preservation, and in-game output validation
+  remain. The KN5 v5/v6 writer also round-trips real static, textured, and skinned
+  assets byte-for-byte.
 - Complete driver texture export/reload/review and hierarchy-edit workflows. Native
   KSANIM v1/v2 transform tracks now parse,
   bind to every matching hierarchy node, and preview with the game's normalized
@@ -39,7 +54,8 @@ vertical slice is only the foundation.
   against their inverse-bind matrices, and selected shared driver models receive the
   configured KNH base pose before joining every car LOD. Packed or unpacked car `data/lods.ini` projects now load every
   contiguous LOD, preserve distance bands, expose cockpit/driver switches, and allow
-  automatic or forced LOD inspection; authoring and exporting those manifests remain.
+  automatic or forced LOD inspection. LOD ranges and distance switches now support
+  live editing, undo, recovery, project persistence, validation, and `lods.ini` export.
 
 ## 2. CSP authoring preview
 
@@ -77,8 +93,9 @@ vertical slice is only the foundation.
   records through a tested camera-side silhouette proxy with exclusion polygons.
   Recovered interior/exterior view enums and tri-state track-receiver modes now gate
   bounded light selection and per-mesh ordinary/GrassFX receivers, including
-  template-expanded `SelfLight` defaults. Native occluder cell/BVH ordering and size
-  weighting, native Gaussian filtering, and photometric behavior remain.
+  template-expanded `SelfLight` defaults. Local shadows use the recovered four-sample
+  resolve and separable 7-tap or 15-tap filters. Native occluder cell/BVH ordering,
+  32-slot atlas packing, dynamic refresh scheduling, and photometric behavior remain.
 - Complete VAO split-animation blending, legacy normal overrides, dynamic-object
   extra samples, and tree samples; add higher-fidelity car
   paint/glass/interior rendering. Installed legacy/v3/v4/v5 `.vao-patch` containers
@@ -158,9 +175,10 @@ vertical slice is only the foundation.
   substrate-normal concentrated diffuse, fixed 52.8-exponent gloss, strongest-light
   backlighting, and fake-shadow detail response. A cached 1024² static-editor depth
   radial-ESM atlas shadows up to four camera-prioritized authored spotlights in four
-  512² cells for both ordinary materials and GrassFX; GrassFX uses CSP's 10 cm lowered
-  receiver. Full unsampled compute density, moving-vehicle air/deformation stamping,
-  CSP's exact Gaussian local-shadow prefilter and dynamic/car atlas refresh scheduling,
+  512² cells for both ordinary materials and GrassFX. Its recovered four-sample
+  resolve and separable 7-tap or 15-tap filters run before receiver sampling. GrassFX
+  uses CSP's 10 cm lowered receiver. Full unsampled compute density,
+  moving-vehicle air/deformation stamping, 32-slot packing, dynamic/car atlas refresh scheduling,
   wet cubemap reflection,
   negative-wetness snow, and the rest of CSP's game-only lighting integration remain.
   RainFX now classifies puddle, soaking, smooth, rough, line, relief, and stream
@@ -175,7 +193,10 @@ vertical slice is only the foundation.
   stock SDK presets now use the native version-3 HDR color conversion and sun-angle
   interpolation. A procedural HDR sky and sun, distance fog, supported multisample
   RGBA16F composition, full-frame automatic exposure within the shipped 0.2–0.5
-  limits, manual exposure, and display mapping share the same linear pass. The stock
+  limits and manual exposure share the same linear pass. The display stage now executes
+  the embedded Yebis `FUNCTION=-1` shader's exponential cubic curve, pre-curve
+  saturation, reciprocal gamma, input floor, and output epsilon with the native
+  characteristic-curve initialization. The stock
   directional path uses three 2048² cascades, the shipped 2/12/50 m camera splits,
   SDK biases, mesh/CSP caster flags, and native non-opaque-material cutouts. Runtime
   reflection capture follows ksEditor’s 90° face orientation, 0.01–500 m clip range,
@@ -191,10 +212,14 @@ vertical slice is only the foundation.
   transparent layers. Grass blades share HDR weather/fog lighting, receive the same
   cascades, and use their tapered instanced geometry in viewport and probe shadow maps;
   reflection sampling and refraction are disabled during capture
-  to avoid recursive feedback. Exact Yebis tone mapping,
-  temporal eye adaptation, cloud billboards, exact local-shadow filtering/scheduling, and controlled
+  to avoid recursive feedback. The default Yebis path now uses its recovered quality-3
+  quarter-resolution source, five bloom levels, threshold bright pass, equal native
+  composite weights, screen blend, and output-dither scale. Its separable bloom uses the
+  active native 29-tap fallback, including the 15 bilinear samples, level radii, wavelength
+  dispersion, and tail cutoff. Yebis star, ghost, light-shaft, non-default max-61 Gaussian,
+  non-default tone functions, cloud billboards, full local-shadow packing/scheduling, and controlled
   game-image matching remain. GrassFX full-density GPU dispatch, moving-vehicle
-  air/deformation stamps, CSP's exact local-shadow Gaussian filter, wet cubemap
+  air/deformation stamps, CSP's full local-shadow atlas packing, wet cubemap
   reflection, and transparent-layer refraction feedback remain separate fidelity gates.
 
 ## 3. Track and car workflows
@@ -208,36 +233,57 @@ vertical slice is only the foundation.
   skin metadata/editing, animation authoring, cross-folder shared-driver access without
   a browser file grant, lights,
   damage/dirt, instruments, steering/driver alignment, collider editing, and LOD-manifest
-  authoring remain.
+  file-name authoring remain. LOD ranges and cockpit/driver distance switches now support
+  live editing, project persistence, validation, and `lods.ini` export.
 - Track workspace: static multi-KN5 layouts now load from ordered `models*.ini`
   manifests or manual multi-file selection, including placement transforms and
   collision diagnostics. `DYNAMIC_OBJECT_n` entries now parse and load at their
   deterministic range centers with probability, multiplicity, velocity, and audio
-  diagnostics; randomized motion playback remains. Packed or unpacked `surfaces.ini` physics,
+  diagnostics. Their native manifest fields now support live editing, undo, recovery,
+  project persistence, validation, and `models.ini` export. The preview uses the
+  deterministic position center. Randomized motion playback remains. Packed or unpacked `surfaces.ini` physics,
   the runtime `WALL` plus system/track definition merge, exact nonzero-sector and
   unique-substring physical-mesh bindings, contiguous starts/pits, timing-gate pairs,
   and hotlap markers now have an assembled-layout audit and spatial physics overlay.
+  All parsed local-surface fields now support live editing, undo, recovery, project
+  persistence, validation, binding refresh, and `surfaces.ini` export. Packed input
+  exports a standalone file because `data.acd` repacking remains separate.
   Version-3 camera sets are validated and can
   drive the viewport with their configured basis, FOV, and clip planes. Referenced
   spline CSVs resolve and use the game's world-Y rotation and normalized sampling for
   manual path-position preview and configured-duration playback; live focused-car
-  targeting remains. Layout authoring, exact environment matching, remaining shaders
+  targeting remains. Static layout positions and rotations now support live editing,
+  project persistence, validation, and `models.ini` export. Exact environment matching, remaining shaders
   and CSP effects, and performance/spatial diagnostics remain.
-- Searchable hierarchy, multi-select, undo/redo, validation findings, batch editing,
-  autosave/recovery, recent projects, and portable project files. Search, material
-  editing, 100-step undo/redo, autosave/recovery, portable project JSON, and CSP
-  export now form a tested vertical slice; track and archive validation are also
-  exposed in the inspector. Multi-select, batch editing, recent projects, and
-  geometry/hierarchy edits remain.
+- Search, material editing, direct hierarchy editing, and static-mesh geometry transforms
+  now form a tested vertical slice. Hierarchy edits use stable node paths and support names, active states,
+  local position, XYZ rotation, and scale. The preview, 100-step undo history,
+  autosave recovery, portable project JSON, and KN5 export use the same edits.
+  Static geometry edits use the source bounds center. They update positions,
+  inverse-transpose normals, tangents, GPU buffers, preview bounds, and KN5 bounds.
+  Static topology repair removes degenerate triangles, reverses faces, and rebuilds
+  area-weighted normals. Each operation starts from the source vertex and index buffers.
+  Dynamic track objects use the same edit history, recovery data, and portable project
+  data as static layout edits. Their native fields remain separate from CSP export.
+  CSP export contains only material and mesh edits because CSP cannot change the
+  source hierarchy or geometry. Track and archive validation are also available in the inspector.
+  Multi-select, batch editing, recent projects, arbitrary vertex and face editing,
+  and skinned bind-pose geometry editing remain.
 
 ## 4. Distribution and proof
 
 - Package signed applications for Windows, macOS, and Linux with no Wine dependency.
+  The Electron shell now uses a sandboxed renderer and a loopback-only local server.
+  Reproducible Linux AppImage and tar.gz packages now pass a production WebGL check.
+  Target-native Windows and macOS packages, signing, and release automation remain.
 - Run parser/writer round trips against representative official and mod assets.
 - Maintain golden-image comparisons for stock and CSP rendering on cars and tracks.
   A reusable CDP browser-smoke tool now provides deterministic capture hashes and
   WebGL/JavaScript error checks as the foundation for those comparisons. A separate
-  authoring smoke check proves edit, undo, redo, recovery, and CSP serialization on
-  a production KN5 in a real WebGL browser.
+  authoring smoke check proves edit, undo, redo, recovery, and serialization in a
+  real WebGL browser. Hierarchy checks also prove recursive visibility updates and
+  keep CSP export disabled for hierarchy-only projects. Static geometry checks prove
+  live bounds updates, topology repair, invalid-scale rejection, recovery, and
+  KN5-only export.
 - Verify generated KN5/config outputs in Assetto Corsa and document unsupported CSP
   features. Completion requires passing all these gates, not merely launching the UI.

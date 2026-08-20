@@ -1,14 +1,17 @@
-import { parseKn5, propertyValue, walkNodes } from "/src/kn5.js";
+import { computeKn5Visibility, parseKn5, propertyValue, walkNodes } from "/src/kn5.js";
 import { evaluateCspConfig, expandCspMaterialTemplates, parseCspIni } from "/src/csp-config.js";
 import { customEmissiveAtlasSize } from "/src/custom-emissive.js";
-import { cloneEditorProject, createEditorProject, editorProjectEditCount, formatEditorValue, normalizeEditorProject, parseEditorValue, serializeEditorCsp, serializeEditorProject } from "/src/editor-project.js";
+import { cloneEditorProject, createEditorProject, editorProjectCspEditCount, editorProjectEditCount, formatEditorValue, normalizeEditorProject, parseEditorValue, serializeEditorCsp, serializeEditorProject } from "/src/editor-project.js";
 import { decodeDdsRgba, inspectDds } from "/src/dds.js";
 import { createAssetFileIndex, discoverAssetAnimations, discoverAssetSkins, externalResourcePaths, matchSkinTextures, normalizeAssetPath, resolveAssetFile } from "/src/asset-files.js";
-import { carLodDistance, carLodVisible, mergeKn5Models, parseCarLodsIni, parseModelsIni } from "/src/kn5-workspace.js";
-import { parseKsAnimation, sampleKsAnimation } from "/src/ksanim.js";
+import { applyGeometryEdits, captureStaticGeometryBaselines, staticGeometryMetrics } from "/src/geometry-authoring.js";
+import { carLodDistance, carLodVisible, mergeKn5Models, parseCarLodsIni, parseModelsIni, serializeCarLodsIni, serializeModelsIni } from "/src/kn5-workspace.js";
+import { applyWorkspaceEdits, captureWorkspaceBaseline, workspaceEditCount as countWorkspaceEdits } from "/src/workspace-authoring.js";
+import { parseKsAnimation, sampleKsAnimation, serializeKsAnimation } from "/src/ksanim.js";
 import { bakeEditorProjectIntoKn5 } from "/src/kn5-bake.js";
 import { serializeKn5 } from "/src/kn5-write.js";
-import { auditTrackModel, parseSurfacesIni, resolveTrackSurface } from "/src/track-validation.js";
+import { auditTrackModel, parseSurfacesIni, resolveTrackSurface, serializeSurfacesIni } from "/src/track-validation.js";
+import { applySurfaceEdits, captureSurfaceBaseline, surfaceEditCount as countSurfaceEdits } from "/src/surface-authoring.js";
 import { findAcdEntry, parseAcd } from "/src/acd.js";
 import { auditCarCollider, auditCarHierarchy, parseBottomCollidersIni } from "/src/car-validation.js";
 import { parseKnh } from "/src/knh.js";
@@ -17,14 +20,16 @@ import { skinMeshVertices } from "/src/skinning.js";
 import { parseCameraSplineCsv, parseTrackCamerasIni, rotateCameraSpline, sampleCameraSpline } from "/src/track-cameras.js";
 import { buildGrassInstances, evaluateGrassFx, grassTangentSpaceNormal, GRASS_FX_DEFAULT_TEXTURE, GRASS_FX_INSTANCE_STRIDE } from "/src/grass-fx.js";
 import { evaluateRainFx } from "/src/rain-fx.js";
-import { computeDirectionalProbeShadowCascades, computeDirectionalShadowCascades, computeLocalLightShadow, cspLocalShadowFilter, CSP_LOCAL_SHADOW_ATLAS_SIZE, CSP_LOCAL_SHADOW_CELL_SIZE, CSP_LOCAL_SHADOW_LIMIT, KS_SHADOW_BIASES, KS_SHADOW_MAP_SIZE, KS_SHADOW_SPLITS, shadowCasterEnabled } from "/src/shadows.js";
-import { cspLightDistanceFade, cspLightReceiverVisible, cspLineClosestPoint, cspSecondarySpotPacking, cspSpotConePacking, cspSpotEdgePacking, evaluateKsLighting, KS_EDITOR_DEFAULT_WEATHER, KS_EDITOR_EXPOSURE, STOCK_WEATHER_PRESETS, sunDirectionFromAngles } from "/src/lighting.js";
+import { computeDirectionalProbeShadowCascades, computeDirectionalShadowCascades, computeLocalLightShadow, cspLocalShadowFilter, CSP_LOCAL_SHADOW_ATLAS_SIZE, CSP_LOCAL_SHADOW_CELL_SIZE, CSP_LOCAL_SHADOW_LIMIT, CSP_LOCAL_SHADOW_SAMPLES, KS_SHADOW_BIASES, KS_SHADOW_MAP_SIZE, KS_SHADOW_SPLITS, shadowCasterEnabled } from "/src/shadows.js";
+import { cspLightDistanceFade, cspLightReceiverVisible, cspLineClosestPoint, cspSecondarySpotPacking, cspSpotConePacking, cspSpotEdgePacking, evaluateKsLighting, ksEditorAutoExposure, ksEditorBloomCompositeScale, ksEditorBloomGaussianKernel, KS_EDITOR_DEFAULT_WEATHER, KS_EDITOR_EXPOSURE, KS_EDITOR_GLARE, KS_EDITOR_TONEMAP, STOCK_WEATHER_PRESETS, sunDirectionFromAngles } from "/src/lighting.js";
 import { cspTrackOccluded } from "/src/csp-occlusion.js";
 import { bindVaoPatch, parseVaoPatch } from "/src/vao-patch.js";
 import { adjustCspSeasonColor, analyzeCspSeasonalOverrides } from "/src/seasons.js";
 import { auditMaterialShaderProfiles, resolveMaterialRenderProfile } from "/src/shader-profiles.js";
 import { KS_EDITOR_CUBEMAP, WEBGL_CUBEMAP_FACES, reflectionBlurFromExponent, selectReflectionCaptureItems } from "/src/reflections.js";
 import { createCspWindParticles, CSP_WIND_MAP_FORMAT, CSP_WIND_MAP_SIZE, CSP_WIND_PARTICLE_COUNT, updateCspWindParticles } from "/src/csp-wind.js";
+import { collectFbxAnimations, parseFbxWithTextures, resolveFbxModelTextures } from "/src/fbx-import.js";
+import { applyNodeEdits, composeNodeTransform, decomposeNodeTransform, nodePathEntries } from "/src/node-authoring.js";
 
 const $ = (selector) => document.querySelector(selector);
 const fileInput = $("#file");
@@ -65,11 +70,14 @@ let cspTextureFolderFiles = [];
 let assetSkins = [];
 let assetSkinName = "";
 let assetAnimations = [];
+let importedFbxAnimations = [];
 let activeAnimation = null;
 let activeAnimationName = "";
+let activeFbxAnimationIndex = -1;
 let animationPosition = 0;
 let assetSurfaceEntries = [];
 let trackSurfaceConfig = null;
+let trackSurfaceBaseline = null;
 let trackSurfaceFileName = "";
 let trackAudit = null;
 let trackSurfaceBindings = new Map();
@@ -109,6 +117,11 @@ let vaoError = "";
 let loadedModelDescriptors = [];
 let loadedWorkspaceOptions = {};
 let reflectionRootChoices = [];
+let nodePathByNode = new WeakMap();
+let nodeByPath = new Map();
+let nodeBaselines = new WeakMap();
+let geometryBaselines = new Map();
+let workspaceBaseline = null;
 
 $("#gpu").textContent = renderer ? renderer.description : "WebGL 2 is unavailable";
 document.querySelectorAll("[data-file-mirror]").forEach((input) => input.addEventListener("change", () => load([...input.files])));
@@ -130,9 +143,16 @@ $("#asset-folder").addEventListener("change", async (event) => {
   configureAnimationChoices();
   await configureDriverData();
   await configureTrackDataChoices();
+  const importedFbxModels=[...new Set(loadedModelDescriptors.map((descriptor)=>descriptor.model).filter((entry)=>entry?.fbx))];
+  if(importedFbxModels.length){
+    await resolveFbxModelTextures(importedFbxModels,assetFileIndex);
+    if(model?.workspace)await load(loadedModelDescriptors,loadedWorkspaceOptions);
+    else{model=importedFbxModels[0];window.__apexFbx=model.fbx;renderer?.setModel(model);status.textContent=modelStatusText();}
+  }
   await Promise.all([renderer?.setExternalFiles([...assetFolderFiles,...cspTextureFolderFiles]), renderer?.setSkinFiles([], "")]);
   refreshCarColliderAudit();
   updateExternalTextureUi();
+  if (modelFile) status.textContent = modelStatusText();
   if (model && !selectedNode) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
 });
 $("#csp-texture-folder").addEventListener("change",async(event)=>{cspTextureFolderFiles=[...event.target.files];cspTextureFolderName=cspTextureFolderFiles[0]?.webkitRelativePath?.split("/")[0]||(cspTextureFolderFiles.length?`${cspTextureFolderFiles.length} selected files`:"");await renderer?.setExternalFiles([...assetFolderFiles,...cspTextureFolderFiles]);updateExternalTextureUi();if(model&&!selectedNode)renderModelInspector(modelFile,modelSummary.nodes,modelSummary.triangles);});
@@ -147,6 +167,7 @@ $("#skin-select").addEventListener("change", async (event) => {
   if (model && !selectedNode) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
 });
 $("#animation-select").addEventListener("change", loadSelectedAnimation);
+$("#export-ksanim").addEventListener("click", exportFbxAnimation);
 $("#animation-position").addEventListener("input", (event) => {
   animationPosition = Number(event.target.value);
   $("#animation-position-output").value = animationPosition.toFixed(3);
@@ -183,6 +204,14 @@ $("#isolate").addEventListener("click", (event) => {
   event.target.classList.toggle("active", renderer.isolate);
   renderer.draw();
 });
+$("#show-hidden").addEventListener("click", (event) => {
+  if (!renderer) return;
+  renderer.setShowHidden(!renderer.showHidden);
+  event.target.classList.toggle("active", renderer.showHidden);
+  event.target.textContent = renderer.showHidden ? "Hidden shown" : "Show hidden";
+  renderer.draw();
+  if (model && !selectedNode) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
+});
 $("#wireframe").addEventListener("click", (event) => {
   if (!renderer) return;
   renderer.wireframe = !renderer.wireframe;
@@ -208,7 +237,7 @@ window.__apexAppReady=true;
 async function load(files, workspaceOptions = {}) {
   const descriptors = (Array.isArray(files) ? files : [files]).filter(Boolean).map((entry) => entry.file ? entry : { file: entry });
   if (!descriptors.length) return;
-  const displayName = workspaceOptions.name || (descriptors.length === 1 ? descriptors[0].file.name : `${descriptors[0].file.name.replace(/\.kn5$/i, "")} workspace`);
+  const displayName = workspaceOptions.name || (descriptors.length === 1 ? descriptors[0].file.name : `${descriptors[0].file.name.replace(/\.(?:kn5|fbx)$/i, "")} workspace`);
   loading.hidden = false;
   status.textContent = `Loading ${displayName}…`;
   await new Promise((resolve) => requestAnimationFrame(resolve));
@@ -218,34 +247,40 @@ async function load(files, workspaceOptions = {}) {
       const descriptor = descriptors[index], file = descriptor.file;
       status.textContent = `Loading ${file.name} · ${index + 1}/${descriptors.length}…`;
       await new Promise((resolve) => requestAnimationFrame(resolve));
-      let parsed = parsedByFile.get(file);
-      if (!parsed) { parsed = parseKn5(await file.arrayBuffer());if(descriptor.driverPose){sharedDriverPoseResult=applyDriverBasePose(parsed,descriptor.driverPose);parsed=sharedDriverPoseResult.model;}if(descriptor.auxiliary==="driver")sharedDriverHideAudit=auditDriverHiddenObjects(parsed,driverConfig?.hideObjects||[]);parsedByFile.set(file, parsed); }
-      entries.push({ name: descriptor.name || file.name, size: file.size, model: parsed, position: descriptor.position, rotation: descriptor.rotation, lod: descriptor.lod, auxiliary:descriptor.auxiliary, dynamic: descriptor.dynamic });
+      let parsed = descriptor.model || parsedByFile.get(file);
+      if (!parsed) { const bytes=await file.arrayBuffer();parsed=/\.fbx$/i.test(file.name)?await parseFbxWithTextures(bytes,file.webkitRelativePath||file.name,assetFileIndex):parseKn5(bytes);if(descriptor.driverPose){sharedDriverPoseResult=applyDriverBasePose(parsed,descriptor.driverPose);parsed=sharedDriverPoseResult.model;}if(descriptor.auxiliary==="driver")sharedDriverHideAudit=auditDriverHiddenObjects(parsed,driverConfig?.hideObjects||[]);parsedByFile.set(file, parsed); }
+      entries.push({ name: descriptor.name || file.name, size: file.size, model: parsed, position: descriptor.position, rotation: descriptor.rotation, lod: descriptor.lod, manifestIndex: descriptor.manifestIndex, auxiliary:descriptor.auxiliary, dynamic: descriptor.dynamic });
     }
     const forceWorkspace = workspaceOptions.forceWorkspace || entries.length > 1 || entries.some((entry) => [...(entry.position || []), ...(entry.rotation || [])].some((value) => Number(value) !== 0));
     model = forceWorkspace ? mergeKn5Models(entries, { name: displayName, kind: workspaceOptions.kind, manifest: workspaceOptions.manifest, warnings: workspaceOptions.warnings, cockpitHrDistance: workspaceOptions.cockpitHrDistance, driverHrDistance: workspaceOptions.driverHrDistance }) : entries[0].model;
-    loadedModelDescriptors=descriptors.map((descriptor)=>({...descriptor}));loadedWorkspaceOptions={...workspaceOptions,name:displayName};
+    loadedModelDescriptors=descriptors.map((descriptor,index)=>({...descriptor,model:entries[index].model}));loadedWorkspaceOptions={...workspaceOptions,name:displayName};
     const totalSize = descriptors.reduce((sum, descriptor) => sum + (Number(descriptor.file.size) || 0), 0);
     modelFile = forceWorkspace ? { name: displayName, size: totalSize, workspaceKey: descriptors.map((descriptor, index) => `${descriptor.file.webkitRelativePath || descriptor.file.name}:${descriptor.file.size}:${entries[index].position || ""}:${entries[index].rotation || ""}:${entries[index].lod ? `${entries[index].lod.index},${entries[index].lod.in},${entries[index].lod.out}` : ""}`).join("|") } : descriptors[0].file;
     selectedNode = null;
     inspectedMaterial = null;
-    if (renderer) { renderer.isolate = false; renderer.surfaceOverlay = false; }
+    if (renderer) { renderer.isolate = false; renderer.surfaceOverlay = false; renderer.showHidden = false; }
     $("#isolate").disabled = true; $("#isolate").classList.remove("active"); $("#frame").textContent = "Frame scene";
+    $("#show-hidden").disabled = !renderer; $("#show-hidden").classList.remove("active"); $("#show-hidden").textContent = "Show hidden";
+    initializeNodeAuthoring(model.root);
+    geometryBaselines = captureStaticGeometryBaselines(model.root);
+    initializeWorkspaceAuthoring();
+    initializeEditorProject(modelFile);
+    applyProjectSceneEdits();
     const nodes = walkNodes(model.root);
     const meshes = nodes.filter(({ node }) => node.kind === "mesh" || node.kind === "skinnedMesh");
-    sceneVisibility = computeSceneVisibility(model.root);
+    sceneVisibility = computeKn5Visibility(model.root);
     const previewMeshes = meshes.filter(({ node }) => sceneVisibility.get(node));
     const triangles = meshes.reduce((sum, { node }) => sum + node.indices.length / 3, 0);
-    modelSummary = { nodes, meshes, previewMeshes, triangles };
+    modelSummary = { nodes, meshes, previewMeshes, triangles };window.__apexFbx=model.fbx||null;
     trackAudit = model.workspace?.kind === "track" ? auditTrackModel(model, trackSurfaceConfig) : null;trackSurfaceBindings=trackAudit?new Map(meshes.map(({node})=>[node,resolveTrackSurface(node.name,trackSurfaceConfig)])):new Map();window.__apexTrackAudit=trackAudit;carHierarchyAudit=model.workspace?.kind==="carLods"?auditCarHierarchy(model):null;window.__apexCarHierarchyAudit=carHierarchyAudit;refreshCarColliderAudit();
-    initializeEditorProject(modelFile);
     $("#welcome").hidden = true;
     $("#stats").hidden = false;
-    $("#stats").innerHTML = `${previewMeshes.length.toLocaleString()} renderable / ${meshes.length.toLocaleString()} meshes<br>${Math.round(triangles).toLocaleString()} triangles<br>${model.materials.length} materials${model.workspace ? `<br>${model.workspace.files.length} KN5 files` : ""}`;
+    $("#stats").innerHTML = `${previewMeshes.length.toLocaleString()} renderable / ${meshes.length.toLocaleString()} meshes<br>${Math.round(triangles).toLocaleString()} triangle${Math.round(triangles) === 1 ? "" : "s"}<br>${model.materials.length} materials${model.workspace ? `<br>${model.workspace.files.length} KN5 files` : ""}`;
     $("#node-count").textContent = nodes.length;
     $("#search").disabled = false;
     $("#frame").disabled = !renderer;
     $("#wireframe").disabled = !renderer;
+    configureAnimationChoices();
     status.textContent = modelStatusText();
     renderTree();
     renderer?.setModel(model);configureReflectionCaptureChoices();applyVaoPatch();renderer?.setSurfaceBindings(trackSurfaceBindings);configureSurfaceOverlay();
@@ -257,7 +292,7 @@ async function load(files, workspaceOptions = {}) {
   } catch (error) {
     console.error(error);
     status.textContent = `Could not open ${displayName}`;
-    inspector.innerHTML = `<div class="empty"><strong>KN5 read error</strong><br>${escapeHtml(error.message)}</div>`;
+    inspector.innerHTML = `<div class="empty"><strong>Model read error</strong><br>${escapeHtml(error.message)}</div>`;
   } finally { loading.hidden = true; }
 }
 
@@ -302,13 +337,23 @@ function configureSkinChoices() {
 
 function configureAnimationChoices() {
   assetAnimations = discoverAssetAnimations(assetFileIndex);
-  activeAnimation = null; activeAnimationName = ""; animationPosition = 0;
+  activeAnimation = null; activeAnimationName = ""; activeFbxAnimationIndex = -1; animationPosition = 0;
   const select = $("#animation-select"), control = $("#animation-position-control"), slider = $("#animation-position");
-  select.replaceChildren(new Option("Bind pose", ""), ...assetAnimations.map((entry) => new Option(`Anim · ${entry.relativePath}`, entry.path)));
-  select.hidden = !assetAnimations.length; select.value = "";
-  select.title = assetAnimations.length ? `${assetAnimations.length} KSANIM files discovered` : "No KSANIM files discovered";
+  importedFbxAnimations = collectFbxAnimations(loadedModelDescriptors.map((descriptor) => descriptor.model));
+  select.replaceChildren(new Option("Bind pose", ""), ...importedFbxAnimations.map((entry, index) => new Option(`FBX · ${entry.sourceName} · ${entry.clip.name}`, `fbx:${index}`)), ...assetAnimations.map((entry) => new Option(`Anim · ${entry.relativePath}`, entry.path)));
+  select.hidden = !assetAnimations.length && !importedFbxAnimations.length; select.value = "";
+  select.title = importedFbxAnimations.length || assetAnimations.length ? `${importedFbxAnimations.length} FBX clips · ${assetAnimations.length} KSANIM files` : "No animation clips discovered";
   control.hidden = true; slider.value = "0"; $("#animation-position-output").value = "0.000";
+  configureKsAnimationExport();
   renderer?.setAnimation(null, 0, "");
+}
+
+function configureKsAnimationExport() {
+  const button = $("#export-ksanim"), clip = activeFbxAnimationIndex >= 0 ? importedFbxAnimations[activeFbxAnimationIndex]?.clip : null;
+  button.hidden = !importedFbxAnimations.length;
+  button.disabled = !clip || !clip.frameCount;
+  button.textContent = clip ? `Export ${clip.name}` : "Export KSANIM";
+  button.title = clip ? "Export this FBX clip in the game-compatible KSANIM v2 format" : "Select an imported FBX clip to export it";
 }
 
 function popupAnimationSelected() {
@@ -320,7 +365,7 @@ function cspPreviewContext() {
 }
 
 async function configureTrackDataChoices() {
-  assetSurfaceEntries=assetFileIndex.entries.filter((entry)=>/(^|\/)data\/surfaces\.ini$/i.test(entry.relativePath));const packed=virtualAcdAssetEntry("surfaces.ini");if(packed&&!assetSurfaceEntries.some((entry)=>/^data\/surfaces\.ini$/i.test(entry.relativePath)))assetSurfaceEntries.push(packed);trackSurfaceConfig=null;trackSurfaceFileName="";trackAudit=null;trackSurfaceBindings=new Map();renderer?.setSurfaceBindings(trackSurfaceBindings);configureSurfaceOverlay();
+  assetSurfaceEntries=assetFileIndex.entries.filter((entry)=>/(^|\/)data\/surfaces\.ini$/i.test(entry.relativePath));const packed=virtualAcdAssetEntry("surfaces.ini");if(packed&&!assetSurfaceEntries.some((entry)=>/^data\/surfaces\.ini$/i.test(entry.relativePath)))assetSurfaceEntries.push(packed);trackSurfaceConfig=null;trackSurfaceBaseline=null;trackSurfaceFileName="";trackAudit=null;trackSurfaceBindings=new Map();renderer?.setSurfaceBindings(trackSurfaceBindings);configureSurfaceOverlay();
   const entries=assetFileIndex.entries.filter((entry)=>/(^|\/)data\/cameras(?:_[^\/]*)?\.ini$/i.test(entry.relativePath)),splineCache=new Map();trackCameraSets=[];trackCameraChoices=[];trackCameraErrors=[];trackCameraPosition=0;window.__apexTrackCameras=[];
   for(const entry of entries){try{const set=parseTrackCamerasIni(await entry.file.text(),entry.relativePath),directory=entry.relativePath.split("/").slice(0,-1).join("/");for(const camera of set.cameras)if(camera.spline){const requested=normalizeAssetPath(`${directory}/${camera.spline}`),resolved=resolveAssetFile(assetFileIndex,requested);if(resolved.status!=="resolved"){set.warnings.push(`${set.source}: CAMERA_${camera.index} spline ${camera.spline} is ${resolved.status}`);continue;}let parsed=splineCache.get(resolved.path.toLowerCase());if(!parsed){parsed=parseCameraSplineCsv(await resolved.file.text(),resolved.path);splineCache.set(resolved.path.toLowerCase(),parsed);}const points=rotateCameraSpline(parsed.points,camera.splineRotation);camera.splineData={source:parsed.source,points,length:parsed.length,warnings:[...parsed.warnings]};set.warnings.push(...parsed.warnings);}trackCameraSets.push(set);for(const camera of set.cameras)trackCameraChoices.push({key:`${entry.path}:${camera.index}`,set,camera});}catch(error){console.error(error);trackCameraErrors.push(`${entry.relativePath}: ${error.message}`);}}
   const select=$("#track-camera-select");select.replaceChildren(new Option("Orbit camera",""),...trackCameraChoices.map((choice)=>new Option(`${choice.set.name||choice.set.source} · ${choice.camera.index}: ${choice.camera.name}`,choice.key)));select.hidden=!trackCameraChoices.length;select.value="";select.title=trackCameraChoices.length?`${trackCameraSets.length} camera sets · ${trackCameraChoices.length} cameras`:"No track camera files discovered";stopTrackCameraPlayback();$("#track-camera-position-control").hidden=true;$("#track-camera-play").hidden=true;$("#track-camera-play").disabled=true;setTrackCameraPosition(0);renderer?.setTrackCamera(null);window.__apexTrackCameras=trackCameraSets;
@@ -371,19 +416,31 @@ function configureDriverModelButton(){const button=$("#driver-model-button"),nam
 function configureDriverViewButton(){const button=$("#driver-cockpit-view"),available=Boolean(model?.workspace?.files.some((file)=>file.auxiliary==="driver")&&sharedDriverHideAudit?.matched);button.hidden=!sharedDriverFile;button.disabled=!available;button.classList.toggle("active",available&&driverCockpitView);button.textContent=driverCockpitView?"Cockpit driver · hidden":"Cockpit driver";button.title=sharedDriverHideAudit?`${sharedDriverHideAudit.matched}/${sharedDriverHideAudit.requested} configured objects match; ${sharedDriverHideAudit.meshCount} mesh${sharedDriverHideAudit.meshCount===1?"":"es"} hidden in cockpit mode`:"No shared driver geometry is loaded";}
 
 async function selectTrackSurfaceConfig(manifestEntry) {
-  trackSurfaceConfig=null;trackSurfaceFileName="";trackAudit=null;if(!assetSurfaceEntries.length)return;
+  trackSurfaceConfig=null;trackSurfaceBaseline=null;trackSurfaceFileName="";trackAudit=null;if(!assetSurfaceEntries.length)return;
   const parts=manifestEntry.relativePath.split("/"),directory=parts.slice(0,-1).join("/"),basename=parts.at(-1),layout=basename.match(/^models_(.+)\.ini$/i)?.[1];
   const preferred=[layout?normalizeAssetPath(`${directory}/${layout}/data/surfaces.ini`):"",normalizeAssetPath(`${directory}/data/surfaces.ini`)].filter(Boolean);
   let entry=preferred.map((path)=>assetSurfaceEntries.find((candidate)=>candidate.relativePath.toLowerCase()===path.toLowerCase())).find(Boolean);if(!entry&&assetSurfaceEntries.length===1)entry=assetSurfaceEntries[0];if(!entry)return;
-  try{trackSurfaceConfig=parseSurfacesIni(await entry.file.text(),entry.relativePath);trackSurfaceFileName=entry.relativePath;}catch(error){console.error(error);status.textContent=`Could not read ${entry.relativePath}: ${error.message}`;}
+  try{trackSurfaceConfig=parseSurfacesIni(await entry.file.text(),entry.relativePath);trackSurfaceBaseline=captureSurfaceBaseline(trackSurfaceConfig);trackSurfaceFileName=entry.relativePath;}catch(error){console.error(error);status.textContent=`Could not read ${entry.relativePath}: ${error.message}`;}
 }
 
 async function loadSelectedAnimation(event) {
   const entry = assetAnimations.find((candidate) => candidate.path === event.target.value);
-  activeAnimation = null; activeAnimationName = ""; animationPosition = 0;
+  const importedMatch = event.target.value.match(/^fbx:(\d+)$/), importedIndex = importedMatch ? Number(importedMatch[1]) : -1, imported = importedFbxAnimations[importedIndex];
+  activeAnimation = null; activeAnimationName = ""; activeFbxAnimationIndex = -1; animationPosition = 0;
   $("#animation-position").value = "0"; $("#animation-position-output").value = "0.000";
+  if (imported) {
+    activeAnimation = imported.clip; activeAnimationName = `${imported.sourceName} · ${imported.clip.name}`; activeFbxAnimationIndex = importedIndex;
+    $("#animation-position-control").hidden = !imported.clip.frameCount;
+    configureKsAnimationExport();
+    renderer?.setAnimation(activeAnimation, 0, activeAnimationName);
+    if (activeCspConfig) applyCspConfig();
+    if (modelFile) status.textContent = modelStatusText();
+    if (model && !selectedNode) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
+    return;
+  }
   if (!entry) {
     $("#animation-position-control").hidden = true;
+    configureKsAnimationExport();
     renderer?.setAnimation(null, 0, "");
     if (activeCspConfig) applyCspConfig();
     if (modelFile) status.textContent = modelStatusText();
@@ -394,6 +451,7 @@ async function loadSelectedAnimation(event) {
   try {
     activeAnimation = parseKsAnimation(await entry.file.arrayBuffer(), entry.relativePath);
     activeAnimationName = entry.relativePath;
+    configureKsAnimationExport();
     $("#animation-position-control").hidden = false;
     renderer?.setAnimation(activeAnimation, 0, activeAnimationName);
     if (activeCspConfig) applyCspConfig();
@@ -402,6 +460,7 @@ async function loadSelectedAnimation(event) {
   } catch (error) {
     console.error(error); status.textContent = `Could not open animation: ${error.message}`;
     event.target.value = ""; $("#animation-position-control").hidden = true;
+    configureKsAnimationExport();
     renderer?.setAnimation(null, 0, "");
     if (activeCspConfig) applyCspConfig();
   }
@@ -417,7 +476,7 @@ async function loadSelectedLayout() {
     for (const item of [...manifest.models, ...manifest.dynamicObjects]) {
       const requested = normalizeAssetPath(`${base}/${item.file}`), match = resolveAssetFile(assetFileIndex, requested);
       if (match.status !== "resolved") unresolved.push(`${item.file} (${match.status})`);
-      else descriptors.push({ file: match.file, name: item.file, position: item.position || item.positionCenter, rotation: item.rotation || [0, 0, 0], dynamic: item.positionCenter ? item : null });
+      else descriptors.push({ file: match.file, name: item.file, position: item.position || item.positionCenter, rotation: item.rotation || [0, 0, 0], manifestIndex: item.positionCenter ? null : item.index, dynamic: item.positionCenter ? item : null });
     }
     if (!descriptors.length) throw new Error("The selected manifest has no resolvable MODEL_n files");
     if (unresolved.length) throw new Error(`Could not resolve ${unresolved.length} layout file${unresolved.length === 1 ? "" : "s"}: ${unresolved.slice(0, 5).join(", ")}`);
@@ -429,7 +488,7 @@ async function loadSelectedLayout() {
 
 async function loadSelectedCarLods(manifestEntry) {
   try {
-    trackSurfaceConfig=null;trackSurfaceFileName="";trackAudit=null;
+    trackSurfaceConfig=null;trackSurfaceBaseline=null;trackSurfaceFileName="";trackAudit=null;
     const manifest = parseCarLodsIni(await manifestEntry.file.text(), manifestEntry.relativePath);
     const parts = manifestEntry.relativePath.split("/"), manifestDirectory = parts.slice(0, -1), dataDirectory = manifestDirectory.at(-1) || "";
     const base = /^data(?:[-_].*)?$/i.test(dataDirectory) ? manifestDirectory.slice(0, -1).join("/") : manifestDirectory.join("/");
@@ -450,13 +509,14 @@ async function loadSelectedCarLods(manifestEntry) {
   }
 }
 
-function configureLodPreview() {
+function configureLodPreview(preserveSelection = false) {
   const select = $("#lod-preview"), workspace = model?.workspace;
   const carWorkspace = workspace?.kind === "carLods";
+  const previous = preserveSelection ? select.value : "auto";
   select.hidden = !carWorkspace;
   select.replaceChildren(new Option("LOD auto (45° camera)", "auto"), ...(carWorkspace ? workspace.files.filter((file)=>file.lod).map((file) => new Option(`LOD ${file.lod.index} · ${format(file.lod.in)}–${format(file.lod.out)} m`, String(file.lod.index))) : []));
-  select.value = "auto";
-  renderer?.setWorkspaceLod(null);
+  select.value = [...select.options].some((option) => option.value === previous) ? previous : "auto";
+  renderer?.setWorkspaceLod(select.value === "auto" ? null : Number(select.value));
 }
 
 function updateWorkspaceLodUi(value) {
@@ -488,6 +548,93 @@ function projectStorageKey(file = modelFile) {
   return `apex-editor:project:${file.name}:${(hash >>> 0).toString(16)}`;
 }
 
+function initializeNodeAuthoring(root) {
+  nodePathByNode = new WeakMap(); nodeByPath = new Map(); nodeBaselines = new WeakMap();
+  for (const { node, path } of nodePathEntries(root)) {
+    nodePathByNode.set(node, path); nodeByPath.set(path, node);
+    nodeBaselines.set(node, { name: node.name, active: node.active, transform: node.transform ? [...node.transform] : null });
+  }
+}
+
+function initializeWorkspaceAuthoring() {
+  workspaceBaseline = captureWorkspaceBaseline(model);
+}
+
+function nodeBaseline(node) {
+  return nodeBaselines.get(node) || { name: node.name, active: node.active, transform: node.transform ? [...node.transform] : null };
+}
+
+function restoreNodeBaselines() {
+  if (!model?.root) return;
+  for (const { node } of nodePathEntries(model.root)) {
+    const baseline = nodeBaselines.get(node);
+    if (!baseline) continue;
+    node.name = baseline.name; node.active = baseline.active;
+    if (baseline.transform) node.transform = [...baseline.transform];
+  }
+}
+
+function applyProjectNodeEdits() {
+  if (!model?.root) return;
+  restoreNodeBaselines();
+  const warnings = [];
+  applyNodeEdits(model.root, editorProject?.nodeEdits, warnings);
+  window.__apexNodeAuthoring = { paths: nodeByPath.size, edits: Object.keys(editorProject?.nodeEdits || {}).length, warnings };
+}
+
+function applyProjectWorkspaceEdits() {
+  const workspace = model?.workspace;
+  if (!workspace || !workspaceBaseline) return;
+  const edits = editorProject?.workspaceEdits || {}, fileEdits = edits.files || {};
+  const applied = applyWorkspaceEdits(model, edits, workspaceBaseline);
+  try {
+    const text = workspace.kind === "carLods" ? serializeCarLodsIni(workspace) : serializeModelsIni(workspace);
+    workspace.authoredWarnings = workspace.kind === "carLods" ? parseCarLodsIni(text, workspace.manifest || "data/lods.ini").warnings : parseModelsIni(text, workspace.manifest || "models.ini").warnings;
+  } catch (error) { workspace.authoredWarnings = [error.message]; }
+  window.__apexWorkspaceAuthoring = { edits: applied, files: Object.keys(fileEdits).length, warnings: [...workspace.authoredWarnings] };
+}
+
+function applyProjectSurfaceEdits() {
+  if (!trackSurfaceConfig || !trackSurfaceBaseline) return;
+  const edits = editorProject?.surfaceEdits || {}, applied = applySurfaceEdits(trackSurfaceConfig, edits, trackSurfaceBaseline);
+  try {
+    const text = serializeSurfacesIni(trackSurfaceConfig);
+    trackSurfaceConfig.authoredWarnings = parseSurfacesIni(text, trackSurfaceFileName || "data/surfaces.ini").warnings;
+  } catch (error) { trackSurfaceConfig.authoredWarnings = [error.message]; }
+  window.__apexSurfaceAuthoring = { edits: applied, surfaces: Object.keys(edits).length, warnings: [...trackSurfaceConfig.authoredWarnings] };
+}
+
+function applyProjectSceneEdits() {
+  applyProjectSurfaceEdits();
+  applyProjectNodeEdits();
+  applyProjectWorkspaceEdits();
+  const warnings = [];
+  const applied = model?.root ? applyGeometryEdits(model.root, editorProject?.geometryEdits, geometryBaselines, warnings) : 0;
+  window.__apexGeometryAuthoring = { edits: Object.keys(editorProject?.geometryEdits || {}).length, applied, warnings };
+}
+
+function refreshHierarchyAuthoring(geometryChanged = false) {
+  if (!model) return;
+  const nodes = walkNodes(model.root), meshes = nodes.filter(({ node }) => node.kind === "mesh" || node.kind === "skinnedMesh");
+  sceneVisibility = computeKn5Visibility(model.root);
+  const previewMeshes = meshes.filter(({ node }) => sceneVisibility.get(node)), triangles = meshes.reduce((sum, { node }) => sum + node.indices.length / 3, 0);
+  modelSummary = { nodes, meshes, previewMeshes, triangles };
+  trackAudit = model.workspace?.kind === "track" ? auditTrackModel(model, trackSurfaceConfig) : null;
+  trackSurfaceBindings = trackAudit ? new Map(meshes.map(({ node }) => [node, resolveTrackSurface(node.name, trackSurfaceConfig)])) : new Map();
+  window.__apexTrackAudit = trackAudit;
+  carHierarchyAudit = model.workspace?.kind === "carLods" ? auditCarHierarchy(model) : null;
+  window.__apexCarHierarchyAudit = carHierarchyAudit;
+  $("#stats").innerHTML = `${previewMeshes.length.toLocaleString()} renderable / ${meshes.length.toLocaleString()} meshes<br>${Math.round(triangles).toLocaleString()} triangle${Math.round(triangles) === 1 ? "" : "s"}<br>${model.materials.length} materials${model.workspace ? `<br>${model.workspace.files.length} KN5 files` : ""}`;
+  $("#node-count").textContent = nodes.length;
+  renderTree($("#search").value);
+  if (geometryChanged) renderer?.refreshGeometry(); else renderer?.refreshHierarchy();
+  renderer?.setSurfaceBindings(trackSurfaceBindings);
+  if (geometryChanged) { refreshCarColliderAudit(); applyVaoPatch(); }
+  configureSurfaceOverlay();
+  configureLodPreview(true);
+  configureReflectionCaptureChoices();
+}
+
 function initializeEditorProject(file) {
   const fresh = createEditorProject({ name: file.name, size: file.size, kn5Version: model.version });
   editorProject = fresh;
@@ -504,8 +651,16 @@ function initializeEditorProject(file) {
 }
 
 function refreshAuthoredConfig() {
-  authoredConfig = editorProject && editorProjectEditCount(editorProject)
-    ? parseCspIni(serializeEditorCsp(editorProject), "<Apex authored edits>")
+  let liveProject = editorProject;
+  if (editorProject && modelSummary?.meshes) {
+    liveProject = cloneEditorProject(editorProject);
+    for (const { node } of modelSummary.meshes) {
+      const baselineName = nodeBaseline(node).name, edit = matchingProjectEdit(editorProject.meshEdits, baselineName)?.value;
+      if (edit && node.name.toLowerCase() !== baselineName.toLowerCase()) liveProject.meshEdits[node.name] = edit;
+    }
+  }
+  authoredConfig = liveProject && editorProjectCspEditCount(liveProject)
+    ? parseCspIni(serializeEditorCsp(liveProject), "<Apex authored edits>")
     : null;
 }
 
@@ -521,17 +676,24 @@ function commitEditorChange(label, mutate) {
   mutate(next);
   const normalized = normalizeEditorProject(next), after = serializeEditorProject(normalized);
   if (after === before) return false;
+  const geometryChanged = JSON.stringify(normalized.geometryEdits) !== JSON.stringify(editorProject.geometryEdits);
+  const sceneChanged = geometryChanged || JSON.stringify(normalized.nodeEdits) !== JSON.stringify(editorProject.nodeEdits) || JSON.stringify(normalized.workspaceEdits) !== JSON.stringify(editorProject.workspaceEdits) || JSON.stringify(normalized.surfaceEdits) !== JSON.stringify(editorProject.surfaceEdits);
   undoStack.push({ label, snapshot: before });
   if (undoStack.length > 100) undoStack.shift();
   redoStack = [];
   editorProject = normalized;
+  if (sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged); }
   refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
+  if (sceneChanged && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
   return true;
 }
 
 function restoreEditorSnapshot(snapshot) {
-  editorProject = normalizeEditorProject(JSON.parse(snapshot));
+  const restored = normalizeEditorProject(JSON.parse(snapshot)), geometryChanged = JSON.stringify(restored.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits), sceneChanged = geometryChanged || JSON.stringify(restored.nodeEdits) !== JSON.stringify(editorProject?.nodeEdits) || JSON.stringify(restored.workspaceEdits) !== JSON.stringify(editorProject?.workspaceEdits) || JSON.stringify(restored.surfaceEdits) !== JSON.stringify(editorProject?.surfaceEdits);
+  editorProject = restored;
+  if (sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged); }
   refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
+  if (sceneChanged && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
 }
 
 function undoEditorChange() {
@@ -549,19 +711,19 @@ function redoEditorChange() {
 }
 
 function updateEditorButtons() {
-  const edits = editorProjectEditCount(editorProject), available = Boolean(editorProject && model);
+  const edits = editorProjectEditCount(editorProject), cspEdits = editorProjectCspEditCount(editorProject), available = Boolean(editorProject && model);
   $("#undo").disabled = !undoStack.length; $("#undo").title = undoStack.length ? `Undo ${undoStack.at(-1).label}` : "Nothing to undo";
   $("#redo").disabled = !redoStack.length; $("#redo").title = redoStack.length ? `Redo ${redoStack.at(-1).label}` : "Nothing to redo";
   $("#save-project").disabled = !available;
   $("#open-project").disabled = !available;
-  $("#export-csp").disabled = !available || !edits;
-  $("#export-csp").textContent = edits ? `Export CSP (${edits})` : "Export CSP";
-  const kn5Blocked=model?.encryption?"CSP-protected KN5 files cannot be safely rewritten":model?.workspace?"Export each source KN5 separately; assembled workspaces are not a single source asset":"Export a game-compatible KN5 copy with compatible authored edits baked in";
-  $("#export-kn5").disabled=!available||Boolean(model?.encryption)||Boolean(model?.workspace);$("#export-kn5").title=kn5Blocked;$("#export-kn5").textContent=edits?`Export KN5 (${edits})`:"Export KN5 copy";
+  $("#export-csp").disabled = !available || !cspEdits;
+  $("#export-csp").textContent = cspEdits ? `Export CSP (${cspEdits})` : "Export CSP";
+  const kn5Blocked=model?.encryption?"CSP-protected KN5 files cannot be safely rewritten":model?.workspace?"Export each source model separately; assembled workspaces are not a single source asset":model?.fbx?"Export the imported FBX scene as a game-compatible KN5":"Export a game-compatible KN5 copy with compatible authored edits baked in";
+  $("#export-kn5").disabled=!available||Boolean(model?.encryption)||Boolean(model?.workspace);$("#export-kn5").title=kn5Blocked;$("#export-kn5").textContent=edits?`Export KN5 (${edits})`:model?.fbx?"Export KN5":"Export KN5 copy";
 }
 
 function projectBaseName() {
-  return (modelFile?.name || "asset").replace(/\.kn5$/i, "").replace(/[^a-z0-9._-]+/gi, "_");
+  return (modelFile?.name || "asset").replace(/\.(?:kn5|fbx)$/i, "").replace(/[^a-z0-9._-]+/gi, "_");
 }
 
 function downloadText(name, text, type) {
@@ -570,18 +732,31 @@ function downloadText(name, text, type) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+function exportFbxAnimation() {
+  const clip = activeFbxAnimationIndex >= 0 ? importedFbxAnimations[activeFbxAnimationIndex]?.clip : null;
+  if (!clip?.frameCount) return;
+  try {
+    const bytes = serializeKsAnimation(clip), clipName = clip.name.replace(/[^a-z0-9._-]+/gi, "_").replace(/^_+|_+$/g, "") || "animation";
+    const name = `${projectBaseName()}_${clipName}.ksanim`, url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" })), anchor = document.createElement("a");
+    anchor.href = url; anchor.download = name; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    window.__apexLastKsAnimationExport = { name, bytes: bytes.byteLength, version: 2, tracks: clip.tracks.length, frames: clip.frameCount };
+    status.textContent = `Exported game-compatible KSANIM v2 · ${clip.tracks.length} tracks · ${clip.frameCount} frames`;
+  } catch (error) { console.error(error); status.textContent = `Could not export KSANIM: ${error.message}`; }
+}
+
 function saveEditorProject() {
   if (editorProject) downloadText(`${projectBaseName()}.apex.json`, serializeEditorProject(editorProject), "application/json");
 }
 
 function exportEditorCsp() {
-  if (editorProject && editorProjectEditCount(editorProject)) downloadText(`${projectBaseName()}_apex.ini`, serializeEditorCsp(editorProject), "text/plain");
+  if (editorProject && editorProjectCspEditCount(editorProject)) downloadText(`${projectBaseName()}_apex.ini`, serializeEditorCsp(editorProject), "text/plain");
 }
 
 function exportBakedKn5() {
   if(!model||!editorProject||model.encryption||model.workspace)return;
-  try{const baked=bakeEditorProjectIntoKn5(model,editorProject),bytes=serializeKn5(baked.model),url=URL.createObjectURL(new Blob([bytes],{type:"application/octet-stream"})),anchor=document.createElement("a");anchor.href=url;anchor.download=`${projectBaseName()}_apex.kn5`;anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);window.__apexLastKn5Export={bytes:bytes.byteLength,warnings:[...baked.warnings],applied:{...baked.applied}};status.textContent=baked.warnings.length?`Exported KN5 with ${baked.warnings.length} CSP-only edit warning${baked.warnings.length===1?"":"s"}; export CSP to preserve them`:`Exported game-compatible KN5 · ${(bytes.byteLength/1048576).toFixed(1)} MB`;}
+  try{restoreNodeBaselines();applyGeometryEdits(model.root,{},geometryBaselines);const baked=bakeEditorProjectIntoKn5(model,editorProject),bytes=serializeKn5(baked.model),url=URL.createObjectURL(new Blob([bytes],{type:"application/octet-stream"})),anchor=document.createElement("a");anchor.href=url;anchor.download=`${projectBaseName()}_apex.kn5`;anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);window.__apexLastKn5Export={bytes:bytes.byteLength,warnings:[...baked.warnings],applied:{...baked.applied}};status.textContent=baked.warnings.length?`Exported KN5 with ${baked.warnings.length} CSP-only edit warning${baked.warnings.length===1?"":"s"}; export CSP to preserve them`:`Exported game-compatible KN5 · ${(bytes.byteLength/1048576).toFixed(1)} MB`;}
   catch(error){console.error(error);status.textContent=`Could not export KN5: ${error.message}`;}
+  finally{applyProjectSceneEdits();}
 }
 
 async function loadEditorProject(file) {
@@ -590,8 +765,10 @@ async function loadEditorProject(file) {
     const loaded = normalizeEditorProject(JSON.parse(await file.text()));
     if (loaded.asset.size && loaded.asset.size !== modelFile.size) throw new Error(`Project expects a ${loaded.asset.size}-byte KN5, but ${modelFile.name} is ${modelFile.size} bytes`);
     if (loaded.asset.kn5Version && loaded.asset.kn5Version !== model.version) throw new Error(`Project expects KN5 v${loaded.asset.kn5Version}, but this model is v${model.version}`);
+    const geometryChanged = JSON.stringify(loaded.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits);
     editorProject = loaded; undoStack = []; redoStack = [];
-    refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
+    applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged); refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
+    if (!selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
   } catch (error) {
     console.error(error); status.textContent = `Could not open project: ${error.message}`;
   } finally { $("#project-file").value = ""; }
@@ -633,7 +810,7 @@ function configureVaoButton(){const button=$("#vao-toggle"),fileButton=$("#vao-f
 
 function modelStatusText() {
   if (!model || !modelFile) return "No model loaded";
-  const workspace = model.workspace, format = workspace ? `${workspace.files.length} KN5 files · v${workspace.versions.join("/")}` : `KN5 v${model.version}`;
+  const workspace = model.workspace, format = workspace ? `${workspace.files.length} model files · KN5 v${workspace.versions.join("/")}` : model.fbx ? `FBX ${model.fbx.version} ${model.fbx.format} → KN5 v${model.version}` : `KN5 v${model.version}`;
   const protectedTextures = model.encryption?.protectedTextures.length || workspace?.protectedFiles.reduce((sum, entry) => sum + (entry.encryption.protectedTextures?.length || 0), 0) || 0;
   const edits = editorProjectEditCount(editorProject);
   return `${modelFile.name} · ${format} · ${(modelFile.size / 1048576).toFixed(1)} MB${assetSkinName ? ` · skin ${assetSkinName}` : ""}${activeAnimationName ? ` · animation ${activeAnimationName} @ ${animationPosition.toFixed(3)}` : ""}${trackAudit ? ` · track audit ${trackAudit.errors} errors / ${trackAudit.warnings} warnings` : ""}${carHierarchyAudit ? ` · hierarchy ${carHierarchyAudit.errors} errors / ${carHierarchyAudit.warnings} warnings` : ""}${carColliderAudit ? ` · collider ${carColliderAudit.errors} errors / ${carColliderAudit.warnings} warnings` : ""}${driverAudit ? ` · driver ${driverAudit.errors} errors / ${driverAudit.warnings} warnings` : ""}${protectedTextures ? ` · CSP protected (${protectedTextures} textures)` : ""}${cspConfig ? ` · ${cspFileName}` : ""}${vaoBinding?` · VAO ${vaoBinding.matchedMeshes} meshes`:vaoError?" · VAO error":""}${edits ? ` · ${edits} authored edit${edits === 1 ? "" : "s"}` : ""}`;
@@ -649,18 +826,6 @@ function combinedCspConfig() {
   };
 }
 
-function computeSceneVisibility(root) {
-  const result = new WeakMap();
-  const visit = (node, parentActive) => {
-    const branchActive = parentActive && node.active;
-    const meshVisible = node.kind !== "mesh" && node.kind !== "skinnedMesh" || node.visible && node.renderable;
-    result.set(node, branchActive && meshVisible);
-    for (const child of node.children) visit(child, branchActive);
-  };
-  visit(root, true);
-  return result;
-}
-
 function renderTree(filter = "") {
   if (!model) return;
   const needle = filter.trim().toLowerCase();
@@ -672,7 +837,7 @@ function renderTree(filter = "") {
   };
   visit(model.root, 0);
   tree.className = "tree";
-  tree.innerHTML = rows.map(({ node, depth }, index) => `<div class="node-row ${node.kind} ${sceneVisibility.get(node) ? "" : "node-off"}" data-row="${index}" style="padding-left:${5 + depth * 14}px"><span class="node-icon">${node.kind === "mesh" || node.kind === "skinnedMesh" ? "◆" : "›"}</span><span class="node-name">${escapeHtml(node.name)}</span></div>`).join("");
+  tree.innerHTML = rows.map(({ node, depth }, index) => `<div class="node-row node-depth-${Math.min(depth, 24)} ${node.kind} ${sceneVisibility.get(node) ? "" : "node-off"} ${node === selectedNode ? "selected" : ""}" data-row="${index}"><span class="node-icon">${node.kind === "mesh" || node.kind === "skinnedMesh" ? "◆" : "›"}</span><span class="node-name">${escapeHtml(node.name)}</span></div>`).join("");
   tree.querySelectorAll(".node-row").forEach((row) => row.addEventListener("click", () => {
     tree.querySelector(".selected")?.classList.remove("selected");
     row.classList.add("selected");
@@ -690,7 +855,9 @@ function renderNodeInspector(node) {
   const override = cspEvaluation?.nodeOverrides.get(node);
   inspector.className = "inspector";
   const animated = activeAnimation?.tracks.some((track) => track.animated && track.name === node.name);
-  inspector.innerHTML = `<div class="section"><h3>${node.kind}</h3>${kv("Name", node.name)}${kv("Active", node.active ? "Yes" : "No")}${animated ? kv("Animation", `${activeAnimationName} @ ${animationPosition.toFixed(3)}`) : ""}${node.kind === "mesh" || node.kind === "skinnedMesh" ? `${kv("Visible", node.visible ? "Yes" : "No")}${kv("Renderable", node.renderable ? "Yes" : "No")}${kv("Game preview", sceneVisibility.get(node) ? "Visible" : "Hidden")}${kv("Vertices", (node.vertices.length / node.vertexStride).toLocaleString())}${kv("Triangles", (node.indices.length / 3).toLocaleString())}${node.bones ? kv("Bones", node.bones.length) : ""}${kv("Layer", node.layer)}${kv("LOD range", `${format(node.lodIn)} – ${format(node.lodOut)}`)}` : kv("Children", node.children.length)}</div>${override ? overrideHtml(override) : ""}${material ? meshAuthoringHtml(node, override) + materialHtml(material, override, node) : ""}`;
+  inspector.innerHTML = `<div class="section"><h3>${node.kind}</h3>${kv("Name", node.name)}${kv("Active", node.active ? "Yes" : "No")}${animated ? kv("Animation", `${activeAnimationName} @ ${animationPosition.toFixed(3)}`) : ""}${node.kind === "mesh" || node.kind === "skinnedMesh" ? `${kv("Visible", node.visible ? "Yes" : "No")}${kv("Renderable", node.renderable ? "Yes" : "No")}${kv("Game preview", sceneVisibility.get(node) ? "Visible" : "Hidden")}${kv("Vertices", (node.vertices.length / node.vertexStride).toLocaleString())}${kv("Triangles", (node.indices.length / 3).toLocaleString())}${node.bones ? kv("Bones", node.bones.length) : ""}${kv("Layer", node.layer)}${kv("LOD range", `${format(node.lodIn)} – ${format(node.lodOut)}`)}` : kv("Children", node.children.length)}</div>${nodeAuthoringHtml(node)}${geometryAuthoringHtml(node)}${override ? overrideHtml(override) : ""}${material ? meshAuthoringHtml(node, override) + materialHtml(material, override, node) : ""}`;
+  bindNodeEditors(node);
+  bindGeometryEditors(node);
   if (material) { bindMeshEditors(node); bindMaterialEditors(material); }
 }
 
@@ -699,7 +866,7 @@ function renderModelInspector(file, nodes, triangles) {
   inspector.className = "inspector";
   const protection = model.encryption ? `<div class="section"><h3>CSP-protected payload</h3>${kv("Format", model.encryption.format)}${kv("Payload", `${(model.encryption.payloadBytes / 1048576).toFixed(2)} MB`)}${kv("Records", model.encryption.recordCount.toLocaleString())}${kv("Protected textures", model.encryption.protectedTextures.length)}${kv("Protected meshes", model.encryption.protectedMeshes.length)}${kv("Structure", model.encryption.valid ? "Recognized" : `Invalid: ${model.encryption.error}`)}<span class="empty">The public KN5 scene is available. Protected geometry and textures remain placeholders until a compatible payload decoder is available.</span></div>` : "";
   inspector.innerHTML = `<div class="section"><h3>Model</h3>${kv("File", file.name)}${kv("Format", `KN5 v${model.version}`)}${kv("Size", `${(file.size / 1048576).toFixed(2)} MB`)}${kv("Nodes", nodes.length.toLocaleString())}${kv("Triangles", Math.round(triangles).toLocaleString())}${kv("Textures", model.textures.length)}${kv("Parsed", model.bytesRead === model.byteLength ? "Complete" : model.encryption?.valid ? "Public scene + protected payload" : `${model.bytesRead} / ${model.byteLength}`)}${kv("Authored edits", editorProjectEditCount(editorProject))}</div>${protection}${cspEvaluation ? `<div class="section"><h3>CSP configuration</h3>${kv("File", cspConfig ? cspFileName : "Apex authored edits")}${kv("Sections", activeCspConfig?.sections.length || 0)}${kv("Expanded templates", cspConfig?.expandedTemplates?.length || 0)}${kv("Matched override sections", cspEvaluation.matchedSections)}${kv("Overridden meshes", cspEvaluation.nodeOverrides.size)}${kv("Custom-emissive meshes", cspEvaluation.customEmissiveMeshes)}${kv("Matched light sections", cspEvaluation.matchedLightSections)}${kv("Light instances", cspEvaluation.lights.length)}${kv("Active light instances", cspEvaluation.lights.filter((light) => Math.max(...light.color.map(Math.abs)) > 1e-5).length)}${kv("Track light occluders", cspEvaluation.trackOccluders?.length || 0)}${kv("Unresolved includes", cspEvaluation.unresolvedIncludes.length)}${cspEvaluation.unresolvedIncludes.map((name) => `<div class="resource"><span>${escapeHtml(name)}</span></div>`).join("")}</div>${cspEvaluation.usedConditions.size ? `<div class="section"><h3>Condition preview</h3>${[...cspEvaluation.usedConditions].sort().map((name) => conditionHtml(name, cspEvaluation.conditions.get(name) ?? 0)).join("")}</div>` : ""}${cspEvaluation.usedInputs.size ? `<div class="section"><h3>Input preview</h3>${[...cspEvaluation.usedInputs].sort(([a], [b]) => a.localeCompare(b)).map(([name, input]) => inputHtml(name, input)).join("")}</div>` : ""}${cspEvaluation.lights.length ? `<div class="section"><h3>CSP lights</h3>${cspEvaluation.lights.slice(0, 16).map(lightHtml).join("")}${cspEvaluation.lights.length > 16 ? `<span class="empty">${(cspEvaluation.lights.length - 16).toLocaleString()} more light instances</span>` : ""}</div>` : ""}` : ""}<div class="section"><h3>Materials</h3>${model.materials.map((m, i) => `<div class="resource material-link" data-material="${i}"><strong>${escapeHtml(m.name)}</strong><span>${escapeHtml(m.shader)}</span></div>`).join("")}</div>`;
-  const supplementalHtml = workspaceInspectorHtml() + packedDataInspectorHtml() + carHierarchyInspectorHtml() + carColliderInspectorHtml() + driverInspectorHtml() + trackCameraInspectorHtml() + trackValidationInspectorHtml() + shaderProfilesInspectorHtml() + vaoInspectorHtml() + seasonalInspectorHtml() + weatherLightingInspectorHtml() + reflectionCaptureInspectorHtml() + lightingInspectorHtml() + grassFxInspectorHtml() + rainFxInspectorHtml() + animationInspectorHtml() + skinTextureInspectorHtml() + externalTextureInspectorHtml(), materialSection = inspector.querySelector(".section:last-child");
+  const supplementalHtml = fbxImportInspectorHtml() + workspaceInspectorHtml() + packedDataInspectorHtml() + carHierarchyInspectorHtml() + carColliderInspectorHtml() + driverInspectorHtml() + trackCameraInspectorHtml() + trackValidationInspectorHtml() + shaderProfilesInspectorHtml() + vaoInspectorHtml() + seasonalInspectorHtml() + weatherLightingInspectorHtml() + reflectionCaptureInspectorHtml() + lightingInspectorHtml() + grassFxInspectorHtml() + rainFxInspectorHtml() + animationInspectorHtml() + skinTextureInspectorHtml() + externalTextureInspectorHtml(), materialSection = inspector.querySelector(".section:last-child");
   if (supplementalHtml && materialSection) materialSection.insertAdjacentHTML("beforebegin", supplementalHtml);
   inspector.querySelectorAll("[data-material]").forEach((el) => el.addEventListener("click", () => renderMaterialInspector(model.materials[Number(el.dataset.material)])));
   inspector.querySelectorAll("[data-condition]").forEach((input) => input.addEventListener("input", () => {
@@ -718,6 +885,8 @@ function renderModelInspector(file, nodes, triangles) {
     renderer?.setCsp(cspEvaluation);
     $("#pipeline").textContent = pipelineLabel();
   }));
+  bindWorkspaceEditors();
+  bindSurfaceEditors();
 }
 
 function renderMaterialInspector(material) {
@@ -728,11 +897,18 @@ function renderMaterialInspector(material) {
   bindMaterialEditors(material);
 }
 
+function fbxImportInspectorHtml() {
+  if (!model?.fbx) return "";
+  const source = model.fbx, textures = source.textureSummary || {}, maps = source.mapSummary || {};
+  return `<div class="section"><h3>FBX import</h3>${kv("Source", `${source.format} ${source.version}`)}${kv("KN5 target", `v${model.version}`)}${kv("Animations", source.animations.length)}${kv("Materials", source.materials)}${kv("Preserved maps", maps.preserved || 0)}${maps.folded ? kv("Diffuse-alpha maps", maps.folded) : ""}${maps.ignored ? kv("Ignored maps", maps.ignored) : ""}${kv("Texture references", textures.referenced || 0)}${kv("Source textures", (textures.resolved || 0) + (textures.embedded || 0))}${textures.embedded ? kv("Embedded textures", textures.embedded) : ""}${textures.missing ? kv("Missing textures", textures.missing) : ""}${textures.ambiguous ? kv("Ambiguous textures", textures.ambiguous) : ""}${textures.unsupported ? kv("Unsupported textures", textures.unsupported) : ""}${kv("Warnings", source.warnings.length)}${source.textureReferences.map((reference) => `<div class="resource"><strong>${escapeHtml(reference.material)} · ${escapeHtml(reference.slot || "texture")}</strong><span>${escapeHtml(reference.source)} · ${escapeHtml(reference.status)}${reference.output ? ` → ${escapeHtml(reference.output)}` : ""}</span></div>`).join("")}${source.animations.map((clip) => `<div class="resource"><strong>${escapeHtml(clip.name)}</strong><span>${format(clip.duration)} s · ${clip.tracks.length} object tracks · ${clip.sourceTrackCount} source curves · ${clip.frameCount} frames</span></div>`).join("")}${source.warnings.map((warning) => `<div class="resource validation-warning"><strong>Import action</strong><span>${escapeHtml(warning)}</span></div>`).join("")}</div>`;
+}
+
 function pipelineLabel() {
   const external = renderer?.externalTextureStatus, texturePart = external?.requested ? ` · ${external.ready}/${external.requested} external textures` : "";
-  const source = model?.workspace?.kind === "carLods" ? "Car LOD workspace" : model?.workspace ? "KN5 workspace" : "KN5";
-  const stock = model?.workspace?.kind === "carLods" ? "Stock car LOD pipeline" : model?.workspace ? "Stock multi-KN5 pipeline" : "Stock KN5 pipeline", skinPart = assetSkinName ? ` · skin ${assetSkinName}` : "", animationPart = activeAnimationName ? ` · ${renderer?.animationStatus.matchedNodes || 0} animated nodes` : "",vaoPart=vaoBinding?.matchedMeshes?` · VAO ${vaoBinding.matchedMeshes.toLocaleString()} meshes`:"";
-  return cspEvaluation ? `${source} + CSP${skinPart}${animationPart}${vaoPart} · ${cspEvaluation.nodeOverrides.size.toLocaleString()} meshes · ${cspEvaluation.customEmissiveMeshes.toLocaleString()} emissive · ${cspEvaluation.lights.length.toLocaleString()} lights${texturePart}` : `${stock}${skinPart}${animationPart}${vaoPart}`;
+  const fbxTextures=model?.fbx?.textureSummary,fbxTexturePart=fbxTextures?.referenced?` · ${(fbxTextures.resolved+fbxTextures.embedded)}/${fbxTextures.referenced} source textures`:"";
+  const source = model?.workspace?.kind === "carLods" ? "Car LOD workspace" : model?.workspace ? "Model workspace" : model?.fbx ? "FBX authoring" : "KN5";
+  const stock = model?.workspace?.kind === "carLods" ? "Stock car LOD pipeline" : model?.workspace ? "Multi-model pipeline" : model?.fbx ? "FBX → KN5 authoring pipeline" : "Stock KN5 pipeline", skinPart = assetSkinName ? ` · skin ${assetSkinName}` : "", animationPart = activeAnimationName ? ` · ${renderer?.animationStatus.matchedNodes || 0} animated nodes` : "",vaoPart=vaoBinding?.matchedMeshes?` · VAO ${vaoBinding.matchedMeshes.toLocaleString()} meshes`:"";
+  return cspEvaluation ? `${source} + CSP${skinPart}${animationPart}${vaoPart}${fbxTexturePart} · ${cspEvaluation.nodeOverrides.size.toLocaleString()} meshes · ${cspEvaluation.customEmissiveMeshes.toLocaleString()} emissive · ${cspEvaluation.lights.length.toLocaleString()} lights${texturePart}` : `${stock}${skinPart}${animationPart}${vaoPart}${fbxTexturePart}`;
 }
 
 function updateExternalTextureUi() {
@@ -769,21 +945,41 @@ function skinTextureInspectorHtml() {
 function updateAnimationUi(value) {
   const select = $("#animation-select");
   if (!select || !value) return;
-  select.title = value.name ? `${value.matchedTracks}/${value.animatedTracks} animated tracks matched ${value.matchedNodes} KN5 nodes` : `${assetAnimations.length} KSANIM files discovered`;
+  select.title = value.name ? `${value.matchedTracks}/${value.animatedTracks} animated tracks matched ${value.matchedNodes} KN5 nodes` : `${importedFbxAnimations.length} FBX clips · ${assetAnimations.length} KSANIM files`;
   $("#pipeline").textContent = pipelineLabel();
 }
 
 function animationInspectorHtml() {
   const animation = renderer?.animationStatus;
-  if (!assetAnimations.length && !animation?.name) return "";
-  return `<div class="section"><h3>KSANIM preview</h3>${kv("Discovered files", assetAnimations.length)}${kv("Selected", animation?.name || "Bind pose")}${animation?.name ? `${kv("Format", `KSANIM v${animation.version}`)}${kv("Position", animation.position.toFixed(3))}${kv("Frames", animation.frameCount)}${kv("Tracks", animation.tracks)}${kv("Animated tracks", animation.animatedTracks)}${kv("Matched tracks", animation.matchedTracks)}${kv("Matched KN5 nodes", animation.matchedNodes)}${kv("Skinned meshes", animation.skinnedMeshes)}${kv("Maximum skin displacement", `${format(animation.maxSkinnedDisplacement)} m`)}${kv("Unmatched tracks", animation.unmatchedTracks.length)}${animation.unmatchedTracks.slice(0,12).map((name)=>`<div class="resource"><span>${escapeHtml(name)}</span></div>`).join("")}${animation.unmatchedTracks.length>12?`<span class="empty">${animation.unmatchedTracks.length-12} more unmatched tracks</span>`:""}${(activeAnimation?.warnings||[]).map((warning)=>`<div class="resource"><span>${escapeHtml(warning)}</span></div>`).join("")}` : ""}</div>`;
+  if (!assetAnimations.length && !importedFbxAnimations.length && !animation?.name) return "";
+  return `<div class="section"><h3>KSANIM preview</h3>${kv("Imported FBX clips", importedFbxAnimations.length)}${kv("Discovered files", assetAnimations.length)}${kv("Selected", animation?.name || "Bind pose")}${animation?.name ? `${kv("Format", `KSANIM v${animation.version}`)}${kv("Position", animation.position.toFixed(3))}${kv("Frames", animation.frameCount)}${kv("Tracks", animation.tracks)}${kv("Animated tracks", animation.animatedTracks)}${kv("Matched tracks", animation.matchedTracks)}${kv("Matched KN5 nodes", animation.matchedNodes)}${kv("Skinned meshes", animation.skinnedMeshes)}${kv("Maximum skin displacement", `${format(animation.maxSkinnedDisplacement)} m`)}${kv("Unmatched tracks", animation.unmatchedTracks.length)}${animation.unmatchedTracks.slice(0,12).map((name)=>`<div class="resource"><span>${escapeHtml(name)}</span></div>`).join("")}${animation.unmatchedTracks.length>12?`<span class="empty">${animation.unmatchedTracks.length-12} more unmatched tracks</span>`:""}${(activeAnimation?.warnings||[]).map((warning)=>`<div class="resource"><span>${escapeHtml(warning)}</span></div>`).join("")}` : ""}</div>`;
+}
+
+function workspaceEditCount() {
+  return countWorkspaceEdits(editorProject?.workspaceEdits);
 }
 
 function workspaceInspectorHtml() {
   const workspace = model?.workspace;
   if (!workspace) return "";
-  const isCar = workspace.kind === "carLods";
-  return `<div class="section"><h3>${isCar ? "Car LOD workspace" : "KN5 workspace"}</h3>${kv("Manifest", workspace.manifest || "Manual selection")}${kv("Files", workspace.files.length)}${!isCar ? kv("Dynamic objects", workspace.files.filter((file)=>file.dynamic).length) : ""}${kv("Versions", workspace.versions.join(", "))}${isCar && workspace.cockpitHrDistance !== null ? kv("Cockpit HR switch", `${format(workspace.cockpitHrDistance)} m`) : ""}${isCar && workspace.driverHrDistance !== null ? kv("Driver HR switch", `${format(workspace.driverHrDistance)} m`) : ""}${kv("Texture name collisions", workspace.textureCollisions.length)}${kv("Protected files", workspace.protectedFiles.length)}${kv("Warnings", workspace.warnings.length)}${workspace.files.map((file) => `<div class="resource"><strong>${file.auxiliary==="driver"?"Driver · ":file.auxiliary==="reflectionEnvironment"?"Reflection environment · ":isCar&&file.lod?`LOD ${file.lod.index} · `:file.dynamic?`Dynamic ${file.dynamic.index} · `:""}${escapeHtml(file.name)}</strong><span>${isCar&&file.lod?`${format(file.lod.in)} ≤ distance &lt; ${format(file.lod.out)} m · `:file.auxiliary==="reflectionEnvironment"?"Cubemap capture subtree · ":file.auxiliary?"Shared auxiliary · ":""}KN5 v${file.version} · ${(file.size / 1048576).toFixed(2)} MB · ${file.materials} materials · ${file.textures} textures${file.position.some((value) => value !== 0) || file.rotation.some((value) => value !== 0) ? ` · position ${file.position.map(format).join(", ")} · rotation ${file.rotation.map(format).join(", ")}` : ""}${file.dynamic ? ` · deterministic center preview · ${format(file.dynamic.probability)}% · velocity ${file.dynamic.velocityBase.map(format).join(", ")} ± ${file.dynamic.velocityRange.map(format).join(", ")}` : ""}</span></div>`).join("")}${workspace.warnings.slice(0, 8).map((warning) => `<div class="resource"><span>${escapeHtml(warning)}</span></div>`).join("")}</div>`;
+  const isCar = workspace.kind === "carLods", count = workspaceEditCount(), edits = editorProject?.workspaceEdits || {};
+  const warnings = [...new Set([...(workspace.warnings || []), ...(workspace.authoredWarnings || [])])];
+  const switchField = (key, label, current) => `<label class="author-field"><span>${label}</span><input class="${edits[key] !== undefined ? "authored" : ""}" data-edit-workspace-switch="${key}" value="${edits[key] ?? ""}" placeholder="Inherit: ${escapeHtml(String(current ?? "not set"))}"></label>`;
+  const files = workspace.files.map((file, index) => {
+    const edit = edits.files?.[String(index)], baseline = workspaceBaseline?.files?.[index], editable = !file.auxiliary && (isCar ? Boolean(file.lod) : true);
+    const vector = (key, label, value) => `<label class="author-field"><span>${label}</span><input class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-workspace-vector="${key}" data-workspace-file="${index}" value="${escapeHtml(formatEditorValue(value))}" spellcheck="false"></label>`;
+    const number = (key, label, current) => `<label class="author-field"><span>${label}</span><input class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-workspace-number="${key}" data-workspace-file="${index}" value="${edit?.[key] ?? ""}" placeholder="Inherit: ${escapeHtml(String(current))}"></label>`;
+    const dynamicVector = (key, label, value, length = 3) => `<label class="author-field"><span>${label}</span><input class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-workspace-dynamic-vector="${key}" data-vector-length="${length}" data-workspace-file="${index}" value="${escapeHtml(formatEditorValue(value))}" spellcheck="false"></label>`;
+    const dynamicNumber = (key, label, value) => `<label class="author-field"><span>${label}</span><input class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-workspace-dynamic-number="${key}" data-workspace-file="${index}" value="${escapeHtml(String(value))}" spellcheck="false"></label>`;
+    const dynamicText = (key, label, value) => `<label class="author-field"><span>${label}</span><input class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-workspace-dynamic-text="${key}" data-workspace-file="${index}" value="${escapeHtml(String(value ?? ""))}" maxlength="1024" spellcheck="false"></label>`;
+    const controls = !editable ? "" : isCar
+      ? `${number("lodIn", "LOD in", baseline?.lod?.in ?? file.lod.in)}${number("lodOut", "LOD out", baseline?.lod?.out ?? file.lod.out)}`
+      : file.dynamic
+        ? `${dynamicNumber("probability", "Probability %", file.dynamic.probability)}${dynamicVector("multiplicity", "Multiplicity min, max", file.dynamic.multiplicity, 2)}${dynamicText("posMode", "Position mode", file.dynamic.posMode)}${dynamicVector("positionCenter", "Position center", file.dynamic.positionCenter)}${dynamicVector("positionRange", "Position range ±", file.dynamic.positionRange)}${dynamicText("velMode", "Velocity mode", file.dynamic.velMode)}${dynamicVector("velocityBase", "Velocity base", file.dynamic.velocityBase)}${dynamicVector("velocityRange", "Velocity range ±", file.dynamic.velocityRange)}${dynamicText("playWav", "Audio file", file.dynamic.playWav)}`
+        : `${vector("position", "Position", file.position)}${vector("rotation", "Rotation °", file.rotation)}`;
+    return `<div class="resource"><strong>${file.auxiliary === "driver" ? "Driver · " : file.auxiliary === "reflectionEnvironment" ? "Reflection environment · " : isCar && file.lod ? `LOD ${file.lod.index} · ` : file.dynamic ? `Dynamic ${file.dynamic.index} · ` : ""}${escapeHtml(file.name)}</strong><span>${isCar && file.lod ? `${format(file.lod.in)} ≤ distance &lt; ${format(file.lod.out)} m · ` : file.auxiliary === "reflectionEnvironment" ? "Cubemap capture subtree · " : file.auxiliary ? "Shared auxiliary · " : ""}KN5 v${file.version} · ${(file.size / 1048576).toFixed(2)} MB · ${file.materials} materials · ${file.textures} textures${file.position.some((value) => value !== 0) || file.rotation.some((value) => value !== 0) ? ` · position ${file.position.map(format).join(", ")} · rotation ${file.rotation.map(format).join(", ")}` : ""}${file.dynamic ? ` · deterministic center preview · ${format(file.dynamic.probability)}% · velocity ${file.dynamic.velocityBase.map(format).join(", ")} ± ${file.dynamic.velocityRange.map(format).join(", ")}` : ""}</span>${controls}${editable ? `<div class="section-actions"><button class="mini" data-reset-workspace-file="${index}" ${edit ? "" : "disabled"}>Reset file edits</button></div>` : ""}</div>`;
+  }).join("");
+  return `<div class="section"><h3>${isCar ? "Car LOD workspace" : "Track workspace"}${count ? ` · <span class="edit-count">${count} edit${count === 1 ? "" : "s"}</span>` : ""}</h3>${kv("Manifest", workspace.manifest || "Manual selection")}${kv("Files", workspace.files.length)}${!isCar ? kv("Dynamic objects", workspace.files.filter((file) => file.dynamic).length) : ""}${kv("Versions", workspace.versions.join(", "))}${isCar ? `${switchField("cockpitHrDistance", "Cockpit HR", workspaceBaseline?.cockpitHrDistance)}${switchField("driverHrDistance", "Driver HR", workspaceBaseline?.driverHrDistance)}` : ""}${kv("Texture name collisions", workspace.textureCollisions.length)}${kv("Protected files", workspace.protectedFiles.length)}${kv("Warnings", warnings.length)}${files}${warnings.slice(0, 8).map((warning) => `<div class="resource validation-warning"><strong>Manifest warning</strong><span>${escapeHtml(warning)}</span></div>`).join("")}<div class="section-actions"><button class="mini" data-export-workspace>Export ${isCar ? "lods.ini" : "models.ini"}</button><button class="mini" data-reset-workspace ${count ? "" : "disabled"}>Reset manifest edits</button></div></div>`;
 }
 
 function packedDataInspectorHtml() {
@@ -808,12 +1004,21 @@ function vaoInspectorHtml(){if(!vaoFileName)return "";if(vaoError)return `<div c
 function seasonalInspectorHtml(){const value=renderer?.seasonalStatus;if(!value||(!value.affectedMeshes&&!value.legacySummerMeshes))return "";return `<div class="section"><h3>CSP seasonal materials</h3>${kv("Year progress",value.yearProgress===null?"Direct conditions":format(value.yearProgress))}${kv("Color-adjusted meshes",value.affectedMeshes.toLocaleString())}${kv("Autumn",`${value.autumnMeshes.toLocaleString()} meshes · peak ${format(value.peakAutumn)}`)}${kv("Winter",`${value.winterMeshes.toLocaleString()} meshes · peak ${format(value.peakWinter)}`)}${value.legacySummerMeshes?kv("Legacy summer",`${value.legacySummerMeshes.toLocaleString()} meshes · accepted no-op`):""}<span class="empty">Autumn yellowing and winter desaturation/brightness use CSP’s green-channel mask and upward-normal snow coverage. Tree variation uses deterministic world-space preview noise. Current CSP accepts seasonSummer for legacy configs but does not bind it to the shader.</span></div>`;}
 function shaderProfilesInspectorHtml(){const value=renderer?.shaderProfileStatus;if(!value)return "";return `<div class="section"><h3>Stock shader profiles</h3>${kv("Known shipped shaders",`${value.knownStock.toLocaleString()} / ${value.materials.toLocaleString()} materials`)}${kv("Alpha blend",value.alphaBlend.toLocaleString())}${kv("Alpha-to-coverage",value.alphaToCoverage.toLocaleString())}${kv("Cutout shadow pass",value.shadowCutout.toLocaleString())}${kv("Windscreens",value.windscreens.toLocaleString())}${kv("Reflection glass",value.reflectionGlass.toLocaleString())}${kv("Refractive-capable",value.refractive.toLocaleString())}${kv("Shader package defaults",value.packageDefaults.toLocaleString())}${kv("Serialized overrides",value.serializedOverrides.toLocaleString())}${kv("Unknown shader names",value.unknownShaders.length)}${value.unknownShaders.slice(0,10).map((name)=>`<div class="resource"><span>${escapeHtml(name)}</span></div>`).join("")}${value.unknownShaders.length>10?`<span class="empty">${value.unknownShaders.length-10} more extension shaders</span>`:""}<span class="empty">Shipped alpha-tested shader packages default to multisample alpha-to-coverage. KN5 alpha-blend and alpha-to-coverage flags override that package default in native load order; every non-opaque native mode uses the cutout shadow shader.</span></div>`;}
 function lightingInspectorHtml(){const value=renderer?.shadowStatus;if(!value)return "";return `<div class="section"><h3>Directional shadows</h3>${kv("Preview",value.enabled?"Enabled":"Disabled")}${kv("Shadow maps",`${value.cascades} × ${value.mapSize}²`)}${kv("Camera splits",value.splits.map((split)=>`${split} m`).join(" · "))}${kv("Native biases",value.biases.map((bias)=>bias.toExponential()).join(" · "))}${kv("Mesh casters",value.casters.toLocaleString())}${value.grassInstances?kv("GrassFX casters",value.grassInstances.toLocaleString()):""}${kv("Caster triangles",value.triangles.toLocaleString())}<span class="empty">Three camera-space cascades reproduce ksEditor’s shipped 2/12/50 m split endpoints, 2048 map size, per-cascade bias, mesh cast-shadow flags, diffuse-alpha cutouts, and tapered instanced GrassFX blades.</span></div>`;}
-function weatherLightingInspectorHtml(){const value=renderer?.lightingStatus;if(!value)return "";return `<div class="section"><h3>Weather lighting</h3>${kv("Preset",value.name)}${kv("Source",value.source)}${kv("Sun",`${format(value.heading)}° heading · ${format(value.height)}° height`)}${kv("Curve blend",format(value.angleMix))}${kv("Sun HDR",value.sunColor.map(format).join(", "))}${kv("Ambient HDR",value.ambientColor.map(format).join(", "))}${kv("Sky HDR",value.skyColor.map(format).join(", "))}${kv("Fog",`${value.fogDistance.toLocaleString()} m · ${format(value.fogBlend)} blend`)}${kv("Exposure",value.autoExposure?`${format(value.effectiveExposure)} auto · ${value.exposureMin}–${value.exposureMax}`:`${format(value.effectiveExposure)} manual`)}${kv("HDR target",value.hdr?`${value.samples}× MSAA · RGBA16F`:"RGBA8 fallback")}<span class="empty">Version-3 curve colors use the engine’s RGB × intensity / 255 conversion and native sun-angle interpolation. Procedural sky color, sun disc, linear fog, full-frame mip exposure, and a filmic display transform share one HDR composition pass.</span></div>`;}
+function weatherLightingInspectorHtml(){const value=renderer?.lightingStatus;if(!value)return "";return `<div class="section"><h3>Weather lighting</h3>${kv("Preset",value.name)}${kv("Source",value.source)}${kv("Sun",`${format(value.heading)}° heading · ${format(value.height)}° height`)}${kv("Curve blend",format(value.angleMix))}${kv("Sun HDR",value.sunColor.map(format).join(", "))}${kv("Ambient HDR",value.ambientColor.map(format).join(", "))}${kv("Sky HDR",value.skyColor.map(format).join(", "))}${kv("Fog",`${value.fogDistance.toLocaleString()} m · ${format(value.fogBlend)} blend`)}${kv("Exposure",value.autoExposure?`${format(value.effectiveExposure)} auto · ${value.exposureMin}–${value.exposureMax}`:`${format(value.effectiveExposure)} manual`)}${kv("Display",value.toneMap)}${kv("Glare",value.glareEnabled?`Yebis quality ${value.glareQuality} · ${value.bloomLevels} bloom levels · threshold ${format(value.bloomThreshold)}`:"Disabled on RGBA8 fallback")}${kv("Bloom source",`${format((value.bloomSourceScale||0)*100)}% · composite ${format(value.bloomCompositeScale||0)}`)}${kv("Bloom kernel",`${value.bloomKernel} · ${value.bloomKernelSamples.join("/")} samples · σ ${value.bloomKernelSigmas.map(format).join("/")}`)}${kv("Dither",value.dither?"Recovered 8-bit output scale":"Disabled")}${kv("HDR target",value.hdr?`${value.samples}× MSAA · RGBA16F`:"RGBA8 fallback")}<span class="empty">Version-3 curve colors use the engine’s RGB × intensity / 255 conversion and native sun-angle interpolation. The Yebis path measures exposure before glare, then applies threshold bloom, the display curve, screen composition, reciprocal gamma, and output dither.</span></div>`;}
 function reflectionCaptureInspectorHtml(){const value=renderer?.sceneStatus?.reflections;if(!value)return "";const preview=!value.enabled?"Procedural fallback · live capture disabled":value.ready?"Live scene cubemap":"Procedural fallback",mode={environment:"Showroom environment",explicit:"Selected subtree",scene:"Whole scene",fallback:"Automatic fallback",disabled:"Disabled"}[value.selectionMode]||"Automatic";return `<div class="section"><h3>Scene reflections</h3>${kv("Preview",preview)}${kv("Capture selection",value.rootName?`${mode} · ${value.rootName}`:mode)}${kv("Capture target",`${value.size}² · ${value.faces||0}/6 valid faces`)}${value.ready?`${kv("Material path",value.materialPath||"Shared viewport shader")}${kv("Capture meshes",`${value.opaqueMeshes||0} opaque · ${value.transparentMeshes||0} transparent`)}${kv("Probe shadows",value.directionalShadows?`3 cascades · ${value.shadowCasters||0} mesh casters`:"Disabled")}${kv("GrassFX",value.grassFx?`${(value.grassInstances||0).toLocaleString()} lit instances${value.grassCastsShadows?" · cast/receive shadows":""}`:"Not in selected subtree")}${kv("Latest update",`${value.updatedFaces} face${value.updatedFaces===1?"":"s"} · next ${value.nextFace}`)}${kv("Capture geometry",`${value.draws.toLocaleString()} draws · ${Math.round(value.triangles).toLocaleString()} triangles`)}${kv("CSP lights",value.cspLights||0)}${kv("Clip range",`${KS_EDITOR_CUBEMAP.nearPlane}–${value.farPlane} m`)}${kv("CPU submission",`${format(value.captureMilliseconds)} ms`)}`:""}${value.reason?kv("Fallback reason",value.reason):""}<span class="empty">The capture follows ksEditor’s 512², 90° six-face camera at the active view position, initializes all faces, then refreshes one face per draw. It uses the viewport material path, probe-centered directional cascades, and weather-lit whole-track GrassFX with instanced shadow casting. Reflection sampling and refraction are disabled to prevent recursive feedback.</span></div>`;}
 
 function trackValidationInspectorHtml() {
-  if(!trackAudit)return "";const severity=(finding)=>finding.severity==="error"?"Error":"Warning";
-  return `<div class="section"><h3>Track validation</h3>${kv("surfaces.ini",trackSurfaceFileName||"Not available")}${kv("Track surface overrides",trackSurfaceConfig?.surfaces.length||0)}${kv("Runtime surfaces",trackAudit.runtimeSurfaces)}${kv("Starting positions",trackAudit.starts)}${kv("Pit positions",trackAudit.pits)}${kv("Timing gates",trackAudit.timeGates)}${kv("Hotlap marker",trackAudit.hotlap?"Present":"Missing")}${kv("Errors",trackAudit.errors)}${kv("Warnings",trackAudit.warnings)}${trackAudit.findings.map((finding)=>`<div class="resource ${finding.severity==="error"?"validation-error":""}"><strong>${severity(finding)}</strong><span>${escapeHtml(finding.message)}</span></div>`).join("")}${trackAudit.surfaceMatches.map((surface)=>`<div class="resource"><strong>${escapeHtml(surface.key)}</strong><span>${surface.count.toLocaleString()} physics meshes · ${escapeHtml(surface.origin)}</span></div>`).join("")}${(trackSurfaceConfig?.warnings||[]).slice(0,8).map((warning)=>`<div class="resource"><strong>surfaces.ini</strong><span>${escapeHtml(warning)}</span></div>`).join("")}${trackAudit.unmatchedPhysical.slice(0,12).map((name)=>`<div class="resource"><strong>Default physics fallback</strong><span>${escapeHtml(name)}</span></div>`).join("")}${trackAudit.ambiguousPhysical.slice(0,12).map((item)=>`<div class="resource validation-error"><strong>Ambiguous physics mesh</strong><span>${escapeHtml(item.name)} → ${escapeHtml(item.keys.join(", "))}</span></div>`).join("")}${trackAudit.unmatchedPhysical.length>12?`<span class="empty">${trackAudit.unmatchedPhysical.length-12} more fallback physics meshes</span>`:""}${trackAudit.ambiguousPhysical.length>12?`<span class="empty">${trackAudit.ambiguousPhysical.length-12} more ambiguous physics meshes</span>`:""}</div>`;
+  if (!trackAudit) return "";
+  const severity = (finding) => finding.severity === "error" ? "Error" : "Warning", edits = editorProject?.surfaceEdits || {}, editCount = countSurfaceEdits(edits);
+  const surfaceControls = (trackSurfaceConfig?.surfaces || []).map((surface, position) => {
+    const edit = edits[String(position)], match = trackAudit.surfaceMatches.find((item) => item.key.toUpperCase() === surface.key.toUpperCase());
+    const number = (key, label) => `<label class="author-field"><span>${label}</span><input class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-surface-number="${key}" data-surface-position="${position}" value="${escapeHtml(formatEditorValue(surface[key]))}" spellcheck="false"></label>`;
+    const text = (key, label) => `<label class="author-field"><span>${label}</span><input class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-surface-text="${key}" data-surface-position="${position}" value="${escapeHtml(String(surface[key] ?? ""))}" maxlength="${key === "key" ? 128 : 1024}" spellcheck="false"></label>`;
+    const boolean = (key, label) => `<label class="author-field"><span>${label}</span><select class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-surface-boolean="${key}" data-surface-position="${position}"><option value="true" ${surface[key] ? "selected" : ""}>Yes</option><option value="false" ${surface[key] ? "" : "selected"}>No</option></select></label>`;
+    return `<div class="resource"><strong>SURFACE_${surface.index} · ${escapeHtml(surface.key)}</strong><span>${(match?.count || 0).toLocaleString()} physics meshes · friction ${format(surface.friction)}${surface.isPitlane ? " · pit lane" : ""}</span>${text("key", "Surface key")}${number("friction", "Friction")}${number("damping", "Damping")}${number("dirtAdditive", "Dirt additive")}${number("blackFlagTime", "Black-flag time")}${boolean("isValidTrack", "Valid track")}${boolean("isPitlane", "Pit lane")}${number("sinHeight", "Sine height")}${number("sinLength", "Sine length")}${number("vibrationGain", "Vibration gain")}${number("vibrationLength", "Vibration length")}${text("wav", "WAV file")}${number("wavPitch", "WAV pitch")}${text("ffEffect", "FF effect")}<div class="section-actions"><button class="mini" data-reset-surface="${position}" ${edit ? "" : "disabled"}>Reset ${escapeHtml(surface.key)} edits</button></div></div>`;
+  }).join("");
+  const configWarnings = [...new Set([...(trackSurfaceConfig?.warnings || []), ...(trackSurfaceConfig?.authoredWarnings || [])])];
+  return `<div class="section"><h3>Track validation${editCount ? ` · <span class="edit-count">${editCount} surface edit${editCount === 1 ? "" : "s"}</span>` : ""}</h3>${kv("surfaces.ini",trackSurfaceFileName||"Not available")}${kv("Track surface overrides",trackSurfaceConfig?.surfaces.length||0)}${kv("Runtime surfaces",trackAudit.runtimeSurfaces)}${kv("Starting positions",trackAudit.starts)}${kv("Pit positions",trackAudit.pits)}${kv("Timing gates",trackAudit.timeGates)}${kv("Hotlap marker",trackAudit.hotlap?"Present":"Missing")}${kv("Errors",trackAudit.errors)}${kv("Warnings",trackAudit.warnings)}${trackAudit.findings.map((finding)=>`<div class="resource ${finding.severity==="error"?"validation-error":""}"><strong>${severity(finding)}</strong><span>${escapeHtml(finding.message)}</span></div>`).join("")}${surfaceControls}${trackAudit.surfaceMatches.filter((surface)=>!(trackSurfaceConfig?.surfaces||[]).some((item)=>item.key.toUpperCase()===surface.key.toUpperCase())).map((surface)=>`<div class="resource"><strong>${escapeHtml(surface.key)}</strong><span>${surface.count.toLocaleString()} physics meshes · ${escapeHtml(surface.origin)}</span></div>`).join("")}${configWarnings.slice(0,8).map((warning)=>`<div class="resource"><strong>surfaces.ini</strong><span>${escapeHtml(warning)}</span></div>`).join("")}${trackAudit.unmatchedPhysical.slice(0,12).map((name)=>`<div class="resource"><strong>Default physics fallback</strong><span>${escapeHtml(name)}</span></div>`).join("")}${trackAudit.ambiguousPhysical.slice(0,12).map((item)=>`<div class="resource validation-error"><strong>Ambiguous physics mesh</strong><span>${escapeHtml(item.name)} → ${escapeHtml(item.keys.join(", "))}</span></div>`).join("")}${trackAudit.unmatchedPhysical.length>12?`<span class="empty">${trackAudit.unmatchedPhysical.length-12} more fallback physics meshes</span>`:""}${trackAudit.ambiguousPhysical.length>12?`<span class="empty">${trackAudit.ambiguousPhysical.length-12} more ambiguous physics meshes</span>`:""}${trackSurfaceConfig?`<div class="section-actions"><button class="mini" data-export-surfaces>Export surfaces.ini</button><button class="mini" data-reset-surfaces ${editCount ? "" : "disabled"}>Reset surface edits</button></div>`:""}</div>`;
 }
 
 function lightHtml(light) {
@@ -839,8 +1044,37 @@ function overrideHtml(override) {
   return `<div class="section"><h3>CSP effective override</h3>${override.shader ? kv("Shader", override.shader) : ""}${override.blendMode ? kv("Blend mode", override.blendMode) : ""}${override.depthMode ? kv("Depth mode", override.depthMode) : ""}${override.cullMode ? kv("Cull mode", override.cullMode) : ""}${override.isTransparent !== null ? kv("Transparent", override.isTransparent ? "Yes" : "No") : ""}${override.layer !== null ? kv("Layer", override.layer) : ""}${override.lodIn !== null || override.lodOut !== null ? kv("LOD range", `${override.lodIn ?? "inherit"} – ${override.lodOut ?? "inherit"}`) : ""}${override.castShadows !== null ? kv("Cast shadows", override.castShadows ? "Yes" : "No") : ""}${custom ? `${kv("Emissive atlas", `${custom.resolution[0]} × ${custom.resolution[1]}`)}${kv("Emissive shapes", custom.shapes.length)}${kv("Color masks", custom.colorMasks.length)}${kv("Vertex anchors", custom.vertexMask?.points.filter(Boolean).length || 0)}${kv("Bounce-back rules", custom.bounceBack.length)}${kv("Input bindings", custom.bindings.length)}${kv("Approximated operations", custom.approximatedOperations.length)}${kv("Unsupported operations", custom.unsupportedOperations.length)}` : ""}${[...override.properties].map(([key, value]) => `<div class="kv"><span>${escapeHtml(key)}</span><span class="csp-value">${escapeHtml(Array.isArray(value) ? value.map(format).join(", ") : format(value))}</span></div>`).join("")}${[...override.resources].map(([slot, resource]) => `<div class="kv"><span>${escapeHtml(slot)}</span><span class="csp-value">${escapeHtml(resource.texture || resource.file || (Array.isArray(resource.color) ? resource.color.map(format).join(", ") : "Unresolved"))}</span></div>`).join("")}${override.sources.map((source) => `<div class="resource csp-source"><strong>${escapeHtml(source.section)}</strong><span>${escapeHtml(source.source)}:${source.line}</span></div>`).join("")}</div>`;
 }
 
+function nodeEditCount(edit) {
+  return ["name", "active", "transform"].filter((key) => edit?.[key] !== undefined).length;
+}
+
+function nodeAuthoringHtml(node) {
+  const path = nodePathByNode.get(node), edit = editorProject?.nodeEdits?.[path], baseline = nodeBaseline(node), count = nodeEditCount(edit);
+  let transform = "";
+  const workspaceRoot = Boolean(model?.workspace && model.root.children.includes(node));
+  if (node.kind === "node" && node.transform && !workspaceRoot) {
+    const components = decomposeNodeTransform(node.transform), authored = Boolean(edit?.transform);
+    const vector = (key, label, value, suffix = "") => `<label class="author-field"><span>${label}</span><input class="${authored ? "authored" : ""}" data-edit-node-transform="${key}" value="${escapeHtml(formatEditorValue(value))}" spellcheck="false"${suffix ? ` title="${escapeHtml(suffix)}"` : ""}></label>`;
+    transform = `${vector("position", "Position", components.position)}${vector("rotation", "Rotation °", components.rotation, "Euler XYZ degrees")}${vector("scale", "Scale", components.scale)}${components.decomposable ? "" : `<span class="empty validation-warning">This matrix contains shear or signed scale. Changing rotation or scale replaces it with a standard TRS matrix.</span>`}<div class="section-actions"><button class="mini" data-reset-node-transform ${authored ? "" : "disabled"}>Reset transform</button></div>`;
+  }
+  return `<div class="section"><h3>Node authoring${count ? ` · <span class="edit-count">${count} edits</span>` : ""}</h3>${kv("Stable path", path || "Unavailable")}<label class="author-field"><span>Name</span><input class="${edit?.name !== undefined ? "authored" : ""}" data-edit-node-name value="${escapeHtml(edit?.name || "")}" placeholder="Inherit: ${escapeHtml(baseline.name)}" maxlength="1024" spellcheck="false"></label><label class="author-field"><span>Active</span><select class="${edit?.active !== undefined ? "authored" : ""}" data-edit-node-active><option value="">Inherit: ${baseline.active ? "Yes" : "No"}</option><option value="true" ${edit?.active === true ? "selected" : ""}>Yes</option><option value="false" ${edit?.active === false ? "selected" : ""}>No</option></select></label>${workspaceRoot ? `<span class="empty">Edit this workspace root transform in the model inspector so the manifest export uses the same values.</span>` : transform}<div class="section-actions"><button class="mini" data-reset-node ${edit ? "" : "disabled"}>Reset node edits</button></div></div>`;
+}
+
+function geometryAuthoringHtml(node) {
+  if (node.kind !== "mesh" && node.kind !== "skinnedMesh") return "";
+  if (model?.workspace) return `<div class="section"><h3>Geometry authoring</h3><span class="empty">Open this KN5 by itself to edit and export its geometry.</span></div>`;
+  if (node.kind === "skinnedMesh") return `<div class="section"><h3>Geometry authoring</h3><span class="empty">Skinned bind-pose geometry stays read-only until bone-space editing can preserve every inverse bind.</span></div>`;
+  const path = nodePathByNode.get(node), baseline = geometryBaselines.get(path), edit = editorProject?.geometryEdits?.[path];
+  if (!path || !baseline) return "";
+  const metrics = staticGeometryMetrics({ ...node, vertices: baseline.vertices, indices: baseline.indices }), currentMetrics = staticGeometryMetrics(node), components = edit?.transform ? decomposeNodeTransform(edit.transform) : { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1], decomposable: true }, count = geometryEditCount(edit);
+  const vector = (key, label, value, title = "") => `<label class="author-field"><span>${label}</span><input class="${edit?.transform ? "authored" : ""}" data-edit-geometry-transform="${key}" value="${escapeHtml(formatEditorValue(value))}" spellcheck="false"${title ? ` title="${escapeHtml(title)}"` : ""}></label>`;
+  const operation = (key, label, title) => `<label class="author-field"><span>${label}</span><select class="${edit?.[key] ? "authored" : ""}" data-edit-geometry-operation="${key}" title="${escapeHtml(title)}"><option value="">Keep source</option><option value="true" ${edit?.[key] ? "selected" : ""}>Apply</option></select></label>`;
+  const topology = (value) => `${value.vertices.toLocaleString()} ${value.vertices === 1 ? "vertex" : "vertices"} · ${value.triangles.toLocaleString()} triangle${value.triangles === 1 ? "" : "s"}`;
+  return `<div class="section"><h3>Geometry authoring${count ? ` · <span class="edit-count">${count} edit${count === 1 ? "" : "s"}</span>` : ""}</h3>${kv("Stable path", path)}${kv("Pivot", metrics.center.map(format).join(", "))}${kv("Source size", metrics.size.map(format).join(" × "))}${edit?.transform ? kv("Current size", currentMetrics.size.map(format).join(" × ")) : ""}${kv("Source topology", topology(metrics))}${count ? kv("Current topology", topology(currentMetrics)) : ""}${vector("position", "Vertex offset", components.position)}${vector("rotation", "Vertex rotation °", components.rotation, "Euler XYZ degrees")}${vector("scale", "Vertex scale", components.scale)}${components.decomposable ? "" : `<span class="empty validation-warning">This project transform cannot be represented as standard position, rotation, and scale.</span>`}${operation("removeDegenerate", "Remove degenerate triangles", "Remove repeated-index and zero-area triangles")}${operation("reverseWinding", "Reverse faces", "Reverse triangle winding and vertex normals")}${operation("recalculateNormals", "Rebuild normals", "Build area-weighted normals from the edited triangle winding")}<span class="empty">Transforms use the source bounds center. Geometry edits update vertex data, triangle data, GPU buffers, preview bounds, and KN5 output.</span><div class="section-actions"><button class="mini" data-reset-geometry ${edit ? "" : "disabled"}>Reset geometry</button></div></div>`;
+}
+
 function meshAuthoringHtml(node, override) {
-  const edit = editorProject?.meshEdits?.[node.name], count = meshEditCount(edit), duplicateCount = modelSummary.meshes.filter(({ node: candidate }) => candidate.name.toLowerCase() === node.name.toLowerCase()).length;
+  const sourceName = nodeBaseline(node).name, edit = matchingProjectEdit(editorProject?.meshEdits, sourceName)?.value, count = meshEditCount(edit), duplicateCount = modelSummary.meshes.filter(({ node: candidate }) => nodeBaseline(candidate).name.toLowerCase() === sourceName.toLowerCase()).length;
   const booleanField = (key, label, inherited) => `<label class="author-field"><span>${label}</span><select class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-mesh-boolean="${key}"><option value="">Inherit: ${inherited ? "Yes" : "No"}</option><option value="true" ${edit?.[key] === true ? "selected" : ""}>Yes</option><option value="false" ${edit?.[key] === false ? "selected" : ""}>No</option></select></label>`;
   const numericField = (key, label, inherited) => `<label class="author-field"><span>${label}</span><input class="${edit?.[key] !== undefined ? "authored" : ""}" data-edit-mesh-number="${key}" value="${edit?.[key] ?? ""}" placeholder="Inherit: ${escapeHtml(String(inherited))}"></label>`;
   return `<div class="section"><h3>Mesh authoring${count ? ` · <span class="edit-count">${count} edits</span>` : ""}</h3>${booleanField("isTransparent", "Transparent", override?.isTransparent ?? node.transparent)}${numericField("layer", "Layer", override?.layer ?? node.layer)}${numericField("lodIn", "LOD in", override?.lodIn ?? node.lodIn)}${numericField("lodOut", "LOD out", override?.lodOut ?? node.lodOut)}${booleanField("castShadows", "Shadows", override?.castShadows ?? node.castShadows)}${duplicateCount > 1 ? `<span class="empty">This name matches ${duplicateCount} meshes; the CSP export applies to all of them.</span>` : ""}<div class="section-actions"><button class="mini" data-reset-mesh ${edit ? "" : "disabled"}>Reset mesh edits</button></div></div>`;
@@ -917,15 +1151,249 @@ function meshEditCount(edit) {
   return ["isTransparent", "castShadows", "layer", "lodIn", "lodOut"].filter((key) => edit?.[key] !== undefined).length;
 }
 
+function matchingProjectEdit(record, name) {
+  const key = Object.keys(record || {}).find((candidate) => candidate.toLowerCase() === String(name).toLowerCase());
+  return key ? { key, value: record[key] } : null;
+}
+
 function editMesh(project, meshName, mutate) {
   const edit = project.meshEdits[meshName] || {};
   mutate(edit); project.meshEdits[meshName] = edit;
 }
 
+function editNode(project, path, mutate) {
+  const edit = project.nodeEdits[path] || {};
+  mutate(edit); project.nodeEdits[path] = edit;
+}
+
+function parseNodeVector(input, label) {
+  const value = parseEditorValue(input.value);
+  if (!Array.isArray(value) || value.length !== 3) throw new Error(`${label} needs three finite numbers`);
+  return value;
+}
+
+function bindNodeEditors(node) {
+  const path = nodePathByNode.get(node);
+  if (!path) return;
+  inspector.querySelector("[data-edit-node-name]")?.addEventListener("change", (event) => {
+    const value = event.target.value.trim();
+    commitEditorChange(`${value ? "Rename" : "Reset name for"} ${node.name}`, (project) => editNode(project, path, (edit) => { if (value) edit.name = value; else delete edit.name; }));
+  });
+  inspector.querySelector("[data-edit-node-active]")?.addEventListener("change", (event) => {
+    const value = event.target.value;
+    commitEditorChange(`${value ? "Set" : "Reset"} ${node.name} active`, (project) => editNode(project, path, (edit) => { if (value) edit.active = value === "true"; else delete edit.active; }));
+  });
+  inspector.querySelectorAll("[data-edit-node-transform]").forEach((input) => {
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") input.blur(); });
+    input.addEventListener("change", () => {
+      try {
+        const key = input.dataset.editNodeTransform, value = parseNodeVector(input, key[0].toUpperCase() + key.slice(1));
+        const current = decomposeNodeTransform(node.transform);
+        let transform;
+        if (key === "position") { transform = [...node.transform]; transform.splice(12, 3, ...value); }
+        else transform = composeNodeTransform({ position: current.position, rotation: key === "rotation" ? value : current.rotation, scale: key === "scale" ? value : current.scale });
+        commitEditorChange(`Set ${node.name} ${key}`, (project) => editNode(project, path, (edit) => { edit.transform = transform; }));
+      } catch (error) { input.classList.add("invalid"); status.textContent = error.message; }
+    });
+  });
+  inspector.querySelector("[data-reset-node-transform]")?.addEventListener("click", () => commitEditorChange(`Reset ${node.name} transform`, (project) => editNode(project, path, (edit) => { delete edit.transform; })));
+  inspector.querySelector("[data-reset-node]")?.addEventListener("click", () => commitEditorChange(`Reset ${node.name} node edits`, (project) => { delete project.nodeEdits[path]; }));
+}
+
+function geometryTransformIsIdentity(transform) {
+  const expected = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  return transform.every((value, index) => Math.abs(value - expected[index]) < 1e-7);
+}
+
+function geometryEditCount(edit) {
+  return ["transform", "removeDegenerate", "reverseWinding", "recalculateNormals"].filter((key) => edit?.[key] !== undefined).length;
+}
+
+function updateGeometryEdit(project, path, mutate) {
+  const edit = { ...(project.geometryEdits[path] || {}) };
+  mutate(edit);
+  if (Object.keys(edit).length) project.geometryEdits[path] = edit;
+  else delete project.geometryEdits[path];
+}
+
+function bindGeometryEditors(node) {
+  const path = nodePathByNode.get(node);
+  if (!path || node.kind !== "mesh" || model?.workspace || !geometryBaselines.has(path)) return;
+  inspector.querySelectorAll("[data-edit-geometry-transform]").forEach((input) => {
+    const commit = () => {
+      try {
+        const key = input.dataset.editGeometryTransform, value = parseNodeVector(input, key[0].toUpperCase() + key.slice(1));
+        if (key === "scale" && value.some((component) => Math.abs(component) < 1e-6)) throw new Error("Vertex scale cannot collapse an axis");
+        const existing = editorProject?.geometryEdits?.[path], current = existing?.transform ? decomposeNodeTransform(existing.transform) : { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] };
+        const transform = composeNodeTransform({ position: key === "position" ? value : current.position, rotation: key === "rotation" ? value : current.rotation, scale: key === "scale" ? value : current.scale });
+        commitEditorChange(`Set ${node.name} geometry ${key}`, (project) => updateGeometryEdit(project, path, (edit) => { if (geometryTransformIsIdentity(transform)) delete edit.transform; else edit.transform = transform; }));
+      } catch (error) { input.classList.add("invalid"); status.textContent = error.message; }
+    };
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } });
+    input.addEventListener("change", commit);
+  });
+  inspector.querySelectorAll("[data-edit-geometry-operation]").forEach((select) => select.addEventListener("change", () => {
+    const key = select.dataset.editGeometryOperation, enabled = select.value === "true";
+    commitEditorChange(`${enabled ? "Apply" : "Reset"} ${node.name} ${key}`, (project) => updateGeometryEdit(project, path, (edit) => { if (enabled) edit[key] = true; else delete edit[key]; }));
+  }));
+  inspector.querySelector("[data-reset-geometry]")?.addEventListener("click", () => commitEditorChange(`Reset ${node.name} geometry`, (project) => { delete project.geometryEdits[path]; }));
+}
+
+function editWorkspaceFile(project, index, mutate) {
+  project.workspaceEdits ||= { files: Object.create(null) };
+  project.workspaceEdits.files ||= Object.create(null);
+  const key = String(index), edit = project.workspaceEdits.files[key] || {};
+  mutate(edit); project.workspaceEdits.files[key] = edit;
+}
+
+function editSurface(project, position, mutate) {
+  project.surfaceEdits ||= Object.create(null);
+  const key = String(position), edit = project.surfaceEdits[key] || {};
+  mutate(edit); project.surfaceEdits[key] = edit;
+}
+
+function bindSurfaceEditors() {
+  if (!trackSurfaceConfig) return;
+  inspector.querySelectorAll("[data-edit-surface-number]").forEach((input) => {
+    const commit = () => {
+      try {
+        const position = Number(input.dataset.surfacePosition), key = input.dataset.editSurfaceNumber, value = parseEditorValue(input.value);
+        if (Array.isArray(value)) throw new Error(`${key} needs one finite number`);
+        commitEditorChange(`Set ${trackSurfaceConfig.surfaces[position].key} ${key}`, (project) => editSurface(project, position, (edit) => { edit[key] = value; }));
+      } catch (error) { input.classList.add("invalid"); status.textContent = error.message; }
+    };
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } });
+    input.addEventListener("change", commit);
+  });
+  inspector.querySelectorAll("[data-edit-surface-boolean]").forEach((select) => select.addEventListener("change", () => {
+    const position = Number(select.dataset.surfacePosition), key = select.dataset.editSurfaceBoolean;
+    commitEditorChange(`Set ${trackSurfaceConfig.surfaces[position].key} ${key}`, (project) => editSurface(project, position, (edit) => { edit[key] = select.value === "true"; }));
+  }));
+  inspector.querySelectorAll("[data-edit-surface-text]").forEach((input) => {
+    const commit = () => {
+      try {
+        const position = Number(input.dataset.surfacePosition), key = input.dataset.editSurfaceText, text = input.value.trim();
+        if (text.includes(";")) throw new Error(`${key} cannot contain an INI comment marker`);
+        if (key === "key") {
+          if (!text) throw new Error("Surface key cannot be empty");
+          const duplicate = trackSurfaceConfig.surfaces.some((surface, index) => index !== position && surface.key.toUpperCase() === text.toUpperCase());
+          if (duplicate) throw new Error(`Surface key ${text.toUpperCase()} is already in use`);
+        }
+        commitEditorChange(`Set ${trackSurfaceConfig.surfaces[position].key} ${key}`, (project) => editSurface(project, position, (edit) => { edit[key] = key === "key" ? text.toUpperCase() : text || null; }));
+      } catch (error) { input.classList.add("invalid"); status.textContent = error.message; }
+    };
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } });
+    input.addEventListener("change", commit);
+  });
+  inspector.querySelectorAll("[data-reset-surface]").forEach((button) => button.addEventListener("click", () => {
+    const position = button.dataset.resetSurface, surface = trackSurfaceConfig.surfaces[Number(position)];
+    commitEditorChange(`Reset ${surface.key} surface edits`, (project) => { delete project.surfaceEdits[position]; });
+  }));
+  inspector.querySelector("[data-reset-surfaces]")?.addEventListener("click", () => commitEditorChange("Reset surface edits", (project) => { project.surfaceEdits = Object.create(null); }));
+  inspector.querySelector("[data-export-surfaces]")?.addEventListener("click", () => {
+    try {
+      const text = serializeSurfacesIni(trackSurfaceConfig), name = trackSurfaceFileName.split("/").at(-1) || "surfaces.ini";
+      downloadText(name, text, "text/plain");
+      window.__apexLastSurfaceExport = { name, text, warnings: [...(trackSurfaceConfig.authoredWarnings || [])] };
+      const count = trackSurfaceConfig.surfaces.length;
+      status.textContent = `Exported ${name} · ${count} surface${count === 1 ? "" : "s"}`;
+    } catch (error) { console.error(error); status.textContent = `Could not export surfaces.ini: ${error.message}`; }
+  });
+}
+
+function bindWorkspaceEditors() {
+  if (!model?.workspace) return;
+  inspector.querySelectorAll("[data-edit-workspace-vector]").forEach((input) => {
+    const commit = () => {
+      try {
+        const index = Number(input.dataset.workspaceFile), key = input.dataset.editWorkspaceVector, text = input.value.trim();
+        const value = text ? parseEditorValue(text) : null;
+        if (text && (!Array.isArray(value) || value.length !== 3)) throw new Error(`${key} needs three finite numbers`);
+        commitEditorChange(`${text ? "Set" : "Reset"} ${model.workspace.files[index].name} ${key}`, (project) => editWorkspaceFile(project, index, (edit) => { if (text) edit[key] = value; else delete edit[key]; }));
+      } catch (error) { input.classList.add("invalid"); status.textContent = error.message; }
+    };
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } });
+    input.addEventListener("change", commit);
+  });
+  inspector.querySelectorAll("[data-edit-workspace-number]").forEach((input) => {
+    const commit = () => {
+      try {
+        const index = Number(input.dataset.workspaceFile), key = input.dataset.editWorkspaceNumber, text = input.value.trim(), value = text ? parseEditorValue(text) : null;
+        if (Array.isArray(value)) throw new Error(`${key} needs one finite number`);
+        if (text && value < 0) throw new Error(`${key} cannot be negative`);
+        commitEditorChange(`${text ? "Set" : "Reset"} ${model.workspace.files[index].name} ${key}`, (project) => editWorkspaceFile(project, index, (edit) => { if (text) edit[key] = value; else delete edit[key]; }));
+      } catch (error) { input.classList.add("invalid"); status.textContent = error.message; }
+    };
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } });
+    input.addEventListener("change", commit);
+  });
+  inspector.querySelectorAll("[data-edit-workspace-dynamic-vector]").forEach((input) => {
+    const commit = () => {
+      try {
+        const index = Number(input.dataset.workspaceFile), key = input.dataset.editWorkspaceDynamicVector, length = Number(input.dataset.vectorLength) || 3, value = parseEditorValue(input.value);
+        if (!Array.isArray(value) || value.length !== length) throw new Error(`${key} needs ${length} finite numbers`);
+        if (key === "multiplicity" && (value.some((component) => component < 0) || value[1] < value[0])) throw new Error("Multiplicity needs a nonnegative minimum followed by an equal or greater maximum");
+        commitEditorChange(`Set ${model.workspace.files[index].name} ${key}`, (project) => editWorkspaceFile(project, index, (edit) => { edit[key] = value; }));
+      } catch (error) { input.classList.add("invalid"); status.textContent = error.message; }
+    };
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } });
+    input.addEventListener("change", commit);
+  });
+  inspector.querySelectorAll("[data-edit-workspace-dynamic-number]").forEach((input) => {
+    const commit = () => {
+      try {
+        const index = Number(input.dataset.workspaceFile), key = input.dataset.editWorkspaceDynamicNumber, value = parseEditorValue(input.value);
+        if (Array.isArray(value)) throw new Error(`${key} needs one finite number`);
+        if (key === "probability" && (value < 0 || value > 100)) throw new Error("Probability must be from 0 to 100");
+        commitEditorChange(`Set ${model.workspace.files[index].name} ${key}`, (project) => editWorkspaceFile(project, index, (edit) => { edit[key] = value; }));
+      } catch (error) { input.classList.add("invalid"); status.textContent = error.message; }
+    };
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } });
+    input.addEventListener("change", commit);
+  });
+  inspector.querySelectorAll("[data-edit-workspace-dynamic-text]").forEach((input) => {
+    const commit = () => {
+      try {
+        const index = Number(input.dataset.workspaceFile), key = input.dataset.editWorkspaceDynamicText, text = input.value.trim();
+        if (key !== "playWav" && !text) throw new Error(`${key} cannot be empty`);
+        commitEditorChange(`Set ${model.workspace.files[index].name} ${key}`, (project) => editWorkspaceFile(project, index, (edit) => { edit[key] = key === "playWav" ? text || null : text.toUpperCase(); }));
+      } catch (error) { input.classList.add("invalid"); status.textContent = error.message; }
+    };
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } });
+    input.addEventListener("change", commit);
+  });
+  inspector.querySelectorAll("[data-edit-workspace-switch]").forEach((input) => {
+    const commit = () => {
+      try {
+        const key = input.dataset.editWorkspaceSwitch, text = input.value.trim(), value = text ? parseEditorValue(text) : null;
+        if (Array.isArray(value)) throw new Error(`${key} needs one finite number`);
+        if (text && value < 0) throw new Error(`${key} cannot be negative`);
+        commitEditorChange(`${text ? "Set" : "Reset"} ${key}`, (project) => { if (text) project.workspaceEdits[key] = value; else delete project.workspaceEdits[key]; });
+      } catch (error) { input.classList.add("invalid"); status.textContent = error.message; }
+    };
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } });
+    input.addEventListener("change", commit);
+  });
+  inspector.querySelectorAll("[data-reset-workspace-file]").forEach((button) => button.addEventListener("click", () => {
+    const index = button.dataset.resetWorkspaceFile;
+    commitEditorChange(`Reset ${model.workspace.files[Number(index)].name} manifest edits`, (project) => { delete project.workspaceEdits.files[index]; });
+  }));
+  inspector.querySelector("[data-reset-workspace]")?.addEventListener("click", () => commitEditorChange("Reset manifest edits", (project) => { project.workspaceEdits = { files: Object.create(null) }; }));
+  inspector.querySelector("[data-export-workspace]")?.addEventListener("click", () => {
+    try {
+      const car = model.workspace.kind === "carLods", text = car ? serializeCarLodsIni(model.workspace) : serializeModelsIni(model.workspace), fallback = car ? "lods.ini" : "models.ini", name = model.workspace.manifest?.split("/").at(-1) || fallback;
+      downloadText(name, text, "text/plain");
+      window.__apexLastManifestExport = { name, text, warnings: [...(model.workspace.authoredWarnings || [])] };
+      status.textContent = `Exported ${name} · ${model.workspace.files.filter((file) => !file.auxiliary).length} entries`;
+    } catch (error) { console.error(error); status.textContent = `Could not export manifest: ${error.message}`; }
+  });
+}
+
 function bindMeshEditors(node) {
+  const sourceName = nodeBaseline(node).name, sourceKey = matchingProjectEdit(editorProject?.meshEdits, sourceName)?.key || sourceName;
   inspector.querySelectorAll("[data-edit-mesh-boolean]").forEach((input) => input.addEventListener("change", () => {
     const key = input.dataset.editMeshBoolean, value = input.value;
-    commitEditorChange(`${value ? "Set" : "Reset"} ${node.name} ${key}`, (project) => editMesh(project, node.name, (edit) => { if (value) edit[key] = value === "true"; else delete edit[key]; }));
+    commitEditorChange(`${value ? "Set" : "Reset"} ${node.name} ${key}`, (project) => editMesh(project, sourceKey, (edit) => { if (value) edit[key] = value === "true"; else delete edit[key]; }));
   }));
   inspector.querySelectorAll("[data-edit-mesh-number]").forEach((input) => {
     input.addEventListener("keydown", (event) => { if (event.key === "Enter") input.blur(); });
@@ -934,11 +1402,11 @@ function bindMeshEditors(node) {
         const key = input.dataset.editMeshNumber, text = input.value.trim();
         const value = text ? parseEditorValue(text) : null;
         if (Array.isArray(value)) throw new Error(`${key} needs one finite number`);
-        commitEditorChange(`${text ? "Set" : "Reset"} ${node.name} ${key}`, (project) => editMesh(project, node.name, (edit) => { if (text) edit[key] = value; else delete edit[key]; }));
+        commitEditorChange(`${text ? "Set" : "Reset"} ${node.name} ${key}`, (project) => editMesh(project, sourceKey, (edit) => { if (text) edit[key] = value; else delete edit[key]; }));
       } catch (error) { input.classList.add("invalid"); status.textContent = error.message; }
     });
   });
-  inspector.querySelector("[data-reset-mesh]")?.addEventListener("click", () => commitEditorChange(`Reset ${node.name}`, (project) => { delete project.meshEdits[node.name]; }));
+  inspector.querySelector("[data-reset-mesh]")?.addEventListener("click", () => commitEditorChange(`Reset ${node.name}`, (project) => { delete project.meshEdits[sourceKey]; }));
 }
 
 function editMaterial(project, materialName, mutate) {
@@ -1111,7 +1579,7 @@ function createRenderer(canvas) {
     void main(){vec2 uv=region.xy+vUv*region.zw;float result=0.0,total=0.0;if(filterMode==1){const float weights[4]=float[4](.2496147,.1924633,.0514763,.0064457);const float offsets[4]=float[4](.6443417,2.3788476,4.2911105,6.2166071);for(int i=0;i<4;i++){vec2 o=pixelStep*offsets[i];result+=(readValue(uv+o)+readValue(uv-o))*weights[i];}}else{const float weights[2]=float[2](.4490798,.0509202);const float offsets[2]=float[2](.5380487,2.0627797);for(int i=0;i<2;i++){vec2 o=pixelStep*offsets[i];float a=readValue(uv+o),b=readValue(uv-o),wa=weights[i],wb=weights[i];if(filterMode==2){wa*=1.0+a*.1;wb*=1.0+b*.1;}result+=a*wa+b*wb;total+=wa+wb;}if(filterMode==2)result/=max(.000001,total);}color=vec4(result,0,0,1);}`);
   const localShadowBlurLocations={sourceTexture:gl.getUniformLocation(localShadowBlurProgram,"sourceTexture"),region:gl.getUniformLocation(localShadowBlurProgram,"region"),pixelStep:gl.getUniformLocation(localShadowBlurProgram,"pixelStep"),filterMode:gl.getUniformLocation(localShadowBlurProgram,"filterMode")};
   const shadowTargets=Array.from({length:3},()=>{const texture=gl.createTexture(),framebuffer=gl.createFramebuffer();gl.bindTexture(gl.TEXTURE_2D,texture);gl.texImage2D(gl.TEXTURE_2D,0,gl.DEPTH_COMPONENT24,KS_SHADOW_MAP_SIZE,KS_SHADOW_MAP_SIZE,0,gl.DEPTH_COMPONENT,gl.UNSIGNED_INT,null);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.bindFramebuffer(gl.FRAMEBUFFER,framebuffer);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.TEXTURE_2D,texture,0);gl.drawBuffers([gl.NONE]);gl.readBuffer(gl.NONE);if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw new Error("Directional shadow framebuffer is incomplete");return {texture,framebuffer};});
-  const localShadowTexture=gl.createTexture(),localShadowFramebuffer=gl.createFramebuffer(),localShadowDepth=gl.createRenderbuffer(),localShadowFloat=hdrEnabled;gl.bindTexture(gl.TEXTURE_2D,localShadowTexture);gl.texImage2D(gl.TEXTURE_2D,0,localShadowFloat?gl.R32F:gl.RGBA8,CSP_LOCAL_SHADOW_ATLAS_SIZE,CSP_LOCAL_SHADOW_ATLAS_SIZE,0,localShadowFloat?gl.RED:gl.RGBA,localShadowFloat?gl.FLOAT:gl.UNSIGNED_BYTE,null);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,localShadowFloat&&!floatLinear?gl.NEAREST:gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,localShadowFloat&&!floatLinear?gl.NEAREST:gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.bindRenderbuffer(gl.RENDERBUFFER,localShadowDepth);gl.renderbufferStorage(gl.RENDERBUFFER,gl.DEPTH_COMPONENT24,CSP_LOCAL_SHADOW_ATLAS_SIZE,CSP_LOCAL_SHADOW_ATLAS_SIZE);gl.bindFramebuffer(gl.FRAMEBUFFER,localShadowFramebuffer);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,localShadowTexture,0);gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.RENDERBUFFER,localShadowDepth);gl.drawBuffers([gl.COLOR_ATTACHMENT0]);if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw new Error("CSP exponential local-shadow atlas framebuffer is incomplete");let localShadowState={lights:[],matrices:[],slotByLight:new Map(),casters:0,triangles:0,casterNodes:[],ready:false};
+  const localShadowTexture=gl.createTexture(),localShadowFramebuffer=gl.createFramebuffer(),localShadowMsFramebuffer=gl.createFramebuffer(),localShadowMsColor=gl.createRenderbuffer(),localShadowDepth=gl.createRenderbuffer(),localShadowFloat=hdrEnabled,localShadowFormat=localShadowFloat?gl.R32F:gl.RGBA8,localShadowColorSamples=Array.from(gl.getInternalformatParameter(gl.RENDERBUFFER,localShadowFormat,gl.SAMPLES)||[]),localShadowDepthSamples=Array.from(gl.getInternalformatParameter(gl.RENDERBUFFER,gl.DEPTH_COMPONENT24,gl.SAMPLES)||[]),localShadowSamples=localShadowColorSamples.includes(CSP_LOCAL_SHADOW_SAMPLES)&&localShadowDepthSamples.includes(CSP_LOCAL_SHADOW_SAMPLES)?CSP_LOCAL_SHADOW_SAMPLES:1;gl.bindTexture(gl.TEXTURE_2D,localShadowTexture);gl.texImage2D(gl.TEXTURE_2D,0,localShadowFormat,CSP_LOCAL_SHADOW_ATLAS_SIZE,CSP_LOCAL_SHADOW_ATLAS_SIZE,0,localShadowFloat?gl.RED:gl.RGBA,localShadowFloat?gl.FLOAT:gl.UNSIGNED_BYTE,null);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,localShadowFloat&&!floatLinear?gl.NEAREST:gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,localShadowFloat&&!floatLinear?gl.NEAREST:gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.bindFramebuffer(gl.FRAMEBUFFER,localShadowFramebuffer);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,localShadowTexture,0);gl.drawBuffers([gl.COLOR_ATTACHMENT0]);if(localShadowSamples===CSP_LOCAL_SHADOW_SAMPLES){gl.bindRenderbuffer(gl.RENDERBUFFER,localShadowMsColor);gl.renderbufferStorageMultisample(gl.RENDERBUFFER,localShadowSamples,localShadowFormat,CSP_LOCAL_SHADOW_ATLAS_SIZE,CSP_LOCAL_SHADOW_ATLAS_SIZE);gl.bindRenderbuffer(gl.RENDERBUFFER,localShadowDepth);gl.renderbufferStorageMultisample(gl.RENDERBUFFER,localShadowSamples,gl.DEPTH_COMPONENT24,CSP_LOCAL_SHADOW_ATLAS_SIZE,CSP_LOCAL_SHADOW_ATLAS_SIZE);gl.bindFramebuffer(gl.FRAMEBUFFER,localShadowMsFramebuffer);gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.RENDERBUFFER,localShadowMsColor);gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.RENDERBUFFER,localShadowDepth);gl.drawBuffers([gl.COLOR_ATTACHMENT0]);if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw new Error("CSP multisample local-shadow framebuffer is incomplete");}else{gl.bindRenderbuffer(gl.RENDERBUFFER,localShadowDepth);gl.renderbufferStorage(gl.RENDERBUFFER,gl.DEPTH_COMPONENT24,CSP_LOCAL_SHADOW_ATLAS_SIZE,CSP_LOCAL_SHADOW_ATLAS_SIZE);gl.bindFramebuffer(gl.FRAMEBUFFER,localShadowFramebuffer);gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.RENDERBUFFER,localShadowDepth);}gl.bindFramebuffer(gl.FRAMEBUFFER,localShadowFramebuffer);if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw new Error("CSP exponential local-shadow atlas framebuffer is incomplete");let localShadowState={lights:[],matrices:[],slotByLight:new Map(),casters:0,triangles:0,casterNodes:[],ready:false};
   const localShadowPingTexture=gl.createTexture(),localShadowPingFramebuffer=gl.createFramebuffer();gl.bindTexture(gl.TEXTURE_2D,localShadowPingTexture);gl.texImage2D(gl.TEXTURE_2D,0,localShadowFloat?gl.R32F:gl.RGBA8,CSP_LOCAL_SHADOW_ATLAS_SIZE,CSP_LOCAL_SHADOW_ATLAS_SIZE,0,localShadowFloat?gl.RED:gl.RGBA,localShadowFloat?gl.FLOAT:gl.UNSIGNED_BYTE,null);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,localShadowFloat&&!floatLinear?gl.NEAREST:gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,localShadowFloat&&!floatLinear?gl.NEAREST:gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.bindFramebuffer(gl.FRAMEBUFFER,localShadowPingFramebuffer);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,localShadowPingTexture,0);gl.drawBuffers([gl.COLOR_ATTACHMENT0]);if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw new Error("CSP local-shadow Gaussian framebuffer is incomplete");
   gl.bindFramebuffer(gl.FRAMEBUFFER,null);
   const fullscreenVao=gl.createVertexArray(),windUpdateProgram=link(gl,`#version 300 es
@@ -1127,11 +1595,19 @@ function createRenderer(canvas) {
   const reflectionCubeTexture=gl.createTexture(),reflectionCubeFramebuffer=gl.createFramebuffer(),reflectionCubeDepth=gl.createRenderbuffer(),reflectionCubeTargets={"negative-x":gl.TEXTURE_CUBE_MAP_NEGATIVE_X,"positive-x":gl.TEXTURE_CUBE_MAP_POSITIVE_X,"positive-y":gl.TEXTURE_CUBE_MAP_POSITIVE_Y,"negative-y":gl.TEXTURE_CUBE_MAP_NEGATIVE_Y,"positive-z":gl.TEXTURE_CUBE_MAP_POSITIVE_Z,"negative-z":gl.TEXTURE_CUBE_MAP_NEGATIVE_Z};
   gl.bindTexture(gl.TEXTURE_CUBE_MAP,reflectionCubeTexture);for(const face of WEBGL_CUBEMAP_FACES)gl.texImage2D(reflectionCubeTargets[face.target],0,hdrEnabled?gl.RGBA16F:gl.RGBA8,KS_EDITOR_CUBEMAP.size,KS_EDITOR_CUBEMAP.size,0,gl.RGBA,hdrEnabled?gl.HALF_FLOAT:gl.UNSIGNED_BYTE,null);gl.texParameteri(gl.TEXTURE_CUBE_MAP,gl.TEXTURE_MIN_FILTER,gl.LINEAR_MIPMAP_LINEAR);gl.texParameteri(gl.TEXTURE_CUBE_MAP,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_CUBE_MAP,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_CUBE_MAP,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_CUBE_MAP,gl.TEXTURE_WRAP_R,gl.CLAMP_TO_EDGE);
   gl.bindRenderbuffer(gl.RENDERBUFFER,reflectionCubeDepth);gl.renderbufferStorage(gl.RENDERBUFFER,gl.DEPTH_COMPONENT24,KS_EDITOR_CUBEMAP.size,KS_EDITOR_CUBEMAP.size);gl.bindFramebuffer(gl.FRAMEBUFFER,reflectionCubeFramebuffer);gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.RENDERBUFFER,reflectionCubeDepth);gl.bindFramebuffer(gl.FRAMEBUFFER,null);
-  const postProgram=link(gl,`#version 300 es
-    precision highp float;out vec2 vUv;void main(){vec2 p=gl_VertexID==0?vec2(-1,-1):gl_VertexID==1?vec2(3,-1):vec2(-1,3);vUv=p*.5+.5;gl_Position=vec4(p,0,1);}`,
-    `#version 300 es
-    precision highp float;in vec2 vUv;uniform sampler2D hdrTexture;uniform float exposure;uniform float gamma;uniform float saturation;uniform bool diagnosticMode;out vec4 color;void main(){vec4 source=texture(hdrTexture,vUv);vec3 mapped=diagnosticMode?clamp(source.rgb,0.0,1.0):source.rgb*exposure/(vec3(1.0)+source.rgb*exposure);float luminance=dot(mapped,vec3(.2126,.7152,.0722));mapped=mix(vec3(luminance),mapped,saturation);mapped=pow(clamp(mapped,0.0,1.0),vec3(gamma/2.2));color=vec4(mapped,source.a);}`),postLocations=Object.fromEntries(["hdrTexture","exposure","gamma","saturation","diagnosticMode"].map((name)=>[name,gl.getUniformLocation(postProgram,name)]));
+  const postVertex=`#version 300 es
+    precision highp float;out vec2 vUv;void main(){vec2 p=gl_VertexID==0?vec2(-1,-1):gl_VertexID==1?vec2(3,-1):vec2(-1,3);vUv=p*.5+.5;gl_Position=vec4(p,0,1);}`;
+  const brightPassProgram=link(gl,postVertex,`#version 300 es
+    precision highp float;in vec2 vUv;uniform sampler2D sourceTexture;uniform float exposure;uniform float threshold;uniform float remap;out vec4 color;void main(){vec3 source=texture(sourceTexture,vUv).rgb;color=vec4(min(max(source*exposure-vec3(threshold),vec3(0.0))*remap,vec3(64000.0)),1.0);}`),brightPassLocations=Object.fromEntries(["sourceTexture","exposure","threshold","remap"].map((name)=>[name,gl.getUniformLocation(brightPassProgram,name)]));
+  const bloomDownsampleProgram=link(gl,postVertex,`#version 300 es
+    precision highp float;in vec2 vUv;uniform sampler2D sourceTexture;out vec4 color;void main(){vec2 stepSize=.5/vec2(textureSize(sourceTexture,0));vec3 result=texture(sourceTexture,vUv+vec2(-stepSize.x,-stepSize.y)).rgb+texture(sourceTexture,vUv+vec2(stepSize.x,-stepSize.y)).rgb+texture(sourceTexture,vUv+vec2(-stepSize.x,stepSize.y)).rgb+texture(sourceTexture,vUv+stepSize).rgb;color=vec4(result*.25,1.0);}`),bloomDownsampleSource=gl.getUniformLocation(bloomDownsampleProgram,"sourceTexture");
+  const bloomBlurProgram=link(gl,postVertex,`#version 300 es
+    precision highp float;in vec2 vUv;uniform sampler2D sourceTexture;uniform vec2 direction;uniform int sampleCount;uniform float sampleOffsets[15];uniform float sampleWeights[15];out vec4 color;void main(){vec2 texel=direction/vec2(textureSize(sourceTexture,0));vec3 result=vec3(0.0);for(int sampleIndex=0;sampleIndex<15;sampleIndex++){if(sampleIndex>=sampleCount)break;result+=texture(sourceTexture,vUv+texel*sampleOffsets[sampleIndex]).rgb*sampleWeights[sampleIndex];}color=vec4(result,1.0);}`),bloomBlurLocations={sourceTexture:gl.getUniformLocation(bloomBlurProgram,"sourceTexture"),direction:gl.getUniformLocation(bloomBlurProgram,"direction"),sampleCount:gl.getUniformLocation(bloomBlurProgram,"sampleCount"),sampleOffsets:gl.getUniformLocation(bloomBlurProgram,"sampleOffsets[0]"),sampleWeights:gl.getUniformLocation(bloomBlurProgram,"sampleWeights[0]")};
+  const postProgram=link(gl,postVertex,`#version 300 es
+    precision highp float;in vec2 vUv;uniform sampler2D hdrTexture;uniform sampler2D bloom0;uniform sampler2D bloom1;uniform sampler2D bloom2;uniform sampler2D bloom3;uniform sampler2D bloom4;uniform sampler2D ditherTexture;uniform float exposure;uniform float gamma;uniform float saturation;uniform float curveScale;uniform float curveShoulder;uniform float bloomScale;uniform float ditherScale;uniform float ditherOffset;uniform bool glareEnabled;uniform bool diagnosticMode;out vec4 color;void main(){vec4 source=texture(hdrTexture,vUv);if(diagnosticMode){color=vec4(clamp(source.rgb,0.0,1.0),source.a);return;}float luminance=dot(source.rgb,vec3(.2126,.7152,.0722));vec3 exposed=max(mix(vec3(luminance),source.rgb,saturation)*exposure,vec3(6.103515625e-5));vec3 decay=exp(-exposed*curveScale);vec3 shoulder=vec3(1.0)-decay*curveShoulder;vec3 mapped=clamp((vec3(1.0)-decay)*shoulder*shoulder,0.0,1.0);if(glareEnabled){vec3 glare=(texture(bloom0,vUv).rgb+texture(bloom1,vUv).rgb+texture(bloom2,vUv).rgb+texture(bloom3,vUv).rgb+texture(bloom4,vUv).rgb)*bloomScale;glare=clamp(glare,0.0,1.0);mapped=mapped+(vec3(1.0)-mapped)*glare;}mapped=pow(min(mapped+vec3(2.384185791015625e-7),vec3(1.0)),vec3(1.0/gamma));float dither=texture(ditherTexture,gl_FragCoord.xy/8.0).r*ditherScale+ditherOffset;color=vec4(mapped+vec3(dither),source.a);}`),postLocations=Object.fromEntries(["hdrTexture","bloom0","bloom1","bloom2","bloom3","bloom4","ditherTexture","exposure","gamma","saturation","curveScale","curveShoulder","bloomScale","ditherScale","ditherOffset","glareEnabled","diagnosticMode"].map((name)=>[name,gl.getUniformLocation(postProgram,name)]));
   const hdrTexture=gl.createTexture(),hdrFramebuffer=gl.createFramebuffer(),hdrMsFramebuffer=gl.createFramebuffer(),hdrMsColor=gl.createRenderbuffer(),hdrMsDepth=gl.createRenderbuffer(),exposureFramebuffer=gl.createFramebuffer();let hdrWidth=0,hdrHeight=0,hdrMaxMip=0;
+  const bloomTargets=Array.from({length:KS_EDITOR_GLARE.levels},()=>({width:1,height:1,textures:[gl.createTexture(),gl.createTexture()],framebuffers:[gl.createFramebuffer(),gl.createFramebuffer()]})),bloomKernels=Array.from({length:KS_EDITOR_GLARE.levels},(_,level)=>ksEditorBloomGaussianKernel(level));
+  const ditherTexture=gl.createTexture(),bayer8=[0,48,12,60,3,51,15,63,32,16,44,28,35,19,47,31,8,56,4,52,11,59,7,55,40,24,36,20,43,27,39,23,2,50,14,62,1,49,13,61,34,18,46,30,33,17,45,29,10,58,6,54,9,57,5,53,42,26,38,22,41,25,37,21];gl.bindTexture(gl.TEXTURE_2D,ditherTexture);gl.texImage2D(gl.TEXTURE_2D,0,gl.R8,8,8,0,gl.RED,gl.UNSIGNED_BYTE,Uint8Array.from(bayer8,(value)=>Math.round((value+.5)*255/64)));gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.REPEAT);
   const grassProgram=link(gl,`#version 300 es
     precision highp float;layout(location=0)in vec3 blade;layout(location=1)in vec4 instancePositionHeight;layout(location=2)in vec4 instanceAngleColor;layout(location=3)in vec4 instanceAtlasRect;layout(location=4)in vec3 instanceShape;layout(location=5)in vec2 instanceLean;layout(location=6)in float instanceFade;layout(location=7)in float instanceType;layout(location=8)in vec2 instanceNormal;layout(location=9)in vec3 instancePixel;layout(location=10)in vec2 instanceMaterial;uniform mat4 viewProjection;uniform vec3 cameraPosition;uniform sampler2D windMapTexture;uniform vec2 windVelocity;out vec3 vGrassColor;out vec2 vBlade;out vec2 vAtlasUv;flat out vec4 vAtlasRect;out vec3 vWorld;out vec3 vNormal;flat out vec3 vSubstrateNormal;flat out vec3 vBent;out float vFade;out float vTexDimming;flat out vec2 vRndFactors;flat out vec2 vMaterial;
     void main(){float angle=instanceAngleColor.x;vec2 direction=vec2(cos(angle),sin(angle));float height=instancePositionHeight.w,width=max(.002,instanceShape.x),upY=sqrt(max(0.0,1.0-dot(instanceLean,instanceLean))),normalY=sqrt(max(0.0,1.0-dot(instanceNormal,instanceNormal)));vec3 up=vec3(instanceLean.x,upY,instanceLean.y),inNormal=vec3(instanceNormal.x,normalY,instanceNormal.y),side=normalize(cross(vec3(direction.x,0.0,direction.y),inNormal)),bent=normalize(cross(side,inNormal));vec3 position=instancePositionHeight.xyz+side*blade.x*width+up*blade.y*height;float phaseOffset=instanceType*.5,windMult=blade.y*instanceShape.y*.5*(textureLod(windMapTexture,position.xz/80.0+phaseOffset*.05,0.0).r+textureLod(windMapTexture,position.xz/21.71+phaseOffset*.05,0.0).r*.471)*up.y;vec2 windOffset=windMult*windVelocity;windOffset/=1.0+abs(windOffset);position.xz+=windOffset*height;position.y-=min(.5,1.0-sqrt(max(0.0,1.0-dot(windOffset,windOffset))))*(.5+fract(558.476*phaseOffset))*height;float atlasX=instanceAtlasRect.x+(blade.x*.5+.5)*instanceAtlasRect.z,atlasY=blade.y*(1.0-instanceShape.z*fract(instanceAtlasRect.x+atlasX*.3)),distanceToCamera=length(position-cameraPosition);float density=1.0-instancePixel.x,advFade=clamp(1.2-distanceToCamera/60.0,0.0,1.0);vGrassColor=instanceAngleColor.yzw;vBlade=blade.xy;vAtlasUv=vec2(atlasX,instanceAtlasRect.y+atlasY*instanceAtlasRect.w);vAtlasRect=instanceAtlasRect;vWorld=position;vNormal=normalize(mix(inNormal,vec3(0,1,0),blade.y));vSubstrateNormal=inNormal;vBent=bent;vFade=instanceFade;vTexDimming=advFade*advFade*density*.88*(1.0-blade.y);vRndFactors=instancePixel.yz;vMaterial=instanceMaterial;gl_Position=viewProjection*vec4(position,1.0);}`,
@@ -1170,7 +1646,7 @@ function createRenderer(canvas) {
     bptc: gl.getExtension("EXT_texture_compression_bptc")
   };
   gl.bindVertexArray(grassVao);gl.bindBuffer(gl.ARRAY_BUFFER,grassInstanceBuffer);gl.vertexAttribPointer(9,3,gl.FLOAT,false,grassInstanceStride,84);gl.enableVertexAttribArray(9);gl.vertexAttribDivisor(9,1);gl.vertexAttribPointer(10,2,gl.FLOAT,false,grassInstanceStride,96);gl.enableVertexAttribArray(10);gl.vertexAttribDivisor(10,1);gl.bindVertexArray(null);
-  let items = [], itemByNode = new WeakMap(), sceneRoot = null,sceneModel=null, textures = [], textureLookup = new Map(), embeddedTextureNames = new Set(), solidTextures = new Map(), cspTextures = new Map(), cspTextureCache = new Map(), colliderItems = [], surfaceBindings=new Map(), selected = null, cspState = null,grassFx=null,grassStatus={instanceCount:0,sourceMeshes:0,sourceTriangles:0,rejectedByMask:0,rejectedByShape:0,rejectedByOcclusion:0,totalArea:0,density:0,shapeWidth:1},grassSurfaceMapCenter=null,grassRebuildTimer=0,rainFx=null,rainStatus={matchedMeshes:0,lineVertices:0,pointVertices:0},shadowStatus={enabled:true,mapSize:KS_SHADOW_MAP_SIZE,cascades:3,splits:[...KS_SHADOW_SPLITS],biases:[...KS_SHADOW_BIASES],casters:0,triangles:0},lightingStatus={name:KS_EDITOR_DEFAULT_WEATHER.name,source:KS_EDITOR_DEFAULT_WEATHER.source,heading:40,height:55,angleMix:0,sunColor:[0,0,0],ambientColor:[0,0,0],skyColor:[0,0,0],fogDistance:KS_EDITOR_DEFAULT_WEATHER.fogDistance,fogBlend:KS_EDITOR_DEFAULT_WEATHER.fogBlend,autoExposure:true,effectiveExposure:.35,exposureMin:KS_EDITOR_EXPOSURE.min,exposureMax:KS_EDITOR_EXPOSURE.max,hdr:hdrEnabled,samples:hdrSamples}, workspaceLodIndex = null, driverCockpitMode=false, driverHiddenNames=new Set(), trackCamera=null, bounds = { center: [0,0,0], radius: 1 }, yaw = .7, pitch = .35, distance = 5, target = [0,0,0], dragging = null, modelGeneration = 0, textureStatus = { total: 0, ready: 0, pending: 0, unsupported: 0, protected: 0, formats: {} }, sceneStatus = { total: 0, visible: 0, hidden: 0 };
+  let items = [], itemByNode = new WeakMap(), sceneRoot = null,sceneModel=null, textures = [], textureLookup = new Map(), embeddedTextureNames = new Set(), solidTextures = new Map(), cspTextures = new Map(), cspTextureCache = new Map(), colliderItems = [], surfaceBindings=new Map(), selected = null, cspState = null,grassFx=null,grassStatus={instanceCount:0,sourceMeshes:0,sourceTriangles:0,rejectedByMask:0,rejectedByShape:0,rejectedByOcclusion:0,totalArea:0,density:0,shapeWidth:1},grassSurfaceMapCenter=null,grassRebuildTimer=0,rainFx=null,rainStatus={matchedMeshes:0,lineVertices:0,pointVertices:0},shadowStatus={enabled:true,mapSize:KS_SHADOW_MAP_SIZE,cascades:3,splits:[...KS_SHADOW_SPLITS],biases:[...KS_SHADOW_BIASES],casters:0,triangles:0},lightingStatus={name:KS_EDITOR_DEFAULT_WEATHER.name,source:KS_EDITOR_DEFAULT_WEATHER.source,heading:40,height:55,angleMix:0,sunColor:[0,0,0],ambientColor:[0,0,0],skyColor:[0,0,0],fogDistance:KS_EDITOR_DEFAULT_WEATHER.fogDistance,fogBlend:KS_EDITOR_DEFAULT_WEATHER.fogBlend,autoExposure:true,effectiveExposure:.35,exposureMin:KS_EDITOR_EXPOSURE.min,exposureMax:KS_EDITOR_EXPOSURE.max,toneMap:"Yebis default · function −1",hdr:hdrEnabled,samples:hdrSamples,glareEnabled:hdrEnabled,glareQuality:KS_EDITOR_GLARE.quality,bloomLevels:hdrEnabled?KS_EDITOR_GLARE.levels:0,bloomSourceScale:KS_EDITOR_GLARE.sourceScale,bloomThreshold:KS_EDITOR_GLARE.threshold,bloomCompositeScale:ksEditorBloomCompositeScale(),bloomKernel:"Yebis max-29 fallback",bloomKernelSamples:bloomKernels.map((kernel)=>kernel.sampleCount),bloomKernelSigmas:bloomKernels.map((kernel)=>kernel.sigma),dither:true}, workspaceLodIndex = null, driverCockpitMode=false, driverHiddenNames=new Set(), trackCamera=null, bounds = { center: [0,0,0], radius: 1 }, yaw = .7, pitch = .35, distance = 5, target = [0,0,0], dragging = null, modelGeneration = 0, textureStatus = { total: 0, ready: 0, pending: 0, unsupported: 0, protected: 0, formats: {} }, sceneStatus = { total: 0, visible: 0, hidden: 0 };
   let vaoBindings=new Map(),vaoStatus={source:"",version:0,records:0,matchedRecords:0,unmatchedRecords:0,alternateRecords:0,normalRecords:0,matchedMeshes:0,primaryMeshes:0,secondaryMeshes:0,vertices:0,minimum:255,maximum:255,mean:255},seasonalStatus={affectedMeshes:0,autumnMeshes:0,winterMeshes:0,legacySummerMeshes:0,peakAutumn:0,peakWinter:0,peakSummer:0},shaderProfileStatus=null;
   let reflectionCaptureStatus={enabled:true,ready:false,size:KS_EDITOR_CUBEMAP.size,faces:0,draws:0,triangles:0,farPlane:KS_EDITOR_CUBEMAP.farPlane,captureMilliseconds:0};
   let reflectionCubeInitialized=false,reflectionNextFace=0,reflectionCaptureRoot=null;
@@ -1178,10 +1654,11 @@ function createRenderer(canvas) {
   let externalFileIndex=createAssetFileIndex([]),externalTextures=new Map(),externalCpuTextures=new Map(),externalGpuTextures=new Set(),externalGeneration=0,externalRequirementSignature="",externalTextureStatus={selected:0,requested:0,ready:0,pending:0,missing:0,ambiguous:0,unsupported:0,formats:{},missingPaths:[],ambiguousPaths:[]};
   let selectedSkinFiles=[],selectedSkinName="",skinTextures=new Map(),skinGpuTextures=new Set(),skinGeneration=0,skinTextureStatus={name:"",available:0,matched:0,ready:0,pending:0,inherited:0,ambiguous:0,unsupported:0,formats:{},replacedNames:[]};
   const windParticles=createCspWindParticles();let windTargetIndex=0,windLastTime=0,windAccumulator=0,windUpdateCount=0,windRandomState=0x6d2b79f5,windAnimationTimer=0;
-  const api = { description, wireframe: false, isolate: false, colliderVisible:false,surfaceOverlay:false,grassVisible:true,rainVisible:true,rainWetness:1,shadowsEnabled:true,vaoEnabled:true,weatherPreset:KS_EDITOR_DEFAULT_WEATHER,sunHeading:40,sunHeight:55,windHeading:50,windSpeed:5,autoExposure:true,exposure:.35, setModel, setCollider, setCsp,setGrassFx,setRainFx,setVaoBindings, setAnimation, setExternalFiles, setSkinFiles,setDriverCockpitMode,setTrackCamera,setReflectionCaptureRoot(value){reflectionCaptureRoot=value||null;reflectionCubeInitialized=false;reflectionNextFace=0;draw();},setSurfaceBindings(value){surfaceBindings=value instanceof Map?value:new Map();draw();},setWorkspaceLod(value){workspaceLodIndex=value===null||value===undefined?null:Number(value);draw();},onExternalTextureStatus:null,onSkinTextureStatus:null,onWorkspaceLodStatus:null,onAnimationStatus:null,onTrackCameraChange:null,frame,draw,get textureStatus(){return {...textureStatus,formats:{...textureStatus.formats}};},get externalTextureStatus(){return {...externalTextureStatus,formats:{...externalTextureStatus.formats},missingPaths:[...externalTextureStatus.missingPaths],ambiguousPaths:[...externalTextureStatus.ambiguousPaths]};},get skinTextureStatus(){return {...skinTextureStatus,formats:{...skinTextureStatus.formats},replacedNames:[...skinTextureStatus.replacedNames]};},get animationStatus(){return {...animationStatus,unmatchedTracks:[...animationStatus.unmatchedTracks]};},get grassStatus(){const active=api.grassVisible&&grassStatus.instanceCount>0,shadowed=active&&api.shadowsEnabled&&!api.surfaceOverlay,path=grassAtlasPath(),atlasReady=Boolean(path&&externalTextures.get(path.toLowerCase())),hasGroups=(grassStatus.groupInstances||[]).some((count)=>count>0);return {...grassStatus,texture:path,textureGrid:[...(grassFx?.textureGrid||[])],textureBrightness:grassFx?.textureBrightness??1,maskBlur:grassFx?.maskBlur??1,colorSampleMipLevel:grassFx?.colorSampleMipLevel??0,atlasReady,atlasMode:atlasReady?(hasGroups?"texture-groups":"base-row"):"procedural-fallback",windMapMode:`csp-${hdrEnabled?CSP_WIND_MAP_FORMAT:"r8-fallback"}`,windMapSize:CSP_WIND_MAP_SIZE,windParticles:CSP_WIND_PARTICLE_COUNT,windUpdates:windUpdateCount,windSpeed:api.windSpeed,windHeading:api.windHeading,airMapMode:"static-editor-zero",visible:api.grassVisible,weatherLit:active,castsShadows:shadowed,receivesShadows:shadowed};},get rainStatus(){return {...rainStatus,visible:api.rainVisible&&Boolean(rainFx),wetness:api.rainVisible?api.rainWetness:0};},get shadowStatus(){return {...shadowStatus,enabled:api.shadowsEnabled&&!api.surfaceOverlay,splits:[...shadowStatus.splits],biases:[...shadowStatus.biases]};},get lightingStatus(){return {...lightingStatus,sunColor:[...lightingStatus.sunColor],ambientColor:[...lightingStatus.ambientColor],skyColor:[...lightingStatus.skyColor]};},get vaoStatus(){return {...vaoStatus,enabled:api.vaoEnabled&&vaoStatus.matchedMeshes>0};},get seasonalStatus(){return {...seasonalStatus,yearProgress:cspState?.usedInputs.get("YEAR_PROGRESS")?.value??null,gpuAutumn:gl.getUniform(program,locations.seasonAutumn),gpuWinter:gl.getUniform(program,locations.seasonWinter)};},get shaderProfileStatus(){return shaderProfileStatus?{...shaderProfileStatus,unknownShaders:[...shaderProfileStatus.unknownShaders]}:null;},get sceneStatus(){const visible=items.filter(itemPreviewVisible).length;return {...sceneStatus,visible,hidden:items.length-visible,driverCockpitMode,driverHidden:items.filter((item)=>item.sceneVisible&&!itemPreviewVisible(item)).length,trackCamera:trackCamera?{name:trackCamera.name,position:[...trackCamera.position],fov:trackCamera.splineData?trackCamera.minFov:(trackCamera.minFov+trackCamera.maxFov)/2,splinePosition:trackCamera.splinePreviewPosition??null,splineOffset:trackCamera.splineOffset?[...trackCamera.splineOffset]:null}:null,colliderMeshes:colliderItems.length,colliderVisible:api.colliderVisible,surfaceOverlay:api.surfaceOverlay,surfacePhysicsMeshes:[...surfaceBindings.values()].filter((binding)=>binding.status!=="not-physics").length,grassBlades:grassStatus.instanceCount,grassVisible:api.grassVisible&&grassStatus.instanceCount>0,rainMeshes:rainStatus.matchedMeshes,rainVisible:api.rainVisible&&Boolean(rainFx),rainWetness:api.rainVisible?api.rainWetness:0,shadowsEnabled:api.shadowsEnabled&&!api.surfaceOverlay,shadowCasters:shadowStatus.casters,vaoEnabled:api.vaoEnabled&&vaoStatus.matchedMeshes>0,vaoMeshes:vaoStatus.matchedMeshes,seasonalMeshes:seasonalStatus.affectedMeshes,shaderAlphaMaterials:shaderProfileStatus?.shadowCutout||0,weather:lightingStatus.name,exposure:lightingStatus.effectiveExposure};},get workspaceLodStatus(){const cameraDistance=Math.sqrt(distanceSquared(bounds.center,cameraEye())),effectiveDistance=carLodDistance(cameraDistance,cameraFovDegrees),activeIndices=[...new Set(items.filter((item)=>item.workspaceLod&&carLodVisible(item.workspaceLod,effectiveDistance,workspaceLodIndex)).map((item)=>item.workspaceLod.index))].sort((a,b)=>a-b);return {selectedIndex:workspaceLodIndex,cameraDistance,effectiveDistance,activeIndices};},select(node){selected=node;draw();}};
+  const api = { description, wireframe: false, isolate: false,showHidden:false, colliderVisible:false,surfaceOverlay:false,grassVisible:true,rainVisible:true,rainWetness:1,shadowsEnabled:true,vaoEnabled:true,weatherPreset:KS_EDITOR_DEFAULT_WEATHER,sunHeading:40,sunHeight:55,windHeading:50,windSpeed:5,autoExposure:true,exposure:.35, setModel,refreshHierarchy, setCollider, setCsp,setGrassFx,setRainFx,setVaoBindings, setAnimation, setExternalFiles, setSkinFiles,setDriverCockpitMode,setShowHidden(value){api.showHidden=Boolean(value);refreshAnimationWorlds();draw();},setTrackCamera,setReflectionCaptureRoot(value){reflectionCaptureRoot=value||null;reflectionCubeInitialized=false;reflectionNextFace=0;draw();},setSurfaceBindings(value){surfaceBindings=value instanceof Map?value:new Map();draw();},setWorkspaceLod(value){workspaceLodIndex=value===null||value===undefined?null:Number(value);draw();},onExternalTextureStatus:null,onSkinTextureStatus:null,onWorkspaceLodStatus:null,onAnimationStatus:null,onTrackCameraChange:null,frame,draw,get textureStatus(){return {...textureStatus,formats:{...textureStatus.formats}};},get externalTextureStatus(){return {...externalTextureStatus,formats:{...externalTextureStatus.formats},missingPaths:[...externalTextureStatus.missingPaths],ambiguousPaths:[...externalTextureStatus.ambiguousPaths]};},get skinTextureStatus(){return {...skinTextureStatus,formats:{...skinTextureStatus.formats},replacedNames:[...skinTextureStatus.replacedNames]};},get animationStatus(){return {...animationStatus,unmatchedTracks:[...animationStatus.unmatchedTracks]};},get grassStatus(){const active=api.grassVisible&&grassStatus.instanceCount>0,shadowed=active&&api.shadowsEnabled&&!api.surfaceOverlay,path=grassAtlasPath(),atlasReady=Boolean(path&&externalTextures.get(path.toLowerCase())),hasGroups=(grassStatus.groupInstances||[]).some((count)=>count>0);return {...grassStatus,texture:path,textureGrid:[...(grassFx?.textureGrid||[])],textureBrightness:grassFx?.textureBrightness??1,maskBlur:grassFx?.maskBlur??1,colorSampleMipLevel:grassFx?.colorSampleMipLevel??0,atlasReady,atlasMode:atlasReady?(hasGroups?"texture-groups":"base-row"):"procedural-fallback",windMapMode:`csp-${hdrEnabled?CSP_WIND_MAP_FORMAT:"r8-fallback"}`,windMapSize:CSP_WIND_MAP_SIZE,windParticles:CSP_WIND_PARTICLE_COUNT,windUpdates:windUpdateCount,windSpeed:api.windSpeed,windHeading:api.windHeading,airMapMode:"static-editor-zero",visible:api.grassVisible,weatherLit:active,castsShadows:shadowed,receivesShadows:shadowed};},get rainStatus(){return {...rainStatus,visible:api.rainVisible&&Boolean(rainFx),wetness:api.rainVisible?api.rainWetness:0};},get shadowStatus(){return {...shadowStatus,enabled:api.shadowsEnabled&&!api.surfaceOverlay,splits:[...shadowStatus.splits],biases:[...shadowStatus.biases]};},get lightingStatus(){return {...lightingStatus,sunColor:[...lightingStatus.sunColor],ambientColor:[...lightingStatus.ambientColor],skyColor:[...lightingStatus.skyColor]};},get vaoStatus(){return {...vaoStatus,enabled:api.vaoEnabled&&vaoStatus.matchedMeshes>0};},get seasonalStatus(){return {...seasonalStatus,yearProgress:cspState?.usedInputs.get("YEAR_PROGRESS")?.value??null,gpuAutumn:gl.getUniform(program,locations.seasonAutumn),gpuWinter:gl.getUniform(program,locations.seasonWinter)};},get shaderProfileStatus(){return shaderProfileStatus?{...shaderProfileStatus,unknownShaders:[...shaderProfileStatus.unknownShaders]}:null;},get sceneStatus(){const previewVisible=items.filter(itemPreviewVisible).length;return {...sceneStatus,gameVisible:sceneStatus.visible,gameHidden:sceneStatus.hidden,previewVisible,previewHidden:items.length-previewVisible,visible:previewVisible,hidden:items.length-previewVisible,showHidden:api.showHidden,driverCockpitMode,driverHidden:items.filter((item)=>item.sceneVisible&&!itemPreviewVisible(item)).length,trackCamera:trackCamera?{name:trackCamera.name,position:[...trackCamera.position],fov:trackCamera.splineData?trackCamera.minFov:(trackCamera.minFov+trackCamera.maxFov)/2,splinePosition:trackCamera.splinePreviewPosition??null,splineOffset:trackCamera.splineOffset?[...trackCamera.splineOffset]:null}:null,colliderMeshes:colliderItems.length,colliderVisible:api.colliderVisible,surfaceOverlay:api.surfaceOverlay,surfacePhysicsMeshes:[...surfaceBindings.values()].filter((binding)=>binding.status!=="not-physics").length,grassBlades:grassStatus.instanceCount,grassVisible:api.grassVisible&&grassStatus.instanceCount>0,rainMeshes:rainStatus.matchedMeshes,rainVisible:api.rainVisible&&Boolean(rainFx),rainWetness:api.rainVisible?api.rainWetness:0,shadowsEnabled:api.shadowsEnabled&&!api.surfaceOverlay,shadowCasters:shadowStatus.casters,vaoEnabled:api.vaoEnabled&&vaoStatus.matchedMeshes>0,vaoMeshes:vaoStatus.matchedMeshes,seasonalMeshes:seasonalStatus.affectedMeshes,shaderAlphaMaterials:shaderProfileStatus?.shadowCutout||0,weather:lightingStatus.name,exposure:lightingStatus.effectiveExposure};},get workspaceLodStatus(){const cameraDistance=Math.sqrt(distanceSquared(bounds.center,cameraEye())),effectiveDistance=carLodDistance(cameraDistance,cameraFovDegrees),activeIndices=[...new Set(items.filter((item)=>item.workspaceLod&&carLodVisible(item.workspaceLod,effectiveDistance,workspaceLodIndex)).map((item)=>item.workspaceLod.index))].sort((a,b)=>a-b);return {selectedIndex:workspaceLodIndex,cameraDistance,effectiveDistance,activeIndices};},select(node){selected=node;draw();}};
   api.reflectionsEnabled=true;
+  api.refreshGeometry=refreshGeometry;
 
-  function itemPreviewVisible(item){return item.sceneVisible&&!(driverCockpitMode&&item.workspaceAuxiliary==="driver"&&item.driverPath.some((name)=>driverHiddenNames.has(name)));}
+  function itemPreviewVisible(item){return (api.showHidden||item.sceneVisible)&&!(driverCockpitMode&&item.workspaceAuxiliary==="driver"&&item.driverPath.some((name)=>driverHiddenNames.has(name)));}
   function setDriverCockpitMode(value,names=[]){driverCockpitMode=Boolean(value);driverHiddenNames=new Set((names||[]).map((name)=>String(name||"").trim().toUpperCase()).filter(Boolean));refreshAnimationWorlds();draw();}
   function setTrackCamera(value){const next=value||null,changed=trackCamera!==next;if(!changed)return;trackCamera=next;scheduleGrassRebuild();draw();}
   function grassAtlasPath(){return grassFx?normalizeAssetPath(grassFx.texture||GRASS_FX_DEFAULT_TEXTURE):"";}
@@ -1374,15 +1851,37 @@ function createRenderer(canvas) {
     refreshAnimationWorlds();draw();
   }
 
+  function refreshHierarchy() {
+    refreshAnimationWorlds(); reflectionCubeInitialized=false; reflectionNextFace=0; scheduleGrassRebuild(); draw();
+  }
+
+  function refreshGeometry() {
+    for (const item of items) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, item.vertex);
+      gl.bufferData(gl.ARRAY_BUFFER, item.node.vertices, gl.STATIC_DRAW);
+      gl.bindVertexArray(item.vao);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, item.index);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, item.node.indices, gl.STATIC_DRAW);
+      item.localMin = [Infinity, Infinity, Infinity]; item.localMax = [-Infinity, -Infinity, -Infinity];
+      for (let offset = 0; offset < item.node.vertices.length; offset += item.node.vertexStride) for (let axis = 0; axis < 3; axis++) {
+        const value = item.node.vertices[offset + axis];
+        item.localMin[axis] = Math.min(item.localMin[axis], value); item.localMax[axis] = Math.max(item.localMax[axis], value);
+      }
+    }
+    gl.bindVertexArray(null);
+    refreshAnimationWorlds(); reflectionCubeInitialized=false; reflectionNextFace=0; scheduleGrassRebuild(); draw();
+  }
+
   function refreshAnimationWorlds() {
     const min=[Infinity,Infinity,Infinity],max=[-Infinity,-Infinity,-Infinity],matchedTracks=new Set(),worldByName=new Map();let matchedNodes=0;
-    const visit=(node,parentWorld)=>{
+    const visit=(node,parentWorld,parentActive)=>{
       const animated=animationTransforms.get(node.name);if(animated){matchedTracks.add(node.name);matchedNodes++;}
-      const local=animated||node.transform,world=local?multiply(parentWorld,local):parentWorld,item=itemByNode.get(node);if(!worldByName.has(node.name))worldByName.set(node.name,world);
-      if(item){item.world=world;const itemBounds=transformBounds(item.localMin,item.localMax,world);item.center=itemBounds.min.map((value,index)=>(value+itemBounds.max[index])/2);if(itemPreviewVisible(item))for(let axis=0;axis<3;axis++){min[axis]=Math.min(min[axis],itemBounds.min[axis]);max[axis]=Math.max(max[axis],itemBounds.max[axis]);}}
-      for(const child of node.children)visit(child,world);
+      const local=animated||node.transform,world=local?multiply(parentWorld,local):parentWorld,item=itemByNode.get(node),branchActive=parentActive&&node.active;if(!worldByName.has(node.name))worldByName.set(node.name,world);
+      if(item){item.world=world;item.branchActive=branchActive;item.sceneVisible=Boolean(branchActive&&node.visible&&node.renderable);const itemBounds=transformBounds(item.localMin,item.localMax,world);item.center=itemBounds.min.map((value,index)=>(value+itemBounds.max[index])/2);if(itemPreviewVisible(item))for(let axis=0;axis<3;axis++){min[axis]=Math.min(min[axis],itemBounds.min[axis]);max[axis]=Math.max(max[axis],itemBounds.max[axis]);}}
+      for(const child of node.children)visit(child,world,branchActive);
     };
-    let skinnedMeshes=0,skinnedVertices=0,maxSkinnedDisplacement=0;if(sceneRoot)visit(sceneRoot,identity());for(const item of items)if(item.node.kind==="skinnedMesh"){const skinned=currentAnimation?skinMeshVertices(item.node,worldByName,item.world):item.node.vertices;skinnedMeshes++;skinnedVertices+=item.node.vertices.length/item.node.vertexStride;if(currentAnimation)for(let offset=0;offset<skinned.length;offset+=item.node.vertexStride)maxSkinnedDisplacement=Math.max(maxSkinnedDisplacement,Math.hypot(skinned[offset]-item.node.vertices[offset],skinned[offset+1]-item.node.vertices[offset+1],skinned[offset+2]-item.node.vertices[offset+2]));gl.bindBuffer(gl.ARRAY_BUFFER,item.vertex);gl.bufferSubData(gl.ARRAY_BUFFER,0,skinned);}
+    let skinnedMeshes=0,skinnedVertices=0,maxSkinnedDisplacement=0;if(sceneRoot)visit(sceneRoot,identity(),true);for(const item of items)if(item.node.kind==="skinnedMesh"){const skinned=currentAnimation?skinMeshVertices(item.node,worldByName,item.world):item.node.vertices;skinnedMeshes++;skinnedVertices+=item.node.vertices.length/item.node.vertexStride;if(currentAnimation)for(let offset=0;offset<skinned.length;offset+=item.node.vertexStride)maxSkinnedDisplacement=Math.max(maxSkinnedDisplacement,Math.hypot(skinned[offset]-item.node.vertices[offset],skinned[offset+1]-item.node.vertices[offset+1],skinned[offset+2]-item.node.vertices[offset+2]));gl.bindBuffer(gl.ARRAY_BUFFER,item.vertex);gl.bufferSubData(gl.ARRAY_BUFFER,0,skinned);}
+    sceneStatus={...sceneStatus,total:items.length,visible:items.filter((item)=>item.sceneVisible).length,hidden:items.filter((item)=>!item.sceneVisible).length};
     const center=min[0]===Infinity?[0,0,0]:min.map((value,index)=>(value+max[index])/2);bounds={center,radius:min[0]===Infinity?1:Math.hypot(...sub(max,center))};
     const animatedTracks=currentAnimation?.tracks.filter((track)=>track.animated)||[];
     animationStatus={name:currentAnimationName,position:currentAnimationPosition,version:currentAnimation?.version||0,frameCount:currentAnimation?.frameCount||0,tracks:currentAnimation?.tracks.length||0,animatedTracks:animatedTracks.length,matchedTracks:matchedTracks.size,matchedNodes,skinnedMeshes,skinnedVertices,maxSkinnedDisplacement,unmatchedTracks:animatedTracks.map((track)=>track.name).filter((name)=>!matchedTracks.has(name))};
@@ -1396,7 +1895,7 @@ function createRenderer(canvas) {
     for(let i=0;i<item.node.vertices.length;i+=item.node.vertexStride){const p=transformPoint(item.world,item.node.vertices[i],item.node.vertices[i+1],item.node.vertices[i+2]);for(let axis=0;axis<3;axis++){min[axis]=Math.min(min[axis],p[axis]);max[axis]=Math.max(max[axis],p[axis]);}}
     target=min.map((value,index)=>(value+max[index])/2);distance=Math.max(Math.hypot(...sub(max,target))*2.35,.02);rebuildGrassFx();draw();
   }
-  function resizeHdrTarget(){if(hdrWidth===canvas.width&&hdrHeight===canvas.height)return;hdrWidth=canvas.width;hdrHeight=canvas.height;hdrMaxMip=Math.floor(Math.log2(Math.max(1,hdrWidth,hdrHeight)));const colorFormat=hdrEnabled?gl.RGBA16F:gl.RGBA8;gl.bindTexture(gl.TEXTURE_2D,hdrTexture);gl.texImage2D(gl.TEXTURE_2D,0,colorFormat,hdrWidth,hdrHeight,0,gl.RGBA,hdrEnabled?gl.HALF_FLOAT:gl.UNSIGNED_BYTE,null);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR_MIPMAP_LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.bindFramebuffer(gl.FRAMEBUFFER,hdrFramebuffer);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,hdrTexture,0);gl.bindRenderbuffer(gl.RENDERBUFFER,hdrMsColor);gl.renderbufferStorageMultisample(gl.RENDERBUFFER,hdrSamples,colorFormat,hdrWidth,hdrHeight);gl.bindRenderbuffer(gl.RENDERBUFFER,hdrMsDepth);gl.renderbufferStorageMultisample(gl.RENDERBUFFER,hdrSamples,gl.DEPTH_COMPONENT24,hdrWidth,hdrHeight);gl.bindFramebuffer(gl.FRAMEBUFFER,hdrMsFramebuffer);gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.RENDERBUFFER,hdrMsColor);gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.RENDERBUFFER,hdrMsDepth);if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw new Error("HDR multisample framebuffer is incomplete");gl.bindFramebuffer(gl.FRAMEBUFFER,hdrFramebuffer);if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw new Error("HDR resolve framebuffer is incomplete");gl.bindFramebuffer(gl.FRAMEBUFFER,null);}
+  function resizeHdrTarget(){if(hdrWidth===canvas.width&&hdrHeight===canvas.height)return;hdrWidth=canvas.width;hdrHeight=canvas.height;hdrMaxMip=Math.floor(Math.log2(Math.max(1,hdrWidth,hdrHeight)));const colorFormat=hdrEnabled?gl.RGBA16F:gl.RGBA8,colorType=hdrEnabled?gl.HALF_FLOAT:gl.UNSIGNED_BYTE;gl.bindTexture(gl.TEXTURE_2D,hdrTexture);gl.texImage2D(gl.TEXTURE_2D,0,colorFormat,hdrWidth,hdrHeight,0,gl.RGBA,colorType,null);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR_MIPMAP_LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.bindFramebuffer(gl.FRAMEBUFFER,hdrFramebuffer);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,hdrTexture,0);gl.bindRenderbuffer(gl.RENDERBUFFER,hdrMsColor);gl.renderbufferStorageMultisample(gl.RENDERBUFFER,hdrSamples,colorFormat,hdrWidth,hdrHeight);gl.bindRenderbuffer(gl.RENDERBUFFER,hdrMsDepth);gl.renderbufferStorageMultisample(gl.RENDERBUFFER,hdrSamples,gl.DEPTH_COMPONENT24,hdrWidth,hdrHeight);gl.bindFramebuffer(gl.FRAMEBUFFER,hdrMsFramebuffer);gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.RENDERBUFFER,hdrMsColor);gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.RENDERBUFFER,hdrMsDepth);if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw new Error("HDR multisample framebuffer is incomplete");gl.bindFramebuffer(gl.FRAMEBUFFER,hdrFramebuffer);if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw new Error("HDR resolve framebuffer is incomplete");let width=Math.max(1,Math.ceil(hdrWidth*KS_EDITOR_GLARE.sourceScale)),height=Math.max(1,Math.ceil(hdrHeight*KS_EDITOR_GLARE.sourceScale));for(const target of bloomTargets){target.width=width;target.height=height;for(let side=0;side<2;side++){gl.bindTexture(gl.TEXTURE_2D,target.textures[side]);gl.texImage2D(gl.TEXTURE_2D,0,colorFormat,width,height,0,gl.RGBA,colorType,null);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.bindFramebuffer(gl.FRAMEBUFFER,target.framebuffers[side]);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,target.textures[side],0);if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw new Error("Yebis bloom framebuffer is incomplete");}width=Math.max(1,Math.ceil(width*.5));height=Math.max(1,Math.ceil(height*.5));}gl.bindFramebuffer(gl.FRAMEBUFFER,null);}
   function bindMainTextureUnits(){
     const samplers=[["diffuseTexture",0],["customEmissiveTexture",1],["customColorShapeTexture",2],["customVertexShapeTexture",3],["normalTexture",4],["mapsTexture",5],["detailTexture",6],["normalDetailTexture",7],["multiMaskTexture",8],["multiDetailRTexture",9],["multiDetailGTexture",10],["multiDetailBTexture",11],["multiDetailATexture",12],["multiDetailNormalTexture",13],["sceneColorTexture",17]];
     for(const [name,unit] of samplers)gl.uniform1i(locations[name],unit);
@@ -1454,11 +1953,11 @@ function createRenderer(canvas) {
   }
   function renderLocalShadowAtlas(renderItems,focus){
     const casters=renderItems.filter(({item,override})=>shadowCasterEnabled(item.node,override)),lights=api.shadowsEnabled&&!api.surfaceOverlay?selectCspLights(cspState?.lights||[],focus,{trackReceiver:sceneUsesTrackReceivers()}).filter((light)=>light.castsShadows&&light.shadowSpot>0).slice(0,CSP_LOCAL_SHADOW_LIMIT):[];
-    const casterNodes=casters.map(({item})=>item.node),cached=localShadowState.ready&&lights.length===localShadowState.lights.length&&lights.every((light,index)=>light===localShadowState.lights[index])&&casterNodes.length===localShadowState.casterNodes.length&&casterNodes.every((node,index)=>node===localShadowState.casterNodes[index]);grassStatus.localShadowLights=lights.length;grassStatus.localShadowCasters=lights.length?casters.length:0;grassStatus.localShadowFilterModes=lights.map((light)=>cspLocalShadowFilter(light).kernel+(cspLocalShadowFilter(light).valueAware?"-headlight":""));grassStatus.localShadowAtlasMode=`portable-static-${localShadowFloat?"r32f-esm":"rgba8-log-esm"}-1024-4x512-separable-gaussian`;if(cached)return localShadowState;localShadowState={lights,matrices:lights.map(computeLocalLightShadow),slotByLight:new Map(lights.map((light,index)=>[light,index])),casters:casters.length,triangles:casters.reduce((sum,{item})=>sum+item.node.indices.length/3,0),casterNodes,ready:false};
+    const casterNodes=casters.map(({item})=>item.node),cached=localShadowState.ready&&lights.length===localShadowState.lights.length&&lights.every((light,index)=>light===localShadowState.lights[index])&&casterNodes.length===localShadowState.casterNodes.length&&casterNodes.every((node,index)=>node===localShadowState.casterNodes[index]);grassStatus.localShadowLights=lights.length;grassStatus.localShadowCasters=lights.length?casters.length:0;grassStatus.localShadowFilterModes=lights.map((light)=>cspLocalShadowFilter(light).kernel+(cspLocalShadowFilter(light).valueAware?"-headlight":""));grassStatus.localShadowSamples=localShadowSamples;grassStatus.localShadowAtlasMode=`portable-static-${localShadowFloat?"r32f-esm":"rgba8-log-esm"}-1024-4x512-${localShadowSamples}x-resolve-separable-gaussian`;if(cached)return localShadowState;localShadowState={lights,matrices:lights.map(computeLocalLightShadow),slotByLight:new Map(lights.map((light,index)=>[light,index])),casters:casters.length,triangles:casters.reduce((sum,{item})=>sum+item.node.indices.length/3,0),casterNodes,ready:false};
     if(!lights.length)return localShadowState;
-    gl.bindFramebuffer(gl.FRAMEBUFFER,localShadowFramebuffer);gl.useProgram(localShadowProgram);gl.uniform1i(localShadowLocations.diffuseTexture,0);gl.uniform1i(localShadowLocations.exponentialOutput,localShadowFloat);gl.colorMask(true,true,true,true);gl.depthMask(true);gl.enable(gl.DEPTH_TEST);gl.disable(gl.BLEND);gl.disable(gl.SAMPLE_ALPHA_TO_COVERAGE);gl.enable(gl.SCISSOR_TEST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER,localShadowSamples===CSP_LOCAL_SHADOW_SAMPLES?localShadowMsFramebuffer:localShadowFramebuffer);gl.useProgram(localShadowProgram);gl.uniform1i(localShadowLocations.diffuseTexture,0);gl.uniform1i(localShadowLocations.exponentialOutput,localShadowFloat);gl.colorMask(true,true,true,true);gl.depthMask(true);gl.enable(gl.DEPTH_TEST);gl.disable(gl.BLEND);gl.disable(gl.SAMPLE_ALPHA_TO_COVERAGE);gl.enable(gl.SCISSOR_TEST);
     for(let slot=0;slot<lights.length;slot++){const shadow=localShadowState.matrices[slot],x=(slot%2)*CSP_LOCAL_SHADOW_CELL_SIZE,y=Math.floor(slot/2)*CSP_LOCAL_SHADOW_CELL_SIZE;gl.viewport(x,y,CSP_LOCAL_SHADOW_CELL_SIZE,CSP_LOCAL_SHADOW_CELL_SIZE);gl.scissor(x,y,CSP_LOCAL_SHADOW_CELL_SIZE,CSP_LOCAL_SHADOW_CELL_SIZE);const emptyValue=localShadowFloat?Math.exp(shadow.expFactor):1;gl.clearColor(emptyValue,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.uniformMatrix4fv(localShadowLocations.viewProjection,false,shadow.matrix);gl.uniform3fv(localShadowLocations.lightPosition,shadow.position);gl.uniform1f(localShadowLocations.lightRangeInv,shadow.rangeInv);gl.uniform1f(localShadowLocations.lightClipSphere,shadow.clipSphere);gl.uniform1f(localShadowLocations.expFactor,shadow.expFactor);for(const {item,override,profile}of casters){const material=item.material;if(profile.cull==="none")gl.disable(gl.CULL_FACE);else{gl.enable(gl.CULL_FACE);gl.cullFace(profile.cull==="front"?gl.FRONT:gl.BACK);}const alphaRef=profile.shadowAlphaTested?Math.max(0,effectiveScalar(material,override,"ksAlphaRef",.5)):0,diffuseTexture=effectiveResourceTexture(item,override,"txdiffuse",item.texture);gl.uniformMatrix4fv(localShadowLocations.world,false,item.world);gl.uniform1f(localShadowLocations.alphaRef,alphaRef);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,diffuseTexture||null);gl.uniform1i(localShadowLocations.hasDiffuseTexture,Boolean(diffuseTexture));gl.bindVertexArray(item.vao);gl.drawElements(gl.TRIANGLES,item.node.indices.length,gl.UNSIGNED_SHORT,0);}}
-    filterLocalShadowAtlas(lights);gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.clearColor(0,0,0,1);localShadowState.ready=true;return localShadowState;
+    if(localShadowSamples===CSP_LOCAL_SHADOW_SAMPLES){gl.disable(gl.SCISSOR_TEST);gl.bindFramebuffer(gl.READ_FRAMEBUFFER,localShadowMsFramebuffer);gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,localShadowFramebuffer);gl.blitFramebuffer(0,0,CSP_LOCAL_SHADOW_ATLAS_SIZE,CSP_LOCAL_SHADOW_ATLAS_SIZE,0,0,CSP_LOCAL_SHADOW_ATLAS_SIZE,CSP_LOCAL_SHADOW_ATLAS_SIZE,gl.COLOR_BUFFER_BIT,gl.NEAREST);}filterLocalShadowAtlas(lights);gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.clearColor(0,0,0,1);localShadowState.ready=true;return localShadowState;
   }
   function drawGeneratedGrass(viewProjection,{eye,forward,lighting,shadowData,shadowsEnabled=false}={}){
     if(!api.grassVisible||api.surfaceOverlay||!grassStatus.instanceCount)return false;
@@ -1480,7 +1979,8 @@ function createRenderer(canvas) {
     reflectionCubeInitialized=true;reflectionNextFace=(reflectionNextFace+faces.length)%WEBGL_CUBEMAP_FACES.length;gl.activeTexture(gl.TEXTURE18);gl.bindTexture(gl.TEXTURE_CUBE_MAP,reflectionCubeTexture);gl.generateMipmap(gl.TEXTURE_CUBE_MAP);gl.uniform1i(locations.reflectionCapturePass,0);gl.bindFramebuffer(gl.FRAMEBUFFER,null);reflectionCaptureStatus={enabled:true,ready:true,size:KS_EDITOR_CUBEMAP.size,faces:WEBGL_CUBEMAP_FACES.length,updatedFaces:faces.length,nextFace:reflectionNextFace,draws,triangles,opaqueMeshes:opaqueItems.length,transparentMeshes:transparentItems.length,cspLights,materialPath:"Shared viewport shader",directionalShadows:probeShadowsEnabled,shadowCasters:probeShadowCasters.length,grassFx:grassIncluded,grassInstances:grassIncluded?grassStatus.instanceCount:0,grassCastsShadows:grassIncluded&&probeShadowsEnabled,grassReceivesShadows:grassIncluded&&probeShadowsEnabled,farPlane:KS_EDITOR_CUBEMAP.farPlane,captureMilliseconds:performance.now()-started,geometryIncluded:true,selectionMode:selection.mode,rootName:selection.rootName,reason:""};
   }
   function resolveOpaqueSceneColor(){gl.bindFramebuffer(gl.READ_FRAMEBUFFER,hdrMsFramebuffer);gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,hdrFramebuffer);gl.blitFramebuffer(0,0,hdrWidth,hdrHeight,0,0,hdrWidth,hdrHeight,gl.COLOR_BUFFER_BIT,gl.NEAREST);gl.activeTexture(gl.TEXTURE17);gl.bindTexture(gl.TEXTURE_2D,hdrTexture);gl.generateMipmap(gl.TEXTURE_2D);gl.bindFramebuffer(gl.FRAMEBUFFER,hdrMsFramebuffer);gl.viewport(0,0,canvas.width,canvas.height);gl.useProgram(program);}
-  function resolveExposureAndPresent(){gl.bindFramebuffer(gl.READ_FRAMEBUFFER,hdrMsFramebuffer);gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,hdrFramebuffer);gl.blitFramebuffer(0,0,hdrWidth,hdrHeight,0,0,hdrWidth,hdrHeight,gl.COLOR_BUFFER_BIT,gl.NEAREST);gl.bindTexture(gl.TEXTURE_2D,hdrTexture);gl.generateMipmap(gl.TEXTURE_2D);let measured=[.32,.32,.32];gl.bindFramebuffer(gl.FRAMEBUFFER,exposureFramebuffer);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,hdrTexture,hdrMaxMip);if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)===gl.FRAMEBUFFER_COMPLETE){if(hdrEnabled){const pixel=new Float32Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.FLOAT,pixel);measured=pixel;}else{const pixel=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);measured=[pixel[0]/255,pixel[1]/255,pixel[2]/255];}}gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,null,0);const luminance=Math.max(.0001,measured[0]*.2126+measured[1]*.7152+measured[2]*.0722),effectiveExposure=api.autoExposure?Math.max(KS_EDITOR_EXPOSURE.min,Math.min(KS_EDITOR_EXPOSURE.max,KS_EDITOR_EXPOSURE.target/luminance)):api.exposure;lightingStatus={...lightingStatus,autoExposure:api.autoExposure,effectiveExposure,measuredLuminance:luminance};gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,canvas.width,canvas.height);gl.disable(gl.DEPTH_TEST);gl.depthMask(false);gl.disable(gl.BLEND);gl.disable(gl.SAMPLE_ALPHA_TO_COVERAGE);gl.useProgram(postProgram);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,hdrTexture);gl.uniform1i(postLocations.hdrTexture,0);gl.uniform1f(postLocations.exposure,effectiveExposure);gl.uniform1f(postLocations.gamma,KS_EDITOR_EXPOSURE.gamma);gl.uniform1f(postLocations.saturation,KS_EDITOR_EXPOSURE.saturation);gl.uniform1i(postLocations.diagnosticMode,api.surfaceOverlay);gl.bindVertexArray(fullscreenVao);gl.drawArrays(gl.TRIANGLES,0,3);}
+  function generateBloom(effectiveExposure){if(!hdrEnabled||api.surfaceOverlay)return false;gl.disable(gl.DEPTH_TEST);gl.depthMask(false);gl.disable(gl.BLEND);gl.disable(gl.SAMPLE_ALPHA_TO_COVERAGE);gl.bindVertexArray(fullscreenVao);const first=bloomTargets[0];gl.bindFramebuffer(gl.FRAMEBUFFER,first.framebuffers[0]);gl.viewport(0,0,first.width,first.height);gl.useProgram(brightPassProgram);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,hdrTexture);gl.uniform1i(brightPassLocations.sourceTexture,0);gl.uniform1f(brightPassLocations.exposure,effectiveExposure);gl.uniform1f(brightPassLocations.threshold,KS_EDITOR_GLARE.threshold);gl.uniform1f(brightPassLocations.remap,KS_EDITOR_GLARE.brightPassRemap);gl.drawArrays(gl.TRIANGLES,0,3);for(let level=0;level<bloomTargets.length;level++){const target=bloomTargets[level];if(level){const previous=bloomTargets[level-1];gl.bindFramebuffer(gl.FRAMEBUFFER,target.framebuffers[0]);gl.viewport(0,0,target.width,target.height);gl.useProgram(bloomDownsampleProgram);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,previous.textures[0]);gl.uniform1i(bloomDownsampleSource,0);gl.drawArrays(gl.TRIANGLES,0,3);}const kernel=bloomKernels[level];gl.useProgram(bloomBlurProgram);gl.uniform1i(bloomBlurLocations.sourceTexture,0);gl.uniform1i(bloomBlurLocations.sampleCount,kernel.sampleCount);gl.uniform1fv(bloomBlurLocations.sampleOffsets,kernel.offsets);gl.uniform1fv(bloomBlurLocations.sampleWeights,kernel.weights);gl.bindFramebuffer(gl.FRAMEBUFFER,target.framebuffers[1]);gl.viewport(0,0,target.width,target.height);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,target.textures[0]);gl.uniform2f(bloomBlurLocations.direction,1,0);gl.drawArrays(gl.TRIANGLES,0,3);gl.bindFramebuffer(gl.FRAMEBUFFER,target.framebuffers[0]);gl.bindTexture(gl.TEXTURE_2D,target.textures[1]);gl.uniform2f(bloomBlurLocations.direction,0,1);gl.drawArrays(gl.TRIANGLES,0,3);}return true;}
+  function resolveExposureAndPresent(){gl.bindFramebuffer(gl.READ_FRAMEBUFFER,hdrMsFramebuffer);gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,hdrFramebuffer);gl.blitFramebuffer(0,0,hdrWidth,hdrHeight,0,0,hdrWidth,hdrHeight,gl.COLOR_BUFFER_BIT,gl.NEAREST);gl.bindTexture(gl.TEXTURE_2D,hdrTexture);gl.generateMipmap(gl.TEXTURE_2D);let measured=[.32,.32,.32];gl.bindFramebuffer(gl.FRAMEBUFFER,exposureFramebuffer);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,hdrTexture,hdrMaxMip);if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)===gl.FRAMEBUFFER_COMPLETE){if(hdrEnabled){const pixel=new Float32Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.FLOAT,pixel);measured=pixel;}else{const pixel=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);measured=[pixel[0]/255,pixel[1]/255,pixel[2]/255];}}gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,null,0);const luminance=Math.max(.0001,measured[0]*.2126+measured[1]*.7152+measured[2]*.0722),effectiveExposure=api.autoExposure?ksEditorAutoExposure(luminance):api.exposure,glareEnabled=generateBloom(effectiveExposure);lightingStatus={...lightingStatus,autoExposure:api.autoExposure,effectiveExposure,measuredLuminance:luminance,glareEnabled,glareQuality:KS_EDITOR_GLARE.quality,bloomLevels:glareEnabled?KS_EDITOR_GLARE.levels:0,bloomSourceScale:KS_EDITOR_GLARE.sourceScale,bloomThreshold:KS_EDITOR_GLARE.threshold,bloomCompositeScale:ksEditorBloomCompositeScale(),dither:true};gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,canvas.width,canvas.height);gl.disable(gl.DEPTH_TEST);gl.depthMask(false);gl.disable(gl.BLEND);gl.disable(gl.SAMPLE_ALPHA_TO_COVERAGE);gl.useProgram(postProgram);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,hdrTexture);gl.uniform1i(postLocations.hdrTexture,0);for(let level=0;level<bloomTargets.length;level++){gl.activeTexture(gl.TEXTURE1+level);gl.bindTexture(gl.TEXTURE_2D,bloomTargets[level].textures[0]);gl.uniform1i(postLocations[`bloom${level}`],1+level);}gl.activeTexture(gl.TEXTURE6);gl.bindTexture(gl.TEXTURE_2D,ditherTexture);gl.uniform1i(postLocations.ditherTexture,6);gl.uniform1f(postLocations.exposure,effectiveExposure);gl.uniform1f(postLocations.gamma,KS_EDITOR_EXPOSURE.gamma);gl.uniform1f(postLocations.saturation,KS_EDITOR_EXPOSURE.saturation);gl.uniform1f(postLocations.curveScale,KS_EDITOR_TONEMAP.curveScale);gl.uniform1f(postLocations.curveShoulder,KS_EDITOR_TONEMAP.curveShoulder);gl.uniform1f(postLocations.bloomScale,ksEditorBloomCompositeScale());gl.uniform1f(postLocations.ditherScale,KS_EDITOR_GLARE.ditherScale);gl.uniform1f(postLocations.ditherOffset,KS_EDITOR_GLARE.ditherOffset);gl.uniform1i(postLocations.glareEnabled,glareEnabled);gl.uniform1i(postLocations.diagnosticMode,api.surfaceOverlay);gl.bindVertexArray(fullscreenVao);gl.drawArrays(gl.TRIANGLES,0,3);}
   function renderShadowMaps(renderItems,eye,viewTarget,viewUp,viewFov,viewNear,viewFar,lighting){
     const casters=renderItems.filter(({item,override})=>shadowCasterEnabled(item.node,override)),grassCaster=api.grassVisible&&!api.surfaceOverlay&&grassStatus.instanceCount>0,triangles=casters.reduce((sum,{item})=>sum+item.node.indices.length/3,0)+(grassCaster?grassStatus.instanceCount*2:0),enabled=api.shadowsEnabled&&!api.surfaceOverlay;
     shadowStatus={enabled,mapSize:KS_SHADOW_MAP_SIZE,cascades:3,splits:[...KS_SHADOW_SPLITS],biases:[...KS_SHADOW_BIASES],casters:casters.length,grassInstances:grassCaster?grassStatus.instanceCount:0,triangles};
@@ -1500,6 +2000,8 @@ function createRenderer(canvas) {
     if(!api.surfaceOverlay&&api.reflectionsEnabled)captureReflectionCube(renderItems,eye,lighting);else reflectionCaptureStatus={...reflectionCaptureStatus,enabled:false,ready:false};sceneStatus.reflections={...reflectionCaptureStatus};
     const shadowData=renderShadowMaps(renderItems,eye,viewTarget,viewUp,viewFov,viewNear,viewFar,lighting);gl.bindFramebuffer(gl.FRAMEBUFFER,hdrMsFramebuffer);gl.viewport(0,0,canvas.width,canvas.height);gl.colorMask(true,true,true,true);gl.depthMask(true);gl.enable(gl.DEPTH_TEST);gl.disable(gl.BLEND);gl.clearColor(0,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
     const skyForward=norm(sub(viewTarget,eye)),skyRight=norm(cross(skyForward,viewUp)),skyUp=norm(cross(skyRight,skyForward));gl.useProgram(skyProgram);gl.disable(gl.DEPTH_TEST);gl.depthMask(false);gl.uniform3fv(skyLocations.cameraForward,skyForward);gl.uniform3fv(skyLocations.cameraRight,skyRight);gl.uniform3fv(skyLocations.cameraUp,skyUp);gl.uniform1f(skyLocations.tanHalfFov,Math.tan(viewFov*Math.PI/360));gl.uniform1f(skyLocations.aspect,canvas.width/canvas.height);gl.uniform3fv(skyLocations.horizonColor,lighting.horizonColor);gl.uniform3fv(skyLocations.skyColor,lighting.skyColor);gl.uniform3fv(skyLocations.sunColor,lighting.sunColor);gl.uniform3fv(skyLocations.sunDirection,lighting.sunDirection);gl.bindVertexArray(fullscreenVao);gl.drawArrays(gl.TRIANGLES,0,3);gl.depthMask(true);gl.enable(gl.DEPTH_TEST);gl.useProgram(program);
+    // Reflection capture uses this program and leaves its cube-face camera active.
+    gl.uniformMatrix4fv(locations.viewProjection,false,vp);
     gl.uniform1i(locations.shadowsEnabled,api.shadowsEnabled&&!api.surfaceOverlay&&shadowStatus.casters>0);gl.uniform3fv(locations.cameraForward,shadowData.forward);gl.uniform3fv(locations.shadowSplits,shadowData.splits);gl.uniform3fv(locations.shadowBiases,KS_SHADOW_BIASES);for(let index=0;index<3;index++){gl.uniformMatrix4fv(locations[`shadowMatrix${index}`],false,shadowData.cascades[index].matrix);gl.activeTexture(gl.TEXTURE14+index);gl.bindTexture(gl.TEXTURE_2D,shadowTargets[index].texture);gl.uniform1i(locations[`shadowMap${index}`],14+index);}
     gl.uniform3fv(locations.sunDirection,lighting.sunDirection);gl.uniform3fv(locations.sunColor,lighting.sunColor);gl.uniform3fv(locations.ambientColor,lighting.ambientColor);gl.uniform3fv(locations.horizonColor,lighting.horizonColor);gl.uniform3fv(locations.skyColor,lighting.skyColor);gl.uniform3fv(locations.fogColor,lighting.fogColor);gl.uniform1f(locations.fogDistance,lighting.fogDistance);gl.uniform1f(locations.fogBlend,lighting.fogBlend);gl.uniform2f(locations.viewportSize,canvas.width,canvas.height);gl.uniform3fv(locations.cameraRight,skyRight);gl.uniform3fv(locations.cameraUp,skyUp);gl.uniform1f(locations.cameraTangent,Math.tan(viewFov*Math.PI/360));gl.activeTexture(gl.TEXTURE18);gl.bindTexture(gl.TEXTURE_CUBE_MAP,reflectionCubeTexture);gl.uniform1i(locations.reflectionCubeTexture,18);gl.uniform1i(locations.reflectionCubeReady,reflectionCaptureStatus.enabled&&reflectionCaptureStatus.ready);gl.uniform1i(locations.sceneColorReady,0);gl.uniform1i(locations.reflectionCapturePass,0);uploadCspLights(cspState?.lights||[],target);
     sceneStatus.glass={windscreenDraws:renderItems.filter(({profile})=>profile.windscreen).length,reflectionDraws:renderItems.filter(({profile})=>profile.reflectionAlpha&&!profile.brokenGlass).length,brokenGlassDraws:renderItems.filter(({profile})=>profile.brokenGlass).length,refractiveDraws:renderItems.filter(({profile})=>profile.refractive).length,opaqueSceneResolved:false};

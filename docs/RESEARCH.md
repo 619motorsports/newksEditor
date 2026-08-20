@@ -66,6 +66,26 @@ count as a source marker shifted every subsequent field and was the cause of man
 apparent mod-file failures. The corrected v5 path consumes the complete collider and
 also parses the public scene of protected v5 cars.
 
+### Scene visibility semantics
+
+KN5 visibility is hierarchical. A mesh participates in the normal game preview only
+when every node from the root to that mesh has `active != 0`, and the mesh itself has
+both `visible != 0` and `renderable != 0`. Apex stores that derived result separately
+from the source flags. Hidden rows stay in the hierarchy for inspection, and the
+**Show hidden** mode changes only preview inclusion and framing; it does not mutate the
+parsed KN5 state.
+
+Production Chrome checks exercise both forms of hiding. The complete Imola main KN5
+contains 1,239 meshes: 1,023 are game-visible and 216 non-renderable collision meshes
+are hidden. Its normal and all-mesh captures hashed to `b620d56af64ea684` and
+`d5f9126b08eeee35`. The complete Kunos Nissan 370Z contains 215 meshes: 193 are
+game-visible and 22 descendants of inactive damage, low-resolution cockpit, belt, and
+wheel-blur branches are hidden even though their own leaf flags are enabled. Its two
+captures hashed to `d641f95f4d93900e` and `5c0726c6ccf2c622`. All four captures
+returned WebGL error zero with no browser exception. The renderer diagnostics retain
+both `gameVisible`/`gameHidden` and current `previewVisible`/`previewHidden` counts so
+the inspection override cannot be mistaken for source visibility.
+
 ## Rendering implication
 
 The stock `.shader` containers contain ordinary D3D11 DXBC. Reflection strings show
@@ -494,8 +514,8 @@ On the complete Imola main KN5, 18 light sections currently produce 169 bounded
 preview instances when night and the tested flag conditions are enabled. This path
 consumes world transforms and mesh normals and completes without a WebGL error on
 3,036,891 triangles. It remains an authoring approximation: native occluder spatial
-indexing, visibility levels, native Gaussian shadow filtering, and full photometric
-matching are not implemented yet. Receiver/view filtering is now implemented by the
+indexing, visibility levels, 32-slot shadow packing, dynamic refresh, and full
+photometric matching are not implemented yet. Receiver/view filtering uses the
 native enums described above.
 
 ## GrassFX evidence
@@ -764,13 +784,25 @@ and computes automatic boost as
 
 Apex implements the editor-relevant static subset. Up to four authored spotlight
 shadows among the nearest 32 active lights receive 512² cells in a cached 1024² R32F
-atlas, with a normalized RGBA8 fallback where float render targets are unavailable.
-Opaque and alpha-tested scene geometry writes recovered radial exponential depth;
-ordinary materials and GrassFX use the public one-sample receiver equation, native
-normal-dependent bias, automatic or authored boost, clip sphere, and optional extra
-filtering. GrassFX preserves the recovered 0.1 m receiver offset. Generated grass
-does not cast local shadows. This is intentionally not a claim of CSP's exact native
-MSAA/Gaussian kernel, 32-slot packing, or moving-car/dynamic refresh behavior.
+atlas. A normalized RGBA8 fallback covers systems without float render targets.
+Opaque and alpha-tested scene geometry writes recovered radial exponential depth.
+When supported, the atlas uses four-sample color and depth renderbuffers. A fixed
+resolve then averages the samples into the single-sample atlas. The renderer uses
+the recovered 7-tap standard, value-aware 7-tap headlight, and 15-tap extra-blur
+separable filters. Ordinary materials and GrassFX use the public one-sample receiver
+equation, native normal-dependent bias, automatic or authored boost, and clip sphere.
+GrassFX preserves the recovered 0.1 m receiver offset. Generated grass does not cast
+local shadows. The portable path does not claim CSP's 32-slot packing or its
+moving-car and dynamic refresh behavior.
+
+A production Electron run tested the four-sample path on Monza's seven-file,
+1,428-mesh workspace. `NIGHT_SMOOTH=1` activated 114 lights, including two authored
+shadow lights. The camera selected one shadow light and 307 scene casters for the
+local atlas. Chromium selected the four-sample R32F resolve and the standard
+separable filter. The night frame hashed to `4fc183e6cbcda773`; every captured state
+returned WebGL error zero, and the browser logged no exception. Animated GrassFX
+wind makes this hash run-specific. The reported light, caster, and sample counts
+prove that the local resolve executed.
 
 The native surface setup names a separate `GrassFX: normals and AO` target and creates
 it with format code `0x1c` (`RGBA8_UNORM`). Disassembly of the shipped
@@ -1520,12 +1552,32 @@ capture colored all 375 bindings, retained a coherent continuous circuit and sur
 boundaries, produced hash `a4d6d0ca8bfbe84b`, and reported no JavaScript or WebGL
 errors.
 
+The surface editor preserves the native section index and all 14 parsed fields.
+These fields cover matching, grip, damping, dirt, penalties, validity, pitlane state,
+surface waves, vibration, sound, pitch, and force feedback. The project stores edits
+separately from CSP overrides and writes a standalone `surfaces.ini`.
+
+A production WebGL test changed `KEY=ROAD` to `KEY=TARMAC`. The live audit changed
+one mesh from fallback physics to an exact match. The same test covered all fields,
+invalid input, undo, redo, recovery, the surface overlay, and export. A serializer
+round trip preserved every field and rejected unsafe INI text.
+
 ## Track layout assembly evidence
 
 Installed tracks use ordered `[MODEL_n]` sections in `models*.ini`, with `FILE`,
 `POSITION`, and `ROTATION` fields. Other section families such as
 `[DYNAMIC_OBJECT_n]` have different runtime semantics and are not treated as static
 layout geometry.
+
+Dynamic sections preserve `PROBABILITY`, `MULT`, `POS_MODE`, `RND_POS_CENTER`,
+`RND_POS_RANGE`, `VEL_MODE`, `RND_VEL_BASE`, `RND_VEL_RANGE`, and `PLAY_WAV`.
+Apex edits these native fields and writes them back to `models.ini`. The preview uses
+`RND_POS_CENTER` as the deterministic model-root position.
+
+The preview does not simulate position modes, velocity modes, or random ranges.
+Those behaviors remain a separate native-motion recovery task. A production WebGL
+test covered all nine fields, validation, undo, redo, recovery, and export.
+The serializer round-trip test also proves that audio removal omits `PLAY_WAV`.
 
 The installed `acs.exe` includes matching PDB symbols. Its `TrackAvatar::init3D`
 function at `1401c8740` reads `POSITION` and `ROTATION` with `INIReader::getFloat3`,
@@ -1664,24 +1716,93 @@ procedural horizon/sky gradient and sun disc, weather ambient and direct light,
 environment response, emissive and CSP local lights, and distance fog. It resolves a
 supported multisample RGBA16F target, builds the full-frame mip chain, derives exposure
 from the final 1×1 average luminance, clamps automatic exposure to the installed
-0.2–0.5 range, and supports an explicit manual value. The final portable display pass
-uses a bounded Reinhard-style filmic mapping with the installed gamma and saturation.
-That display curve is intentionally labeled an approximation: the public symbols show
-the Yebis exposure and post-effect path, but the proprietary behavior selected by
-`FUNCTION=-1`, its temporal eye adaptation, and cloud billboard rendering have not
-been reproduced. They require controlled editor/game image matching.
+0.2–0.5 range, and supports an explicit manual value.
 
-Production Chrome checks again covered both asset scales. The assembled Nissan 370Z
-used the stock Clear preset, RGBA16F with 4× MSAA, automatic exposure 0.2, 164 shadow
-casters, and all 82 textures. Its 55° sun capture hash was `21b86f802fb68243`, the
-10° sun hash was `9e3c9e4f234548fb`, and the shadows-disabled hash was
-`40ac5bd12a5eb1fa`. A separate UI check selected manual exposure 0.35 and reported it
-unchanged in the renderer state. Imola used Light Clouds, its 12 km fog distance,
-RGBA16F with 4× MSAA, automatic exposure 0.5, 273 shadow casters, and all 110 textures;
-its corresponding hashes were `9bbb5f0950b8088a`, `301510c6bfd72134`, and
-`560b8ef90fe4c2f9`. Every capture returned WebGL error zero and no JavaScript or browser
-log errors. The distinct sun-height captures prove live weather-curve evaluation, not
-pixel equality with ksEditor or Assetto Corsa.
+The installed `ksNet.dll` contains 2,649 embedded DXBC programs. Its effect table maps
+`tech_TonemapHDR_Dither_Exposure_Gamma` to pixel program 2095 for the configured
+`FUNCTION=-1` default. D3D reflection identifies `fParam_GammaCorrection` at byte 3232
+with default 0.454545468 and `fParam_TonemapMaxMappingLuminance` at byte 3328 with
+default `(1, 1, 1.015625, 1)`. The program clamps input to `2^-14`, computes
+`q = exp(-input × curve.x)`, then `saturate((1-q) × (1-q×curve.y)^2)`, adds `2^-22`,
+and applies the gamma exponent. Ghidra resolves `CPostEffect::SetTonemapParameters`
+at `0x100933a0`, `GetEffectiveTonemapParameters` at `0x100894b0`,
+`CRenderGlare::TonemapToSurface` at `0x100e2f00`, and
+`CTextureUtil::DrawRectGPU_TonemapHDR` at `0x100b9310`. Together they prove that the
+configured 1.2 gamma is passed through the effective settings and uploaded as its
+reciprocal. The saturation matrix is applied before the curve. Apex now implements
+those recovered instructions rather than the previous Reinhard approximation.
+
+The reflected mapping vector is only the effect-file initializer. `CPostEffect::Initialize`
+overwrites it after setting the characteristic-curve control to 0.5. With the editor's
+default feature flags, `UpdateParameters_ChangeFormat` selects `EHDRTONEMAP=10` and
+`CTextureUtil::SetTonemapEffectParameters` computes `p = float(pow(0.5, 0.3333333433))`.
+Its first curve coefficient is `float(1 + p × 2.0891273022) = 2.6581413746`. The second
+is the linear interpolation of the binary's 21-value, 0.05-step normalization table at
+`p`, yielding `0.6653175950`. Those initialized coefficients, rather than the reflected
+`(1, 1)`, are the default values uploaded for the active editor display pass.
+
+The same pass includes the default glare result and output dither. Program 2095 samples
+the glare texture after it evaluates the display curve. It clamps glare to one and uses
+`curve + (1 - curve) × glare`, then applies reciprocal gamma. Finally, it adds a sampled
+dither value with scale `1/255` and offset `-0.5/255`.
+
+The default filter sets glare quality 3, luminance 1.6, threshold 5, bright-pass mode 0,
+and `BLOOM_NUM_LEVELS=0`. `CPostEffect::EndPostEffectScene_InternalProcess` at
+`0x100846c0` maps mode 0 to Yebis bright-pass type 1. Embedded program 493,
+`tech_BrightPassT1_THRESHOLD_S1`, computes
+`clamp(max(source × exposure - threshold, 0) × remap, 0, 64000)`. The shipped remap is
+one. Automatic exposure reads the original HDR scene before this pass, so glare does not
+change the exposure measurement.
+
+`CPostEffect::Initialize` selects the quality table entry `(0.25, 5)` for quality 3.
+Thus, the glare source uses one quarter of the viewport dimensions and the default bloom
+uses five levels. `CRenderGlare::GenerateGlare_Bloom_CompositeSubLevels` at `0x100dbdd0`
+and embedded program 407, `tech_MadT5`, prove an equal RGB weight for all five float-HDR
+levels. `GetBloomCompositeLuminanceScale` at `0x100e14f0` calculates each weight as
+`1 × 0.035 × 5 × 1.6 × 0.038 = 0.01064` for the installed custom shape.
+
+Apex now reproduces the recovered source scale, level count, bright-pass equation,
+composite weights, screen blend, and dither scale. The glare call enters
+`GaussianFilterMax61x61_2Pass` at `0x100d0d90`. The configured bloom dispersion passes
+RGB radii in the wavelength ratios 615:540:465 and sets the alpha radius to zero. These
+unequal radii make the function delegate to `GaussianFilterMax29x29_2Pass` at
+`0x100cfde0`. Thus, the max-61 implementation is not the active default kernel.
+
+`GPUTexUtil_GetGaussianArray` at `0x10078150` evaluates
+`exp(-x²/(2σ²))`. `GPUTexUtil_GetColorWeight15_Gauss29` at `0x1007bd10` pairs taps for
+linear texture sampling, normalizes the full 29-tap kernel, and emits the center plus
+seven positive and seven negative samples. The active scalar-weight path averages the
+four channel offsets and uses the red-channel weights. The 0.002 threshold selects
+5, 7, 13, 15, and 15 samples across the five default levels. The source level is two,
+and the recovered scale is `2^(1-2) × 0.95 × 2.2`. This gives sigma values 1.045, 2.09,
+4.18, 8.36, and 16.72. Apex now uploads these native offsets and weights for both axes.
+The star, ghost, light-shaft, and non-default max-61 branches remain outside this
+bloom-core increment.
+
+The same binary preserves distinct linear, linear-saturated, Reinhard, luminance,
+logarithmic, and pre-map shader variants. The default post filter sets adaptation delay
+to zero, so Apex's immediate event-driven exposure is consistent with this shipped
+editor configuration. Yebis star, ghost, light-shaft, non-default max-61 Gaussian, non-default curves,
+and controlled editor/game pixel matching remain fidelity work. The legacy non-Yebis
+SDK shaders separately expose a temporal adaptation rate, but that dormant path is not
+substituted for the active default.
+
+The corrected curve was checked in the production browser path at both asset scales.
+The compact Nissan 370Z LOD rendered three meshes and 2,343 triangles. Full Imola
+rendered 1,023 of 1,239 meshes and 3,036,891 triangles; its live scene cubemap reported
+238 draws and 107,886 triangles while the directional pass reported 179 mesh casters.
+Both checks used Light Clouds, automatic exposure 0.2, and an RGBA16F target with 4×
+MSAA. Neither check produced a JavaScript or browser warning/error. These checks prove
+the portable runtime path, not pixel equality with ksEditor or Assetto Corsa.
+
+A follow-up production Electron run used the full textured Nissan 370Z with manual
+exposure 0.35. It loaded all 82 textures, rendered 193 of 215 scene meshes, and used
+all five active bloom kernels. Runtime diagnostics reported 5/7/13/15/15 samples and
+sigma values 1.045/2.09/4.18/8.36/16.72. The lit frame hashed to
+`bd999be64c9d42ed`; shadows-off and low-sun frames hashed to `1fd352c0372fba95`
+and `4be34d217367d96a`. Every state returned WebGL error zero, and the browser logged
+no exception. This proves the recovered Gaussian code executes in the production
+WebGL path. It does not prove pixel equality with the native editor.
 
 ## CSP vertex ambient-occlusion evidence
 
@@ -1786,3 +1907,156 @@ with manual exposure 0.35, and evaluated hundreds of seasonal meshes. Year progr
 `3093ba7be063a1a4`. Both captures returned WebGL error zero and no JavaScript or
 browser-log errors. Brown bark and other non-green, non-upward materials correctly
 remain unchanged under the native mask.
+
+## Viewport camera state after reflection capture
+
+The live scene cubemap uses the same material program as the main viewport. Each
+cubemap face uploads a different view-projection matrix. The capture path previously
+left the last face matrix active after it returned. The sky used the viewport camera,
+but the main geometry used the stale cubemap camera.
+
+Apex now uploads the viewport matrix again before it draws the main geometry. A
+production Monza run used a saved TV camera, 1,428 meshes, 130 textures, and live
+scene reflections. A second run loaded all four Nissan 370Z LODs, all 82 embedded
+textures, and the selected skin. Both runs returned WebGL error zero and no browser
+errors. The Nissan frame also proves that the correction does not invert the car.
+
+The browser smoke check now waits for folder input and manifest discovery separately.
+This sequence removes a clean-session race that occurred before the renderer existed.
+
+## FBX import behavior
+
+The installed `ksNet.pdb` identifies `FBXImporter::loadNode` at `0x10005880`.
+The matching code calls `FbxGeometryConverter::TriangulateInPlace` before it reads
+the mesh. It reads polygon-corner normals and UVs after triangulation.
+
+The native importer changes the sign of the V coordinate. It also reads the polygon
+material index and sends the corners to one `MeshBuilder` for each material.
+Ordinary nodes use `EvaluateLocalTransform` with the source pivot. The geometry path
+also applies the geometric translation, rotation, and scale matrix.
+
+The skin path reads the first skin deformer. It imports every cluster link, inverse
+bind matrix, control-point index, and weight. This path matches the 19-float KN5
+vertex layout and its four weight and index fields.
+
+The PDB identifies `FBXImporter::loadAnimation` at `0x100071a0` and
+`FBXImporter::loadAnimationNode` at `0x10007550`. The node walk accepts FBX mesh,
+skeleton, and null attributes. It evaluates each accepted node in local space.
+
+The native sample step is one percent of the selected animation time span. The loop
+stops before the end time. As a result, each nonempty animation contains 100 frames.
+
+`Animation::save` at `0x10043dd0` writes version 2, the track count, and each UTF-8
+track name. It then writes the frame count and 40 bytes for each frame. A frame contains
+one quaternion, one position, and one scale.
+
+Apex uses the [Three.js FBXLoader](https://threejs.org/docs/pages/FBXLoader.html) for
+portable FBX decoding. The adapter applies the recovered ksEditor rules after the
+loader triangulates the scene. It expands triangle corners to preserve UV and normal
+seams. It splits each output mesh before the 16-bit KN5 index limit.
+
+The official SDK sphere imports as one mesh with 224 triangles. The official animated
+GT40 suspension scene imports as 42 meshes with 16,514 triangles. Four spring meshes
+retain their skin data. Its clip contains 104 source curves. Apex exports 112 object
+tracks with 100 frames, which matches the native object-selection rule.
+
+Both scenes serialize to KN5 v6 and parse again. A live Electron run loaded all
+generated DDS textures and returned WebGL error zero. The packaged Linux application
+also imported the sphere with no JavaScript or browser-log errors.
+
+Three.js removes the directory from an external FBX image path before it loads the
+image. Apex captures the remaining filename from the loader. It resolves that name
+against the selected source folder with the shared path resolver. The resolver uses
+an exact path, a unique suffix, or a unique basename. It does not select an ambiguous
+file.
+
+Apex embeds resolved DDS, PNG, JPEG, and WebP bytes in the KN5 output. The importer
+also captures supported embedded FBX images through their temporary blob or data URL.
+Missing, ambiguous, unreadable, and unsupported images retain the material-color DDS.
+The inspector shows the slot, state, and output name for each texture reference.
+
+`FBXImporter::load` at `0x10004200` starts each material with `ksPerPixel`.
+It also sets `ksSpecularEXP` to 1. For recognized surface materials, it reads
+the first component of the ambient, diffuse, and specular colors. Values of
+`ksSpecularEXP` that are less than 1 become 10.
+
+ksEditor loops through all 32 entries in `FbxLayerElement::sTextureChannelNames`.
+It accepts only `FbxFileTexture` objects and reduces each path to a basename.
+It searches the configured folders and the automatic sibling `texture` folder.
+The first file found fills `txDiffuse`. Later channels cannot replace this resource.
+The importer never requests `txNormal`.
+
+Apex keeps the explicit FBX diffuse channel as `txDiffuse`. For static materials,
+it maps `normalMap` to `txNormal` and selects `ksPerPixelNM`. Unresolved normal
+references use a flat tangent-space DDS. The inspector reports every preserved map.
+It also reports maps that have no safe stock KN5 binding.
+
+An installed production FBX contains 22 materials and 23 texture references.
+Five static materials contain true normal-map connections. Apex assigns
+`ksPerPixelNM` and both required resources to all five materials. The converted
+scene contains 17 `ksPerPixel` materials and five `ksPerPixelNM` materials.
+
+A live browser import loaded all 27 generated DDS textures. The selected normal-mapped
+material showed both `txDiffuse` and `txNormal` in the inspector. The scene drew
+241,432 triangles, and WebGL returned error zero. The browser log contained no errors.
+
+The official GT40 FBX contains `Grey.dds` and `exterior_engine_diffuse.dds`
+references. A selected source folder resolved `Grey.dds` by suffix. The exported KN5
+retained the DDS bytes and the `txDiffuse` name after a write/read round trip. The
+second missing reference kept its generated DDS.
+
+The animation adapter preserves `userData.originalName` because Three.js removes
+colons from binding names. This rule preserves names such as `DRIVER:RIG_HAND_L` in
+the exported file. A production driver FBX and its KSANIM file both contain 59 named
+tracks, 100 frames, and 38 animated tracks.
+
+The live browser preview selected the GT40 clip and moved its timeline to 0.500. The
+renderer matched 42 animated nodes. The export action reported 112 tracks and 100
+frames. The browser log contained no errors.
+
+A Blender-generated binary FBX embedded the SDK `Arrows.png` image. The browser
+imported the image as `base_color_texture.png` without a source folder. WebGL loaded
+the PNG, rendered the textured cube, and returned error zero. The browser log had no
+errors.
+
+## Static geometry authoring evidence
+
+Apex stores static geometry edits by stable hierarchy path. Each application starts
+from captured source vertex and index buffers. This rule prevents cumulative changes
+during preview refresh, undo, recovery, and export.
+
+The transform path uses the source bounds center as its pivot. It transforms positions,
+applies the inverse-transpose matrix to normals, and preserves both supported tangent
+encodings. It also recalculates the KN5 bounding sphere.
+
+The topology path removes repeated-index and zero-area triangles with a scale-aware
+tolerance. Face reversal swaps the second and third indices and reverses source
+normals. Normal rebuilds use area-weighted triangle cross products.
+
+Unit checks cover ordinary and packed tangents, normal transforms, topology repair,
+baseline restoration, source-buffer immutability, and KN5 write/read round trips. A
+live WebGL check reduced a two-triangle mesh to one triangle. Undo, redo, and recovery
+preserved all three topology operations, and KN5 export completed. CSP export stayed
+disabled because CSP cannot replace source geometry.
+
+## Desktop packaging evidence
+
+The desktop shell uses Electron 43.4.1 and serves the existing application from an
+ephemeral loopback port. The renderer has no Node.js integration. Context isolation,
+the Chromium sandbox, web security, and the application content security policy are
+active. The shell rejects new windows, external navigation, and permission requests.
+
+The production check loaded the installed Nissan 370Z KN5 in the packaged Linux
+application. It loaded all 82 textures and reported no unsupported textures. The
+normal view showed 193 of 215 scene meshes. The application reported WebGL error zero,
+no browser errors, and no renderer access to `process` or `require`.
+
+The Linux build produced these unsigned artifacts:
+
+- `Apex Editor-0.1.0-linux-x86_64.AppImage`: SHA-256
+  `65815f009eb7d5c67284698b0840188a583607bdb2d75a8fd77dd00a5bc9802b`
+- `Apex Editor-0.1.0-linux-x64.tar.gz`: SHA-256
+  `6b72c3d15f8ae5e1f274aac64d9eacbf20c81347a3850745d43df226fcec5229`
+
+The artifacts prove the Linux package path. They do not prove Windows or macOS
+packaging, code signing, or installer behavior.

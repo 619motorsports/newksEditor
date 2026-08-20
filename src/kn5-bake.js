@@ -1,4 +1,8 @@
-function cloneNode(node) { return { ...node, transform:node.transform?[...node.transform]:node.transform, bounds:node.bounds?[...node.bounds]:node.bounds, bones:node.bones?.map((bone)=>({...bone,transform:[...bone.transform]})), children:(node.children||[]).map(cloneNode) }; }
+import { applyNodeEdits } from "./node-authoring.js";
+import { applyGeometryEdits } from "./geometry-authoring.js";
+
+function cloneTypedArray(value) { return value?.slice ? value.slice() : value; }
+function cloneNode(node) { return { ...node, transform:node.transform?[...node.transform]:node.transform, bounds:node.bounds?[...node.bounds]:node.bounds, vertices:cloneTypedArray(node.vertices), indices:cloneTypedArray(node.indices), bones:node.bones?.map((bone)=>({...bone,transform:[...bone.transform]})), children:(node.children||[]).map(cloneNode) }; }
 
 function cloneModel(model) {
   return { ...model, textures:(model.textures||[]).map((texture)=>({...texture})), materials:(model.materials||[]).map((material)=>({...material,properties:(material.properties||[]).map((property)=>({...property,value2:[...property.value2],value3:[...property.value3],value4:[...property.value4]})),resources:(material.resources||[]).map((resource)=>({...resource}))})), root:cloneNode(model.root) };
@@ -14,7 +18,7 @@ function setProperty(property, value) {
 }
 
 export function bakeEditorProjectIntoKn5(model, project) {
-  const output=cloneModel(model),warnings=[],applied={materials:0,properties:0,resources:0,meshes:0};
+  const output=cloneModel(model),warnings=[],applied={materials:0,properties:0,resources:0,meshes:0,nodes:0,geometry:0};
   const textureIds=new Map(output.textures.map((texture,index)=>[texture.name.toLowerCase(),index]));
   for(const material of output.materials){const match=matchingEntry(project?.materialEdits,material.name);if(!match)continue;const [editName,edit]=match;let changed=false;
     if(edit.shader){material.shader=edit.shader;changed=true;}
@@ -25,5 +29,7 @@ export function bakeEditorProjectIntoKn5(model, project) {
     if(changed)applied.materials++;
   }
   const visit=(node)=>{if(node.kind==="mesh"||node.kind==="skinnedMesh"){const match=matchingEntry(project?.meshEdits,node.name);if(match){const edit=match[1];if(edit.isTransparent!==undefined)node.transparent=edit.isTransparent;if(edit.castShadows!==undefined)node.castShadows=edit.castShadows;if(edit.layer!==undefined)node.layer=edit.layer;if(edit.lodIn!==undefined)node.lodIn=edit.lodIn;if(edit.lodOut!==undefined)node.lodOut=edit.lodOut;applied.meshes++;}}for(const child of node.children||[])visit(child);};visit(output.root);
+  applied.nodes=applyNodeEdits(output.root,project?.nodeEdits,warnings);
+  applied.geometry=applyGeometryEdits(output.root,project?.geometryEdits,null,warnings);
   return { model:output,warnings,applied };
 }
