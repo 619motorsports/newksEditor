@@ -92,6 +92,8 @@ npm test
   Dimmed hierarchy rows remain selectable, and **Show hidden** exposes all such
   geometry explicitly for authoring inspection. The optional grid reproduces the
   old editor's 11 by 11-line magenta authoring overlay across a 10 m square.
+  A selected hierarchy node shows the native one-meter red X, green Y, and blue
+  negative-Z world-axis marker through scene geometry.
 - Direct hierarchy authoring for node names, active states, and local transforms.
   Transform controls use position, XYZ rotation in degrees, and scale. Stable
   root-relative paths keep duplicate names independent. Edits update the preview,
@@ -328,6 +330,8 @@ to drive seasonal conditions through the track's calendar LUTs and compare captu
 Pass `--reflection-compare` to capture and hash the live scene-cubemap and procedural
 fallback states independently. Use `--reflection-environment SHOWROOM.kn5` and,
 optionally, `--reflection-root NODE` to verify showroom assembly and subtree selection.
+Pass `--selection-axis` to require the native selected-node marker and capture a
+comparison after the tool clears the selection.
 
 The authoring round-trip has its own production-browser check:
 

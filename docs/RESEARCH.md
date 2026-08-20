@@ -121,6 +121,28 @@ captures hashed to `197e3148237ea966` and `2db4c74a6ad57ae8`. All 80 textures lo
 both captures returned WebGL error zero, and the browser log contained no errors.
 The grid remained visible through the car, which confirms the recovered depth-off state.
 
+### Native selected-node axis marker
+
+`ksNet.ksGraphics.render` has token `0x06000389` and RVA `0x27388`. After the grid
+pass, the method checks its selected-node argument. A null value skips the marker.
+For a selected node, the renderer gets its 64-byte world matrix through the native
+node vtable method at offset 32. Matrix byte offsets 48, 52, and 56 supply the origin.
+
+The marker is a line list with depth mode `eOff`. Red uses the normalized basis at
+byte offsets 0, 4, and 8. Green uses offsets 16, 20, and 24. Blue negates the basis
+at offsets 32, 36, and 40 before normalization. Each endpoint adds its direction to
+the origin, so each axis is one world meter long. The method restores
+`eDepthNormal` after the three segments.
+
+Apex computes this marker for every selectable hierarchy node, including transform
+nodes without geometry. It rejects truncated, non-finite, or zero-length world bases
+before GPU upload. This guard does not change valid native transforms.
+
+A production Chrome check used the installed Abarth 500 and selected `GEO_Cofano`.
+The recovered origin was `(0, 0.2583455, 0)`. The selected and cleared captures hashed
+to `debf7c810ffad716` and `06fcc72e4a117042`. All 80 textures loaded, both frames
+returned WebGL error zero, and the browser log contained no errors.
+
 ### Native blurred-rim switch
 
 `ksEditor.Form1.btnBlurred_Click` has token `0x060000da` and RVA `0x7460`.

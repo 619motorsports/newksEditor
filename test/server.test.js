@@ -46,6 +46,9 @@ test("serves the desktop application and its explicitly allowed modules", async 
     const gridPreview = await fetch(`${url}/src/grid-preview.js`);
     assert.equal(gridPreview.status, 200);
     assert.match(await gridPreview.text(), /nativeGridVertices/);
+    const selectionAxis = await fetch(`${url}/src/selection-axis.js`);
+    assert.equal(selectionAxis.status, 200);
+    assert.match(await selectionAxis.text(), /nativeSelectionAxis/);
     assert.equal((await fetch(`${url}/vendor/three.module.js`)).status, 200);
     assert.equal((await fetch(`${url}/vendor/three-addons/loaders/FBXLoader.js`)).status, 200);
   });
