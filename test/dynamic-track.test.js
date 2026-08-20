@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { advanceDynamicTrackObjects, createMsvcRandom, sampleDynamicTrackObjects } from "../src/dynamic-track.js";
+import { advanceDynamicTrackObjects, createMsvcRandom, dynamicTrackRootTransform, sampleDynamicTrackObjects } from "../src/dynamic-track.js";
 import { parseModelsIni } from "../src/kn5-workspace.js";
 
 test("matches the shipped MSVCR120 random generator", () => {
@@ -47,6 +47,14 @@ test("advances each instance with the native float position update", () => {
   assert.equal(state.elapsed, 0.25);
 });
 
+test("replaces dynamic KN5 root translation and preserves its basis", () => {
+  const source = [2, 3, 4, 0, 5, 6, 7, 0, 8, 9, 10, 0, 100, 200, 300, 1];
+  const transformed = dynamicTrackRootTransform(source, [11, 12, 13]);
+  assert.deepEqual(transformed.slice(0, 12), source.slice(0, 12));
+  assert.deepEqual(transformed.slice(12), [11, 12, 13, 1]);
+  assert.deepEqual(source.slice(12), [100, 200, 300, 1]);
+});
+
 test("bounds unsafe multiplicity without changing later random samples", () => {
   const state = sampleDynamicTrackObjects([
     { name: "many.kn5", dynamic: { probability: 101, multiplicity: [300, 300], posMode: "RANDOM", positionCenter: [0, 0, 0], positionRange: [1, 1, 1], velMode: "RANDOM", velocityBase: [0, 0, 0], velocityRange: [1, 1, 1] } },
@@ -68,6 +76,22 @@ test("does not allocate or throw for overflowing multiplicity input", () => {
   assert.equal(state.nativeInstances, 0);
   assert.equal(state.previewInstances, 0);
   assert.match(state.warnings[0], /non-finite multiplicity/);
+});
+
+test("rejects dynamic vectors outside the finite float32 range", () => {
+  const state = sampleDynamicTrackObjects([{ name: "unsafe.kn5", dynamic: {
+    probability: 101, multiplicity: [1, 1], posMode: "RANDOM",
+    positionCenter: [1e308, 2, 3], positionRange: [1, 1, 1], velMode: "RANDOM",
+    velocityBase: [4, 5, 6], velocityRange: [1e308, 1, 1]
+  } }], 1, { serverTime: 1e308 });
+  assert.ok(state.results[0].instances[0].position.every((value) => value >= -1 && value <= 1));
+  assert.ok(state.results[0].instances[0].velocity.every(Number.isFinite));
+  assert.ok(state.results[0].instances[0].position.every(Number.isFinite));
+  assert.equal(state.serverTime, 0);
+  assert.equal(state.warnings.length, 2);
+  assert.match(state.warnings.join("\n"), /RND_POS_CENTER.*finite float32.*RND_VEL_RANGE.*finite float32/s);
+  advanceDynamicTrackObjects(state, 1e308);
+  assert.ok(state.results[0].instances[0].position.every(Number.isFinite));
 });
 
 test("samples the installed Kunos Barcelona dynamic objects", async (context) => {

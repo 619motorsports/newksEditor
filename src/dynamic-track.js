@@ -1,13 +1,22 @@
 const RAND_MAX = 0x7fff;
 const RAND_SCALE = Math.fround(1 / RAND_MAX);
+const IDENTITY = Object.freeze([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 
 function finite(value, fallback = 0) {
-  const number = Number(value);
-  return Number.isFinite(number) ? Math.fround(number) : Math.fround(fallback);
+  const rounded = Math.fround(Number(value)), fallbackRounded = Math.fround(Number(fallback));
+  return Number.isFinite(rounded) ? rounded : Number.isFinite(fallbackRounded) ? fallbackRounded : 0;
 }
 
-function vector(value, fallback = [0, 0, 0]) {
-  return Array.from({ length: 3 }, (_, index) => finite(value?.[index], fallback[index]));
+function isFiniteFloat32(value) {
+  return Number.isFinite(Math.fround(Number(value)));
+}
+
+function vector(value, fallback = [0, 0, 0], warnings = null, label = "Vector") {
+  if (value === undefined || value === null) return fallback.map((item) => finite(item));
+  const input = Array.from(value || [], Number), rounded = input.map(Math.fround);
+  if (rounded.length === 3 && rounded.every(Number.isFinite)) return rounded;
+  warnings?.push(`${label} must contain three finite float32 values; the preview uses its fallback`);
+  return fallback.map((item) => finite(item));
 }
 
 function randomUnit(random) {
@@ -15,13 +24,21 @@ function randomUnit(random) {
 }
 
 function randomRange(random, minimum, maximum) {
-  const span = Math.fround(maximum - minimum);
-  return Math.fround(Math.fround(randomUnit(random) * span) + minimum);
+  const span = finite(maximum - minimum);
+  return finite(finite(randomUnit(random) * span) + minimum, minimum);
 }
 
 function randomCenteredAxis(random, center, range) {
-  const minimum = Math.fround(-range);
-  return Math.fround(randomRange(random, minimum, range) + center);
+  const minimum = finite(-range);
+  return finite(randomRange(random, minimum, range) + center, center);
+}
+
+/** Preserve a loaded KN5 root basis while replacing its native translation fields. */
+export function dynamicTrackRootTransform(rootTransform, position) {
+  const output = Array.from({ length: 16 }, (_, index) => finite(rootTransform?.[index], IDENTITY[index]));
+  const translation = vector(position);
+  output[12] = translation[0]; output[13] = translation[1]; output[14] = translation[2];
+  return output;
 }
 
 function normalizeSampledMultiplicity(value, warnings, label) {
@@ -75,15 +92,18 @@ export function sampleDynamicTrackObjects(files, seed = 1, options = {}) {
     const dynamic = files[fileIndex]?.dynamic;
     if (!dynamic) continue;
 
+    const label = files[fileIndex].name || dynamic.section || `DYNAMIC_OBJECT_${dynamic.index ?? fileIndex}`;
     const probability = Math.trunc(Number(dynamic.probability) || 0);
     const probabilitySample = Math.fround(Math.fround(randomUnit(random) * 100));
     const accepted = probabilitySample < probability;
     let sampledMultiplicity = 0;
     if (accepted) {
-      const minimum = finite(dynamic.multiplicity?.[0], 1);
-      const maximum = Math.fround(finite(dynamic.multiplicity?.[1], 1) + 1);
-      const sampled = randomRange(random, minimum, maximum);
-      sampledMultiplicity = normalizeSampledMultiplicity(sampled, warnings, files[fileIndex].name || dynamic.section || `DYNAMIC_OBJECT_${dynamic.index ?? fileIndex}`);
+      const minimumInput = dynamic.multiplicity?.[0] ?? 1, maximumInput = dynamic.multiplicity?.[1] ?? 1;
+      const validMultiplicity = isFiniteFloat32(minimumInput) && isFiniteFloat32(maximumInput) && isFiniteFloat32(Number(maximumInput) + 1);
+      let sampled;
+      if (validMultiplicity) sampled = randomRange(random, finite(minimumInput, 1), finite(Number(maximumInput) + 1, 2));
+      else { randomUnit(random); sampled = NaN; }
+      sampledMultiplicity = normalizeSampledMultiplicity(sampled, warnings, label);
     }
 
     const available = Math.max(0, maximumPreviewInstances - nativeInstances);
@@ -92,10 +112,10 @@ export function sampleDynamicTrackObjects(files, seed = 1, options = {}) {
       `${files[fileIndex].name || dynamic.section || `DYNAMIC_OBJECT_${dynamic.index ?? fileIndex}`} sampled ${sampledMultiplicity} instances; the preview limit is ${maximumPreviewInstances}`
     );
 
-    const positionCenter = vector(dynamic.positionCenter);
-    const positionRange = vector(dynamic.positionRange);
-    const velocityBase = vector(dynamic.velocityBase);
-    const velocityRange = vector(dynamic.velocityRange);
+    const positionCenter = vector(dynamic.positionCenter, [0, 0, 0], warnings, `${label} RND_POS_CENTER`);
+    const positionRange = vector(dynamic.positionRange, [0, 0, 0], warnings, `${label} RND_POS_RANGE`);
+    const velocityBase = vector(dynamic.velocityBase, [0, 0, 0], warnings, `${label} RND_VEL_BASE`);
+    const velocityRange = vector(dynamic.velocityRange, [0, 0, 0], warnings, `${label} RND_VEL_RANGE`);
     const randomPosition = String(dynamic.posMode || "") === "RANDOM";
     const randomVelocity = String(dynamic.velMode || "") === "RANDOM";
     const instances = [];
@@ -115,7 +135,7 @@ export function sampleDynamicTrackObjects(files, seed = 1, options = {}) {
         velocity[1] = randomCenteredAxis(random, velocityBase[1], velocityRange[1]);
         velocity[0] = randomCenteredAxis(random, velocityBase[0], velocityRange[0]);
       }
-      for (let axis = 0; axis < 3; axis++) position[axis] = Math.fround(position[axis] + Math.fround(serverTime * velocity[axis]));
+      for (let axis = 0; axis < 3; axis++) position[axis] = finite(position[axis] + finite(serverTime * velocity[axis]), position[axis]);
       instances.push({ fileIndex, instanceIndex, position, velocity });
     }
     const callsPerOmittedInstance = (randomPosition ? 3 : 0) + (randomVelocity ? 3 : 0);
@@ -141,7 +161,7 @@ export function advanceDynamicTrackObjects(state, deltaTime) {
   const delta = finite(Math.max(0, Number(deltaTime) || 0));
   state.elapsed += delta;
   for (const result of state.results) for (const instance of result.instances) {
-    for (let axis = 0; axis < 3; axis++) instance.position[axis] = Math.fround(instance.position[axis] + Math.fround(delta * instance.velocity[axis]));
+    for (let axis = 0; axis < 3; axis++) instance.position[axis] = finite(instance.position[axis] + finite(delta * instance.velocity[axis]), instance.position[axis]);
   }
   return state;
 }

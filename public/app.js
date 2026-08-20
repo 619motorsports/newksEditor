@@ -30,7 +30,7 @@ import { KS_EDITOR_CUBEMAP, WEBGL_CUBEMAP_FACES, reflectionBlurFromExponent, sel
 import { createCspWindParticles, CSP_WIND_MAP_FORMAT, CSP_WIND_MAP_SIZE, CSP_WIND_PARTICLE_COUNT, updateCspWindParticles } from "/src/csp-wind.js";
 import { collectFbxAnimations, parseFbxWithTextures, resolveFbxModelTextures } from "/src/fbx-import.js";
 import { applyNodeEdits, composeNodeTransform, decomposeNodeTransform, nodePathEntries } from "/src/node-authoring.js";
-import { advanceDynamicTrackObjects, sampleDynamicTrackObjects } from "/src/dynamic-track.js";
+import { advanceDynamicTrackObjects, dynamicTrackRootTransform, sampleDynamicTrackObjects } from "/src/dynamic-track.js";
 
 const $ = (selector) => document.querySelector(selector);
 const fileInput = $("#file");
@@ -1903,10 +1903,10 @@ function createRenderer(canvas) {
       if(uploaded.ready){textureStatus.pending++;uploaded.ready.then((success)=>{if(generation!==modelGeneration)return;textureStatus.pending--;if(success)textureStatus.ready++;else textureStatus.unsupported++;draw();});}else textureStatus.ready++;
     }
     textureLookup=textureMap;refreshSkinTextures();
-    const visit = (node, parentWorld, parentActive, parentWorkspaceLod = null, parentWorkspaceAuxiliary = null, parentDriverPath = [], parentWorkspaceFile = "", parentReflectionAncestors = [], dynamicInstanceIndex = -1) => {
+    const visit = (node, parentWorld, parentActive, parentWorkspaceLod = null, parentWorkspaceAuxiliary = null, parentDriverPath = [], parentWorkspaceFile = "", parentReflectionAncestors = [], dynamicInstanceIndex = -1, localOverride = null) => {
       const dynamicRoot=dynamicRootFiles.get(node);
-      if(dynamicRoot){const branchActive=parentActive&&node.active,workspaceLod=node.workspaceLod||parentWorkspaceLod,workspaceAuxiliary=node.workspaceAuxiliary||parentWorkspaceAuxiliary,workspaceFile=node.workspaceFile||parentWorkspaceFile,reflectionAncestors=[...parentReflectionAncestors,node],driverPath=workspaceAuxiliary==="driver"?[...parentDriverPath,node.name.toUpperCase()]:[];for(const instance of dynamicRoot.result.instances){const transform=identity();transform[12]=instance.position[0];transform[13]=instance.position[1];transform[14]=instance.position[2];const world=multiply(parentWorld,transform);for(const child of node.children)visit(child,world,branchActive,workspaceLod,workspaceAuxiliary,driverPath,workspaceFile,reflectionAncestors,instance.instanceIndex);}return;}
-      const world = node.transform ? multiply(parentWorld, node.transform) : parentWorld;
+      if(dynamicRoot){const branchActive=parentActive&&node.active,workspaceLod=node.workspaceLod||parentWorkspaceLod,workspaceAuxiliary=node.workspaceAuxiliary||parentWorkspaceAuxiliary,workspaceFile=node.workspaceFile||parentWorkspaceFile,reflectionAncestors=[...parentReflectionAncestors,node],driverPath=workspaceAuxiliary==="driver"?[...parentDriverPath,node.name.toUpperCase()]:[];for(const instance of dynamicRoot.result.instances)for(const child of node.children)visit(child,parentWorld,branchActive,workspaceLod,workspaceAuxiliary,driverPath,workspaceFile,reflectionAncestors,instance.instanceIndex,dynamicTrackRootTransform(child.transform,instance.position));return;}
+      const local=localOverride??node.transform,world = local ? multiply(parentWorld, local) : parentWorld;
       const branchActive = parentActive && node.active;
       const workspaceLod = node.workspaceLod || parentWorkspaceLod;
       const workspaceAuxiliary=node.workspaceAuxiliary||parentWorkspaceAuxiliary,workspaceFile=node.workspaceFile||parentWorkspaceFile,reflectionAncestors=[...parentReflectionAncestors,node],driverPath=workspaceAuxiliary==="driver"?[...parentDriverPath,node.name.toUpperCase()]:[];
@@ -1964,11 +1964,11 @@ function createRenderer(canvas) {
 
   function refreshAnimationWorlds() {
     const min=[Infinity,Infinity,Infinity],max=[-Infinity,-Infinity,-Infinity],matchedTracks=new Set(),worldByName=new Map();let matchedNodes=0;
-    const visit=(node,parentWorld,parentActive,dynamicInstanceIndex=-1)=>{
+    const visit=(node,parentWorld,parentActive,dynamicInstanceIndex=-1,localOverride=null)=>{
       const dynamicRoot=dynamicRootFiles.get(node);
-      if(dynamicRoot){const branchActive=parentActive&&node.active;for(const instance of dynamicRoot.result.instances){const transform=identity();transform[12]=instance.position[0];transform[13]=instance.position[1];transform[14]=instance.position[2];const world=multiply(parentWorld,transform);for(const child of node.children)visit(child,world,branchActive,instance.instanceIndex);}return;}
+      if(dynamicRoot){const branchActive=parentActive&&node.active;for(const instance of dynamicRoot.result.instances)for(const child of node.children)visit(child,parentWorld,branchActive,instance.instanceIndex,dynamicTrackRootTransform(child.transform,instance.position));return;}
       const animated=animationTransforms.get(node.name);if(animated){matchedTracks.add(node.name);matchedNodes++;}
-      const local=animated||node.transform,world=local?multiply(parentWorld,local):parentWorld,item=itemByNode.get(node)?.get(dynamicInstanceIndex),branchActive=parentActive&&node.active;if(!worldByName.has(node.name))worldByName.set(node.name,world);
+      const local=localOverride||animated||node.transform,world=local?multiply(parentWorld,local):parentWorld,item=itemByNode.get(node)?.get(dynamicInstanceIndex),branchActive=parentActive&&node.active;if(!worldByName.has(node.name))worldByName.set(node.name,world);
       if(item){item.world=world;item.branchActive=branchActive;item.sceneVisible=Boolean(branchActive&&node.visible&&node.renderable);const itemBounds=transformBounds(item.localMin,item.localMax,world);item.center=itemBounds.min.map((value,index)=>(value+itemBounds.max[index])/2);if(itemPreviewVisible(item))for(let axis=0;axis<3;axis++){min[axis]=Math.min(min[axis],itemBounds.min[axis]);max[axis]=Math.max(max[axis],itemBounds.max[axis]);}}
       for(const child of node.children)visit(child,world,branchActive,dynamicInstanceIndex);
     };

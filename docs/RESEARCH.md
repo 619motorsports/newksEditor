@@ -1587,6 +1587,8 @@ The update function applies `position += deltaTime * velocity` with single-preci
 values. It writes the result to M41, M42, and M43 of the model-root transform. A
 multiplayer client also adds `serverTime * velocity` during initialization. These
 functions do not wrap positions and do not implement object lifetime or rotation.
+Apex replaces those three fields on the loaded KN5 root and preserves the other 13
+matrix values. It rejects values that cannot remain finite after float32 conversion.
 
 `Sim::Sim` at `140192070` seeds the shared random generator from
 `ksGetSystemTime`. The shipped MSVCR120 `rand` implementation uses
@@ -1597,10 +1599,11 @@ rendered instances to 256 and advances the omitted random calls. This limit prev
 an untrusted manifest from causing an excessive allocation.
 
 A packaged Electron WebGL test loaded the official Barcelona `11.kn5` through a
-two-instance dynamic manifest. Seed 1 produced two moving render instances. A
-two-second update matched the native single-precision equation on all six position
-components. The test also found no JavaScript or WebGL errors, kept Node.js APIs out
-of the renderer, and confirmed the seed, play, and reset controls.
+dynamic manifest after setting the KN5 root translation to `[1000, 2000, 3000]`.
+After two seconds, the moving instance was at `[2, 4, 6]`, not the additive
+`[1002, 2004, 3006]`. This confirms that the preview replaces the root translation.
+The captured frame hash was `fceea43cc3ccfe5d`. The test found no JavaScript or
+WebGL errors, and the desktop renderer did not expose Node.js APIs.
 
 The earlier production WebGL test covered all nine fields, validation, undo, redo,
 recovery, and export. The serializer round-trip test also proves that audio removal
