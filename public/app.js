@@ -1,7 +1,7 @@
 import { computeKn5Visibility, parseKn5, propertyValue, walkNodes } from "/src/kn5.js";
 import { evaluateCspConfig, expandCspMaterialTemplates, parseCspIni } from "/src/csp-config.js";
 import { customEmissiveAtlasSize } from "/src/custom-emissive.js";
-import { cloneEditorProject, createEditorProject, editorProjectCspEditCount, editorProjectEditCount, formatEditorValue, normalizeEditorProject, parseEditorValue, serializeEditorCsp, serializeEditorProject } from "/src/editor-project.js";
+import { classifyEditorProjectChanges, cloneEditorProject, createEditorProject, editorProjectCspEditCount, editorProjectEditCount, editorProjectKn5EditCount, formatEditorValue, normalizeEditorProject, parseEditorValue, serializeEditorCsp, serializeEditorProject } from "/src/editor-project.js";
 import { decodeDdsRgba, inspectDds } from "/src/dds.js";
 import { assetFolderMatchesModelFiles, createAssetFileIndex, discoverAssetAnimations, discoverAssetSkins, externalResourcePaths, matchSkinTextures, normalizeAssetPath, resolveAssetFile } from "/src/asset-files.js";
 import { applyGeometryEdits, captureStaticGeometryBaselines, staticGeometryMetrics } from "/src/geometry-authoring.js";
@@ -31,6 +31,9 @@ import { createCspWindParticles, CSP_WIND_MAP_FORMAT, CSP_WIND_MAP_SIZE, CSP_WIN
 import { createFileIdentity, fileIdentityMatches } from "/src/file-identity.js";
 import { collectFbxAnimations, parseFbxWithTextures, resolveFbxModelTextures } from "/src/fbx-import.js";
 import { applyNodeEdits, composeNodeTransform, decomposeNodeTransform, nodeAtPath, nodePathEntries } from "/src/node-authoring.js";
+import { advanceDynamicTrackObjects, contiguousDynamicTrackObjects, dynamicTrackRootTransform, sampleDynamicTrackObjects } from "/src/dynamic-track.js";
+import { analyzeScene } from "/src/scene-diagnostics.js";
+import { captureSkinMetadataEditorTarget, createSkinMetadata, createSkinMetadataLoadGuard, effectiveSkinMetadata, readSkinMetadataFile, serializeSkinMetadata, SKIN_METADATA_TEXT_FIELDS } from "/src/skin-metadata.js";
 
 const $ = (selector) => document.querySelector(selector);
 const fileInput = $("#file");
@@ -46,6 +49,7 @@ if (renderer) renderer.onExternalTextureStatus = updateExternalTextureUi;
 if (renderer) renderer.onWorkspaceLodStatus = updateWorkspaceLodUi;
 if (renderer) renderer.onSkinTextureStatus = updateSkinTextureUi;
 if (renderer) renderer.onAnimationStatus = updateAnimationUi;
+if (renderer) renderer.onDynamicTrackStatus = updateDynamicTrackUi;
 if (renderer) renderer.onTrackCameraChange = () => { stopTrackCameraPlayback();$("#track-camera-select").value="";$("#track-camera-position-control").hidden=true;$("#track-camera-play").hidden=true;$("#track-camera-play").disabled=true;if(model&&!selectedNode)renderModelInspector(modelFile,modelSummary.nodes,modelSummary.triangles); };
 let model = null;
 let selectedNode = null;
@@ -70,6 +74,9 @@ let cspTextureFolderName = "";
 let cspTextureFolderFiles = [];
 let assetSkins = [];
 let assetSkinName = "";
+let assetSkinMetadata = null;
+let assetSkinMetadataError = "";
+const assetSkinMetadataLoadGuard = createSkinMetadataLoadGuard();
 let assetAnimations = [];
 let importedFbxAnimations = [];
 let activeAnimation = null;
@@ -81,6 +88,8 @@ let trackSurfaceConfig = null;
 let trackSurfaceBaseline = null;
 let trackSurfaceFileName = "";
 let trackAudit = null;
+let sceneDiagnostics = null;
+let sceneDiagnosticsRuns = 0;
 let trackSurfaceBindings = new Map();
 let trackCameraSets = [];
 let trackCameraChoices = [];
@@ -125,6 +134,9 @@ let nodeByPath = new Map();
 let nodeBaselines = new WeakMap();
 let geometryBaselines = new Map();
 let workspaceBaseline = null;
+let dynamicTrackSeed = 1;
+let dynamicTrackPlayFrame = 0;
+let dynamicTrackPlayLast = 0;
 
 $("#gpu").textContent = renderer ? renderer.description : "WebGL 2 is unavailable";
 document.querySelectorAll("[data-file-mirror]").forEach((input) => input.addEventListener("change", () => load([...input.files])));
@@ -165,7 +177,10 @@ $("#skin-select").addEventListener("change", async (event) => {
   const skin = assetSkins.find((candidate) => candidate.name === event.target.value);
   assetSkinName = skin?.name || "";
   status.textContent = assetSkinName ? `Loading skin ${assetSkinName}…` : modelStatusText();
-  await renderer?.setSkinFiles(skin?.files || [], assetSkinName);
+  const textureLoad = renderer?.setSkinFiles(skin?.files || [], assetSkinName), metadataLoad = configureSelectedSkinMetadata(skin);
+  if (model && !selectedNode) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
+  const [, metadataCurrent] = await Promise.all([textureLoad, metadataLoad]);
+  if (!metadataCurrent) return;
   if (modelFile) status.textContent = modelStatusText();
   if (model && !selectedNode) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
 });
@@ -179,6 +194,25 @@ $("#animation-position").addEventListener("input", (event) => {
   if (modelFile) status.textContent = modelStatusText();
 });
 $("#lod-preview").addEventListener("change", (event) => renderer?.setWorkspaceLod(event.target.value === "auto" ? null : Number(event.target.value)));
+$("#dynamic-track-seed").addEventListener("change", (event) => {
+  stopDynamicTrackPlayback();
+  dynamicTrackSeed = Math.max(0, Math.min(0xffffffff, Math.trunc(Number(event.target.value) || 0))) >>> 0;
+  event.target.value = String(dynamicTrackSeed);
+  renderer?.setDynamicTrackSeed(dynamicTrackSeed);
+  if (model && !selectedNode) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
+});
+$("#dynamic-track-play").addEventListener("click", () => {
+  if (dynamicTrackPlayFrame) { stopDynamicTrackPlayback(); return; }
+  dynamicTrackPlayLast = performance.now();
+  $("#dynamic-track-play").textContent = "Pause objects";
+  $("#dynamic-track-play").classList.add("active");
+  dynamicTrackPlayFrame = requestAnimationFrame(playDynamicTrackObjects);
+});
+$("#dynamic-track-reset").addEventListener("click", () => {
+  stopDynamicTrackPlayback();
+  renderer?.setDynamicTrackSeed(dynamicTrackSeed);
+  if (model && !selectedNode) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
+});
 $("#track-camera-select").addEventListener("change",()=>{stopTrackCameraPlayback();setTrackCameraPosition(0);applyTrackCameraPreview();if(model&&!selectedNode)renderModelInspector(modelFile,modelSummary.nodes,modelSummary.triangles);});
 $("#track-camera-position").addEventListener("input",(event)=>{stopTrackCameraPlayback();setTrackCameraPosition(Number(event.target.value)||0);applyTrackCameraPreview();if(model&&!selectedNode)renderModelInspector(modelFile,modelSummary.nodes,modelSummary.triangles);});
 $("#track-camera-play").addEventListener("click",()=>{if(trackCameraPlayFrame){stopTrackCameraPlayback();return;}const choice=trackCameraChoices.find((item)=>item.key===$("#track-camera-select").value);if(!choice?.camera.splineData)return;if(trackCameraPosition>=1)setTrackCameraPosition(0);trackCameraPlayLast=performance.now();$("#track-camera-play").textContent="Pause spline";$("#track-camera-play").classList.add("active");trackCameraPlayFrame=requestAnimationFrame(playTrackCameraSpline);});
@@ -275,6 +309,7 @@ async function load(files, workspaceOptions = {}) {
     const previewMeshes = meshes.filter(({ node }) => sceneVisibility.get(node));
     const triangles = meshes.reduce((sum, { node }) => sum + node.indices.length / 3, 0);
     modelSummary = { nodes, meshes, previewMeshes, triangles };window.__apexFbx=model.fbx||null;
+    refreshSceneDiagnostics();
     trackAudit = model.workspace?.kind === "track" ? auditTrackModel(model, trackSurfaceConfig) : null;trackSurfaceBindings=trackAudit?new Map(meshes.map(({node})=>[node,resolveTrackSurface(node.name,trackSurfaceConfig)])):new Map();window.__apexTrackAudit=trackAudit;carHierarchyAudit=model.workspace?.kind==="carLods"?auditCarHierarchy(model):null;window.__apexCarHierarchyAudit=carHierarchyAudit;refreshCarColliderAudit();
     $("#welcome").hidden = true;
     $("#stats").hidden = false;
@@ -286,7 +321,10 @@ async function load(files, workspaceOptions = {}) {
     configureAnimationChoices();
     status.textContent = modelStatusText();
     renderTree();
-    renderer?.setModel(model);refreshCarColliderPreview();configureReflectionCaptureChoices();applyVaoPatch();renderer?.setSurfaceBindings(trackSurfaceBindings);configureSurfaceOverlay();
+    const hasDynamicTrack = model.workspace?.kind === "track" && model.workspace.files.some((file) => file.dynamic);
+    if (hasDynamicTrack) dynamicTrackSeed = 1;
+    renderer?.setDynamicTrackSeed(dynamicTrackSeed, false);
+    renderer?.setModel(model);configureDynamicTrackPreview(hasDynamicTrack);refreshCarColliderPreview();configureReflectionCaptureChoices();applyVaoPatch();renderer?.setSurfaceBindings(trackSurfaceBindings);configureSurfaceOverlay();
     renderer?.setDriverCockpitMode(driverCockpitView,driverConfig?.hideObjects||[]);
     configureLodPreview();
     configureDriverViewButton();
@@ -330,12 +368,40 @@ function configureLayoutChoices() {
 
 function configureSkinChoices() {
   assetSkins = discoverAssetSkins(assetFileIndex);
+  assetSkinMetadataLoadGuard.invalidate();
   assetSkinName = "";
+  assetSkinMetadata = null;
+  assetSkinMetadataError = "";
+  window.__apexSkinMetadata = null;
   const select = $("#skin-select");
   select.replaceChildren(new Option("Embedded textures", ""), ...assetSkins.map((skin) => new Option(`Skin · ${skin.name}`, skin.name)));
   select.hidden = !assetSkins.length;
   select.value = "";
   select.title = assetSkins.length ? `${assetSkins.length} skin folders discovered` : "No skin folders discovered";
+}
+
+async function configureSelectedSkinMetadata(skin) {
+  const selection = assetSkinMetadataLoadGuard.start(skin?.name || "");
+  assetSkinMetadata = null; assetSkinMetadataError = ""; window.__apexSkinMetadata = null;
+  if (!skin) return selection.isCurrent(assetSkinName);
+  if (skin.metadataFiles.length > 1) {
+    assetSkinMetadataError = `${skin.path}/ui_skin.json is ambiguous because ${skin.metadataFiles.length} case-insensitive files match`;
+    return selection.isCurrent(assetSkinName);
+  }
+  try {
+    const entry = skin.metadataFiles[0];
+    const metadata = entry
+      ? await readSkinMetadataFile(entry.file, entry.relativePath)
+      : createSkinMetadata(`${skin.path}/ui_skin.json`);
+    if (!selection.isCurrent(assetSkinName)) return false;
+    assetSkinMetadata = metadata;
+    window.__apexSkinMetadata = assetSkinMetadata;
+  } catch (error) {
+    if (!selection.isCurrent(assetSkinName)) return false;
+    console.error(error);
+    assetSkinMetadataError = error.message;
+  }
+  return true;
 }
 
 function configureAnimationChoices() {
@@ -496,7 +562,8 @@ async function loadSelectedLayout() {
   try {
     await selectTrackSurfaceConfig(manifestEntry);
     const manifest = parseModelsIni(await manifestEntry.file.text(), manifestEntry.relativePath), base = manifestEntry.relativePath.split("/").slice(0, -1).join("/"), descriptors = [], unresolved = [];
-    for (const item of [...manifest.models, ...manifest.dynamicObjects]) {
+    const runtimeDynamicObjects = contiguousDynamicTrackObjects(manifest.dynamicObjects, manifest.warnings);
+    for (const item of [...manifest.models, ...runtimeDynamicObjects]) {
       const requested = normalizeAssetPath(`${base}/${item.file}`), match = resolveAssetFile(assetFileIndex, requested);
       if (match.status !== "resolved") unresolved.push(`${item.file} (${match.status})`);
       else descriptors.push({ file: match.file, name: item.file, position: item.position || item.positionCenter, rotation: item.rotation || [0, 0, 0], manifestIndex: item.positionCenter ? null : item.index, dynamic: item.positionCenter ? item : null });
@@ -540,6 +607,42 @@ function configureLodPreview(preserveSelection = false) {
   select.replaceChildren(new Option("LOD auto (45° camera)", "auto"), ...(carWorkspace ? workspace.files.filter((file)=>file.lod).map((file) => new Option(`LOD ${file.lod.index} · ${format(file.lod.in)}–${format(file.lod.out)} m`, String(file.lod.index))) : []));
   select.value = [...select.options].some((option) => option.value === previous) ? previous : "auto";
   renderer?.setWorkspaceLod(select.value === "auto" ? null : Number(select.value));
+}
+
+function configureDynamicTrackPreview(resetSeed = false) {
+  const active = model?.workspace?.kind === "track" && model.workspace.files.some((file) => file.dynamic);
+  const seedControl = $("#dynamic-track-seed-control"), play = $("#dynamic-track-play"), reset = $("#dynamic-track-reset"), time = $("#dynamic-track-time");
+  stopDynamicTrackPlayback();
+  seedControl.hidden = !active; play.hidden = !active; reset.hidden = !active; time.hidden = !active;
+  if (!active) return;
+  if (resetSeed) dynamicTrackSeed = 1;
+  $("#dynamic-track-seed").value = String(dynamicTrackSeed);
+  play.disabled = false; reset.disabled = false;
+  updateDynamicTrackUi(renderer?.dynamicTrackStatus);
+}
+
+function stopDynamicTrackPlayback() {
+  if (dynamicTrackPlayFrame) cancelAnimationFrame(dynamicTrackPlayFrame);
+  dynamicTrackPlayFrame = 0; dynamicTrackPlayLast = 0;
+  const button = $("#dynamic-track-play");
+  button.textContent = "Play objects"; button.classList.remove("active");
+}
+
+function playDynamicTrackObjects(now) {
+  if (!renderer?.dynamicTrackStatus?.active) { stopDynamicTrackPlayback(); return; }
+  const delta = Math.max(0, (now - dynamicTrackPlayLast) / 1000);
+  dynamicTrackPlayLast = now;
+  renderer.advanceDynamicTrack(delta);
+  dynamicTrackPlayFrame = requestAnimationFrame(playDynamicTrackObjects);
+}
+
+function updateDynamicTrackUi(value) {
+  if (!value) return;
+  window.__apexDynamicTrack = value;
+  const output = $("#dynamic-track-time"), play = $("#dynamic-track-play"), seedControl = $("#dynamic-track-seed-control");
+  output.value = `${value.elapsed.toFixed(2)} s`; output.textContent = output.value;
+  play.disabled = !value.previewInstances || !value.movingInstances;
+  seedControl.title = `Native MSVCR120 sampling · ${value.previewInstances}/${value.nativeInstances} preview instances · actual game samples also depend on earlier global rand() calls`;
 }
 
 function updateWorkspaceLodUi(value) {
@@ -637,26 +740,31 @@ function applyProjectSceneEdits() {
   applyProjectColliderEdits();
 }
 
+function refreshTrackSurfaceAuthoring(meshes = modelSummary?.meshes || []) {
+  trackAudit = model?.workspace?.kind === "track" ? auditTrackModel(model, trackSurfaceConfig) : null;
+  trackSurfaceBindings = trackAudit ? new Map(meshes.map(({ node }) => [node, resolveTrackSurface(node.name, trackSurfaceConfig)])) : new Map();
+  window.__apexTrackAudit = trackAudit;
+  renderer?.setSurfaceBindings(trackSurfaceBindings);
+  configureSurfaceOverlay();
+}
+
 function refreshHierarchyAuthoring(geometryChanged = false, colliderChanged = false) {
   if (!model) return;
   const nodes = walkNodes(model.root), meshes = nodes.filter(({ node }) => node.kind === "mesh" || node.kind === "skinnedMesh");
   sceneVisibility = computeKn5Visibility(model.root);
   const previewMeshes = meshes.filter(({ node }) => sceneVisibility.get(node)), triangles = meshes.reduce((sum, { node }) => sum + node.indices.length / 3, 0);
   modelSummary = { nodes, meshes, previewMeshes, triangles };
-  trackAudit = model.workspace?.kind === "track" ? auditTrackModel(model, trackSurfaceConfig) : null;
-  trackSurfaceBindings = trackAudit ? new Map(meshes.map(({ node }) => [node, resolveTrackSurface(node.name, trackSurfaceConfig)])) : new Map();
-  window.__apexTrackAudit = trackAudit;
+  refreshSceneDiagnostics();
+  refreshTrackSurfaceAuthoring(meshes);
   carHierarchyAudit = model.workspace?.kind === "carLods" ? auditCarHierarchy(model) : null;
   window.__apexCarHierarchyAudit = carHierarchyAudit;
   $("#stats").innerHTML = `${previewMeshes.length.toLocaleString()} renderable / ${meshes.length.toLocaleString()} meshes<br>${Math.round(triangles).toLocaleString()} triangle${Math.round(triangles) === 1 ? "" : "s"}<br>${model.materials.length} materials${model.workspace ? `<br>${model.workspace.files.length} KN5 files` : ""}`;
   $("#node-count").textContent = nodes.length;
   renderTree($("#search").value);
   if (geometryChanged) renderer?.refreshGeometry(); else renderer?.refreshHierarchy();
-  renderer?.setSurfaceBindings(trackSurfaceBindings);
   if (colliderChanged) refreshCarColliderPreview();
   if (geometryChanged || colliderChanged) refreshCarColliderAudit();
   if (geometryChanged) applyVaoPatch();
-  configureSurfaceOverlay();
   configureLodPreview(true);
   configureReflectionCaptureChoices();
 }
@@ -702,25 +810,39 @@ function commitEditorChange(label, mutate) {
   mutate(next);
   const normalized = normalizeEditorProject(next), after = serializeEditorProject(normalized);
   if (after === before) return false;
-  const geometryChanged = JSON.stringify(normalized.geometryEdits) !== JSON.stringify(editorProject.geometryEdits);
-  const colliderChanged = colliderProjectState(normalized) !== colliderProjectState(editorProject);
-  const sceneChanged = geometryChanged || colliderChanged || JSON.stringify(normalized.nodeEdits) !== JSON.stringify(editorProject.nodeEdits) || JSON.stringify(normalized.workspaceEdits) !== JSON.stringify(editorProject.workspaceEdits) || JSON.stringify(normalized.surfaceEdits) !== JSON.stringify(editorProject.surfaceEdits);
+  const changes = classifyEditorProjectChanges(editorProject, normalized);
   undoStack.push({ label, snapshot: before });
   if (undoStack.length > 100) undoStack.shift();
   redoStack = [];
   editorProject = normalized;
-  if (sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged,colliderChanged); }
+  if (changes.sceneChanged) {
+    applyProjectSceneEdits();
+    if (changes.workspaceChanged && model?.workspace?.files.some((file) => file.dynamic)) {
+      stopDynamicTrackPlayback();
+      renderer?.setDynamicTrackSeed(dynamicTrackSeed);
+    }
+    refreshHierarchyAuthoring(changes.geometryChanged, changes.colliderChanged);
+  }
+  else if (changes.surfaceChanged) { applyProjectSurfaceEdits(); refreshTrackSurfaceAuthoring(); }
   refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
-  if (sceneChanged && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
+  if ((changes.sceneChanged || changes.surfaceChanged || changes.skinChanged) && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
   return true;
 }
 
 function restoreEditorSnapshot(snapshot) {
-  const restored = normalizeEditorProject(JSON.parse(snapshot)), geometryChanged = JSON.stringify(restored.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits), colliderChanged = colliderProjectState(restored) !== colliderProjectState(editorProject), sceneChanged = geometryChanged || colliderChanged || JSON.stringify(restored.nodeEdits) !== JSON.stringify(editorProject?.nodeEdits) || JSON.stringify(restored.workspaceEdits) !== JSON.stringify(editorProject?.workspaceEdits) || JSON.stringify(restored.surfaceEdits) !== JSON.stringify(editorProject?.surfaceEdits);
+  const restored = normalizeEditorProject(JSON.parse(snapshot)), changes = classifyEditorProjectChanges(editorProject, restored);
   editorProject = restored;
-  if (sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged,colliderChanged); }
+  if (changes.sceneChanged) {
+    applyProjectSceneEdits();
+    if (changes.workspaceChanged && model?.workspace?.files.some((file) => file.dynamic)) {
+      stopDynamicTrackPlayback();
+      renderer?.setDynamicTrackSeed(dynamicTrackSeed);
+    }
+    refreshHierarchyAuthoring(changes.geometryChanged, changes.colliderChanged);
+  }
+  else if (changes.surfaceChanged) { applyProjectSurfaceEdits(); refreshTrackSurfaceAuthoring(); }
   refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
-  if (sceneChanged && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
+  if ((changes.sceneChanged || changes.surfaceChanged || changes.skinChanged) && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
 }
 
 function undoEditorChange() {
@@ -738,7 +860,7 @@ function redoEditorChange() {
 }
 
 function updateEditorButtons() {
-  const edits = editorProjectEditCount(editorProject), cspEdits = editorProjectCspEditCount(editorProject), kn5Edits=edits-colliderProjectEditCount(editorProject), available = Boolean(editorProject && model);
+  const cspEdits = editorProjectCspEditCount(editorProject), kn5Edits = editorProjectKn5EditCount(editorProject), available = Boolean(editorProject && model);
   $("#undo").disabled = !undoStack.length; $("#undo").title = undoStack.length ? `Undo ${undoStack.at(-1).label}` : "Nothing to undo";
   $("#redo").disabled = !redoStack.length; $("#redo").title = redoStack.length ? `Redo ${redoStack.at(-1).label}` : "Nothing to redo";
   $("#save-project").disabled = !available;
@@ -799,9 +921,11 @@ async function loadEditorProject(file) {
     const loaded = normalizeEditorProject(JSON.parse(await file.text()));
     if (loaded.asset.size && loaded.asset.size !== modelFile.size) throw new Error(`Project expects a ${loaded.asset.size}-byte KN5, but ${modelFile.name} is ${modelFile.size} bytes`);
     if (loaded.asset.kn5Version && loaded.asset.kn5Version !== model.version) throw new Error(`Project expects KN5 v${loaded.asset.kn5Version}, but this model is v${model.version}`);
-    const geometryChanged = JSON.stringify(loaded.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits), colliderChanged = colliderProjectState(loaded) !== colliderProjectState(editorProject);
+    const changes = classifyEditorProjectChanges(editorProject, loaded);
     editorProject = loaded; undoStack = []; redoStack = [];
-    applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged,colliderChanged); refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
+    if (changes.sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(changes.geometryChanged, changes.colliderChanged); }
+    else if (changes.surfaceChanged) { applyProjectSurfaceEdits(); refreshTrackSurfaceAuthoring(); }
+    refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
     if (!selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
   } catch (error) {
     console.error(error); status.textContent = `Could not open project: ${error.message}`;
@@ -900,7 +1024,7 @@ function renderModelInspector(file, nodes, triangles) {
   inspector.className = "inspector";
   const protection = model.encryption ? `<div class="section"><h3>CSP-protected payload</h3>${kv("Format", model.encryption.format)}${kv("Payload", `${(model.encryption.payloadBytes / 1048576).toFixed(2)} MB`)}${kv("Records", model.encryption.recordCount.toLocaleString())}${kv("Protected textures", model.encryption.protectedTextures.length)}${kv("Protected meshes", model.encryption.protectedMeshes.length)}${kv("Structure", model.encryption.valid ? "Recognized" : `Invalid: ${model.encryption.error}`)}<span class="empty">The public KN5 scene is available. Protected geometry and textures remain placeholders until a compatible payload decoder is available.</span></div>` : "";
   inspector.innerHTML = `<div class="section"><h3>Model</h3>${kv("File", file.name)}${kv("Format", `KN5 v${model.version}`)}${kv("Size", `${(file.size / 1048576).toFixed(2)} MB`)}${kv("Nodes", nodes.length.toLocaleString())}${kv("Triangles", Math.round(triangles).toLocaleString())}${kv("Textures", model.textures.length)}${kv("Parsed", model.bytesRead === model.byteLength ? "Complete" : model.encryption?.valid ? "Public scene + protected payload" : `${model.bytesRead} / ${model.byteLength}`)}${kv("Authored edits", editorProjectEditCount(editorProject))}</div>${protection}${cspEvaluation ? `<div class="section"><h3>CSP configuration</h3>${kv("File", cspConfig ? cspFileName : "Apex authored edits")}${kv("Sections", activeCspConfig?.sections.length || 0)}${kv("Expanded templates", cspConfig?.expandedTemplates?.length || 0)}${kv("Matched override sections", cspEvaluation.matchedSections)}${kv("Overridden meshes", cspEvaluation.nodeOverrides.size)}${kv("Custom-emissive meshes", cspEvaluation.customEmissiveMeshes)}${kv("Matched light sections", cspEvaluation.matchedLightSections)}${kv("Light instances", cspEvaluation.lights.length)}${kv("Active light instances", cspEvaluation.lights.filter((light) => Math.max(...light.color.map(Math.abs)) > 1e-5).length)}${kv("Track light occluders", cspEvaluation.trackOccluders?.length || 0)}${kv("Unresolved includes", cspEvaluation.unresolvedIncludes.length)}${cspEvaluation.unresolvedIncludes.map((name) => `<div class="resource"><span>${escapeHtml(name)}</span></div>`).join("")}</div>${cspEvaluation.usedConditions.size ? `<div class="section"><h3>Condition preview</h3>${[...cspEvaluation.usedConditions].sort().map((name) => conditionHtml(name, cspEvaluation.conditions.get(name) ?? 0)).join("")}</div>` : ""}${cspEvaluation.usedInputs.size ? `<div class="section"><h3>Input preview</h3>${[...cspEvaluation.usedInputs].sort(([a], [b]) => a.localeCompare(b)).map(([name, input]) => inputHtml(name, input)).join("")}</div>` : ""}${cspEvaluation.lights.length ? `<div class="section"><h3>CSP lights</h3>${cspEvaluation.lights.slice(0, 16).map(lightHtml).join("")}${cspEvaluation.lights.length > 16 ? `<span class="empty">${(cspEvaluation.lights.length - 16).toLocaleString()} more light instances</span>` : ""}</div>` : ""}` : ""}<div class="section"><h3>Materials</h3>${model.materials.map((m, i) => `<div class="resource material-link" data-material="${i}"><strong>${escapeHtml(m.name)}</strong><span>${escapeHtml(m.shader)}</span></div>`).join("")}</div>`;
-  const supplementalHtml = fbxImportInspectorHtml() + workspaceInspectorHtml() + packedDataInspectorHtml() + carHierarchyInspectorHtml() + carColliderInspectorHtml() + driverInspectorHtml() + trackCameraInspectorHtml() + trackValidationInspectorHtml() + shaderProfilesInspectorHtml() + vaoInspectorHtml() + seasonalInspectorHtml() + weatherLightingInspectorHtml() + reflectionCaptureInspectorHtml() + lightingInspectorHtml() + grassFxInspectorHtml() + rainFxInspectorHtml() + animationInspectorHtml() + skinTextureInspectorHtml() + externalTextureInspectorHtml(), materialSection = inspector.querySelector(".section:last-child");
+  const supplementalHtml = fbxImportInspectorHtml() + workspaceInspectorHtml() + packedDataInspectorHtml() + carHierarchyInspectorHtml() + carColliderInspectorHtml() + driverInspectorHtml() + trackCameraInspectorHtml() + sceneDiagnosticsInspectorHtml() + trackValidationInspectorHtml() + shaderProfilesInspectorHtml() + vaoInspectorHtml() + seasonalInspectorHtml() + weatherLightingInspectorHtml() + reflectionCaptureInspectorHtml() + lightingInspectorHtml() + grassFxInspectorHtml() + rainFxInspectorHtml() + animationInspectorHtml() + skinMetadataInspectorHtml() + skinTextureInspectorHtml() + externalTextureInspectorHtml(), materialSection = inspector.querySelector(".section:last-child");
   if (supplementalHtml && materialSection) materialSection.insertAdjacentHTML("beforebegin", supplementalHtml);
   inspector.querySelectorAll("[data-material]").forEach((el) => el.addEventListener("click", () => renderMaterialInspector(model.materials[Number(el.dataset.material)])));
   inspector.querySelectorAll("[data-condition]").forEach((input) => input.addEventListener("input", () => {
@@ -921,6 +1045,7 @@ function renderModelInspector(file, nodes, triangles) {
   }));
   bindWorkspaceEditors();
   bindSurfaceEditors();
+  bindSkinMetadataEditors();
   bindColliderEditors();
 }
 
@@ -977,6 +1102,17 @@ function skinTextureInspectorHtml() {
   return `<div class="section"><h3>Skin textures</h3>${kv("Discovered skins", assetSkins.length)}${kv("Selected", skin?.name || "Embedded textures")}${skin?.name ? `${kv("Files in skin", skin.available)}${kv("Matched KN5 textures", skin.matched)}${kv("Loaded", skin.ready)}${kv("Pending", skin.pending)}${kv("Inherited from KN5", skin.inherited)}${kv("Ambiguous", skin.ambiguous)}${kv("Unsupported", skin.unsupported)}${skin.replacedNames.map((name) => `<div class="resource"><span>${escapeHtml(name)}</span></div>`).join("")}` : ""}</div>`;
 }
 
+function skinMetadataInspectorHtml() {
+  if (!assetSkinName) return "";
+  if (assetSkinMetadataError) return `<div class="section"><h3>Skin metadata</h3>${kv("Selected", assetSkinName)}<div class="resource validation-error"><strong>ui_skin.json</strong><span>${escapeHtml(assetSkinMetadataError)}</span></div></div>`;
+  if (!assetSkinMetadata) return "";
+  const match = matchingProjectEdit(editorProject?.skinEdits, assetSkinName), edit = match?.value || {}, metadata = effectiveSkinMetadata(assetSkinMetadata, edit), sourceExists = assetSkinMetadata.byteLength > 0;
+  const labels = { skinname: "Skin name", drivername: "Driver", country: "Country", team: "Team", number: "Number" };
+  const fields = SKIN_METADATA_TEXT_FIELDS.map((key) => `<div class="author-field skin-metadata-field"><span>${labels[key]}</span><input aria-label="${labels[key]}" class="${edit[key] !== undefined ? "authored" : ""}" data-edit-skin-text="${key}" value="${escapeAttribute(metadata[key])}" maxlength="4096"><button class="mini" data-reset-skin-field="${key}" ${edit[key] !== undefined ? "" : "disabled"}>Reset</button></div>`).join("");
+  const priority = metadata.priority === null ? "" : String(metadata.priority);
+  return `<div class="section"><h3>Skin metadata${Object.keys(edit).length ? ` · <span class="edit-count">${Object.keys(edit).length} edits</span>` : ""}</h3>${kv("Selected", assetSkinName)}${kv("Source", sourceExists ? assetSkinMetadata.source : "New ui_skin.json")}${fields}<div class="author-field skin-metadata-field"><span>Priority</span><input aria-label="Priority" class="${edit.priority !== undefined ? "authored" : ""}" data-edit-skin-priority type="number" min="0" step="1" value="${escapeAttribute(priority)}" placeholder="Not set"><button class="mini" data-reset-skin-field="priority" ${edit.priority !== undefined ? "" : "disabled"}>Reset</button></div>${assetSkinMetadata.warnings.map((warning) => `<div class="resource"><strong>Metadata warning</strong><span>${escapeHtml(warning)}</span></div>`).join("")}<span class="empty">Unknown source fields are retained. Metadata exports separately from KN5 and CSP files.</span><div class="section-actions"><button class="mini" data-export-skin-metadata>Export ui_skin.json</button><button class="mini" data-reset-skin-metadata ${Object.keys(edit).length ? "" : "disabled"}>Reset metadata edits</button></div></div>`;
+}
+
 function updateAnimationUi(value) {
   const select = $("#animation-select");
   if(vaoBinding)window.__apexVaoAudit=renderer?.vaoStatus;
@@ -998,7 +1134,7 @@ function workspaceEditCount() {
 function workspaceInspectorHtml() {
   const workspace = model?.workspace;
   if (!workspace) return "";
-  const isCar = workspace.kind === "carLods", count = workspaceEditCount(), edits = editorProject?.workspaceEdits || {};
+  const isCar = workspace.kind === "carLods", count = workspaceEditCount(), edits = editorProject?.workspaceEdits || {},dynamicStatus=renderer?.dynamicTrackStatus;
   const warnings = [...new Set([...(workspace.warnings || []), ...(workspace.authoredWarnings || [])])];
   const switchField = (key, label, current) => `<label class="author-field"><span>${label}</span><input class="${edits[key] !== undefined ? "authored" : ""}" data-edit-workspace-switch="${key}" value="${edits[key] ?? ""}" placeholder="Inherit: ${escapeHtml(String(current ?? "not set"))}"></label>`;
   const files = workspace.files.map((file, index) => {
@@ -1014,9 +1150,11 @@ function workspaceInspectorHtml() {
       : file.dynamic
         ? `${dynamicNumber("probability", "Probability %", file.dynamic.probability)}${dynamicVector("multiplicity", "Multiplicity min, max", file.dynamic.multiplicity, 2)}${dynamicText("posMode", "Position mode", file.dynamic.posMode)}${dynamicVector("positionCenter", "Position center", file.dynamic.positionCenter)}${dynamicVector("positionRange", "Position range ±", file.dynamic.positionRange)}${dynamicText("velMode", "Velocity mode", file.dynamic.velMode)}${dynamicVector("velocityBase", "Velocity base", file.dynamic.velocityBase)}${dynamicVector("velocityRange", "Velocity range ±", file.dynamic.velocityRange)}${dynamicText("playWav", "Audio file", file.dynamic.playWav)}`
         : `${vector("position", "Position", file.position)}${vector("rotation", "Rotation °", file.rotation)}`;
-    return `<div class="resource"><strong>${file.auxiliary === "driver" ? "Driver · " : file.auxiliary === "reflectionEnvironment" ? "Reflection environment · " : isCar && file.lod ? `LOD ${file.lod.index} · ` : file.dynamic ? `Dynamic ${file.dynamic.index} · ` : ""}${escapeHtml(file.name)}</strong><span>${isCar && file.lod ? `${format(file.lod.in)} ≤ distance &lt; ${format(file.lod.out)} m · ` : file.auxiliary === "reflectionEnvironment" ? "Cubemap capture subtree · " : file.auxiliary ? "Shared auxiliary · " : ""}KN5 v${file.version} · ${(file.size / 1048576).toFixed(2)} MB · ${file.materials} materials · ${file.textures} textures${file.position.some((value) => value !== 0) || file.rotation.some((value) => value !== 0) ? ` · position ${file.position.map(format).join(", ")} · rotation ${file.rotation.map(format).join(", ")}` : ""}${file.dynamic ? ` · deterministic center preview · ${format(file.dynamic.probability)}% · velocity ${file.dynamic.velocityBase.map(format).join(", ")} ± ${file.dynamic.velocityRange.map(format).join(", ")}` : ""}</span>${controls}${editable ? `<div class="section-actions"><button class="mini" data-reset-workspace-file="${index}" ${edit ? "" : "disabled"}>Reset file edits</button></div>` : ""}</div>`;
+    const dynamicResult=file.dynamic?dynamicStatus?.results.find((result)=>result.fileIndex===index):null;
+    return `<div class="resource"><strong>${file.auxiliary === "driver" ? "Driver · " : file.auxiliary === "reflectionEnvironment" ? "Reflection environment · " : isCar && file.lod ? `LOD ${file.lod.index} · ` : file.dynamic ? `Dynamic ${file.dynamic.index} · ` : ""}${escapeHtml(file.name)}</strong><span>${isCar && file.lod ? `${format(file.lod.in)} ≤ distance &lt; ${format(file.lod.out)} m · ` : file.auxiliary === "reflectionEnvironment" ? "Cubemap capture subtree · " : file.auxiliary ? "Shared auxiliary · " : ""}KN5 v${file.version} · ${(file.size / 1048576).toFixed(2)} MB · ${file.materials} materials · ${file.textures} textures${file.position.some((value) => value !== 0) || file.rotation.some((value) => value !== 0) ? ` · position ${file.position.map(format).join(", ")} · rotation ${file.rotation.map(format).join(", ")}` : ""}${file.dynamic ? ` · native seed sample ${dynamicResult?.accepted?`${dynamicResult.previewMultiplicity}/${dynamicResult.sampledMultiplicity} instances`:"not spawned"} · ${format(file.dynamic.probability)}% · velocity ${file.dynamic.velocityBase.map(format).join(", ")} ± ${file.dynamic.velocityRange.map(format).join(", ")}` : ""}</span>${controls}${editable ? `<div class="section-actions"><button class="mini" data-reset-workspace-file="${index}" ${edit ? "" : "disabled"}>Reset file edits</button></div>` : ""}</div>`;
   }).join("");
-  return `<div class="section"><h3>${isCar ? "Car LOD workspace" : "Track workspace"}${count ? ` · <span class="edit-count">${count} edit${count === 1 ? "" : "s"}</span>` : ""}</h3>${kv("Manifest", workspace.manifest || "Manual selection")}${kv("Files", workspace.files.length)}${!isCar ? kv("Dynamic objects", workspace.files.filter((file) => file.dynamic).length) : ""}${kv("Versions", workspace.versions.join(", "))}${isCar ? `${switchField("cockpitHrDistance", "Cockpit HR", workspaceBaseline?.cockpitHrDistance)}${switchField("driverHrDistance", "Driver HR", workspaceBaseline?.driverHrDistance)}` : ""}${kv("Texture name collisions", workspace.textureCollisions.length)}${kv("Protected files", workspace.protectedFiles.length)}${kv("Warnings", warnings.length)}${files}${warnings.slice(0, 8).map((warning) => `<div class="resource validation-warning"><strong>Manifest warning</strong><span>${escapeHtml(warning)}</span></div>`).join("")}<div class="section-actions"><button class="mini" data-export-workspace>Export ${isCar ? "lods.ini" : "models.ini"}</button><button class="mini" data-reset-workspace ${count ? "" : "disabled"}>Reset manifest edits</button></div></div>`;
+  const dynamicSummary=!isCar&&dynamicStatus?.active?`${kv("Dynamic seed",dynamicStatus.seed)}${kv("Spawned instances",`${dynamicStatus.previewInstances} preview / ${dynamicStatus.nativeInstances} native`)}${kv("Moving instances",dynamicStatus.movingInstances)}${kv("Shared GPU geometry",`${dynamicStatus.gpuGeometries} uploads / ${dynamicStatus.renderItems} render items`)}${kv("Motion time",`${format(dynamicStatus.elapsed)} s`)}${dynamicStatus.warnings.map((warning)=>`<div class="resource validation-warning"><strong>Preview limit</strong><span>${escapeHtml(warning)}</span></div>`).join("")}<span class="empty">The preview uses the native MSVCR120 generator and movement equations. A game session can use a different sample because earlier systems share the global random sequence.</span>`:"";
+  return `<div class="section"><h3>${isCar ? "Car LOD workspace" : "Track workspace"}${count ? ` · <span class="edit-count">${count} edit${count === 1 ? "" : "s"}</span>` : ""}</h3>${kv("Manifest", workspace.manifest || "Manual selection")}${kv("Files", workspace.files.length)}${!isCar ? kv("Dynamic objects", workspace.files.filter((file) => file.dynamic).length) : ""}${dynamicSummary}${kv("Versions", workspace.versions.join(", "))}${isCar ? `${switchField("cockpitHrDistance", "Cockpit HR", workspaceBaseline?.cockpitHrDistance)}${switchField("driverHrDistance", "Driver HR", workspaceBaseline?.driverHrDistance)}` : ""}${kv("Texture name collisions", workspace.textureCollisions.length)}${kv("Protected files", workspace.protectedFiles.length)}${kv("Warnings", warnings.length)}${files}${warnings.slice(0, 8).map((warning) => `<div class="resource validation-warning"><strong>Manifest warning</strong><span>${escapeHtml(warning)}</span></div>`).join("")}<div class="section-actions"><button class="mini" data-export-workspace>Export ${isCar ? "lods.ini" : "models.ini"}</button><button class="mini" data-reset-workspace ${count ? "" : "disabled"}>Reset manifest edits</button></div></div>`;
 }
 
 function packedDataInspectorHtml() {
@@ -1062,6 +1200,22 @@ function shaderProfilesInspectorHtml(){const value=renderer?.shaderProfileStatus
 function lightingInspectorHtml(){const value=renderer?.shadowStatus;if(!value)return "";return `<div class="section"><h3>Directional shadows</h3>${kv("Preview",value.enabled?"Enabled":"Disabled")}${kv("Shadow maps",`${value.cascades} × ${value.mapSize}²`)}${kv("Camera splits",value.splits.map((split)=>`${split} m`).join(" · "))}${kv("Native biases",value.biases.map((bias)=>bias.toExponential()).join(" · "))}${kv("Mesh casters",value.casters.toLocaleString())}${value.grassInstances?kv("GrassFX casters",value.grassInstances.toLocaleString()):""}${kv("Caster triangles",value.triangles.toLocaleString())}<span class="empty">Three camera-space cascades reproduce ksEditor’s shipped 2/12/50 m split endpoints, 2048 map size, per-cascade bias, mesh cast-shadow flags, diffuse-alpha cutouts, and tapered instanced GrassFX blades.</span></div>`;}
 function weatherLightingInspectorHtml(){const value=renderer?.lightingStatus;if(!value)return "";return `<div class="section"><h3>Weather lighting</h3>${kv("Preset",value.name)}${kv("Source",value.source)}${kv("Sun",`${format(value.heading)}° heading · ${format(value.height)}° height`)}${kv("Curve blend",format(value.angleMix))}${kv("Sun HDR",value.sunColor.map(format).join(", "))}${kv("Ambient HDR",value.ambientColor.map(format).join(", "))}${kv("Sky HDR",value.skyColor.map(format).join(", "))}${kv("Fog",`${value.fogDistance.toLocaleString()} m · ${format(value.fogBlend)} blend`)}${kv("Exposure",value.autoExposure?`${format(value.effectiveExposure)} auto · ${value.exposureMin}–${value.exposureMax}`:`${format(value.effectiveExposure)} manual`)}${kv("Display",value.toneMap)}${kv("Glare",value.glareEnabled?`Yebis quality ${value.glareQuality} · ${value.bloomLevels} bloom levels · threshold ${format(value.bloomThreshold)}`:"Disabled on RGBA8 fallback")}${kv("Bloom source",`${format((value.bloomSourceScale||0)*100)}% · composite ${format(value.bloomCompositeScale||0)}`)}${kv("Bloom kernel",`${value.bloomKernel} · ${value.bloomKernelSamples.join("/")} samples · σ ${value.bloomKernelSigmas.map(format).join("/")}`)}${kv("Dither",value.dither?"Recovered 8-bit output scale":"Disabled")}${kv("HDR target",value.hdr?`${value.samples}× MSAA · RGBA16F`:"RGBA8 fallback")}<span class="empty">Version-3 curve colors use the engine’s RGB × intensity / 255 conversion and native sun-angle interpolation. The Yebis path measures exposure before glare, then applies threshold bloom, the display curve, screen composition, reciprocal gamma, and output dither.</span></div>`;}
 function reflectionCaptureInspectorHtml(){const value=renderer?.sceneStatus?.reflections;if(!value)return "";const preview=!value.enabled?"Procedural fallback · live capture disabled":value.ready?"Live scene cubemap":"Procedural fallback",mode={environment:"Showroom environment",explicit:"Selected subtree",scene:"Whole scene",fallback:"Automatic fallback",disabled:"Disabled"}[value.selectionMode]||"Automatic";return `<div class="section"><h3>Scene reflections</h3>${kv("Preview",preview)}${kv("Capture selection",value.rootName?`${mode} · ${value.rootName}`:mode)}${kv("Capture target",`${value.size}² · ${value.faces||0}/6 valid faces`)}${value.ready?`${kv("Material path",value.materialPath||"Shared viewport shader")}${kv("Capture meshes",`${value.opaqueMeshes||0} opaque · ${value.transparentMeshes||0} transparent`)}${kv("Probe shadows",value.directionalShadows?`3 cascades · ${value.shadowCasters||0} mesh casters`:"Disabled")}${kv("GrassFX",value.grassFx?`${(value.grassInstances||0).toLocaleString()} lit instances${value.grassCastsShadows?" · cast/receive shadows":""}`:"Not in selected subtree")}${kv("Latest update",`${value.updatedFaces} face${value.updatedFaces===1?"":"s"} · next ${value.nextFace}`)}${kv("Capture geometry",`${value.draws.toLocaleString()} draws · ${Math.round(value.triangles).toLocaleString()} triangles`)}${kv("CSP lights",value.cspLights||0)}${kv("Clip range",`${KS_EDITOR_CUBEMAP.nearPlane}–${value.farPlane} m`)}${kv("CPU submission",`${format(value.captureMilliseconds)} ms`)}`:""}${value.reason?kv("Fallback reason",value.reason):""}<span class="empty">The capture follows ksEditor’s 512², 90° six-face camera at the active view position, initializes all faces, then refreshes one face per draw. It uses the viewport material path, probe-centered directional cascades, and weather-lit whole-track GrassFX with instanced shadow casting. Reflection sampling and refraction are disabled to prevent recursive feedback.</span></div>`;}
+
+function refreshSceneDiagnostics() {
+  sceneDiagnostics = model?.workspace?.kind === "track" ? analyzeScene(model, { sourceName: modelFile?.name, excludeAuxiliary: true }) : null;
+  if (sceneDiagnostics) sceneDiagnosticsRuns++;
+  window.__apexSceneDiagnostics = sceneDiagnostics;
+  window.__apexSceneDiagnosticsRuns = sceneDiagnosticsRuns;
+}
+
+function sceneDiagnosticsInspectorHtml() {
+  if (!sceneDiagnostics) return "";
+  const value = sceneDiagnostics, totals = value.totals, bounds = value.bounds;
+  const vector = (items) => items?.map((item) => `${format(item)} m`).join(" × ") || "No geometry";
+  const files = value.files.slice(0, 12).map((file) => `<div class="resource"><strong>${escapeHtml(file.name)}</strong><span>${file.meshes.toLocaleString()} mesh records · ${file.triangles.toLocaleString()} triangles · ${file.vertices.toLocaleString()} vertices · ${formatBytes(file.geometryBytes)} vertex/index data · ${formatBytes(file.textureBytes)} textures · span ${vector(file.bounds?.size)}</span></div>`).join("");
+  const meshes = value.largestMeshes.slice(0, 10).map((mesh) => `<div class="resource"><strong>${escapeHtml(mesh.name)} · ${escapeHtml(mesh.file)}</strong><span>${mesh.triangles.toLocaleString()} triangles · ${mesh.vertices.toLocaleString()} vertices · ${formatBytes(mesh.geometryBytes)} · ${escapeHtml(mesh.material)} · farthest point ${format(mesh.furthestDistance)} m</span></div>`).join("");
+  return `<div class="section"><h3>Track scene diagnostics</h3>${kv("Source files",value.files.length.toLocaleString())}${kv("Hierarchy nodes",totals.nodes.toLocaleString())}${kv("Mesh records",`${totals.visibleMeshes.toLocaleString()} active-branch visible / ${totals.meshes.toLocaleString()} total`)}${kv("Static / skinned",`${totals.staticMeshes.toLocaleString()} / ${totals.skinnedMeshes.toLocaleString()}`)}${kv("Vertices",totals.vertices.toLocaleString())}${kv("Triangles",totals.triangles.toLocaleString())}${kv("Materials",`${totals.usedMaterials.toLocaleString()} used / ${totals.materials.toLocaleString()} loaded`)}${kv("Embedded textures",`${totals.textures.toLocaleString()} source / ${totals.effectiveTextures.toLocaleString()} effective`)}${kv("Vertex/index payload",formatBytes(totals.geometryBytes))}${kv("Texture payload",formatBytes(totals.textureBytes))}${kv("Source KN5 payload",formatBytes(totals.sourceBytes))}${kv("Hierarchy depth",totals.maxDepth.toLocaleString())}${kv("World span",vector(bounds?.size))}${kv("World centre",bounds ? bounds.center.map((item) => `${format(item)} m`).join(", ") : "No geometry")}${kv("Centre from origin",bounds ? `${format(bounds.centerDistance)} m` : "No geometry")}${totals.emptyMeshes?kv("Empty mesh records",totals.emptyMeshes.toLocaleString()):""}${totals.invalidMaterialMeshes?kv("Invalid material links",totals.invalidMaterialMeshes.toLocaleString()):""}<h3>File hotspots</h3>${files}${value.files.length>12?`<span class="empty">${value.files.length-12} more source files</span>`:""}<h3>Largest meshes</h3>${meshes}<span class="empty">Counts and bounds come from parsed track KN5 records after workspace and hierarchy transforms. Auxiliary showrooms are excluded. These are measurements, not unsupported game-performance limits.</span></div>`;
+}
 
 function trackValidationInspectorHtml() {
   if (!trackAudit) return "";
@@ -1351,6 +1505,55 @@ function editSurface(project, position, mutate) {
   mutate(edit); project.surfaceEdits[key] = edit;
 }
 
+function editSkinMetadata(project, skinName, mutate) {
+  project.skinEdits ||= Object.create(null);
+  const existing = matchingProjectEdit(project.skinEdits, skinName), key = existing?.key || skinName, edit = existing?.value || {};
+  mutate(edit);
+  project.skinEdits[key] = edit;
+}
+
+function bindSkinMetadataEditors() {
+  if (assetSkinMetadataError) return;
+  const target = captureSkinMetadataEditorTarget(assetSkinName, assetSkinMetadata);
+  if (!target) return;
+  inspector.querySelectorAll("[data-edit-skin-text]").forEach((input) => {
+    const commit = () => {
+      const key = input.dataset.editSkinText, value = input.value;
+      commitEditorChange(`Set ${target.name} ${key}`, (project) => editSkinMetadata(project, target.name, (edit) => { edit[key] = value; }));
+    };
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } });
+    input.addEventListener("change", commit);
+  });
+  inspector.querySelector("[data-edit-skin-priority]")?.addEventListener("change", (event) => {
+    try {
+      const text = event.target.value.trim();
+      if (!text) {
+        commitEditorChange(`Reset ${target.name} priority`, (project) => editSkinMetadata(project, target.name, (edit) => { delete edit.priority; }));
+        return;
+      }
+      const value = Number(text);
+      if (!Number.isSafeInteger(value) || value < 0) throw new Error("Skin priority must be a nonnegative integer");
+      commitEditorChange(`Set ${target.name} priority`, (project) => editSkinMetadata(project, target.name, (edit) => { edit.priority = value; }));
+    } catch (error) { event.target.classList.add("invalid"); status.textContent = error.message; }
+  });
+  inspector.querySelectorAll("[data-reset-skin-field]").forEach((button) => button.addEventListener("click", () => {
+    const key = button.dataset.resetSkinField;
+    commitEditorChange(`Reset ${target.name} ${key}`, (project) => editSkinMetadata(project, target.name, (edit) => { delete edit[key]; }));
+  }));
+  inspector.querySelector("[data-reset-skin-metadata]")?.addEventListener("click", () => commitEditorChange(`Reset ${target.name} metadata`, (project) => {
+    const existing = matchingProjectEdit(project.skinEdits, target.name);
+    if (existing) delete project.skinEdits[existing.key];
+  }));
+  inspector.querySelector("[data-export-skin-metadata]")?.addEventListener("click", () => {
+    try {
+      const edit = matchingProjectEdit(editorProject?.skinEdits, target.name)?.value, text = serializeSkinMetadata(target.metadata, edit);
+      downloadText("ui_skin.json", text, "application/json");
+      window.__apexLastSkinMetadataExport = { name: "ui_skin.json", skin: target.name, text, metadata: JSON.parse(text) };
+      status.textContent = `Exported ${target.name}/ui_skin.json`;
+    } catch (error) { console.error(error); status.textContent = `Could not export ui_skin.json: ${error.message}`; }
+  });
+}
+
 function bindSurfaceEditors() {
   if (!trackSurfaceConfig) return;
   inspector.querySelectorAll("[data-edit-surface-number]").forEach((input) => {
@@ -1565,7 +1768,14 @@ function bindMaterialEditors(material) {
 
 function kv(key, value) { return `<div class="kv"><span>${escapeHtml(String(key))}</span><span>${escapeHtml(String(value))}</span></div>`; }
 function format(value) { return Number.isFinite(value) ? Number(value.toFixed(4)).toString() : "—"; }
+function formatBytes(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes < 1024) return `${bytes.toLocaleString()} B`;
+  if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / 1048576).toFixed(2)} MiB`;
+}
 function escapeHtml(value) { const el = document.createElement("span"); el.textContent = value; return el.innerHTML; }
+function escapeAttribute(value) { return escapeHtml(String(value)).replaceAll('"', "&quot;").replaceAll("'", "&#39;"); }
 
 function createRenderer(canvas) {
   const gl = canvas.getContext("webgl2", { antialias: true, alpha: false });
@@ -1689,7 +1899,7 @@ function createRenderer(canvas) {
     void main(){vec2 uv=region.xy+vUv*region.zw;float result=0.0,total=0.0;if(filterMode==1){const float weights[4]=float[4](.2496147,.1924633,.0514763,.0064457);const float offsets[4]=float[4](.6443417,2.3788476,4.2911105,6.2166071);for(int i=0;i<4;i++){vec2 o=pixelStep*offsets[i];result+=(readValue(uv+o)+readValue(uv-o))*weights[i];}}else{const float weights[2]=float[2](.4490798,.0509202);const float offsets[2]=float[2](.5380487,2.0627797);for(int i=0;i<2;i++){vec2 o=pixelStep*offsets[i];float a=readValue(uv+o),b=readValue(uv-o),wa=weights[i],wb=weights[i];if(filterMode==2){wa*=1.0+a*.1;wb*=1.0+b*.1;}result+=a*wa+b*wb;total+=wa+wb;}if(filterMode==2)result/=max(.000001,total);}color=vec4(result,0,0,1);}`);
   const localShadowBlurLocations={sourceTexture:gl.getUniformLocation(localShadowBlurProgram,"sourceTexture"),region:gl.getUniformLocation(localShadowBlurProgram,"region"),pixelStep:gl.getUniformLocation(localShadowBlurProgram,"pixelStep"),filterMode:gl.getUniformLocation(localShadowBlurProgram,"filterMode")};
   const shadowTargets=Array.from({length:3},()=>{const texture=gl.createTexture(),framebuffer=gl.createFramebuffer();gl.bindTexture(gl.TEXTURE_2D,texture);gl.texImage2D(gl.TEXTURE_2D,0,gl.DEPTH_COMPONENT24,KS_SHADOW_MAP_SIZE,KS_SHADOW_MAP_SIZE,0,gl.DEPTH_COMPONENT,gl.UNSIGNED_INT,null);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.bindFramebuffer(gl.FRAMEBUFFER,framebuffer);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.TEXTURE_2D,texture,0);gl.drawBuffers([gl.NONE]);gl.readBuffer(gl.NONE);if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw new Error("Directional shadow framebuffer is incomplete");return {texture,framebuffer};});
-  const localShadowTexture=gl.createTexture(),localShadowFramebuffer=gl.createFramebuffer(),localShadowMsFramebuffer=gl.createFramebuffer(),localShadowMsColor=gl.createRenderbuffer(),localShadowDepth=gl.createRenderbuffer(),localShadowFloat=hdrEnabled,localShadowFormat=localShadowFloat?gl.R32F:gl.RGBA8,localShadowColorSamples=Array.from(gl.getInternalformatParameter(gl.RENDERBUFFER,localShadowFormat,gl.SAMPLES)||[]),localShadowDepthSamples=Array.from(gl.getInternalformatParameter(gl.RENDERBUFFER,gl.DEPTH_COMPONENT24,gl.SAMPLES)||[]),localShadowSamples=localShadowColorSamples.includes(CSP_LOCAL_SHADOW_SAMPLES)&&localShadowDepthSamples.includes(CSP_LOCAL_SHADOW_SAMPLES)?CSP_LOCAL_SHADOW_SAMPLES:1;gl.bindTexture(gl.TEXTURE_2D,localShadowTexture);gl.texImage2D(gl.TEXTURE_2D,0,localShadowFormat,CSP_LOCAL_SHADOW_ATLAS_SIZE,CSP_LOCAL_SHADOW_ATLAS_SIZE,0,localShadowFloat?gl.RED:gl.RGBA,localShadowFloat?gl.FLOAT:gl.UNSIGNED_BYTE,null);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,localShadowFloat&&!floatLinear?gl.NEAREST:gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,localShadowFloat&&!floatLinear?gl.NEAREST:gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.bindFramebuffer(gl.FRAMEBUFFER,localShadowFramebuffer);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,localShadowTexture,0);gl.drawBuffers([gl.COLOR_ATTACHMENT0]);if(localShadowSamples===CSP_LOCAL_SHADOW_SAMPLES){gl.bindRenderbuffer(gl.RENDERBUFFER,localShadowMsColor);gl.renderbufferStorageMultisample(gl.RENDERBUFFER,localShadowSamples,localShadowFormat,CSP_LOCAL_SHADOW_ATLAS_SIZE,CSP_LOCAL_SHADOW_ATLAS_SIZE);gl.bindRenderbuffer(gl.RENDERBUFFER,localShadowDepth);gl.renderbufferStorageMultisample(gl.RENDERBUFFER,localShadowSamples,gl.DEPTH_COMPONENT24,CSP_LOCAL_SHADOW_ATLAS_SIZE,CSP_LOCAL_SHADOW_ATLAS_SIZE);gl.bindFramebuffer(gl.FRAMEBUFFER,localShadowMsFramebuffer);gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.RENDERBUFFER,localShadowMsColor);gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.RENDERBUFFER,localShadowDepth);gl.drawBuffers([gl.COLOR_ATTACHMENT0]);if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw new Error("CSP multisample local-shadow framebuffer is incomplete");}else{gl.bindRenderbuffer(gl.RENDERBUFFER,localShadowDepth);gl.renderbufferStorage(gl.RENDERBUFFER,gl.DEPTH_COMPONENT24,CSP_LOCAL_SHADOW_ATLAS_SIZE,CSP_LOCAL_SHADOW_ATLAS_SIZE);gl.bindFramebuffer(gl.FRAMEBUFFER,localShadowFramebuffer);gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.RENDERBUFFER,localShadowDepth);}gl.bindFramebuffer(gl.FRAMEBUFFER,localShadowFramebuffer);if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw new Error("CSP exponential local-shadow atlas framebuffer is incomplete");let localShadowState={lights:[],matrices:[],slotByLight:new Map(),casters:0,triangles:0,casterNodes:[],ready:false};
+  const localShadowTexture=gl.createTexture(),localShadowFramebuffer=gl.createFramebuffer(),localShadowMsFramebuffer=gl.createFramebuffer(),localShadowMsColor=gl.createRenderbuffer(),localShadowDepth=gl.createRenderbuffer(),localShadowFloat=hdrEnabled,localShadowFormat=localShadowFloat?gl.R32F:gl.RGBA8,localShadowColorSamples=Array.from(gl.getInternalformatParameter(gl.RENDERBUFFER,localShadowFormat,gl.SAMPLES)||[]),localShadowDepthSamples=Array.from(gl.getInternalformatParameter(gl.RENDERBUFFER,gl.DEPTH_COMPONENT24,gl.SAMPLES)||[]),localShadowSamples=localShadowColorSamples.includes(CSP_LOCAL_SHADOW_SAMPLES)&&localShadowDepthSamples.includes(CSP_LOCAL_SHADOW_SAMPLES)?CSP_LOCAL_SHADOW_SAMPLES:1;gl.bindTexture(gl.TEXTURE_2D,localShadowTexture);gl.texImage2D(gl.TEXTURE_2D,0,localShadowFormat,CSP_LOCAL_SHADOW_ATLAS_SIZE,CSP_LOCAL_SHADOW_ATLAS_SIZE,0,localShadowFloat?gl.RED:gl.RGBA,localShadowFloat?gl.FLOAT:gl.UNSIGNED_BYTE,null);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,localShadowFloat&&!floatLinear?gl.NEAREST:gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,localShadowFloat&&!floatLinear?gl.NEAREST:gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.bindFramebuffer(gl.FRAMEBUFFER,localShadowFramebuffer);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,localShadowTexture,0);gl.drawBuffers([gl.COLOR_ATTACHMENT0]);if(localShadowSamples===CSP_LOCAL_SHADOW_SAMPLES){gl.bindRenderbuffer(gl.RENDERBUFFER,localShadowMsColor);gl.renderbufferStorageMultisample(gl.RENDERBUFFER,localShadowSamples,localShadowFormat,CSP_LOCAL_SHADOW_ATLAS_SIZE,CSP_LOCAL_SHADOW_ATLAS_SIZE);gl.bindRenderbuffer(gl.RENDERBUFFER,localShadowDepth);gl.renderbufferStorageMultisample(gl.RENDERBUFFER,localShadowSamples,gl.DEPTH_COMPONENT24,CSP_LOCAL_SHADOW_ATLAS_SIZE,CSP_LOCAL_SHADOW_ATLAS_SIZE);gl.bindFramebuffer(gl.FRAMEBUFFER,localShadowMsFramebuffer);gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.RENDERBUFFER,localShadowMsColor);gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.RENDERBUFFER,localShadowDepth);gl.drawBuffers([gl.COLOR_ATTACHMENT0]);if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw new Error("CSP multisample local-shadow framebuffer is incomplete");}else{gl.bindRenderbuffer(gl.RENDERBUFFER,localShadowDepth);gl.renderbufferStorage(gl.RENDERBUFFER,gl.DEPTH_COMPONENT24,CSP_LOCAL_SHADOW_ATLAS_SIZE,CSP_LOCAL_SHADOW_ATLAS_SIZE);gl.bindFramebuffer(gl.FRAMEBUFFER,localShadowFramebuffer);gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.RENDERBUFFER,localShadowDepth);}gl.bindFramebuffer(gl.FRAMEBUFFER,localShadowFramebuffer);if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw new Error("CSP exponential local-shadow atlas framebuffer is incomplete");let localShadowState={lights:[],matrices:[],slotByLight:new Map(),casters:0,triangles:0,casterNodes:[],ready:false},localShadowUpdates=0;
   const localShadowPingTexture=gl.createTexture(),localShadowPingFramebuffer=gl.createFramebuffer();gl.bindTexture(gl.TEXTURE_2D,localShadowPingTexture);gl.texImage2D(gl.TEXTURE_2D,0,localShadowFloat?gl.R32F:gl.RGBA8,CSP_LOCAL_SHADOW_ATLAS_SIZE,CSP_LOCAL_SHADOW_ATLAS_SIZE,0,localShadowFloat?gl.RED:gl.RGBA,localShadowFloat?gl.FLOAT:gl.UNSIGNED_BYTE,null);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,localShadowFloat&&!floatLinear?gl.NEAREST:gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,localShadowFloat&&!floatLinear?gl.NEAREST:gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.bindFramebuffer(gl.FRAMEBUFFER,localShadowPingFramebuffer);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,localShadowPingTexture,0);gl.drawBuffers([gl.COLOR_ATTACHMENT0]);if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw new Error("CSP local-shadow Gaussian framebuffer is incomplete");
   gl.bindFramebuffer(gl.FRAMEBUFFER,null);
   const fullscreenVao=gl.createVertexArray(),windUpdateProgram=link(gl,`#version 300 es
@@ -1756,7 +1966,8 @@ function createRenderer(canvas) {
     bptc: gl.getExtension("EXT_texture_compression_bptc")
   };
   gl.bindVertexArray(grassVao);gl.bindBuffer(gl.ARRAY_BUFFER,grassInstanceBuffer);gl.vertexAttribPointer(9,3,gl.FLOAT,false,grassInstanceStride,84);gl.enableVertexAttribArray(9);gl.vertexAttribDivisor(9,1);gl.vertexAttribPointer(10,2,gl.FLOAT,false,grassInstanceStride,96);gl.enableVertexAttribArray(10);gl.vertexAttribDivisor(10,1);gl.bindVertexArray(null);
-  let items = [], itemByNode = new WeakMap(), sceneRoot = null,sceneModel=null, textures = [], textureLookup = new Map(), embeddedTextureNames = new Set(), solidTextures = new Map(), cspTextures = new Map(), cspTextureCache = new Map(), colliderItems = [], surfaceBindings=new Map(), selected = null, cspState = null,grassFx=null,grassStatus={instanceCount:0,sourceMeshes:0,sourceTriangles:0,rejectedByMask:0,rejectedByShape:0,rejectedByOcclusion:0,totalArea:0,density:0,shapeWidth:1},grassSurfaceMapCenter=null,grassRebuildTimer=0,rainFx=null,rainStatus={matchedMeshes:0,lineVertices:0,pointVertices:0},shadowStatus={enabled:true,mapSize:KS_SHADOW_MAP_SIZE,cascades:3,splits:[...KS_SHADOW_SPLITS],biases:[...KS_SHADOW_BIASES],casters:0,triangles:0},lightingStatus={name:KS_EDITOR_DEFAULT_WEATHER.name,source:KS_EDITOR_DEFAULT_WEATHER.source,heading:40,height:55,angleMix:0,sunColor:[0,0,0],ambientColor:[0,0,0],skyColor:[0,0,0],fogDistance:KS_EDITOR_DEFAULT_WEATHER.fogDistance,fogBlend:KS_EDITOR_DEFAULT_WEATHER.fogBlend,autoExposure:true,effectiveExposure:.35,exposureMin:KS_EDITOR_EXPOSURE.min,exposureMax:KS_EDITOR_EXPOSURE.max,toneMap:"Yebis default · function −1",hdr:hdrEnabled,samples:hdrSamples,glareEnabled:hdrEnabled,glareQuality:KS_EDITOR_GLARE.quality,bloomLevels:hdrEnabled?KS_EDITOR_GLARE.levels:0,bloomSourceScale:KS_EDITOR_GLARE.sourceScale,bloomThreshold:KS_EDITOR_GLARE.threshold,bloomCompositeScale:ksEditorBloomCompositeScale(),bloomKernel:"Yebis max-29 fallback",bloomKernelSamples:bloomKernels.map((kernel)=>kernel.sampleCount),bloomKernelSigmas:bloomKernels.map((kernel)=>kernel.sigma),dither:true}, workspaceLodIndex = null, driverCockpitMode=false, driverHiddenNames=new Set(), trackCamera=null, bounds = { center: [0,0,0], radius: 1 }, yaw = .7, pitch = .35, distance = 5, target = [0,0,0], dragging = null, modelGeneration = 0, textureStatus = { total: 0, ready: 0, pending: 0, unsupported: 0, protected: 0, formats: {} }, sceneStatus = { total: 0, visible: 0, hidden: 0 };
+  let items = [], itemByNode = new WeakMap(), gpuGeometryByNode = new WeakMap(), gpuGeometries = new Set(), sceneRoot = null,sceneModel=null, textures = [], textureLookup = new Map(), embeddedTextureNames = new Set(), solidTextures = new Map(), cspTextures = new Map(), cspTextureCache = new Map(), colliderItems = [], surfaceBindings=new Map(), selected = null, cspState = null,grassFx=null,grassStatus={instanceCount:0,sourceMeshes:0,sourceTriangles:0,rejectedByMask:0,rejectedByShape:0,rejectedByOcclusion:0,totalArea:0,density:0,shapeWidth:1},grassSurfaceMapCenter=null,grassRebuildTimer=0,rainFx=null,rainStatus={matchedMeshes:0,lineVertices:0,pointVertices:0},shadowStatus={enabled:true,mapSize:KS_SHADOW_MAP_SIZE,cascades:3,splits:[...KS_SHADOW_SPLITS],biases:[...KS_SHADOW_BIASES],casters:0,triangles:0},lightingStatus={name:KS_EDITOR_DEFAULT_WEATHER.name,source:KS_EDITOR_DEFAULT_WEATHER.source,heading:40,height:55,angleMix:0,sunColor:[0,0,0],ambientColor:[0,0,0],skyColor:[0,0,0],fogDistance:KS_EDITOR_DEFAULT_WEATHER.fogDistance,fogBlend:KS_EDITOR_DEFAULT_WEATHER.fogBlend,autoExposure:true,effectiveExposure:.35,exposureMin:KS_EDITOR_EXPOSURE.min,exposureMax:KS_EDITOR_EXPOSURE.max,toneMap:"Yebis default · function −1",hdr:hdrEnabled,samples:hdrSamples,glareEnabled:hdrEnabled,glareQuality:KS_EDITOR_GLARE.quality,bloomLevels:hdrEnabled?KS_EDITOR_GLARE.levels:0,bloomSourceScale:KS_EDITOR_GLARE.sourceScale,bloomThreshold:KS_EDITOR_GLARE.threshold,bloomCompositeScale:ksEditorBloomCompositeScale(),bloomKernel:"Yebis max-29 fallback",bloomKernelSamples:bloomKernels.map((kernel)=>kernel.sampleCount),bloomKernelSigmas:bloomKernels.map((kernel)=>kernel.sigma),dither:true}, workspaceLodIndex = null, driverCockpitMode=false, driverHiddenNames=new Set(), trackCamera=null, bounds = { center: [0,0,0], radius: 1 }, yaw = .7, pitch = .35, distance = 5, target = [0,0,0], dragging = null, modelGeneration = 0, textureStatus = { total: 0, ready: 0, pending: 0, unsupported: 0, protected: 0, formats: {} }, sceneStatus = { total: 0, visible: 0, hidden: 0 };
+  let dynamicTrackSeed=1,dynamicTrackState=null,dynamicRootFiles=new WeakMap(),dynamicTrackStatus={active:false,seed:1,elapsed:0,objects:0,nativeInstances:0,previewInstances:0,movingInstances:0,renderItems:0,gpuGeometries:0,warnings:[]};
   let vaoBindings=new Map(),splitAoState=resolveSplitAoAnimation(null,"",0),vaoStatus={source:"",version:0,records:0,matchedRecords:0,unmatchedRecords:0,alternateRecords:0,normalRecords:0,matchedNormalRecords:0,unmatchedNormalRecords:0,matchedMeshes:0,primaryMeshes:0,secondaryMeshes:0,normalMeshes:0,vertices:0,normalVertices:0,minimum:255,maximum:255,mean:255,splitAo:null,splitAoWarnings:0,splitAoKind:"bind-pose",splitAoAmount:0,splitAoMeshes:0},seasonalStatus={affectedMeshes:0,autumnMeshes:0,winterMeshes:0,legacySummerMeshes:0,peakAutumn:0,peakWinter:0,peakSummer:0},shaderProfileStatus=null;
   let reflectionCaptureStatus={enabled:true,ready:false,size:KS_EDITOR_CUBEMAP.size,faces:0,draws:0,triangles:0,farPlane:KS_EDITOR_CUBEMAP.farPlane,captureMilliseconds:0};
   let reflectionCubeInitialized=false,reflectionNextFace=0,reflectionCaptureRoot=null;
@@ -1764,12 +1975,15 @@ function createRenderer(canvas) {
   let externalFileIndex=createAssetFileIndex([]),externalTextures=new Map(),externalCpuTextures=new Map(),externalGpuTextures=new Set(),externalGeneration=0,externalRequirementSignature="",externalTextureStatus={selected:0,requested:0,ready:0,pending:0,missing:0,ambiguous:0,unsupported:0,formats:{},missingPaths:[],ambiguousPaths:[]};
   let selectedSkinFiles=[],selectedSkinName="",skinTextures=new Map(),skinGpuTextures=new Set(),skinGeneration=0,skinTextureStatus={name:"",available:0,matched:0,ready:0,pending:0,inherited:0,ambiguous:0,unsupported:0,formats:{},replacedNames:[]};
   const windParticles=createCspWindParticles();let windTargetIndex=0,windLastTime=0,windAccumulator=0,windUpdateCount=0,windRandomState=0x6d2b79f5,windAnimationTimer=0;
-  const api = { description, wireframe: false, isolate: false,showHidden:false, colliderVisible:false,surfaceOverlay:false,grassVisible:true,rainVisible:true,rainWetness:1,shadowsEnabled:true,vaoEnabled:true,weatherPreset:KS_EDITOR_DEFAULT_WEATHER,sunHeading:40,sunHeight:55,windHeading:50,windSpeed:5,autoExposure:true,exposure:.35, setModel,refreshHierarchy, setCollider, setCsp,setGrassFx,setRainFx,setVaoBindings, setAnimation, setExternalFiles, setSkinFiles,setDriverCockpitMode,setShowHidden(value){api.showHidden=Boolean(value);refreshAnimationWorlds();draw();},setTrackCamera,setReflectionCaptureRoot(value){reflectionCaptureRoot=value||null;reflectionCubeInitialized=false;reflectionNextFace=0;draw();},setSurfaceBindings(value){surfaceBindings=value instanceof Map?value:new Map();draw();},setWorkspaceLod(value){workspaceLodIndex=value===null||value===undefined?null:Number(value);draw();},onExternalTextureStatus:null,onSkinTextureStatus:null,onWorkspaceLodStatus:null,onAnimationStatus:null,onTrackCameraChange:null,frame,draw,get textureStatus(){return {...textureStatus,formats:{...textureStatus.formats}};},get externalTextureStatus(){return {...externalTextureStatus,formats:{...externalTextureStatus.formats},missingPaths:[...externalTextureStatus.missingPaths],ambiguousPaths:[...externalTextureStatus.ambiguousPaths]};},get skinTextureStatus(){return {...skinTextureStatus,formats:{...skinTextureStatus.formats},replacedNames:[...skinTextureStatus.replacedNames]};},get animationStatus(){return {...animationStatus,unmatchedTracks:[...animationStatus.unmatchedTracks]};},get grassStatus(){const active=api.grassVisible&&grassStatus.instanceCount>0,shadowed=active&&api.shadowsEnabled&&!api.surfaceOverlay,path=grassAtlasPath(),atlasReady=Boolean(path&&externalTextures.get(path.toLowerCase())),hasGroups=(grassStatus.groupInstances||[]).some((count)=>count>0);return {...grassStatus,texture:path,textureGrid:[...(grassFx?.textureGrid||[])],textureBrightness:grassFx?.textureBrightness??1,maskBlur:grassFx?.maskBlur??1,colorSampleMipLevel:grassFx?.colorSampleMipLevel??0,atlasReady,atlasMode:atlasReady?(hasGroups?"texture-groups":"base-row"):"procedural-fallback",windMapMode:`csp-${hdrEnabled?CSP_WIND_MAP_FORMAT:"r8-fallback"}`,windMapSize:CSP_WIND_MAP_SIZE,windParticles:CSP_WIND_PARTICLE_COUNT,windUpdates:windUpdateCount,windSpeed:api.windSpeed,windHeading:api.windHeading,airMapMode:"static-editor-zero",visible:api.grassVisible,weatherLit:active,castsShadows:shadowed,receivesShadows:shadowed};},get rainStatus(){return {...rainStatus,visible:api.rainVisible&&Boolean(rainFx),wetness:api.rainVisible?api.rainWetness:0};},get shadowStatus(){return {...shadowStatus,enabled:api.shadowsEnabled&&!api.surfaceOverlay,splits:[...shadowStatus.splits],biases:[...shadowStatus.biases]};},get lightingStatus(){return {...lightingStatus,sunColor:[...lightingStatus.sunColor],ambientColor:[...lightingStatus.ambientColor],skyColor:[...lightingStatus.skyColor]};},get vaoStatus(){return {...vaoStatus,enabled:api.vaoEnabled&&vaoStatus.matchedMeshes>0};},get seasonalStatus(){return {...seasonalStatus,yearProgress:cspState?.usedInputs.get("YEAR_PROGRESS")?.value??null,gpuAutumn:gl.getUniform(program,locations.seasonAutumn),gpuWinter:gl.getUniform(program,locations.seasonWinter)};},get shaderProfileStatus(){return shaderProfileStatus?{...shaderProfileStatus,unknownShaders:[...shaderProfileStatus.unknownShaders]}:null;},get sceneStatus(){const previewVisible=items.filter(itemPreviewVisible).length;return {...sceneStatus,gameVisible:sceneStatus.visible,gameHidden:sceneStatus.hidden,previewVisible,previewHidden:items.length-previewVisible,visible:previewVisible,hidden:items.length-previewVisible,showHidden:api.showHidden,driverCockpitMode,driverHidden:items.filter((item)=>item.sceneVisible&&!itemPreviewVisible(item)).length,trackCamera:trackCamera?{name:trackCamera.name,position:[...trackCamera.position],fov:trackCamera.splineData?trackCamera.minFov:(trackCamera.minFov+trackCamera.maxFov)/2,splinePosition:trackCamera.splinePreviewPosition??null,splineOffset:trackCamera.splineOffset?[...trackCamera.splineOffset]:null}:null,colliderMeshes:colliderItems.length,colliderVisible:api.colliderVisible,surfaceOverlay:api.surfaceOverlay,surfacePhysicsMeshes:[...surfaceBindings.values()].filter((binding)=>binding.status!=="not-physics").length,grassBlades:grassStatus.instanceCount,grassVisible:api.grassVisible&&grassStatus.instanceCount>0,rainMeshes:rainStatus.matchedMeshes,rainVisible:api.rainVisible&&Boolean(rainFx),rainWetness:api.rainVisible?api.rainWetness:0,shadowsEnabled:api.shadowsEnabled&&!api.surfaceOverlay,shadowCasters:shadowStatus.casters,vaoEnabled:api.vaoEnabled&&vaoStatus.matchedMeshes>0,vaoMeshes:vaoStatus.matchedMeshes,seasonalMeshes:seasonalStatus.affectedMeshes,shaderAlphaMaterials:shaderProfileStatus?.shadowCutout||0,weather:lightingStatus.name,exposure:lightingStatus.effectiveExposure};},get workspaceLodStatus(){const cameraDistance=Math.sqrt(distanceSquared(bounds.center,cameraEye())),effectiveDistance=carLodDistance(cameraDistance,cameraFovDegrees),activeIndices=[...new Set(items.filter((item)=>item.workspaceLod&&carLodVisible(item.workspaceLod,effectiveDistance,workspaceLodIndex)).map((item)=>item.workspaceLod.index))].sort((a,b)=>a-b);return {selectedIndex:workspaceLodIndex,cameraDistance,effectiveDistance,activeIndices};},select(node){selected=node;draw();}};
+  const api = { description, wireframe: false, isolate: false,showHidden:false, colliderVisible:false,surfaceOverlay:false,grassVisible:true,rainVisible:true,rainWetness:1,shadowsEnabled:true,vaoEnabled:true,weatherPreset:KS_EDITOR_DEFAULT_WEATHER,sunHeading:40,sunHeight:55,windHeading:50,windSpeed:5,autoExposure:true,exposure:.35, setModel,refreshHierarchy, setCollider, setCsp,setGrassFx,setRainFx,setVaoBindings, setAnimation, setExternalFiles, setSkinFiles,setDriverCockpitMode,setDynamicTrackSeed,advanceDynamicTrack,setShowHidden(value){api.showHidden=Boolean(value);refreshAnimationWorlds();draw();},setTrackCamera,setReflectionCaptureRoot(value){reflectionCaptureRoot=value||null;reflectionCubeInitialized=false;reflectionNextFace=0;draw();},setSurfaceBindings(value){surfaceBindings=value instanceof Map?value:new Map();draw();},setWorkspaceLod(value){workspaceLodIndex=value===null||value===undefined?null:Number(value);draw();},onExternalTextureStatus:null,onSkinTextureStatus:null,onWorkspaceLodStatus:null,onAnimationStatus:null,onDynamicTrackStatus:null,onTrackCameraChange:null,frame,draw,get textureStatus(){return {...textureStatus,formats:{...textureStatus.formats}};},get externalTextureStatus(){return {...externalTextureStatus,formats:{...externalTextureStatus.formats},missingPaths:[...externalTextureStatus.missingPaths],ambiguousPaths:[...externalTextureStatus.ambiguousPaths]};},get skinTextureStatus(){return {...skinTextureStatus,formats:{...skinTextureStatus.formats},replacedNames:[...skinTextureStatus.replacedNames]};},get animationStatus(){return {...animationStatus,unmatchedTracks:[...animationStatus.unmatchedTracks]};},get dynamicTrackStatus(){return {...dynamicTrackStatus,warnings:[...dynamicTrackStatus.warnings],results:(dynamicTrackState?.results||[]).map((result)=>({...result,instances:result.instances.map((instance)=>({...instance,position:[...instance.position],velocity:[...instance.velocity]}))}))};},get grassStatus(){const active=api.grassVisible&&grassStatus.instanceCount>0,shadowed=active&&api.shadowsEnabled&&!api.surfaceOverlay,path=grassAtlasPath(),atlasReady=Boolean(path&&externalTextures.get(path.toLowerCase())),hasGroups=(grassStatus.groupInstances||[]).some((count)=>count>0);return {...grassStatus,texture:path,textureGrid:[...(grassFx?.textureGrid||[])],textureBrightness:grassFx?.textureBrightness??1,maskBlur:grassFx?.maskBlur??1,colorSampleMipLevel:grassFx?.colorSampleMipLevel??0,atlasReady,atlasMode:atlasReady?(hasGroups?"texture-groups":"base-row"):"procedural-fallback",windMapMode:`csp-${hdrEnabled?CSP_WIND_MAP_FORMAT:"r8-fallback"}`,windMapSize:CSP_WIND_MAP_SIZE,windParticles:CSP_WIND_PARTICLE_COUNT,windUpdates:windUpdateCount,windSpeed:api.windSpeed,windHeading:api.windHeading,airMapMode:"static-editor-zero",visible:api.grassVisible,weatherLit:active,castsShadows:shadowed,receivesShadows:shadowed};},get rainStatus(){return {...rainStatus,visible:api.rainVisible&&Boolean(rainFx),wetness:api.rainVisible?api.rainWetness:0};},get shadowStatus(){return {...shadowStatus,enabled:api.shadowsEnabled&&!api.surfaceOverlay,splits:[...shadowStatus.splits],biases:[...shadowStatus.biases]};},get lightingStatus(){return {...lightingStatus,sunColor:[...lightingStatus.sunColor],ambientColor:[...lightingStatus.ambientColor],skyColor:[...lightingStatus.skyColor]};},get vaoStatus(){return {...vaoStatus,enabled:api.vaoEnabled&&vaoStatus.matchedMeshes>0};},get seasonalStatus(){return {...seasonalStatus,yearProgress:cspState?.usedInputs.get("YEAR_PROGRESS")?.value??null,gpuAutumn:gl.getUniform(program,locations.seasonAutumn),gpuWinter:gl.getUniform(program,locations.seasonWinter)};},get shaderProfileStatus(){return shaderProfileStatus?{...shaderProfileStatus,unknownShaders:[...shaderProfileStatus.unknownShaders]}:null;},get sceneStatus(){const previewVisible=items.filter(itemPreviewVisible).length;return {...sceneStatus,gameVisible:sceneStatus.visible,gameHidden:sceneStatus.hidden,previewVisible,previewHidden:items.length-previewVisible,visible:previewVisible,hidden:items.length-previewVisible,showHidden:api.showHidden,driverCockpitMode,driverHidden:items.filter((item)=>item.sceneVisible&&!itemPreviewVisible(item)).length,trackCamera:trackCamera?{name:trackCamera.name,position:[...trackCamera.position],fov:trackCamera.splineData?trackCamera.minFov:(trackCamera.minFov+trackCamera.maxFov)/2,splinePosition:trackCamera.splinePreviewPosition??null,splineOffset:trackCamera.splineOffset?[...trackCamera.splineOffset]:null}:null,colliderMeshes:colliderItems.length,colliderVisible:api.colliderVisible,surfaceOverlay:api.surfaceOverlay,surfacePhysicsMeshes:[...surfaceBindings.values()].filter((binding)=>binding.status!=="not-physics").length,grassBlades:grassStatus.instanceCount,grassVisible:api.grassVisible&&grassStatus.instanceCount>0,rainMeshes:rainStatus.matchedMeshes,rainVisible:api.rainVisible&&Boolean(rainFx),rainWetness:api.rainVisible?api.rainWetness:0,shadowsEnabled:api.shadowsEnabled&&!api.surfaceOverlay,shadowCasters:shadowStatus.casters,vaoEnabled:api.vaoEnabled&&vaoStatus.matchedMeshes>0,vaoMeshes:vaoStatus.matchedMeshes,seasonalMeshes:seasonalStatus.affectedMeshes,shaderAlphaMaterials:shaderProfileStatus?.shadowCutout||0,weather:lightingStatus.name,exposure:lightingStatus.effectiveExposure};},get workspaceLodStatus(){const cameraDistance=Math.sqrt(distanceSquared(bounds.center,cameraEye())),effectiveDistance=carLodDistance(cameraDistance,cameraFovDegrees),activeIndices=[...new Set(items.filter((item)=>item.workspaceLod&&carLodVisible(item.workspaceLod,effectiveDistance,workspaceLodIndex)).map((item)=>item.workspaceLod.index))].sort((a,b)=>a-b);return {selectedIndex:workspaceLodIndex,cameraDistance,effectiveDistance,activeIndices};},select(node){selected=node;draw();}};
   api.reflectionsEnabled=true;
   api.refreshGeometry=refreshGeometry;
 
   function itemPreviewVisible(item){return (api.showHidden||item.sceneVisible)&&!(driverCockpitMode&&item.workspaceAuxiliary==="driver"&&item.driverPath.some((name)=>driverHiddenNames.has(name)));}
   function setDriverCockpitMode(value,names=[]){driverCockpitMode=Boolean(value);driverHiddenNames=new Set((names||[]).map((name)=>String(name||"").trim().toUpperCase()).filter(Boolean));refreshAnimationWorlds();draw();}
+  function refreshDynamicTrackStatus(){const instances=(dynamicTrackState?.results||[]).flatMap((result)=>result.instances);dynamicTrackStatus={active:Boolean(dynamicTrackState?.results.length),seed:dynamicTrackSeed,elapsed:dynamicTrackState?.elapsed||0,objects:dynamicTrackState?.results.length||0,nativeInstances:dynamicTrackState?.nativeInstances||0,previewInstances:dynamicTrackState?.previewInstances||0,movingInstances:instances.filter((instance)=>instance.velocity.some((value)=>value!==0)).length,renderItems:items.length,gpuGeometries:gpuGeometries.size,warnings:[...(dynamicTrackState?.warnings||[])]};api.onDynamicTrackStatus?.(api.dynamicTrackStatus);}
+  function setDynamicTrackSeed(value,rebuild=true){dynamicTrackSeed=Number(value)>>>0;if(rebuild&&sceneModel)setModel(sceneModel);else refreshDynamicTrackStatus();return api.dynamicTrackStatus;}
+  function advanceDynamicTrack(deltaTime){if(!dynamicTrackState)return api.dynamicTrackStatus;advanceDynamicTrackObjects(dynamicTrackState,deltaTime);refreshAnimationWorlds();localShadowState.ready=false;reflectionCubeInitialized=false;reflectionNextFace=0;refreshDynamicTrackStatus();draw();return api.dynamicTrackStatus;}
   function setTrackCamera(value){const next=value||null,changed=trackCamera!==next;if(!changed)return;trackCamera=next;scheduleGrassRebuild();draw();}
   function grassAtlasPath(){return grassFx?normalizeAssetPath(grassFx.texture||GRASS_FX_DEFAULT_TEXTURE):"";}
   function grassAtlasTexture(){const path=grassAtlasPath();return path?externalTextures.get(path.toLowerCase())||null:null;}
@@ -1903,16 +2117,43 @@ function createRenderer(canvas) {
       for(const child of node.children||[])visit(child,world);};visit(value.root,identity());draw();
   }
 
+  function gpuGeometryFor(node){
+    let geometry=gpuGeometryByNode.get(node);if(geometry)return geometry;
+    const vao=gl.createVertexArray(),vertex=gl.createBuffer(),index=gl.createBuffer(),vaoAo=gl.createBuffer(),vaoAoSecondary=gl.createBuffer();
+    gl.bindVertexArray(vao);gl.bindBuffer(gl.ARRAY_BUFFER,vertex);gl.bufferData(gl.ARRAY_BUFFER,node.vertices,gl.STATIC_DRAW);
+    gl.vertexAttribPointer(0,3,gl.FLOAT,false,node.vertexStride*4,0);gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(1,3,gl.FLOAT,false,node.vertexStride*4,12);gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(2,2,gl.FLOAT,false,node.vertexStride*4,24);gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(3,3,gl.FLOAT,false,node.vertexStride*4,32);gl.enableVertexAttribArray(3);
+    const vertexCount=node.vertices.length/node.vertexStride,vaoBinding=vaoBindings.get(node),vaoValues=vaoBinding?.primary&&vaoBinding.primary.length===vertexCount?vaoBinding.primary:new Uint8Array(vertexCount).fill(255);
+    gl.bindBuffer(gl.ARRAY_BUFFER,vaoAo);gl.bufferData(gl.ARRAY_BUFFER,vaoValues,gl.DYNAMIC_DRAW);gl.vertexAttribPointer(4,1,gl.UNSIGNED_BYTE,true,1,0);gl.enableVertexAttribArray(4);
+    const vaoSecondaryValues=vaoBinding?.secondary&&vaoBinding.secondary.length===vertexCount?vaoBinding.secondary:vaoValues;
+    gl.bindBuffer(gl.ARRAY_BUFFER,vaoAoSecondary);gl.bufferData(gl.ARRAY_BUFFER,vaoSecondaryValues,gl.DYNAMIC_DRAW);gl.vertexAttribPointer(5,1,gl.UNSIGNED_BYTE,true,1,0);gl.enableVertexAttribArray(5);
+    let vaoNormal=null;
+    if(vaoBinding?.normal&&vaoBinding.normal.length===vertexCount*3){vaoNormal=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,vaoNormal);gl.bufferData(gl.ARRAY_BUFFER,vaoBinding.normal,gl.DYNAMIC_DRAW);gl.vertexAttribPointer(6,3,gl.FLOAT,false,12,0);gl.enableVertexAttribArray(6);}
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,index);gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,node.indices,gl.STATIC_DRAW);
+    const localMin=[Infinity,Infinity,Infinity],localMax=[-Infinity,-Infinity,-Infinity];
+    for(let offset=0;offset<node.vertices.length;offset+=node.vertexStride)for(let axis=0;axis<3;axis++){const value=node.vertices[offset+axis];localMin[axis]=Math.min(localMin[axis],value);localMax[axis]=Math.max(localMax[axis],value);}
+    geometry={node,vao,vertex,index,vaoAo,vaoAoSecondary,vaoNormal,vaoAoBound:Boolean(vaoBinding?.primary),vaoNormalBound:Boolean(vaoNormal),vaoBound:Boolean(vaoBinding?.primary||vaoNormal),localMin,localMax};gpuGeometryByNode.set(node,geometry);gpuGeometries.add(geometry);return geometry;
+  }
+
+  function releaseGpuGeometries(){
+    for(const geometry of gpuGeometries){gl.deleteBuffer(geometry.vertex);gl.deleteBuffer(geometry.index);gl.deleteBuffer(geometry.vaoAo);gl.deleteBuffer(geometry.vaoAoSecondary);if(geometry.vaoNormal)gl.deleteBuffer(geometry.vaoNormal);gl.deleteVertexArray(geometry.vao);}
+    gpuGeometryByNode=new WeakMap();gpuGeometries=new Set();
+  }
+
   function setVaoBindings(value,status={}){
     vaoBindings=value instanceof Map?value:new Map();vaoStatus={source:"",version:0,records:0,matchedRecords:0,unmatchedRecords:0,alternateRecords:0,normalRecords:0,matchedNormalRecords:0,unmatchedNormalRecords:0,matchedMeshes:0,primaryMeshes:0,secondaryMeshes:0,normalMeshes:0,vertices:0,normalVertices:0,minimum:255,maximum:255,mean:255,splitAo:null,splitAoWarnings:0,splitAoKind:"bind-pose",splitAoAmount:0,splitAoPosition:0,splitAoExponent:1,splitAoMeshes:0,splitAoNodes:0,...status};
-    for(const item of items){
-      const binding=vaoBindings.get(item.node),count=item.node.vertices.length/item.node.vertexStride,primary=binding?.primary&&binding.primary.length===count?binding.primary:new Uint8Array(count).fill(255),secondary=binding?.secondary&&binding.secondary.length===count?binding.secondary:primary,normal=binding?.normal&&binding.normal.length===count*3?binding.normal:null;
-      gl.bindBuffer(gl.ARRAY_BUFFER,item.vaoAo);gl.bufferData(gl.ARRAY_BUFFER,primary,gl.DYNAMIC_DRAW);gl.bindBuffer(gl.ARRAY_BUFFER,item.vaoAoSecondary);gl.bufferData(gl.ARRAY_BUFFER,secondary,gl.DYNAMIC_DRAW);
-      gl.bindVertexArray(item.vao);
-      if(normal){item.vaoNormal ||= gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,item.vaoNormal);gl.bufferData(gl.ARRAY_BUFFER,normal,gl.DYNAMIC_DRAW);gl.vertexAttribPointer(6,3,gl.FLOAT,false,12,0);gl.enableVertexAttribArray(6);}
-      else if(item.vaoNormal){gl.disableVertexAttribArray(6);gl.deleteBuffer(item.vaoNormal);item.vaoNormal=null;}
-      gl.bindVertexArray(null);item.vaoAoBound=Boolean(binding?.primary);item.vaoNormalBound=Boolean(normal);item.vaoBound=item.vaoAoBound||item.vaoNormalBound;
+    for(const geometry of gpuGeometries){
+      const binding=vaoBindings.get(geometry.node),count=geometry.node.vertices.length/geometry.node.vertexStride,primary=binding?.primary&&binding.primary.length===count?binding.primary:new Uint8Array(count).fill(255),secondary=binding?.secondary&&binding.secondary.length===count?binding.secondary:primary,normal=binding?.normal&&binding.normal.length===count*3?binding.normal:null;
+      gl.bindBuffer(gl.ARRAY_BUFFER,geometry.vaoAo);gl.bufferData(gl.ARRAY_BUFFER,primary,gl.DYNAMIC_DRAW);gl.bindBuffer(gl.ARRAY_BUFFER,geometry.vaoAoSecondary);gl.bufferData(gl.ARRAY_BUFFER,secondary,gl.DYNAMIC_DRAW);
+      gl.bindVertexArray(geometry.vao);
+      if(normal){if(!geometry.vaoNormal)geometry.vaoNormal=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,geometry.vaoNormal);gl.bufferData(gl.ARRAY_BUFFER,normal,gl.DYNAMIC_DRAW);gl.vertexAttribPointer(6,3,gl.FLOAT,false,12,0);gl.enableVertexAttribArray(6);}
+      else{gl.disableVertexAttribArray(6);if(geometry.vaoNormal){gl.deleteBuffer(geometry.vaoNormal);geometry.vaoNormal=null;}}
+      geometry.vaoAoBound=Boolean(binding?.primary);geometry.vaoNormalBound=Boolean(normal);geometry.vaoBound=geometry.vaoAoBound||geometry.vaoNormalBound;
     }
+    gl.bindVertexArray(null);
+    for(const item of items){item.vaoBound=item.geometry.vaoBound;item.vaoAoBound=item.geometry.vaoAoBound;item.vaoNormalBound=item.geometry.vaoNormalBound;}
     updateSplitAoState();
     draw();
   }
@@ -1926,8 +2167,14 @@ function createRenderer(canvas) {
   function setModel(model) {
     const generation = ++modelGeneration;
     grassSurfaceMapCenter=null;
+    localShadowState.ready=false;
     sceneModel=model;shaderProfileStatus=auditMaterialShaderProfiles(model.materials);reflectionCaptureRoot=null;reflectionCubeInitialized=false;reflectionNextFace=0;
-    items.forEach((x) => { gl.deleteBuffer(x.vertex); gl.deleteBuffer(x.index);gl.deleteBuffer(x.vaoAo);gl.deleteBuffer(x.vaoAoSecondary);if(x.vaoNormal)gl.deleteBuffer(x.vaoNormal); gl.deleteVertexArray(x.vao); });
+    dynamicRootFiles=new WeakMap();
+    const workspaceFiles=model.workspace?.kind==="track"?model.workspace.files:[];
+    dynamicTrackState=workspaceFiles.some((file)=>file.dynamic)?sampleDynamicTrackObjects(workspaceFiles,dynamicTrackSeed):null;
+    const dynamicResults=new Map((dynamicTrackState?.results||[]).map((result)=>[result.fileIndex,result]));
+    for(let fileIndex=0;fileIndex<workspaceFiles.length;fileIndex++){const root=model.root.children?.[fileIndex],file=workspaceFiles[fileIndex],result=dynamicResults.get(fileIndex);if(root&&file.dynamic)dynamicRootFiles.set(root,{fileIndex,file,result:result||{instances:[]}});}
+    releaseGpuGeometries();
     textures.forEach((texture) => gl.deleteTexture(texture));
     items = []; itemByNode = new WeakMap(); sceneRoot = model.root; splitAoAnimationScope=splitAoAnimationNodeScope(sceneRoot,currentAnimation); textures = []; textureLookup = new Map(); embeddedTextureNames = new Set(); solidTextures = new Map();
     const textureMap = new Map();
@@ -1940,34 +2187,24 @@ function createRenderer(canvas) {
       if(uploaded.ready){textureStatus.pending++;uploaded.ready.then((success)=>{if(generation!==modelGeneration)return;textureStatus.pending--;if(success)textureStatus.ready++;else textureStatus.unsupported++;draw();});}else textureStatus.ready++;
     }
     textureLookup=textureMap;refreshSkinTextures();
-    const visit = (node, parentWorld, parentActive, parentWorkspaceLod = null, parentWorkspaceAuxiliary = null, parentDriverPath = [], parentWorkspaceFile = "", parentReflectionAncestors = []) => {
-      const world = node.transform ? multiply(parentWorld, node.transform) : parentWorld;
+    const visit = (node, parentWorld, parentActive, parentWorkspaceLod = null, parentWorkspaceAuxiliary = null, parentDriverPath = [], parentWorkspaceFile = "", parentReflectionAncestors = [], dynamicInstanceIndex = -1, localOverride = null) => {
+      const dynamicRoot=dynamicRootFiles.get(node);
+      if(dynamicRoot){const branchActive=parentActive&&node.active,workspaceLod=node.workspaceLod||parentWorkspaceLod,workspaceAuxiliary=node.workspaceAuxiliary||parentWorkspaceAuxiliary,workspaceFile=node.workspaceFile||parentWorkspaceFile,reflectionAncestors=[...parentReflectionAncestors,node],driverPath=workspaceAuxiliary==="driver"?[...parentDriverPath,node.name.toUpperCase()]:[];for(const instance of dynamicRoot.result.instances)for(const child of node.children)visit(child,parentWorld,branchActive,workspaceLod,workspaceAuxiliary,driverPath,workspaceFile,reflectionAncestors,instance.instanceIndex,dynamicTrackRootTransform(child.transform,instance.position));return;}
+      const local=localOverride??node.transform,world = local ? multiply(parentWorld, local) : parentWorld;
       const branchActive = parentActive && node.active;
       const workspaceLod = node.workspaceLod || parentWorkspaceLod;
       const workspaceAuxiliary=node.workspaceAuxiliary||parentWorkspaceAuxiliary,workspaceFile=node.workspaceFile||parentWorkspaceFile,reflectionAncestors=[...parentReflectionAncestors,node],driverPath=workspaceAuxiliary==="driver"?[...parentDriverPath,node.name.toUpperCase()]:[];
       if (node.kind === "mesh" || node.kind === "skinnedMesh") {
-        const vao = gl.createVertexArray(), vertex = gl.createBuffer(), index = gl.createBuffer(),vaoAo=gl.createBuffer(),vaoAoSecondary=gl.createBuffer();
-        gl.bindVertexArray(vao); gl.bindBuffer(gl.ARRAY_BUFFER, vertex); gl.bufferData(gl.ARRAY_BUFFER, node.vertices, gl.STATIC_DRAW);
-        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, node.vertexStride * 4, 0); gl.enableVertexAttribArray(0);
-        gl.vertexAttribPointer(1, 3, gl.FLOAT, false, node.vertexStride * 4, 12); gl.enableVertexAttribArray(1);
-        gl.vertexAttribPointer(2, 2, gl.FLOAT, false, node.vertexStride * 4, 24); gl.enableVertexAttribArray(2);
-        gl.vertexAttribPointer(3, 3, gl.FLOAT, false, node.vertexStride * 4, 32); gl.enableVertexAttribArray(3);
-        gl.bindBuffer(gl.ARRAY_BUFFER,vaoAo);gl.bufferData(gl.ARRAY_BUFFER,new Uint8Array(node.vertices.length/node.vertexStride).fill(255),gl.DYNAMIC_DRAW);gl.vertexAttribPointer(4,1,gl.UNSIGNED_BYTE,true,1,0);gl.enableVertexAttribArray(4);
-        gl.bindBuffer(gl.ARRAY_BUFFER,vaoAoSecondary);gl.bufferData(gl.ARRAY_BUFFER,new Uint8Array(node.vertices.length/node.vertexStride).fill(255),gl.DYNAMIC_DRAW);gl.vertexAttribPointer(5,1,gl.UNSIGNED_BYTE,true,1,0);gl.enableVertexAttribArray(5);
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, index); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, node.indices, gl.STATIC_DRAW);
+        const geometry=gpuGeometryFor(node),{vao,vertex,index,vaoAo,vaoAoSecondary,localMin,localMax}=geometry;
         const material = model.materials[node.materialId];
         const resourceNames=Object.fromEntries((material?.resources||[]).map((resource)=>[resource.slot.toLowerCase(),normalizeAssetPath(resource.texture).split("/").at(-1).toLowerCase()]));
         const resourceTexture=(slot)=>{const name=material?.resources.find((resource)=>resource.slot.toLowerCase()===slot)?.texture.toLowerCase();return textureMap.get(`${String(material?.workspaceFile||"").toLowerCase()}\0${name}`)||textureMap.get(name);};
-        const localMin=[Infinity,Infinity,Infinity],localMax=[-Infinity,-Infinity,-Infinity];
-        for (let i = 0; i < node.vertices.length; i += node.vertexStride) {
-          for (let axis=0;axis<3;axis++){const value=node.vertices[i+axis];localMin[axis]=Math.min(localMin[axis],value);localMax[axis]=Math.max(localMax[axis],value);}
-        }
-        const sceneVisible=Boolean(branchActive&&node.visible&&node.renderable),item={ node, world, branchActive,sceneVisible, workspaceLod, workspaceAuxiliary,workspaceFile,reflectionAncestors, driverPath, material, resourceNames, texture: resourceTexture("txdiffuse"), normalTexture:resourceTexture("txnormal"), mapsTexture:resourceTexture("txmaps"), detailTexture:resourceTexture("txdetail"), normalDetailTexture:resourceTexture("txnormaldetail")||resourceTexture("txdetailnm"), multiMaskTexture:resourceTexture("txmask"),multiDetailRTexture:resourceTexture("txdetailr"),multiDetailGTexture:resourceTexture("txdetailg"),multiDetailBTexture:resourceTexture("txdetailb"),multiDetailATexture:resourceTexture("txdetaila"),multiDetailNormalTexture:resourceTexture("txdetailnm"), vao, vertex, index,vaoAo,vaoAoSecondary,vaoNormal:null,vaoBound:false,vaoAoBound:false,vaoNormalBound:false,splitAoFactor:0, localMin, localMax, center:[0,0,0] };items.push(item);itemByNode.set(node,item);
+        const sceneVisible=Boolean(branchActive&&node.visible&&node.renderable),item={ node, geometry, world, branchActive,sceneVisible, workspaceLod, workspaceAuxiliary,workspaceFile,reflectionAncestors, driverPath,dynamicInstanceIndex, material, resourceNames, texture: resourceTexture("txdiffuse"), normalTexture:resourceTexture("txnormal"), mapsTexture:resourceTexture("txmaps"), detailTexture:resourceTexture("txdetail"), normalDetailTexture:resourceTexture("txnormaldetail")||resourceTexture("txdetailnm"), multiMaskTexture:resourceTexture("txmask"),multiDetailRTexture:resourceTexture("txdetailr"),multiDetailGTexture:resourceTexture("txdetailg"),multiDetailBTexture:resourceTexture("txdetailb"),multiDetailATexture:resourceTexture("txdetaila"),multiDetailNormalTexture:resourceTexture("txdetailnm"), vao, vertex, index,vaoAo,vaoAoSecondary,vaoBound:geometry.vaoBound,vaoAoBound:geometry.vaoAoBound,vaoNormalBound:geometry.vaoNormalBound,splitAoFactor:0, localMin, localMax, center:[0,0,0] };items.push(item);let nodeItems=itemByNode.get(node);if(!nodeItems){nodeItems=new Map();itemByNode.set(node,nodeItems);}nodeItems.set(dynamicInstanceIndex,item);
       }
-      for (const child of node.children) visit(child, world, branchActive, workspaceLod, workspaceAuxiliary, driverPath,workspaceFile,reflectionAncestors);
+      for (const child of node.children) visit(child, world, branchActive, workspaceLod, workspaceAuxiliary, driverPath,workspaceFile,reflectionAncestors,dynamicInstanceIndex);
     };
-    visit(model.root, identity(), true);sceneStatus={total:items.length,visible:items.filter((item)=>item.sceneVisible).length,hidden:items.filter((item)=>!item.sceneVisible).length};
-    refreshAnimationWorlds();frame();
+    visit(model.root, identity(), true);sceneStatus={total:items.length,visible:items.filter((item)=>item.sceneVisible).length,hidden:items.filter((item)=>!item.sceneVisible).length,gpuGeometries:gpuGeometries.size,sharedGeometryInstances:Math.max(0,items.length-gpuGeometries.size)};
+    refreshAnimationWorlds();refreshDynamicTrackStatus();frame();
   }
 
   function setAnimation(animation, position = 0, name = "") {
@@ -1982,16 +2219,16 @@ function createRenderer(canvas) {
   }
 
   function refreshGeometry() {
-    for (const item of items) {
-      gl.bindBuffer(gl.ARRAY_BUFFER, item.vertex);
-      gl.bufferData(gl.ARRAY_BUFFER, item.node.vertices, gl.STATIC_DRAW);
-      gl.bindVertexArray(item.vao);
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, item.index);
-      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, item.node.indices, gl.STATIC_DRAW);
-      item.localMin = [Infinity, Infinity, Infinity]; item.localMax = [-Infinity, -Infinity, -Infinity];
-      for (let offset = 0; offset < item.node.vertices.length; offset += item.node.vertexStride) for (let axis = 0; axis < 3; axis++) {
-        const value = item.node.vertices[offset + axis];
-        item.localMin[axis] = Math.min(item.localMin[axis], value); item.localMax[axis] = Math.max(item.localMax[axis], value);
+    for (const geometry of gpuGeometries) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, geometry.vertex);
+      gl.bufferData(gl.ARRAY_BUFFER, geometry.node.vertices, gl.STATIC_DRAW);
+      gl.bindVertexArray(geometry.vao);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, geometry.index);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, geometry.node.indices, gl.STATIC_DRAW);
+      geometry.localMin.fill(Infinity); geometry.localMax.fill(-Infinity);
+      for (let offset = 0; offset < geometry.node.vertices.length; offset += geometry.node.vertexStride) for (let axis = 0; axis < 3; axis++) {
+        const value = geometry.node.vertices[offset + axis];
+        geometry.localMin[axis] = Math.min(geometry.localMin[axis], value); geometry.localMax[axis] = Math.max(geometry.localMax[axis], value);
       }
     }
     gl.bindVertexArray(null);
@@ -2000,13 +2237,15 @@ function createRenderer(canvas) {
 
   function refreshAnimationWorlds() {
     const min=[Infinity,Infinity,Infinity],max=[-Infinity,-Infinity,-Infinity],matchedTracks=new Set(),worldByName=new Map();let matchedNodes=0;
-    const visit=(node,parentWorld,parentActive)=>{
+    const visit=(node,parentWorld,parentActive,dynamicInstanceIndex=-1,localOverride=null)=>{
+      const dynamicRoot=dynamicRootFiles.get(node);
+      if(dynamicRoot){const branchActive=parentActive&&node.active;for(const instance of dynamicRoot.result.instances)for(const child of node.children)visit(child,parentWorld,branchActive,instance.instanceIndex,dynamicTrackRootTransform(child.transform,instance.position));return;}
       const animated=animationTransformForNode(node,animationTransforms);if(animated){matchedTracks.add(node.name);matchedNodes++;}
-      const local=animated||node.transform,world=local?multiply(parentWorld,local):parentWorld,item=itemByNode.get(node),branchActive=parentActive&&node.active;if(!worldByName.has(node.name))worldByName.set(node.name,world);
+      const local=localOverride||animated||node.transform,world=local?multiply(parentWorld,local):parentWorld,item=itemByNode.get(node)?.get(dynamicInstanceIndex),branchActive=parentActive&&node.active;if(!worldByName.has(node.name))worldByName.set(node.name,world);
       if(item){item.world=world;item.branchActive=branchActive;item.sceneVisible=Boolean(branchActive&&node.visible&&node.renderable);const itemBounds=transformBounds(item.localMin,item.localMax,world);item.center=itemBounds.min.map((value,index)=>(value+itemBounds.max[index])/2);if(itemPreviewVisible(item))for(let axis=0;axis<3;axis++){min[axis]=Math.min(min[axis],itemBounds.min[axis]);max[axis]=Math.max(max[axis],itemBounds.max[axis]);}}
-      for(const child of node.children)visit(child,world,branchActive);
+      for(const child of node.children)visit(child,world,branchActive,dynamicInstanceIndex);
     };
-    let skinnedMeshes=0,skinnedVertices=0,maxSkinnedDisplacement=0;if(sceneRoot)visit(sceneRoot,identity(),true);for(const item of items)if(item.node.kind==="skinnedMesh"){const skinned=currentAnimation?skinMeshVertices(item.node,worldByName,item.world):item.node.vertices;skinnedMeshes++;skinnedVertices+=item.node.vertices.length/item.node.vertexStride;if(currentAnimation)for(let offset=0;offset<skinned.length;offset+=item.node.vertexStride)maxSkinnedDisplacement=Math.max(maxSkinnedDisplacement,Math.hypot(skinned[offset]-item.node.vertices[offset],skinned[offset+1]-item.node.vertices[offset+1],skinned[offset+2]-item.node.vertices[offset+2]));gl.bindBuffer(gl.ARRAY_BUFFER,item.vertex);gl.bufferSubData(gl.ARRAY_BUFFER,0,skinned);}
+    const updatedSkinnedGeometries=new Set();let skinnedMeshes=0,skinnedVertices=0,maxSkinnedDisplacement=0;if(sceneRoot)visit(sceneRoot,identity(),true);for(const item of items)if(item.node.kind==="skinnedMesh"){skinnedMeshes++;skinnedVertices+=item.node.vertices.length/item.node.vertexStride;if(updatedSkinnedGeometries.has(item.geometry))continue;updatedSkinnedGeometries.add(item.geometry);const skinned=currentAnimation?skinMeshVertices(item.node,worldByName,item.world):item.node.vertices;if(currentAnimation)for(let offset=0;offset<skinned.length;offset+=item.node.vertexStride)maxSkinnedDisplacement=Math.max(maxSkinnedDisplacement,Math.hypot(skinned[offset]-item.node.vertices[offset],skinned[offset+1]-item.node.vertices[offset+1],skinned[offset+2]-item.node.vertices[offset+2]));gl.bindBuffer(gl.ARRAY_BUFFER,item.vertex);gl.bufferSubData(gl.ARRAY_BUFFER,0,skinned);}
     sceneStatus={...sceneStatus,total:items.length,visible:items.filter((item)=>item.sceneVisible).length,hidden:items.filter((item)=>!item.sceneVisible).length};
     const center=min[0]===Infinity?[0,0,0]:min.map((value,index)=>(value+max[index])/2);bounds={center,radius:min[0]===Infinity?1:Math.hypot(...sub(max,center))};
     const animatedTracks=currentAnimation?.tracks.filter((track)=>track.animated)||[];
@@ -2080,9 +2319,9 @@ function createRenderer(canvas) {
   }
   function renderLocalShadowAtlas(renderItems,focus){
     const casters=renderItems.filter(({item,override})=>shadowCasterEnabled(item.node,override)),lights=api.shadowsEnabled&&!api.surfaceOverlay?selectCspLights(cspState?.lights||[],focus,{trackReceiver:sceneUsesTrackReceivers()}).filter((light)=>light.castsShadows&&light.shadowSpot>0).slice(0,CSP_LOCAL_SHADOW_LIMIT):[];
-    const casterNodes=casters.map(({item})=>item.node),cached=localShadowState.ready&&lights.length===localShadowState.lights.length&&lights.every((light,index)=>light===localShadowState.lights[index])&&casterNodes.length===localShadowState.casterNodes.length&&casterNodes.every((node,index)=>node===localShadowState.casterNodes[index]);grassStatus.localShadowLights=lights.length;grassStatus.localShadowCasters=lights.length?casters.length:0;grassStatus.localShadowFilterModes=lights.map((light)=>cspLocalShadowFilter(light).kernel+(cspLocalShadowFilter(light).valueAware?"-headlight":""));grassStatus.localShadowSamples=localShadowSamples;grassStatus.localShadowAtlasMode=`portable-static-${localShadowFloat?"r32f-esm":"rgba8-log-esm"}-1024-4x512-${localShadowSamples}x-resolve-separable-gaussian`;if(cached)return localShadowState;localShadowState={lights,matrices:lights.map(computeLocalLightShadow),slotByLight:new Map(lights.map((light,index)=>[light,index])),casters:casters.length,triangles:casters.reduce((sum,{item})=>sum+item.node.indices.length/3,0),casterNodes,ready:false};
+    const casterNodes=casters.map(({item})=>item.node),cached=localShadowState.ready&&lights.length===localShadowState.lights.length&&lights.every((light,index)=>light===localShadowState.lights[index])&&casterNodes.length===localShadowState.casterNodes.length&&casterNodes.every((node,index)=>node===localShadowState.casterNodes[index]);grassStatus.localShadowLights=lights.length;grassStatus.localShadowCasters=lights.length?casters.length:0;grassStatus.localShadowFilterModes=lights.map((light)=>cspLocalShadowFilter(light).kernel+(cspLocalShadowFilter(light).valueAware?"-headlight":""));grassStatus.localShadowSamples=localShadowSamples;grassStatus.localShadowAtlasMode=`portable-static-${localShadowFloat?"r32f-esm":"rgba8-log-esm"}-1024-4x512-${localShadowSamples}x-resolve-separable-gaussian`;grassStatus.localShadowUpdates=localShadowUpdates;if(cached)return localShadowState;localShadowState={lights,matrices:lights.map(computeLocalLightShadow),slotByLight:new Map(lights.map((light,index)=>[light,index])),casters:casters.length,triangles:casters.reduce((sum,{item})=>sum+item.node.indices.length/3,0),casterNodes,ready:false};
     if(!lights.length)return localShadowState;
-    gl.bindFramebuffer(gl.FRAMEBUFFER,localShadowSamples===CSP_LOCAL_SHADOW_SAMPLES?localShadowMsFramebuffer:localShadowFramebuffer);gl.useProgram(localShadowProgram);gl.uniform1i(localShadowLocations.diffuseTexture,0);gl.uniform1i(localShadowLocations.exponentialOutput,localShadowFloat);gl.colorMask(true,true,true,true);gl.depthMask(true);gl.enable(gl.DEPTH_TEST);gl.disable(gl.BLEND);gl.disable(gl.SAMPLE_ALPHA_TO_COVERAGE);gl.enable(gl.SCISSOR_TEST);
+    localShadowUpdates++;grassStatus.localShadowUpdates=localShadowUpdates;gl.bindFramebuffer(gl.FRAMEBUFFER,localShadowSamples===CSP_LOCAL_SHADOW_SAMPLES?localShadowMsFramebuffer:localShadowFramebuffer);gl.useProgram(localShadowProgram);gl.uniform1i(localShadowLocations.diffuseTexture,0);gl.uniform1i(localShadowLocations.exponentialOutput,localShadowFloat);gl.colorMask(true,true,true,true);gl.depthMask(true);gl.enable(gl.DEPTH_TEST);gl.disable(gl.BLEND);gl.disable(gl.SAMPLE_ALPHA_TO_COVERAGE);gl.enable(gl.SCISSOR_TEST);
     for(let slot=0;slot<lights.length;slot++){const shadow=localShadowState.matrices[slot],x=(slot%2)*CSP_LOCAL_SHADOW_CELL_SIZE,y=Math.floor(slot/2)*CSP_LOCAL_SHADOW_CELL_SIZE;gl.viewport(x,y,CSP_LOCAL_SHADOW_CELL_SIZE,CSP_LOCAL_SHADOW_CELL_SIZE);gl.scissor(x,y,CSP_LOCAL_SHADOW_CELL_SIZE,CSP_LOCAL_SHADOW_CELL_SIZE);const emptyValue=localShadowFloat?Math.exp(shadow.expFactor):1;gl.clearColor(emptyValue,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.uniformMatrix4fv(localShadowLocations.viewProjection,false,shadow.matrix);gl.uniform3fv(localShadowLocations.lightPosition,shadow.position);gl.uniform1f(localShadowLocations.lightRangeInv,shadow.rangeInv);gl.uniform1f(localShadowLocations.lightClipSphere,shadow.clipSphere);gl.uniform1f(localShadowLocations.expFactor,shadow.expFactor);for(const {item,override,profile}of casters){const material=item.material;if(profile.cull==="none")gl.disable(gl.CULL_FACE);else{gl.enable(gl.CULL_FACE);gl.cullFace(profile.cull==="front"?gl.FRONT:gl.BACK);}const alphaRef=profile.shadowAlphaTested?Math.max(0,effectiveScalar(material,override,"ksAlphaRef",.5)):0,diffuseTexture=effectiveResourceTexture(item,override,"txdiffuse",item.texture);gl.uniformMatrix4fv(localShadowLocations.world,false,item.world);gl.uniform1f(localShadowLocations.alphaRef,alphaRef);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,diffuseTexture||null);gl.uniform1i(localShadowLocations.hasDiffuseTexture,Boolean(diffuseTexture));gl.bindVertexArray(item.vao);gl.drawElements(gl.TRIANGLES,item.node.indices.length,gl.UNSIGNED_SHORT,0);}}
     if(localShadowSamples===CSP_LOCAL_SHADOW_SAMPLES){gl.disable(gl.SCISSOR_TEST);gl.bindFramebuffer(gl.READ_FRAMEBUFFER,localShadowMsFramebuffer);gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,localShadowFramebuffer);gl.blitFramebuffer(0,0,CSP_LOCAL_SHADOW_ATLAS_SIZE,CSP_LOCAL_SHADOW_ATLAS_SIZE,0,0,CSP_LOCAL_SHADOW_ATLAS_SIZE,CSP_LOCAL_SHADOW_ATLAS_SIZE,gl.COLOR_BUFFER_BIT,gl.NEAREST);}filterLocalShadowAtlas(lights);gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.clearColor(0,0,0,1);localShadowState.ready=true;return localShadowState;
   }
