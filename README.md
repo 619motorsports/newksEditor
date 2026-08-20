@@ -82,7 +82,7 @@ npm test
 - KN5 v5/v6 headers, embedded texture, material, hierarchy, static and skinned-mesh
   parsing, including recognition of appended CSP KN5ENC v1 protected payloads
 - Stock shader parameters, texture-resource inspection, embedded BC1/2/3,
-  CPU-decoded BC4/5, native BPTC BC6H/BC7 where available, generic
+  CPU-decoded BC4/5/7, native BPTC BC6H/BC7 where available, generic
   8/16/24/32-bit masked DDS, bounded legacy D3D9 R/RG/RGBA 16/32-bit float DDS,
   PNG/JPEG/WebP,
   tangent-space normal maps, packed maps channels, diffuse/normal detail maps, and
@@ -306,7 +306,7 @@ npm test
   aspect-, FOV-, strength-, and blur-dependent offsets
 - Defensive bounds checks and explicit errors for unsupported node layouts
 
-A portable BC6H/BC7 fallback for systems without BPTC, dynamic RainFX accumulation,
+A portable BC6H fallback for systems without BPTC, dynamic RainFX accumulation,
 drainage, spray and occlusion, GrassFX's full 868,352-thread density rather than the
 portable CPU sampling budget, CSP's full 32-slot local-shadow packing and dynamic/car
 atlas refresh scheduling,

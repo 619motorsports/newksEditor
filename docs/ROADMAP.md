@@ -20,8 +20,8 @@ vertical slice is only the foundation.
   bounded legacy D3D9 R/RG/RGBA 16/32-bit float DDS,
   embedded PNG/JPEG/WebP, and native BPTC BC6H/BC7, tangent normals, packed MultiMap specular/gloss/reflection,
   diffuse/normal detail maps, and stock four-way world-space track multilayers are
-  decoded and rendered. BC6H/BC7 still need a software fallback when BPTC is
-  unavailable; other DX10 variants and the remaining shader families still need exact
+  decoded and rendered. BC7 has a software fallback when BPTC is unavailable.
+  BC6H, other DX10 variants, and the remaining shader families still need exact
   paths. Track/environment workspaces now use a recovered 512² runtime scene cubemap:
   six faces initialize from the active camera and one face refreshes per draw. The
   portable reflection fallback now uses

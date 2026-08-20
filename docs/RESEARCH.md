@@ -271,6 +271,21 @@ and DX10 sRGB and uncompressed RGBA/BGRA/R8 mappings are recognized. A 144.5 MB
 Dallara IR18 fixture loaded 60 of 60 textures, including eight BC7 images, and its
 isolated Firestone sidewall rendered legibly without WebGL or JavaScript errors.
 
+When `EXT_texture_compression_bptc` is unavailable, Apex decodes BC7 to RGBA8 in
+software. The JavaScript decoder is based on `bcdec` commit
+`93628fe5627102fe5187b7eeb99122dec6612c36` under its MIT license. Tests cover all
+eight BC7 modes, clipped edge blocks, missing bytes, and an invalid mode. An
+independent ImageMagick 7.1.2-29 decode of the upstream 800×600 `dice_bc7.dds`
+matched Apex byte-for-byte across all 1,920,000 RGBA bytes. Both decodes have SHA-256
+`7f9bd5c018d7c8872e8b4c04ba724df08627d9b771877b56e2ee55a7a02b173f`.
+In development Electron and the packaged Linux application, a synthetic KN5 rendered
+the same BC7 material with BPTC enabled and with `EXT_texture_compression_bptc`
+forced unavailable. Both
+screenshots have SHA-256
+`39ff6b48044997d05c6cc72d35893963fe6f303faa387520f5b41b9d99ae38ec`.
+The software run loaded one of one textures, returned WebGL error zero, and reported
+no JavaScript or browser-log errors.
+
 After correcting the v5 header, both 100-file baseline groups audit with zero parse
 failures. A separate 300-file mixed-car slice also has zero texture-table failures
 and contains 4,477 textures, including the 49 BC7 images and 1,218 embedded PNGs.
