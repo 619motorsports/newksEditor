@@ -47,6 +47,21 @@ bone:       name:string, inverse-bind-transform:mat4
 skin vertex:position:vec3, normal:vec3, uv:vec2, tangent:vec3, weights/indices:8 floats
 ```
 
+The material `texture-id` stores the shader resource bind point. It does not store
+an index into the model texture array. The native pixel shader reflection for
+`ksPerPixelMultiMap_damage_dirt` reports bind point 21 for `txDamageMask`.
+
+The official `bmw_m3_e92.kn5` stores 21 for this resource. Its texture has model
+index 18 and material resource index 6. Four official car families supplied 16 KN5
+files for a wider audit. None of the 868 decisive records matched the model texture
+index. Of these records, 849 matched their material resource position. The other 19
+records were `txDamageMask` records with bind point 21.
+
+The shipped `ksNet.pdb` identifies `KN5IO::loadMaterialsBinary` at `0x1003b9de` and
+`KN5IO::saveMaterialsBinary` at `0x1003d273`. The native save loop writes the first
+integer from each 56-byte `MaterialResource` before the texture name. The load loop
+reads this integer after the resource name and finds the material resource by name.
+
 For the collider fixture, this consumes all 1,838 bytes, yielding 3 nodes, 28
 vertices, and 156 indices. The larger LOD-D file validates the material record:
 three materials and shader properties such as `ksAmbient`, `ksDiffuse`,
@@ -739,9 +754,9 @@ near-field specular factor as `saturate(extSceneWetness * 100) * AO * 0.5`, then
 multiplies the substrate-specular direction term by `lerp(1, 2, factor)`. Supported
 terrain shaders write AO one to the normal/AO target, so Apex can reproduce both
 terms directly from the live RainFX wetness slider. The same wet uniform is used by
-the viewport and non-recursive scene-probe grass draw. The source's negative-wetness
-snow whitening, local-light specular and cubemap-reflection extension remain outside
-this editor subset.
+the viewport and non-recursive scene-probe grass draw. Both draws also apply the
+source's negative-wetness, squared-height snow whitening. The disabled experimental
+cubemap-reflection extension remains outside this editor subset.
 
 GrassFX has a separate active LightingFX path that is independent of the zeroed
 experimental padding aliases above. Public `custom/grass/flgGrass_vs.fx` selects
@@ -1410,10 +1425,23 @@ reports zero collider errors or warnings and also exposes its packed bottom box.
 A wider audit parsed 124 installed `ks_*` colliders. It showed that many shipping
 Kunos cars exceed the older guide's polygon budget, so budget excess remains a
 warning; material, texture, and open/non-manifold topology violations remain errors.
-The renderer can upload this separate model to an independent edge buffer and draw
-an orange, always-visible cage over any automatic or forced car LOD without adding
-the collider to the editable/exportable scene. The retained overlay capture is
-coherent and completes with WebGL error zero.
+The renderer uploads this separate model to an independent edge buffer. It draws an
+orange cage over any automatic or forced car LOD. The collider stays separate from
+the visual car scene and its KN5 export.
+
+Apex now stores static collider edits by stable root-relative node path. Each edit
+starts from copied source vertices and indices. Mesh controls apply offset, rotation,
+scale, degenerate-face removal, face reversal, and area-weighted normal rebuilding.
+The same edit refreshes the edge buffer and reruns the collider audit. Project JSON,
+local recovery, undo, and redo keep these edits separate from CSP output. The first
+edit also stores the collider path, byte size, KN5 version, and SHA-256 digest. The app
+restores source geometry and blocks editing and export if the selected collider does
+not match that identity. This also detects replacements with unchanged names and sizes.
+
+Standalone export serializes the edited collision model as `collider.kn5`. A writer
+test parses this output again and confirms that its topology stays closed. A production
+WebKit run used a synthetic car and closed collider. It confirmed live cage movement,
+zero audit findings, invalid-scale rejection, undo, redo, recovery, and overlay retention.
 
 ## Car hierarchy evidence
 
@@ -1850,10 +1878,37 @@ The renderer uploads the primary result as one normalized unsigned byte per matc
 KN5 vertex and attenuates ambient diffuse and environment response. Direct sun,
 directional shadows, CSP local lights, specular, and emissive terms remain independent.
 This corresponds to vertex ambient occlusion rather than treating it as another
-shadow map. The secondary car channel is preserved and reported, but correct blending
-for `SPLIT_AO` door, steering, headlight, and wing animation states remains. Legacy
-normal-override type-2 records, `@@__ALT@:` states, embedded v1 extra samples, v2
-`ExtraSamples.data`, and tree samples are also diagnosed but not yet applied.
+shadow map.
+
+The [official CSP bakery](https://github.com/ac-custom-shaders-patch/acc-bakeryoptix/blob/master/bakeryoptix/baked_data.cpp)
+stores primary and secondary AO in a float pair. Its first animation bake updates only
+the primary value; the secondary value remains at the bind pose. CSP's public
+[`ext_vao/_include_vs.fx`](https://gitlab.com/ac-custom-shaders-patch/public/acc-shaders/-/blob/master/recreated/include_new/ext_vao/_include_vs.fx)
+then evaluates
+`lerp(vsLoadAo0(...), vsLoadAo1(...), vaoSecondaryMix)`. Thus, a zero native mix selects
+the animation channel, and a mix of one selects the bind-pose channel. Apex uploads both
+bytes and applies the equivalent blend with a primary-channel amount.
+
+The installed `dwrite.dll` parser at `FUN_181169ae0` (`0x181169ae0`) reads the
+`[SPLIT_AO]` section. It uses default exponents of two for doors and headlights and one
+for wing animations. It also reads cockpit, door, headlight, steering-wheel, and up to
+100 contiguous wing node lists. The
+[official bakery mappings](https://github.com/ac-custom-shaders-patch/acc-bakeryoptix/blob/master/bakeryoptix/main.cpp)
+map `lights.ksanim`,
+`car_door_L.ksanim`, `car_door_R.ksanim`, and named wing animations to those lists. It
+expands `@AUTO` to animation track names before it writes the patch configuration.
+Apex follows those mappings and matches a configured transform ancestor for each mesh.
+For door previews, it intersects explicit configured roots with the selected animated
+track and its ancestors. This prevents a shared left-and-right list from changing the
+stationary door. This selection guard is portable preview behavior, not a recovered
+native runtime rule.
+
+The native CPU function that converts animation position to `vaoSecondaryMix` is not
+yet recovered. Apex therefore labels `position^EXP` as a power preview; it does not
+claim that curve is exact. Steering-wheel split AO also remains at the bind pose until
+the native steering input and conversion are recovered. Legacy normal-override type-2
+records, `@@__ALT@:` states, embedded v1 extra samples, v2 `ExtraSamples.data`, and tree
+samples are diagnosed but not yet applied.
 
 Production Chrome proofs covered both asset scales. The Nissan 370Z patch supplied
 908 records; 416 default records bound both channels on 201 meshes, with 174 alternate
@@ -1867,6 +1922,20 @@ Both scenes retained complete texture coverage, RGBA16F with 4× MSAA, direction
 shadows and weather lighting, returned WebGL error zero for every state, and logged no
 browser exception. These comparisons prove the portable primary-channel path and its
 toggle, not the remaining animated or spatial extra-sample behavior.
+
+A packaged Electron follow-up loaded the full Nissan 370Z, its v4 VAO patch, and
+`animations/car_door_L.ksanim`. All 201 matched meshes had primary and secondary AO.
+The animation supplied three active root-to-track paths. Five configured door names
+reduced to four related names and three exact branches.
+
+At animation position 0.5, the configured power preview applied a primary amount of
+0.25 to 17 meshes. The shared `COCKPIT_HR` ancestor did not select the opposite door
+or unrelated cockpit meshes. The bind-pose, VAO-disabled, and half-open frame hashes
+were `8862b363066ba7e4`, `b6a06bfa0908959a`, and `348b2c4fd0de1b71`.
+The production renderer returned WebGL error zero and logged no browser error. A
+desktop check also found no Node.js API in the renderer. This proves that split
+buffers, branch routing, and per-draw mixing execute in packaged WebGL. It does not
+make the labeled power curve native evidence.
 
 ## CSP seasonal-material evidence
 
@@ -1953,6 +2022,11 @@ skeleton, and null attributes. It evaluates each accepted node in local space.
 The native sample step is one percent of the selected animation time span. The loop
 stops before the end time. As a result, each nonempty animation contains 100 frames.
 
+KN5 null nodes contain local transforms. KN5 mesh records do not contain local
+transforms. The native SDK `sphere.kn5` gives its null node and child mesh the same
+`Sphere001` name. Apex therefore applies a matching animation track only to the null
+node. It does not create a second local transform for the same-named mesh.
+
 `Animation::save` at `0x10043dd0` writes version 2, the track count, and each UTF-8
 track name. It then writes the frame count and 40 bytes for each frame. A frame contains
 one quaternion, one position, and one scale.
@@ -1970,6 +2044,10 @@ tracks with 100 frames, which matches the native object-selection rule.
 Both scenes serialize to KN5 v6 and parse again. A live Electron run loaded all
 generated DDS textures and returned WebGL error zero. The packaged Linux application
 also imported the sphere with no JavaScript or browser-log errors.
+
+A production WebGL check used a `DOOR` null node and a same-named child mesh. The
+`DOOR` track matched one node at animation position 1. The screenshot hash was
+`ea00abb086e55c92`, and the browser log contained no warnings or errors.
 
 Three.js removes the directory from an external FBX image path before it loads the
 image. Apex captures the remaining filename from the loader. It resolves that name
@@ -2084,12 +2162,12 @@ specular gain. Negative values set those wet terms to zero and apply snow only t
 GrassFX. The ordinary RainFX material preview clamps its input to the positive range.
 
 A packaged Linux WebGL check used a bounded 16 m square fixture with 540 generated
-grass fins. Snow mode produced capture hash `451694bba6759fce`. Zero weather input
-produced `728118b45943ea26` with the same grass geometry. Both states returned WebGL
-error zero, and the browser reported no errors. The full portable suite passed 232
-tests and skipped 25 installed-game checks.
+grass fins. Snow mode produced capture hash `69bbb4d406be3bde`. Zero weather input
+produced `7aa7c1780fa0b195` with the same grass geometry. Both states returned WebGL
+error zero, and the browser reported no errors. The full portable suite passed 248
+tests and skipped 27 installed-game checks.
 
 A second packaged check removed GrassFX and kept one RainFX soaking surface. Its
-negative-input and disabled captures both produced `33fd34445afbf573`. This proves
+negative-input and disabled captures both produced `22fa65aa1df02d53`. This proves
 that snow input does not extrapolate the wet-material approximation. Visual inspection
 of the snow capture showed the expected white tips and green roots.

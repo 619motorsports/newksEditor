@@ -3,18 +3,21 @@ import { walkNodes } from "./kn5.js";
 const decoder = new TextDecoder("utf-8");
 const ZIP_LOCAL = 0x04034b50, ZIP_CENTRAL = 0x02014b50, ZIP_END = 0x06054b50;
 const PATCH_ENTRIES = ["Patch_v5.data", "Patch_v4.data", "Patch_v3.data", "Patch.data"];
+const MAX_CONFIG_BYTES = 4 * 1024 * 1024, MAX_SPLIT_AO_WINGS = 100, MAX_SPLIT_AO_NODES = 10_000, MAX_SPLIT_AO_NAME = 1024;
 export const CSP_VAO_BIND_DISTANCE_SQUARED = 0.01;
 
 export async function parseVaoPatch(input, source = "VAO patch") {
   const bytes = asBytes(input), archive = readZipDirectory(bytes, source);
   const patchEntry = PATCH_ENTRIES.map((name) => archive.get(name.toLowerCase())).find(Boolean);
   if (!patchEntry) throw new Error(`${source}: archive has no supported Patch_v1/v3/v4/v5 data`);
+  const configEntry = archive.get("config.ini");
+  if (configEntry?.uncompressedSize > MAX_CONFIG_BYTES) throw new Error(`${source}: Config.ini exceeds ${MAX_CONFIG_BYTES} bytes`);
   const version = patchEntry.name === "Patch.data" ? 1 : Number(/_v(\d+)/i.exec(patchEntry.name)?.[1]);
   const [payload, configBytes] = await Promise.all([
     extractZipEntry(bytes, patchEntry, source),
-    archive.has("config.ini") ? extractZipEntry(bytes, archive.get("config.ini"), source) : new Uint8Array()
+    configEntry ? extractZipEntry(bytes, configEntry, source) : new Uint8Array()
   ]);
-  const configText = decoder.decode(configBytes), lighting = parseLightingConfig(configText);
+  const configText = decoder.decode(configBytes), lighting = parseLightingConfig(configText), splitAo = parseSplitAoConfig(configText);
   const parsed = parseVaoData(payload, { version, lighting, source });
   const extra = archive.get("extrasamples.data"), trees = archive.get("treesamples.data");
   return Object.freeze({
@@ -24,6 +27,7 @@ export async function parseVaoPatch(input, source = "VAO patch") {
     entry: patchEntry.name,
     configText,
     lighting,
+    splitAo,
     archiveEntries: [...archive.values()].map(({ name, uncompressedSize }) => ({ name, size: uncompressedSize })),
     extraSamples: extra ? { entry: extra.name, bytes: extra.uncompressedSize, version: 2 } : parsed.embeddedExtraSamples,
     treeSamples: trees ? { entry: trees.name, bytes: trees.uncompressedSize } : null
@@ -82,6 +86,13 @@ export function parseVaoData(input, options = {}) {
 
 export function bindVaoPatch(model, patch) {
   const meshes = walkNodes(model.root).map(({ node }) => node).filter((node) => node.kind === "mesh" || node.kind === "skinnedMesh");
+  const nodePaths = new WeakMap();
+  const indexPaths = (node, names = []) => {
+    const path = [...names, String(node?.name || "")];
+    nodePaths.set(node, Object.freeze(path));
+    for (const child of node?.children || []) indexPaths(child, path);
+  };
+  indexPaths(model.root);
   const byName = new Map();
   for (const node of meshes) { const list = byName.get(node.name) || []; list.push(node); byName.set(node.name, list); }
   const bindings = new Map(), unmatched = [], alternate = [];
@@ -96,7 +107,7 @@ export function bindVaoPatch(model, patch) {
       return dx * dx + dy * dy + dz * dz < CSP_VAO_BIND_DISTANCE_SQUARED;
     });
     if (!node) { unmatched.push(record); continue; }
-    const binding = bindings.get(node) || { node, primary: null, secondary: null, records: [] };
+    const binding = bindings.get(node) || { node, nodeNames: nodePaths.get(node) || Object.freeze([node.name]), primary: null, secondary: null, records: [] };
     binding[record.channel] = record.values; binding.records.push(record); bindings.set(node, binding); matchedRecords++;
   }
   let vertices = 0, sum = 0, minimum = 255, maximum = 0, primaryMeshes = 0, secondaryMeshes = 0;
@@ -105,6 +116,108 @@ export function bindVaoPatch(model, patch) {
     if (binding.secondary) secondaryMeshes++;
   }
   return { bindings, patchRecords: patch?.recordCount || patch?.records?.length || 0, matchedRecords, unmatchedRecords: unmatched.length, alternateRecords: alternate.length, normalRecords, matchedMeshes: bindings.size, primaryMeshes, secondaryMeshes, vertices, minimum: vertices ? minimum : 255, maximum: vertices ? maximum : 255, mean: vertices ? sum / vertices : 255, unmatched: unmatched.slice(0, 32), alternate: alternate.slice(0, 32) };
+}
+
+/** Parse the CSP node groups and curves used to blend split vertex AO. */
+export function parseSplitAoConfig(text) {
+  let section = "", present = false;
+  const values = new Map(), warnings = [];
+  for (const raw of String(text || "").replace(/\r/g, "").split("\n")) {
+    const line = raw.split(";")[0].trim();
+    if (!line) continue;
+    const header = /^\[([^\]]+)\]$/.exec(line);
+    if (header) { section = header[1].trim().toUpperCase(); present ||= section === "SPLIT_AO"; continue; }
+    const equals = line.indexOf("=");
+    if (equals < 0 || section !== "SPLIT_AO") continue;
+    const key = line.slice(0, equals).trim().toUpperCase();
+    if (key) values.set(key, line.slice(equals + 1).trim());
+  }
+  const names = (key) => {
+    const output = [];
+    for (const value of String(values.get(key) || "").split(",")) {
+      const name = value.trim();
+      if (!name) continue;
+      if (name.length > MAX_SPLIT_AO_NAME) { warnings.push(`${key}: node name exceeds ${MAX_SPLIT_AO_NAME} characters`); continue; }
+      if (output.length === MAX_SPLIT_AO_NODES) { warnings.push(`${key}: node list exceeds ${MAX_SPLIT_AO_NODES} entries`); break; }
+      if (!output.some((candidate) => candidate.toLowerCase() === name.toLowerCase())) output.push(name);
+    }
+    return Object.freeze(output);
+  };
+  const exponent = (key, fallback) => {
+    if (!values.has(key)) return fallback;
+    const value = Number(values.get(key));
+    if (!Number.isFinite(value) || value < 0) { warnings.push(`${key}: exponent must be a finite nonnegative number`); return fallback; }
+    return value;
+  };
+  const wings = [];
+  for (let index = 0; index < MAX_SPLIT_AO_WINGS; index++) {
+    const prefix = `WING_ANIM_${index}`, name = String(values.get(`${prefix}_NAME`) || "").trim();
+    if (!name) break;
+    if (name.length > MAX_SPLIT_AO_NAME) { warnings.push(`${prefix}_NAME: animation name exceeds ${MAX_SPLIT_AO_NAME} characters`); continue; }
+    wings.push(Object.freeze({ index, name, exponent: exponent(`${prefix}_EXP`, 1), nodes: names(`${prefix}_NODES`) }));
+  }
+  return Object.freeze({
+    present,
+    cockpitHr: names("COCKPIT_HR"),
+    door: Object.freeze({ exponent: exponent("DOOR_EXP", 2), nodes: names("DOOR_NODES") }),
+    headlights: Object.freeze({ exponent: exponent("HEADLIGHTS_EXP", 2), nodes: names("HEADLIGHTS_NODES") }),
+    steeringWheel: Object.freeze({ nodes: names("STEERING_WHEEL_NODES") }),
+    wings: Object.freeze(wings),
+    warnings: Object.freeze(warnings)
+  });
+}
+
+/** Collect animated track names, root paths, and transform ancestors for split-AO selection. */
+export function splitAoAnimationNodeScope(root, animation) {
+  const tracks = [...new Set((animation?.tracks || [])
+    .filter((track) => track?.animated && track.frames?.length)
+    .map((track) => String(track.name || "").trim().toLowerCase())
+    .filter(Boolean))];
+  const trackNames = new Set(tracks), related = new Set(tracks), paths = [], stack = root ? [{ node: root, path: [] }] : [];
+  while (stack.length) {
+    const { node, path } = stack.pop(), name = String(node?.name || "").trim().toLowerCase(), nodePath = name ? [...path, name] : path;
+    if (trackNames.has(name)) { paths.push(Object.freeze(nodePath)); for (const ancestor of nodePath) related.add(ancestor); }
+    const children = node?.children || [];
+    for (let index = children.length - 1; index >= 0; index--) stack.push({ node: children[index], path: nodePath });
+  }
+  return Object.freeze({ tracks: Object.freeze(tracks), related: Object.freeze([...related]), paths: Object.freeze(paths) });
+}
+
+/** Resolve the split-AO node set for one active KSANIM state. */
+export function resolveSplitAoAnimation(splitAo, animationName, position, animatedNodeNames = [], relatedNodeNames = animatedNodeNames, animatedNodePaths = []) {
+  const basename = String(animationName || "").replace(/\\/g, "/").split("/").at(-1).toLowerCase();
+  let kind = "bind-pose", exponent = 1, configuredNodes = [];
+  if (basename === "lights.ksanim") { kind = "headlights"; exponent = splitAo?.headlights?.exponent ?? 2; configuredNodes = splitAo?.headlights?.nodes || []; }
+  else if (basename === "car_door_l.ksanim" || basename === "car_door_r.ksanim") { kind = "door"; exponent = splitAo?.door?.exponent ?? 2; configuredNodes = splitAo?.door?.nodes || []; }
+  else {
+    const wing = splitAo?.wings?.find((entry) => String(entry.name).replace(/\\/g, "/").split("/").at(-1).toLowerCase() === basename);
+    if (wing) { kind = `wing-${wing.index}`; exponent = wing.exponent; configuredNodes = wing.nodes; }
+  }
+  const automatic = animatedNodeNames.map((name) => String(name || "").trim()).filter(Boolean), related = new Set(relatedNodeNames.map((name) => String(name || "").trim().toLowerCase()).filter(Boolean)), nodes = new Set(), branches = [];
+  const paths = animatedNodePaths.map((path) => path.map((name) => String(name || "").trim().toLowerCase()).filter(Boolean)).filter((path) => path.length);
+  const addBranch = (path) => { if (!branches.some((candidate) => candidate.length === path.length && candidate.every((name, index) => name === path[index]))) branches.push(Object.freeze(path)); };
+  for (const name of configuredNodes) {
+    if (name.toUpperCase() === "@AUTO") {
+      for (const automaticName of automatic) nodes.add(automaticName.toLowerCase());
+      if (kind === "door") for (const path of paths) addBranch(path);
+    } else {
+      const normalizedName = name.toLowerCase();
+      if (kind !== "door" || related.has(normalizedName)) nodes.add(normalizedName);
+      if (kind === "door") for (const path of paths) if (path.includes(normalizedName)) addBranch(path);
+    }
+  }
+  const normalized = Math.max(0, Math.min(1, Number(position) || 0));
+  return Object.freeze({ kind, animation: basename, position: normalized, exponent, amount: kind === "bind-pose" ? 0 : Math.pow(normalized, exponent), nodes, branches: Object.freeze(branches) });
+}
+
+/** Get the split-AO blend for a bound mesh and its transform ancestors. */
+export function splitAoBindingAmount(binding, state) {
+  if (!binding?.secondary || !state?.nodes?.size) return 0;
+  if (state.branches?.length) {
+    const path = binding.nodeNames?.map((name) => String(name || "").trim().toLowerCase()).filter(Boolean) || [];
+    return state.branches.some((branch) => branch.length <= path.length && branch.every((name, index) => name === path[index])) ? state.amount : 0;
+  }
+  return binding.nodeNames?.some((name) => state.nodes.has(String(name || "").toLowerCase())) ? state.amount : 0;
 }
 
 function parseLightingConfig(text) {

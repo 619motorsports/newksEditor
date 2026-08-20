@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createAssetFileIndex, discoverAssetAnimations, discoverAssetSkins, externalResourcePaths, matchSkinTextures, normalizeAssetPath, resolveAssetFile } from "../src/asset-files.js";
+import { assetFolderMatchesModelFiles, createAssetFileIndex, discoverAssetAnimations, discoverAssetSkins, externalResourcePaths, matchSkinTextures, normalizeAssetPath, resolveAssetFile } from "../src/asset-files.js";
 
 function file(name, webkitRelativePath = "") { return { name, webkitRelativePath }; }
 
@@ -27,6 +27,26 @@ test("does not guess when a basename or suffix is ambiguous", () => {
   const result = resolveAssetFile(createAssetFileIndex([first, second]), "shared.dds");
   assert.equal(result.status, "ambiguous");
   assert.deepEqual(result.matches.map((entry) => entry.path), ["car/extension/a/shared.dds", "car/extension/b/shared.dds"]);
+});
+
+test("matches open model files to the selected asset folder", () => {
+  const main = { name: "car.kn5", webkitRelativePath: "car/car.kn5", size: 1200, lastModified: 42 };
+  const lod = { name: "car_lod_b.kn5", webkitRelativePath: "car/car_lod_b.kn5", size: 800, lastModified: 43 };
+  const matchingIndex = createAssetFileIndex([
+    { ...main },
+    { ...lod },
+    { name: "collider.kn5", webkitRelativePath: "car/collider.kn5", size: 300, lastModified: 44 }
+  ]);
+  assert.equal(assetFolderMatchesModelFiles(matchingIndex, [{ file: main }, { file: lod }]), true);
+  assert.equal(assetFolderMatchesModelFiles(matchingIndex, [{ file: main }, { file: lod }, { file: { name: "driver.kn5" }, auxiliary: "driver" }]), true);
+  assert.equal(assetFolderMatchesModelFiles(createAssetFileIndex([{ ...main }]), [{ file: main }, { file: lod }]), false);
+  assert.equal(assetFolderMatchesModelFiles(matchingIndex, []), false);
+});
+
+test("rejects a different car folder even when model paths and sizes collide", () => {
+  const openModel = { name: "car.kn5", webkitRelativePath: "car/car.kn5", size: 1200, lastModified: 42 };
+  const otherModel = { ...openModel, lastModified: 99 };
+  assert.equal(assetFolderMatchesModelFiles(createAssetFileIndex([otherModel]), [{ file: openModel }]), false);
 });
 
 test("collects unique external resource files from evaluated overrides", () => {
