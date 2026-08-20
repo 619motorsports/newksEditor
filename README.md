@@ -32,7 +32,11 @@ For a car, edit each LOD file name and range, or the cockpit or driver distance 
 The preview, undo history, recovery data, and project file use the same values. Select **Export models.ini** or **Export lods.ini** to download the manifest.
 Discovered
 `skins/<name>` folders can replace matching KN5 texture basenames just as they do in
-the game. Discovered `.ksanim` files can be sampled on a normalized timeline with
+the game. Select a skin and open the **Model** inspector to edit its `ui_skin.json`
+name, driver, country, team, number, and priority. Skin metadata edits use the same
+undo, recovery, and project history as other edits. Export writes a separate
+`ui_skin.json` file and retains safe unknown source fields. Discovered `.ksanim`
+files can be sampled on a normalized timeline with
 their matching KN5 hierarchy transforms applied live. Imported FBX clips use the
 same timeline. You can export a selected clip as a KSANIM v2 file. The same asset folder
 resolves case-insensitive external CSP texture paths and reports missing or ambiguous
@@ -102,13 +106,18 @@ npm test
   KN5 exports. Skinned bind-pose geometry remains read-only.
 - Ordered multi-KN5 track workspaces from manual selection or `models*.ini`, with
   per-file hierarchy roots, game-compatible placement transforms, material remapping,
-  deterministic texture-name replacement, collision diagnostics, and deterministic
-  center previews for dynamic objects with their random ranges and velocity metadata.
+  deterministic texture-name replacement, collision diagnostics, and native seeded
+  previews for dynamic objects with probability, multiplicity, random positions, and
+  velocity playback.
+  The Model inspector reports exact parsed-scene totals, transformed world bounds,
+  source-file hotspots, and the largest meshes. It also reports source-KN5,
+  vertex/index, and embedded-texture payload sizes without claiming unsupported game limits.
   Static model positions and rotations support live editing, undo, recovery, project
   persistence, and `models.ini` export. Dynamic objects support edits to probability,
   multiplicity, position mode, position center and range, velocity mode, velocity base
   and range, and audio. These edits use the same undo, recovery, project, and
-  `models.ini` export paths. The preview stays at the deterministic position center.
+  `models.ini` export paths. The seed control makes previews reproducible. A live game
+  can differ because it uses one shared random sequence.
 - Packed or unpacked `data/surfaces.ini` physics inspection and assembled-layout validation
   using the game's built-in `WALL`, stock system surfaces, track override precedence,
   nonzero sector IDs, and unique substring binding; fallback and ambiguous physics
@@ -142,7 +151,9 @@ npm test
   steering, and brake-disc nodes; duplicate/null-kind diagnostics; left/right and
   +Z-forward wheel-axis checks; related-pivot and cross-LOD alignment
 - Car and track skin discovery with live selection, case-insensitive KN5-basename
-  replacement, sparse inheritance, per-LOD texture scoping, and ambiguity/load diagnostics
+  replacement, sparse inheritance, per-LOD texture scoping, and ambiguity/load diagnostics.
+  Bounded `ui_skin.json` parsing and editing covers all six installed metadata fields,
+  project persistence, undo, recovery, unknown-field preservation, and standalone export.
 - KSANIM v1 matrix and v2 quaternion/position/scale parsing, exact runtime frame
   sampling, v2 serialization, hierarchical node binding, live timeline preview,
   and match diagnostics
@@ -299,7 +310,7 @@ atlas refresh scheduling,
 wet cubemap reflection and negative-wetness snow response,
 transparent-layer feedback,
 general CSP template/include expansion,
-randomized dynamic-object motion, subtractive procedural-emissive
+dynamic-object audio, subtractive procedural-emissive
 composition, FBX bump-map conversion and packed material maps, arbitrary vertex and
 face editing, skinned bind-pose geometry editing,
 full local-light photometric fidelity,
