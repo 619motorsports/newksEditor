@@ -151,6 +151,13 @@ export function cloneEditorProject(project) {
   return normalizeEditorProject(JSON.parse(JSON.stringify(project)));
 }
 
+/** Classify authoring changes so callers can refresh only affected scene data. */
+export function classifyEditorProjectChanges(previous, next) {
+  const changed = (key) => JSON.stringify(previous?.[key] || null) !== JSON.stringify(next?.[key] || null);
+  const geometryChanged = changed("geometryEdits"), nodeChanged = changed("nodeEdits"), workspaceChanged = changed("workspaceEdits"), surfaceChanged = changed("surfaceEdits");
+  return Object.freeze({ geometryChanged, nodeChanged, workspaceChanged, surfaceChanged, sceneChanged: geometryChanged || nodeChanged || workspaceChanged });
+}
+
 export function parseEditorValue(text) {
   const source = String(text).trim();
   if (!source) throw new Error("Enter a number or comma-separated vector");

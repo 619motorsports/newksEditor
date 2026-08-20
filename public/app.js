@@ -1,7 +1,7 @@
 import { computeKn5Visibility, parseKn5, propertyValue, walkNodes } from "/src/kn5.js";
 import { evaluateCspConfig, expandCspMaterialTemplates, parseCspIni } from "/src/csp-config.js";
 import { customEmissiveAtlasSize } from "/src/custom-emissive.js";
-import { cloneEditorProject, createEditorProject, editorProjectCspEditCount, editorProjectEditCount, formatEditorValue, normalizeEditorProject, parseEditorValue, serializeEditorCsp, serializeEditorProject } from "/src/editor-project.js";
+import { classifyEditorProjectChanges, cloneEditorProject, createEditorProject, editorProjectCspEditCount, editorProjectEditCount, formatEditorValue, normalizeEditorProject, parseEditorValue, serializeEditorCsp, serializeEditorProject } from "/src/editor-project.js";
 import { decodeDdsRgba, inspectDds } from "/src/dds.js";
 import { createAssetFileIndex, discoverAssetAnimations, discoverAssetSkins, externalResourcePaths, matchSkinTextures, normalizeAssetPath, resolveAssetFile } from "/src/asset-files.js";
 import { applyGeometryEdits, captureStaticGeometryBaselines, staticGeometryMetrics } from "/src/geometry-authoring.js";
@@ -82,6 +82,7 @@ let trackSurfaceBaseline = null;
 let trackSurfaceFileName = "";
 let trackAudit = null;
 let sceneDiagnostics = null;
+let sceneDiagnosticsRuns = 0;
 let trackSurfaceBindings = new Map();
 let trackCameraSets = [];
 let trackCameraChoices = [];
@@ -616,6 +617,14 @@ function applyProjectSceneEdits() {
   window.__apexGeometryAuthoring = { edits: Object.keys(editorProject?.geometryEdits || {}).length, applied, warnings };
 }
 
+function refreshTrackSurfaceAuthoring(meshes = modelSummary?.meshes || []) {
+  trackAudit = model?.workspace?.kind === "track" ? auditTrackModel(model, trackSurfaceConfig) : null;
+  trackSurfaceBindings = trackAudit ? new Map(meshes.map(({ node }) => [node, resolveTrackSurface(node.name, trackSurfaceConfig)])) : new Map();
+  window.__apexTrackAudit = trackAudit;
+  renderer?.setSurfaceBindings(trackSurfaceBindings);
+  configureSurfaceOverlay();
+}
+
 function refreshHierarchyAuthoring(geometryChanged = false) {
   if (!model) return;
   const nodes = walkNodes(model.root), meshes = nodes.filter(({ node }) => node.kind === "mesh" || node.kind === "skinnedMesh");
@@ -623,18 +632,14 @@ function refreshHierarchyAuthoring(geometryChanged = false) {
   const previewMeshes = meshes.filter(({ node }) => sceneVisibility.get(node)), triangles = meshes.reduce((sum, { node }) => sum + node.indices.length / 3, 0);
   modelSummary = { nodes, meshes, previewMeshes, triangles };
   refreshSceneDiagnostics();
-  trackAudit = model.workspace?.kind === "track" ? auditTrackModel(model, trackSurfaceConfig) : null;
-  trackSurfaceBindings = trackAudit ? new Map(meshes.map(({ node }) => [node, resolveTrackSurface(node.name, trackSurfaceConfig)])) : new Map();
-  window.__apexTrackAudit = trackAudit;
+  refreshTrackSurfaceAuthoring(meshes);
   carHierarchyAudit = model.workspace?.kind === "carLods" ? auditCarHierarchy(model) : null;
   window.__apexCarHierarchyAudit = carHierarchyAudit;
   $("#stats").innerHTML = `${previewMeshes.length.toLocaleString()} renderable / ${meshes.length.toLocaleString()} meshes<br>${Math.round(triangles).toLocaleString()} triangle${Math.round(triangles) === 1 ? "" : "s"}<br>${model.materials.length} materials${model.workspace ? `<br>${model.workspace.files.length} KN5 files` : ""}`;
   $("#node-count").textContent = nodes.length;
   renderTree($("#search").value);
   if (geometryChanged) renderer?.refreshGeometry(); else renderer?.refreshHierarchy();
-  renderer?.setSurfaceBindings(trackSurfaceBindings);
   if (geometryChanged) { refreshCarColliderAudit(); applyVaoPatch(); }
-  configureSurfaceOverlay();
   configureLodPreview(true);
   configureReflectionCaptureChoices();
 }
@@ -680,24 +685,25 @@ function commitEditorChange(label, mutate) {
   mutate(next);
   const normalized = normalizeEditorProject(next), after = serializeEditorProject(normalized);
   if (after === before) return false;
-  const geometryChanged = JSON.stringify(normalized.geometryEdits) !== JSON.stringify(editorProject.geometryEdits);
-  const sceneChanged = geometryChanged || JSON.stringify(normalized.nodeEdits) !== JSON.stringify(editorProject.nodeEdits) || JSON.stringify(normalized.workspaceEdits) !== JSON.stringify(editorProject.workspaceEdits) || JSON.stringify(normalized.surfaceEdits) !== JSON.stringify(editorProject.surfaceEdits);
+  const changes = classifyEditorProjectChanges(editorProject, normalized);
   undoStack.push({ label, snapshot: before });
   if (undoStack.length > 100) undoStack.shift();
   redoStack = [];
   editorProject = normalized;
-  if (sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged); }
+  if (changes.sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(changes.geometryChanged); }
+  else if (changes.surfaceChanged) { applyProjectSurfaceEdits(); refreshTrackSurfaceAuthoring(); }
   refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
-  if (sceneChanged && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
+  if ((changes.sceneChanged || changes.surfaceChanged) && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
   return true;
 }
 
 function restoreEditorSnapshot(snapshot) {
-  const restored = normalizeEditorProject(JSON.parse(snapshot)), geometryChanged = JSON.stringify(restored.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits), sceneChanged = geometryChanged || JSON.stringify(restored.nodeEdits) !== JSON.stringify(editorProject?.nodeEdits) || JSON.stringify(restored.workspaceEdits) !== JSON.stringify(editorProject?.workspaceEdits) || JSON.stringify(restored.surfaceEdits) !== JSON.stringify(editorProject?.surfaceEdits);
+  const restored = normalizeEditorProject(JSON.parse(snapshot)), changes = classifyEditorProjectChanges(editorProject, restored);
   editorProject = restored;
-  if (sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged); }
+  if (changes.sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(changes.geometryChanged); }
+  else if (changes.surfaceChanged) { applyProjectSurfaceEdits(); refreshTrackSurfaceAuthoring(); }
   refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
-  if (sceneChanged && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
+  if ((changes.sceneChanged || changes.surfaceChanged) && !selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
 }
 
 function undoEditorChange() {
@@ -769,9 +775,11 @@ async function loadEditorProject(file) {
     const loaded = normalizeEditorProject(JSON.parse(await file.text()));
     if (loaded.asset.size && loaded.asset.size !== modelFile.size) throw new Error(`Project expects a ${loaded.asset.size}-byte KN5, but ${modelFile.name} is ${modelFile.size} bytes`);
     if (loaded.asset.kn5Version && loaded.asset.kn5Version !== model.version) throw new Error(`Project expects KN5 v${loaded.asset.kn5Version}, but this model is v${model.version}`);
-    const geometryChanged = JSON.stringify(loaded.geometryEdits) !== JSON.stringify(editorProject?.geometryEdits);
+    const changes = classifyEditorProjectChanges(editorProject, loaded);
     editorProject = loaded; undoStack = []; redoStack = [];
-    applyProjectSceneEdits(); refreshHierarchyAuthoring(geometryChanged); refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
+    if (changes.sceneChanged) { applyProjectSceneEdits(); refreshHierarchyAuthoring(changes.geometryChanged); }
+    else if (changes.surfaceChanged) { applyProjectSurfaceEdits(); refreshTrackSurfaceAuthoring(); }
+    refreshAuthoredConfig(); persistEditorProject(); applyCspConfig();
     if (!selectedNode && !inspectedMaterial) renderModelInspector(modelFile, modelSummary.nodes, modelSummary.triangles);
   } catch (error) {
     console.error(error); status.textContent = `Could not open project: ${error.message}`;
@@ -1013,7 +1021,9 @@ function reflectionCaptureInspectorHtml(){const value=renderer?.sceneStatus?.ref
 
 function refreshSceneDiagnostics() {
   sceneDiagnostics = model?.workspace?.kind === "track" ? analyzeScene(model, { sourceName: modelFile?.name, excludeAuxiliary: true }) : null;
+  if (sceneDiagnostics) sceneDiagnosticsRuns++;
   window.__apexSceneDiagnostics = sceneDiagnostics;
+  window.__apexSceneDiagnosticsRuns = sceneDiagnosticsRuns;
 }
 
 function sceneDiagnosticsInspectorHtml() {
