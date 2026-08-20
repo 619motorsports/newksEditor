@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { AcdError, createAcdKey, findAcdEntry, parseAcd } from "../src/acd.js";
+import { assettoPath } from "./fixture-paths.js";
 
 function int32Bytes(value) { const data = new Uint8Array(4); new DataView(data.buffer).setInt32(0, value, true); return data; }
 function pack(assetName, files, header = null) {
@@ -47,7 +48,7 @@ test("rejects truncated ACD records with their byte offset", () => {
 });
 
 test("opens an installed official Kunos car data.acd", async (t) => {
-  const path = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/cars/ks_nissan_370z/data.acd";
+  const path = assettoPath("content/cars/ks_nissan_370z/data.acd");
   let data; try { data = await readFile(path); } catch { t.skip("Assetto Corsa data.acd fixture is not installed"); return; }
   const archive = parseAcd(data, "ks_nissan_370z", path), car = findAcdEntry(archive, "car.ini"), lods = findAcdEntry(archive, "lods.ini");
   assert.equal(archive.bytesRead, data.length);
@@ -57,7 +58,7 @@ test("opens an installed official Kunos car data.acd", async (t) => {
 });
 
 test("matches an installed archive entry byte-for-byte with its unpacked copy", async (t) => {
-  const directory = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/content/cars/2009_nascar";
+  const directory = assettoPath("content/cars/2009_nascar");
   let packed, unpacked; try { [packed, unpacked] = await Promise.all([readFile(`${directory}/data.acd`), readFile(`${directory}/data/lods.ini`)]); } catch { t.skip("Matching packed and unpacked fixtures are not installed"); return; }
   const archive = parseAcd(packed, "2009_nascar", `${directory}/data.acd`), lods = findAcdEntry(archive, "lods.ini");
   assert.ok(lods);

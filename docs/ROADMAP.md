@@ -235,9 +235,9 @@ vertical slice is only the foundation.
   wheel axes, related pivots, and cross-LOD placement. Packed-data editing/repacking,
   skin texture creation and preview-image authoring, animation authoring, cross-folder shared-driver access without
   a browser file grant, lights,
-  damage/dirt, instruments, steering/driver alignment, collider editing, and LOD-manifest
-  file-name authoring remain. LOD ranges and cockpit/driver distance switches now support
-  live editing, project persistence, validation, and `lods.ini` export.
+  damage/dirt, instruments, steering/driver alignment, collider editing, and remaining
+  car-workflow expansion remain. LOD file names, ranges, and cockpit/driver distance switches now
+  support live editing, project persistence, validation, and `lods.ini` export.
 - Track workspace: static multi-KN5 layouts now load from ordered `models*.ini`
   manifests or manual multi-file selection, including placement transforms and
   collision diagnostics. `DYNAMIC_OBJECT_n` entries now parse and load at their

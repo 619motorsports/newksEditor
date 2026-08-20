@@ -1,7 +1,7 @@
 import { modelPlacementMatrix } from "./kn5-workspace.js";
 
 export const WORKSPACE_FILE_EDIT_KEYS = [
-  "position", "rotation", "lodIn", "lodOut",
+  "name", "position", "rotation", "lodIn", "lodOut",
   "probability", "multiplicity", "posMode", "positionCenter", "positionRange",
   "velMode", "velocityBase", "velocityRange", "playWav"
 ];
@@ -34,6 +34,7 @@ export function captureWorkspaceBaseline(model) {
     cockpitHrDistance: workspace.cockpitHrDistance,
     driverHrDistance: workspace.driverHrDistance,
     files: workspace.files.map((file) => ({
+      name: String(file.name || ""),
       position: cloneVector(file.position, [0, 0, 0]),
       rotation: cloneVector(file.rotation, [0, 0, 0]),
       lod: file.lod ? { ...file.lod } : null,
@@ -55,7 +56,7 @@ export function applyWorkspaceEdits(model, edits = {}, baseline) {
   for (let index = 0; index < workspace.files.length; index++) {
     const file = workspace.files[index], source = baseline.files[index], root = model.root.children[index];
     if (!source) continue;
-    file.position = [...source.position]; file.rotation = [...source.rotation]; file.dynamic = cloneDynamic(source.dynamic);
+    file.name = source.name; file.position = [...source.position]; file.rotation = [...source.rotation]; file.dynamic = cloneDynamic(source.dynamic);
     if (file.lod && source.lod) { file.lod.in = source.lod.in; file.lod.out = source.lod.out; }
     if (root) {
       root.transform = modelPlacementMatrix(file.position, file.rotation);
@@ -75,6 +76,7 @@ export function applyWorkspaceEdits(model, edits = {}, baseline) {
       if (edit.rotation) file.rotation = [...edit.rotation];
     }
     root.transform = modelPlacementMatrix(file.position, file.rotation);
+    if (file.lod && edit.name !== undefined) file.name = edit.name;
     if (file.lod && root.workspaceLod) {
       if (edit.lodIn !== undefined) file.lod.in = root.workspaceLod.in = edit.lodIn;
       if (edit.lodOut !== undefined) file.lod.out = root.workspaceLod.out = edit.lodOut;

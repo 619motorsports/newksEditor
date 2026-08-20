@@ -1622,6 +1622,13 @@ covering 0–15, 15–45, 45–201, and 201–2000 metres. The merged result has
 bytes are consumed. Its `COCKPIT_HR` switch is preserved at 70 metres and the manifest
 produces no range diagnostic.
 
+An installed-data audit decoded 572 car archives and read 1,888 contiguous LOD
+records. Most `FILE` values are simple KN5 basenames. Shipping mods also use spaces
+and portable parent-relative paths such as `../shared_car/body.kn5`. File-name
+authoring therefore preserves those forms, normalizes separators, quotes INI-sensitive
+names, and rejects absolute paths, control characters, non-KN5 extensions, and names
+that cannot be created on Windows.
+
 A Chrome 151 WebGL smoke loaded that folder through the same directory-picker and
 manifest-discovery path as the UI. All 11 embedded textures decoded (five BC3, two
 BC1, and four masked raw DDS images), with zero unsupported textures, JavaScript

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import { adjustCspSeasonColor, analyzeCspSeasonalOverrides } from "../src/seasons.js";
 import { parseCspIni } from "../src/csp-config.js";
+import { assettoPath } from "./fixture-paths.js";
 
 test("reproduces CSP autumn and winter diffuse transforms", () => {
   assert.deepEqual(adjustCspSeasonColor([0.2, 0.6, 0.1], [0, 1, 0], 0.5, 0, 0), [0.2, 0.6, 0.1]);
@@ -23,7 +24,7 @@ test("reports active shader inputs separately from the legacy summer no-op", () 
 });
 
 test("inventories every installed loaded-track seasonal assignment", async (t) => {
-  const root = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/extension/config/tracks/loaded";
+  const root = assettoPath("extension/config/tracks/loaded");
   let files;
   try { files = (await readdir(root)).filter((name) => name.endsWith(".ini")); }
   catch { t.skip("Installed CSP track configs are unavailable"); return; }

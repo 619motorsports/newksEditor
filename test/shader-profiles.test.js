@@ -7,6 +7,7 @@ import {
   resolveMaterialRenderProfile,
   stockShaderProfile
 } from "../src/shader-profiles.js";
+import { assettoPath } from "./fixture-paths.js";
 
 function container(alphaTested = false, layout = 0) {
   const bytes = new Uint8Array(26), view = new DataView(bytes.buffer);
@@ -113,7 +114,7 @@ test("classifies stock and CSP glass paths without conflating windscreens and re
 });
 
 test("matches every non-empty installed ksEditor shader package header", async (t) => {
-  const root = "/mnt/D/SteamLibrary/SteamLibrary/steamapps/common/assettocorsa/sdk/editor/system/shaders";
+  const root = assettoPath("sdk/editor/system/shaders");
   let names;
   try { names = (await readdir(root)).filter((name) => name.endsWith(".shader")); }
   catch { t.skip("Installed ksEditor shader fixtures are unavailable"); return; }
