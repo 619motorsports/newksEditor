@@ -30,7 +30,7 @@ import { KS_EDITOR_CUBEMAP, WEBGL_CUBEMAP_FACES, reflectionBlurFromExponent, sel
 import { createCspWindParticles, CSP_WIND_MAP_FORMAT, CSP_WIND_MAP_SIZE, CSP_WIND_PARTICLE_COUNT, updateCspWindParticles } from "/src/csp-wind.js";
 import { collectFbxAnimations, parseFbxWithTextures, resolveFbxModelTextures } from "/src/fbx-import.js";
 import { applyNodeEdits, composeNodeTransform, decomposeNodeTransform, nodePathEntries } from "/src/node-authoring.js";
-import { advanceDynamicTrackObjects, dynamicTrackRootTransform, sampleDynamicTrackObjects } from "/src/dynamic-track.js";
+import { advanceDynamicTrackObjects, contiguousDynamicTrackObjects, dynamicTrackRootTransform, sampleDynamicTrackObjects } from "/src/dynamic-track.js";
 
 const $ = (selector) => document.querySelector(selector);
 const fileInput = $("#file");
@@ -500,7 +500,8 @@ async function loadSelectedLayout() {
   try {
     await selectTrackSurfaceConfig(manifestEntry);
     const manifest = parseModelsIni(await manifestEntry.file.text(), manifestEntry.relativePath), base = manifestEntry.relativePath.split("/").slice(0, -1).join("/"), descriptors = [], unresolved = [];
-    for (const item of [...manifest.models, ...manifest.dynamicObjects]) {
+    const runtimeDynamicObjects = contiguousDynamicTrackObjects(manifest.dynamicObjects, manifest.warnings);
+    for (const item of [...manifest.models, ...runtimeDynamicObjects]) {
       const requested = normalizeAssetPath(`${base}/${item.file}`), match = resolveAssetFile(assetFileIndex, requested);
       if (match.status !== "resolved") unresolved.push(`${item.file} (${match.status})`);
       else descriptors.push({ file: match.file, name: item.file, position: item.position || item.positionCenter, rotation: item.rotation || [0, 0, 0], manifestIndex: item.positionCenter ? null : item.index, dynamic: item.positionCenter ? item : null });
@@ -1889,7 +1890,7 @@ function createRenderer(canvas) {
     const workspaceFiles=model.workspace?.kind==="track"?model.workspace.files:[];
     dynamicTrackState=workspaceFiles.some((file)=>file.dynamic)?sampleDynamicTrackObjects(workspaceFiles,dynamicTrackSeed):null;
     const dynamicResults=new Map((dynamicTrackState?.results||[]).map((result)=>[result.fileIndex,result]));
-    for(let fileIndex=0;fileIndex<workspaceFiles.length;fileIndex++){const root=model.root.children?.[fileIndex],result=dynamicResults.get(fileIndex);if(root&&result)dynamicRootFiles.set(root,{fileIndex,file:workspaceFiles[fileIndex],result});}
+    for(let fileIndex=0;fileIndex<workspaceFiles.length;fileIndex++){const root=model.root.children?.[fileIndex],file=workspaceFiles[fileIndex],result=dynamicResults.get(fileIndex);if(root&&file.dynamic)dynamicRootFiles.set(root,{fileIndex,file,result:result||{instances:[]}});}
     items.forEach((x) => { gl.deleteBuffer(x.vertex); gl.deleteBuffer(x.index);gl.deleteBuffer(x.vaoAo); gl.deleteVertexArray(x.vao); });
     textures.forEach((texture) => gl.deleteTexture(texture));
     items = []; itemByNode = new WeakMap(); sceneRoot = model.root; textures = []; textureLookup = new Map(); embeddedTextureNames = new Set(); solidTextures = new Map();

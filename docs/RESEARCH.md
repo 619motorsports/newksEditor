@@ -1605,6 +1605,12 @@ After two seconds, the moving instance was at `[2, 4, 6]`, not the additive
 The captured frame hash was `fceea43cc3ccfe5d`. The test found no JavaScript or
 WebGL errors, and the desktop renderer did not expose Node.js APIs.
 
+A packaged gap-manifest test supplied `DYNAMIC_OBJECT_0` and `DYNAMIC_OBJECT_2`,
+but the second section referenced a missing file. Apex loaded only the official
+Barcelona `11.kn5` file and produced one instance. The frame hash was
+`6023febc3fb32bb6`, and WebGL returned zero errors. This result confirms that later
+sections do not resolve or render after a gap.
+
 The earlier production WebGL test covered all nine fields, validation, undo, redo,
 recovery, and export. The serializer round-trip test also proves that audio removal
 omits `PLAY_WAV`.

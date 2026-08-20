@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { advanceDynamicTrackObjects, createMsvcRandom, dynamicTrackRootTransform, sampleDynamicTrackObjects } from "../src/dynamic-track.js";
+import { advanceDynamicTrackObjects, contiguousDynamicTrackObjects, createMsvcRandom, dynamicTrackRootTransform, sampleDynamicTrackObjects } from "../src/dynamic-track.js";
 import { parseModelsIni } from "../src/kn5-workspace.js";
 
 test("matches the shipped MSVCR120 random generator", () => {
@@ -29,7 +29,7 @@ test("samples native probability, inclusive multiplicity, position, and velocity
 
 test("leaves non-random modes at the native zero transform", () => {
   const state = sampleDynamicTrackObjects([{ dynamic: {
-    probability: 101, multiplicity: [1, 1], posMode: "FIXED", positionCenter: [10, 20, 30], positionRange: [1, 2, 3],
+    index: 0, probability: 101, multiplicity: [1, 1], posMode: "FIXED", positionCenter: [10, 20, 30], positionRange: [1, 2, 3],
     velMode: "FIXED", velocityBase: [4, 5, 6], velocityRange: [1, 1, 1]
   } }], 7);
   assert.deepEqual(state.results[0].instances[0].position, [0, 0, 0]);
@@ -38,7 +38,7 @@ test("leaves non-random modes at the native zero transform", () => {
 
 test("advances each instance with the native float position update", () => {
   const state = sampleDynamicTrackObjects([{ dynamic: {
-    probability: 101, multiplicity: [1, 1], posMode: "FIXED", velMode: "RANDOM",
+    index: 0, probability: 101, multiplicity: [1, 1], posMode: "FIXED", velMode: "RANDOM",
     velocityBase: [2, 4, 6], velocityRange: [0, 0, 0]
   } }], 3, { serverTime: 2 });
   assert.deepEqual(state.results[0].instances[0].position, [4, 8, 12]);
@@ -57,8 +57,8 @@ test("replaces dynamic KN5 root translation and preserves its basis", () => {
 
 test("bounds unsafe multiplicity without changing later random samples", () => {
   const state = sampleDynamicTrackObjects([
-    { name: "many.kn5", dynamic: { probability: 101, multiplicity: [300, 300], posMode: "RANDOM", positionCenter: [0, 0, 0], positionRange: [1, 1, 1], velMode: "RANDOM", velocityBase: [0, 0, 0], velocityRange: [1, 1, 1] } },
-    { name: "later.kn5", dynamic: { probability: 101, multiplicity: [1, 1], posMode: "RANDOM", positionCenter: [0, 0, 0], positionRange: [1, 1, 1], velMode: "FIXED" } }
+    { name: "many.kn5", dynamic: { index: 0, probability: 101, multiplicity: [300, 300], posMode: "RANDOM", positionCenter: [0, 0, 0], positionRange: [1, 1, 1], velMode: "RANDOM", velocityBase: [0, 0, 0], velocityRange: [1, 1, 1] } },
+    { name: "later.kn5", dynamic: { index: 1, probability: 101, multiplicity: [1, 1], posMode: "RANDOM", positionCenter: [0, 0, 0], positionRange: [1, 1, 1], velMode: "FIXED" } }
   ], 9, { maximumPreviewInstances: 4 });
   assert.equal(state.nativeInstances, 301);
   assert.equal(state.previewInstances, 4);
@@ -69,7 +69,7 @@ test("bounds unsafe multiplicity without changing later random samples", () => {
 
 test("does not allocate or throw for overflowing multiplicity input", () => {
   const state = sampleDynamicTrackObjects([{ name: "overflow.kn5", dynamic: {
-    probability: 101, multiplicity: [1e308, 1e308], posMode: "RANDOM",
+    index: 0, probability: 101, multiplicity: [1e308, 1e308], posMode: "RANDOM",
     positionCenter: [0, 0, 0], positionRange: [1, 1, 1], velMode: "RANDOM",
     velocityBase: [0, 0, 0], velocityRange: [1, 1, 1]
   } }], 1, { maximumPreviewInstances: 4 });
@@ -80,7 +80,7 @@ test("does not allocate or throw for overflowing multiplicity input", () => {
 
 test("rejects dynamic vectors outside the finite float32 range", () => {
   const state = sampleDynamicTrackObjects([{ name: "unsafe.kn5", dynamic: {
-    probability: 101, multiplicity: [1, 1], posMode: "RANDOM",
+    index: 0, probability: 101, multiplicity: [1, 1], posMode: "RANDOM",
     positionCenter: [1e308, 2, 3], positionRange: [1, 1, 1], velMode: "RANDOM",
     velocityBase: [4, 5, 6], velocityRange: [1e308, 1, 1]
   } }], 1, { serverTime: 1e308 });
@@ -92,6 +92,29 @@ test("rejects dynamic vectors outside the finite float32 range", () => {
   assert.match(state.warnings.join("\n"), /RND_POS_CENTER.*finite float32.*RND_VEL_RANGE.*finite float32/s);
   advanceDynamicTrackObjects(state, 1e308);
   assert.ok(state.results[0].instances[0].position.every(Number.isFinite));
+});
+
+test("stops at the first missing dynamic object index", () => {
+  const files = [
+    { name: "late.kn5", dynamic: { index: 2, probability: 101, multiplicity: [1, 1], posMode: "FIXED", velMode: "FIXED" } },
+    { name: "main.kn5" },
+    { name: "first.kn5", dynamic: { index: 0, probability: 101, multiplicity: [1, 1], posMode: "FIXED", velMode: "FIXED" } }
+  ], warnings = [], state = sampleDynamicTrackObjects(files, 1);
+  assert.deepEqual(state.results.map((result) => [result.index, result.fileIndex]), [[0, 2]]);
+  assert.equal(state.nativeInstances, 1);
+  assert.match(state.warnings[0], /missing DYNAMIC_OBJECT_1.*ignores 1 later section/);
+  assert.deepEqual(contiguousDynamicTrackObjects(files.filter((file) => file.dynamic).map((file) => ({ ...file.dynamic, file: file.name })), warnings).map((entry) => entry.file), ["first.kn5"]);
+  assert.match(warnings[0], /missing DYNAMIC_OBJECT_1/);
+});
+
+test("ignores malformed and duplicate dynamic object indices", () => {
+  const state = sampleDynamicTrackObjects([
+    { name: "invalid.kn5", dynamic: { probability: 101 } },
+    { name: "first.kn5", dynamic: { index: 0, probability: 0 } },
+    { name: "duplicate.kn5", dynamic: { index: 0, probability: 101 } }
+  ], 1);
+  assert.deepEqual(state.results.map((result) => [result.index, result.accepted]), [[0, false]]);
+  assert.match(state.warnings.join("\n"), /invalid\.kn5.*nonnegative integer index.*DYNAMIC_OBJECT_0 is duplicated/s);
 });
 
 test("samples the installed Kunos Barcelona dynamic objects", async (context) => {

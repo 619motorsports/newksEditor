@@ -80,6 +80,36 @@ export function createMsvcRandom(seed = 1) {
   };
 }
 
+function contiguousDynamicEntries(files, warnings) {
+  const byIndex = new Map();
+  for (let fileIndex = 0; fileIndex < (files || []).length; fileIndex++) {
+    const dynamic = files[fileIndex]?.dynamic;
+    if (!dynamic) continue;
+    const index = Number(dynamic.index), label = files[fileIndex].name || dynamic.section || "Dynamic object";
+    if (!Number.isSafeInteger(index) || index < 0) {
+      warnings.push(`${label} has no nonnegative integer index; the preview ignores it`);
+      continue;
+    }
+    if (byIndex.has(index)) {
+      warnings.push(`DYNAMIC_OBJECT_${index} is duplicated; the preview uses its first entry`);
+      continue;
+    }
+    byIndex.set(index, { fileIndex, dynamic });
+  }
+  const contiguous = [];
+  for (let index = 0; byIndex.has(index); index++) contiguous.push(byIndex.get(index));
+  if (contiguous.length < byIndex.size) warnings.push(
+    `Dynamic objects stop at missing DYNAMIC_OBJECT_${contiguous.length}; the preview ignores ${byIndex.size - contiguous.length} later section${byIndex.size - contiguous.length === 1 ? "" : "s"}`
+  );
+  return contiguous;
+}
+
+/** Select the contiguous DYNAMIC_OBJECT_n prefix used by the native loader. */
+export function contiguousDynamicTrackObjects(objects, warnings = []) {
+  const files = (objects || []).map((dynamic) => ({ name: dynamic?.file, dynamic }));
+  return contiguousDynamicEntries(files, warnings).map(({ fileIndex }) => objects[fileIndex]);
+}
+
 export function sampleDynamicTrackObjects(files, seed = 1, options = {}) {
   const random = createMsvcRandom(seed);
   const maximumPreviewInstances = Math.max(1, Math.trunc(Number(options.maximumPreviewInstances) || 256));
@@ -88,9 +118,7 @@ export function sampleDynamicTrackObjects(files, seed = 1, options = {}) {
   const warnings = [];
   let nativeInstances = 0;
 
-  for (let fileIndex = 0; fileIndex < (files || []).length; fileIndex++) {
-    const dynamic = files[fileIndex]?.dynamic;
-    if (!dynamic) continue;
+  for (const { fileIndex, dynamic } of contiguousDynamicEntries(files, warnings)) {
 
     const label = files[fileIndex].name || dynamic.section || `DYNAMIC_OBJECT_${dynamic.index ?? fileIndex}`;
     const probability = Math.trunc(Number(dynamic.probability) || 0);
