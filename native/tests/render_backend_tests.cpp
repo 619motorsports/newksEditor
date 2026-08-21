@@ -2241,6 +2241,20 @@ bool contract_backend(apex::render::Backend backend) {
     require_nm_pixel(damage_normal_alpha_result.rgba8, 64U, 65U, 43U,
                      "normal alpha applies the recovered damage specular attenuation");
 
+    // Exercise ordered per-draw descriptor/root binding for the source-evidenced
+    // dirt-zero damage branch. This checks transport and ordering only; it does
+    // not claim full stock damage material parity.
+    const std::array<IndexedStaticMeshDrawRequest, 2> damage_batch_draws = {
+        damage_enabled_request, damage_normal_alpha_request};
+    IndexedStaticMeshBatchDescription damage_batch;
+    damage_batch.draws = damage_batch_draws;
+    const IndexedStaticMeshBatchResult damage_batch_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *triangle_texture.texture, damage_batch);
+    require(damage_batch_result.ok(), "dirt-zero damage ordered batch/readback");
+    require_nm_pixel(damage_batch_result.rgba8, 64U, 65U, 43U,
+                     "ordered damage batch selects the later normal-alpha record");
+
     // Extend the same eight-binding NM maps fixture with the generic detail
     // stack at bindings 8/9 and 10/11. The detail records mirror the
     // production useDetail, detailUVMultiplier, and detailNormalBlend values.
@@ -2948,6 +2962,164 @@ bool contract_backend(apex::render::Backend backend) {
             "bounded MultiMap stock facade executes on the real backend");
     require_nm_pixel(multimap_draw_result.rgba8, 74U, 155U, 103U,
                      "bounded MultiMap stock facade executes maps.r and maps.g");
+
+    // Close the complete F4 execution path on the real backend. The selected
+    // damage root and an always-visible mesh share one material, matching the
+    // native shared-material write without making the intact state draw a
+    // hidden damage mesh. This proves the bounded dirt-zero stage only.
+    apex::formats::Kn5File damage_facade_model;
+    damage_facade_model.source = "stock-scene-damage-runtime.kn5";
+    damage_facade_model.root.type = 1U;
+    damage_facade_model.root.kind = "node";
+    damage_facade_model.root.name = "ROOT";
+    damage_facade_model.root.active = true;
+    apex::formats::Kn5Node damage_facade_root_mesh = indexed_mesh;
+    damage_facade_root_mesh.name = "DAMAGE_GLASS_FRONT_1";
+    damage_facade_root_mesh.materialId = 0U;
+    damage_facade_root_mesh.active = false;
+    apex::formats::Kn5Node damage_facade_visible_mesh = indexed_mesh;
+    damage_facade_visible_mesh.name = "VISIBLE_DAMAGE_MATERIAL";
+    damage_facade_visible_mesh.materialId = 0U;
+    damage_facade_visible_mesh.active = true;
+    damage_facade_model.root.children.push_back(
+        std::move(damage_facade_root_mesh));
+    damage_facade_model.root.children.push_back(
+        std::move(damage_facade_visible_mesh));
+    apex::formats::Kn5Material damage_facade_material;
+    damage_facade_material.name = "damage-material";
+    damage_facade_material.shader = "ksPerPixelMultiMap_damage_dirt";
+    damage_facade_material.depthMode = 2U;
+    damage_facade_material.properties = {
+        {"ksAmbient", 0.2F, {}, {}, {}},
+        {"ksDiffuse", 0.4F, {}, {}, {}},
+        {"ksSpecular", 0.5F, {}, {}, {}},
+        {"ksSpecularEXP", 1.0F, {}, {}, {}},
+        {"ksEmissive", 0.0F, {}, {0.0F, 0.0F, 0.0F}, {}},
+        {"fresnelMaxLevel", 0.0F, {}, {}, {}},
+        {"nmObjectSpace", 0.0F, {}, {}, {}},
+        {"useDetail", 0.0F, {}, {}, {}},
+        {"sunSpecular", 0.0F, {}, {}, {}},
+        {"dirt", 0.0F, {}, {}, {}},
+        {"damageZones", 0.0F, {}, {}, {0.0F, 0.0F, 0.0F, 0.0F}},
+        {"glassDamage", 0.0F, {}, {}, {}},
+    };
+    damage_facade_material.resources = {
+        {"txDiffuse", 0U, "damage-body.dds"},
+        {"txNormal", 1U, "damage-normal.dds"},
+        {"txMaps", 2U, "damage-maps.dds"},
+        {"txDamage", 4U, "damage-color.dds"},
+        {"txDamageMask", 21U, "damage-mask.dds"},
+    };
+    damage_facade_model.materials.push_back(
+        std::move(damage_facade_material));
+    const std::array<std::array<std::uint8_t, 4>, 5> damage_facade_pixels = {
+        std::array<std::uint8_t, 4>{17U, 201U, 83U, 255U},
+        std::array<std::uint8_t, 4>{128U, 128U, 255U, 255U},
+        std::array<std::uint8_t, 4>{255U, 255U, 255U, 255U},
+        std::array<std::uint8_t, 4>{200U, 20U, 40U, 128U},
+        std::array<std::uint8_t, 4>{255U, 0U, 0U, 0U},
+    };
+    const std::array<const char*, 5> damage_facade_texture_names = {
+        "damage-body.dds", "damage-normal.dds", "damage-maps.dds",
+        "damage-color.dds", "damage-mask.dds"};
+    for (std::size_t index = 0U; index < damage_facade_pixels.size(); ++index) {
+        std::vector<std::uint8_t> dds =
+            rgba8_dds_fixture(damage_facade_pixels[index]);
+        damage_facade_model.textures.push_back(
+            {true, damage_facade_texture_names[index],
+             static_cast<std::uint32_t>(dds.size()), std::move(dds), {}});
+    }
+
+    apex::scene::SceneSnapshot damage_facade_scene;
+    (void)damage_facade_scene.add_material(
+        {"damage-material", "ksPerPixelMultiMap_damage_dirt",
+         apex::scene::BlendMode::opaque});
+    apex::scene::SceneNode damage_facade_scene_root;
+    damage_facade_scene_root.name = "ROOT";
+    const apex::scene::NodeId damage_facade_scene_root_id =
+        damage_facade_scene.add_node(std::move(damage_facade_scene_root));
+    apex::scene::SceneNode damage_facade_selected;
+    damage_facade_selected.name = "DAMAGE_GLASS_FRONT_1";
+    damage_facade_selected.kind = apex::scene::NodeKind::mesh;
+    damage_facade_selected.material = 0U;
+    damage_facade_selected.active = false;
+    (void)damage_facade_scene.add_node(std::move(damage_facade_selected),
+                                       damage_facade_scene_root_id);
+    apex::scene::SceneNode damage_facade_visible;
+    damage_facade_visible.name = "VISIBLE_DAMAGE_MATERIAL";
+    damage_facade_visible.kind = apex::scene::NodeKind::mesh;
+    damage_facade_visible.material = 0U;
+    damage_facade_visible.active = true;
+    (void)damage_facade_scene.add_node(std::move(damage_facade_visible),
+                                       damage_facade_scene_root_id);
+
+    const std::array<StockMaterialShaderModules, 1>
+        damage_facade_shader_modules = {StockMaterialShaderModules{
+            StockMaterialShaderKeyKind::shader_family,
+            "ksPerPixelMultiMap_damage_dirt",
+            std::span<const PipelineShaderModule>(damage_pipeline.shaders),
+        }};
+    StockSceneExecutionRequest damage_facade_request;
+    damage_facade_request.model = &damage_facade_model;
+    damage_facade_request.scene = &damage_facade_scene;
+    damage_facade_request.shader_modules = damage_facade_shader_modules;
+    damage_facade_request.targets = damage_pipeline.targets;
+    damage_facade_request.texture_authority =
+        StaticSceneTextureAuthority::embedded_kn5;
+    damage_facade_request.evaluate_damage_preview = true;
+    damage_facade_request.damage_broken_visible = true;
+    StockSceneExecutionResult damage_facade_broken =
+        prepare_stock_scene_execution(*device.device, damage_facade_request);
+    require(damage_facade_broken.ok() &&
+                damage_facade_broken.damage_preview.has_value() &&
+                damage_facade_broken.damage_preview
+                        ->executable_zero_dirt_materials ==
+                    std::vector<apex::scene::MaterialId>{0U} &&
+                damage_facade_broken.render_plan.items.size() == 2U &&
+                damage_facade_broken.resources->owned_texture_count() == 5U,
+            "broken F4 facade prepares its complete bounded damage draw");
+    StaticSceneFrameDescription damage_facade_frame;
+    damage_facade_frame.camera = *indexed_camera.frame;
+    damage_facade_frame.frame_constants = nm_frame;
+    const IndexedStaticMeshBatchResult damage_facade_broken_draw =
+        damage_facade_broken.resources->draw_and_readback(
+            *device.device, *triangle_texture.texture, damage_facade_frame);
+    require(damage_facade_broken_draw.ok(),
+            "broken F4 facade executes on the real backend");
+    require_nm_pixel(damage_facade_broken_draw.rgba8, 81U, 81U, 60U,
+                     "broken F4 facade applies damageZones before submission");
+
+    damage_facade_model.textures[1U].data =
+        rgba8_dds_fixture({128U, 128U, 255U, 0U});
+    damage_facade_model.textures[1U].size = static_cast<std::uint32_t>(
+        damage_facade_model.textures[1U].data.size());
+    StockSceneExecutionResult damage_facade_alpha =
+        prepare_stock_scene_execution(*device.device, damage_facade_request);
+    require(damage_facade_alpha.ok(),
+            "broken F4 facade accepts the normal-alpha attenuation fixture");
+    const IndexedStaticMeshBatchResult damage_facade_alpha_draw =
+        damage_facade_alpha.resources->draw_and_readback(
+            *device.device, *triangle_texture.texture, damage_facade_frame);
+    require(damage_facade_alpha_draw.ok(),
+            "broken F4 normal-alpha facade executes on the real backend");
+    require_nm_pixel(damage_facade_alpha_draw.rgba8, 64U, 65U, 43U,
+                     "F4 facade retains recovered normal-alpha attenuation");
+
+    damage_facade_request.damage_broken_visible = false;
+    StockSceneExecutionResult damage_facade_intact =
+        prepare_stock_scene_execution(*device.device, damage_facade_request);
+    require(damage_facade_intact.ok() &&
+                damage_facade_intact.damage_preview.has_value() &&
+                damage_facade_intact.render_plan.items.size() == 1U &&
+                damage_facade_intact.resources->owned_texture_count() == 5U,
+            "intact F4 facade keeps the selected damage root inactive");
+    const IndexedStaticMeshBatchResult damage_facade_intact_draw =
+        damage_facade_intact.resources->draw_and_readback(
+            *device.device, *triangle_texture.texture, damage_facade_frame);
+    require(damage_facade_intact_draw.ok(),
+            "intact F4 facade executes on the real backend");
+    require_nm_pixel(damage_facade_intact_draw.rgba8, 74U, 155U, 103U,
+                     "intact F4 facade clears damageZones before submission");
 
     apex::formats::Kn5File multimap_at_model = multimap_model;
     multimap_at_model.source = "stock-scene-multimap-at-runtime.kn5";

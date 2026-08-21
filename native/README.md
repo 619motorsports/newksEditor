@@ -129,11 +129,13 @@ Runtime tests cover known pixels and mixed resource layouts.
 The dirt-zero damage ABI uses the same diffuse, normal, and maps resources.
 It adds `txDamage` at bindings 12 and 13. It adds `txDamageMask` at bindings
 14 and 15. The handoff requires an authored `damageZones` value and exact zero
-`dirt`. It validates optional `txDust` but does not bind it. The recovered
-zero-dirt equation makes the dust factor one. Vulkan and D3D12 execute the
-damage mix and the two recovered specular factors. Pixel tests cover disabled
-damage, enabled damage, and normal-alpha attenuation. This bounded stage does
-not execute stock detail, sun-specular, Fresnel, or reflection branches.
+`dirt`. It validates optional `txDust` but does not bind it. The isolated
+damage-mix equation makes the dust RGB factor one when dirt is zero. Vulkan and
+D3D12 execute the damage mix and two recovered specular factors. Pixel tests
+cover disabled damage, enabled damage, and normal-alpha attenuation. The stock
+shader samples `txDust` in the complete direct-light path. Its alpha affects
+diffuse and specular light. Thus, the complete direct-light path remains
+staged. Stock detail, sun-specular, Fresnel, and reflection also remain staged.
 The serialized KN5 resource ID remains a shader bind point, not a
 texture-table index. A bounded static-scene adapter maps the final KN5 tree to
 dense scene IDs. It validates all packets and pipelines before buffer creation.
@@ -157,9 +159,11 @@ merges the activity writes and complete material table before allocation. A
 real SwiftShader test executes the complete facade through
 pixel readback. A second test executes the three-texture MultiMap facade and
 checks the `maps.r` and `maps.g` result. It also executes the AT family on a
-4x target and checks partial resolved coverage. The same tests run through
-D3D12/WARP in CI. The input snapshot must contain resolved workspace and CSP
-state. A bounded workspace adapter
+4x target and checks partial resolved coverage. An F4 facade test executes
+broken and intact states with five embedded textures. It also checks the
+recovered normal-alpha attenuation. The same tests run through D3D12/WARP in
+CI. The input snapshot must contain resolved workspace and CSP state. A
+bounded workspace adapter
 maps files to merged scene roots in source order. It attaches file and
 auxiliary labels without partial mutation. A bounded LOD resolver uses the
 production half-open ranges and FOV formula. The caller must supply the exact
@@ -194,6 +198,11 @@ arrays, cubemaps, and RGB24 conversion. The embedded static-scene mode rejects
 arrays, cubemaps, 1D/3D textures, BC6H, and legacy D3D9 float textures.
 The maps path rejects sRGB payloads before backend allocation. Source, decoded,
 and host-preparation budgets include the maps resource and its retained tables.
+A separate CPU bridge resolves external DDS files through explicit
+`AssetSource` grants. It rejects unsafe, missing, ambiguous, and over-budget
+requests. It retains source identity and returns no partial table after an
+error. The bridge has no GPU access. It is not yet connected to the
+stock-scene facade.
 The FBX converter handles static positions, triangulation, hierarchy, a
 bounded transform subset, and first material assignment. Its aggregate budget
 includes temporary containers, copied strings, and output containers. It

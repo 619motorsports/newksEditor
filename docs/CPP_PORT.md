@@ -210,6 +210,8 @@ remains unchanged and feature-complete.
   dirt. It also rejects active detail, sun-specular, Fresnel, and reflection
   branches. The stock-scene facade can resolve this F4 state before allocation.
   It merges node activity and the complete material table into the handoff.
+  A real backend test executes broken and intact F4 states through this facade.
+  The test also executes the recovered normal-alpha attenuation.
   The caller must still resolve surface overlays. A
   bounded workspace adapter maps metadata to merged scene roots. It attaches
   file and auxiliary labels without partial mutation. A bounded resolver implements
@@ -230,7 +232,11 @@ remains unchanged and feature-complete.
   has a configurable aggregate byte budget. Count-driven containers, strings,
   texture payloads, and encryption records consume it before allocation.
   Bounded asset support includes directory/ACD resolution, asset-folder/skin
-  indexing, and skin metadata JSON. A staged CSP configuration model is implemented. A bounded
+  indexing, and skin metadata JSON. A CPU bridge resolves external DDS files
+  through explicit `AssetSource` grants. It rejects unsafe, missing, ambiguous,
+  and over-budget input. It retains source identity and returns no partial
+  table after an error. The bridge has no backend access. Stock-scene
+  integration remains staged. A staged CSP configuration model is implemented. A bounded
   binary/ASCII FBX DOM parser is implemented. A bounded FBX conversion subset
   supports static positions, polygon triangulation, hierarchy, local/world
   transforms, and first material assignment. It rejects or diagnoses skinning,
@@ -294,6 +300,8 @@ remains unchanged and feature-complete.
   authority validates every DDS payload before backend allocation. It decodes
   supported 2D mip chains to RGBA8 and retains explicit sRGB metadata. Stock
   shader translation and complete material-resource resolution remain staged.
+  The external-texture bridge is a separate target above Assets and Render.
+  Thus, filesystem authority does not enter the renderer library.
   Vulkan and D3D12 create a basic graphics pipeline and execute fixed and
   indexed R16 static and CPU-skinned mesh draws. A real Vulkan pixel test
   proves that a one-bone update moves the triangle. The same test runs on the
