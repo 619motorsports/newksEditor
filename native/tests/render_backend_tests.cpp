@@ -1882,6 +1882,16 @@ bool contract_backend(apex::render::Backend backend) {
             executable_ks_per_pixel_nm_detail_stack_fragment_shader();
     } else {
 #if defined(_WIN32)
+        constexpr std::string_view nm_detail_vertex_source =
+            "cbuffer DrawMatrices : register(b0) { column_major float4x4 world; column_major float4x4 viewProjection; };"
+            "struct Input { float3 position : POSITION; float3 normal : NORMAL; float2 texcoord : TEXCOORD0; float3 tangent : TANGENT; };"
+            "struct Output { float4 position : SV_Position; float3 normal : TEXCOORD1; float3 tangent : TEXCOORD2;"
+            "float3 bitangent : TEXCOORD3; float3 world : TEXCOORD4; float2 texcoord : TEXCOORD0; };"
+            "Output main(Input input) { Output output; float4 worldPosition = mul(world, float4(input.position, 1.0));"
+            "float3x3 world3 = (float3x3)world; output.position = mul(viewProjection, worldPosition);"
+            "output.world = worldPosition.xyz; output.normal = mul(world3, input.normal);"
+            "output.tangent = mul(world3, input.tangent); output.bitangent = mul(world3, cross(input.tangent, input.normal));"
+            "output.texcoord = input.texcoord; return output; }";
         constexpr std::string_view nm_detail_fragment_source =
             "Texture2D diffuseTexture : register(t0); SamplerState diffuseSampler : register(s1);"
             "cbuffer KsPerPixelMaterial : register(b2) { float4 lighting; float4 fresnel; float4 emissive; float4 detail; };"
@@ -1910,7 +1920,7 @@ bool contract_backend(apex::render::Backend backend) {
             "float3 spec = sun_color.rgb * (pow(max(dot(n, normalize(l + v)), 0.0), mappedPower) * mappedSpecular);"
             "return float4(max(diffuse + spec + texel.rgb * emissive.rgb, 0.0), texel.a); }";
         nm_detail_pipeline.shaders[0].bytes = executable_d3d_shader(
-            nm_maps_vertex_source, "vs_5_0");
+            nm_detail_vertex_source, "vs_5_0");
         nm_detail_pipeline.shaders[1].bytes = executable_d3d_shader(
             nm_detail_fragment_source, "ps_5_0");
 #else
