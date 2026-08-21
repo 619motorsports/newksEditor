@@ -560,9 +560,14 @@ bool contract_backend(apex::render::Backend backend) {
     TextureResult clear_texture = device.device->create_texture(clear_texture_description);
     require(clear_texture.ok(), "clear/readback texture creation");
     const TextureClearReadbackRequest clear_request{{0.0F, 1.0F, 0.0F, 1.0F}, 0U, 0U, 2U, 2U};
-    ContractD3D12Texture foreign_texture(clear_texture_description);
-    const TextureClearReadbackResult foreign_result =
-        device.device->clear_texture_and_readback(foreign_texture, clear_request);
+    TextureClearReadbackResult foreign_result;
+    if (backend == Backend::Vulkan) {
+        ContractD3D12Texture foreign_texture(clear_texture_description);
+        foreign_result = device.device->clear_texture_and_readback(foreign_texture, clear_request);
+    } else {
+        ContractTexture foreign_texture(clear_texture_description);
+        foreign_result = device.device->clear_texture_and_readback(foreign_texture, clear_request);
+    }
     require(foreign_result.status == TextureReadbackStatus::unsupported &&
                 foreign_result.diagnostic.code == "texture_backend_mismatch",
             "real backend rejects foreign texture ownership");
