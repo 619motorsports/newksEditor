@@ -325,8 +325,10 @@ composition, FBX bump-map conversion and packed material maps, arbitrary vertex 
 face editing, skinned bind-pose geometry editing,
 full local-light photometric fidelity,
 Yebis star, ghost, light-shaft, non-default max-61 Gaussian passes, controlled pixel matching,
-the remaining post-processing stack, VAO split-animation blending, normal overrides, dynamic
-extra samples, and tree samples remain on the implementation roadmap. CSP's exact
+the remaining post-processing stack, VAO split-animation blending, dynamic extra
+samples, and tree samples remain on the implementation roadmap. Legacy VAO
+normal overrides now use the recovered decoder, identity key, and normalized WebGL
+vertex input. CSP's exact
 tree-season variation noise texture is represented by deterministic world-space preview
 noise; the recovered color transform and all non-tree fixed-variation paths are exact. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full goal and completion gates.
