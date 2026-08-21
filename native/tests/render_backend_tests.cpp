@@ -1287,6 +1287,31 @@ bool contract_backend(apex::render::Backend backend) {
                 embedded_result.rgba8[center + 3U] == std::byte{255},
             "embedded DDS static scene samples the expected center pixel");
 
+    const std::array<const PipelineProgram*, 1> embedded_material_pipelines = {
+        &material_pipeline};
+    const std::array<KsPerPixelMaterialConstants, 1> embedded_material_constants = {
+        first_material};
+    StaticScenePrepareRequest embedded_material_request = embedded_request;
+    embedded_material_request.pipelines_by_material = embedded_material_pipelines;
+    embedded_material_request.material_constants_by_material =
+        embedded_material_constants;
+    StaticSceneResourceResult embedded_material_resources =
+        prepare_static_scene_resources(*device.device, embedded_material_request);
+    require(embedded_material_resources.ok() &&
+                embedded_material_resources.resources->owned_texture_count() == 1U &&
+                embedded_material_resources.resources->owned_material_constant_count() == 1U,
+            "real backend owns one embedded texture and one material record");
+    const IndexedStaticMeshBatchResult embedded_material_result =
+        embedded_material_resources.resources->draw_and_readback(
+            *device.device, *triangle_texture.texture, embedded_frame);
+    require(embedded_material_result.ok(),
+            "material-record static scene executes on the real backend");
+    require(near_material_channel(embedded_material_result.rgba8[center], 34U) &&
+                near_material_channel(embedded_material_result.rgba8[center + 1U], 101U) &&
+                near_material_channel(embedded_material_result.rgba8[center + 2U], 93U) &&
+                near_material_channel(embedded_material_result.rgba8[center + 3U], 128U),
+            "material-record static scene selects its source values");
+
     // An sRGB source and target form a decode/encode round trip. A wrong
     // source format produces visibly different midtone bytes.
     put_u32(embedded_model.textures.front().data, 128U, 29U);

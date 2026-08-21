@@ -81,20 +81,23 @@ pair for single draws and ordered batches. The pair is a portable test ABI. It
 is not a recovered stock KN5 or CSP shader contract. An optional uniform buffer
 at set 0, binding 2 carries one aligned material record. D3D12 maps it to
 `b2`. Its first 48 bytes use source-evidenced `ksPerPixel` defaults in this
-port's std140/HLSL-compatible packing. Pixel tests prove per-draw record selection.
-The complete lighting and reflection equations remain staged. A bounded batch
-preflights all requests, clears or loads attachments once, submits one render
-pass, and returns one final readback. Draw-packet texture resources resolve by
-canonical name.
+port's std140/HLSL-compatible packing. A bounded resolver reads parsed KN5
+values and typed CSP overrides. It preserves CSP precedence and the WebGL
+emissive conversion. Pixel tests prove per-draw record selection. The complete
+lighting and reflection equations remain staged. A bounded batch preflights
+all requests. It clears or loads attachments once and returns one final
+readback. Draw-packet texture resources resolve by canonical name.
 The serialized KN5 resource ID remains a shader bind point, not a
 texture-table index. A bounded static-scene adapter maps the final KN5 tree to
 dense scene IDs. It validates all packets and pipelines before buffer creation.
 The adapter uploads each referenced node once. It retains duplicate packets as
 ordered draw instances. It submits one batch with caller-supplied SPIR-V or
-DXIL pipelines. Production packets remain marked as staged. The adapter does
-not claim that stock KN5 shaders are executable. Window surfaces, swapchains,
-complete material binding, and production pixel comparisons remain roadmap
-work. The static-scene adapter has two texture-authority modes. The first mode
+DXIL pipelines. A constants-enabled pipeline requires an explicit table in
+final material order. The adapter validates this table before allocation. It
+owns one 256-byte buffer per used material and reuses it for duplicate packets.
+Production packets remain marked as staged. The adapter does not claim that
+stock KN5 shaders are executable. Window surfaces, swapchains, and complete
+stock material execution remain roadmap work. The static-scene adapter has two texture-authority modes. The first mode
 uses caller-owned tables in the final KN5 texture order. The second mode owns
 the used embedded KN5 textures and one linear-repeat sampler. It validates all
 used DDS payloads before backend allocation. It decodes supported 2D mip chains
@@ -108,11 +111,9 @@ static positions, triangulation, hierarchy, a bounded transform subset, and
 first material assignment. It explicitly diagnoses unsupported images,
 skinning, animation, layer mappings, and advanced transform semantics.
 
-The Vulkan SDK is detected by the strict Linux builds. The system Vulkan
-configuration has no usable device. Electron provides a bundled SwiftShader
-ICD, which runs the validation-enabled backend test locally. CI runs the same
-test with a software Vulkan device. The production WebGL visual check is still
-required before any visible-rendering parity claim.
+The strict Linux builds detect the Vulkan SDK. Local runtime checks use the
+SwiftShader ICD. CI runs the same checks with a software Vulkan device. The
+production WebGL visual check remains mandatory for each rendering change.
 
 ## Contribution rules
 

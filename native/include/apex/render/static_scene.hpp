@@ -21,6 +21,7 @@ struct StaticSceneResourceLimits {
     PipelineLimits pipeline{};
     std::size_t max_draws = max_indexed_static_mesh_batch_draws;
     std::size_t max_materials = 4096U;
+    std::size_t max_material_constant_buffers = 4096U;
     std::size_t max_textures = 65'536U;
     std::size_t max_resource_string_bytes = 1U << 20;
     apex::core::ParseLimits texture_decode{};
@@ -29,6 +30,7 @@ struct StaticSceneResourceLimits {
     std::uint64_t max_total_vertex_bytes = 512ULL * 1024ULL * 1024ULL;
     std::uint64_t max_total_index_bytes = 256ULL * 1024ULL * 1024ULL;
     std::uint64_t max_total_shader_bytes = 64ULL * 1024ULL * 1024ULL;
+    std::uint64_t max_total_material_constant_bytes = 1ULL * 1024ULL * 1024ULL;
     // Counts full source payloads once per packet. This limit bounds repeated
     // validation work when many packets reference one large mesh.
     std::uint64_t max_validation_bytes = 1024ULL * 1024ULL * 1024ULL;
@@ -49,6 +51,10 @@ struct StaticScenePrepareRequest {
     // Indexed by the final model's global MaterialId. Used programs are
     // copied into the returned resources.
     std::span<const PipelineProgram* const> pipelines_by_material{};
+    // This optional table uses the same material order. A used pipeline that
+    // declares the portable constants binding requires the complete table.
+    // Preparation copies each used value into an owned 256-byte GPU record.
+    std::span<const KsPerPixelMaterialConstants> material_constants_by_material{};
     StaticSceneTextureAuthority texture_authority =
         StaticSceneTextureAuthority::caller_tables;
     StaticSceneResourceLimits limits{};
@@ -86,6 +92,9 @@ public:
     [[nodiscard]] std::size_t draw_count() const noexcept { return packets_.size(); }
     [[nodiscard]] std::size_t unique_geometry_count() const noexcept { return uploads_.size(); }
     [[nodiscard]] std::size_t owned_texture_count() const noexcept;
+    [[nodiscard]] std::size_t owned_material_constant_count() const noexcept {
+        return owned_material_constants_.size();
+    }
 
     // Keep the preparing device alive and use it for every draw. The call is
     // synchronous. The target and optional depth attachment must remain alive
@@ -104,10 +113,12 @@ private:
     std::vector<std::size_t> upload_for_packet_;
     std::vector<std::size_t> pipeline_for_packet_;
     std::vector<std::uint32_t> texture_for_packet_;
+    std::vector<std::size_t> material_constant_for_packet_;
     std::vector<std::unique_ptr<Texture>> owned_textures_;
+    std::vector<std::unique_ptr<Buffer>> owned_material_constants_;
     std::unique_ptr<Sampler> owned_sampler_;
     std::size_t texture_count_ = 0U;
-    bool has_material_resources_ = false;
+    bool has_texture_resources_ = false;
     StaticSceneTextureAuthority texture_authority_ =
         StaticSceneTextureAuthority::caller_tables;
 

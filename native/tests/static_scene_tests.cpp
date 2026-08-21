@@ -4,7 +4,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -65,6 +67,7 @@ public:
     BufferResult create_buffer(const BufferDescription& description,
                                std::span<const std::byte> initial_data) override {
         ++buffer_calls;
+        buffer_descriptions.push_back(description);
         uploaded_bytes.emplace_back(initial_data.begin(), initial_data.end());
         if (fail_buffer_call != 0U && buffer_calls == fail_buffer_call)
             return {BufferStatus::allocation_failed,
@@ -127,6 +130,9 @@ public:
         resource_authorities.clear();
         sampled_textures.clear();
         sampled_samplers.clear();
+        material_buffers.clear();
+        material_offsets.clear();
+        material_ranges.clear();
         for (const auto& draw : batch.draws) {
             nodes.push_back(draw.packet->node);
             pipeline_names.push_back(draw.pipeline->name);
@@ -138,6 +144,9 @@ public:
             resource_authorities.push_back(draw.resource_authority);
             sampled_textures.push_back(draw.sampled_binding.texture);
             sampled_samplers.push_back(draw.sampled_binding.sampler);
+            material_buffers.push_back(draw.material_binding.buffer);
+            material_offsets.push_back(draw.material_binding.offset_bytes);
+            material_ranges.push_back(draw.material_binding.range_bytes);
         }
         Diagnostic diagnostic;
         const auto validation = validate_indexed_static_mesh_batch_description(texture, batch, diagnostic);
@@ -161,6 +170,7 @@ public:
     bool captured_load_color = false;
     std::array<float, 4> captured_clear_color{};
     std::vector<std::vector<std::byte>> uploaded_bytes;
+    std::vector<BufferDescription> buffer_descriptions;
     std::vector<TextureDescription> texture_descriptions;
     std::vector<std::vector<std::byte>> texture_upload_bytes;
     std::vector<SamplerDescription> sampler_descriptions;
@@ -174,6 +184,9 @@ public:
     std::vector<IndexedResourceAuthority> resource_authorities;
     std::vector<const Texture*> sampled_textures;
     std::vector<const Sampler*> sampled_samplers;
+    std::vector<const Buffer*> material_buffers;
+    std::vector<std::uint64_t> material_offsets;
+    std::vector<std::uint32_t> material_ranges;
 
 private:
     DeviceInfo info_{Backend::Vulkan, "recording", "test", 1U, 0U, 0U, 0U, 0U, true};
@@ -861,6 +874,214 @@ void rejects_malformed_diffuse_packets_before_allocation() {
             "same-name texture from another workspace scope is rejected before allocation");
 }
 
+void owns_and_reuses_material_constant_records() {
+    Fixture value = fixture();
+    value.model.textures.push_back({true, "body.dds", 0U, {}, {}});
+    const std::array<PipelineResourceBinding, 3> material_layout = {{
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 2U, "ksPerPixelMaterial"},
+    }};
+    value.first_pipeline.resources.assign(material_layout.begin(), material_layout.end());
+    value.second_pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+    };
+    for (DrawPacket& packet : value.packets)
+        packet.resources = {{"txDiffuse", 21U, 0U, "body.dds"}};
+
+    std::array<KsPerPixelMaterialConstants, 2> constants{};
+    constants[0].lighting = {0.2F, 0.4F, 0.6F, 8.0F};
+    constants[0].fresnel = {0.1F, 3.0F, 0.5F, 0.0F};
+    constants[0].emissive = {0.7F, 0.8F, 0.9F, 0.0F};
+    constants[1].lighting[0] = std::numeric_limits<float>::quiet_NaN();
+    auto request = request_for(value);
+    request.material_constants_by_material = constants;
+
+    RecordingDevice device;
+    auto prepared = prepare_static_scene_resources(device, request);
+    require(prepared.ok() && prepared.resources->owned_material_constant_count() == 1U &&
+                device.buffer_calls == 5U,
+            "one used constants material owns one buffer beside two geometry uploads");
+    const auto material_upload = std::find_if(
+        device.buffer_descriptions.begin(), device.buffer_descriptions.end(),
+        [](const BufferDescription& description) {
+            return description.usage == BufferUsage::uniform;
+        });
+    require(material_upload != device.buffer_descriptions.end(),
+            "material preparation creates a uniform buffer");
+    const std::size_t material_upload_index = static_cast<std::size_t>(
+        material_upload - device.buffer_descriptions.begin());
+    require(material_upload->size_bytes == portable_material_buffer_view_bytes &&
+                material_upload->memory == BufferMemory::device_local &&
+                material_upload->mutability == BufferMutability::immutable &&
+                device.uploaded_bytes[material_upload_index].size() ==
+                    portable_material_buffer_view_bytes &&
+                std::memcmp(device.uploaded_bytes[material_upload_index].data(),
+                            &constants[0], sizeof(constants[0])) == 0 &&
+                std::all_of(device.uploaded_bytes[material_upload_index].begin() +
+                                static_cast<std::ptrdiff_t>(sizeof(constants[0])),
+                            device.uploaded_bytes[material_upload_index].end(),
+                            [](std::byte byte) { return byte == std::byte{0}; }),
+            "the owned record contains 48 source values and zero padding");
+
+    const TextureDescription sampled_description{
+        1U, 1U, 1U, 1U, TextureFormat::rgba8_unorm, TextureUsage::sampled,
+        TextureMemory::device_local, TextureMutability::immutable};
+    FakeTexture diffuse(sampled_description);
+    FakeSampler sampler;
+    const std::array<const Texture*, 1> textures = {&diffuse};
+    const std::array<const Sampler*, 1> samplers = {&sampler};
+    StaticSceneFrameDescription frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.textures_by_global_index = textures;
+    frame.samplers_by_global_index = samplers;
+    FakeTexture target;
+    const auto drawn = prepared.resources->draw_and_readback(device, target, frame);
+    require(drawn.ok() && device.material_buffers.size() == 3U &&
+                device.material_buffers[0] != nullptr &&
+                device.material_buffers[0] == device.material_buffers[2] &&
+                device.material_buffers[1] == nullptr &&
+                device.material_offsets == std::vector<std::uint64_t>{0U, 0U, 0U} &&
+                device.material_ranges ==
+                    std::vector<std::uint32_t>{portable_material_buffer_view_bytes, 0U,
+                                               portable_material_buffer_view_bytes},
+            "duplicate packets reuse one record and the diffuse-only draw has no record");
+
+    Fixture distinct = fixture();
+    distinct.model.textures.push_back({true, "body.dds", 0U, {}, {}});
+    distinct.first_pipeline.resources.assign(material_layout.begin(), material_layout.end());
+    distinct.second_pipeline.resources.assign(material_layout.begin(), material_layout.end());
+    for (DrawPacket& packet : distinct.packets)
+        packet.resources = {{"txDiffuse", 21U, 0U, "body.dds"}};
+    constants[1] = KsPerPixelMaterialConstants{};
+    constants[1].lighting[1] = 0.25F;
+    auto distinct_request = request_for(distinct);
+    distinct_request.material_constants_by_material = constants;
+    RecordingDevice distinct_device;
+    auto distinct_prepared =
+        prepare_static_scene_resources(distinct_device, distinct_request);
+    require(distinct_prepared.ok() &&
+                distinct_prepared.resources->owned_material_constant_count() == 2U &&
+                distinct_device.buffer_calls == 6U,
+            "two used material IDs own two records even when their layouts match");
+    StaticSceneFrameDescription distinct_frame = frame;
+    const auto distinct_drawn = distinct_prepared.resources->draw_and_readback(
+        distinct_device, target, distinct_frame);
+    require(distinct_drawn.ok() && distinct_device.material_buffers[0] != nullptr &&
+                distinct_device.material_buffers[1] != nullptr &&
+                distinct_device.material_buffers[0] != distinct_device.material_buffers[1] &&
+                distinct_device.material_buffers[0] == distinct_device.material_buffers[2],
+            "material IDs keep distinct records while duplicate packets reuse one record");
+}
+
+void rejects_invalid_material_constant_inputs_before_allocation() {
+    Fixture diffuse_only = fixture();
+    auto diffuse_only_request = request_for(diffuse_only);
+    diffuse_only_request.limits.max_material_constant_buffers = 0U;
+    diffuse_only_request.limits.max_total_material_constant_bytes = 0U;
+    RecordingDevice diffuse_only_device;
+    const auto diffuse_only_prepared =
+        prepare_static_scene_resources(diffuse_only_device, diffuse_only_request);
+    require(diffuse_only_prepared.ok() && diffuse_only_device.buffer_calls == 4U &&
+                diffuse_only_prepared.resources->owned_material_constant_count() == 0U,
+            "resource-free scenes do not require or allocate material-constant limits");
+
+    Fixture value = fixture();
+    value.model.textures.push_back({true, "body.dds", 0U, {}, {}});
+    value.first_pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 2U, "ksPerPixelMaterial"},
+    };
+    value.packets[0].resources = {{"txDiffuse", 21U, 0U, "body.dds"}};
+    value.packets[2].resources = {{"txDiffuse", 21U, 0U, "body.dds"}};
+    std::array<KsPerPixelMaterialConstants, 2> constants{};
+
+    RecordingDevice device;
+    auto request = request_for(value);
+    const auto missing = prepare_static_scene_resources(device, request);
+    require(!missing.ok() &&
+                missing.diagnostic.code == "static_scene_material_constant_table_invalid" &&
+                device.buffer_calls == 0U,
+            "a missing material-constant table fails before allocation");
+
+    request.material_constants_by_material =
+        std::span<const KsPerPixelMaterialConstants>(constants.data(), 1U);
+    const auto short_table = prepare_static_scene_resources(device, request);
+    require(!short_table.ok() &&
+                short_table.diagnostic.code == "static_scene_material_constant_table_invalid" &&
+                device.buffer_calls == 0U,
+            "a short material-constant table fails before allocation");
+
+    constants[0].fresnel[1] = std::numeric_limits<float>::infinity();
+    request.material_constants_by_material = constants;
+    const auto non_finite = prepare_static_scene_resources(device, request);
+    require(!non_finite.ok() &&
+                non_finite.diagnostic.code == "static_scene_material_constant_non_finite" &&
+                device.buffer_calls == 0U,
+            "a non-finite used material record fails before allocation");
+
+    constants[0] = KsPerPixelMaterialConstants{};
+    request.material_constants_by_material = constants;
+    request.limits.max_total_material_constant_bytes =
+        portable_material_buffer_view_bytes - 1U;
+    const auto limited = prepare_static_scene_resources(device, request);
+    require(!limited.ok() &&
+                limited.diagnostic.code == "static_scene_material_constant_aggregate_limit" &&
+                device.buffer_calls == 0U,
+            "the material-buffer byte limit fails before allocation");
+
+    Fixture two_materials = fixture();
+    two_materials.model.textures.push_back({true, "body.dds", 0U, {}, {}});
+    const std::vector<PipelineResourceBinding> constants_layout = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 2U, "ksPerPixelMaterial"},
+    };
+    two_materials.first_pipeline.resources = constants_layout;
+    two_materials.second_pipeline.resources = constants_layout;
+    for (DrawPacket& packet : two_materials.packets)
+        packet.resources = {{"txDiffuse", 21U, 0U, "body.dds"}};
+    auto count_limited_request = request_for(two_materials);
+    count_limited_request.material_constants_by_material = constants;
+    count_limited_request.limits.max_material_constant_buffers = 1U;
+    RecordingDevice count_limited_device;
+    const auto count_limited =
+        prepare_static_scene_resources(count_limited_device, count_limited_request);
+    require(!count_limited.ok() &&
+                count_limited.diagnostic.code == "static_scene_material_constant_count_limit" &&
+                count_limited_device.buffer_calls == 0U,
+            "the material-buffer count limit fails before allocation");
+
+    Fixture malformed_layout = fixture();
+    malformed_layout.model.textures.push_back({true, "body.dds", 0U, {}, {}});
+    malformed_layout.first_pipeline.resources = constants_layout;
+    malformed_layout.first_pipeline.resources.back().binding = 3U;
+    malformed_layout.packets[0].resources = {{"txDiffuse", 21U, 0U, "body.dds"}};
+    malformed_layout.packets[2].resources = {{"txDiffuse", 21U, 0U, "body.dds"}};
+    auto malformed_layout_request = request_for(malformed_layout);
+    malformed_layout_request.material_constants_by_material = constants;
+    RecordingDevice malformed_layout_device;
+    const auto bad_layout =
+        prepare_static_scene_resources(malformed_layout_device, malformed_layout_request);
+    require(!bad_layout.ok() &&
+                bad_layout.diagnostic.code ==
+                    "static_scene_material_pipeline_unsupported" &&
+                malformed_layout_device.buffer_calls == 0U,
+            "an incorrect constants binding fails before allocation");
+
+    request = request_for(value);
+    request.material_constants_by_material = constants;
+    device.fail_buffer_call = 1U;
+    const auto allocation_failure = prepare_static_scene_resources(device, request);
+    require(!allocation_failure.ok() &&
+                allocation_failure.status == StaticSceneResourceStatus::allocation_failed &&
+                allocation_failure.diagnostic.code == "recording_buffer_failure" &&
+                device.buffer_calls == 1U,
+            "a material-buffer allocation error propagates before geometry upload");
+}
+
 void propagates_upload_and_batch_failures() {
     Fixture value = fixture();
     RecordingDevice device;
@@ -911,6 +1132,8 @@ int main() {
         owns_embedded_diffuse_resources_after_source_lifetime();
         rejects_malformed_embedded_textures_before_allocation();
         rejects_malformed_diffuse_packets_before_allocation();
+        owns_and_reuses_material_constant_records();
+        rejects_invalid_material_constant_inputs_before_allocation();
         propagates_embedded_resource_failures();
         propagates_upload_and_batch_failures();
         require(std::string(static_scene_resource_status_name(StaticSceneResourceStatus::ready)) ==

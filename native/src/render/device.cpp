@@ -557,6 +557,41 @@ TriangleDrawStatus validate_triangle_draw_request(const Texture& texture,
     return TriangleDrawStatus::ready;
 }
 
+IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
+    const PipelineProgram& pipeline) noexcept {
+    if (pipeline.resources.empty())
+        return IndexedPortableResourceLayout::resource_free;
+    if (pipeline.resources.size() != 2U && pipeline.resources.size() != 3U)
+        return IndexedPortableResourceLayout::unsupported;
+    bool sampled_texture = false;
+    bool sampler = false;
+    bool material_constants = false;
+    for (const PipelineResourceBinding& resource : pipeline.resources) {
+        if (resource.set == 0U && resource.binding == 0U &&
+            resource.kind == PipelineResourceKind::sampled_texture) {
+            if (sampled_texture) return IndexedPortableResourceLayout::unsupported;
+            sampled_texture = true;
+        } else if (resource.set == 0U && resource.binding == 1U &&
+                   resource.kind == PipelineResourceKind::sampler) {
+            if (sampler) return IndexedPortableResourceLayout::unsupported;
+            sampler = true;
+        } else if (resource.set == 0U && resource.binding == 2U &&
+                   resource.kind == PipelineResourceKind::uniform_buffer) {
+            if (material_constants) return IndexedPortableResourceLayout::unsupported;
+            material_constants = true;
+        } else {
+            return IndexedPortableResourceLayout::unsupported;
+        }
+    }
+    if (!sampled_texture || !sampler)
+        return IndexedPortableResourceLayout::unsupported;
+    if (pipeline.resources.size() == 2U && !material_constants)
+        return IndexedPortableResourceLayout::diffuse;
+    if (pipeline.resources.size() == 3U && material_constants)
+        return IndexedPortableResourceLayout::diffuse_with_constants;
+    return IndexedPortableResourceLayout::unsupported;
+}
+
 IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     const Texture& texture, const IndexedStaticMeshDrawRequest& request, Diagnostic& diagnostic) {
     if (request.packet == nullptr || request.pipeline == nullptr || request.vertex_buffer == nullptr ||
@@ -754,7 +789,9 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     const bool has_material_buffer = request.material_binding.buffer != nullptr;
     const bool has_material_range = request.material_binding.offset_bytes != 0U ||
                                     request.material_binding.range_bytes != 0U;
-    if (pipeline.resources.empty()) {
+    const IndexedPortableResourceLayout resource_layout =
+        classify_indexed_portable_resource_layout(pipeline);
+    if (resource_layout == IndexedPortableResourceLayout::resource_free) {
         if (has_sampled_texture || has_sampler || has_material_buffer || has_material_range ||
             request.resource_authority != IndexedResourceAuthority::packet_contract) {
             diagnostic = {"indexed_resource_binding_unexpected",
@@ -767,32 +804,13 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             return IndexedStaticMeshDrawStatus::unsupported;
         }
     } else {
-        bool sampled_declaration = false;
-        bool sampler_declaration = false;
-        bool material_declaration = false;
-        for (const PipelineResourceBinding& resource : pipeline.resources) {
-            if (resource.set == 0U && resource.binding == 0U &&
-                resource.kind == PipelineResourceKind::sampled_texture) {
-                sampled_declaration = true;
-            } else if (resource.set == 0U && resource.binding == 1U &&
-                       resource.kind == PipelineResourceKind::sampler) {
-                sampler_declaration = true;
-            } else if (resource.set == 0U && resource.binding == 2U &&
-                       resource.kind == PipelineResourceKind::uniform_buffer) {
-                material_declaration = true;
-            } else {
-                diagnostic = {"indexed_resource_layout_unsupported",
-                              "The portable material ABI uses set 0 bindings 0 for texture, 1 for sampler, and optional 2 for constants"};
-                return IndexedStaticMeshDrawStatus::unsupported;
-            }
-        }
-        const std::size_t expected_resources = material_declaration ? 3U : 2U;
-        if (pipeline.resources.size() != expected_resources || !sampled_declaration ||
-            !sampler_declaration) {
+        if (resource_layout == IndexedPortableResourceLayout::unsupported) {
             diagnostic = {"indexed_resource_layout_unsupported",
                           "The portable material ABI requires one texture, one sampler, and at most one constants buffer"};
             return IndexedStaticMeshDrawStatus::unsupported;
         }
+        const bool material_declaration =
+            resource_layout == IndexedPortableResourceLayout::diffuse_with_constants;
         if (request.resource_authority != IndexedResourceAuthority::explicit_bindings) {
             diagnostic = {"indexed_resource_execution_staged",
                           "Material resources require explicit request-local binding authority"};

@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -168,6 +169,148 @@ void external_override_and_limits() {
     require(threw, "string limit must be enforced");
 }
 
+void resolves_ks_per_pixel_defaults_and_kn5_values() {
+    Kn5Material material;
+    material.shader = "ksPerPixel";
+    material.properties = {
+        {"ksAmbient", 0.42F, {}, {}, {}},
+        {"ksDiffuse", 0.63F, {}, {}, {}},
+        {"ksSpecular", 0.17F, {}, {}, {}},
+        {"ksSpecularEXP", 47.0F, {}, {}, {}},
+        {"fresnelC", 0.02F, {}, {}, {}},
+        {"fresnelEXP", 6.0F, {}, {}, {}},
+        {"fresnelMaxLevel", 0.13F, {}, {}, {}},
+        {"ksEmissive", 0.0F, {}, {32.0F, 64.0F, 128.0F}, {}},
+    };
+    const MaterialBinding binding = build_material_binding(material, 0);
+    const auto resolved = resolve_ks_per_pixel_material_constants(binding);
+    require(resolved.ok(), "KN5 ksPerPixel constants resolve");
+    require(resolved.constants.lighting == std::array<float, 4>{0.42F, 0.63F, 0.17F, 47.0F},
+            "KN5 lighting values preserve source order");
+    require(resolved.constants.fresnel == std::array<float, 4>{0.02F, 6.0F, 0.13F, 0.0F},
+            "KN5 fresnel values preserve opaque alpha semantics");
+    require(resolved.constants.emissive[0] == 32.0F / 255.0F &&
+                resolved.constants.emissive[1] == 64.0F / 255.0F &&
+                resolved.constants.emissive[2] == 128.0F / 255.0F &&
+                resolved.constants.emissive[3] == 0.0F,
+            "KN5 emissive values normalize the WebGL >16 representation");
+
+    Kn5Material defaults;
+    defaults.shader = "ksPerPixel";
+    const auto default_result = resolve_ks_per_pixel_material_constants(
+        build_material_binding(defaults, 0));
+    require(default_result.ok() &&
+                default_result.constants.lighting == std::array<float, 4>{0.35F, 0.8F, 0.2F, 30.0F} &&
+                default_result.constants.fresnel == std::array<float, 4>{0.0F, 5.0F, 0.05F, 0.0F} &&
+                default_result.constants.emissive == std::array<float, 4>{0, 0, 0, 0},
+            "ksPerPixel defaults match the production binder");
+}
+
+void adapts_the_bounded_kn5_parser_model() {
+    apex::formats::Kn5Material parsed;
+    parsed.name = "Body";
+    parsed.shader = "ksPerPixel";
+    parsed.serializedBlendMode = 0U;
+    parsed.depthMode = 1U;
+    parsed.properties = {
+        {"ksDiffuse", 0.61F, {}, {}, {}},
+        {"ksEmissive", 0.0F, {}, {4.0F, 5.0F, 6.0F}, {}},
+    };
+    parsed.resources = {{"txDiffuse", 21U, "body.dds"}};
+    const MaterialBinding binding = build_material_binding(parsed, false, 1U);
+    const auto constants = resolve_ks_per_pixel_material_constants(binding);
+    require(constants.ok() && constants.constants.lighting[1] == 0.61F &&
+                constants.constants.emissive ==
+                    std::array<float, 4>{4.0F, 5.0F, 6.0F, 0.0F} &&
+                find_material_texture(binding, "txdiffuse") != nullptr &&
+                find_material_texture(binding, "txdiffuse")->bind_point == 21U,
+            "the parser model feeds the portable material resolver without a duplicate caller adapter");
+
+    parsed.depthMode = std::numeric_limits<std::uint32_t>::max();
+    bool threw = false;
+    try {
+        (void)build_material_binding(parsed, false, 1U);
+    } catch (const MaterialBindingError& error) {
+        threw = true;
+        require(error.code() == "material_state_range",
+                "out-of-range parsed material state diagnostic");
+    }
+    require(threw, "out-of-range parsed material state is rejected");
+}
+
+void resolves_ks_per_pixel_csp_precedence_and_alpha_capture() {
+    Kn5Material material;
+    material.shader = "ksPerPixel";
+    material.properties = {
+        {"ksAmbient", 0.1F, {}, {}, {}},
+        {"ksEmissive", 0.0F, {}, {1.0F, 2.0F, 3.0F}, {}},
+        {"ksAlphaRef", 0.2F, {}, {}, {}},
+    };
+    MaterialBindingOverrides overrides;
+    overrides.properties.emplace("ksAmbient", MaterialPropertyOverride::scalar_value(0.9F));
+    overrides.properties.emplace("ksEmissive",
+                                 MaterialPropertyOverride::vector4_value({64.0F, 128.0F, 192.0F, 0.5F}));
+    overrides.properties.emplace("ksAlphaRef", MaterialPropertyOverride::scalar_value(0.2F));
+    const MaterialBinding binding = build_material_binding(material, 0, &overrides);
+
+    const auto ordinary = resolve_ks_per_pixel_material_constants(binding);
+    require(ordinary.ok() && ordinary.constants.lighting[0] == 0.9F &&
+                ordinary.constants.emissive[0] == 64.0F / 255.0F * 0.5F &&
+                ordinary.constants.emissive[1] == 128.0F / 255.0F * 0.5F &&
+                ordinary.constants.emissive[2] == 192.0F / 255.0F * 0.5F &&
+                ordinary.constants.fresnel[3] == 0.0F,
+            "CSP values override KN5 values and ordinary alpha remains zero");
+
+    const auto capture = resolve_ks_per_pixel_material_constants(
+        binding, KsPerPixelMaterialResolveOptions{true, true});
+    require(capture.ok() && capture.constants.fresnel[3] == 0.5F,
+            "capture alpha-to-coverage applies the production minimum alpha reference");
+}
+
+void rejects_invalid_ks_per_pixel_constants() {
+    Kn5Material material;
+    material.shader = "ksPerPixel";
+    material.properties.push_back({"ksDiffuse", std::numeric_limits<float>::quiet_NaN(), {}, {}, {}});
+    bool threw = false;
+    try {
+        (void)build_material_binding(material, 0);
+    } catch (const MaterialBindingError& error) {
+        threw = true;
+        require(error.code() == "non_finite_property", "KN5 non-finite property diagnostic");
+    }
+    require(threw, "KN5 non-finite property is rejected");
+
+    material.properties.clear();
+    MaterialBindingOverrides overrides;
+    overrides.properties.emplace("ksDiffuse",
+                                 MaterialPropertyOverride::scalar_value(
+                                     std::numeric_limits<float>::infinity()));
+    threw = false;
+    try {
+        (void)build_material_binding(material, 0, &overrides);
+    } catch (const MaterialBindingError& error) {
+        threw = true;
+        require(error.code() == "non_finite_property", "CSP non-finite property diagnostic");
+    }
+    require(threw, "CSP non-finite property is rejected");
+
+    const MaterialBinding valid = build_material_binding(material, 0);
+    auto malformed = valid;
+    malformed.properties.at("ksdiffuse").scalar = std::numeric_limits<float>::quiet_NaN();
+    const auto resolved = resolve_ks_per_pixel_material_constants(malformed);
+    require(!resolved.ok() &&
+                resolved.status == KsPerPixelMaterialResolveStatus::invalid_input &&
+                resolved.diagnostic.code == "non_finite_constants",
+            "resolver rejects non-finite values even after binding construction");
+
+    malformed.shader = "ksPerPixelNM";
+    const auto unsupported = resolve_ks_per_pixel_material_constants(malformed);
+    require(!unsupported.ok() &&
+                unsupported.status == KsPerPixelMaterialResolveStatus::unsupported &&
+                unsupported.diagnostic.code == "ks_per_pixel_shader_unsupported",
+            "resolver does not relabel unsupported stock shader variants");
+}
+
 } // namespace
 
 int main() {
@@ -177,6 +320,10 @@ int main() {
         missing_and_duplicate_resources();
         unknown_and_bind_point_references();
         external_override_and_limits();
+        resolves_ks_per_pixel_defaults_and_kn5_values();
+        adapts_the_bounded_kn5_parser_model();
+        resolves_ks_per_pixel_csp_precedence_and_alpha_capture();
+        rejects_invalid_ks_per_pixel_constants();
         std::cout << "material binding tests passed\n";
         return 0;
     } catch (const std::exception& error) {

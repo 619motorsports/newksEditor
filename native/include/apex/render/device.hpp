@@ -400,6 +400,18 @@ struct IndexedMaterialBufferBinding {
     std::uint32_t range_bytes = 0U;
 };
 
+enum class IndexedPortableResourceLayout : std::uint8_t {
+    resource_free,
+    diffuse,
+    diffuse_with_constants,
+    unsupported,
+};
+
+// Classify the only portable resource layouts that the indexed executor can
+// run. Binding names do not affect the ABI. Sets, bindings, and kinds do.
+[[nodiscard]] IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
+    const PipelineProgram& pipeline) noexcept;
+
 inline constexpr std::uint32_t max_indexed_static_mesh_vertices = 10'000'000U;
 inline constexpr std::uint32_t max_indexed_static_mesh_indices = 20'000'000U;
 

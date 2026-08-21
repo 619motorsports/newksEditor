@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <sstream>
 #include <utility>
 
@@ -53,7 +54,8 @@ void check_finite(const Kn5MaterialProperty& property) {
 
 [[nodiscard]] MaterialPropertyValue from_kn5(const Kn5MaterialProperty& property) {
     return MaterialPropertyValue{property.name, property.value, property.value2, property.value3,
-                                 property.value4, MaterialPropertySource::kn5};
+                                 property.value4, MaterialPropertySource::kn5,
+                                 MaterialPropertyValue::Arity::vector3};
 }
 
 [[nodiscard]] MaterialPropertyValue from_override(std::string name,
@@ -63,24 +65,28 @@ void check_finite(const Kn5MaterialProperty& property) {
     result.source = MaterialPropertySource::csp;
     switch (value.kind) {
     case MaterialPropertyOverride::Kind::scalar:
+        result.arity = MaterialPropertyValue::Arity::scalar;
         result.scalar = value.scalar;
         result.vector2 = {value.scalar, value.scalar};
         result.vector3 = {value.scalar, value.scalar, value.scalar};
         result.vector4 = {value.scalar, value.scalar, value.scalar, value.scalar};
         break;
     case MaterialPropertyOverride::Kind::vector2:
+        result.arity = MaterialPropertyValue::Arity::vector2;
         result.scalar = value.vector2[0];
         result.vector2 = value.vector2;
         result.vector3 = {value.vector2[0], value.vector2[1], value.vector2[1]};
         result.vector4 = {value.vector2[0], value.vector2[1], value.vector2[1], value.vector2[1]};
         break;
     case MaterialPropertyOverride::Kind::vector3:
+        result.arity = MaterialPropertyValue::Arity::vector3;
         result.scalar = value.vector3[0];
         result.vector2 = {value.vector3[0], value.vector3[1]};
         result.vector3 = value.vector3;
         result.vector4 = {value.vector3[0], value.vector3[1], value.vector3[2], value.vector3[2]};
         break;
     case MaterialPropertyOverride::Kind::vector4:
+        result.arity = MaterialPropertyValue::Arity::vector4;
         result.scalar = value.vector4[0];
         result.vector2 = {value.vector4[0], value.vector4[1]};
         result.vector3 = {value.vector4[0], value.vector4[1], value.vector4[2]};
@@ -139,6 +145,7 @@ void add_default(std::map<std::string, MaterialPropertyValue>& properties,
     output.vector3 = {value.value, value.value, value.value};
     output.vector4 = {value.value, value.value, value.value, value.value};
     output.source = MaterialPropertySource::default_value;
+    output.arity = MaterialPropertyValue::Arity::scalar;
     if (value.name == "multa" || value.name == "detailnmmult") {
         output.scalar = value.vector2[0];
         output.vector3 = {value.vector2[0], value.vector2[1], value.vector2[1]};
@@ -394,6 +401,120 @@ MaterialBinding build_material_binding(const Kn5Material& material, std::size_t 
         result.status = MaterialBindingStatus::incomplete;
     else
         result.status = MaterialBindingStatus::complete;
+    return result;
+}
+
+MaterialBinding build_material_binding(
+    const apex::formats::Kn5Material& material, bool node_transparent,
+    std::size_t texture_table_count, const MaterialBindingOverrides* overrides,
+    const MaterialBindingLimits& limits) {
+    check_string(material.name, "material name", limits);
+    check_string(material.shader, "shader name", limits);
+    if (material.properties.size() > limits.max_properties)
+        fail("property_limit", "Material property count exceeds the configured limit");
+    if (material.resources.size() > limits.max_resources)
+        fail("resource_limit", "Material resource count exceeds the configured limit");
+    if (material.serializedBlendMode > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
+        material.depthMode > static_cast<std::uint32_t>(std::numeric_limits<int>::max()))
+        fail("material_state_range", "KN5 material state exceeds the native integer range");
+
+    Kn5Material projected;
+    projected.name = material.name;
+    projected.shader = material.shader;
+    projected.serialized_blend_mode = static_cast<int>(material.serializedBlendMode);
+    projected.depth_mode = static_cast<int>(material.depthMode);
+    projected.transparent = node_transparent;
+    projected.properties.reserve(material.properties.size());
+    for (const apex::formats::Kn5MaterialProperty& property : material.properties) {
+        check_string(property.name, "property name", limits);
+        const Kn5MaterialProperty value{property.name, property.value, property.value2,
+                                       property.value3, property.value4};
+        check_finite(value);
+        projected.properties.push_back(value);
+    }
+    projected.resources.reserve(material.resources.size());
+    for (const apex::formats::Kn5MaterialResource& resource : material.resources) {
+        check_string(resource.slot, "resource slot", limits);
+        check_string(resource.texture, "resource texture", limits);
+        projected.resources.push_back(
+            {resource.slot, resource.textureId, resource.texture});
+    }
+    return build_material_binding(projected, texture_table_count, overrides, limits);
+}
+
+KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
+    const MaterialBinding& binding, KsPerPixelMaterialResolveOptions options) {
+    KsPerPixelMaterialResolveResult result;
+    if (canonical(binding.shader) != "ksperpixel") {
+        result.status = KsPerPixelMaterialResolveStatus::unsupported;
+        result.diagnostic = {"ks_per_pixel_shader_unsupported", "shader",
+                             "The bounded material resolver only accepts the exact ksPerPixel shader"};
+        return result;
+    }
+
+    result.constants.lighting = {
+        material_scalar(binding, "ksAmbient", 0.35F),
+        material_scalar(binding, "ksDiffuse", 0.80F),
+        material_scalar(binding, "ksSpecular", 0.20F),
+        material_scalar(binding, "ksSpecularEXP", 30.0F),
+    };
+    result.constants.fresnel = {
+        material_scalar(binding, "fresnelC", 0.0F),
+        material_scalar(binding, "fresnelEXP", 5.0F),
+        material_scalar(binding, "fresnelMaxLevel", 0.05F),
+        0.0F,
+    };
+
+    const MaterialPropertyValue* emissive = find_material_property(binding, "ksEmissive");
+    if (emissive == nullptr) {
+        result.constants.emissive = {0.0F, 0.0F, 0.0F, 0.0F};
+    } else {
+        std::array<float, 3> color{};
+        float strength = 1.0F;
+        if (emissive->source == MaterialPropertySource::csp) {
+            switch (emissive->arity) {
+            case MaterialPropertyValue::Arity::scalar:
+                color = {emissive->scalar, emissive->scalar, emissive->scalar};
+                break;
+            case MaterialPropertyValue::Arity::vector2:
+                color = {emissive->vector2[0], emissive->vector2[1], 0.0F};
+                break;
+            case MaterialPropertyValue::Arity::vector3:
+                color = emissive->vector3;
+                break;
+            case MaterialPropertyValue::Arity::vector4:
+                color = {emissive->vector4[0], emissive->vector4[1], emissive->vector4[2]};
+                strength = emissive->vector4[3];
+                break;
+            }
+        } else {
+            // public/app.js reads KN5 ksemissive from value3, which has no
+            // fourth strength component.
+            color = emissive->vector3;
+        }
+        if (std::max({color[0], color[1], color[2]}) > 16.0F)
+            for (float& component : color) component /= 255.0F;
+        result.constants.emissive = {color[0] * strength, color[1] * strength,
+                                     color[2] * strength, 0.0F};
+    }
+
+    if (options.capture_pass && options.alpha_to_coverage)
+        result.constants.fresnel[3] = std::max(
+            0.5F, material_scalar(binding, "ksAlphaRef", 0.5F));
+
+    const auto finite = [](const auto& values) {
+        return std::all_of(values.begin(), values.end(),
+                           [](float value) { return std::isfinite(value); });
+    };
+    if (!finite(result.constants.lighting) || !finite(result.constants.fresnel) ||
+        !finite(result.constants.emissive)) {
+        result.status = KsPerPixelMaterialResolveStatus::invalid_input;
+        result.diagnostic = {"non_finite_constants", "ksPerPixel",
+                             "Resolved ksPerPixel constants must contain only finite values"};
+        return result;
+    }
+
+    result.status = KsPerPixelMaterialResolveStatus::ready;
     return result;
 }
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "apex/formats/kn5.hpp"
+#include "apex/render/device.hpp"
 #include "apex/render/material_profile.hpp"
 
 #include <array>
@@ -57,12 +59,23 @@ enum class MaterialPropertySource : std::uint8_t {
 };
 
 struct MaterialPropertyValue {
+    enum class Arity : std::uint8_t {
+        scalar,
+        vector2,
+        vector3,
+        vector4,
+    };
+
     std::string name;
     float scalar = 0.0F;
     std::array<float, 2> vector2{};
     std::array<float, 3> vector3{};
     std::array<float, 4> vector4{};
     MaterialPropertySource source = MaterialPropertySource::kn5;
+    // KN5 properties expose value3 to the production emissive path. CSP
+    // overrides retain their original arity so a fourth vector component is
+    // only interpreted as emissive strength for an explicit vector4 value.
+    Arity arity = Arity::vector3;
 };
 
 // CSP values are parsed before they reach this boundary. The kind preserves
@@ -164,12 +177,52 @@ private:
     std::string code_;
 };
 
+struct KsPerPixelMaterialResolveOptions {
+    // public/app.js only applies ksAlphaRef during the reflection-capture
+    // alpha-to-coverage path. Ordinary ksPerPixel draws use zero.
+    bool capture_pass = false;
+    bool alpha_to_coverage = false;
+};
+
+enum class KsPerPixelMaterialResolveStatus : std::uint8_t {
+    ready,
+    invalid_input,
+    unsupported,
+};
+
+struct KsPerPixelMaterialResolveResult {
+    KsPerPixelMaterialResolveStatus status = KsPerPixelMaterialResolveStatus::unsupported;
+    KsPerPixelMaterialConstants constants{};
+    MaterialBindingDiagnostic diagnostic;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == KsPerPixelMaterialResolveStatus::ready;
+    }
+};
+
+// Resolve only the bounded ksPerPixel material-value subset. This copies the
+// source semantics from public/app.js; the 48-byte layout is the separately
+// documented portable test ABI in render/device.hpp, not a claim about the
+// native stock shader's constant-buffer layout.
+[[nodiscard]] KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
+    const MaterialBinding& binding,
+    KsPerPixelMaterialResolveOptions options = {});
+
 // Build a backend-neutral material binding. texture_table_count is retained
 // for callers that already have the parsed KN5 table size, but resource bind
 // points are deliberately not range-checked against it: KN5 stores shader
 // resource slots, not texture-table indices.
 [[nodiscard]] MaterialBinding build_material_binding(
     const Kn5Material& material, std::size_t texture_table_count,
+    const MaterialBindingOverrides* overrides = nullptr,
+    const MaterialBindingLimits& limits = {});
+
+// Adapt the bounded parser model without making callers duplicate every KN5
+// property and resource. Node transparency stays explicit because KN5 stores
+// it on a mesh, not on a material.
+[[nodiscard]] MaterialBinding build_material_binding(
+    const apex::formats::Kn5Material& material, bool node_transparent,
+    std::size_t texture_table_count,
     const MaterialBindingOverrides* overrides = nullptr,
     const MaterialBindingLimits& limits = {});
 

@@ -2,9 +2,13 @@
 
 #include "apex/render/decoded_dds_texture.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cctype>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <new>
 #include <optional>
@@ -58,17 +62,14 @@ bool canonical_resource_equals(std::string_view value,
     return true;
 }
 
-bool portable_diffuse_layout(const PipelineProgram& pipeline) noexcept {
-    if (pipeline.resources.size() != 2U) return false;
-    bool texture = false;
-    bool sampler = false;
-    for (const PipelineResourceBinding& resource : pipeline.resources) {
-        texture = texture || (resource.kind == PipelineResourceKind::sampled_texture &&
-                              resource.set == 0U && resource.binding == 0U);
-        sampler = sampler || (resource.kind == PipelineResourceKind::sampler &&
-                              resource.set == 0U && resource.binding == 1U);
-    }
-    return texture && sampler;
+bool finite_material_constants(const KsPerPixelMaterialConstants& constants) noexcept {
+    for (const float value : constants.lighting)
+        if (!std::isfinite(value)) return false;
+    for (const float value : constants.fresnel)
+        if (!std::isfinite(value)) return false;
+    for (const float value : constants.emissive)
+        if (!std::isfinite(value)) return false;
+    return true;
 }
 
 StaticSceneResourceStatus map_upload_status(StaticMeshUploadStatus status) noexcept {
@@ -103,6 +104,17 @@ StaticSceneResourceStatus map_sampler_status(SamplerStatus status) noexcept {
     return StaticSceneResourceStatus::allocation_failed;
 }
 
+StaticSceneResourceStatus map_buffer_status(BufferStatus status) noexcept {
+    switch (status) {
+    case BufferStatus::ready: return StaticSceneResourceStatus::ready;
+    case BufferStatus::invalid_description: return StaticSceneResourceStatus::invalid_request;
+    case BufferStatus::unsupported: return StaticSceneResourceStatus::unsupported;
+    case BufferStatus::allocation_failed: return StaticSceneResourceStatus::allocation_failed;
+    case BufferStatus::upload_failed: return StaticSceneResourceStatus::upload_failed;
+    }
+    return StaticSceneResourceStatus::upload_failed;
+}
+
 struct ExecutorPipelineValidation {
     StaticSceneResourceStatus status = StaticSceneResourceStatus::ready;
     std::string error;
@@ -130,9 +142,10 @@ ExecutorPipelineValidation validate_executor_pipeline(
         pipeline.blend.alpha_to_coverage)
         return {StaticSceneResourceStatus::unsupported,
                 "Static-scene execution supports solid pipelines without alpha-to-coverage", 0U};
-    if (!pipeline.resources.empty() && !portable_diffuse_layout(pipeline))
+    if (classify_indexed_portable_resource_layout(pipeline) ==
+        IndexedPortableResourceLayout::unsupported)
         return {StaticSceneResourceStatus::unsupported,
-                "Static-scene material execution supports only the portable diffuse resource layout", 0U};
+                "Static-scene material execution requires the portable diffuse layout with optional constants", 0U};
     if (pipeline.resources.empty() != packet.resources.empty())
         return {StaticSceneResourceStatus::invalid_request,
                 "Pipeline and draw-packet resource declarations do not match", 0U};
@@ -270,16 +283,24 @@ StaticSceneResourceResult prepare_static_scene_resources(
     std::vector<std::size_t> pipeline_for_packet(request.packets.size(), invalid_resource_index);
     std::vector<std::uint32_t> texture_for_packet(request.packets.size(),
                                                   invalid_draw_texture_index);
+    std::vector<std::size_t> material_constant_by_material(model.materials.size(),
+                                                           invalid_resource_index);
+    std::vector<std::size_t> material_constant_for_packet(request.packets.size(),
+                                                          invalid_resource_index);
     std::vector<const formats::Kn5Node*> unique_meshes;
     std::vector<std::size_t> representative_packets;
     std::vector<PipelineProgram> pipelines;
+    std::vector<KsPerPixelMaterialConstants> material_constants;
     unique_meshes.reserve(request.packets.size());
     representative_packets.reserve(request.packets.size());
     pipelines.reserve(request.packets.size());
+    material_constants.reserve(std::min(request.packets.size(),
+                                        limits.max_material_constant_buffers));
 
     std::uint64_t total_vertex_bytes = 0U;
     std::uint64_t total_index_bytes = 0U;
     std::uint64_t total_shader_bytes = 0U;
+    std::uint64_t total_material_constant_bytes = 0U;
     std::uint64_t validation_bytes = 0U;
     std::optional<bool> batch_has_depth;
     std::optional<PipelineRenderTargetFormat> batch_color_format;
@@ -348,6 +369,8 @@ StaticSceneResourceResult prepare_static_scene_resources(
                             ? "static_scene_material_pipeline_invalid"
                             : "static_scene_material_pipeline_unsupported",
                         pipeline_validation.error);
+        const IndexedPortableResourceLayout material_layout =
+            classify_indexed_portable_resource_layout(*pipeline);
         if (!pipeline->resources.empty()) {
             if (packet.resources.size() != 1U)
                 return fail(StaticSceneResourceStatus::unsupported,
@@ -386,6 +409,40 @@ StaticSceneResourceResult prepare_static_scene_resources(
                             "static_scene_diffuse_texture_identity_invalid",
                             "A txDiffuse packet resource does not match its active scoped global KN5 texture");
             texture_for_packet[packet_index] = diffuse.texture_index;
+        }
+        if (material_layout == IndexedPortableResourceLayout::diffuse_with_constants) {
+            if (limits.max_material_constant_buffers == 0U ||
+                limits.max_total_material_constant_bytes == 0U)
+                return fail(StaticSceneResourceStatus::invalid_request,
+                            "static_scene_material_constant_limits_invalid",
+                            "Material-constant limits must be nonzero when a used pipeline declares constants");
+            if (request.material_constants_by_material.size() != model.materials.size())
+                return fail(StaticSceneResourceStatus::invalid_request,
+                            "static_scene_material_constant_table_invalid",
+                            "The material-constant table must match the final material table");
+            if (material_constant_by_material[material_index] == invalid_resource_index) {
+                if (material_constants.size() >= limits.max_material_constant_buffers)
+                    return fail(StaticSceneResourceStatus::invalid_request,
+                                "static_scene_material_constant_count_limit",
+                                "Used materials exceed the constant-buffer count limit");
+                if (!checked_add(portable_material_buffer_view_bytes,
+                                 total_material_constant_bytes) ||
+                    total_material_constant_bytes >
+                        limits.max_total_material_constant_bytes)
+                    return fail(StaticSceneResourceStatus::invalid_request,
+                                "static_scene_material_constant_aggregate_limit",
+                                "Used material constants exceed the aggregate buffer limit");
+                const KsPerPixelMaterialConstants& constants =
+                    request.material_constants_by_material[material_index];
+                if (!finite_material_constants(constants))
+                    return fail(StaticSceneResourceStatus::invalid_request,
+                                "static_scene_material_constant_non_finite",
+                                "A used material constant contains a non-finite value");
+                material_constant_by_material[material_index] = material_constants.size();
+                material_constants.push_back(constants);
+            }
+            material_constant_for_packet[packet_index] =
+                material_constant_by_material[material_index];
         }
         const PipelineRenderTargetFormat color_format = pipeline->targets.colors.front().format;
         if (batch_color_format.has_value() && *batch_color_format != color_format)
@@ -467,12 +524,26 @@ StaticSceneResourceResult prepare_static_scene_resources(
     resources->upload_for_packet_ = std::move(upload_for_packet);
     resources->pipeline_for_packet_ = std::move(pipeline_for_packet);
     resources->texture_for_packet_ = std::move(texture_for_packet);
+    resources->material_constant_for_packet_ =
+        std::move(material_constant_for_packet);
     resources->texture_count_ = model.textures.size();
     resources->texture_authority_ = request.texture_authority;
     for (const std::uint32_t index : resources->texture_for_packet_)
-        resources->has_material_resources_ =
-            resources->has_material_resources_ || index != invalid_draw_texture_index;
-    if (resources->has_material_resources_ &&
+        resources->has_texture_resources_ =
+            resources->has_texture_resources_ || index != invalid_draw_texture_index;
+    resources->owned_material_constants_.reserve(material_constants.size());
+    for (const KsPerPixelMaterialConstants& constants : material_constants) {
+        std::array<std::byte, portable_material_buffer_view_bytes> bytes{};
+        std::memcpy(bytes.data(), &constants, sizeof(constants));
+        const BufferDescription description{
+            bytes.size(), BufferUsage::uniform, BufferMemory::device_local,
+            BufferMutability::immutable};
+        BufferResult buffer = device.create_buffer(description, bytes);
+        if (!buffer.ok())
+            return {map_buffer_status(buffer.status), std::move(buffer.diagnostic), nullptr};
+        resources->owned_material_constants_.push_back(std::move(buffer.buffer));
+    }
+    if (resources->has_texture_resources_ &&
         request.texture_authority == StaticSceneTextureAuthority::embedded_kn5) {
         resources->owned_textures_.resize(resources->texture_count_);
         for (std::size_t index = 0U; index < decoded_textures.size(); ++index) {
@@ -496,7 +567,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
             return {map_upload_status(uploaded.status), std::move(uploaded.diagnostic), nullptr};
         resources->uploads_.push_back(std::move(uploaded.upload));
     }
-    if (resources->has_material_resources_ &&
+    if (resources->has_texture_resources_ &&
         request.texture_authority == StaticSceneTextureAuthority::embedded_kn5) {
         SamplerDescription sampler_description;
         Diagnostic sampler_diagnostic;
@@ -531,10 +602,11 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
                  "The prepared static-scene texture authority is invalid"}, {}};
     if (packets_.empty() || packets_.size() != upload_for_packet_.size() ||
         packets_.size() != pipeline_for_packet_.size() ||
-        packets_.size() != texture_for_packet_.size())
+        packets_.size() != texture_for_packet_.size() ||
+        packets_.size() != material_constant_for_packet_.size())
         return {IndexedStaticMeshBatchStatus::invalid_request,
                 {"static_scene_resources_invalid", "Static-scene resource mappings are incomplete"}, {}};
-    if (has_material_resources_ &&
+    if (has_texture_resources_ &&
         texture_authority_ == StaticSceneTextureAuthority::caller_tables &&
         (frame.textures_by_global_index.size() != texture_count_ ||
          frame.samplers_by_global_index.size() != texture_count_))
@@ -582,6 +654,18 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
             }
             draw->resource_authority = IndexedResourceAuthority::explicit_bindings;
             draw->sampled_binding = {texture, sampler};
+        }
+        const std::size_t material_index = material_constant_for_packet_[index];
+        if (material_index != invalid_resource_index) {
+            if (material_index >= owned_material_constants_.size() ||
+                owned_material_constants_[material_index] == nullptr)
+                return {IndexedStaticMeshBatchStatus::invalid_request,
+                        {"static_scene_owned_material_constant_missing",
+                         "A used material has no owned constant buffer"}, {}};
+            draw->resource_authority = IndexedResourceAuthority::explicit_bindings;
+            draw->material_binding = {
+                owned_material_constants_[material_index].get(), 0U,
+                portable_material_buffer_view_bytes};
         }
         draws.push_back(std::move(*draw));
     }

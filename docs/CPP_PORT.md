@@ -114,9 +114,12 @@ remains unchanged and feature-complete.
   Vulkan maps it to a uniform descriptor.
   D3D12 maps it to `b2`. Per-draw pixel tests prove transport, but not the
   complete lighting formula. This remains a test ABI, not recovered stock KN5
-  or CSP behavior. A
-  bounded static-scene adapter validates the complete packet set before allocation.
+  or CSP behavior. A bounded resolver reads parsed KN5 values and typed CSP
+  overrides. It preserves override precedence and WebGL emissive conversion.
+  A bounded static-scene adapter validates the complete packet set before allocation.
   It uploads each referenced node once and retains duplicate ordered draws.
+  It owns one 256-byte material buffer per used material. Duplicate packets
+  reuse the same buffer. Count and byte limits bound these allocations.
   Caller-supplied SPIR-V or DXIL pipelines authorize only their local requests.
   Production packets remain marked as staged. This work proves basic pipeline
   creation, geometry binding, ordered submission, and rasterization. It does
@@ -156,6 +159,9 @@ remains unchanged and feature-complete.
   define the Vulkan and D3D12 clip-space conversions. The indexed backend
   shader contract uses these camera matrices. The static-scene adapter can
   dispatch bounded resource-free packets and the portable `txDiffuse` pair.
+  It can also bind a source-valued material record for explicitly authorized
+  pipelines. The record table uses final material order. Preparation copies
+  only used records and rejects non-finite values before backend allocation.
   One authority resolves the pair through caller-owned tables in the final KN5
   texture order. A second authority owns the used embedded KN5 textures. This
   authority validates every DDS payload before backend allocation. It decodes
@@ -175,6 +181,16 @@ remains unchanged and feature-complete.
   does not execute stock KN5 shader packages. The port does not create windows
   or swapchains, bind complete materials, or provide golden-image parity
   evidence.
+
+The production WebGL material gate uses the synthetic `BC7_PLANE` scene. The
+baseline screenshot SHA-256 is
+`4b744f36ad118f58b1a13ce4607a48f88d1501f275c705cd33849a842369ec38`.
+A CSP override changed `ksAmbient`, `ksDiffuse`, and `ksEmissive`. The WebGL
+state reported the exact override values and no GL error. Its screenshot
+SHA-256 is
+`bb82fef5bbca2d9e0911c34f1e0251c2bcb664f59e073a3a8162f329fe2c49db`.
+This gate proves override consumption. Source inspection remains the authority
+for absent-property defaults and emissive normalization.
 
 DDS BC7 has a bounded CPU decoder with differential fixtures for all eight
 modes. BC6H remains explicit and requires a GPU path. The checked upload
