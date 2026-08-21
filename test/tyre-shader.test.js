@@ -31,16 +31,23 @@ test("matches the stock dirt reductions for specular and reflections", () => {
   assert.equal(stockTyreFresnelCap(0.08, 1), 0);
 });
 
-test("audits exact tyre resources without accepting brake-disc slots", () => {
-  const audit = auditStockTyreMaterials([
-    { name: "Front tyres", shader: "ksTyres", resources: ["txDiffuse", "txNormal", "txDirty", "txBlur", "txNormalBlur"].map((slot) => ({ slot })) },
+test("requires usable textures before auditing a tyre binding as exact", () => {
+  const materials = [
+    { name: "Front tyres", shader: "ksTyres", resources: ["txDiffuse", "txNormal", "txDirty", "txBlur", "txNormalBlur"].map((slot) => ({ slot, texture: { usable: slot !== "txNormal" } })) },
     { name: "Rear tyres", shader: "newStefano_ksTyres", resources: [{ slot: "txDiffuse" }] },
     { name: "Discs", shader: "ksBrakeDisc", resources: [{ slot: "txBlur" }] }
-  ]);
+  ];
+  const declarations = auditStockTyreMaterials(materials);
+  assert.equal(declarations.declaredCompleteMaterials, 1);
+  assert.equal(declarations.completeMaterials, 0);
+  assert.equal(declarations.entries[0].verified, false);
+  const audit = auditStockTyreMaterials(materials, (_material, resource) => resource.texture?.usable === true);
   assert.equal(audit.materials, 2);
-  assert.equal(audit.completeMaterials, 1);
-  assert.equal(audit.incompleteMaterials, 1);
-  assert.deepEqual(audit.entries[1].missingResources, ["txNormal", "txDirty", "txBlur", "txNormalBlur"]);
+  assert.equal(audit.completeMaterials, 0);
+  assert.equal(audit.incompleteMaterials, 2);
+  assert.deepEqual(audit.entries[0].missingResources, ["txNormal"]);
+  assert.deepEqual(audit.entries[1].missingResources, ["txDiffuse", "txNormal", "txDirty", "txBlur", "txNormalBlur"]);
+  assert.throws(() => auditStockTyreMaterials(materials, true), /validation must be a function/);
 });
 
 test("rejects malformed preview state and vector input", () => {
@@ -61,7 +68,8 @@ test("audits the installed Porsche stock tyre material", async (context) => {
   const model = parseKn5(bytes), audit = auditStockTyreMaterials(model.materials), materialId = audit.entries[0]?.materialId;
   const meshNames = walkNodes(model.root).filter(({ node }) => (node.kind === "mesh" || node.kind === "skinnedMesh") && node.materialId === materialId).map(({ node }) => node.name).sort();
   assert.equal(audit.materials, 1);
-  assert.equal(audit.completeMaterials, 1);
+  assert.equal(audit.declaredCompleteMaterials, 1);
+  assert.equal(audit.completeMaterials, 0);
   assert.deepEqual(audit.entries[0].missingResources, []);
   assert.deepEqual(meshNames, ["TYRE_MESH_LF", "TYRE_MESH_LR", "TYRE_MESH_RF", "TYRE_MESH_RR"]);
 });
