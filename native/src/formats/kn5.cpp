@@ -7,6 +7,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <new>
 #include <sstream>
 #include <string_view>
 #include <utility>
@@ -34,6 +36,57 @@ constexpr std::string_view kEncryptionMarker = "__AC_SHADERS_PATCH_KN5ENC_v1__";
     throw Kn5Error(std::move(message), offset);
 }
 
+class NativeAllocationBudget final {
+public:
+    explicit NativeAllocationBudget(std::size_t limit) : limit_(limit) {}
+
+    void charge(std::size_t bytes, std::size_t offset, std::string_view what) {
+        if (bytes > limit_ - used_)
+            fail("KN5 native allocation budget exceeded while reserving " + std::string(what), offset);
+        used_ += bytes;
+    }
+
+    void chargeCount(std::size_t count, std::size_t elementBytes,
+                     std::size_t offset, std::string_view what) {
+        if (count != 0U && elementBytes > std::numeric_limits<std::size_t>::max() / count)
+            fail("KN5 native allocation size overflows while reserving " + std::string(what), offset);
+        charge(count * elementBytes, offset, what);
+    }
+
+    template <typename T>
+    void reserve(std::vector<T>& values, std::size_t count,
+                 std::size_t offset, std::string_view what) {
+        chargeCount(count, sizeof(T), offset, what);
+        values.reserve(count);
+    }
+
+private:
+    std::size_t limit_ = 0U;
+    std::size_t used_ = 0U;
+};
+
+[[nodiscard]] std::uint32_t peekU32(const ByteReader& reader, std::size_t offset) noexcept {
+    const auto bytes = reader.bytes();
+    if (offset > bytes.size() || bytes.size() - offset < 4U) return 0U;
+    return static_cast<std::uint32_t>(bytes[offset]) |
+           (static_cast<std::uint32_t>(bytes[offset + 1U]) << 8U) |
+           (static_cast<std::uint32_t>(bytes[offset + 2U]) << 16U) |
+           (static_cast<std::uint32_t>(bytes[offset + 3U]) << 24U);
+}
+
+std::string readString(ByteReader& reader, NativeAllocationBudget& budget,
+                       std::string_view label) {
+    const auto lengthOffset = reader.offset();
+    if (reader.remaining() >= 4U) {
+        const auto length = peekU32(reader, lengthOffset);
+        if (length <= reader.limits().maxStringBytes &&
+            static_cast<std::size_t>(length) <= reader.remaining() - 4U) {
+            budget.charge(static_cast<std::size_t>(length), lengthOffset, label);
+        }
+    }
+    return reader.string(label);
+}
+
 template <typename T>
 void checkCount(const ByteReader& reader, T count, std::size_t minimumBytes,
                 std::string_view label, std::size_t countOffset) {
@@ -50,9 +103,9 @@ std::array<float, N> readFloats(ByteReader& reader, std::string_view label) {
     return values;
 }
 
-Kn5MaterialProperty readProperty(ByteReader& reader) {
+Kn5MaterialProperty readProperty(ByteReader& reader, NativeAllocationBudget& budget) {
     Kn5MaterialProperty property;
-    property.name = reader.string("property name");
+    property.name = readString(reader, budget, "property name");
     property.value = reader.f32("property value");
     property.value2 = readFloats<2>(reader, "property vec2 value");
     property.value3 = readFloats<3>(reader, "property vec3 value");
@@ -60,10 +113,11 @@ Kn5MaterialProperty readProperty(ByteReader& reader) {
     return property;
 }
 
-Kn5Material readMaterial(ByteReader& reader, std::uint32_t version) {
+Kn5Material readMaterial(ByteReader& reader, std::uint32_t version,
+                         NativeAllocationBudget& budget) {
     Kn5Material material;
-    material.name = reader.string("material name");
-    material.shader = reader.string("shader name");
+    material.name = readString(reader, budget, "material name");
+    material.shader = readString(reader, budget, "shader name");
     material.alphaBlend = reader.u8("alpha-blend flag") != 0;
     material.alphaToCoverage = reader.u8("alpha-to-coverage flag") != 0;
     material.blendMode = material.alphaToCoverage ? 2u : material.alphaBlend ? 1u : 0u;
@@ -73,19 +127,19 @@ Kn5Material readMaterial(ByteReader& reader, std::uint32_t version) {
     const auto propertyOffset = reader.offset();
     const auto propertyCount = reader.u32("material property count");
     checkCount(reader, propertyCount, kMinimumPropertyBytes, "material property", propertyOffset);
-    material.properties.reserve(propertyCount);
+    budget.reserve(material.properties, propertyCount, propertyOffset, "material properties");
     for (std::uint32_t index = 0; index < propertyCount; ++index)
-        material.properties.push_back(readProperty(reader));
+        material.properties.push_back(readProperty(reader, budget));
 
     const auto resourceOffset = reader.offset();
     const auto resourceCount = reader.u32("material resource count");
     checkCount(reader, resourceCount, kMinimumResourceBytes, "material resource", resourceOffset);
-    material.resources.reserve(resourceCount);
+    budget.reserve(material.resources, resourceCount, resourceOffset, "material resources");
     for (std::uint32_t index = 0; index < resourceCount; ++index) {
         Kn5MaterialResource resource;
-        resource.slot = reader.string("resource slot");
+        resource.slot = readString(reader, budget, "resource slot");
         resource.textureId = reader.u32("resource bind point");
-        resource.texture = reader.string("texture name");
+        resource.texture = readString(reader, budget, "texture name");
         material.resources.push_back(std::move(resource));
     }
     return material;
@@ -101,7 +155,7 @@ void validateMeshIndices(const Kn5Node& node, std::size_t vertexCount, std::size
 }
 
 Kn5Node readNode(ByteReader& reader, std::size_t depth, std::size_t materialCount,
-                 std::size_t& nodeCount) {
+                 std::size_t& nodeCount, NativeAllocationBudget& budget) {
     if (depth > kMaxDepth) fail("Scene hierarchy is too deep", reader.offset());
     if (nodeCount == kMaxElements) fail("Too many scene nodes", reader.offset());
     ++nodeCount;
@@ -113,7 +167,7 @@ Kn5Node readNode(ByteReader& reader, std::size_t depth, std::size_t materialCoun
     Kn5Node node;
     node.type = type;
     node.kind = type == 1 ? "node" : type == 2 ? "mesh" : "skinnedMesh";
-    node.name = reader.string("node name");
+    node.name = readString(reader, budget, "node name");
     const auto childOffset = reader.offset();
     const auto childCount = reader.u32("child count");
     checkCount(reader, childCount, kMinimumNodeBytes, "child", childOffset);
@@ -131,10 +185,10 @@ Kn5Node readNode(ByteReader& reader, std::size_t depth, std::size_t materialCoun
             const auto boneOffset = reader.offset();
             const auto boneCount = reader.u32("bone count");
             checkCount(reader, boneCount, kMinimumBoneBytes, "bone", boneOffset);
-            node.bones.reserve(boneCount);
+            budget.reserve(node.bones, boneCount, boneOffset, "bones");
             for (std::uint32_t index = 0; index < boneCount; ++index) {
                 Kn5Bone bone;
-                bone.name = reader.string("bone name");
+                bone.name = readString(reader, budget, "bone name");
                 bone.transform = readFloats<16>(reader, "bone transform");
                 node.bones.push_back(std::move(bone));
             }
@@ -148,14 +202,14 @@ Kn5Node readNode(ByteReader& reader, std::size_t depth, std::size_t materialCoun
         node.vertexStride = type == 2 ? 11 : 19;
         const auto vertexValues = apex::core::checkedMultiply(
             vertexCount, node.vertexStride, "KN5", "vertex data", vertexOffset, "vertex");
-        node.vertices.reserve(vertexValues);
+        budget.reserve(node.vertices, vertexValues, vertexOffset, "vertex values");
         for (std::size_t index = 0; index < vertexValues; ++index)
             node.vertices.push_back(reader.f32(type == 2 ? "vertex data" : "skinned vertex data"));
 
         meshIndexOffset = reader.offset();
         const auto indexCount = reader.u32("index count");
         checkCount(reader, indexCount, sizeof(std::uint16_t), "index", meshIndexOffset);
-        node.indices.reserve(indexCount);
+        budget.reserve(node.indices, indexCount, meshIndexOffset, "mesh indices");
         for (std::uint32_t index = 0; index < indexCount; ++index) {
             const auto low = reader.u8("index");
             const auto high = reader.u8("index");
@@ -180,9 +234,9 @@ Kn5Node readNode(ByteReader& reader, std::size_t depth, std::size_t materialCoun
         }
     }
 
-    node.children.reserve(childCount);
+    budget.reserve(node.children, childCount, childOffset, "node children");
     for (std::uint32_t index = 0; index < childCount; ++index)
-        node.children.push_back(readNode(reader, depth + 1, materialCount, nodeCount));
+        node.children.push_back(readNode(reader, depth + 1, materialCount, nodeCount, budget));
     return node;
 }
 
@@ -214,6 +268,21 @@ bool hasMarker(std::span<const std::uint8_t> bytes, std::size_t offset) {
     return true;
 }
 
+void appendProtectedName(std::vector<std::string>& output, std::string_view name,
+                         std::size_t start, std::size_t length,
+                         NativeAllocationBudget& budget, std::size_t offset,
+                         std::string_view label) {
+    if (output.size() == output.capacity()) {
+        const auto current = output.capacity();
+        const auto next = current == 0U ? 1U : current > std::numeric_limits<std::size_t>::max() / 2U
+                                                   ? std::numeric_limits<std::size_t>::max()
+                                                   : current * 2U;
+        budget.reserve(output, next, offset, label);
+    }
+    budget.charge(length, offset, label);
+    output.emplace_back(name.substr(start, length));
+}
+
 }  // namespace
 
 Kn5Error::Kn5Error(std::string message, std::size_t offset)
@@ -224,8 +293,9 @@ Kn5Error::Kn5Error(std::string message, std::size_t offset)
       }()),
       offset_(offset) {}
 
-std::optional<Kn5EncryptionInspection> inspectKn5Encryption(
-    std::span<const std::uint8_t> bytes, std::size_t payloadOffset) {
+std::optional<Kn5EncryptionInspection> inspectKn5EncryptionWithBudget(
+    std::span<const std::uint8_t> bytes, std::size_t payloadOffset,
+    NativeAllocationBudget& budget) {
     if (payloadOffset > bytes.size() || bytes.size() < kEncryptionMarker.size() + 8) return std::nullopt;
     const auto first = bytes.size() - kEncryptionMarker.size() - 8;
     const auto lower = std::max(payloadOffset, bytes.size() > 256 ? bytes.size() - 256 : std::size_t{0});
@@ -259,6 +329,8 @@ std::optional<Kn5EncryptionInspection> inspectKn5Encryption(
                 static_cast<std::size_t>(nameLength) > recordsEnd - offset - 4)
                 fail("invalid encryption record name length " + std::to_string(nameLength), nameOffset);
             const auto nameBytes = bytes.subspan(offset, nameLength);
+            budget.charge(static_cast<std::size_t>(nameLength), nameOffset,
+                          "encryption record name");
             const auto name = ByteReader::decodeUtf8(nameBytes, "encryption record name", "KN5ENC",
                                                      "KN5", offset);
             offset += nameLength;
@@ -268,10 +340,14 @@ std::optional<Kn5EncryptionInspection> inspectKn5Encryption(
                 fail("encryption record " + name + " exceeds payload", offset - 4);
             if (name.size() > 7 && name.rfind("tex.", 0) == 0 && name.size() > 6 &&
                 name.substr(name.size() - 2) == ".d")
-                inspection.protectedTextures.push_back(name.substr(4, name.size() - 6));
+                appendProtectedName(inspection.protectedTextures, name, 4U,
+                                    name.size() - 6U, budget, nameOffset,
+                                    "protected texture names");
             if (name.size() > 7 && name.rfind("ver.", 0) == 0 && name.size() > 6 &&
                 name.substr(name.size() - 2) == ".x")
-                inspection.protectedMeshes.push_back(name.substr(4, name.size() - 6));
+                appendProtectedName(inspection.protectedMeshes, name, 4U,
+                                    name.size() - 6U, budget, nameOffset,
+                                    "protected mesh names");
             offset += size;
             ++inspection.recordCount;
             if (inspection.recordCount > 1'000'000) fail("too many encryption records", nameOffset);
@@ -289,6 +365,12 @@ std::optional<Kn5EncryptionInspection> inspectKn5Encryption(
 }
 
 std::optional<Kn5EncryptionInspection> inspectKn5Encryption(
+    std::span<const std::uint8_t> bytes, std::size_t payloadOffset) {
+    NativeAllocationBudget budget(default_kn5_native_object_bytes);
+    return inspectKn5EncryptionWithBudget(bytes, payloadOffset, budget);
+}
+
+std::optional<Kn5EncryptionInspection> inspectKn5Encryption(
     std::span<const std::byte> bytes, std::size_t payloadOffset) {
     const auto* data = reinterpret_cast<const std::uint8_t*>(bytes.data());
     return inspectKn5Encryption(std::span<const std::uint8_t>(data, bytes.size()), payloadOffset);
@@ -297,8 +379,12 @@ std::optional<Kn5EncryptionInspection> inspectKn5Encryption(
 Kn5File parseKn5(std::span<const std::uint8_t> bytes, std::string source,
                  Kn5ParseOptions options) {
     try {
+        if (options.maxNativeObjectBytes == 0U)
+            throw Kn5Error("KN5 native allocation budget is zero", 0U);
         ByteReader reader(bytes, source, options.limits, "KN5");
+        NativeAllocationBudget budget(options.maxNativeObjectBytes);
         std::string magic;
+        budget.charge(6U, 0U, "magic");
         magic.reserve(6);
         for (unsigned index = 0; index < 6; ++index) magic.push_back(static_cast<char>(reader.u8("magic")));
         if (magic != "sc6969") fail("Not a KN5 file (magic is " + magic + ")", 0);
@@ -311,20 +397,23 @@ Kn5File parseKn5(std::span<const std::uint8_t> bytes, std::string source,
         const auto textureCount = reader.u32("texture count");
         checkCount(reader, textureCount, kMinimumTextureBytes, "texture", textureOffset);
         Kn5File file;
+        budget.charge(source.size(), 0U, "source name");
         file.source = source;
         file.version = version;
         file.sourceMarker = sourceMarker;
         file.byteLength = bytes.size();
-        file.textures.reserve(textureCount);
+        budget.reserve(file.textures, textureCount, textureOffset, "textures");
         for (std::uint32_t index = 0; index < textureCount; ++index) {
             Kn5Texture texture;
             texture.active = reader.u32("texture active flag") != 0;
-            texture.name = reader.string("texture name");
+            texture.name = readString(reader, budget, "texture name");
             const auto sizeOffset = reader.offset();
             texture.size = reader.u32("texture byte size");
             if (static_cast<std::size_t>(texture.size) > reader.remaining())
                 fail("Texture data exceeds file", sizeOffset);
             if (!options.metadataOnly) {
+                budget.charge(static_cast<std::size_t>(texture.size), sizeOffset,
+                              "texture data");
                 const auto raw = reader.bytes().subspan(reader.offset(), texture.size);
                 texture.data.assign(raw.begin(), raw.end());
             }
@@ -337,18 +426,21 @@ Kn5File parseKn5(std::span<const std::uint8_t> bytes, std::string source,
         checkCount(reader, materialCount,
                    version > 4 ? kMinimumMaterialV5Bytes : kMinimumMaterialV4Bytes,
                    "material", materialOffset);
-        file.materials.reserve(materialCount);
+        budget.reserve(file.materials, materialCount, materialOffset, "materials");
         for (std::uint32_t index = 0; index < materialCount; ++index)
-            file.materials.push_back(readMaterial(reader, version));
+            file.materials.push_back(readMaterial(reader, version, budget));
         std::size_t nodeCount = 0;
-        file.root = readNode(reader, 0, file.materials.size(), nodeCount);
+        file.root = readNode(reader, 0, file.materials.size(), nodeCount, budget);
         file.bytesRead = reader.offset();
-        if (reader.offset() < bytes.size()) file.encryption = inspectKn5Encryption(bytes, reader.offset());
+        if (reader.offset() < bytes.size())
+            file.encryption = inspectKn5EncryptionWithBudget(bytes, reader.offset(), budget);
         return file;
     } catch (const Kn5Error&) {
         throw;
     } catch (const ParseError& error) {
         throw Kn5Error(error.what(), error.offset());
+    } catch (const std::bad_alloc&) {
+        throw Kn5Error("KN5 native allocation failed within the configured budget", 0U);
     }
 }
 
@@ -359,7 +451,9 @@ Kn5File parseKn5(std::span<const std::byte> bytes, std::string source,
 }
 
 Kn5File parseKn5(std::span<const std::uint8_t> bytes, std::string source, bool metadataOnly) {
-    return parseKn5(bytes, std::move(source), Kn5ParseOptions{metadataOnly, {}});
+    Kn5ParseOptions options;
+    options.metadataOnly = metadataOnly;
+    return parseKn5(bytes, std::move(source), std::move(options));
 }
 
 std::vector<Kn5WalkEntry> walkKn5(const Kn5Node& root) {

@@ -36,6 +36,12 @@ void u32(Bytes& bytes, std::uint32_t value) {
         bytes.push_back(static_cast<std::uint8_t>(value >> shift));
 }
 
+void put32At(Bytes& bytes, std::size_t offset, std::uint32_t value) {
+    require(offset + 4U <= bytes.size(), "fixture count write is in bounds");
+    for (unsigned shift = 0; shift < 32; shift += 8)
+        bytes[offset + shift / 8U] = static_cast<std::uint8_t>(value >> shift);
+}
+
 void f32(Bytes& bytes, float value) { u32(bytes, std::bit_cast<std::uint32_t>(value)); }
 
 void string(Bytes& bytes, std::string_view value) {
@@ -168,6 +174,36 @@ void requireError(Function&& function, std::string_view context) {
     throw std::runtime_error(std::string(context) + ": malformed input was accepted");
 }
 
+std::size_t findBytes(const Bytes& bytes, std::string_view value, std::size_t start = 0U) {
+    const auto begin = bytes.begin() + static_cast<std::ptrdiff_t>(start);
+    const auto marker = std::search(begin, bytes.end(), value.begin(), value.end());
+    require(marker != bytes.end(), "fixture marker is present");
+    return static_cast<std::size_t>(marker - bytes.begin());
+}
+
+void setHighCountAndTruncate(Bytes& bytes, std::size_t offset,
+                             std::uint32_t count, std::size_t minimumBytes) {
+    require(offset + 4U <= bytes.size(), "count field is in bounds");
+    put32At(bytes, offset, count);
+    const auto required = offset + 4U + static_cast<std::size_t>(count) * minimumBytes;
+    if (bytes.size() < required) bytes.resize(required, 0U);
+}
+
+void requireNativeBudgetFailure(Bytes bytes, std::string_view context) {
+    apex::formats::Kn5ParseOptions options;
+    options.maxNativeObjectBytes = 1U * 1024U * 1024U;
+    try {
+        (void)apex::formats::parseKn5(bytes, "budget.kn5", options);
+    } catch (const apex::formats::Kn5Error& error) {
+        require(std::string_view(error.what()).find("native allocation budget") != std::string_view::npos,
+                context);
+        return;
+    } catch (const std::exception& error) {
+        throw std::runtime_error(std::string(context) + ": wrong exception: " + error.what());
+    }
+    throw std::runtime_error(std::string(context) + ": oversized allocation was accepted");
+}
+
 void test_v6_scene_and_visibility() {
     const auto bytes = scene();
     const auto parsed = apex::formats::parseKn5(bytes, "synthetic.kn5");
@@ -264,6 +300,97 @@ void test_malformed_bounds() {
     (void)meshTypeOffset;
 }
 
+void test_native_allocation_budget() {
+    {
+        apex::formats::Kn5ParseOptions options;
+        options.maxNativeObjectBytes = 0U;
+        bool caught = false;
+        try {
+            (void)apex::formats::parseKn5(scene(), "zero-budget.kn5", options);
+        } catch (const apex::formats::Kn5Error& error) {
+            caught = true;
+            require(std::string_view(error.what()).find("native allocation budget") != std::string_view::npos,
+                    "zero native allocation budget diagnostic");
+        }
+        require(caught, "zero native allocation budget is rejected");
+    }
+    // Each case leaves enough serialized padding for checkCount() to accept
+    // the hostile count. The parser must reject before reserve() allocates the
+    // corresponding native vector. The zero padding is intentionally a
+    // truncated record tail, not a valid KN5 container.
+    {
+        auto bytes = scene();
+        setHighCountAndTruncate(bytes, 14U, 100'000U, 12U);
+        requireNativeBudgetFailure(std::move(bytes), "texture reserve budget");
+    }
+    {
+        auto bytes = scene();
+        setHighCountAndTruncate(bytes, 41U, 100'000U, 22U);
+        requireNativeBudgetFailure(std::move(bytes), "material reserve budget");
+    }
+    {
+        auto bytes = scene();
+        const auto marker = findBytes(bytes, "ksDiffuse");
+        setHighCountAndTruncate(bytes, marker - 8U, 100'000U, 44U);
+        requireNativeBudgetFailure(std::move(bytes), "property reserve budget");
+    }
+    {
+        auto bytes = scene();
+        const auto marker = findBytes(bytes, "txDiffuse");
+        setHighCountAndTruncate(bytes, marker - 8U, 100'000U, 12U);
+        requireNativeBudgetFailure(std::move(bytes), "resource reserve budget");
+    }
+    {
+        auto bytes = scene();
+        const auto marker = findBytes(bytes, "skin");
+        setHighCountAndTruncate(bytes, marker + 12U, 100'000U, 68U);
+        requireNativeBudgetFailure(std::move(bytes), "bone reserve budget");
+    }
+    {
+        auto bytes = scene();
+        const auto marker = findBytes(bytes, "mesh");
+        setHighCountAndTruncate(bytes, marker + 12U, 1'000'000U, 44U);
+        requireNativeBudgetFailure(std::move(bytes), "vertex reserve budget");
+    }
+    {
+        auto bytes = scene();
+        const auto marker = findBytes(bytes, "mesh");
+        // The first index starts immediately after the current three vertices.
+        setHighCountAndTruncate(bytes, marker + 12U + 4U + 3U * 44U,
+                                1'000'000U, sizeof(std::uint16_t));
+        requireNativeBudgetFailure(std::move(bytes), "index reserve budget");
+    }
+    {
+        auto bytes = scene();
+        const auto marker = findBytes(bytes, "root");
+        setHighCountAndTruncate(bytes, marker + 4U, 1'000'000U, 13U);
+        requireNativeBudgetFailure(std::move(bytes), "child reserve budget");
+    }
+    {
+        auto bytes = scene();
+        // The texture payload begins after the name and serialized size.
+        put32At(bytes, 34U, 2U * 1024U * 1024U);
+        bytes.resize(38U + 2U * 1024U * 1024U, 0U);
+        requireNativeBudgetFailure(std::move(bytes), "texture payload budget");
+    }
+    {
+        auto bytes = scene(5U);
+        for (std::size_t index = 0U; index < 20'000U; ++index)
+            appendEncryptionRecord(bytes, "tex.skin.dds.d", {});
+        constexpr std::string_view marker = "__AC_SHADERS_PATCH_KN5ENC_v1__";
+        u32(bytes, static_cast<std::uint32_t>(marker.size()));
+        bytes.insert(bytes.end(), marker.begin(), marker.end());
+        u32(bytes, 0U);
+        u32(bytes, 0U);
+        apex::formats::Kn5ParseOptions options;
+        options.maxNativeObjectBytes = 1U * 1024U * 1024U;
+        const auto parsed = apex::formats::parseKn5(std::move(bytes), "encryption-budget.kn5", options);
+        require(parsed.encryption.has_value() && !parsed.encryption->valid &&
+                    parsed.encryption->error.find("native allocation budget") != std::string::npos,
+                "encryption vector budget");
+    }
+}
+
 bool readFile(const std::string& path, Bytes& output) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) return false;
@@ -312,6 +439,7 @@ int main() {
         test_encryption_diagnosis();
         test_every_truncated_prefix();
         test_malformed_bounds();
+        test_native_allocation_budget();
         test_repository_fixtures();
         std::cout << "KN5 tests passed\n";
         return 0;

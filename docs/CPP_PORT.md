@@ -118,9 +118,11 @@ remains unchanged and feature-complete.
   not prove scene-rendering parity.
 - P1 is partial. Bounded readers support KN5 v4/v5/v6, DDS, ACD, INI/CSP,
   KSANIM v1/v2, and KNH. The port also supports byte-stable KN5 writing, VAO
-  ZIP decoding, and track surfaces, cameras, and splines. Bounded asset support
-  includes directory/ACD resolution, asset-folder/skin indexing, and skin
-  metadata JSON. A staged CSP configuration model is implemented. A bounded
+  ZIP decoding, and track surfaces, cameras, and splines. KN5 object creation
+  has a configurable aggregate byte budget. Count-driven containers, strings,
+  texture payloads, and encryption records consume it before allocation.
+  Bounded asset support includes directory/ACD resolution, asset-folder/skin
+  indexing, and skin metadata JSON. A staged CSP configuration model is implemented. A bounded
   binary/ASCII FBX DOM parser is implemented. A bounded FBX conversion subset
   supports static positions, polygon triangulation, hierarchy, local/world
   transforms, and first material assignment. It rejects or diagnoses skinning,

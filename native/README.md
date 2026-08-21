@@ -7,10 +7,12 @@ native implementation works through the parity gates in
 
 The native port has shared bounded input utilities. It reads KN5 v4/v5/v6,
 DDS, ACD, VAO, ordered INI/CSP, KSANIM v1/v2, and KNH. It writes KN5 files
-without byte changes when the model is unchanged. DDS includes bounded BC7 CPU
-decode. Its upload planner supports DX10 2D arrays, cubemaps, and exact RGB24
-to RGBA8 conversion. FBX support includes a bounded binary/ASCII DOM and a
-static-geometry conversion subset.
+without byte changes when the model is unchanged. KN5 parsing also has an
+aggregate native-object budget. Counts, strings, texture payloads, and
+encryption records consume this budget before allocation. DDS includes bounded
+BC7 CPU decode. Its upload planner supports DX10 2D arrays, cubemaps, and exact
+RGB24 to RGBA8 conversion. FBX support includes a bounded binary/ASCII DOM and
+a static-geometry conversion subset.
 
 The port supports surfaces, cameras, splines, workspaces, asset folders, skin
 indexes, and skin metadata. It includes staged CSP evaluation and KN5 scene

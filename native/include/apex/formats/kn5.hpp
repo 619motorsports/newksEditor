@@ -99,9 +99,16 @@ struct Kn5EncryptionInspection {
     std::string error;
 };
 
+inline constexpr std::size_t default_kn5_native_object_bytes =
+    512U * 1024U * 1024U;
+
 struct Kn5ParseOptions {
     bool metadataOnly = false;
     apex::core::ParseLimits limits{};
+    // Bounds aggregate native allocations made while materializing the KN5
+    // object graph. This is separate from maxInputBytes because a small
+    // serialized record can contain a large vector of C++ objects.
+    std::size_t maxNativeObjectBytes = default_kn5_native_object_bytes;
 };
 
 class Kn5Error final : public std::runtime_error {
