@@ -2,6 +2,7 @@
 
 #include "apex/core/parse_limits.hpp"
 #include "apex/formats/dds.hpp"
+#include "apex/render/texture_format.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -11,32 +12,6 @@
 #include <vector>
 
 namespace apex::render {
-
-// This enum is deliberately independent of Vulkan and DirectX headers. It is
-// the small common format vocabulary used by the upload planner.
-enum class TextureFormat {
-    unknown,
-    r8_unorm,
-    r5g6b5_unorm,
-    rgba8_unorm,
-    rgba8_srgb,
-    bgra8_unorm,
-    bgra8_srgb,
-    bc1_unorm,
-    bc1_srgb,
-    bc2_unorm,
-    bc2_srgb,
-    bc3_unorm,
-    bc3_srgb,
-    bc4_unorm,
-    bc4_snorm,
-    bc5_unorm,
-    bc5_snorm,
-    bc6h_ufloat,
-    bc6h_sfloat,
-    bc7_unorm,
-    bc7_srgb,
-};
 
 struct TextureFormatMapping {
     TextureFormat format = TextureFormat::unknown;

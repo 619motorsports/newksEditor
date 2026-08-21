@@ -4,6 +4,7 @@
 #include "apex/formats/ini.hpp"
 #include "apex/formats/kn5.hpp"
 #include "apex/formats/ksanim.hpp"
+#include "apex/formats/vao.hpp"
 #include "apex/render/device.hpp"
 
 #include <cstdint>
@@ -24,6 +25,7 @@ void usage(std::ostream& output) {
            << "  apex-native --inspect-dds <file>\n"
            << "  apex-native --inspect-acd <asset-directory-name> <file>\n"
            << "  apex-native --inspect-ini <file>\n"
+           << "  apex-native --inspect-vao <file>\n"
            << "  apex-native --inspect-ksanim <file>\n";
 }
 
@@ -102,6 +104,16 @@ int inspect_ini(const std::filesystem::path& path) {
     return 0;
 }
 
+int inspect_vao(const std::filesystem::path& path) {
+    const auto bytes = read_file(path);
+    const auto patch = apex::formats::parseVaoPatch(bytes, path.string());
+    std::cout << path.string() << ": VAO v" << patch.version << ", "
+              << patch.data.records.size() << " records, "
+              << patch.archiveEntries.size() << " archive entries, "
+              << patch.splitAo.warnings.size() << " split-AO warnings\n";
+    return 0;
+}
+
 int probe_backend(apex::render::Backend backend, bool validation) {
     apex::render::DeviceOptions options;
     options.enable_validation = validation;
@@ -130,6 +142,8 @@ int main(int argc, char** argv) {
             return inspect_acd(argv[2], argv[3]);
         if (argc == 3 && std::string_view(argv[1]) == "--inspect-ini")
             return inspect_ini(argv[2]);
+        if (argc == 3 && std::string_view(argv[1]) == "--inspect-vao")
+            return inspect_vao(argv[2]);
         if (argc >= 3 && argc <= 4 && std::string_view(argv[1]) == "--backend") {
             const bool validation = argc == 4 && std::string_view(argv[3]) == "--validation";
             if (argc == 4 && !validation) throw std::runtime_error("unknown backend option");

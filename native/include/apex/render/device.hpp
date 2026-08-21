@@ -1,5 +1,7 @@
 #pragma once
 
+#include "apex/render/texture_format.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -91,6 +93,8 @@ enum class BufferUsage : std::uint32_t {
 }
 
 inline constexpr std::uint64_t max_buffer_bytes = 1ULL << 34U;
+inline constexpr std::uint64_t max_texture_bytes = 1ULL << 34U;
+inline constexpr std::uint32_t max_texture_dimension = 16384U;
 
 struct BufferDescription {
     std::uint64_t size_bytes = 0;
@@ -136,6 +140,100 @@ struct BufferUpdateResult {
     [[nodiscard]] bool ok() const noexcept { return status == BufferStatus::ready; }
 };
 
+[[nodiscard]] constexpr std::size_t texture_format_bytes_per_pixel(TextureFormat format) noexcept {
+    return texture_format_info(format).bytes_per_pixel;
+}
+
+enum class TextureUsage : std::uint32_t {
+    none = 0,
+    sampled = 1U << 0U,
+    transfer_source = 1U << 1U,
+    transfer_destination = 1U << 2U,
+    color_attachment = 1U << 3U,
+    storage = 1U << 4U,
+};
+
+[[nodiscard]] constexpr TextureUsage operator|(TextureUsage left, TextureUsage right) noexcept {
+    return static_cast<TextureUsage>(static_cast<std::uint32_t>(left) |
+                                     static_cast<std::uint32_t>(right));
+}
+
+[[nodiscard]] constexpr TextureUsage operator&(TextureUsage left, TextureUsage right) noexcept {
+    return static_cast<TextureUsage>(static_cast<std::uint32_t>(left) &
+                                     static_cast<std::uint32_t>(right));
+}
+
+enum class TextureMemory : std::uint8_t {
+    device_local,
+    host_visible,
+};
+
+enum class TextureMutability : std::uint8_t {
+    immutable,
+    mutable_data,
+};
+
+struct TextureDescription {
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint32_t mip_levels = 1;
+    std::uint32_t array_layers = 1;
+    TextureFormat format = TextureFormat::rgba8_unorm;
+    TextureUsage usage = TextureUsage::none;
+    TextureMemory memory = TextureMemory::device_local;
+    TextureMutability mutability = TextureMutability::immutable;
+};
+
+struct TextureUpload {
+    std::uint32_t mip_level = 0;
+    std::uint32_t array_layer = 0;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint32_t row_pitch = 0;
+    std::span<const std::byte> data{};
+};
+
+struct TextureUploadPlan {
+    std::vector<TextureUpload> subresources;
+};
+
+enum class TextureStatus {
+    ready,
+    invalid_description,
+    unsupported,
+    allocation_failed,
+    upload_failed,
+};
+
+struct TextureInfo {
+    TextureDescription description{};
+};
+
+class Texture {
+public:
+    virtual ~Texture() = default;
+
+    [[nodiscard]] virtual Backend backend() const noexcept = 0;
+    [[nodiscard]] virtual const TextureInfo& info() const noexcept = 0;
+};
+
+struct TextureResult {
+    TextureStatus status = TextureStatus::unsupported;
+    Diagnostic diagnostic;
+    std::unique_ptr<Texture> texture;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == TextureStatus::ready && texture != nullptr;
+    }
+};
+
+struct TextureUpdateResult {
+    TextureStatus status = TextureStatus::unsupported;
+    Diagnostic diagnostic;
+
+    [[nodiscard]] bool ok() const noexcept { return status == TextureStatus::ready; }
+};
+
 [[nodiscard]] BufferStatus validate_buffer_description(
     const BufferDescription& description,
     std::size_t initial_data_size,
@@ -145,6 +243,21 @@ struct BufferUpdateResult {
     const Buffer& buffer,
     std::uint64_t offset,
     std::size_t data_size,
+    Diagnostic& diagnostic);
+
+[[nodiscard]] TextureStatus validate_texture_description(
+    const TextureDescription& description,
+    const TextureUploadPlan& initial_uploads,
+    Diagnostic& diagnostic);
+
+[[nodiscard]] TextureStatus validate_texture_upload_plan(
+    const TextureDescription& description,
+    const TextureUploadPlan& uploads,
+    Diagnostic& diagnostic);
+
+[[nodiscard]] TextureStatus validate_texture_update(
+    const Texture& texture,
+    const TextureUploadPlan& uploads,
     Diagnostic& diagnostic);
 
 struct AdapterResult {
@@ -173,6 +286,14 @@ public:
         std::uint64_t offset,
         std::span<const std::byte> data) = 0;
 
+    [[nodiscard]] virtual TextureResult create_texture(
+        const TextureDescription& description,
+        const TextureUploadPlan& initial_uploads = {}) = 0;
+
+    [[nodiscard]] virtual TextureUpdateResult update_texture(
+        Texture& texture,
+        const TextureUploadPlan& uploads) = 0;
+
     virtual void wait_idle() noexcept = 0;
 };
 
@@ -189,6 +310,7 @@ struct DeviceResult {
 [[nodiscard]] const char* backend_name(Backend backend) noexcept;
 [[nodiscard]] const char* device_status_name(DeviceStatus status) noexcept;
 [[nodiscard]] const char* buffer_status_name(BufferStatus status) noexcept;
+[[nodiscard]] const char* texture_status_name(TextureStatus status) noexcept;
 
 [[nodiscard]] AdapterResult enumerate_adapters(Backend backend,
                                                 const DeviceOptions& options = {});

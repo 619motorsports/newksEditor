@@ -25,6 +25,10 @@ void contract_names() {
             "buffer ready status name");
     require(std::string(apex::render::buffer_status_name(apex::render::BufferStatus::upload_failed)) == "upload_failed",
             "buffer upload status name");
+    require(std::string(apex::render::texture_status_name(apex::render::TextureStatus::ready)) == "ready",
+            "texture ready status name");
+    require(std::string(apex::render::texture_status_name(apex::render::TextureStatus::upload_failed)) == "upload_failed",
+            "texture upload status name");
 }
 
 void contract_options() {
@@ -54,6 +58,17 @@ public:
 
 private:
     apex::render::BufferInfo info_;
+};
+
+class ContractTexture final : public apex::render::Texture {
+public:
+    explicit ContractTexture(apex::render::TextureDescription description) : info_({description}) {}
+
+    apex::render::Backend backend() const noexcept override { return apex::render::Backend::Vulkan; }
+    const apex::render::TextureInfo& info() const noexcept override { return info_; }
+
+private:
+    apex::render::TextureInfo info_;
 };
 
 void contract_buffer_limits() {
@@ -92,6 +107,103 @@ void contract_buffer_limits() {
     require(validate_buffer_update(mutable_buffer, 0U, 0U, diagnostic) == BufferStatus::invalid_description,
             "empty update rejected");
     require(diagnostic.code == "buffer_update_empty", "empty update diagnostic");
+}
+
+void contract_texture_limits() {
+    using namespace apex::render;
+    Diagnostic diagnostic;
+    const auto rgb565_info = texture_format_info(TextureFormat::r5g6b5_unorm);
+    require(rgb565_info.classification == TextureFormatClass::uncompressed &&
+                rgb565_info.bytes_per_pixel == 2U && texture_format_bytes_per_pixel(TextureFormat::r5g6b5_unorm) == 2U,
+            "RGB565 texture metadata");
+    const auto bc7_info = texture_format_info(TextureFormat::bc7_srgb);
+    require(bc7_info.classification == TextureFormatClass::block_compressed && bc7_info.block_width == 4U &&
+                bc7_info.block_height == 4U && bc7_info.block_bytes == 16U && bc7_info.srgb &&
+                texture_format_is_compressed(TextureFormat::bc7_srgb),
+            "BC7 texture metadata");
+    TextureDescription description;
+    TextureUploadPlan empty;
+    require(validate_texture_description(description, empty, diagnostic) == TextureStatus::invalid_description,
+            "zero-sized texture rejected");
+    require(diagnostic.code == "texture_dimensions_invalid", "zero-sized texture diagnostic");
+    description.width = max_texture_dimension + 1U;
+    description.height = 1U;
+    description.usage = TextureUsage::sampled;
+    require(validate_texture_description(description, empty, diagnostic) == TextureStatus::invalid_description,
+            "oversized texture rejected");
+    require(diagnostic.code == "texture_dimension_limit", "oversized texture diagnostic");
+    description.width = 1U;
+    description.mip_levels = 2U;
+    require(validate_texture_description(description, empty, diagnostic) == TextureStatus::invalid_description,
+            "too many texture mips rejected");
+    require(diagnostic.code == "texture_mip_limit", "texture mip diagnostic");
+    description.mip_levels = 1U;
+    description.format = static_cast<TextureFormat>(255U);
+    require(validate_texture_description(description, empty, diagnostic) == TextureStatus::unsupported,
+            "unknown texture format rejected");
+    require(diagnostic.code == "texture_format_unknown", "unknown texture format diagnostic");
+    description.format = TextureFormat::bc1_unorm;
+    require(validate_texture_description(description, empty, diagnostic) == TextureStatus::unsupported,
+            "compressed texture format rejected explicitly");
+    require(diagnostic.code == "texture_compressed_format_unsupported",
+            "compressed texture format diagnostic");
+    description.format = TextureFormat::rgba8_unorm;
+    description.usage = TextureUsage::none;
+    require(validate_texture_description(description, empty, diagnostic) == TextureStatus::invalid_description,
+            "empty texture usage rejected");
+    require(diagnostic.code == "texture_usage_invalid", "texture usage diagnostic");
+
+    description.width = 2U;
+    description.height = 2U;
+    description.usage = TextureUsage::sampled;
+    const std::array<std::byte, 16> pixels{};
+    TextureUpload upload{0U, 0U, 2U, 2U, 7U, pixels};
+    TextureUploadPlan plan{{upload}};
+    require(validate_texture_description(description, plan, diagnostic) == TextureStatus::invalid_description,
+            "short texture row pitch rejected");
+    require(diagnostic.code == "texture_row_pitch_too_small", "row pitch diagnostic");
+    upload.row_pitch = 8U;
+    upload.data = std::span<const std::byte>(pixels.data(), 8U);
+    plan.subresources[0] = upload;
+    require(validate_texture_description(description, plan, diagnostic) == TextureStatus::invalid_description,
+            "truncated texture upload rejected");
+    require(diagnostic.code == "texture_upload_truncated", "truncated upload diagnostic");
+    upload.data = pixels;
+    plan.subresources[0] = upload;
+    plan.subresources.push_back(upload);
+    require(validate_texture_description(description, plan, diagnostic) == TextureStatus::invalid_description,
+            "duplicate texture subresource rejected");
+    require(diagnostic.code == "texture_subresource_duplicate", "duplicate subresource diagnostic");
+
+    description.mutability = TextureMutability::immutable;
+    ContractTexture immutable(description);
+    TextureUploadPlan valid_plan{{TextureUpload{0U, 0U, 2U, 2U, 8U, pixels}}};
+    require(validate_texture_upload_plan(description, valid_plan, diagnostic) == TextureStatus::ready,
+            "valid texture upload plan accepted");
+    require(validate_texture_update(immutable, valid_plan, diagnostic) == TextureStatus::invalid_description,
+            "immutable texture update rejected");
+    require(diagnostic.code == "texture_immutable", "immutable texture diagnostic");
+
+    TextureDescription array_mips{4U, 2U, 2U, 2U, TextureFormat::r8_unorm,
+                                  TextureUsage::sampled, TextureMemory::device_local,
+                                  TextureMutability::mutable_data};
+    const std::array<std::byte, 8> mip0{};
+    const std::array<std::byte, 4> mip1{};
+    TextureUploadPlan all_subresources{{
+        TextureUpload{0U, 0U, 4U, 2U, 4U, mip0},
+        TextureUpload{1U, 0U, 2U, 1U, 4U, mip1},
+        TextureUpload{0U, 1U, 4U, 2U, 4U, mip0},
+        TextureUpload{1U, 1U, 2U, 1U, 4U, mip1},
+    }};
+    require(validate_texture_description(array_mips, all_subresources, diagnostic) == TextureStatus::ready,
+            "multi-mip array texture plan accepted");
+    TextureUploadPlan partial{{TextureUpload{1U, 1U, 2U, 1U, 4U, mip1}}};
+    require(validate_texture_upload_plan(array_mips, partial, diagnostic) == TextureStatus::ready,
+            "partial texture update plan accepted");
+    partial.subresources.push_back(partial.subresources.front());
+    require(validate_texture_upload_plan(array_mips, partial, diagnostic) == TextureStatus::invalid_description &&
+                diagnostic.code == "texture_subresource_duplicate",
+            "duplicate array-mip subresource rejected");
 }
 
 bool contract_backend(apex::render::Backend backend) {
@@ -138,6 +250,30 @@ bool contract_backend(apex::render::Backend backend) {
     require(immutable_buffer.ok(), "device-local immutable buffer upload");
     update = device.device->update_buffer(*immutable_buffer.buffer, 0U, initial);
     require(update.status == BufferStatus::invalid_description, "real backend rejects immutable update");
+    const std::array<std::byte, 16> texture_pixels = {
+        std::byte{0}, std::byte{1}, std::byte{2}, std::byte{3},
+        std::byte{4}, std::byte{5}, std::byte{6}, std::byte{7},
+        std::byte{8}, std::byte{9}, std::byte{10}, std::byte{11},
+        std::byte{12}, std::byte{13}, std::byte{14}, std::byte{15},
+    };
+    TextureDescription mutable_texture_description{2U, 2U, 1U, 1U, TextureFormat::rgba8_unorm,
+                                                    TextureUsage::sampled, TextureMemory::device_local,
+                                                    TextureMutability::mutable_data};
+    TextureUploadPlan texture_uploads{{TextureUpload{0U, 0U, 2U, 2U, 8U, texture_pixels}}};
+    TextureResult mutable_texture = device.device->create_texture(mutable_texture_description, texture_uploads);
+    require(mutable_texture.ok(), "mutable texture creation and upload");
+    TextureUpdateResult texture_update = device.device->update_texture(*mutable_texture.texture, texture_uploads);
+    require(texture_update.ok(), "mutable texture update");
+    TextureDescription immutable_texture_description = mutable_texture_description;
+    immutable_texture_description.mutability = TextureMutability::immutable;
+    TextureResult immutable_texture = device.device->create_texture(immutable_texture_description, texture_uploads);
+    require(immutable_texture.ok(), "immutable texture creation and upload");
+    texture_update = device.device->update_texture(*immutable_texture.texture, texture_uploads);
+    require(texture_update.status == TextureStatus::invalid_description, "real backend rejects immutable texture update");
+    TextureDescription host_texture_description = mutable_texture_description;
+    host_texture_description.memory = TextureMemory::host_visible;
+    TextureResult host_texture = device.device->create_texture(host_texture_description, texture_uploads);
+    require(host_texture.status == TextureStatus::unsupported, "real backend rejects host-visible texture memory");
     if (backend == Backend::D3D12) {
         const BufferDescription incompatible{16U,
                                              BufferUsage::transfer_destination | BufferUsage::vertex,
@@ -148,6 +284,13 @@ bool contract_backend(apex::render::Backend backend) {
                 "D3D12 rejects combined copy-destination/read usage");
         require(rejected.diagnostic.code == "d3d12_transfer_destination_exclusive",
                 "D3D12 combined usage diagnostic");
+        TextureDescription invalid_texture_usage = mutable_texture_description;
+        invalid_texture_usage.usage = TextureUsage::sampled | TextureUsage::color_attachment;
+        const TextureResult invalid_texture = device.device->create_texture(invalid_texture_usage, texture_uploads);
+        require(invalid_texture.status == TextureStatus::unsupported,
+                "D3D12 rejects combined render-target and sampled texture usage");
+        require(invalid_texture.diagnostic.code == "d3d12_render_target_texture_exclusive",
+                "D3D12 combined texture usage diagnostic");
     }
     device.device->wait_idle();
     std::cout << "PASS " << backend_name(backend) << ": " << device.device->info().name << '\n';
@@ -161,6 +304,7 @@ int main() {
         contract_names();
         contract_options();
         contract_buffer_limits();
+        contract_texture_limits();
         const char* requested = std::getenv("APEX_RENDER_BACKEND");
         if (requested && std::string(requested) == "vulkan") {
             return contract_backend(apex::render::Backend::Vulkan) ? 0 : 77;

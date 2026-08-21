@@ -3,6 +3,7 @@
 #include <cstring>
 #include <cstdio>
 #include <memory>
+#include <limits>
 #include <span>
 #include <utility>
 
@@ -332,6 +333,286 @@ private:
     D3D12_RESOURCE_STATES state_;
 };
 
+[[nodiscard]] DXGI_FORMAT dxgi_texture_format(TextureFormat format) noexcept {
+    switch (format) {
+    case TextureFormat::rgba8_unorm:
+        return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case TextureFormat::bgra8_unorm:
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
+    case TextureFormat::rgba8_srgb:
+        return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    case TextureFormat::bgra8_srgb:
+        return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    case TextureFormat::r8_unorm:
+        return DXGI_FORMAT_R8_UNORM;
+    case TextureFormat::r5g6b5_unorm:
+        return DXGI_FORMAT_B5G6R5_UNORM;
+    default:
+        return DXGI_FORMAT_UNKNOWN;
+    }
+}
+
+[[nodiscard]] D3D12_RESOURCE_STATES texture_state(TextureUsage usage) noexcept {
+    const auto raw = static_cast<std::uint32_t>(usage);
+    D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
+    const auto add = [&state](D3D12_RESOURCE_STATES bit) {
+        state = static_cast<D3D12_RESOURCE_STATES>(static_cast<UINT>(state) | static_cast<UINT>(bit));
+    };
+    if ((raw & static_cast<std::uint32_t>(TextureUsage::sampled)) != 0U)
+        add(static_cast<D3D12_RESOURCE_STATES>(static_cast<UINT>(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) |
+                                               static_cast<UINT>(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)));
+    if ((raw & static_cast<std::uint32_t>(TextureUsage::transfer_source)) != 0U)
+        add(D3D12_RESOURCE_STATE_COPY_SOURCE);
+    if ((raw & static_cast<std::uint32_t>(TextureUsage::transfer_destination)) != 0U)
+        add(D3D12_RESOURCE_STATE_COPY_DEST);
+    if ((raw & static_cast<std::uint32_t>(TextureUsage::color_attachment)) != 0U)
+        add(D3D12_RESOURCE_STATE_RENDER_TARGET);
+    if ((raw & static_cast<std::uint32_t>(TextureUsage::storage)) != 0U)
+        add(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    return state;
+}
+
+[[nodiscard]] D3D12_RESOURCE_FLAGS texture_flags(TextureUsage usage) noexcept {
+    const auto raw = static_cast<std::uint32_t>(usage);
+    D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE;
+    if ((raw & static_cast<std::uint32_t>(TextureUsage::storage)) != 0U)
+        flags = static_cast<D3D12_RESOURCE_FLAGS>(static_cast<UINT>(flags) |
+                                                  static_cast<UINT>(D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS));
+    if ((raw & static_cast<std::uint32_t>(TextureUsage::color_attachment)) != 0U)
+        flags = static_cast<D3D12_RESOURCE_FLAGS>(static_cast<UINT>(flags) |
+                                                  static_cast<UINT>(D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET));
+    return flags;
+}
+
+[[nodiscard]] bool valid_d3d12_texture_usage(TextureUsage usage, Diagnostic& diagnostic) noexcept {
+    const auto raw = static_cast<std::uint32_t>(usage);
+    const auto transfer_destination = static_cast<std::uint32_t>(TextureUsage::transfer_destination);
+    const auto storage = static_cast<std::uint32_t>(TextureUsage::storage);
+    const auto color_attachment = static_cast<std::uint32_t>(TextureUsage::color_attachment);
+    if ((raw & transfer_destination) != 0U && raw != transfer_destination) {
+        diagnostic = {"d3d12_transfer_destination_texture_exclusive",
+                      "D3D12 COPY_DEST cannot be combined with another texture usage"};
+        return false;
+    }
+    if ((raw & storage) != 0U && raw != storage) {
+        diagnostic = {"d3d12_storage_texture_exclusive",
+                      "D3D12 unordered-access texture state cannot be combined with another texture usage"};
+        return false;
+    }
+    if ((raw & color_attachment) != 0U && raw != color_attachment) {
+        diagnostic = {"d3d12_render_target_texture_exclusive",
+                      "D3D12 render-target texture state cannot be combined with another texture usage"};
+        return false;
+    }
+    return true;
+}
+
+bool execute_texture_upload(const std::shared_ptr<D3D12Context>& context,
+                            ID3D12Resource* destination,
+                            const TextureDescription& description,
+                            const TextureUploadPlan& uploads,
+                            D3D12_RESOURCE_STATES& destination_state,
+                            D3D12_RESOURCE_STATES final_state,
+                            Diagnostic& diagnostic) {
+    if (!texture_format_cpu_upload_supported(description.format)) {
+        diagnostic = {"texture_compressed_format_unsupported",
+                      "Block-compressed texture uploads require a dedicated GPU upload path"};
+        return false;
+    }
+    const auto bytes_per_pixel = texture_format_bytes_per_pixel(description.format);
+    if (bytes_per_pixel == 0U) {
+        diagnostic = {"texture_format_unknown", "Texture upload format has no byte layout"};
+        return false;
+    }
+    const UINT subresource_count = description.mip_levels * description.array_layers;
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(subresource_count);
+    std::vector<UINT> row_counts(subresource_count);
+    std::vector<UINT64> row_sizes(subresource_count);
+    UINT64 upload_size = 0;
+    D3D12_RESOURCE_DESC resource_description = destination->GetDesc();
+    context->device->GetCopyableFootprints(&resource_description, 0, subresource_count, 0,
+                                           footprints.data(), row_counts.data(), row_sizes.data(), &upload_size);
+    constexpr auto max_size_t = static_cast<UINT64>(std::numeric_limits<std::size_t>::max());
+    if (upload_size > max_size_t) {
+        diagnostic = {"texture_upload_size_platform_limit",
+                      "D3D12 texture upload footprint exceeds the host size type"};
+        return false;
+    }
+    for (const auto& footprint : footprints) {
+        if (footprint.Offset > max_size_t || footprint.Footprint.RowPitch > max_size_t) {
+            diagnostic = {"texture_upload_size_platform_limit",
+                          "D3D12 texture footprint cannot be represented by the host size type"};
+            return false;
+        }
+    }
+    ComPtr<ID3D12Resource> upload_resource;
+    if (!uploads.subresources.empty()) {
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC upload_description{};
+        upload_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        upload_description.Width = upload_size;
+        upload_description.Height = 1;
+        upload_description.DepthOrArraySize = 1;
+        upload_description.MipLevels = 1;
+        upload_description.SampleDesc.Count = 1;
+        upload_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        HRESULT result = context->device->CreateCommittedResource(
+            &heap, D3D12_HEAP_FLAG_NONE, &upload_description, D3D12_RESOURCE_STATE_GENERIC_READ,
+            nullptr, IID_PPV_ARGS(&upload_resource));
+        if (FAILED(result)) {
+            diagnostic = hresult_error("ID3D12Device::CreateCommittedResource(texture upload)", result);
+            diagnostic.code = "texture_upload_failed";
+            return false;
+        }
+        void* mapped = nullptr;
+        result = upload_resource->Map(0, nullptr, &mapped);
+        if (FAILED(result)) {
+            diagnostic = hresult_error("ID3D12Resource::Map(texture upload)", result);
+            diagnostic.code = "texture_upload_failed";
+            return false;
+        }
+        for (const TextureUpload& upload : uploads.subresources) {
+            const UINT subresource = upload.array_layer * description.mip_levels + upload.mip_level;
+            const auto& footprint = footprints[subresource];
+            const std::size_t row_bytes = static_cast<std::size_t>(upload.width) * bytes_per_pixel;
+            auto* destination_bytes = static_cast<std::byte*>(mapped) + static_cast<std::size_t>(footprint.Offset);
+            for (std::uint32_t row = 0; row < upload.height; ++row) {
+                std::memcpy(destination_bytes + static_cast<std::size_t>(row) * footprint.Footprint.RowPitch,
+                            upload.data.data() + static_cast<std::size_t>(row) * upload.row_pitch, row_bytes);
+            }
+        }
+        upload_resource->Unmap(0, nullptr);
+    }
+
+    ComPtr<ID3D12CommandAllocator> allocator;
+    HRESULT result = context->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                               IID_PPV_ARGS(&allocator));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("ID3D12Device::CreateCommandAllocator(texture)", result);
+        diagnostic.code = "texture_upload_failed";
+        return false;
+    }
+    ComPtr<ID3D12GraphicsCommandList> list;
+    result = context->device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
+                                                 IID_PPV_ARGS(&list));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("ID3D12Device::CreateCommandList(texture)", result);
+        diagnostic.code = "texture_upload_failed";
+        return false;
+    }
+    if (destination_state != D3D12_RESOURCE_STATE_COPY_DEST) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = destination;
+        barrier.Transition.StateBefore = destination_state;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1, &barrier);
+    }
+    if (upload_resource) {
+        for (const TextureUpload& upload : uploads.subresources) {
+            const UINT subresource = upload.array_layer * description.mip_levels + upload.mip_level;
+            D3D12_TEXTURE_COPY_LOCATION source{};
+            source.pResource = upload_resource.Get();
+            source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            source.PlacedFootprint = footprints[subresource];
+            D3D12_TEXTURE_COPY_LOCATION target{};
+            target.pResource = destination;
+            target.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            target.SubresourceIndex = subresource;
+            list->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
+        }
+    }
+    if (final_state != D3D12_RESOURCE_STATE_COPY_DEST) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = destination;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barrier.Transition.StateAfter = final_state;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1, &barrier);
+    }
+    result = list->Close();
+    if (FAILED(result)) {
+        diagnostic = hresult_error("ID3D12GraphicsCommandList::Close(texture)", result);
+        diagnostic.code = "texture_upload_failed";
+        return false;
+    }
+    ComPtr<ID3D12Fence> fence;
+    result = context->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("ID3D12Device::CreateFence(texture)", result);
+        diagnostic.code = "texture_upload_failed";
+        return false;
+    }
+    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!event) {
+        diagnostic = {"texture_upload_failed", "CreateEventW failed while waiting for a D3D12 texture upload"};
+        return false;
+    }
+    ID3D12CommandList* command_lists[] = {list.Get()};
+    context->queue->ExecuteCommandLists(1, command_lists);
+    constexpr UINT64 fence_value = 1;
+    result = context->queue->Signal(fence.Get(), fence_value);
+    if (FAILED(result)) {
+        context->wait_idle();
+        CloseHandle(event);
+        diagnostic = hresult_error("ID3D12CommandQueue::Signal(texture)", result);
+        diagnostic.code = "texture_upload_failed";
+        destination_state = final_state;
+        return false;
+    }
+    if (fence->GetCompletedValue() < fence_value) {
+        result = fence->SetEventOnCompletion(fence_value, event);
+        if (FAILED(result)) {
+            context->wait_idle();
+            CloseHandle(event);
+            diagnostic = hresult_error("ID3D12Fence::SetEventOnCompletion(texture)", result);
+            diagnostic.code = "texture_upload_failed";
+            destination_state = final_state;
+            return false;
+        }
+        const DWORD wait_result = WaitForSingleObject(event, INFINITE);
+        if (wait_result != WAIT_OBJECT_0) {
+            context->wait_idle();
+            CloseHandle(event);
+            diagnostic = {"texture_upload_failed", "Waiting for the D3D12 texture upload fence failed"};
+            destination_state = final_state;
+            return false;
+        }
+    }
+    CloseHandle(event);
+    destination_state = final_state;
+    return true;
+}
+
+class D3D12Texture final : public Texture {
+public:
+    D3D12Texture(std::shared_ptr<D3D12Context> context,
+                 ComPtr<ID3D12Resource> resource,
+                 TextureDescription description,
+                 D3D12_RESOURCE_STATES state)
+        : context_(std::move(context)), resource_(std::move(resource)), info_({description}), state_(state) {}
+
+    ~D3D12Texture() override {
+        if (context_) context_->wait_idle();
+    }
+    Backend backend() const noexcept override { return Backend::D3D12; }
+    const TextureInfo& info() const noexcept override { return info_; }
+
+    bool upload(const TextureUploadPlan& uploads, Diagnostic& diagnostic) {
+        return execute_texture_upload(context_, resource_.Get(), info_.description, uploads,
+                                      state_, texture_state(info_.description.usage), diagnostic);
+    }
+
+private:
+    std::shared_ptr<D3D12Context> context_;
+    ComPtr<ID3D12Resource> resource_;
+    TextureInfo info_;
+    D3D12_RESOURCE_STATES state_;
+};
+
 class D3D12Device final : public Device {
 public:
     explicit D3D12Device(std::shared_ptr<D3D12Context> context) : context_(std::move(context)) {}
@@ -406,6 +687,67 @@ public:
                                  : d3d_buffer->write_device(offset, data, diagnostic);
         return updated ? BufferUpdateResult{BufferStatus::ready, {}}
                        : BufferUpdateResult{BufferStatus::upload_failed, std::move(diagnostic)};
+    }
+
+    TextureResult create_texture(const TextureDescription& description,
+                                 const TextureUploadPlan& initial_uploads) override {
+        Diagnostic diagnostic;
+        const TextureStatus validation = validate_texture_description(description, initial_uploads, diagnostic);
+        if (validation != TextureStatus::ready)
+            return {validation, std::move(diagnostic), nullptr};
+        if (!valid_d3d12_texture_usage(description.usage, diagnostic))
+            return {TextureStatus::unsupported, std::move(diagnostic), nullptr};
+        if (description.memory != TextureMemory::device_local) {
+            return {TextureStatus::unsupported,
+                    {"d3d12_host_visible_texture_unsupported",
+                     "D3D12 texture uploads use default-heap resources; host-visible texture memory is unsupported"},
+                    nullptr};
+        }
+        const D3D12_RESOURCE_STATES final_state = texture_state(description.usage);
+        const bool needs_upload = !initial_uploads.subresources.empty();
+        const D3D12_RESOURCE_STATES initial_state = needs_upload ? D3D12_RESOURCE_STATE_COPY_DEST : final_state;
+        D3D12_RESOURCE_DESC resource_description{};
+        resource_description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        resource_description.Width = description.width;
+        resource_description.Height = description.height;
+        resource_description.DepthOrArraySize = static_cast<UINT16>(description.array_layers);
+        resource_description.MipLevels = static_cast<UINT16>(description.mip_levels);
+        resource_description.Format = dxgi_texture_format(description.format);
+        resource_description.SampleDesc.Count = 1;
+        resource_description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        resource_description.Flags = texture_flags(description.usage);
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        ComPtr<ID3D12Resource> resource;
+        const HRESULT result = context_->device->CreateCommittedResource(
+            &heap, D3D12_HEAP_FLAG_NONE, &resource_description, initial_state, nullptr,
+            IID_PPV_ARGS(&resource));
+        if (FAILED(result)) {
+            Diagnostic failure = hresult_error("ID3D12Device::CreateCommittedResource(texture)", result);
+            failure.code = "texture_allocation_failed";
+            return {TextureStatus::allocation_failed, std::move(failure), nullptr};
+        }
+        auto texture = std::make_unique<D3D12Texture>(context_, std::move(resource), description, initial_state);
+        if (!initial_uploads.subresources.empty() && !texture->upload(initial_uploads, diagnostic))
+            return {TextureStatus::upload_failed, std::move(diagnostic), nullptr};
+        return {TextureStatus::ready, {}, std::move(texture)};
+    }
+
+    TextureUpdateResult update_texture(Texture& texture,
+                                       const TextureUploadPlan& uploads) override {
+        Diagnostic diagnostic;
+        if (texture.backend() != Backend::D3D12)
+            return {TextureStatus::unsupported,
+                    {"texture_backend_mismatch", "The texture belongs to another graphics backend"}};
+        if (!valid_texture_update(texture, uploads, diagnostic))
+            return {TextureStatus::invalid_description, std::move(diagnostic)};
+        auto* d3d_texture = dynamic_cast<D3D12Texture*>(&texture);
+        if (d3d_texture == nullptr)
+            return {TextureStatus::unsupported,
+                    {"texture_type_unsupported", "The D3D12 device received an unknown texture handle"}};
+        return d3d_texture->upload(uploads, diagnostic)
+                   ? TextureUpdateResult{TextureStatus::ready, {}}
+                   : TextureUpdateResult{TextureStatus::upload_failed, std::move(diagnostic)};
     }
 
     void wait_idle() noexcept override {

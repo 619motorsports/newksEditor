@@ -21,5 +21,11 @@ namespace apex::render {
                                        std::uint64_t offset,
                                        std::size_t data_size,
                                        Diagnostic& diagnostic);
+[[nodiscard]] bool valid_texture_description(const TextureDescription& description,
+                                              const TextureUploadPlan& initial_uploads,
+                                              Diagnostic& diagnostic);
+[[nodiscard]] bool valid_texture_update(const Texture& texture,
+                                        const TextureUploadPlan& uploads,
+                                        Diagnostic& diagnostic);
 
 } // namespace apex::render

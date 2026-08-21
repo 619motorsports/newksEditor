@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -507,6 +508,319 @@ private:
     BufferInfo info_;
 };
 
+VkFormat vk_texture_format(TextureFormat format) {
+    switch (format) {
+    case TextureFormat::rgba8_unorm:
+        return VK_FORMAT_R8G8B8A8_UNORM;
+    case TextureFormat::bgra8_unorm:
+        return VK_FORMAT_B8G8R8A8_UNORM;
+    case TextureFormat::rgba8_srgb:
+        return VK_FORMAT_R8G8B8A8_SRGB;
+    case TextureFormat::bgra8_srgb:
+        return VK_FORMAT_B8G8R8A8_SRGB;
+    case TextureFormat::r8_unorm:
+        return VK_FORMAT_R8_UNORM;
+    case TextureFormat::r5g6b5_unorm:
+        return VK_FORMAT_R5G6B5_UNORM_PACK16;
+    default:
+        return VK_FORMAT_UNDEFINED;
+    }
+}
+
+VkImageUsageFlags vk_texture_usage(TextureUsage usage) {
+    VkImageUsageFlags flags = 0;
+    const auto raw = static_cast<std::uint32_t>(usage);
+    if ((raw & static_cast<std::uint32_t>(TextureUsage::sampled)) != 0U)
+        flags |= VK_IMAGE_USAGE_SAMPLED_BIT;
+    if ((raw & static_cast<std::uint32_t>(TextureUsage::transfer_source)) != 0U)
+        flags |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if ((raw & static_cast<std::uint32_t>(TextureUsage::transfer_destination)) != 0U)
+        flags |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    if ((raw & static_cast<std::uint32_t>(TextureUsage::color_attachment)) != 0U)
+        flags |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if ((raw & static_cast<std::uint32_t>(TextureUsage::storage)) != 0U)
+        flags |= VK_IMAGE_USAGE_STORAGE_BIT;
+    return flags;
+}
+
+VkImageLayout texture_final_layout(TextureUsage usage) {
+    const auto raw = static_cast<std::uint32_t>(usage);
+    if ((raw & static_cast<std::uint32_t>(TextureUsage::storage)) != 0U)
+        return VK_IMAGE_LAYOUT_GENERAL;
+    if ((raw & static_cast<std::uint32_t>(TextureUsage::color_attachment)) != 0U)
+        return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    if ((raw & static_cast<std::uint32_t>(TextureUsage::sampled)) != 0U)
+        return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    return VK_IMAGE_LAYOUT_GENERAL;
+}
+
+struct RawVulkanImage {
+    std::shared_ptr<VulkanContext> context;
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+
+    RawVulkanImage() = default;
+    RawVulkanImage(const RawVulkanImage&) = delete;
+    RawVulkanImage& operator=(const RawVulkanImage&) = delete;
+    RawVulkanImage(RawVulkanImage&& other) noexcept
+        : context(std::move(other.context)), image(std::exchange(other.image, VK_NULL_HANDLE)),
+          memory(std::exchange(other.memory, VK_NULL_HANDLE)), view(std::exchange(other.view, VK_NULL_HANDLE)) {}
+    RawVulkanImage& operator=(RawVulkanImage&& other) noexcept {
+        if (this == &other) return *this;
+        reset();
+        context = std::move(other.context);
+        image = std::exchange(other.image, VK_NULL_HANDLE);
+        memory = std::exchange(other.memory, VK_NULL_HANDLE);
+        view = std::exchange(other.view, VK_NULL_HANDLE);
+        return *this;
+    }
+    ~RawVulkanImage() { reset(); }
+
+    void reset() noexcept {
+        if (context && context->device != VK_NULL_HANDLE) {
+            if (view != VK_NULL_HANDLE) vkDestroyImageView(context->device, view, nullptr);
+            if (image != VK_NULL_HANDLE) vkDestroyImage(context->device, image, nullptr);
+            if (memory != VK_NULL_HANDLE) vkFreeMemory(context->device, memory, nullptr);
+        }
+        view = VK_NULL_HANDLE;
+        image = VK_NULL_HANDLE;
+        memory = VK_NULL_HANDLE;
+        context.reset();
+    }
+};
+
+bool create_raw_image(const std::shared_ptr<VulkanContext>& context,
+                      const TextureDescription& description,
+                      RawVulkanImage& raw,
+                      Diagnostic& diagnostic) {
+    raw.reset();
+    raw.context = context;
+    VkImageCreateInfo image_info{};
+    image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.format = vk_texture_format(description.format);
+    image_info.extent = {description.width, description.height, 1};
+    image_info.mipLevels = description.mip_levels;
+    image_info.arrayLayers = description.array_layers;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = vk_texture_usage(description.usage);
+    // The first contract always permits synchronous uploads. A later
+    // resource policy can remove this bit when immutable no-upload images are
+    // introduced, but doing so now would make update validation backend-state
+    // dependent.
+    image_info.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImageFormatProperties format_properties{};
+    VkResult result = vkGetPhysicalDeviceImageFormatProperties(
+        context->physical_device, image_info.format, image_info.imageType, image_info.tiling,
+        image_info.usage, 0, &format_properties);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkGetPhysicalDeviceImageFormatProperties", result);
+        diagnostic.code = "texture_format_unsupported";
+        return false;
+    }
+    result = vkCreateImage(context->device, &image_info, nullptr, &raw.image);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkCreateImage", result);
+        diagnostic.code = "texture_allocation_failed";
+        return false;
+    }
+    VkMemoryRequirements requirements{};
+    vkGetImageMemoryRequirements(context->device, raw.image, &requirements);
+    const auto type = memory_type(*context, requirements.memoryTypeBits,
+                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (!type.has_value()) {
+        diagnostic = {"texture_memory_type_unavailable", "Vulkan has no device-local memory type for the texture"};
+        raw.reset();
+        return false;
+    }
+    VkMemoryAllocateInfo allocation{};
+    allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocation.allocationSize = requirements.size;
+    allocation.memoryTypeIndex = *type;
+    result = vkAllocateMemory(context->device, &allocation, nullptr, &raw.memory);
+    if (result == VK_SUCCESS) result = vkBindImageMemory(context->device, raw.image, raw.memory, 0);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("Vulkan image memory", result);
+        diagnostic.code = "texture_allocation_failed";
+        raw.reset();
+        return false;
+    }
+    VkImageViewCreateInfo view_info{};
+    view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = raw.image;
+    view_info.viewType = description.array_layers == 1U ? VK_IMAGE_VIEW_TYPE_2D : VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    view_info.format = image_info.format;
+    view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    view_info.subresourceRange.levelCount = description.mip_levels;
+    view_info.subresourceRange.layerCount = description.array_layers;
+    result = vkCreateImageView(context->device, &view_info, nullptr, &raw.view);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkCreateImageView", result);
+        diagnostic.code = "texture_allocation_failed";
+        raw.reset();
+        return false;
+    }
+    return true;
+}
+
+bool copy_texture_uploads(const std::shared_ptr<VulkanContext>& context,
+                          RawVulkanImage& image,
+                          const TextureDescription& description,
+                          const TextureUploadPlan& uploads,
+                          VkImageLayout& current_layout,
+                          Diagnostic& diagnostic) {
+    if (!texture_format_cpu_upload_supported(description.format)) {
+        diagnostic = {"texture_compressed_format_unsupported",
+                      "Block-compressed texture uploads require a dedicated GPU upload path"};
+        return false;
+    }
+    const auto bytes_per_pixel = texture_format_bytes_per_pixel(description.format);
+    if (bytes_per_pixel == 0U) {
+        diagnostic = {"texture_format_unknown", "Texture upload format has no byte layout"};
+        return false;
+    }
+    RawVulkanBuffer staging;
+    std::vector<VkBufferImageCopy> copies;
+    std::size_t staging_size = 0U;
+    for (const TextureUpload& upload : uploads.subresources) {
+        if (staging_size > std::numeric_limits<std::size_t>::max() - 3U) {
+            diagnostic = {"texture_upload_size_overflow", "Texture upload staging alignment overflows the host size type"};
+            return false;
+        }
+        staging_size = (staging_size + 3U) & ~static_cast<std::size_t>(3U);
+        if (upload.data.size() > std::numeric_limits<std::size_t>::max() - staging_size) {
+            diagnostic = {"texture_upload_size_overflow", "Texture upload staging size overflows the host size type"};
+            return false;
+        }
+        VkBufferImageCopy copy{};
+        copy.bufferOffset = staging_size;
+        copy.bufferRowLength = static_cast<std::uint32_t>(upload.row_pitch / bytes_per_pixel);
+        copy.bufferImageHeight = upload.height;
+        copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copy.imageSubresource.mipLevel = upload.mip_level;
+        copy.imageSubresource.baseArrayLayer = upload.array_layer;
+        copy.imageSubresource.layerCount = 1;
+        copy.imageExtent = {upload.width, upload.height, 1};
+        copies.push_back(copy);
+        staging_size += upload.data.size();
+    }
+    if (!uploads.subresources.empty()) {
+        BufferDescription staging_description;
+        staging_description.size_bytes = static_cast<std::uint64_t>(staging_size);
+        staging_description.usage = BufferUsage::transfer_source;
+        staging_description.memory = BufferMemory::host_visible;
+        staging_description.mutability = BufferMutability::immutable;
+        if (!create_raw_buffer(context, staging_description, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                               BufferMemory::host_visible, staging, diagnostic)) return false;
+        for (std::size_t index = 0; index < uploads.subresources.size(); ++index) {
+            if (!write_host_buffer(context, staging, copies[index].bufferOffset,
+                                   uploads.subresources[index].data, diagnostic)) {
+                staging.reset();
+                return false;
+            }
+        }
+    }
+    VkCommandBufferAllocateInfo allocation{};
+    allocation.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocation.commandPool = context->command_pool;
+    allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocation.commandBufferCount = 1;
+    VkCommandBuffer command = VK_NULL_HANDLE;
+    VkResult result = vkAllocateCommandBuffers(context->device, &allocation, &command);
+    bool submitted = false;
+    if (result == VK_SUCCESS) {
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        result = vkBeginCommandBuffer(command, &begin);
+        if (result == VK_SUCCESS) {
+            VkImageMemoryBarrier barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.oldLayout = current_layout;
+            barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = image.image;
+            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            barrier.subresourceRange.levelCount = description.mip_levels;
+            barrier.subresourceRange.layerCount = description.array_layers;
+            barrier.srcAccessMask = current_layout == VK_IMAGE_LAYOUT_UNDEFINED
+                                        ? 0U
+                                        : VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            const VkPipelineStageFlags source_stage = current_layout == VK_IMAGE_LAYOUT_UNDEFINED
+                                                           ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                                                           : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            vkCmdPipelineBarrier(command, source_stage,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+            if (!copies.empty()) vkCmdCopyBufferToImage(command, staging.buffer, image.image,
+                                                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                                        static_cast<std::uint32_t>(copies.size()), copies.data());
+            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.newLayout = texture_final_layout(description.usage);
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+            result = vkEndCommandBuffer(command);
+        }
+    }
+    if (result == VK_SUCCESS) {
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &command;
+        VkFenceCreateInfo fence_info{};
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        VkFence fence = VK_NULL_HANDLE;
+        result = vkCreateFence(context->device, &fence_info, nullptr, &fence);
+        if (result == VK_SUCCESS) {
+            result = vkQueueSubmit(context->queue, 1, &submit, fence);
+            submitted = result == VK_SUCCESS;
+            if (result == VK_SUCCESS) result = vkWaitForFences(context->device, 1, &fence, VK_TRUE, UINT64_MAX);
+            vkDestroyFence(context->device, fence, nullptr);
+        }
+    }
+    if (result != VK_SUCCESS && submitted) (void)vkDeviceWaitIdle(context->device);
+    if (command != VK_NULL_HANDLE) vkFreeCommandBuffers(context->device, context->command_pool, 1, &command);
+    staging.reset();
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("Vulkan texture upload", result);
+        diagnostic.code = "texture_upload_failed";
+        return false;
+    }
+    current_layout = texture_final_layout(description.usage);
+    return true;
+}
+
+class VulkanTexture final : public Texture {
+public:
+    VulkanTexture(std::shared_ptr<VulkanContext> context,
+                  RawVulkanImage raw,
+                  TextureDescription description,
+                  VkImageLayout layout)
+        : context_(std::move(context)), raw_(std::move(raw)), info_({description}), layout_(layout) {}
+
+    ~VulkanTexture() override = default;
+    Backend backend() const noexcept override { return Backend::Vulkan; }
+    const TextureInfo& info() const noexcept override { return info_; }
+
+    bool upload(const TextureUploadPlan& uploads, Diagnostic& diagnostic) {
+        return copy_texture_uploads(context_, raw_, info_.description, uploads, layout_, diagnostic);
+    }
+
+private:
+    std::shared_ptr<VulkanContext> context_;
+    RawVulkanImage raw_;
+    TextureInfo info_;
+    VkImageLayout layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+};
+
 class VulkanDevice final : public Device {
 public:
     explicit VulkanDevice(std::shared_ptr<VulkanContext> context) : context_(std::move(context)) {}
@@ -555,6 +869,46 @@ public:
                                           : vulkan_buffer->write_device(offset, data, diagnostic);
         return updated ? BufferUpdateResult{BufferStatus::ready, {}}
                        : BufferUpdateResult{BufferStatus::upload_failed, std::move(diagnostic)};
+    }
+
+    TextureResult create_texture(const TextureDescription& description,
+                                 const TextureUploadPlan& initial_uploads) override {
+        Diagnostic diagnostic;
+        if (!valid_texture_description(description, initial_uploads, diagnostic)) {
+            const TextureStatus status = validate_texture_description(description, initial_uploads, diagnostic);
+            return {status, std::move(diagnostic), nullptr};
+        }
+        if (description.memory != TextureMemory::device_local) {
+            return {TextureStatus::unsupported,
+                    {"vulkan_host_visible_texture_unsupported",
+                     "Vulkan textures use optimal device-local tiling; host-visible texture memory is unsupported"},
+                    nullptr};
+        }
+        RawVulkanImage raw;
+        if (!create_raw_image(context_, description, raw, diagnostic))
+            return {TextureStatus::allocation_failed, std::move(diagnostic), nullptr};
+        auto texture = std::make_unique<VulkanTexture>(context_, std::move(raw), description,
+                                                       VK_IMAGE_LAYOUT_UNDEFINED);
+        if (!texture->upload(initial_uploads, diagnostic))
+            return {TextureStatus::upload_failed, std::move(diagnostic), nullptr};
+        return {TextureStatus::ready, {}, std::move(texture)};
+    }
+
+    TextureUpdateResult update_texture(Texture& texture,
+                                       const TextureUploadPlan& uploads) override {
+        Diagnostic diagnostic;
+        if (texture.backend() != Backend::Vulkan)
+            return {TextureStatus::unsupported,
+                    {"texture_backend_mismatch", "The texture belongs to another graphics backend"}};
+        if (!valid_texture_update(texture, uploads, diagnostic))
+            return {TextureStatus::invalid_description, std::move(diagnostic)};
+        auto* vulkan_texture = dynamic_cast<VulkanTexture*>(&texture);
+        if (vulkan_texture == nullptr)
+            return {TextureStatus::unsupported,
+                    {"texture_type_unsupported", "The Vulkan device received an unknown texture handle"}};
+        return vulkan_texture->upload(uploads, diagnostic)
+                   ? TextureUpdateResult{TextureStatus::ready, {}}
+                   : TextureUpdateResult{TextureStatus::upload_failed, std::move(diagnostic)};
     }
 
     void wait_idle() noexcept override {
