@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
-import { analogRpmAngle, analogRpmRotation, analogRpmTransform, bindAnalogRpm, parseAnalogInstrumentsIni } from "../src/analog-instruments.js";
+import { analogRpmAngle, analogRpmPreviewEligible, analogRpmRotation, analogRpmTransform, bindAnalogRpm, parseAnalogInstrumentsIni } from "../src/analog-instruments.js";
 import { parseKn5 } from "../src/kn5.js";
 import { assettoPath } from "./fixture-paths.js";
 
@@ -23,14 +23,24 @@ test("uses the recovered ksEditor local positive-Z RPM rotation", () => {
   assert.deepEqual(translated.slice(12), [12, 13, 14, 1]);
 });
 
-test("binds the first exact RPM node and diagnoses duplicate names", () => {
+test("binds every exact RPM node across car LODs", () => {
   const first = { name: "ARROW_RPM", transform: new Array(16).fill(0), children: [] }, second = { name: "ARROW_RPM", transform: new Array(16).fill(1), children: [] };
   const model = { root: { name: "ROOT", children: [{ name: "arrow_rpm", transform: new Array(16).fill(2), children: [] }, first, second] } };
   const binding = bindAnalogRpm(model, { objectName: "ARROW_RPM" });
   assert.equal(binding.node, first);
+  assert.deepEqual(binding.nodes, [first, second]);
   assert.equal(binding.matches, 2);
-  assert.equal(binding.status, "ambiguous");
+  assert.equal(binding.usableMatches, 2);
+  assert.equal(binding.status, "resolved-multiple");
   assert.throws(() => analogRpmAngle({ zero: 0, minValue: 0, step: Infinity }, 1000), /valid RPM config/);
+});
+
+test("gates RPM preview on the selected asset folder matching the open car", () => {
+  const config = { previewSupported: true };
+  assert.equal(analogRpmPreviewEligible(config, true), true);
+  assert.equal(analogRpmPreviewEligible(config, false), false);
+  assert.equal(analogRpmPreviewEligible({ previewSupported: false }, true), false);
+  assert.equal(analogRpmPreviewEligible(null, true), false);
 });
 
 test("rejects malformed RPM values, oversized names, LUT previews, and oversized input", () => {

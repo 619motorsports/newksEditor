@@ -10,8 +10,8 @@ const developmentThreeAddonsRoot = fileURLToPath(new URL("../node_modules/three/
 const packagedThreeAddonsRoot = process.resourcesPath ? join(process.resourcesPath, "three-addons") : "";
 const threeAddonsRoot = packagedThreeAddonsRoot && existsSync(packagedThreeAddonsRoot) ? packagedThreeAddonsRoot : developmentThreeAddonsRoot;
 const sourceFiles = new Set([
-  "acd.js", "analog-instruments.js", "asset-files.js", "car-validation.js", "csp-config.js",
-  "csp-noise.js", "csp-occlusion.js", "csp-wind.js", "custom-emissive.js",
+  "acd.js", "analog-instruments.js", "asset-files.js", "bc7-decoder.js", "bottom-collider-authoring.js", "car-damage.js", "car-validation.js", "csp-config.js",
+  "clouds.js", "csp-noise.js", "csp-occlusion.js", "csp-wind.js", "custom-emissive.js", "custom-emissive-uv.js",
   "dds.js", "driver-workspace.js", "dynamic-track.js", "editor-project.js", "fbx-import.js", "file-identity.js", "geometry-authoring.js", "grass-fx.js",
   "kn5-bake.js", "kn5-workspace.js", "kn5-write.js", "kn5.js", "knh.js",
   "ksanim.js", "lighting.js", "node-authoring.js", "rain-fx.js", "reflections.js", "scene-diagnostics.js", "seasons.js",

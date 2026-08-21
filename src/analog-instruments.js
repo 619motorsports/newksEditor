@@ -60,14 +60,19 @@ export function analogRpmTransform(original, config, rpm) {
   return output;
 }
 
+export function analogRpmPreviewEligible(config, assetFolderMatchesModel) {
+  return Boolean(config?.previewSupported && assetFolderMatchesModel);
+}
+
 export function bindAnalogRpm(model, config) {
   const rows = model?.root && config?.objectName ? walkNodes(model.root).filter(({ node }) => node.name === config.objectName) : [];
-  const matrixIsUsable = (node) => Array.isArray(node.transform) && node.transform.length === 16 && node.transform.every(Number.isFinite), usable = rows.filter(({ node }) => matrixIsUsable(node)), first = rows[0]?.node;
+  const matrixIsUsable = (node) => Array.isArray(node.transform) && node.transform.length === 16 && node.transform.every(Number.isFinite), nodes = rows.map(({ node }) => node).filter(matrixIsUsable);
   return {
-    node: first && matrixIsUsable(first) ? first : null,
+    node: nodes[0] || null,
+    nodes,
     objectName: config?.objectName || "",
     matches: rows.length,
-    usableMatches: usable.length,
-    status: !config ? "unconfigured" : !rows.length ? "missing" : !matrixIsUsable(first) ? "no-transform" : rows.length > 1 ? "ambiguous" : "resolved"
+    usableMatches: nodes.length,
+    status: !config ? "unconfigured" : !rows.length ? "missing" : !nodes.length ? "no-transform" : nodes.length < rows.length ? "partial" : rows.length > 1 ? "resolved-multiple" : "resolved"
   };
 }
