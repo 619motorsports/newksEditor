@@ -397,6 +397,88 @@ void resolves_bounded_tangent_space_nm_variant() {
             "normal-map Fresnel reflection remains explicit");
 }
 
+void resolves_bounded_nmdetail_stack() {
+    Kn5Material material;
+    material.shader = "ksPerPixelMultiMap_NMDetail";
+    material.properties = {
+        {"useDetail", 0.75F, {}, {}, {}},
+        {"detailUVMultiplier", 2.5F, {}, {}, {}},
+        {"detailNormalBlend", 0.6F, {}, {}, {}},
+        {"nmObjectSpace", 0.0F, {}, {}, {}},
+        {"fresnelMaxLevel", 0.0F, {}, {}, {}},
+    };
+    material.resources = {
+        {"txDiffuse", 21U, "body.dds"},
+        {"txNormal", 22U, "body_nm.dds"},
+        {"txMaps", 23U, "body_maps.dds"},
+        {"txDetail", 24U, "body_detail.dds"},
+        {"txNormalDetail", 25U, "body_detail_nm.dds"},
+    };
+    const auto resolved = resolve_ks_per_pixel_material_constants(
+        build_material_binding(material, 5U));
+    require(resolved.ok() &&
+                resolved.constants.detail == std::array<float, 4>{0.75F, 2.5F, 0.6F, 0.0F},
+            "bounded ksPerPixelMultiMap_NMDetail controls preserve KN5 values");
+
+    MaterialBindingOverrides overrides;
+    overrides.properties.emplace("useDetail",
+                                 MaterialPropertyOverride::scalar_value(1.0F));
+    overrides.properties.emplace("detailUVMultiplier",
+                                 MaterialPropertyOverride::scalar_value(3.0F));
+    overrides.properties.emplace("detailNormalBlend",
+                                 MaterialPropertyOverride::scalar_value(0.25F));
+    const auto csp = resolve_ks_per_pixel_material_constants(
+        build_material_binding(material, 5U, &overrides));
+    require(csp.ok() &&
+                csp.constants.detail == std::array<float, 4>{1.0F, 3.0F, 0.25F, 0.0F},
+            "CSP detail controls override KN5 values");
+
+    material.resources.back().slot = "txDetailNM";
+    const auto legacy_alias = resolve_ks_per_pixel_material_constants(
+        build_material_binding(material, 5U));
+    require(legacy_alias.ok(),
+            "txDetailNM remains the accepted public normal-detail alias");
+    material.resources.back().slot = "txNormalDetail";
+
+    Kn5Material missing = material;
+    missing.resources.clear();
+    const auto incomplete = build_material_binding(missing, 0U);
+    const auto incomplete_result =
+        resolve_ks_per_pixel_material_constants(incomplete);
+    require(!incomplete_result.ok() &&
+                incomplete_result.status == KsPerPixelMaterialResolveStatus::unsupported &&
+                incomplete_result.diagnostic.code ==
+                    "ks_per_pixel_nmdetail_resources_incomplete",
+            "bounded ksPerPixelMultiMap_NMDetail requires its complete texture stack");
+
+    material.properties[3].value = 1.0F;
+    const auto object_space = resolve_ks_per_pixel_material_constants(
+        build_material_binding(material, 5U));
+    require(!object_space.ok() &&
+                object_space.diagnostic.code ==
+                    "ks_per_pixel_nm_object_space_unsupported",
+            "NMDdetail object-space normals remain explicit");
+
+    material.properties[3].value = 0.0F;
+    material.properties[4].value = 0.05F;
+    const auto fresnel = resolve_ks_per_pixel_material_constants(
+        build_material_binding(material, 5U));
+    require(!fresnel.ok() &&
+                fresnel.diagnostic.code == "ks_per_pixel_nm_fresnel_unsupported",
+            "NMDdetail Fresnel reflection remains explicitly disabled");
+
+    material.properties[4].value = 0.0F;
+    MaterialBinding malformed = build_material_binding(material, 5U);
+    malformed.properties.at("detailnormalblend").scalar =
+        std::numeric_limits<float>::quiet_NaN();
+    const auto non_finite =
+        resolve_ks_per_pixel_material_constants(malformed);
+    require(!non_finite.ok() &&
+                non_finite.status == KsPerPixelMaterialResolveStatus::invalid_input &&
+                non_finite.diagnostic.code == "non_finite_constants",
+            "NMDdetail rejects non-finite detail controls");
+}
+
 } // namespace
 
 int main() {
@@ -412,6 +494,7 @@ int main() {
         resolves_ks_per_pixel_csp_precedence_and_alpha_capture();
         rejects_invalid_ks_per_pixel_constants();
         resolves_bounded_tangent_space_nm_variant();
+        resolves_bounded_nmdetail_stack();
         std::cout << "material binding tests passed\n";
         return 0;
     } catch (const std::exception& error) {

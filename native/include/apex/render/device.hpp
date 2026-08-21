@@ -381,9 +381,12 @@ struct KsPerPixelMaterialConstants {
     std::array<float, 4> fresnel = {0.0F, 5.0F, 0.05F, 0.0F};
     // RGB emissive color and reserved padding.
     std::array<float, 4> emissive = {0.0F, 0.0F, 0.0F, 0.0F};
+    // useDetail, detailUVMultiplier, detailNormalBlend, reserved. These
+    // values preserve the public/app.js generic detail-stack controls.
+    std::array<float, 4> detail = {0.0F, 1.0F, 1.0F, 0.0F};
 };
 
-static_assert(sizeof(KsPerPixelMaterialConstants) == 48U);
+static_assert(sizeof(KsPerPixelMaterialConstants) == 64U);
 static_assert(std::is_trivially_copyable_v<KsPerPixelMaterialConstants>);
 
 // Per-frame directional lighting values follow the production WebGL
@@ -399,7 +402,7 @@ struct KsPerPixelFrameConstants {
 static_assert(sizeof(KsPerPixelFrameConstants) == 64U);
 static_assert(std::is_trivially_copyable_v<KsPerPixelFrameConstants>);
 
-inline constexpr std::uint32_t portable_material_constant_bytes = 48U;
+inline constexpr std::uint32_t portable_material_constant_bytes = 64U;
 inline constexpr std::uint32_t portable_material_buffer_view_bytes = 256U;
 inline constexpr std::uint32_t portable_frame_constant_bytes = 64U;
 inline constexpr std::uint32_t portable_frame_buffer_view_bytes = 256U;
@@ -409,7 +412,7 @@ struct IndexedMaterialBufferBinding {
     const Buffer* buffer = nullptr;
     std::uint64_t offset_bytes = 0U;
     // The cross-backend view is one D3D12-aligned 256-byte record. The typed
-    // ksPerPixel values occupy its first 48 bytes.
+    // ksPerPixel values occupy its first 64 bytes.
     std::uint32_t range_bytes = 0U;
 };
 
@@ -434,6 +437,9 @@ enum class IndexedPortableResourceLayout : std::uint8_t {
     // Exact bounded txMaps extension: the ksPerPixelNM bindings above plus
     // the linear maps texture and sampler at bindings 6/7.
     diffuse_normal_maps_with_constants_and_frame,
+    // Exact generic ksPerPixelMultiMap_NMDetail stack: txDetail at 8/9 and
+    // txNormalDetail at 10/11, with the 64-byte material record.
+    diffuse_normal_maps_detail_stack_with_constants_and_frame,
     unsupported,
 };
 
@@ -485,6 +491,10 @@ struct IndexedStaticMeshDrawRequest {
     IndexedSampledTextureBinding normal_binding{};
     // Optional txMaps sampled image and sampler at set 0/bindings 6 and 7.
     IndexedSampledTextureBinding maps_binding{};
+    // Optional txDetail sampled image and sampler at set 0/bindings 8 and 9.
+    IndexedSampledTextureBinding detail_binding{};
+    // Optional txNormalDetail/txDetailNM sampled image and sampler at set 0/bindings 10 and 11.
+    IndexedSampledTextureBinding normal_detail_binding{};
     IndexedMaterialBufferBinding material_binding{};
     IndexedFrameBufferBinding frame_binding{};
 };

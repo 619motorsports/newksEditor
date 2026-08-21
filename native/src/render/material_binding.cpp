@@ -166,6 +166,8 @@ void add_default(std::map<std::string, MaterialPropertyValue>& properties,
         return {"txDiffuse", "txNormal", "txGlow", "txBlur", "txNormalBlur"};
     if (key == "ksperpixelmultimap_damage" || key == "ksperpixelmultimap_damage_dirt")
         return {"txDamage", "txDamageMask"};
+    if (key == "ksperpixelmultimap_nmdetail")
+        return {"txDiffuse", "txNormal", "txMaps", "txDetail", "txNormalDetail"};
     if (starts_with(key, "ksmultilayer"))
         return {"txMask", "txDetailR", "txDetailG", "txDetailB", "txDetailA"};
     if (starts_with(key, "ksperpixel") || starts_with(key, "ksskinnedmesh") ||
@@ -383,6 +385,15 @@ MaterialBinding build_material_binding(const Kn5Material& material, std::size_t 
 
     for (const std::string& raw_slot : required_slots(result.shader)) {
         const std::string key = canonical(raw_slot);
+        // public/app.js accepts txDetailNM as the legacy spelling for the
+        // generic txNormalDetail slot. Preserve that source fallback while
+        // keeping one required logical binding in the native projection.
+        if (key == "txnormaldetail" &&
+            canonical(result.shader) == "ksperpixelmultimap_nmdetail" &&
+            result.textures.find("txdetailnm") != result.textures.end()) {
+            result.textures.at("txdetailnm").required = true;
+            continue;
+        }
         const auto found = result.textures.find(key);
         if (found != result.textures.end()) {
             found->second.required = true;
@@ -454,11 +465,12 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
     const MaterialBinding& binding, KsPerPixelMaterialResolveOptions options) {
     KsPerPixelMaterialResolveResult result;
     const std::string shader = canonical(binding.shader);
-    const bool normal_variant = shader == "ksperpixelnm";
+    const bool detail_stack_variant = shader == "ksperpixelmultimap_nmdetail";
+    const bool normal_variant = shader == "ksperpixelnm" || detail_stack_variant;
     if (shader != "ksperpixel" && !normal_variant) {
         result.status = KsPerPixelMaterialResolveStatus::unsupported;
         result.diagnostic = {"ks_per_pixel_shader_unsupported", "shader",
-                             "The bounded material resolver accepts exact ksPerPixel and ksPerPixelNM shaders"};
+                             "The bounded material resolver accepts exact ksPerPixel, ksPerPixelNM, and ksPerPixelMultiMap_NMDetail shaders"};
         return result;
     }
 
@@ -472,6 +484,12 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
         material_scalar(binding, "fresnelC", 0.0F),
         material_scalar(binding, "fresnelEXP", 5.0F),
         material_scalar(binding, "fresnelMaxLevel", 0.05F),
+        0.0F,
+    };
+    result.constants.detail = {
+        material_scalar(binding, "useDetail", 0.0F),
+        material_scalar(binding, "detailUVMultiplier", 1.0F),
+        material_scalar(binding, "detailNormalBlend", 1.0F),
         0.0F,
     };
 
@@ -517,7 +535,7 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
                            [](float value) { return std::isfinite(value); });
     };
     if (!finite(result.constants.lighting) || !finite(result.constants.fresnel) ||
-        !finite(result.constants.emissive)) {
+        !finite(result.constants.emissive) || !finite(result.constants.detail)) {
         result.status = KsPerPixelMaterialResolveStatus::invalid_input;
         result.diagnostic = {"non_finite_constants", "ksPerPixel",
                              "Resolved ksPerPixel constants must contain only finite values"};
@@ -528,19 +546,26 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
     if (!std::isfinite(normal_object_space)) {
         result.status = KsPerPixelMaterialResolveStatus::invalid_input;
         result.diagnostic = {"non_finite_constants", "nmObjectSpace",
-                             "Resolved ksPerPixelNM normal-space mode must be finite"};
+                             "Resolved normal-map normal-space mode must be finite"};
         return result;
     }
     if (normal_variant && normal_object_space > 0.5F) {
         result.status = KsPerPixelMaterialResolveStatus::unsupported;
         result.diagnostic = {"ks_per_pixel_nm_object_space_unsupported", "nmObjectSpace",
-                             "The bounded ksPerPixelNM path supports tangent-space normals only"};
+                             "The bounded normal-map paths support tangent-space normals only"};
         return result;
     }
     if (normal_variant && result.constants.fresnel[2] > 0.0F) {
         result.status = KsPerPixelMaterialResolveStatus::unsupported;
         result.diagnostic = {"ks_per_pixel_nm_fresnel_unsupported", "fresnelMaxLevel",
-                             "The bounded ksPerPixelNM path requires disabled Fresnel reflection"};
+                             "The bounded normal-map paths require disabled Fresnel reflection"};
+        return result;
+    }
+
+    if (detail_stack_variant && binding.status != MaterialBindingStatus::complete) {
+        result.status = KsPerPixelMaterialResolveStatus::unsupported;
+        result.diagnostic = {"ks_per_pixel_nmdetail_resources_incomplete", "resources",
+                             "The bounded ksPerPixelMultiMap_NMDetail stack requires txDiffuse, txNormal, txMaps, txDetail, and txNormalDetail"};
         return result;
     }
 

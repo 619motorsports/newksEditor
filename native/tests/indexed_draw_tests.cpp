@@ -837,6 +837,216 @@ void validates_portable_maps_contract() {
             "duplicate maps sampled binding alias rejected");
 }
 
+void validates_portable_detail_stack_contract() {
+    PipelineProgram pipeline = pipeline_fixture();
+    pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 2U, "ksPerPixelMaterial"},
+        {PipelineResourceKind::uniform_buffer, 0U, 3U, "ksPerPixelFrame"},
+        {PipelineResourceKind::sampled_texture, 0U, 4U, "normalTexture"},
+        {PipelineResourceKind::sampler, 0U, 5U, "normalSampler"},
+        {PipelineResourceKind::sampled_texture, 0U, 6U, "mapsTexture"},
+        {PipelineResourceKind::sampler, 0U, 7U, "mapsSampler"},
+        {PipelineResourceKind::sampled_texture, 0U, 8U, "detailTexture"},
+        {PipelineResourceKind::sampler, 0U, 9U, "detailSampler"},
+        {PipelineResourceKind::sampled_texture, 0U, 10U, "normalDetailTexture"},
+        {PipelineResourceKind::sampler, 0U, 11U, "normalDetailSampler"},
+    };
+    require(classify_indexed_portable_resource_layout(pipeline) ==
+                IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame,
+            "portable detail-stack resource layout classified");
+    pipeline.resources.pop_back();
+    require(classify_indexed_portable_resource_layout(pipeline) ==
+                IndexedPortableResourceLayout::unsupported,
+            "incomplete detail-stack resource pair rejected");
+    pipeline.resources.push_back(
+        {PipelineResourceKind::sampler, 0U, 11U, "normalDetailSampler"});
+
+    DrawPacket packet = packet_fixture();
+    FakeTexture target(Backend::Vulkan, target_description());
+    FakeTexture diffuse(Backend::Vulkan, sampled_description());
+    FakeTexture normal(Backend::Vulkan, sampled_description());
+    FakeTexture maps(Backend::Vulkan, sampled_description());
+    FakeTexture detail(Backend::Vulkan,
+                       {2U, 2U, 1U, 1U, TextureFormat::rgba8_srgb, TextureUsage::sampled,
+                        TextureMemory::device_local, TextureMutability::immutable});
+    FakeTexture normal_detail(Backend::Vulkan, sampled_description());
+    FakeSampler diffuse_sampler(Backend::Vulkan);
+    FakeSampler normal_sampler(Backend::Vulkan);
+    FakeSampler maps_sampler(Backend::Vulkan);
+    FakeSampler detail_sampler(Backend::Vulkan);
+    FakeSampler normal_detail_sampler(Backend::Vulkan);
+    FakeBuffer vertices(Backend::Vulkan,
+                        {132U, BufferUsage::vertex, BufferMemory::device_local,
+                         BufferMutability::immutable});
+    FakeBuffer indices(Backend::Vulkan,
+                       {6U, BufferUsage::index, BufferMemory::device_local,
+                        BufferMutability::immutable});
+    FakeBuffer material(Backend::Vulkan,
+                        {256U, BufferUsage::uniform, BufferMemory::host_visible,
+                         BufferMutability::immutable});
+    FakeBuffer frame(Backend::Vulkan,
+                     {256U, BufferUsage::uniform, BufferMemory::host_visible,
+                      BufferMutability::mutable_data});
+    auto request = request_fixture(packet, pipeline, vertices, indices);
+    request.resource_authority = IndexedResourceAuthority::explicit_bindings;
+    request.sampled_binding = {&diffuse, &diffuse_sampler};
+    request.normal_binding = {&normal, &normal_sampler};
+    request.maps_binding = {&maps, &maps_sampler};
+    request.detail_binding = {&detail, &detail_sampler};
+    request.normal_detail_binding = {&normal_detail, &normal_detail_sampler};
+    request.material_binding = {&material, 0U, portable_material_buffer_view_bytes};
+    request.frame_binding = {&frame, 0U, portable_frame_buffer_view_bytes};
+    Diagnostic diagnostic;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            "portable detail-stack contract accepts sRGB detail and linear normal-detail");
+
+    request.detail_binding = {};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_detail_binding_missing",
+            "missing detail pair rejected");
+    request.detail_binding = {&detail, nullptr};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_detail_binding_missing",
+            "partial detail pair rejected");
+    request.detail_binding = {&detail, &detail_sampler};
+    request.normal_detail_binding = {};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_normal_detail_binding_missing",
+            "missing normal-detail pair rejected");
+    request.normal_detail_binding = {&normal_detail, nullptr};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_normal_detail_binding_missing",
+            "partial normal-detail pair rejected");
+    request.normal_detail_binding = {&normal_detail, &normal_detail_sampler};
+
+    pipeline.resources.resize(8U);
+    request.detail_binding = {&detail, &detail_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_detail_binding_unexpected",
+            "detail pair rejected by the maps-only layout");
+    request.detail_binding = {};
+    request.normal_detail_binding = {&normal_detail, &normal_detail_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_normal_detail_binding_unexpected",
+            "normal-detail pair rejected by the maps-only layout");
+
+    pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 2U, "ksPerPixelMaterial"},
+        {PipelineResourceKind::uniform_buffer, 0U, 3U, "ksPerPixelFrame"},
+        {PipelineResourceKind::sampled_texture, 0U, 4U, "normalTexture"},
+        {PipelineResourceKind::sampler, 0U, 5U, "normalSampler"},
+        {PipelineResourceKind::sampled_texture, 0U, 6U, "mapsTexture"},
+        {PipelineResourceKind::sampler, 0U, 7U, "mapsSampler"},
+        {PipelineResourceKind::sampler, 0U, 8U, "detailTextureWrongKind"},
+        {PipelineResourceKind::sampler, 0U, 9U, "detailSampler"},
+        {PipelineResourceKind::sampled_texture, 0U, 10U, "normalDetailTexture"},
+        {PipelineResourceKind::sampler, 0U, 11U, "normalDetailSampler"},
+    };
+    require(classify_indexed_portable_resource_layout(pipeline) ==
+                IndexedPortableResourceLayout::unsupported,
+            "wrong-kind detail declaration rejected");
+    pipeline.resources[8] =
+        {PipelineResourceKind::sampled_texture, 0U, 8U, "detailTexture"};
+    pipeline.resources[10] =
+        {PipelineResourceKind::sampler, 0U, 10U, "normalDetailTextureWrongKind"};
+    require(classify_indexed_portable_resource_layout(pipeline) ==
+                IndexedPortableResourceLayout::unsupported,
+            "wrong-kind normal-detail declaration rejected");
+    pipeline.resources[10] =
+        {PipelineResourceKind::sampled_texture, 0U, 10U, "normalDetailTexture"};
+
+    request.detail_binding = {&detail, &detail_sampler};
+    request.normal_detail_binding = {&normal_detail, &normal_detail_sampler};
+    FakeSampler foreign_sampler(Backend::D3D12);
+    request.detail_binding = {&detail, &foreign_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_detail_backend_mismatch",
+            "foreign detail sampler rejected");
+    request.detail_binding = {&detail, &detail_sampler};
+    request.normal_detail_binding = {&normal_detail, &foreign_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_normal_detail_backend_mismatch",
+            "foreign normal-detail sampler rejected");
+    request.normal_detail_binding = {&normal_detail, &normal_detail_sampler};
+
+    FakeTexture missing_usage(
+        Backend::Vulkan,
+        {2U, 2U, 1U, 1U, TextureFormat::rgba8_unorm, TextureUsage::transfer_source,
+         TextureMemory::device_local, TextureMutability::immutable});
+    request.detail_binding = {&missing_usage, &detail_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_detail_texture_usage_invalid",
+            "detail texture without sampled usage rejected");
+    FakeTexture writable_detail(
+        Backend::Vulkan,
+        {2U, 2U, 1U, 1U, TextureFormat::rgba8_unorm,
+         TextureUsage::sampled | TextureUsage::storage,
+         TextureMemory::device_local, TextureMutability::immutable});
+    request.detail_binding = {&writable_detail, &detail_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_detail_texture_usage_unsupported",
+            "writable detail texture rejected");
+    request.detail_binding = {&detail, &detail_sampler};
+    request.normal_detail_binding = {&missing_usage, &normal_detail_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_normal_detail_texture_usage_invalid",
+            "normal-detail texture without sampled usage rejected");
+    FakeTexture srgb_normal_detail(
+        Backend::Vulkan,
+        {2U, 2U, 1U, 1U, TextureFormat::rgba8_srgb, TextureUsage::sampled,
+         TextureMemory::device_local, TextureMutability::immutable});
+    request.normal_detail_binding = {&srgb_normal_detail, &normal_detail_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_normal_detail_texture_description_unsupported",
+            "sRGB normal-detail texture rejected in favor of linear UNORM");
+    request.normal_detail_binding = {&normal_detail, &normal_detail_sampler};
+
+    request.detail_binding = {&target, &detail_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_detail_feedback_loop",
+            "detail render-target feedback rejected");
+    request.detail_binding = {&detail, &detail_sampler};
+    request.normal_detail_binding = {&target, &normal_detail_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_normal_detail_feedback_loop",
+            "normal-detail render-target feedback rejected");
+    request.normal_detail_binding = {&normal_detail, &normal_detail_sampler};
+
+    SamplerDescription invalid_sampler;
+    invalid_sampler.max_lod = -1.0F;
+    FakeSampler bad_detail_sampler(Backend::Vulkan, invalid_sampler);
+    request.detail_binding = {&detail, &bad_detail_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_detail_sampler_lod_invalid",
+            "malformed detail sampler rejected");
+    request.detail_binding = {&detail, &detail_sampler};
+    request.normal_detail_binding = {&normal_detail, &bad_detail_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_normal_detail_sampler_lod_invalid",
+            "malformed normal-detail sampler rejected");
+}
+
 void rejects_invalid_depth_attachment_descriptions() {
     Diagnostic diagnostic;
     DepthAttachmentDescription description;
@@ -1152,6 +1362,7 @@ int main() {
         validates_portable_frame_buffer_contract();
         validates_portable_normal_map_contract();
         validates_portable_maps_contract();
+        validates_portable_detail_stack_contract();
         rejects_invalid_depth_attachment_descriptions();
         rejects_invalid_depth_contract();
         validates_ordered_indexed_batch_contract();

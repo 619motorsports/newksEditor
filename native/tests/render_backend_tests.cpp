@@ -256,6 +256,21 @@ std::vector<std::uint8_t> executable_ks_per_pixel_nm_maps_fragment_shader() {
     return result;
 }
 
+std::vector<std::uint8_t> executable_ks_per_pixel_nm_detail_stack_fragment_shader() {
+    // Generated from tests/shaders/indexed_ks_per_pixel_nm_detail_stack.frag with:
+    // glslangValidator -V --target-env vulkan1.0 -Os -g0 -S frag
+    // Source SHA-256: 0f3c9c998c7b2d2f21ccc41302437d333fe4f0ec131b94f4c683e0cb090d2f98
+    // SPIR-V SHA-256: d1fbeef4ac21256fe23bcea005f84ec0c88dee253d7911d1d216bad86b592dd0
+    constexpr std::string_view hex =
+        "03022307000001000b000800210100000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f000b0004000000040000006d61696e00000000160000005a0000006000000066000000d100000000010000100003000400000007000000470004000c0000002100000000000000470004000c0000002200000000000000470004001000000021000000010000004700040010000000220000000000000047000400160000001e00000004000000470003001b00000002000000480005001b000000000000002300000000000000480005001b000000010000002300000010000000480005001b000000020000002300000020000000480005001b000000030000002300000030000000470004001d0000002100000002000000470004001d000000220000000000000047000400340000002100000008000000470004003400000022000000000000004700040036000000210000000900000047000400360000002200000000000000470004004c0000002100000004000000470004004c0000002200000000000000470004004e0000002100000005000000470004004e0000002200000000000000470004005a0000001e0000000000000047000400600000001e0000000100000047000400660000001e00000002000000470004007a000000210000000a000000470004007a0000002200000000000000470004007c000000210000000b000000470004007c000000220000000000000047000400a6000000210000000600000047000400a6000000220000000000000047000400a8000000210000000700000047000400a8000000220000000000000047000300c50000000200000048000500c500000000000000230000000000000048000500c500000001000000230000001000000048000500c500000002000000230000002000000048000500c500000003000000230000003000000047000400c7000000210000000300000047000400c7000000220000000000000047000400d10000001e0000000300000047000400000100001e00000000000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000004000000190009000a00000006000000010000000000000000000000000000000100000000000000200004000b000000000000000a0000003b0004000b0000000c000000000000001a0002000e000000200004000f000000000000000e0000003b0004000f00000010000000000000001b000300120000000a00000017000400140000000600000002000000200004001500000001000000140000003b0004001500000016000000010000001e0006001b00000007000000070000000700000007000000200004001c000000020000001b0000003b0004001c0000001d00000002000000150004001e00000020000000010000002b0004001e0000001f00000003000000150004002000000020000000000000002b000400200000002100000000000000200004002200000002000000060000002b00040006000000250000000000003f14000200260000002b000400060000002b0000000000803f2b000400200000002c000000030000002b0004000600000031000000000000003b0004000b00000034000000000000003b0004000f00000036000000000000002b000400200000003a000000010000002b000400060000003d00000017b7d138170004004900000006000000030000003b0004000b0000004c000000000000003b0004000f0000004e000000000000002b000400060000005400000000000040200004005900000001000000490000003b000400590000005a000000010000003b0004005900000060000000010000003b0004005900000066000000010000002b000400200000006e000000020000003b0004000b0000007a000000000000003b0004000f0000007c000000000000003b0004000b000000a6000000000000003b0004000f000000a8000000000000002b0004001e000000af000000000000001e000600c50000000700000007000000070000000700000020000400c600000002000000c50000003b000400c6000000c70000000200000020000400c800000002000000070000003b00040059000000d1000000010000002b0004001e000000dd000000020000002b0004001e000000e40000000100000020000400ff00000003000000070000003b000400ff00000000010000030000002c000600490000000b0100003100000031000000310000002c000600490000001e0100002b0000002b0000002b0000003600050002000000040000000000000003000000f8000200050000003d0004000a0000000d0000000c0000003d0004000e00000011000000100000005600050012000000130000000d000000110000003d00040014000000170000001600000057000500070000001800000013000000170000004100060022000000230000001d0000001f000000210000003d000400060000002400000023000000ba00050026000000270000002400000025000000f70003002a00000000000000fa000400270000002900000030000000f80002002900000051000500060000002e000000180000000300000083000500060000002f0000002b0000002e000000f90002002a000000f800020030000000f90002002a000000f80002002a000000f5000700060000001f0100002f0000002900000031000000300000003d0004000a00000035000000340000003d0004000e0000003700000036000000560005001200000038000000350000003700000041000600220000003b0000001d0000001f0000003a0000003d000400060000003c0000003b0000000c000700060000003e00000001000000280000003c0000003d0000008e000500140000003f000000170000003e000000570005000700000040000000380000003f00000085000500070000004500000018000000400000005000070007000000470000001f0100001f0100001f0100001f0100000c0008000700000048000000010000002e0000001800000045000000470000003d0004000a0000004d0000004c0000003d0004000e0000004f0000004e0000005600050012000000500000004d0000004f00000057000500070000005200000050000000170000004f000800490000005300000052000000520000000000000001000000020000008e00050049000000550000005300000054000000830005004900000057000000550000001e0100003d000400490000005b0000005a0000000c000600490000005c00000001000000450000005b0000003d0004004900000061000000600000000c000600490000006200000001000000450000006100000051000500060000006400000057000000000000008e000500490000006500000062000000640000003d0004004900000067000000660000000c000600490000006800000001000000450000006700000051000500060000006a00000057000000010000008e000500490000006b000000680000006a00000081000500490000006c000000650000006b00000051000500060000007000000057000000020000008e00050049000000710000005c000000700000008100050049000000720000006c000000710000000c0006004900000073000000010000004500000072000000f70003007800000000000000fa000400270000007700000078000000f8000200770000003d0004000a0000007b0000007a0000003d0004000e0000007d0000007c00000056000500120000007e0000007b0000007d0000005700050007000000840000007e0000003f0000004f000800490000008500000084000000840000000000000001000000020000008e00050049000000860000008500000054000000830005004900000088000000860000001e01000051000500060000008d00000088000000000000008e000500490000008e000000620000008d00000051000500060000009200000088000000010000008e000500490000009300000068000000920000008100050049000000940000008e0000009300000051000500060000009700000088000000020000008e0005004900000098000000730000009700000081000500490000009900000094000000980000000c000600490000009a00000001000000450000009900000041000600220000009e0000001d0000001f0000006e0000003d000400060000009f0000009e0000008500050006000000a00000001f0100009f0000000c00080006000000a1000000010000002b000000a0000000310000002b0000005000060049000000a2000000a1000000a1000000a10000000c00080049000000a3000000010000002e000000730000009a000000a20000000c00060049000000a40000000100000045000000a3000000f900020078000000f800020078000000f50007004900000020010000730000002a000000a4000000770000003d0004000a000000a7000000a60000003d0004000e000000a9000000a80000005600050012000000aa000000a7000000a90000005700050007000000ac000000aa000000170000004100060022000000b00000001d000000af0000006e0000003d00040006000000b1000000b00000005100050006000000b3000000ac000000000000008500050006000000b4000000b1000000b30000005100050006000000b800000040000000030000008500050006000000b9000000b4000000b80000000c00080006000000bb000000010000002e000000b4000000b90000001f0100004100060022000000bd0000001d000000af0000002c0000003d00040006000000be000000bd0000005100050006000000c0000000ac000000010000008500050006000000c1000000be000000c00000008100050006000000c2000000c10000002b0000000c00070006000000c300000001000000280000002b000000c200000041000500c8000000c9000000c7000000af0000003d00040007000000ca000000c90000004f00080049000000cb000000ca000000ca0000000000000001000000020000000c00060049000000cc0000000100000045000000cb00000041000500c8000000ce000000c70000001f0000003d00040007000000cf000000ce0000004f00080049000000d0000000cf000000cf0000000000000001000000020000003d00040049000000d2000000d10000008300050049000000d3000000d0000000d20000000c00060049000000d40000000100000045000000d30000009400050006000000d800000020010000cc0000000c00070006000000d90000000100000028000000d8000000310000004f00080049000000dc000000480000004800000000000000010000000200000041000500c8000000de000000c7000000dd0000003d00040007000000df000000de0000004f00080049000000e0000000df000000df0000000000000001000000020000004100060022000000e10000001d000000af000000210000003d00040006000000e2000000e10000008e00050049000000e3000000e0000000e200000041000500c8000000e5000000c7000000e40000003d00040007000000e6000000e50000004f00080049000000e7000000e6000000e60000000000000001000000020000004100060022000000e80000001d000000af0000003a0000003d00040006000000e9000000e80000008e00050049000000ea000000e7000000e90000008e00050049000000ec000000ea000000d90000008100050049000000ed000000e3000000ec0000008500050049000000ee000000dc000000ed0000008100050049000000f6000000cc000000d40000000c00060049000000f70000000100000045000000f60000009400050006000000f800000020010000f70000000c00070006000000f90000000100000028000000f8000000310000000c00070006000000fb000000010000001a000000f9000000c30000008500050006000000fd000000fb000000bb0000008e00050049000000fe000000e7000000fd000000810005004900000003010000ee000000fe00000041000500c8000000060100001d000000dd0000003d0004000700000007010000060100004f00080049000000080100000701000007010000000000000100000002000000850005004900000009010000dc0000000801000081000500490000000a01000003010000090100000c000700490000000c01000001000000280000000a0100000b01000051000500060000000e010000480000000300000051000500060000000f0100000c010000000000005100050006000000100100000c010000010000005100050006000000110100000c010000020000005000070007000000120100000f01000010010000110100000e0100003e0003000001000012010000fd00010038000100";
+    require(hex.size() % 2U == 0U, "embedded ksPerPixelNM detail-stack fragment shader hex alignment");
+    std::vector<std::uint8_t> result(hex.size() / 2U);
+    for (std::size_t index = 0U; index < result.size(); ++index)
+        result[index] = static_cast<std::uint8_t>((hex_digit(hex[index * 2U]) << 4U) |
+                                                   hex_digit(hex[index * 2U + 1U]));
+    return result;
+}
+
 std::vector<std::uint8_t> executable_fragment_shader() {
     constexpr std::string_view hex =
         "03022307000001000b000d000d0000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00060004000000040000006d61696e000000000900000010000300040000000700000047000400090000001e00000000000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000004000000200004000800000003000000070000003b0004000800000009000000030000002b000400060000000a0000000000803f2b000400060000000b000000000000002c000700070000000c0000000a0000000b0000000b0000000a0000003600050002000000040000000000000003000000f8000200050000003e000300090000000c000000fd00010038000100";
@@ -1494,7 +1509,7 @@ bool contract_backend(apex::render::Backend backend) {
     std::memcpy(nm_material_bytes.data(), &nm_material, sizeof(nm_material));
     BufferResult nm_material_buffer = device.device->create_buffer(
         {portable_material_buffer_view_bytes, BufferUsage::uniform, BufferMemory::host_visible,
-         BufferMutability::immutable}, nm_material_bytes);
+         BufferMutability::mutable_data}, nm_material_bytes);
     require(nm_material_buffer.ok(), "bounded ksPerPixelNM material buffer upload");
 
     KsPerPixelFrameConstants nm_frame;
@@ -1808,6 +1823,251 @@ bool contract_backend(apex::render::Backend backend) {
     require(nm_maps_mixed_result.ok(), "mixed ksPerPixelNM six/eight-binding batch/readback");
     require_nm_pixel(nm_maps_mixed_result.rgba8, 74U, 155U, 103U,
                      "mixed batch selects the later maps descriptor");
+
+    // Extend the same eight-binding NM maps fixture with the generic detail
+    // stack at bindings 8/9 and 10/11. The detail records mirror the
+    // production useDetail, detailUVMultiplier, and detailNormalBlend values.
+    const std::array<std::byte, 4> detail_diffuse_pixel = {
+        std::byte{80}, std::byte{160}, std::byte{96}, std::byte{0}};
+    const TextureUploadPlan detail_diffuse_uploads{{
+        TextureUpload{0U, 0U, 1U, 1U, 4U, detail_diffuse_pixel}}};
+    TextureResult detail_diffuse_texture =
+        device.device->create_texture(diffuse_description, detail_diffuse_uploads);
+    require(detail_diffuse_texture.ok(), "bounded ksPerPixelNM detail diffuse texture upload");
+
+    const std::array<std::byte, 8> detail_uv_pixels = {
+        std::byte{64}, std::byte{255}, std::byte{128}, std::byte{255},
+        std::byte{255}, std::byte{64}, std::byte{128}, std::byte{255}};
+    TextureDescription detail_uv_description = diffuse_description;
+    detail_uv_description.width = 2U;
+    const TextureUploadPlan detail_uv_uploads{{
+        TextureUpload{0U, 0U, 2U, 1U, 8U, detail_uv_pixels}}};
+    TextureResult detail_uv_texture =
+        device.device->create_texture(detail_uv_description, detail_uv_uploads);
+    const std::array<std::byte, 4> detail_white_alpha_zero_pixel = {
+        std::byte{255}, std::byte{255}, std::byte{255}, std::byte{0}};
+    const std::array<std::byte, 4> detail_white_alpha_one_pixel = {
+        std::byte{255}, std::byte{255}, std::byte{255}, std::byte{255}};
+    const TextureUploadPlan detail_alpha_zero_uploads{{
+        TextureUpload{0U, 0U, 1U, 1U, 4U, detail_white_alpha_zero_pixel}}};
+    const TextureUploadPlan detail_alpha_one_uploads{{
+        TextureUpload{0U, 0U, 1U, 1U, 4U, detail_white_alpha_one_pixel}}};
+    TextureResult detail_alpha_zero_texture =
+        device.device->create_texture(diffuse_description, detail_alpha_zero_uploads);
+    TextureResult detail_alpha_one_texture =
+        device.device->create_texture(diffuse_description, detail_alpha_one_uploads);
+    const std::array<std::byte, 4> normal_detail_pixel = {
+        std::byte{255}, std::byte{128}, std::byte{255}, std::byte{255}};
+    const TextureUploadPlan normal_detail_uploads{{
+        TextureUpload{0U, 0U, 1U, 1U, 4U, normal_detail_pixel}}};
+    TextureResult normal_detail_texture =
+        device.device->create_texture(diffuse_description, normal_detail_uploads);
+    require(detail_uv_texture.ok() && detail_alpha_zero_texture.ok() &&
+                detail_alpha_one_texture.ok() && normal_detail_texture.ok(),
+            "bounded ksPerPixelNM detail texture uploads");
+
+    PipelineProgram nm_detail_pipeline = nm_maps_pipeline;
+    nm_detail_pipeline.name = "source-evidenced-ks-per-pixel-nm-detail-stack";
+    nm_detail_pipeline.resources.push_back(
+        {PipelineResourceKind::sampled_texture, 0U, 8U, "detailTexture"});
+    nm_detail_pipeline.resources.push_back(
+        {PipelineResourceKind::sampler, 0U, 9U, "detailSampler"});
+    nm_detail_pipeline.resources.push_back(
+        {PipelineResourceKind::sampled_texture, 0U, 10U, "normalDetailTexture"});
+    nm_detail_pipeline.resources.push_back(
+        {PipelineResourceKind::sampler, 0U, 11U, "normalDetailSampler"});
+    if (backend == Backend::Vulkan) {
+        nm_detail_pipeline.shaders[0].bytes = executable_ks_per_pixel_nm_maps_vertex_shader();
+        nm_detail_pipeline.shaders[1].bytes =
+            executable_ks_per_pixel_nm_detail_stack_fragment_shader();
+    } else {
+#if defined(_WIN32)
+        constexpr std::string_view nm_detail_fragment_source =
+            "Texture2D diffuseTexture : register(t0); SamplerState diffuseSampler : register(s1);"
+            "cbuffer KsPerPixelMaterial : register(b2) { float4 lighting; float4 fresnel; float4 emissive; float4 detail; };"
+            "cbuffer KsPerPixelFrame : register(b3) { float4 sun_direction; float4 sun_color; float4 ambient_color; float4 camera_position; };"
+            "Texture2D normalTexture : register(t4); SamplerState normalSampler : register(s5);"
+            "Texture2D mapsTexture : register(t6); SamplerState mapsSampler : register(s7);"
+            "Texture2D detailTexture : register(t8); SamplerState detailSampler : register(s9);"
+            "Texture2D normalDetailTexture : register(t10); SamplerState normalDetailSampler : register(s11);"
+            "float4 main(float4 position : SV_Position, float3 normal : TEXCOORD1, float3 tangent : TEXCOORD2,"
+            "float3 bitangent : TEXCOORD3, float3 world : TEXCOORD4, float2 texcoord : TEXCOORD0) : SV_Target {"
+            "float4 diffuseTexel = diffuseTexture.Sample(diffuseSampler, texcoord);"
+            "float detailMask = detail.x > 0.5 ? 1.0 - diffuseTexel.a : 0.0;"
+            "float4 detailTexel = detailTexture.Sample(detailSampler, texcoord * max(detail.y, 0.0001));"
+            "float4 texel = lerp(diffuseTexel, diffuseTexel * detailTexel, detailMask);"
+            "float3 sampledNormal = normalTexture.Sample(normalSampler, texcoord).rgb * 2.0 - 1.0;"
+            "float3 geometricNormal = normalize(normal); float3 tangentNormal = sampledNormal;"
+            "float3 n = normalize(normalize(tangent) * tangentNormal.x + normalize(bitangent) * tangentNormal.y + geometricNormal * tangentNormal.z);"
+            "if (detail.x > 0.5) { float3 detailNormal = normalDetailTexture.Sample(normalDetailSampler, texcoord * max(detail.y, 0.0001)).rgb * 2.0 - 1.0;"
+            "float3 detailWorld = normalize(normalize(tangent) * detailNormal.x + normalize(bitangent) * detailNormal.y + n * detailNormal.z);"
+            "n = normalize(lerp(n, detailWorld, clamp(detailMask * detail.z, 0.0, 1.0))); }"
+            "float3 maps = mapsTexture.Sample(mapsSampler, texcoord).rgb;"
+            "float mappedSpecular = lighting.z * maps.r; mappedSpecular = lerp(mappedSpecular, mappedSpecular * detailTexel.a, detailMask);"
+            "float mappedPower = max(1.0, lighting.w * maps.g + 1.0); float3 l = normalize(sun_direction.xyz);"
+            "float3 v = normalize(camera_position.xyz - world); float ndl = max(dot(n, l), 0.0);"
+            "float3 diffuse = texel.rgb * (ambient_color.rgb * lighting.x + sun_color.rgb * lighting.y * ndl);"
+            "float3 spec = sun_color.rgb * (pow(max(dot(n, normalize(l + v)), 0.0), mappedPower) * mappedSpecular);"
+            "return float4(max(diffuse + spec + texel.rgb * emissive.rgb, 0.0), texel.a); }";
+        nm_detail_pipeline.shaders[0].bytes = executable_d3d_shader(
+            nm_maps_vertex_source, "vs_5_0");
+        nm_detail_pipeline.shaders[1].bytes = executable_d3d_shader(
+            nm_detail_fragment_source, "ps_5_0");
+#else
+        require(false, "D3D12 ksPerPixelNM detail-stack shader test requires Windows D3DCompile");
+#endif
+    }
+    const SamplerResult detail_sampler =
+        device.device->create_sampler(normal_sampler_description);
+    const SamplerResult normal_detail_sampler =
+        device.device->create_sampler(normal_sampler_description);
+    require(detail_sampler.ok() && normal_detail_sampler.ok(),
+            "bounded ksPerPixelNM detail sampler creation");
+
+    auto make_detail_request = [&](const Texture* detail_texture,
+                                   const Texture* normal_detail_texture_value,
+                                   std::array<float, 4> detail_values,
+                                   const Texture* maps_value) {
+        nm_material.detail = detail_values;
+        std::array<std::byte, portable_material_buffer_view_bytes> detail_material_bytes{};
+        std::memcpy(detail_material_bytes.data(), &nm_material, sizeof(nm_material));
+        const BufferUpdateResult detail_material_update = device.device->update_buffer(
+            *nm_material_buffer.buffer, 0U, detail_material_bytes);
+        require(detail_material_update.ok(), "bounded ksPerPixelNM detail material update");
+        IndexedStaticMeshDrawRequest request = sampled_upload.upload->make_request(
+            nm_detail_pipeline, *indexed_camera.frame);
+        request.resource_authority = IndexedResourceAuthority::explicit_bindings;
+        request.sampled_binding = {detail_diffuse_texture.texture.get(), sampler.sampler.get()};
+        request.normal_binding = {flat_normal_texture.texture.get(), normal_sampler.sampler.get()};
+        request.maps_binding = {maps_value, maps_sampler.sampler.get()};
+        request.detail_binding = {detail_texture, detail_sampler.sampler.get()};
+        request.normal_detail_binding = {normal_detail_texture_value,
+                                         normal_detail_sampler.sampler.get()};
+        request.material_binding = {nm_material_buffer.buffer.get(), 0U,
+                                    portable_material_buffer_view_bytes};
+        request.frame_binding = {nm_frame_buffer.buffer.get(), 0U,
+                                 portable_frame_buffer_view_bytes};
+        return request;
+    };
+    auto require_detail_pixel = [&](const std::vector<std::byte>& rgba8,
+                                    std::uint8_t red, std::uint8_t green,
+                                    std::uint8_t blue, std::string_view message) {
+        if (near_material_channel(rgba8[center], red) &&
+            near_material_channel(rgba8[center + 1U], green) &&
+            near_material_channel(rgba8[center + 2U], blue) &&
+            rgba8[center + 3U] == std::byte{0})
+            return;
+        throw std::runtime_error(
+            std::string(message) + ": got (" +
+            std::to_string(std::to_integer<unsigned int>(rgba8[center])) + ", " +
+            std::to_string(std::to_integer<unsigned int>(rgba8[center + 1U])) + ", " +
+            std::to_string(std::to_integer<unsigned int>(rgba8[center + 2U])) + ", " +
+            std::to_string(std::to_integer<unsigned int>(rgba8[center + 3U])) + ")");
+    };
+
+    IndexedStaticMeshDrawRequest detail_disabled_request = make_detail_request(
+        detail_alpha_one_texture.texture.get(), normal_detail_texture.texture.get(),
+        {0.0F, 1.0F, 0.0F, 0.0F}, maps_zero_texture.texture.get());
+    const IndexedStaticMeshDrawResult detail_disabled_result =
+        device.device->draw_indexed_static_mesh_and_readback(
+            *triangle_texture.texture, detail_disabled_request);
+    require(detail_disabled_result.ok(), "bounded ksPerPixelNM detail disabled draw/readback");
+    require_detail_pixel(detail_disabled_result.rgba8, 35U, 70U, 42U,
+                         "useDetail zero preserves the base diffuse result");
+
+    IndexedStaticMeshDrawRequest detail_uv_one_request = make_detail_request(
+        detail_uv_texture.texture.get(), normal_detail_texture.texture.get(),
+        {1.0F, 1.0F, 0.0F, 0.0F}, maps_zero_texture.texture.get());
+    const IndexedStaticMeshDrawResult detail_uv_one_result =
+        device.device->draw_indexed_static_mesh_and_readback(
+            *triangle_texture.texture, detail_uv_one_request);
+    require(detail_uv_one_result.ok(), "bounded ksPerPixelNM detail UV one draw/readback");
+    require_detail_pixel(detail_uv_one_result.rgba8, 35U, 18U, 21U,
+                         "detail UV multiplier one selects the second detail texel");
+
+    IndexedStaticMeshDrawRequest detail_uv_two_request = make_detail_request(
+        detail_uv_texture.texture.get(), normal_detail_texture.texture.get(),
+        {1.0F, 2.0F, 0.0F, 0.0F}, maps_zero_texture.texture.get());
+    const IndexedStaticMeshDrawResult detail_uv_two_result =
+        device.device->draw_indexed_static_mesh_and_readback(
+            *triangle_texture.texture, detail_uv_two_request);
+    require(detail_uv_two_result.ok(), "bounded ksPerPixelNM detail UV two draw/readback");
+    require_detail_pixel(detail_uv_two_result.rgba8, 9U, 70U, 21U,
+                         "detail UV multiplier two repeats the first detail texel");
+
+    IndexedStaticMeshDrawRequest detail_alpha_zero_request = make_detail_request(
+        detail_alpha_zero_texture.texture.get(), normal_detail_texture.texture.get(),
+        {1.0F, 1.0F, 0.0F, 0.0F}, maps_full_texture.texture.get());
+    const IndexedStaticMeshDrawResult detail_alpha_zero_result =
+        device.device->draw_indexed_static_mesh_and_readback(
+            *triangle_texture.texture, detail_alpha_zero_request);
+    require(detail_alpha_zero_result.ok(), "bounded ksPerPixelNM detail alpha zero draw/readback");
+    require_detail_pixel(detail_alpha_zero_result.rgba8, 35U, 70U, 42U,
+                         "detail alpha zero suppresses mapped specular");
+
+    IndexedStaticMeshDrawRequest detail_alpha_one_request = make_detail_request(
+        detail_alpha_one_texture.texture.get(), normal_detail_texture.texture.get(),
+        {1.0F, 1.0F, 0.0F, 0.0F}, maps_full_texture.texture.get());
+    const IndexedStaticMeshDrawResult detail_alpha_one_result =
+        device.device->draw_indexed_static_mesh_and_readback(
+            *triangle_texture.texture, detail_alpha_one_request);
+    require(detail_alpha_one_result.ok(), "bounded ksPerPixelNM detail alpha one draw/readback");
+    require_detail_pixel(detail_alpha_one_result.rgba8, 102U, 137U, 109U,
+                         "detail alpha one restores mapped specular");
+
+    IndexedStaticMeshDrawRequest detail_normal_request = make_detail_request(
+        detail_uv_texture.texture.get(), normal_detail_texture.texture.get(),
+        {1.0F, 1.0F, 1.0F, 0.0F}, maps_zero_texture.texture.get());
+    const IndexedStaticMeshDrawResult detail_normal_result =
+        device.device->draw_indexed_static_mesh_and_readback(
+            *triangle_texture.texture, detail_normal_request);
+    require(detail_normal_result.ok(), "bounded ksPerPixelNM normal detail draw/readback");
+    require_detail_pixel(detail_normal_result.rgba8, 26U, 13U, 16U,
+                         "detail normal blend changes the tangent-space normal");
+
+    KsPerPixelMaterialConstants detail_alpha_zero_material = nm_material;
+    detail_alpha_zero_material.detail = {1.0F, 1.0F, 0.0F, 0.0F};
+    KsPerPixelMaterialConstants detail_alpha_one_material = detail_alpha_zero_material;
+    detail_alpha_one_material.detail = {1.0F, 1.0F, 0.0F, 0.0F};
+    std::array<std::byte, 2U * portable_material_buffer_view_bytes> detail_batch_material_bytes{};
+    std::memcpy(detail_batch_material_bytes.data(), &detail_alpha_zero_material,
+                sizeof(detail_alpha_zero_material));
+    std::memcpy(detail_batch_material_bytes.data() + portable_material_buffer_view_bytes,
+                &detail_alpha_one_material, sizeof(detail_alpha_one_material));
+    BufferResult detail_batch_material_buffer = device.device->create_buffer(
+        {detail_batch_material_bytes.size(), BufferUsage::uniform, BufferMemory::host_visible,
+         BufferMutability::immutable}, detail_batch_material_bytes);
+    require(detail_batch_material_buffer.ok(), "bounded ksPerPixelNM detail batch material upload");
+    std::array<IndexedStaticMeshDrawRequest, 2> detail_descriptor_draws = {
+        detail_alpha_zero_request, detail_alpha_one_request};
+    detail_descriptor_draws[0].material_binding = {
+        detail_batch_material_buffer.buffer.get(), 0U, portable_material_buffer_view_bytes};
+    detail_descriptor_draws[1].material_binding = {
+        detail_batch_material_buffer.buffer.get(), portable_material_buffer_view_bytes,
+        portable_material_buffer_view_bytes};
+    IndexedStaticMeshBatchDescription detail_descriptor_batch;
+    detail_descriptor_batch.draws = detail_descriptor_draws;
+    const IndexedStaticMeshBatchResult detail_descriptor_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *triangle_texture.texture, detail_descriptor_batch);
+    require(detail_descriptor_result.ok(),
+            "bounded ksPerPixelNM detail descriptor-switch batch/readback");
+    require_detail_pixel(detail_descriptor_result.rgba8, 102U, 137U, 109U,
+                         "detail descriptor switch selects the later alpha-one record");
+
+    std::array<IndexedStaticMeshDrawRequest, 3> detail_mixed_draws = {
+        nm_flat_request, nm_maps_full_request, detail_alpha_one_request};
+    detail_mixed_draws[2].material_binding = {
+        detail_batch_material_buffer.buffer.get(), portable_material_buffer_view_bytes,
+        portable_material_buffer_view_bytes};
+    IndexedStaticMeshBatchDescription detail_mixed_batch;
+    detail_mixed_batch.draws = detail_mixed_draws;
+    const IndexedStaticMeshBatchResult detail_mixed_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *triangle_texture.texture, detail_mixed_batch);
+    require(detail_mixed_result.ok(), "mixed ksPerPixelNM six/eight/twelve-binding batch/readback");
+    require_detail_pixel(detail_mixed_result.rgba8, 102U, 137U, 109U,
+                         "mixed batch selects the later twelve-binding detail descriptor");
 
     // public/app.js applyItemRenderState is the source authority for this
     // alpha blend. Prove the equivalent native factors in both draw paths.

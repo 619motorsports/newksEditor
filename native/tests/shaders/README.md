@@ -186,3 +186,51 @@ SwiftShader Vulkan pixel evidence (`VK_ICD_FILENAMES=/opt/google/chrome/vk_swift
 - `maps=(0,0,1)`: `(7,88,37,255)`; specular scale is zero.
 - `maps=(1,0,1)`: `(99,180,128,255)`; exponent is independently reduced to one.
 - `maps=(1,1,1)`: `(74,155,103,255)`; full maps scale and exponent restore the NM fixture.
+
+`indexed_ks_per_pixel_nm_detail_stack.vert` and
+`indexed_ks_per_pixel_nm_detail_stack.frag` are the bounded 12-binding generic
+detail stack. They retain diffuse/normal/maps at bindings 0/1, 4/5, and 6/7,
+and add `txDetail` at bindings 8/9 and `txNormalDetail` (or `txDetailNM`) at
+bindings 10/11. D3D12 uses the corresponding `t0/s1`, `b2/b3`, `t4/s5`,
+`t6/s7`, `t8/s9`, and `t10/s11` registers.
+
+The material record is the 64-byte portable layout: `lighting`, `fresnel`,
+`emissive`, and `detail`, where `detail = (useDetail, detailUVMultiplier,
+detailNormalBlend, reserved)`. The fragment source follows
+`public/app.js:2074` for the detail color/mask, `:2077` for tangent-space
+normal detail, and `:2080` for detail-alpha specular modulation and maps.r/g.
+It excludes Fresnel/reflection, multilayer world-XZ resources, damage, rain,
+seasons, AO, shadows, local/CSP lights, custom emissions, alpha test/A2C,
+transparency, and overlays. This is an exact bounded execution fixture, not a
+claim of complete stock shader parity.
+
+Detail-stack identities, compiled with glslang `16.4.0` and validated with
+SPIRV-Tools `2026.3` (`vulkan-sdk-1.4.357.0-0-g9a49b0883`), target SPIR-V 1.0
+for Vulkan 1.0:
+
+```sh
+glslangValidator -V --target-env vulkan1.0 -Os -g0 -S vert \
+  -o /tmp/apex_indexed_ks_per_pixel_nm_detail_stack_vert.spv \
+  native/tests/shaders/indexed_ks_per_pixel_nm_detail_stack.vert
+glslangValidator -V --target-env vulkan1.0 -Os -g0 -S frag \
+  -o /tmp/apex_indexed_ks_per_pixel_nm_detail_stack_frag.spv \
+  native/tests/shaders/indexed_ks_per_pixel_nm_detail_stack.frag
+spirv-val --target-env vulkan1.0 /tmp/apex_indexed_ks_per_pixel_nm_detail_stack_vert.spv
+spirv-val --target-env vulkan1.0 /tmp/apex_indexed_ks_per_pixel_nm_detail_stack_frag.spv
+```
+
+- Vertex source SHA-256: `27b9f93f0037d0ab7975d479a4746e42e7481fe094f0dad3da9db116bb456155`
+- Vertex SPIR-V SHA-256: `1d8fa2d0a866c374d42f55e9e92f4a39bbbf8abd6c9beceb8bb9f3de5945d34c`
+- Fragment source SHA-256: `0f3c9c998c7b2d2f21ccc41302437d333fe4f0ec131b94f4c683e0cb090d2f98`
+- Fragment SPIR-V SHA-256: `d1fbeef4ac21256fe23bcea005f84ec0c88dee253d7911d1d216bad86b592dd0`
+
+SwiftShader execution uses a diffuse alpha of zero. This value gives the detail stack a full mask.
+
+- `useDetail=0`: `(35,70,42,0)`. The shader preserves the base diffuse result.
+- `detailUVMultiplier=1`: `(35,18,21,0)`. The second detail texel changes the diffuse color.
+- `detailUVMultiplier=2`: `(9,70,21,0)`. Repeated UVs select the first detail texel.
+- `txDetail.a=0`: `(35,70,42,0)`. The detail alpha suppresses mapped specular.
+- `txDetail.a=1`: `(102,137,109,0)`. The detail alpha restores mapped specular.
+- `detailNormalBlend=1`: `(26,13,16,0)`. The normal-detail texture changes the tangent-space normal.
+
+The same run passes descriptor-switch batches and a mixed 6/8/12-binding batch.

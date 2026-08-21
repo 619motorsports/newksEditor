@@ -101,7 +101,8 @@ struct StaticSceneFrameDescription {
     std::optional<KsPerPixelFrameConstants> frame_constants;
     // For caller_tables authority, these non-owning tables use the final
     // Kn5File::textures ordering. When a prepared packet uses txDiffuse,
-    // txNormal, or txMaps, both lengths must equal the final texture count.
+    // txNormal, txMaps, txDetail, or txNormalDetail, both lengths must equal
+    // the final texture count.
     // Used entries must remain alive through the synchronous draw; unused
     // entries can be null. The embedded_kn5 authority ignores these tables
     // and uses owned resources.
@@ -141,6 +142,8 @@ private:
         std::uint32_t diffuse = invalid_draw_texture_index;
         std::uint32_t normal = invalid_draw_texture_index;
         std::uint32_t maps = invalid_draw_texture_index;
+        std::uint32_t detail = invalid_draw_texture_index;
+        std::uint32_t normal_detail = invalid_draw_texture_index;
     };
 
     Backend backend_ = Backend::Vulkan;

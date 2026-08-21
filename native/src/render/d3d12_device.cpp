@@ -157,10 +157,16 @@ struct D3D12MaterialDescriptorBinding {
     D3D12_GPU_DESCRIPTOR_HANDLE normal_sampler_gpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE maps_srv_gpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE maps_sampler_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE detail_srv_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE detail_sampler_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE normal_detail_srv_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE normal_detail_sampler_gpu{};
     bool constant_enabled = false;
     bool frame_enabled = false;
     bool normal_enabled = false;
     bool maps_enabled = false;
+    bool detail_enabled = false;
+    bool normal_detail_enabled = false;
     bool enabled = false;
 };
 
@@ -212,6 +218,34 @@ struct D3D12MaterialDescriptorBinding {
     return texture && sampler;
 }
 
+[[nodiscard]] bool d3d12_pipeline_has_detail_texture(const PipelineProgram& pipeline) noexcept {
+    bool texture = false;
+    bool sampler = false;
+    for (const PipelineResourceBinding& resource : pipeline.resources) {
+        if (resource.set == 0U && resource.binding == 8U &&
+            resource.kind == PipelineResourceKind::sampled_texture)
+            texture = true;
+        if (resource.set == 0U && resource.binding == 9U &&
+            resource.kind == PipelineResourceKind::sampler)
+            sampler = true;
+    }
+    return texture && sampler;
+}
+
+[[nodiscard]] bool d3d12_pipeline_has_normal_detail_texture(const PipelineProgram& pipeline) noexcept {
+    bool texture = false;
+    bool sampler = false;
+    for (const PipelineResourceBinding& resource : pipeline.resources) {
+        if (resource.set == 0U && resource.binding == 10U &&
+            resource.kind == PipelineResourceKind::sampled_texture)
+            texture = true;
+        if (resource.set == 0U && resource.binding == 11U &&
+            resource.kind == PipelineResourceKind::sampler)
+            sampler = true;
+    }
+    return texture && sampler;
+}
+
 [[nodiscard]] bool prepare_d3d12_material_binding(
     const std::shared_ptr<D3D12Context>& context,
     const IndexedStaticMeshDrawRequest& request,
@@ -221,6 +255,8 @@ struct D3D12MaterialDescriptorBinding {
     UINT frame_cbv_index,
     UINT normal_srv_index,
     UINT maps_srv_index,
+    UINT detail_srv_index,
+    UINT normal_detail_srv_index,
     D3D12MaterialDescriptorBinding& output,
     Diagnostic& diagnostic);
 
@@ -1149,10 +1185,14 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
         const bool has_frame_constants = d3d12_pipeline_has_frame_constants(*request.pipeline);
         const bool has_normal_texture = d3d12_pipeline_has_normal_texture(*request.pipeline);
         const bool has_maps_texture = d3d12_pipeline_has_maps_texture(*request.pipeline);
+        const bool has_detail_texture = d3d12_pipeline_has_detail_texture(*request.pipeline);
+        const bool has_normal_detail_texture = d3d12_pipeline_has_normal_detail_texture(*request.pipeline);
         srv_heap_description.NumDescriptors = 1U + static_cast<UINT>(has_material_constants) +
                                               static_cast<UINT>(has_frame_constants) +
                                               static_cast<UINT>(has_normal_texture) +
-                                              static_cast<UINT>(has_maps_texture);
+                                              static_cast<UINT>(has_maps_texture) +
+                                              static_cast<UINT>(has_detail_texture) +
+                                              static_cast<UINT>(has_normal_detail_texture);
         srv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         srv_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         ComPtr<ID3D12DescriptorHeap> srv_heap;
@@ -1173,6 +1213,19 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
                                                  ? 1U + static_cast<UINT>(has_material_constants) +
                                                        static_cast<UINT>(has_frame_constants) +
                                                        static_cast<UINT>(has_normal_texture)
+                                                 : 0U,
+                                             has_detail_texture
+                                                 ? 1U + static_cast<UINT>(has_material_constants) +
+                                                       static_cast<UINT>(has_frame_constants) +
+                                                       static_cast<UINT>(has_normal_texture) +
+                                                       static_cast<UINT>(has_maps_texture)
+                                                 : 0U,
+                                             has_normal_detail_texture
+                                                 ? 1U + static_cast<UINT>(has_material_constants) +
+                                                       static_cast<UINT>(has_frame_constants) +
+                                                       static_cast<UINT>(has_normal_texture) +
+                                                       static_cast<UINT>(has_maps_texture) +
+                                                       static_cast<UINT>(has_detail_texture)
                                                  : 0U,
                                              material_binding, diagnostic))
             return false;
@@ -1197,7 +1250,15 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     D3D12_ROOT_PARAMETER maps_srv_parameter{};
     D3D12_DESCRIPTOR_RANGE maps_sampler_range{};
     D3D12_ROOT_PARAMETER maps_sampler_parameter{};
-    std::array<D3D12_ROOT_PARAMETER, 9> root_parameters{};
+    D3D12_DESCRIPTOR_RANGE detail_srv_range{};
+    D3D12_ROOT_PARAMETER detail_srv_parameter{};
+    D3D12_DESCRIPTOR_RANGE detail_sampler_range{};
+    D3D12_ROOT_PARAMETER detail_sampler_parameter{};
+    D3D12_DESCRIPTOR_RANGE normal_detail_srv_range{};
+    D3D12_ROOT_PARAMETER normal_detail_srv_parameter{};
+    D3D12_DESCRIPTOR_RANGE normal_detail_sampler_range{};
+    D3D12_ROOT_PARAMETER normal_detail_sampler_parameter{};
+    std::array<D3D12_ROOT_PARAMETER, 13> root_parameters{};
     UINT root_parameter_count = 0U;
     if (draw_matrices != nullptr) {
         transform_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -1299,6 +1360,52 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
             maps_sampler_parameter.DescriptorTable.pDescriptorRanges = &maps_sampler_range;
             maps_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
             root_parameters[root_parameter_count++] = maps_sampler_parameter;
+        }
+        if (d3d12_pipeline_has_detail_texture(*request.pipeline)) {
+            detail_srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            detail_srv_range.NumDescriptors = 1U;
+            detail_srv_range.BaseShaderRegister = 8U;
+            detail_srv_range.RegisterSpace = 0U;
+            detail_srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+            detail_srv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            detail_srv_parameter.DescriptorTable.NumDescriptorRanges = 1U;
+            detail_srv_parameter.DescriptorTable.pDescriptorRanges = &detail_srv_range;
+            detail_srv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            root_parameters[root_parameter_count++] = detail_srv_parameter;
+
+            detail_sampler_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+            detail_sampler_range.NumDescriptors = 1U;
+            detail_sampler_range.BaseShaderRegister = 9U;
+            detail_sampler_range.RegisterSpace = 0U;
+            detail_sampler_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+            detail_sampler_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            detail_sampler_parameter.DescriptorTable.NumDescriptorRanges = 1U;
+            detail_sampler_parameter.DescriptorTable.pDescriptorRanges = &detail_sampler_range;
+            detail_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            root_parameters[root_parameter_count++] = detail_sampler_parameter;
+        }
+        if (d3d12_pipeline_has_normal_detail_texture(*request.pipeline)) {
+            normal_detail_srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            normal_detail_srv_range.NumDescriptors = 1U;
+            normal_detail_srv_range.BaseShaderRegister = 10U;
+            normal_detail_srv_range.RegisterSpace = 0U;
+            normal_detail_srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+            normal_detail_srv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            normal_detail_srv_parameter.DescriptorTable.NumDescriptorRanges = 1U;
+            normal_detail_srv_parameter.DescriptorTable.pDescriptorRanges = &normal_detail_srv_range;
+            normal_detail_srv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            root_parameters[root_parameter_count++] = normal_detail_srv_parameter;
+
+            normal_detail_sampler_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+            normal_detail_sampler_range.NumDescriptors = 1U;
+            normal_detail_sampler_range.BaseShaderRegister = 11U;
+            normal_detail_sampler_range.RegisterSpace = 0U;
+            normal_detail_sampler_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+            normal_detail_sampler_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            normal_detail_sampler_parameter.DescriptorTable.NumDescriptorRanges = 1U;
+            normal_detail_sampler_parameter.DescriptorTable.pDescriptorRanges = &normal_detail_sampler_range;
+            normal_detail_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            root_parameters[root_parameter_count++] = normal_detail_sampler_parameter;
         }
     }
     root_description.NumParameters = root_parameter_count;
@@ -1517,6 +1624,25 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
             list->SetGraphicsRootDescriptorTable(maps_root_index, material_binding.maps_srv_gpu);
             list->SetGraphicsRootDescriptorTable(maps_root_index + 1U, material_binding.maps_sampler_gpu);
         }
+        if (material_binding.detail_enabled) {
+            const UINT detail_root_index = constant_root_index +
+                                           static_cast<UINT>(material_binding.frame_enabled) +
+                                           2U * static_cast<UINT>(material_binding.normal_enabled) +
+                                           2U * static_cast<UINT>(material_binding.maps_enabled);
+            list->SetGraphicsRootDescriptorTable(detail_root_index, material_binding.detail_srv_gpu);
+            list->SetGraphicsRootDescriptorTable(detail_root_index + 1U, material_binding.detail_sampler_gpu);
+        }
+        if (material_binding.normal_detail_enabled) {
+            const UINT normal_detail_root_index = constant_root_index +
+                                                  static_cast<UINT>(material_binding.frame_enabled) +
+                                                  2U * static_cast<UINT>(material_binding.normal_enabled) +
+                                                  2U * static_cast<UINT>(material_binding.maps_enabled) +
+                                                  2U * static_cast<UINT>(material_binding.detail_enabled);
+            list->SetGraphicsRootDescriptorTable(normal_detail_root_index,
+                                                  material_binding.normal_detail_srv_gpu);
+            list->SetGraphicsRootDescriptorTable(normal_detail_root_index + 1U,
+                                                  material_binding.normal_detail_sampler_gpu);
+        }
     }
     if (draw_matrices != nullptr) {
         list->SetGraphicsRoot32BitConstants(
@@ -1673,6 +1799,8 @@ bool draw_indexed_static_mesh_batch_and_readback(
     bool has_frame_constants = false;
     bool has_normal_texture = false;
     bool has_maps_texture = false;
+    bool has_detail_texture = false;
+    bool has_normal_detail_texture = false;
     for (const IndexedStaticMeshDrawRequest& request : batch.draws) {
         if (!request.pipeline->resources.empty()) {
             has_material_resources = true;
@@ -1684,13 +1812,19 @@ bool draw_indexed_static_mesh_batch_and_readback(
                                  d3d12_pipeline_has_normal_texture(*request.pipeline);
             has_maps_texture = has_maps_texture ||
                                d3d12_pipeline_has_maps_texture(*request.pipeline);
+            has_detail_texture = has_detail_texture ||
+                                 d3d12_pipeline_has_detail_texture(*request.pipeline);
+            has_normal_detail_texture = has_normal_detail_texture ||
+                                        d3d12_pipeline_has_normal_detail_texture(*request.pipeline);
         }
     }
     const std::size_t material_descriptor_stride =
         1U + static_cast<std::size_t>(has_material_constants) +
         static_cast<std::size_t>(has_frame_constants) +
         static_cast<std::size_t>(has_normal_texture) +
-        static_cast<std::size_t>(has_maps_texture);
+        static_cast<std::size_t>(has_maps_texture) +
+        static_cast<std::size_t>(has_detail_texture) +
+        static_cast<std::size_t>(has_normal_detail_texture);
     if (has_material_resources &&
         (draws.size() > std::numeric_limits<std::size_t>::max() / material_descriptor_stride ||
          draws.size() * material_descriptor_stride > static_cast<std::size_t>(std::numeric_limits<UINT>::max()))) {
@@ -1730,6 +1864,19 @@ bool draw_indexed_static_mesh_batch_and_readback(
                                                                    (has_frame_constants ? 1U : 0U) +
                                                                    (has_normal_texture ? 1U : 0U) +
                                                                    (has_maps_texture ? 1U : 0U)),
+                                                 static_cast<UINT>(descriptor_index +
+                                                                   (has_material_constants ? 1U : 0U) +
+                                                                   (has_frame_constants ? 1U : 0U) +
+                                                                   (has_normal_texture ? 1U : 0U) +
+                                                                   (has_maps_texture ? 1U : 0U) +
+                                                                   (has_detail_texture ? 1U : 0U)),
+                                                 static_cast<UINT>(descriptor_index +
+                                                                   (has_material_constants ? 1U : 0U) +
+                                                                   (has_frame_constants ? 1U : 0U) +
+                                                                   (has_normal_texture ? 1U : 0U) +
+                                                                   (has_maps_texture ? 1U : 0U) +
+                                                                   (has_detail_texture ? 1U : 0U) +
+                                                                   (has_normal_detail_texture ? 1U : 0U)),
                                                  material_bindings[index], diagnostic))
                 return false;
         }
@@ -1779,7 +1926,15 @@ bool draw_indexed_static_mesh_batch_and_readback(
         D3D12_ROOT_PARAMETER maps_srv_parameter{};
         D3D12_DESCRIPTOR_RANGE maps_sampler_range{};
         D3D12_ROOT_PARAMETER maps_sampler_parameter{};
-        std::array<D3D12_ROOT_PARAMETER, 9> root_parameters{};
+        D3D12_DESCRIPTOR_RANGE detail_srv_range{};
+        D3D12_ROOT_PARAMETER detail_srv_parameter{};
+        D3D12_DESCRIPTOR_RANGE detail_sampler_range{};
+        D3D12_ROOT_PARAMETER detail_sampler_parameter{};
+        D3D12_DESCRIPTOR_RANGE normal_detail_srv_range{};
+        D3D12_ROOT_PARAMETER normal_detail_srv_parameter{};
+        D3D12_DESCRIPTOR_RANGE normal_detail_sampler_range{};
+        D3D12_ROOT_PARAMETER normal_detail_sampler_parameter{};
+        std::array<D3D12_ROOT_PARAMETER, 13> root_parameters{};
         UINT root_parameter_count = 1U;
         root_parameters[0] = transform_parameter;
         if (!program.resources.empty()) {
@@ -1873,6 +2028,52 @@ bool draw_indexed_static_mesh_batch_and_readback(
                 maps_sampler_parameter.DescriptorTable.pDescriptorRanges = &maps_sampler_range;
                 maps_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
                 root_parameters[root_parameter_count++] = maps_sampler_parameter;
+            }
+            if (d3d12_pipeline_has_detail_texture(program)) {
+                detail_srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+                detail_srv_range.NumDescriptors = 1U;
+                detail_srv_range.BaseShaderRegister = 8U;
+                detail_srv_range.RegisterSpace = 0U;
+                detail_srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+                detail_srv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                detail_srv_parameter.DescriptorTable.NumDescriptorRanges = 1U;
+                detail_srv_parameter.DescriptorTable.pDescriptorRanges = &detail_srv_range;
+                detail_srv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                root_parameters[root_parameter_count++] = detail_srv_parameter;
+
+                detail_sampler_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+                detail_sampler_range.NumDescriptors = 1U;
+                detail_sampler_range.BaseShaderRegister = 9U;
+                detail_sampler_range.RegisterSpace = 0U;
+                detail_sampler_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+                detail_sampler_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                detail_sampler_parameter.DescriptorTable.NumDescriptorRanges = 1U;
+                detail_sampler_parameter.DescriptorTable.pDescriptorRanges = &detail_sampler_range;
+                detail_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                root_parameters[root_parameter_count++] = detail_sampler_parameter;
+            }
+            if (d3d12_pipeline_has_normal_detail_texture(program)) {
+                normal_detail_srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+                normal_detail_srv_range.NumDescriptors = 1U;
+                normal_detail_srv_range.BaseShaderRegister = 10U;
+                normal_detail_srv_range.RegisterSpace = 0U;
+                normal_detail_srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+                normal_detail_srv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                normal_detail_srv_parameter.DescriptorTable.NumDescriptorRanges = 1U;
+                normal_detail_srv_parameter.DescriptorTable.pDescriptorRanges = &normal_detail_srv_range;
+                normal_detail_srv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                root_parameters[root_parameter_count++] = normal_detail_srv_parameter;
+
+                normal_detail_sampler_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+                normal_detail_sampler_range.NumDescriptors = 1U;
+                normal_detail_sampler_range.BaseShaderRegister = 11U;
+                normal_detail_sampler_range.RegisterSpace = 0U;
+                normal_detail_sampler_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+                normal_detail_sampler_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                normal_detail_sampler_parameter.DescriptorTable.NumDescriptorRanges = 1U;
+                normal_detail_sampler_parameter.DescriptorTable.pDescriptorRanges = &normal_detail_sampler_range;
+                normal_detail_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                root_parameters[root_parameter_count++] = normal_detail_sampler_parameter;
             }
         }
         D3D12_ROOT_SIGNATURE_DESC root_description{};
@@ -2094,6 +2295,27 @@ bool draw_indexed_static_mesh_batch_and_readback(
                 list->SetGraphicsRootDescriptorTable(maps_root_index, material_bindings[index].maps_srv_gpu);
                 list->SetGraphicsRootDescriptorTable(maps_root_index + 1U,
                                                       material_bindings[index].maps_sampler_gpu);
+            }
+            if (material_bindings[index].detail_enabled) {
+                const UINT detail_root_index = constant_root_index +
+                                               static_cast<UINT>(material_bindings[index].frame_enabled) +
+                                               2U * static_cast<UINT>(material_bindings[index].normal_enabled) +
+                                               2U * static_cast<UINT>(material_bindings[index].maps_enabled);
+                list->SetGraphicsRootDescriptorTable(detail_root_index,
+                                                      material_bindings[index].detail_srv_gpu);
+                list->SetGraphicsRootDescriptorTable(detail_root_index + 1U,
+                                                      material_bindings[index].detail_sampler_gpu);
+            }
+            if (material_bindings[index].normal_detail_enabled) {
+                const UINT normal_detail_root_index = constant_root_index +
+                                                      static_cast<UINT>(material_bindings[index].frame_enabled) +
+                                                      2U * static_cast<UINT>(material_bindings[index].normal_enabled) +
+                                                      2U * static_cast<UINT>(material_bindings[index].maps_enabled) +
+                                                      2U * static_cast<UINT>(material_bindings[index].detail_enabled);
+                list->SetGraphicsRootDescriptorTable(normal_detail_root_index,
+                                                      material_bindings[index].normal_detail_srv_gpu);
+                list->SetGraphicsRootDescriptorTable(normal_detail_root_index + 1U,
+                                                      material_bindings[index].normal_detail_sampler_gpu);
             }
         }
         list->SetPipelineState(pipelines[index].Get());
@@ -2421,6 +2643,8 @@ bool prepare_d3d12_material_binding(
     UINT frame_cbv_index,
     UINT normal_srv_index,
     UINT maps_srv_index,
+    UINT detail_srv_index,
+    UINT normal_detail_srv_index,
     D3D12MaterialDescriptorBinding& output,
     Diagnostic& diagnostic) {
     output = {};
@@ -2433,6 +2657,8 @@ bool prepare_d3d12_material_binding(
         if (request.sampled_binding.texture != nullptr || request.sampled_binding.sampler != nullptr ||
             request.normal_binding.texture != nullptr || request.normal_binding.sampler != nullptr ||
             request.maps_binding.texture != nullptr || request.maps_binding.sampler != nullptr ||
+            request.detail_binding.texture != nullptr || request.detail_binding.sampler != nullptr ||
+            request.normal_detail_binding.texture != nullptr || request.normal_detail_binding.sampler != nullptr ||
             request.material_binding.buffer != nullptr || request.material_binding.offset_bytes != 0U ||
             request.material_binding.range_bytes != 0U || request.frame_binding.buffer != nullptr ||
             request.frame_binding.offset_bytes != 0U || request.frame_binding.range_bytes != 0U) {
@@ -2458,10 +2684,16 @@ bool prepare_d3d12_material_binding(
     const bool has_frame_constants = d3d12_pipeline_has_frame_constants(*request.pipeline);
     const bool has_normal_texture = d3d12_pipeline_has_normal_texture(*request.pipeline);
     const bool has_maps_texture = d3d12_pipeline_has_maps_texture(*request.pipeline);
+    const bool has_detail_texture = d3d12_pipeline_has_detail_texture(*request.pipeline);
+    const bool has_normal_detail_texture = d3d12_pipeline_has_normal_detail_texture(*request.pipeline);
     const D3D12Texture* normal_texture = nullptr;
     const D3D12Sampler* normal_sampler = nullptr;
     const D3D12Texture* maps_texture = nullptr;
     const D3D12Sampler* maps_sampler = nullptr;
+    const D3D12Texture* detail_texture = nullptr;
+    const D3D12Sampler* detail_sampler = nullptr;
+    const D3D12Texture* normal_detail_texture = nullptr;
+    const D3D12Sampler* normal_detail_sampler = nullptr;
     if (has_normal_texture) {
         if (request.normal_binding.texture == nullptr || request.normal_binding.sampler == nullptr) {
             diagnostic = {"indexed_normal_binding_missing",
@@ -2498,6 +2730,42 @@ bool prepare_d3d12_material_binding(
                       "The D3D12 diffuse ABI cannot receive a maps texture or sampler"};
         return false;
     }
+    if (has_detail_texture) {
+        if (request.detail_binding.texture == nullptr || request.detail_binding.sampler == nullptr) {
+            diagnostic = {"indexed_detail_binding_missing",
+                          "D3D12 detail binding requires both a texture and sampler"};
+            return false;
+        }
+        detail_texture = dynamic_cast<const D3D12Texture*>(request.detail_binding.texture);
+        detail_sampler = dynamic_cast<const D3D12Sampler*>(request.detail_binding.sampler);
+        if (detail_texture == nullptr || detail_sampler == nullptr) {
+            diagnostic = {"indexed_detail_type_unsupported",
+                          "The D3D12 device received an unknown detail resource handle"};
+            return false;
+        }
+    } else if (request.detail_binding.texture != nullptr || request.detail_binding.sampler != nullptr) {
+        diagnostic = {"indexed_detail_binding_unexpected",
+                      "The D3D12 material ABI cannot receive a detail texture or sampler"};
+        return false;
+    }
+    if (has_normal_detail_texture) {
+        if (request.normal_detail_binding.texture == nullptr || request.normal_detail_binding.sampler == nullptr) {
+            diagnostic = {"indexed_normal_detail_binding_missing",
+                          "D3D12 normal-detail binding requires both a texture and sampler"};
+            return false;
+        }
+        normal_detail_texture = dynamic_cast<const D3D12Texture*>(request.normal_detail_binding.texture);
+        normal_detail_sampler = dynamic_cast<const D3D12Sampler*>(request.normal_detail_binding.sampler);
+        if (normal_detail_texture == nullptr || normal_detail_sampler == nullptr) {
+            diagnostic = {"indexed_normal_detail_type_unsupported",
+                          "The D3D12 device received an unknown normal-detail resource handle"};
+            return false;
+        }
+    } else if (request.normal_detail_binding.texture != nullptr || request.normal_detail_binding.sampler != nullptr) {
+        diagnostic = {"indexed_normal_detail_binding_unexpected",
+                      "The D3D12 material ABI cannot receive a normal-detail texture or sampler"};
+        return false;
+    }
     if (texture->context() != context.get() || sampler->context() != context.get()) {
         diagnostic = {"indexed_resource_context_mismatch",
                       "D3D12 material resources belong to another device"};
@@ -2515,6 +2783,19 @@ bool prepare_d3d12_material_binding(
                       "D3D12 maps resources belong to another device"};
         return false;
     }
+    if (has_detail_texture &&
+        (detail_texture->context() != context.get() || detail_sampler->context() != context.get())) {
+        diagnostic = {"indexed_detail_context_mismatch",
+                      "D3D12 detail resources belong to another device"};
+        return false;
+    }
+    if (has_normal_detail_texture &&
+        (normal_detail_texture->context() != context.get() ||
+         normal_detail_sampler->context() != context.get())) {
+        diagnostic = {"indexed_normal_detail_context_mismatch",
+                      "D3D12 normal-detail resources belong to another device"};
+        return false;
+    }
     if (texture->resource() == nullptr || !texture->initialized()) {
         diagnostic = {"indexed_resource_texture_uninitialized",
                       "A D3D12 sampled texture must contain uploaded data before drawing"};
@@ -2528,6 +2809,17 @@ bool prepare_d3d12_material_binding(
     if (has_maps_texture && (maps_texture->resource() == nullptr || !maps_texture->initialized())) {
         diagnostic = {"indexed_maps_texture_uninitialized",
                       "A D3D12 maps texture must contain uploaded data before drawing"};
+        return false;
+    }
+    if (has_detail_texture && (detail_texture->resource() == nullptr || !detail_texture->initialized())) {
+        diagnostic = {"indexed_detail_texture_uninitialized",
+                      "A D3D12 detail texture must contain uploaded data before drawing"};
+        return false;
+    }
+    if (has_normal_detail_texture &&
+        (normal_detail_texture->resource() == nullptr || !normal_detail_texture->initialized())) {
+        diagnostic = {"indexed_normal_detail_texture_uninitialized",
+                      "A D3D12 normal-detail texture must contain uploaded data before drawing"};
         return false;
     }
     constexpr UINT required_state = static_cast<UINT>(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -2546,6 +2838,18 @@ bool prepare_d3d12_material_binding(
         (static_cast<UINT>(maps_texture->state()) & required_state) == 0U) {
         diagnostic = {"indexed_maps_texture_state_invalid",
                       "A D3D12 maps texture is not in pixel-shader-resource state"};
+        return false;
+    }
+    if (has_detail_texture &&
+        (static_cast<UINT>(detail_texture->state()) & required_state) == 0U) {
+        diagnostic = {"indexed_detail_texture_state_invalid",
+                      "A D3D12 detail texture is not in pixel-shader-resource state"};
+        return false;
+    }
+    if (has_normal_detail_texture &&
+        (static_cast<UINT>(normal_detail_texture->state()) & required_state) == 0U) {
+        diagnostic = {"indexed_normal_detail_texture_state_invalid",
+                      "A D3D12 normal-detail texture is not in pixel-shader-resource state"};
         return false;
     }
     if (srv_heap == nullptr) {
@@ -2569,7 +2873,9 @@ bool prepare_d3d12_material_binding(
         (has_material_constants && cbv_index >= heap_description.NumDescriptors) ||
         (has_frame_constants && frame_cbv_index >= heap_description.NumDescriptors) ||
         (has_normal_texture && normal_srv_index >= heap_description.NumDescriptors) ||
-        (has_maps_texture && maps_srv_index >= heap_description.NumDescriptors)) {
+        (has_maps_texture && maps_srv_index >= heap_description.NumDescriptors) ||
+        (has_detail_texture && detail_srv_index >= heap_description.NumDescriptors) ||
+        (has_normal_detail_texture && normal_detail_srv_index >= heap_description.NumDescriptors)) {
         diagnostic = {"indexed_resource_descriptor_slot_invalid",
                       "D3D12 material descriptor slot is outside its bounded shader-visible heap"};
         return false;
@@ -2633,6 +2939,58 @@ bool prepare_d3d12_material_binding(
             return false;
         }
     }
+    DXGI_FORMAT detail_format = DXGI_FORMAT_UNKNOWN;
+    if (has_detail_texture) {
+        const TextureDescription& detail_description = detail_texture->info().description;
+        detail_format = dxgi_texture_format(detail_description.format);
+        const std::uint32_t detail_usage = static_cast<std::uint32_t>(detail_description.usage);
+        const std::uint32_t forbidden_usage =
+            static_cast<std::uint32_t>(TextureUsage::color_attachment) |
+            static_cast<std::uint32_t>(TextureUsage::storage) |
+            static_cast<std::uint32_t>(TextureUsage::transfer_destination);
+        if ((detail_usage & static_cast<std::uint32_t>(TextureUsage::sampled)) == 0U ||
+            (detail_usage & forbidden_usage) != 0U) {
+            diagnostic = {"indexed_detail_texture_usage_invalid",
+                          "D3D12 detail textures require sampled-only usage"};
+            return false;
+        }
+        const bool rgba8 = detail_description.format == TextureFormat::rgba8_unorm ||
+                           detail_description.format == TextureFormat::rgba8_srgb ||
+                           detail_description.format == TextureFormat::bgra8_unorm ||
+                           detail_description.format == TextureFormat::bgra8_srgb;
+        if (!rgba8 || detail_format == DXGI_FORMAT_UNKNOWN || detail_description.width == 0U ||
+            detail_description.height == 0U || detail_description.mip_levels == 0U ||
+            detail_description.array_layers != 1U) {
+            diagnostic = {"indexed_detail_texture_format_unsupported",
+                          "D3D12 detail textures require nonempty one-layer RGBA8 or BGRA8 data"};
+            return false;
+        }
+    }
+    DXGI_FORMAT normal_detail_format = DXGI_FORMAT_UNKNOWN;
+    if (has_normal_detail_texture) {
+        const TextureDescription& normal_detail_description = normal_detail_texture->info().description;
+        normal_detail_format = dxgi_texture_format(normal_detail_description.format);
+        const std::uint32_t normal_detail_usage = static_cast<std::uint32_t>(normal_detail_description.usage);
+        const std::uint32_t forbidden_usage =
+            static_cast<std::uint32_t>(TextureUsage::color_attachment) |
+            static_cast<std::uint32_t>(TextureUsage::storage) |
+            static_cast<std::uint32_t>(TextureUsage::transfer_destination);
+        if ((normal_detail_usage & static_cast<std::uint32_t>(TextureUsage::sampled)) == 0U ||
+            (normal_detail_usage & forbidden_usage) != 0U) {
+            diagnostic = {"indexed_normal_detail_texture_usage_invalid",
+                          "D3D12 normal-detail textures require sampled-only usage"};
+            return false;
+        }
+        const bool linear_rgba8 = normal_detail_description.format == TextureFormat::rgba8_unorm ||
+                                  normal_detail_description.format == TextureFormat::bgra8_unorm;
+        if (!linear_rgba8 || normal_detail_format == DXGI_FORMAT_UNKNOWN ||
+            normal_detail_description.width == 0U || normal_detail_description.height == 0U ||
+            normal_detail_description.mip_levels == 0U || normal_detail_description.array_layers != 1U) {
+            diagnostic = {"indexed_normal_detail_texture_format_unsupported",
+                          "D3D12 normal-detail textures require nonempty one-layer linear RGBA8 or BGRA8 data"};
+            return false;
+        }
+    }
     const UINT descriptor_size = context->device->GetDescriptorHandleIncrementSize(
         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     if (descriptor_size == 0U ||
@@ -2640,7 +2998,9 @@ bool prepare_d3d12_material_binding(
         static_cast<UINT64>(cbv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
         static_cast<UINT64>(frame_cbv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
         static_cast<UINT64>(normal_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
-        static_cast<UINT64>(maps_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size) {
+        static_cast<UINT64>(maps_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
+        static_cast<UINT64>(detail_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
+        static_cast<UINT64>(normal_detail_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size) {
         diagnostic = {"indexed_resource_descriptor_offset_overflow",
                       "D3D12 material descriptor offset exceeds handle addressability"};
         return false;
@@ -2650,11 +3010,15 @@ bool prepare_d3d12_material_binding(
     const UINT64 frame_cbv_offset = static_cast<UINT64>(frame_cbv_index) * descriptor_size;
     const UINT64 normal_srv_offset = static_cast<UINT64>(normal_srv_index) * descriptor_size;
     const UINT64 maps_srv_offset = static_cast<UINT64>(maps_srv_index) * descriptor_size;
+    const UINT64 detail_srv_offset = static_cast<UINT64>(detail_srv_index) * descriptor_size;
+    const UINT64 normal_detail_srv_offset = static_cast<UINT64>(normal_detail_srv_index) * descriptor_size;
     if (srv_offset > std::numeric_limits<SIZE_T>::max() ||
         cbv_offset > std::numeric_limits<SIZE_T>::max() ||
         frame_cbv_offset > std::numeric_limits<SIZE_T>::max() ||
         normal_srv_offset > std::numeric_limits<SIZE_T>::max() ||
-        maps_srv_offset > std::numeric_limits<SIZE_T>::max()) {
+        maps_srv_offset > std::numeric_limits<SIZE_T>::max() ||
+        detail_srv_offset > std::numeric_limits<SIZE_T>::max() ||
+        normal_detail_srv_offset > std::numeric_limits<SIZE_T>::max()) {
         diagnostic = {"indexed_resource_descriptor_offset_overflow",
                       "D3D12 material descriptor offset exceeds handle addressability"};
         return false;
@@ -2742,6 +3106,66 @@ bool prepare_d3d12_material_binding(
         output.maps_srv_gpu = maps_gpu;
         output.maps_sampler_gpu = maps_sampler->gpu_descriptor();
         output.maps_enabled = true;
+    }
+    if (has_detail_texture) {
+        D3D12_CPU_DESCRIPTOR_HANDLE detail_cpu = srv_heap->GetCPUDescriptorHandleForHeapStart();
+        if (detail_cpu.ptr > std::numeric_limits<SIZE_T>::max() - static_cast<SIZE_T>(detail_srv_offset)) {
+            diagnostic = {"indexed_resource_descriptor_offset_overflow",
+                          "D3D12 detail SRV descriptor CPU handle overflows"};
+            return false;
+        }
+        detail_cpu.ptr += static_cast<SIZE_T>(detail_srv_offset);
+        D3D12_GPU_DESCRIPTOR_HANDLE detail_gpu = srv_heap->GetGPUDescriptorHandleForHeapStart();
+        if (detail_gpu.ptr > std::numeric_limits<UINT64>::max() - detail_srv_offset) {
+            diagnostic = {"indexed_resource_descriptor_offset_overflow",
+                          "D3D12 detail SRV descriptor GPU handle overflows"};
+            return false;
+        }
+        detail_gpu.ptr += detail_srv_offset;
+        D3D12_SHADER_RESOURCE_VIEW_DESC detail_srv{};
+        const TextureDescription& detail_description = detail_texture->info().description;
+        detail_srv.Format = detail_format;
+        detail_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        detail_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        detail_srv.Texture2D.MostDetailedMip = 0U;
+        detail_srv.Texture2D.MipLevels = detail_description.mip_levels;
+        detail_srv.Texture2D.PlaneSlice = 0U;
+        detail_srv.Texture2D.ResourceMinLODClamp = 0.0F;
+        context->device->CreateShaderResourceView(detail_texture->resource(), &detail_srv, detail_cpu);
+        output.detail_srv_gpu = detail_gpu;
+        output.detail_sampler_gpu = detail_sampler->gpu_descriptor();
+        output.detail_enabled = true;
+    }
+    if (has_normal_detail_texture) {
+        D3D12_CPU_DESCRIPTOR_HANDLE normal_detail_cpu = srv_heap->GetCPUDescriptorHandleForHeapStart();
+        if (normal_detail_cpu.ptr >
+            std::numeric_limits<SIZE_T>::max() - static_cast<SIZE_T>(normal_detail_srv_offset)) {
+            diagnostic = {"indexed_resource_descriptor_offset_overflow",
+                          "D3D12 normal-detail SRV descriptor CPU handle overflows"};
+            return false;
+        }
+        normal_detail_cpu.ptr += static_cast<SIZE_T>(normal_detail_srv_offset);
+        D3D12_GPU_DESCRIPTOR_HANDLE normal_detail_gpu = srv_heap->GetGPUDescriptorHandleForHeapStart();
+        if (normal_detail_gpu.ptr > std::numeric_limits<UINT64>::max() - normal_detail_srv_offset) {
+            diagnostic = {"indexed_resource_descriptor_offset_overflow",
+                          "D3D12 normal-detail SRV descriptor GPU handle overflows"};
+            return false;
+        }
+        normal_detail_gpu.ptr += normal_detail_srv_offset;
+        D3D12_SHADER_RESOURCE_VIEW_DESC normal_detail_srv{};
+        const TextureDescription& normal_detail_description = normal_detail_texture->info().description;
+        normal_detail_srv.Format = normal_detail_format;
+        normal_detail_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        normal_detail_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        normal_detail_srv.Texture2D.MostDetailedMip = 0U;
+        normal_detail_srv.Texture2D.MipLevels = normal_detail_description.mip_levels;
+        normal_detail_srv.Texture2D.PlaneSlice = 0U;
+        normal_detail_srv.Texture2D.ResourceMinLODClamp = 0.0F;
+        context->device->CreateShaderResourceView(normal_detail_texture->resource(), &normal_detail_srv,
+                                                  normal_detail_cpu);
+        output.normal_detail_srv_gpu = normal_detail_gpu;
+        output.normal_detail_sampler_gpu = normal_detail_sampler->gpu_descriptor();
+        output.normal_detail_enabled = true;
     }
 
     if (has_material_constants) {
