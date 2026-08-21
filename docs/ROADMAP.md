@@ -32,7 +32,11 @@ vertical slice is only the foundation.
   refraction reads a mipmapped opaque HDR scene resolve with the recovered projected-
   normal offset. The stock `ksTyres` and `newStefano_ksTyres` path now binds all five
   textures. It also previews the recovered blur, dirt, normal, specular, Fresnel-cap,
-  and additive-reflection operations.
+  and additive-reflection operations. Stock `ksBrakeDisc` materials now bind their
+  five native textures. The preview uses the recovered diffuse/blur and tangent-normal
+  blends, base-multiplied glow, direct specular, Fresnel cap, and additive reflection
+  branch. A static authoring control computes the recovered temperature target.
+  Runtime wheel speed and time-based hot or cool lag remain game-only state.
   Refraction does not yet feed earlier transparent layers back into later ones.
 - The portable FBX importer now reads binary and ASCII FBX scenes through Three.js.
   It imports static and skinned geometry, material groups, transforms, normals, UVs,

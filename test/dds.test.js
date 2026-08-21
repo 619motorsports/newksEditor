@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { decodeDdsRgba, inspectDds } from "../src/dds.js";
+import { decodeDdsRgba, inspectDds, webglCompressedMipChainSafe } from "../src/dds.js";
 import { parseKn5 } from "../src/kn5.js";
 import { assettoPath, carMainKn5 } from "./fixture-paths.js";
 
@@ -55,6 +55,13 @@ test("recognizes legacy BC5 and reconstructs a positive normal Z channel", () =>
 test("software-decodes BC1 colors and transparent palette entries",()=>{const opaque=legacyBcDds("DXT1",[0x00,0xf8,0xe0,0x07,0xe4,0,0,0]),transparent=legacyBcDds("DXT1",[0,0,0xff,0xff,3,0,0,0]);const pixels=decodeDdsRgba(opaque)[0].pixels;assert.deepEqual([...pixels.slice(0,16)],[255,0,0,255,0,255,0,255,170,85,0,255,85,170,0,255]);assert.equal(decodeDdsRgba(transparent)[0].pixels[3],0);});
 
 test("software-decodes BC2 and BC3 alpha blocks",()=>{const color=[0x00,0xf8,0xe0,0x07,0,0,0,0],bc2=legacyBcDds("DXT3",[0x0f,0,0,0,0,0,0,0,...color]),bc3=legacyBcDds("DXT5",[255,0,1,0,0,0,0,0,...color]);assert.deepEqual([...decodeDdsRgba(bc2)[0].pixels.slice(3,8)],[255,255,0,0,0]);assert.equal(decodeDdsRgba(bc3)[0].pixels[3],0);});
+
+test("routes non-block-aligned compressed mip chains to the software decoder",()=>{
+  assert.equal(webglCompressedMipChainSafe({compressed:true,width:2048,height:340,mipCount:1}),true);
+  assert.equal(webglCompressedMipChainSafe({compressed:true,width:2048,height:337,mipCount:1}),false);
+  assert.equal(webglCompressedMipChainSafe({compressed:true,width:4,height:4,mipCount:2}),false);
+  for(const descriptor of [null,{compressed:false,width:4,height:4,mipCount:1},{compressed:true,width:0,height:4,mipCount:1},{compressed:true,width:4,height:4,mipCount:99},{compressed:true,width:4,height:4,mipCount:NaN}])assert.equal(webglCompressedMipChainSafe(descriptor),false);
+});
 
 test("decodes DX10 RGBA8 and recognizes BC7 blocks", () => {
   const rgba = dx10Dds(1, 1, 28, [10, 20, 30, 40]), bc7 = dx10Dds(4, 4, 98, Uint8Array.from(Buffer.from("c0caaeb233af63672412324397a9dcfe", "hex")));

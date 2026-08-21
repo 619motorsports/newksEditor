@@ -16,20 +16,21 @@ The managed metadata and strings expose the original editor's major concepts:
 LOD ranges, node layers, cameras, weather, FBX loading, car projects, persistence,
 KN5 export, texture review, and track/car export modes.
 
-## KN5 v6 layout verified in this repository
+## KN5 v4-v6 layout verified in this repository
 
 Offsets and field widths were checked against Kunos' `ks_nissan_370z/collider.kn5`
 and `nissan_370z_lodD.kn5`.
 
 ```text
-v5 header:  "sc6969"[6], version:u32
+v4/v5 header: "sc6969"[6], version:u32
 v6 header:  "sc6969"[6], version:u32, source-marker:u32
 textures:   count:u32, repeated(active:u32, name:string, size:u32, bytes[size])
 materials:  count:u32, repeated material
 scene:      one recursive node
 
 string:     UTF-8 byte-count:u32, bytes[count]
-material:   name:string, shader:string, alpha-blend:u8, alpha-to-coverage:u8, depth:u32,
+material:   name:string, shader:string, alpha-blend:u8, alpha-to-coverage:u8,
+            depth:u32 (v5+ only),
             property-count:u32, properties, resource-count:u32, resources
 property:   name:string, scalar:f32, vec2:vec2, vec3:vec3, vec4:vec4
 resource:   slot:string, texture-id:u32, texture-name:string
@@ -81,6 +82,23 @@ count as a source marker shifted every subsequent field and was the cause of man
 apparent mod-file failures. The corrected v5 path consumes the complete collider and
 also parses the public scene of protected v5 cars.
 
+The installed editor's `content/objects3D/axis.kn5` is version 4. PDB-guided Ghidra
+decompilation identifies `KN5IO::load` at `0x1003ade4`,
+`KN5IO::loadMaterialsBinary` at `0x1003b9de`, and `KN5IO::loadBinaryV2` at
+`0x1003b3d9`. The header loader reads the source marker only when the version is
+greater than 5. The material loader reads depth mode only when the version is
+greater than 4. The node loader reads layer and LOD fields after version 2, and it
+reads the static-mesh bounding sphere and renderable flag after version 3. Thus,
+version 4 uses the current scene layout without the material depth word. The parser
+consumes all 26,660 bytes of both installed copies of this v4 axis asset. The
+supporting decompiler excerpts and fixture hashes are checked in at
+[`docs/evidence/ksnet-kn5-v4-loader.md`](evidence/ksnet-kn5-v4-loader.md).
+
+A production Chrome check loaded the installed SDK copy through the normal WebGL
+pipeline. It rendered one visible mesh with 478 vertices and 578 triangles, loaded
+its BC1 texture, and produced capture hash `fb0c7abe76272bfc`. WebGL returned error
+zero and the browser log contained no errors.
+
 ### Scene visibility semantics
 
 KN5 visibility is hierarchical. A mesh participates in the normal game preview only
@@ -100,6 +118,190 @@ captures hashed to `d641f95f4d93900e` and `5c0726c6ccf2c622`. All four captures
 returned WebGL error zero with no browser exception. The renderer diagnostics retain
 both `gameVisible`/`gameHidden` and current `previewVisible`/`previewHidden` counts so
 the inspection override cannot be mistaken for source visibility.
+
+### Native authoring grid
+
+The supporting IL opcodes, metadata tokens, enum constants, and installed-binary
+hashes are checked in at
+[`docs/evidence/ksnet-grid-il.md`](evidence/ksnet-grid-il.md).
+
+`ksEditor.Form1.btnShowGrid_Click` has token `0x060000e0` and RVA `0x766c`.
+The handler reads `ksGraphics.getGridVisibility`, inverts the value, and passes it to
+`ksGraphics.setGridVisibility`. Those methods read and write the static
+`isGridVisible` field. The `ksGraphics` static constructor does not initialize that
+field, so the grid starts hidden.
+
+`ksNet.ksGraphics.render` has token `0x06000389` and RVA `0x27388`. When
+`isGridVisible` is true, it selects depth mode `eOff`, whose enum value is two. It
+sets the immediate renderer color to `(1, 0, 1)`. It then emits 11 lines in each
+axis from −5 m through +5 m at 1 m intervals. All vertices use Y = 0. Thus, the 22
+magenta segments form an 11 by 11-line XZ grid across a 10 m square. Apex stores the
+toggle as preview state and does not add grid geometry to the opened model.
+
+A production Chrome check used the installed Abarth 500. The grid-on and grid-off
+captures hashed to `afa6b58d63432335` and `7b86ac9436a1cc24`. All 80 textures loaded,
+both captures returned WebGL error zero, and the browser log contained no errors.
+The grid remained visible through the car, which confirms the recovered depth-off state.
+
+### Native view-axis marker
+
+The supporting IL opcodes, PDB-guided native decompilation excerpts, and
+installed-binary hashes are checked in at
+[`docs/evidence/ksnet-view-axis.md`](evidence/ksnet-view-axis.md).
+
+`ksEditor.Form1.viewAxisMenuItem_Click` has token `0x060000a4` and RVA `0x60e4`.
+The handler toggles its checked state. It passes three for the checked state and zero
+for the unchecked state to `ksGraphics.setRenderAxisMode`.
+
+`ksGraphics.setRenderAxisMode` has token `0x060003d3` and RVA `0x20cc8`. The method
+ignores its argument. It toggles `Camera.axisRenderingMode` at byte offset `0x6c`
+between `eAxisNone` (zero) and `eAxisAfter3d` (two). The PDB enum also identifies
+before-3D line mode and two model modes, but the old editor menu does not select them.
+
+PDB-guided Ghidra decompilation identifies `Camera::renderAxis` at `0x10064788` and
+`CameraShadowMapped::renderPass` at `0x1005e681`. The main render pass draws the
+view axis after opaque geometry and before transparent geometry. After-3D mode turns
+depth off and uses an identity world matrix. It emits one-meter lines from the world
+origin to +X, +Y, and +Z. The immediate colors are `(3, 0, 0)`, `(0, 3, 0)`, and
+`(0, 0, 3)`. The renderer restores normal depth mode after this marker.
+
+A production Chrome check used the installed Abarth 500. The view-axis-on and
+view-axis-off captures hashed to `3337caacbb36b37a` and `31b3b6869fe2c020`.
+All 80 textures loaded, both captures returned WebGL error zero, and the browser
+log contained no errors. Visual inspection confirmed the depth-off one-meter RGB
+axis at the world origin.
+
+### Native selected-node axis marker
+
+The supporting IL opcodes, metadata tokens, and installed-binary hash are checked
+in at
+[`docs/evidence/ksnet-selection-axis-il.md`](evidence/ksnet-selection-axis-il.md).
+
+`ksNet.ksGraphics.render` has token `0x06000389` and RVA `0x27388`. After the grid
+pass, the method checks its selected-node argument. A null value skips the marker.
+For a selected node, the renderer gets its 64-byte world matrix through the native
+node vtable method at offset 32. Matrix byte offsets 48, 52, and 56 supply the origin.
+
+The marker is a line list with depth mode `eOff`. Red uses the normalized basis at
+byte offsets 0, 4, and 8. Green uses offsets 16, 20, and 24. Blue negates the basis
+at offsets 32, 36, and 40 before normalization. Each endpoint adds its direction to
+the origin, so each axis is one world meter long. The method restores
+`eDepthNormal` after the three segments.
+
+Apex computes this marker for every selectable hierarchy node, including transform
+nodes without geometry. It rejects truncated, non-finite, or zero-length world bases
+before GPU upload. This guard does not change valid native transforms.
+
+A production Chrome check used the installed Abarth 500 and selected `GEO_Cofano`.
+The recovered origin was `(0, 0.2583455, 0)`. The selected and cleared captures hashed
+to `31b3b6869fe2c020` and `d711076968898938`. All 80 textures loaded, both frames
+returned WebGL error zero, and the browser log contained no errors.
+
+### Native blurred-rim switch
+
+The supporting IL opcodes, metadata tokens, string RVAs, and installed-binary hash
+are checked in at [`docs/evidence/ksnet-rim-blur-il.md`](evidence/ksnet-rim-blur-il.md).
+
+`ksEditor.Form1.btnBlurred_Click` has token `0x060000da` and RVA `0x7460`.
+The handler sends `{F1}` when the scene tree contains at least one root node.
+
+`ksNet.ksGraphics.render` has token `0x06000389` and RVA `0x27388`.
+The method calls `GetAsyncKeyState(112)`. Virtual key 112 is F1.
+`blurNodesTrigger.ignoreSubsequentTrue` changes the held key into one edge.
+
+The edge searches recursively for `RIM_LF`, `RIM_RF`, `RIM_LR`, and `RIM_RR`.
+It then searches for the matching `RIM_BLUR_*` names in the same corner order.
+Missing names do not enter the two result vectors.
+
+The method reads the active byte at offset 184 from the first regular rim.
+It writes the inverse state to each found regular rim. It writes the source state
+to each found blurred rim. Thus, one F1 edge selects a canonical regular or blurred
+set without changing mesh or material data.
+
+`ksNet.ksGraphics.areBlurredRimsVisible` has token `0x0600038b` and RVA `0x271b8`.
+This method returns the active byte from the first found blurred rim. It returns
+false when no blurred rim exists.
+
+The portable preview keeps the parsed KN5 active flags unchanged. It applies the
+recovered state only during visibility evaluation. The F1 handler also ignores
+keyboard-repeat events, which matches the native edge trigger.
+
+### Native cockpit-resolution switch
+
+The supporting IL opcodes, metadata tokens, string RVAs, and installed-binary hash
+are checked in at [`docs/evidence/ksnet-cockpit-switch-il.md`](evidence/ksnet-cockpit-switch-il.md).
+
+`ksEditor.Form1.btnCockpitHr_Click` has token `0x060000db` and RVA `0x747f`.
+The handler sends `{F3}` when the scene tree contains at least one root node.
+
+`ksNet.ksGraphics.render` has token `0x06000389` and RVA `0x27388`.
+The method calls `GetAsyncKeyState(114)`. Virtual key 114 is F3.
+`cockpitNodesTrigger.ignoreSubsequentTrue` changes the held key into one edge.
+
+The edge searches recursively for the exact `COCKPIT_LR` and `COCKPIT_HR` names.
+It does nothing unless both nodes exist. It reads the active byte at offset 184 from
+`COCKPIT_HR`. It writes the inverse state to `COCKPIT_HR` and the opposite state to
+`COCKPIT_LR`. Thus, one F3 edge swaps the two roots and makes them mutually exclusive.
+
+Installed Kunos Abarth 500, BMW 1M, and Porsche 917/30 models use both exact roots.
+Each model starts with `COCKPIT_HR` active and `COCKPIT_LR` inactive. The portable
+preview keeps these parsed active flags unchanged and replaces them only during
+visibility evaluation. Its F3 handler ignores keyboard-repeat events.
+
+A production Chrome check used the installed Abarth 500. The low- and high-resolution
+captures hashed to `211f7398666869ab` and `26bfc49e12d08593`. Both captures returned
+WebGL error zero, and the browser log contained no errors.
+
+### Native damage switch
+
+The checked-in [native F4 IL and stock damage DXBC evidence](evidence/ksnet-damage-switch-il.md)
+records the exact instruction excerpts, binary hashes, and shared-material write.
+
+`ksEditor.Form1.btnDamage_Click` has token `0x060000dc` and RVA `0x74a0`.
+The handler sends `{F4}` when the scene tree contains at least one root node. It then
+queries `ksNet.ksGraphics.areGlassesBrokenShowed` and sets every component of each
+exact `damageZones` material variable to either one or zero for the pending state.
+
+`ksNet.ksGraphics.render` has token `0x06000389` and RVA `0x27388`.
+The method calls `GetAsyncKeyState(115)`. Virtual key 115 is F4.
+`damageGlassNodesTrigger.ignoreSubsequentTrue` changes the held key into one edge.
+The edge toggles `areBrokenGlassShowed` and passes the new state to
+`ksNet.showNodesWithPrefix` for these prefixes, in this order:
+
+1. `DAMAGE_GLASS_FRONT_`
+2. `DAMAGE_GLASS_REAR_`
+3. `DAMAGE_GLASS_LEFT_`
+4. `DAMAGE_GLASS_RIGHT_`
+5. `DAMAGE_GLASS_CENTER_`
+
+`ksNet.showNodesWithPrefix` has token `0x0600006f` and RVA `0x26ed4`.
+It searches recursively for each exact prefix plus a decimal suffix that starts at
+one. It stops a prefix at the first missing suffix. For each found root, it writes
+the active byte at offset 184. It also collects descendant meshes and sets an exact
+`glassDamage` material variable to one when that variable exists.
+
+The stock `ksPerPixelMultiMap_damage_dirt` pixel shader samples `txDamageMask` at
+bind point 21 and `txDamage` at bind point 4. It computes a saturated damage factor
+from `txDamage.a * dot(txDamageMask, damageZones)`. It mixes the base diffuse with
+`txDamage.rgb` by that factor. With the installed Abarth material's `dirt` value of
+zero, it also scales the specular map by `(1 - factor)` and interpolates that result
+toward the sampled normal alpha. The portable exact path is gated on the effective
+`dirt` value being zero. Nonzero dirt uses the labeled base-material preview because
+the remaining stock dirt branch has not been implemented.
+
+The installed Abarth 500 has nine selected damage-glass roots: two front, one rear,
+two left, two right, and two center. All nine roots are authored inactive. Five
+materials define `damageZones`; one uses the exact stock shader and provides both
+damage textures. The portable preview applies the recovered state only during
+visibility and uniform evaluation. It does not change parsed node flags or material
+values. After either previewed F4 state, the preview collects the material objects
+written through selected descendants. Every draw item sharing one of those material
+objects evaluates `glassDamage` as one, matching the native one-way shared-material
+write. Its F4 handler ignores keyboard-repeat events.
+
+A production Chrome check used the installed Abarth 500. The broken and intact
+captures hashed to `1273d5929eab32ac` and `7b86ac9436a1cc24`. Both captures returned
+WebGL error zero, all 80 textures loaded, and the browser log contained no errors.
 
 ## Rendering implication
 
@@ -190,6 +392,51 @@ All four captures returned WebGL error zero without a browser exception. A packa
 Electron check loaded the Porsche model with all 76 textures. It also kept Node.js
 APIs unavailable, rejected external popups, served the content policy, and returned
 WebGL error zero.
+
+### Stock brake-disc shader evidence
+
+The installed `ksBrakeDisc.shader` container is 15,102 bytes. Its SHA-256 value is
+`6627743f61ac4ca4d92213cf42edac8742d795df25d9190e915d46d2efd856ca`.
+The pixel DXBC begins at byte 4,390 and is 10,708 bytes. Its SHA-256 value is
+`b9f4cabe71df18c21d0de21f0cbf60a2ac5a55ebc15fba1d835bff00bd581527`.
+
+DXBC reflection defines five material resources. They are `txDiffuse` at t0,
+`txNormal` at t1, `txGlow` at t2, `txBlur` at t3, and `txNormalBlur` at t4. The
+32-byte `cbTyre` buffer stores `blurLevel`, `glowLevel`, `fresnelC`, and
+`fresnelEXP` at offsets 0, 4, 8, and 12. It stores `isAdditive` and
+`fresnelMaxLevel` at offsets 16 and 20.
+
+The pixel disassembly blends the diffuse and blur RGBA samples with `blurLevel`.
+It decodes and normalizes both tangent-frame normals separately. It then blends
+those world normals with `blurLevel` and does not normalize the result. The shader
+adds `base.rgb * txGlow.rgb * glowLevel` to the lit result. Glow texture alpha is
+unused. Direct specular uses base alpha and `max(ksSpecularEXP, 1)`. Fresnel uses
+the hard cap `min(fresnelC + facing^fresnelEXP, fresnelMaxLevel)`. The additive
+branch adds the cubemap result. The other branch blends toward it. Both branches
+write output alpha one. The shader does not saturate `blurLevel` or `glowLevel`.
+
+Ghidra recovery of `FUN_18051ab30` gives the runtime target for each wheel:
+`maxGlow * carStateMultiplier * saturate((abs(brakeTemperature) - 10) / 150)`.
+The next glow value is `lerp(current, target, saturate(deltaTime * lag))`. The game
+selects `LAG_HOT` when the target is at least the current value. It selects
+`LAG_COOL` otherwise. The same function computes blur as a wheel-state magnitude
+times 0.1, followed by saturation.
+
+The old ksEditor writes `DISC_LF`, `DISC_RF`, `DISC_LR`, `DISC_RR`,
+`FRONT_MAX_GLOW`, `REAR_MAX_GLOW`, `LAG_HOT`, and `LAG_COOL` in
+`[DISCS_GRAPHICS]`. This section is optional in shipped content. The installed
+Porsche 917/30 and Nissan 370Z omit it. Apex maps their conventional disc-node
+suffixes and keeps manual maximum-glow controls available. The static editor shows
+the recovered steady-state target. It does not claim to simulate wheel speed, time,
+or hot and cool lag.
+
+The installed Porsche binds all five resources to one `ksBrakeDisc` material. Four
+wheel meshes use it. A production Chrome check loaded all 76 embedded textures and
+isolated `LOD_A_DISC_LF`. Temperature 160 °C with maximum glow 64 produced hash
+`ffe5cc9fe5bbbd9e`. Temperature 10 °C produced `234327240eeadf14`.
+At 10 °C, blur levels zero and one produced `234327240eeadf14` and
+`f6967ed96c1b6c45`. All four captures returned WebGL error zero. The browser log
+contained no warnings or errors.
 
 ### Reflection environment evidence
 

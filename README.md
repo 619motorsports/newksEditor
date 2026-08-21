@@ -79,7 +79,7 @@ npm test
   DDS. The inspector reports maps that have no safe stock KN5 binding. Each FBX
   animation clip is sampled into 100 local-transform frames. The timeline previews
   the result, and the export action writes the native KSANIM v2 layout.
-- KN5 v5/v6 headers, embedded texture, material, hierarchy, static and skinned-mesh
+- KN5 v4/v5/v6 headers, embedded texture, material, hierarchy, static and skinned-mesh
   parsing, including recognition of appended CSP KN5ENC v1 protected payloads
 - Stock shader parameters, texture-resource inspection, embedded BC1/2/3,
   CPU-decoded BC4/5/7, native BPTC BC6H/BC7 where available, generic
@@ -87,12 +87,19 @@ npm test
   PNG/JPEG/WebP,
   tangent-space normal maps, packed maps channels, diffuse/normal detail maps, and
   world-space four-layer track materials. The preview also reproduces the recovered
-  five-texture blur and dirt path for `ksTyres` and `newStefano_ksTyres`.
+  five-texture blur and dirt path for `ksTyres` and `newStefano_ksTyres`. Stock
+  `ksBrakeDisc` materials use their diffuse, normal, glow, blur, and blurred-normal
+  textures. Live controls show the recovered temperature target and static blur state.
 - Car- and track-scale orbit preview, hierarchy filtering, selected-mesh framing,
   isolation, and wireframe. Normal preview follows recursive KN5 game visibility:
   an inactive ancestor or a mesh with `visible`/`renderable` disabled stays hidden.
   Dimmed hierarchy rows remain selectable, and **Show hidden** exposes all such
-  geometry explicitly for authoring inspection
+  geometry explicitly for authoring inspection. The optional grid reproduces the
+  old editor's 11 by 11-line magenta authoring overlay across a 10 m square.
+  **View axis** reproduces the native one-meter red +X, green +Y, and blue +Z
+  marker at the world origin. It draws after opaque geometry with depth disabled.
+  A selected hierarchy node shows the native one-meter red X, green Y, and blue
+  negative-Z world-axis marker through scene geometry.
 - Direct hierarchy authoring for node names, active states, and local transforms.
   Transform controls use position, XYZ rotation in degrees, and scale. Stable
   root-relative paths keep duplicate names independent. Edits update the preview,
@@ -355,6 +362,10 @@ Pass `--rpm 1000 --compare-rpm 6000` to compare a linear analog RPM needle.
 Pass `--reflection-compare` to capture and hash the live scene-cubemap and procedural
 fallback states independently. Use `--reflection-environment SHOWROOM.kn5` and,
 optionally, `--reflection-root NODE` to verify showroom assembly and subtree selection.
+Pass `--selection-axis` to require the native selected-node marker and capture a
+comparison after the tool clears the selection.
+Pass `--view-axis` to require the native world-origin marker and capture its on and
+off states.
 
 The authoring round-trip has its own production-browser check:
 

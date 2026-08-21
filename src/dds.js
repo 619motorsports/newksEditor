@@ -81,6 +81,14 @@ export function inspectDds(input) {
   };
 }
 
+/** WebGL compressed uploads require every supplied mip dimension to be block-aligned. */
+export function webglCompressedMipChainSafe(descriptor) {
+  let width=Number(descriptor?.width),height=Number(descriptor?.height),mipCount=Number(descriptor?.mipCount);
+  if(!descriptor?.compressed||!Number.isSafeInteger(width)||width<1||!Number.isSafeInteger(height)||height<1||!Number.isSafeInteger(mipCount)||mipCount<1)return false;
+  for(let level=0;level<mipCount;level++){if(width%4||height%4)return false;width=Math.max(1,width>>1);height=Math.max(1,height>>1);}
+  return true;
+}
+
 function maskByte(pixel, mask) {
   if (!mask) return 0;
   let shift = 0;
