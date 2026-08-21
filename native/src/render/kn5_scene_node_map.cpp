@@ -56,11 +56,14 @@ Kn5SceneNodeMapResult map_kn5_scene_nodes(
     struct WorkItem {
         const Node* node = nullptr;
         std::size_t depth = 0;
+        NodeId parent = apex::scene::invalid_node_id;
     };
     std::vector<WorkItem> work;
     work.reserve(std::min<std::size_t>(limits.max_work_items, 1024U));
-    work.push_back({&root, 0U});
+    work.push_back({&root, 0U, apex::scene::invalid_node_id});
     result.source_nodes.reserve(std::min(scene.nodes.size(), limits.max_nodes));
+    std::vector<NodeId> expected_parents;
+    expected_parents.reserve(std::min(scene.nodes.size(), limits.max_nodes));
 
     while (!work.empty()) {
         const WorkItem item = work.back();
@@ -82,7 +85,9 @@ Kn5SceneNodeMapResult map_kn5_scene_nodes(
                  "KN5 node transform or name is invalid", {}, false);
             return result;
         }
+        const NodeId node_id = static_cast<NodeId>(result.source_nodes.size());
         result.source_nodes.push_back(item.node);
+        expected_parents.push_back(item.parent);
 
         // The work bound covers visited nodes plus pending stack entries. Do
         // this check before pushing children so untrusted fan-out cannot grow
@@ -99,7 +104,7 @@ Kn5SceneNodeMapResult map_kn5_scene_nodes(
             return result;
         }
         for (auto child = item.node->children.rbegin(); child != item.node->children.rend(); ++child)
-            work.push_back({&*child, item.depth + 1U});
+            work.push_back({&*child, item.depth + 1U, node_id});
     }
 
     if (result.source_nodes.size() != scene.nodes.size()) {
@@ -124,6 +129,32 @@ Kn5SceneNodeMapResult map_kn5_scene_nodes(
                  scene_node.id);
             return result;
         }
+        if (scene_node.parent != expected_parents[index] ||
+            scene_node.children.size() != source.children.size()) {
+            fail(result, "SCENE_MODEL_HIERARCHY",
+                 "scene node hierarchy does not match the source KN5 tree",
+                 scene_node.id);
+            return result;
+        }
+    }
+    std::vector<std::size_t> child_offsets(scene.nodes.size(), 0U);
+    for (std::size_t child = 1U; child < expected_parents.size(); ++child) {
+        const NodeId parent = expected_parents[child];
+        if (parent == apex::scene::invalid_node_id || parent >= scene.nodes.size()) {
+            fail(result, "SCENE_MODEL_HIERARCHY",
+                 "scene node hierarchy contains an invalid source parent",
+                 static_cast<NodeId>(child));
+            return result;
+        }
+        std::size_t& offset = child_offsets[parent];
+        if (offset >= scene.nodes[parent].children.size() ||
+            scene.nodes[parent].children[offset] != static_cast<NodeId>(child)) {
+            fail(result, "SCENE_MODEL_HIERARCHY",
+                 "scene child order does not match the source KN5 tree",
+                 static_cast<NodeId>(child));
+            return result;
+        }
+        ++offset;
     }
     return result;
 }

@@ -157,8 +157,14 @@ driver suppression, workspace LOD exclusions, or mesh LOD. Isolation bypasses
 visibility and subtree filters. It still applies the selected mesh LOD range.
 The contract follows `itemPreviewVisible()` and the draw filter in
 `public/app.js`. The cockpit audit in `src/cockpit-preview.js` supplies the F3
-pair. Surface overlays, damage preview, shadows, reflections, and
-post-processing remain staged.
+pair. Surface overlays, damage shader execution, shadows, reflections, and
+post-processing remain staged. A separate bounded damage adapter resolves the
+five exact F4 node sequences. It creates scene activity and material overrides
+without changing the parsed model. It applies `damageZones` after CSP values.
+It also retains the native one-way `glassDamage` write for shared materials.
+The adapter identifies the recovered dirt-zero branch. GPU execution of that
+branch remains staged until more disassembly evidence identifies the final
+specular alpha source.
 The static-scene adapter has two texture-authority modes. The first mode
 uses caller-owned tables in the final KN5 texture order. The second mode owns
 the used embedded KN5 textures and one linear-repeat sampler. It validates all

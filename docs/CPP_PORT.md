@@ -192,10 +192,19 @@ remains unchanged and feature-complete.
   The render plan applies CSP LOD, order, pass, and shadow state per node.
   Static scenes can select a pipeline per packet. Nodes that share one material
   can therefore retain different transparent and depth-write states. CSP
-  shader, property, and resource changes remain staged. The caller must still
-  resolve damage preview and surface overlays. A bounded
-  workspace adapter maps metadata to merged scene roots. It attaches file and
-  auxiliary labels without partial mutation. A bounded resolver implements
+  shader, property, and resource changes remain staged. A bounded damage
+  adapter resolves the five exact F4 prefix sequences. It uses the first
+  pre-order duplicate and stops each sequence at the first missing suffix.
+  The adapter creates activity overrides without changing the scene. It also
+  creates a complete material override table in final material order. F4
+  `damageZones` writes replace CSP values. The one-way `glassDamage` write
+  applies to shared material identities after each F4 edge. The adapter rejects
+  mismatched identities, invalid material references, and over-budget output.
+  It identifies the recovered dirt-zero material branch. GPU execution of that
+  branch remains staged because the final specular alpha source needs more
+  disassembly evidence. The caller must still resolve surface overlays. A
+  bounded workspace adapter maps metadata to merged scene roots. It attaches
+  file and auxiliary labels without partial mutation. A bounded resolver implements
   half-open workspace LOD ranges and the production FOV formula. The caller
   supplies the exact preview AABB center and camera position. The resolver
   passes excluded roots to the stock-scene facade. A second bounded resolver
