@@ -167,11 +167,15 @@ void accepts_valid_mesh_and_uploads_immutable_buffers() {
             "upload byte sizes match source geometry");
 
     PipelineProgram pipeline;
-    const IndexedStaticMeshDrawRequest request = result.upload->make_request(pipeline);
+    pipeline.transform_contract = PipelineTransformContract::draw_matrices;
+    CameraFrame camera;
+    camera.clip_space = CameraClipSpace::vulkan;
+    const IndexedStaticMeshDrawRequest request = result.upload->make_request(pipeline, camera);
     require(request.packet == &result.upload->packet && request.packet != &packet &&
                 request.vertex_buffer == result.upload->vertex_buffer.get() &&
                 request.index_buffer == result.upload->index_buffer.get() &&
-                request.index_type == StaticMeshIndexType::uint16,
+                request.index_type == StaticMeshIndexType::uint16 && request.camera_frame.has_value() &&
+                request.camera_frame->clip_space == CameraClipSpace::vulkan,
             "upload produces an indexed request-ready object");
 }
 

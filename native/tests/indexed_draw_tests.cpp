@@ -71,6 +71,7 @@ PipelineProgram pipeline_fixture() {
     pipeline.raster.cull = PipelineCullMode::none;
     pipeline.depth.test_enabled = false;
     pipeline.depth.write_enabled = false;
+    pipeline.transform_contract = PipelineTransformContract::draw_matrices;
     pipeline.vertex_layout.stride = 12U;
     pipeline.vertex_layout.attributes.push_back({PipelineVertexSemantic::position,
                                                    PipelineVertexAttributeFormat::float32x3, 0U, 0U});
@@ -98,8 +99,12 @@ TextureDescription target_description() {
 
 IndexedStaticMeshDrawRequest request_fixture(const DrawPacket& packet, const PipelineProgram& pipeline,
                                              FakeBuffer& vertices, FakeBuffer& indices) {
+    CameraFrame camera;
+    camera.clip_space = vertices.backend() == Backend::Vulkan
+                            ? CameraClipSpace::vulkan
+                            : CameraClipSpace::d3d12;
     return {&packet, &pipeline, &vertices, &indices, StaticMeshIndexType::uint16, 0U, 0U,
-            {0.0F, 0.0F, 0.0F, 1.0F}};
+            {0.0F, 0.0F, 0.0F, 1.0F}, camera};
 }
 
 void accepts_bounded_static_indexed_contract() {
@@ -111,12 +116,23 @@ void accepts_bounded_static_indexed_contract() {
     FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index, BufferMemory::device_local,
                                          BufferMutability::immutable});
     Diagnostic diagnostic;
+    packet.world_matrix[12] = 0.25F;
     const auto request = request_fixture(packet, pipeline, vertices, indices);
     require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
                 IndexedStaticMeshDrawStatus::ready,
             "valid indexed static-mesh contract accepted");
     require(std::string(indexed_static_mesh_draw_status_name(IndexedStaticMeshDrawStatus::ready)) == "ready",
             "indexed status name");
+
+    FakeTexture d3d_target(Backend::D3D12, target_description());
+    FakeBuffer d3d_vertices(Backend::D3D12, {36U, BufferUsage::vertex, BufferMemory::device_local,
+                                             BufferMutability::immutable});
+    FakeBuffer d3d_indices(Backend::D3D12, {6U, BufferUsage::index, BufferMemory::device_local,
+                                            BufferMutability::immutable});
+    const auto d3d_request = request_fixture(packet, pipeline, d3d_vertices, d3d_indices);
+    require(validate_indexed_static_mesh_draw_request(d3d_target, d3d_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            "D3D12 camera clip contract accepted");
 }
 
 void rejects_static_indexed_limits_and_ownership() {
@@ -129,6 +145,37 @@ void rejects_static_indexed_limits_and_ownership() {
                                          BufferMutability::immutable});
     Diagnostic diagnostic;
     auto request = request_fixture(packet, pipeline, vertices, indices);
+
+    request.camera_frame.reset();
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_camera_frame_missing",
+            "missing camera frame rejected");
+    request = request_fixture(packet, pipeline, vertices, indices);
+    request.camera_frame->clip_space = CameraClipSpace::d3d12;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_camera_clip_space_mismatch",
+            "wrong camera clip space rejected");
+    request = request_fixture(packet, pipeline, vertices, indices);
+    request.camera_frame->view_projection[0] = std::numeric_limits<float>::quiet_NaN();
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_camera_view_projection_non_finite",
+            "non-finite camera matrix rejected");
+    request = request_fixture(packet, pipeline, vertices, indices);
+    packet.world_matrix[0] = std::numeric_limits<float>::infinity();
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_static_mesh_world_matrix_non_finite",
+            "non-finite world matrix rejected");
+    packet.world_matrix = apex::scene::identity_matrix;
+    pipeline.transform_contract = PipelineTransformContract::none;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_transform_contract_required",
+            "missing transform shader contract rejected");
+    pipeline.transform_contract = PipelineTransformContract::draw_matrices;
 
     request.packet = nullptr;
     require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==

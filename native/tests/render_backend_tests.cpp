@@ -92,6 +92,20 @@ std::vector<std::uint8_t> executable_vertex_shader() {
     return result;
 }
 
+std::vector<std::uint8_t> executable_transform_vertex_shader() {
+    // Generated from tests/shaders/indexed_static_mesh.vert with:
+    // glslangValidator -V --target-env vulkan1.0 -Os -g0 -S vert
+    constexpr std::string_view hex =
+        "03022307000001000b0008002a0000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00070000000000040000006d61696e000000001500000022000000470003000b00000002000000480004000b0000000000000005000000480005000b000000000000000700000010000000480005000b000000000000002300000000000000480004000b0000000100000005000000480005000b000000010000000700000010000000480005000b00000001000000230000004000000047000400150000001e000000000000004700030020000000020000004800050020000000000000000b000000000000004800050020000000010000000b000000010000004800050020000000020000000b000000030000004800050020000000030000000b00000004000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000004000000180004000a00000007000000040000001e0004000b0000000a0000000a000000200004000c000000090000000b0000003b0004000c0000000d00000009000000150004000e00000020000000010000002b0004000e0000000f000000000000002000040010000000090000000a00000017000400130000000600000003000000200004001400000001000000130000003b0004001400000015000000010000002b00040006000000170000000000803f150004001d00000020000000000000002b0004001d0000001e000000010000001c0004001f000000060000001e0000001e0006002000000007000000060000001f0000001f000000200004002100000003000000200000003b0004002100000022000000030000002b0004000e0000002300000001000000200004002800000003000000070000003600050002000000040000000000000003000000f8000200050000004100050010000000110000000d0000000f0000003d0004000a00000012000000110000003d0004001300000016000000150000005100050006000000180000001600000000000000510005000600000019000000160000000100000051000500060000001a000000160000000200000050000700070000001b00000018000000190000001a0000001700000091000500070000001c000000120000001b0000004100050010000000240000000d000000230000003d0004000a0000002500000024000000910005000700000027000000250000001c000000410005002800000029000000220000000f0000003e0003002900000027000000fd00010038000100";
+    require(hex.size() % 2U == 0U, "embedded transform shader hex alignment");
+    std::vector<std::uint8_t> result(hex.size() / 2U);
+    for (std::size_t index = 0U; index < result.size(); ++index) {
+        result[index] = static_cast<std::uint8_t>(
+            (hex_digit(hex[index * 2U]) << 4U) | hex_digit(hex[index * 2U + 1U]));
+    }
+    return result;
+}
+
 std::vector<std::uint8_t> executable_fragment_shader() {
     constexpr std::string_view hex =
         "03022307000001000b000d000d0000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00060004000000040000006d61696e000000000900000010000300040000000700000047000400090000001e00000000000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000004000000200004000800000003000000070000003b0004000800000009000000030000002b000400060000000a0000000000803f2b000400060000000b000000000000002c000700070000000c0000000a0000000b0000000b0000000a0000003600050002000000040000000000000003000000f8000200050000003e000300090000000c000000fd00010038000100";
@@ -490,6 +504,11 @@ void contract_triangle_draw_limits() {
     pipeline.resources.push_back({PipelineResourceKind::sampled_texture, 0U, 0U, "texture"});
     require(validate_triangle_draw_request(target, request, diagnostic) == TriangleDrawStatus::unsupported &&
                 diagnostic.code == "triangle_pipeline_unsupported", "triangle resource bindings rejected explicitly");
+    pipeline.resources.clear();
+    pipeline.transform_contract = PipelineTransformContract::draw_matrices;
+    require(validate_triangle_draw_request(target, request, diagnostic) == TriangleDrawStatus::unsupported &&
+                diagnostic.code == "triangle_pipeline_unsupported",
+            "triangle transform contract rejected explicitly");
 }
 
 void contract_sampler_shader_limits() {
@@ -823,6 +842,7 @@ bool contract_backend(apex::render::Backend backend) {
     indexed_packet.index_count = 3U;
     indexed_packet.vertex_stride_floats = 11U;
     indexed_packet.world_matrix = apex::scene::identity_matrix;
+    indexed_packet.world_matrix[12] = 1.5F;
     indexed_packet.shader_execution_supported = true;
     indexed_packet.flags.depth_test = false;
     indexed_packet.flags.depth_write = false;
@@ -830,9 +850,37 @@ bool contract_backend(apex::render::Backend backend) {
         upload_static_mesh(*device.device, indexed_mesh, indexed_packet);
     require(indexed_upload.ok(), "validated KN5 static-mesh upload");
     PipelineProgram indexed_pipeline = triangle_pipeline;
+    indexed_pipeline.name = "indexed-transform-triangle";
     indexed_pipeline.vertex_layout.stride = 11U * sizeof(float);
+    indexed_pipeline.transform_contract = PipelineTransformContract::draw_matrices;
+    if (backend == Backend::Vulkan) {
+        indexed_pipeline.shaders[0].bytes = executable_transform_vertex_shader();
+    } else {
+#if defined(_WIN32)
+        constexpr std::string_view transform_vertex_source =
+            "cbuffer DrawMatrices : register(b0) { column_major float4x4 world; column_major float4x4 viewProjection; };"
+            "struct Input { float3 position : POSITION; };"
+            "struct Output { float4 position : SV_Position; };"
+            "Output main(Input input) { Output output;"
+            "output.position = mul(viewProjection, mul(world, float4(input.position, 1.0))); return output; }";
+        indexed_pipeline.shaders[0].bytes =
+            executable_d3d_shader(transform_vertex_source, "vs_5_0");
+#endif
+    }
+    CameraFrameRequest indexed_camera_request;
+    indexed_camera_request.eye = {0.0F, 0.0F, 2.0F};
+    indexed_camera_request.target = {0.0F, 0.0F, 0.0F};
+    indexed_camera_request.fov_radians = 1.5707963267948966F;
+    indexed_camera_request.aspect = 1.0F;
+    indexed_camera_request.near_plane = 0.1F;
+    indexed_camera_request.far_plane = 10.0F;
+    indexed_camera_request.clip_space = backend == Backend::Vulkan
+                                            ? CameraClipSpace::vulkan
+                                            : CameraClipSpace::d3d12;
+    const CameraFrameResult indexed_camera = build_camera_frame(indexed_camera_request);
+    require(indexed_camera.ok(), "backend-specific indexed camera frame");
     IndexedStaticMeshDrawRequest indexed_request =
-        indexed_upload.upload->make_request(indexed_pipeline);
+        indexed_upload.upload->make_request(indexed_pipeline, *indexed_camera.frame);
     const BufferDescription indexed_vertex_description =
         indexed_upload.upload->vertex_buffer->info().description;
     ContractBuffer foreign_vulkan_buffer(indexed_vertex_description);
@@ -851,23 +899,38 @@ bool contract_backend(apex::render::Backend backend) {
         device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture, indexed_request);
     require(indexed_result.ok() && indexed_result.rgba8.size() == 32U * 32U * 4U,
             "indexed static-mesh draw/readback");
-    require(indexed_result.rgba8[center] == std::byte{255} &&
+    require(indexed_result.rgba8[center] == std::byte{0} &&
                 indexed_result.rgba8[center + 1U] == std::byte{0} &&
                 indexed_result.rgba8[center + 2U] == std::byte{0} &&
                 indexed_result.rgba8[center + 3U] == std::byte{255},
-            "indexed static-mesh center pixel is shader red");
+            "indexed world transform moves geometry away from center");
+    const std::size_t right = (16U * 32U + 28U) * 4U;
+    require(indexed_result.rgba8[right] == std::byte{255} &&
+                indexed_result.rgba8[right + 1U] == std::byte{0} &&
+                indexed_result.rgba8[right + 2U] == std::byte{0} &&
+                indexed_result.rgba8[right + 3U] == std::byte{255},
+            "indexed world transform reaches expected right pixel");
     require(indexed_result.rgba8[0] == std::byte{0} && indexed_result.rgba8[1] == std::byte{0} &&
                 indexed_result.rgba8[2] == std::byte{0} && indexed_result.rgba8[3] == std::byte{255},
             "indexed static-mesh outside pixel retains clear color");
-    const IndexedStaticMeshDrawResult repeated_indexed_result =
-        device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture, indexed_request);
-    require(repeated_indexed_result.ok() && repeated_indexed_result.rgba8.size() == 32U * 32U * 4U,
-            "repeated indexed static-mesh draw/readback preserves tracked state");
-    require(repeated_indexed_result.rgba8[center] == std::byte{255} &&
-                repeated_indexed_result.rgba8[center + 1U] == std::byte{0} &&
-                repeated_indexed_result.rgba8[center + 2U] == std::byte{0} &&
-                repeated_indexed_result.rgba8[center + 3U] == std::byte{255},
-            "repeated indexed static-mesh center pixel is shader red");
+    indexed_upload.upload->packet.world_matrix = apex::scene::identity_matrix;
+    indexed_camera_request.eye = {1.5F, 0.0F, 2.0F};
+    indexed_camera_request.target = {1.5F, 0.0F, 0.0F};
+    const CameraFrameResult shifted_camera = build_camera_frame(indexed_camera_request);
+    require(shifted_camera.ok(), "shifted indexed camera frame");
+    const IndexedStaticMeshDrawRequest shifted_request =
+        indexed_upload.upload->make_request(indexed_pipeline, *shifted_camera.frame);
+    const IndexedStaticMeshDrawResult shifted_result =
+        device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture, shifted_request);
+    require(shifted_result.ok() && shifted_result.rgba8.size() == 32U * 32U * 4U,
+            "shifted camera indexed draw/readback preserves tracked state");
+    const std::size_t left = (16U * 32U + 4U) * 4U;
+    require(shifted_result.rgba8[center] == std::byte{0} &&
+                shifted_result.rgba8[left] == std::byte{255} &&
+                shifted_result.rgba8[left + 1U] == std::byte{0} &&
+                shifted_result.rgba8[left + 2U] == std::byte{0} &&
+                shifted_result.rgba8[left + 3U] == std::byte{255},
+            "camera view-projection moves geometry to the expected left pixel");
 
     const TextureDescription bgra_description{3U, 2U, 1U, 1U, TextureFormat::bgra8_unorm,
                                                TextureUsage::color_attachment | TextureUsage::transfer_source,

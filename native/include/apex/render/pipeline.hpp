@@ -127,6 +127,14 @@ struct PipelineDepthState {
     PipelineCompareOperation compare = PipelineCompareOperation::less_or_equal;
 };
 
+// A backend-neutral ABI for small per-draw transform constants. Vulkan maps
+// this contract to vertex push constants. D3D12 maps it to root constants at
+// b0, space0. Descriptor-backed frame and material resources remain separate.
+enum class PipelineTransformContract : std::uint8_t {
+    none,
+    draw_matrices,
+};
+
 enum class PipelineResourceKind : std::uint8_t { uniform_buffer, sampled_texture, sampler, storage_buffer };
 
 struct PipelineResourceBinding {
@@ -144,6 +152,7 @@ struct PipelineProgram {
     PipelineRasterState raster;
     PipelineBlendState blend;
     PipelineDepthState depth;
+    PipelineTransformContract transform_contract = PipelineTransformContract::none;
     std::vector<PipelineResourceBinding> resources;
 };
 

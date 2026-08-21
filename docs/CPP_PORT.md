@@ -95,10 +95,13 @@ remains unchanged and feature-complete.
   draws with readback. The indexed path uses immutable vertex and index
   buffers. A bounded adapter validates and uploads 11-float KN5 static
   geometry. It rejects malformed geometry, unsafe indices, and invalid packet
-  ranges before allocation. The backend accepts only identity transforms and
-  resource-free, no-depth packets. This proves basic pipeline creation,
-  persistent geometry binding, command submission, rasterization, and
-  resource-state handling. It does not prove scene-rendering parity.
+  ranges before allocation. A 128-byte draw-matrix contract binds world and
+  camera transforms. Vulkan uses vertex push constants. D3D12 uses root
+  constants at `b0`. Backend-specific camera frames make the clip-space
+  conversion explicit. The backend accepts only resource-free, no-depth
+  packets. This proves basic pipeline creation, persistent geometry binding,
+  command submission, rasterization, and resource-state handling. It does not
+  prove scene-rendering parity.
 - P1 is partial. Bounded readers support KN5 v4/v5/v6, DDS, ACD, INI/CSP,
   KSANIM v1/v2, and KNH. The port also supports byte-stable KN5 writing, VAO
   ZIP decoding, and track surfaces, cameras, and splines. Bounded asset support
@@ -129,13 +132,15 @@ remains unchanged and feature-complete.
   selectors and recovered lighting, shadow, and reflection math feed
   deterministic plans. Source-based camera math matches the `perspective`,
   `lookAt`, and `multiply` functions in `public/app.js`. Separate projections
-  define the Vulkan and D3D12 clip-space conversions. Backend shaders do not
-  use these camera matrices yet.
+  define the Vulkan and D3D12 clip-space conversions. The indexed backend
+  shader contract uses these camera matrices. Complete scene dispatch remains
+  staged.
   Vulkan and D3D12 create a basic graphics pipeline and execute fixed and
   indexed R16 static-mesh draws. The indexed path executes only a deliberately
   restricted draw-packet subset. It has no descriptors, scene resources,
-  non-identity transforms, depth, blending, or alpha-to-coverage. The port does
-  not create windows or swapchains, draw complete KN5 scenes, or provide
+  depth, blending, or alpha-to-coverage. It executes finite non-identity world
+  and camera transforms through an explicit shader contract. The port does not
+  create windows or swapchains, draw complete KN5 scenes, or provide
   golden-image parity evidence.
 
 DDS BC7 now has a bounded CPU decoder covered by differential fixtures for all

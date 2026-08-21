@@ -135,6 +135,12 @@ void rejectsInvalidLayoutAndState() {
     const PipelineValidationResult winding_result = validate_pipeline(bad_winding);
     require(!winding_result.valid && has_code(winding_result, "invalid_front_face"), "invalid front-face winding rejected");
 
+    PipelineProgram bad_transform = valid_program();
+    bad_transform.transform_contract = static_cast<PipelineTransformContract>(99);
+    const PipelineValidationResult transform_result = validate_pipeline(bad_transform);
+    require(!transform_result.valid && has_code(transform_result, "invalid_transform_contract"),
+            "invalid transform contract rejected");
+
     PipelineProgram numeric_limits = valid_program();
     numeric_limits.vertex_layout.attributes[0].location = 4;
     numeric_limits.resources[0].set = 2;

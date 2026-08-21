@@ -81,6 +81,17 @@ void maps_native_clip_depth_and_vulkan_y_explicitly() {
             "camera clip-space names are stable");
 }
 
+void composes_world_after_view_projection() {
+    apex::scene::Matrix4 world = apex::scene::identity_matrix;
+    world[12] = 2.0F;
+    apex::scene::Matrix4 view_projection = apex::scene::identity_matrix;
+    view_projection[0] = 3.0F;
+    const auto clip = transform(multiply_camera_matrices(view_projection, world),
+                                {0.0F, 0.0F, 0.0F, 1.0F});
+    require_close(clip[0], 6.0F, "view-projection multiplies the world position");
+    require_close(clip[3], 1.0F, "affine transform preserves homogeneous W");
+}
+
 void rejects_malformed_camera_inputs() {
     CameraFrameRequest request;
     request.eye[0] = std::numeric_limits<float>::quiet_NaN();
@@ -117,6 +128,7 @@ int main() {
     try {
         matches_webgl_reference_formulas();
         maps_native_clip_depth_and_vulkan_y_explicitly();
+        composes_world_after_view_projection();
         rejects_malformed_camera_inputs();
         std::cout << "camera tests passed\n";
         return 0;

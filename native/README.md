@@ -62,15 +62,18 @@ pipeline and execute fixed and indexed R16 static-mesh draws with readback.
 The indexed path validates 11-float KN5 static geometry before allocation.
 It uploads immutable vertex and R16 index buffers. The adapter rejects
 malformed geometry, non-finite values, invalid packet ranges, and unsafe
-indices. The execution path accepts only resource-free, no-depth packets with
-identity transforms. Draw-packet texture resources resolve by canonical name.
+indices. The execution path accepts finite world and camera transforms.
+Vulkan uses a 128-byte vertex push-constant block. D3D12 uses an equivalent
+root-constant block. Each camera must use the clip-space convention for its
+backend. The execution path accepts only resource-free, no-depth packets.
+Draw-packet texture resources resolve by canonical name.
 The serialized KN5 resource ID remains a shader bind point, not a
 texture-table index. This work does not show complete scene pixels. Window
-surfaces, swapchains, descriptor binding, camera shader binding, complete
-scene draws, and production pixel comparisons remain roadmap work. BC7 has an
-exact, bounded CPU fallback. BC6H still requires a capable GPU path. The
-upload planner supports DX10 2D arrays, cubemaps, and RGB24 conversion. It
-rejects 1D/3D textures and legacy D3D9 float textures.
+surfaces, swapchains, descriptor binding, complete scene draws, and production
+pixel comparisons remain roadmap work. BC7 has an exact, bounded CPU fallback.
+BC6H still requires a capable GPU path. The upload planner supports DX10 2D
+arrays, cubemaps, and RGB24 conversion. It rejects 1D/3D textures and legacy
+D3D9 float textures.
 The CPU decoder can still reject arrays and cubemaps. The FBX converter handles
 static positions, triangulation, hierarchy, a bounded transform subset, and
 first material assignment. It explicitly diagnoses unsupported images,

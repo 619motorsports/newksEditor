@@ -1,5 +1,6 @@
 #pragma once
 
+#include "apex/render/camera.hpp"
 #include "apex/render/pipeline.hpp"
 #include "apex/render/texture_format.hpp"
 
@@ -7,8 +8,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace apex::render {
@@ -297,12 +300,22 @@ struct TriangleDrawResult {
 // Indexed static-mesh execution consumes persistent backend-neutral buffers.
 // Offsets in DrawPacket are interpreted as element offsets: vertex_offset is
 // measured in pipeline-stride vertices and index_offset in uint16 indices.
-// This baseline deliberately has no material/resource binding or transform
-// uniform support; those effects remain explicit unsupported states.
+// This baseline deliberately has no material/resource binding. Transform
+// execution uses the explicit PipelineTransformContract::draw_matrices ABI.
 enum class StaticMeshIndexType : std::uint8_t { uint16 };
 
 inline constexpr std::uint32_t max_indexed_static_mesh_vertices = 10'000'000U;
 inline constexpr std::uint32_t max_indexed_static_mesh_indices = 20'000'000U;
+
+// Both matrices use the column-major layout used by SceneNode::transform and
+// public/app.js. The shader evaluates view_projection * world * position.
+struct DrawMatrices {
+    apex::scene::Matrix4 world = apex::scene::identity_matrix;
+    apex::scene::Matrix4 view_projection = apex::scene::identity_matrix;
+};
+
+static_assert(sizeof(DrawMatrices) == 32U * sizeof(float));
+static_assert(std::is_trivially_copyable_v<DrawMatrices>);
 
 struct IndexedStaticMeshDrawRequest {
     const DrawPacket* packet = nullptr;
@@ -313,6 +326,9 @@ struct IndexedStaticMeshDrawRequest {
     std::uint32_t mip_level = 0U;
     std::uint32_t array_layer = 0U;
     std::array<float, 4> clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
+    // The request owns this copy. The clip-space convention must match the
+    // target backend before command recording begins.
+    std::optional<CameraFrame> camera_frame;
 };
 
 enum class IndexedStaticMeshDrawStatus {

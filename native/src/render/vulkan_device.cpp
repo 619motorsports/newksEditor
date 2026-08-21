@@ -1035,10 +1035,20 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
                                 const TextureDescription& description,
                                 const PipelineProgram& program,
                                 const VulkanDrawGeometry& geometry,
+                                const DrawMatrices* draw_matrices,
                                 const std::array<float, 4>& clear_color,
                                 VkImageLayout& current_layout,
                                 std::vector<std::byte>& output,
                                 Diagnostic& diagnostic) {
+    if (draw_matrices != nullptr) {
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(context->physical_device, &properties);
+        if (properties.limits.maxPushConstantsSize < sizeof(DrawMatrices)) {
+            diagnostic = {"vulkan_draw_transform_limit_unsupported",
+                          "Vulkan device push-constant limit is smaller than the draw-matrices contract"};
+            return false;
+        }
+    }
     std::lock_guard command_guard(context->command_mutex);
     const std::uint64_t output_size_u64 = static_cast<std::uint64_t>(description.width) *
                                           static_cast<std::uint64_t>(description.height) * 4U;
@@ -1141,6 +1151,14 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
     }
     VkPipelineLayoutCreateInfo layout_info{};
     layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    VkPushConstantRange push_constant_range{};
+    if (draw_matrices != nullptr) {
+        push_constant_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        push_constant_range.offset = 0U;
+        push_constant_range.size = static_cast<std::uint32_t>(sizeof(DrawMatrices));
+        layout_info.pushConstantRangeCount = 1U;
+        layout_info.pPushConstantRanges = &push_constant_range;
+    }
     VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
     result = vkCreatePipelineLayout(context->device, &layout_info, nullptr, &pipeline_layout);
     VkPipeline pipeline = VK_NULL_HANDLE;
@@ -1268,6 +1286,10 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
             render_begin.pClearValues = &clear;
             vkCmdBeginRenderPass(command, &render_begin, VK_SUBPASS_CONTENTS_INLINE);
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            if (draw_matrices != nullptr) {
+                vkCmdPushConstants(command, pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0U,
+                                   static_cast<std::uint32_t>(sizeof(DrawMatrices)), draw_matrices);
+            }
             vkCmdBindVertexBuffers(command, 0U, 1U, &geometry.vertices.buffer, &geometry.vertex_offset);
             if (geometry.indices != nullptr) {
                 vkCmdBindIndexBuffer(command, geometry.indices->buffer, geometry.index_offset, geometry.index_type);
@@ -1387,7 +1409,7 @@ bool draw_triangle_and_readback(const std::shared_ptr<VulkanContext>& context,
     }
     const VulkanDrawGeometry geometry{vertices, 0U, nullptr, 0U, request.vertex_count, 0U,
                                       VK_INDEX_TYPE_UINT16};
-    if (!draw_graphics_and_readback(context, image, description, *request.pipeline, geometry,
+    if (!draw_graphics_and_readback(context, image, description, *request.pipeline, geometry, nullptr,
                                     request.clear_color, current_layout, output, diagnostic)) {
         if (diagnostic.code.rfind("vulkan_draw_", 0U) == 0U)
             diagnostic.code = "triangle_execution_failed";
@@ -1444,8 +1466,9 @@ public:
                                           &index_buffer.raw(),
                                           static_cast<VkDeviceSize>(index_offset), 0U,
                                           packet.index_count, VK_INDEX_TYPE_UINT16};
+        const DrawMatrices draw_matrices{packet.world_matrix, request.camera_frame->view_projection};
         return draw_graphics_and_readback(context_, raw_, info_.description, *request.pipeline, geometry,
-                                          request.clear_color, layout_, output, diagnostic);
+                                          &draw_matrices, request.clear_color, layout_, output, diagnostic);
     }
 
 private:

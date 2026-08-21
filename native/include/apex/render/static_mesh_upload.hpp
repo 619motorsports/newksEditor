@@ -38,7 +38,8 @@ struct StaticMeshUpload {
     std::unique_ptr<Buffer> index_buffer;
 
     [[nodiscard]] IndexedStaticMeshDrawRequest make_request(
-        const PipelineProgram& pipeline, std::uint32_t mip_level = 0U,
+        const PipelineProgram& pipeline, const CameraFrame& camera_frame,
+        std::uint32_t mip_level = 0U,
         std::uint32_t array_layer = 0U,
         std::array<float, 4> clear_color = {0.0F, 0.0F, 0.0F, 1.0F}) const noexcept;
 };

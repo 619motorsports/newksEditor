@@ -863,7 +863,8 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
                                 D3D12_RESOURCE_STATES& destination_state,
                                 std::vector<std::byte>& output,
                                 Diagnostic& diagnostic,
-                                const D3D12GeometryDescriptor* geometry_override = nullptr) {
+                                const D3D12GeometryDescriptor* geometry_override = nullptr,
+                                const DrawMatrices* draw_matrices = nullptr) {
     const auto& shaders = request.pipeline->shaders;
     const PipelineShaderModule* vertex_shader = nullptr;
     const PipelineShaderModule* fragment_shader = nullptr;
@@ -919,6 +920,17 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
 
     D3D12_ROOT_SIGNATURE_DESC root_description{};
     root_description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    D3D12_ROOT_PARAMETER transform_parameter{};
+    if (draw_matrices != nullptr) {
+        transform_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        transform_parameter.Constants.ShaderRegister = 0U;
+        transform_parameter.Constants.RegisterSpace = 0U;
+        transform_parameter.Constants.Num32BitValues =
+            static_cast<UINT>(sizeof(DrawMatrices) / sizeof(std::uint32_t));
+        transform_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+        root_description.NumParameters = 1U;
+        root_description.pParameters = &transform_parameter;
+    }
     ComPtr<ID3DBlob> root_blob;
     ComPtr<ID3DBlob> root_error;
     result = D3D12SerializeRootSignature(&root_description, D3D_ROOT_SIGNATURE_VERSION_1,
@@ -1064,6 +1076,11 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     list->OMSetRenderTargets(1U, &rtv, FALSE, nullptr);
     list->ClearRenderTargetView(rtv, clear_color, 0U, nullptr);
     list->SetGraphicsRootSignature(root_signature.Get());
+    if (draw_matrices != nullptr) {
+        list->SetGraphicsRoot32BitConstants(
+            0U, static_cast<UINT>(sizeof(DrawMatrices) / sizeof(std::uint32_t)),
+            draw_matrices, 0U);
+    }
     list->SetPipelineState(pipeline.Get());
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     D3D12_VERTEX_BUFFER_VIEW vertex_view{};
@@ -1256,8 +1273,9 @@ bool draw_indexed_static_mesh_and_readback(
     render_request.mip_level = request.mip_level;
     render_request.array_layer = request.array_layer;
     render_request.clear_color = request.clear_color;
+    const DrawMatrices draw_matrices{packet.world_matrix, request.camera_frame->view_projection};
     return draw_graphics_and_readback(context, destination, description, render_request, destination_state, output,
-                                      diagnostic, &geometry);
+                                      diagnostic, &geometry, &draw_matrices);
 }
 
 class D3D12Texture final : public Texture {
@@ -1577,6 +1595,12 @@ public:
         if (texture.backend() != Backend::D3D12)
             return {IndexedStaticMeshDrawStatus::unsupported,
                     {"texture_backend_mismatch", "The texture belongs to another graphics backend"}, {}};
+        if (request.vertex_buffer->backend() != Backend::D3D12 ||
+            request.index_buffer->backend() != Backend::D3D12) {
+            return {IndexedStaticMeshDrawStatus::unsupported,
+                    {"indexed_static_mesh_backend_mismatch",
+                     "Indexed static-mesh resources must belong to the D3D12 backend"}, {}};
+        }
         auto* d3d_texture = dynamic_cast<D3D12Texture*>(&texture);
         const auto* d3d_vertex = dynamic_cast<const D3D12Buffer*>(request.vertex_buffer);
         const auto* d3d_index = dynamic_cast<const D3D12Buffer*>(request.index_buffer);

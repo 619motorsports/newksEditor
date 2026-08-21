@@ -176,6 +176,11 @@ void validate_spirv(std::span<const std::uint8_t> bytes, DiagnosticSink& diagnos
     return static_cast<unsigned>(operation) <= static_cast<unsigned>(PipelineCompareOperation::always);
 }
 
+[[nodiscard]] bool valid_transform_contract(PipelineTransformContract contract) noexcept {
+    return contract == PipelineTransformContract::none ||
+           contract == PipelineTransformContract::draw_matrices;
+}
+
 [[nodiscard]] bool valid_resource_kind(PipelineResourceKind kind) noexcept {
     return static_cast<unsigned>(kind) <= static_cast<unsigned>(PipelineResourceKind::storage_buffer);
 }
@@ -382,6 +387,8 @@ PipelineValidationResult validate_pipeline(const PipelineProgram& program, const
         !valid_blend_operation(program.blend.color_operation) || !valid_blend_operation(program.blend.alpha_operation))
         diagnostics.error("invalid_blend_state", "blend state contains an unknown factor or operation");
     if (!valid_compare(program.depth.compare)) diagnostics.error("invalid_depth_state", "depth state contains an unknown comparison operation");
+    if (!valid_transform_contract(program.transform_contract))
+        diagnostics.error("invalid_transform_contract", "pipeline transform contract is unknown");
 
     if (program.resources.size() > limits.max_resources) diagnostics.error("resource_limit", "pipeline resource count exceeds the configured limit");
     std::set<std::pair<std::uint32_t, std::uint32_t>> bindings;

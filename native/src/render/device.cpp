@@ -453,8 +453,10 @@ TriangleDrawStatus validate_triangle_draw_request(const Texture& texture,
         }
     }
     if (pipeline.targets.colors.size() != 1U || pipeline.targets.has_depth ||
-        pipeline.targets.colors[0].samples != 1U || pipeline.resources.size() != 0U) {
-        diagnostic = {"triangle_pipeline_unsupported", "Triangle drawing supports one single-sample color target without resources"};
+        pipeline.targets.colors[0].samples != 1U || pipeline.resources.size() != 0U ||
+        pipeline.transform_contract != PipelineTransformContract::none) {
+        diagnostic = {"triangle_pipeline_unsupported",
+                      "Triangle drawing supports one single-sample color target without resources or transforms"};
         return TriangleDrawStatus::unsupported;
     }
     const auto expected_target = [&] {
@@ -587,16 +589,37 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                       "Indexed static-mesh drawing does not consume a bone palette"};
         return IndexedStaticMeshDrawStatus::unsupported;
     }
-    for (std::size_t index = 0; index < packet.world_matrix.size(); ++index) {
-        if (!std::isfinite(packet.world_matrix[index])) {
+    if (request.pipeline->transform_contract != PipelineTransformContract::draw_matrices) {
+        diagnostic = {"indexed_transform_contract_required",
+                      "Indexed static-mesh execution requires the draw-matrices shader contract"};
+        return IndexedStaticMeshDrawStatus::unsupported;
+    }
+    if (!request.camera_frame.has_value()) {
+        diagnostic = {"indexed_camera_frame_missing",
+                      "Indexed static-mesh transform execution requires a camera frame"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    const CameraFrame& camera = *request.camera_frame;
+    const CameraClipSpace expected_clip_space = texture.backend() == Backend::Vulkan
+                                                    ? CameraClipSpace::vulkan
+                                                    : CameraClipSpace::d3d12;
+    if (camera.clip_space != expected_clip_space) {
+        diagnostic = {"indexed_camera_clip_space_mismatch",
+                      "Camera clip space does not match the indexed draw backend"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    for (const float component : packet.world_matrix) {
+        if (!std::isfinite(component)) {
             diagnostic = {"indexed_static_mesh_world_matrix_non_finite",
                           "Indexed static-mesh world matrix must be finite"};
             return IndexedStaticMeshDrawStatus::invalid_request;
         }
-        if (packet.world_matrix[index] != apex::scene::identity_matrix[index]) {
-            diagnostic = {"indexed_static_mesh_transform_unsupported",
-                          "Indexed static-mesh baseline supports only an identity world matrix"};
-            return IndexedStaticMeshDrawStatus::unsupported;
+    }
+    for (const float component : camera.view_projection) {
+        if (!std::isfinite(component)) {
+            diagnostic = {"indexed_camera_view_projection_non_finite",
+                          "Camera view-projection matrix must be finite"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
         }
     }
     if (packet.flags.transparent || packet.flags.blend_enabled || packet.flags.alpha_to_coverage ||

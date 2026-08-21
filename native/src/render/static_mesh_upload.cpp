@@ -51,10 +51,11 @@ StaticMeshUploadStatus map_buffer_failure(const BufferResult& result,
 }  // namespace
 
 IndexedStaticMeshDrawRequest StaticMeshUpload::make_request(
-    const PipelineProgram& pipeline, std::uint32_t mip_level, std::uint32_t array_layer,
+    const PipelineProgram& pipeline, const CameraFrame& camera_frame,
+    std::uint32_t mip_level, std::uint32_t array_layer,
     std::array<float, 4> clear_color) const noexcept {
     return {&packet, &pipeline, vertex_buffer.get(), index_buffer.get(), StaticMeshIndexType::uint16,
-            mip_level, array_layer, clear_color};
+            mip_level, array_layer, clear_color, camera_frame};
 }
 
 const char* static_mesh_upload_status_name(StaticMeshUploadStatus status) noexcept {
