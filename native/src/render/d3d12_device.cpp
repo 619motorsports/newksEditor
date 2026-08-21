@@ -947,8 +947,10 @@ bool draw_triangle_and_readback(const std::shared_ptr<D3D12Context>& context,
         diagnostic.code = "triangle_pipeline_failed";
         return false;
     }
-    D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_description{1U, D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
-                                                    D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0U};
+    D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_description{};
+    rtv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    rtv_heap_description.NumDescriptors = 1U;
+    rtv_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
     ComPtr<ID3D12DescriptorHeap> rtv_heap;
     result = context->device->CreateDescriptorHeap(&rtv_heap_description, IID_PPV_ARGS(&rtv_heap));
     if (FAILED(result)) {
@@ -969,8 +971,14 @@ bool draw_triangle_and_readback(const std::shared_ptr<D3D12Context>& context,
     UINT64 readback_size = 0U;
     context->device->GetCopyableFootprints(&resource_description, 0U, 1U, 0U, &footprint,
                                            &row_count, &row_size, &readback_size);
-    const UINT64 row_bytes = static_cast<UINT64>(description.width) * 4U;
     constexpr UINT64 max_size_t = static_cast<UINT64>(std::numeric_limits<std::size_t>::max());
+    const UINT64 row_bytes = static_cast<UINT64>(description.width) * 4U;
+    if (description.height == 0U || row_bytes > max_size_t / description.height) {
+        diagnostic = {"triangle_readback_size_invalid", "D3D12 triangle output size exceeds the platform limit"};
+        return false;
+    }
+    const std::size_t output_size =
+        static_cast<std::size_t>(row_bytes * static_cast<UINT64>(description.height));
     if (row_count < description.height || row_size < row_bytes || footprint.Footprint.RowPitch < row_bytes ||
         footprint.Offset > max_size_t || readback_size > max_texture_readback_bytes ||
         readback_size > max_size_t) {
