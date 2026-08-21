@@ -1,0 +1,264 @@
+#include "apex/render/render_plan.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <limits>
+#include <stdexcept>
+#include <utility>
+
+namespace apex::scene {
+
+const SceneNode* SceneSnapshot::find_node(NodeId id) const noexcept {
+    if (id == invalid_node_id || static_cast<std::size_t>(id) >= nodes.size()) return nullptr;
+    const SceneNode& node = nodes[static_cast<std::size_t>(id)];
+    return node.id == id ? &node : nullptr;
+}
+
+const SceneMaterial* SceneSnapshot::find_material(MaterialId id) const noexcept {
+    if (id == invalid_material_id || static_cast<std::size_t>(id) >= materials.size()) return nullptr;
+    return &materials[static_cast<std::size_t>(id)];
+}
+
+NodeId SceneSnapshot::add_node(SceneNode node, NodeId parent) {
+    const NodeId id = static_cast<NodeId>(nodes.size());
+    if (static_cast<std::size_t>(id) != nodes.size()) {
+        throw std::overflow_error("scene node count exceeds NodeId range");
+    }
+    if (parent != invalid_node_id && find_node(parent) == nullptr) {
+        throw std::invalid_argument("scene node parent does not exist");
+    }
+    if (parent == invalid_node_id && root != invalid_node_id) {
+        throw std::invalid_argument("scene snapshot already has a root");
+    }
+    node.id = id;
+    node.parent = parent;
+    nodes.push_back(std::move(node));
+    if (parent == invalid_node_id) {
+        root = id;
+    } else {
+        // find_node is valid after the push and the parent is known to exist.
+        nodes[static_cast<std::size_t>(parent)].children.push_back(id);
+    }
+    return id;
+}
+
+MaterialId SceneSnapshot::add_material(SceneMaterial material) {
+    const MaterialId id = static_cast<MaterialId>(materials.size());
+    if (static_cast<std::size_t>(id) != materials.size()) {
+        throw std::overflow_error("scene material count exceeds MaterialId range");
+    }
+    materials.push_back(std::move(material));
+    return id;
+}
+
+}  // namespace apex::scene
+
+namespace apex::render {
+namespace {
+
+struct WalkState {
+    apex::scene::NodeId node = apex::scene::invalid_node_id;
+    bool parent_active = true;
+    std::string workspace_auxiliary;
+    std::string workspace_file;
+    std::vector<apex::scene::NodeId> ancestors;
+};
+
+[[nodiscard]] float safe_distance(const apex::scene::Vector3& point,
+                                  const apex::scene::Vector3& camera) noexcept {
+    const float dx = point[0] - camera[0];
+    const float dy = point[1] - camera[1];
+    const float dz = point[2] - camera[2];
+    const float squared = dx * dx + dy * dy + dz * dz;
+    if (!std::isfinite(squared)) return 0.0F;
+    return std::sqrt(std::max(0.0F, squared));
+}
+
+[[nodiscard]] bool lod_visible(const apex::scene::SceneNode& node,
+                               float distance) noexcept {
+    // A finite authored LOD interval is required. A non-positive OUT means
+    // open-ended, matching the current JS viewport condition.
+    const float lod_in = std::isfinite(node.lod_in) ? node.lod_in : 0.0F;
+    const float lod_out = std::isfinite(node.lod_out) ? node.lod_out : 0.0F;
+    if (!std::isfinite(distance)) return false;
+    return distance >= lod_in && (lod_out <= 0.0F || distance <= lod_out);
+}
+
+[[nodiscard]] bool item_less(const RenderItem& first,
+                             const RenderItem& second) noexcept {
+    if (first.transparent != second.transparent) return !first.transparent;
+    if (first.layer != second.layer) return first.layer < second.layer;
+    if (first.transparent && first.distance != second.distance) {
+        return first.distance > second.distance;
+    }
+    return false;
+}
+
+void sort_capture_items(std::vector<RenderItem>& items) {
+    std::stable_sort(items.begin(), items.end(), item_less);
+}
+
+[[nodiscard]] std::string effective_workspace_kind(
+    const apex::scene::SceneSnapshot& scene,
+    const RenderPlanOptions& options) {
+    return options.workspace_kind.empty() ? scene.workspace_kind : options.workspace_kind;
+}
+
+[[nodiscard]] float effective_bounds_radius(
+    const apex::scene::SceneSnapshot& scene,
+    const RenderPlanOptions& options) noexcept {
+    return options.bounds_radius > 0.0F ? options.bounds_radius : scene.bounds_radius;
+}
+
+[[nodiscard]] bool contains(const std::vector<apex::scene::NodeId>& ids,
+                            apex::scene::NodeId value) noexcept {
+    return std::find(ids.begin(), ids.end(), value) != ids.end();
+}
+
+}  // namespace
+
+const char* reflection_selection_mode_name(ReflectionSelectionMode mode) noexcept {
+    switch (mode) {
+        case ReflectionSelectionMode::disabled:
+            return "disabled";
+        case ReflectionSelectionMode::explicit_subtree:
+            return "explicit";
+        case ReflectionSelectionMode::environment:
+            return "environment";
+        case ReflectionSelectionMode::scene:
+            return "scene";
+        case ReflectionSelectionMode::fallback:
+            return "fallback";
+    }
+    return "fallback";
+}
+
+RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
+                             const RenderPlanOptions& options) {
+    RenderPlan plan;
+    plan.unsupported_effects.push_back({
+        "backend_effects",
+        "Shader execution, texture sampling, lighting, fog, and post-processing are not represented; this plan makes no pixel-fidelity claim.",
+    });
+
+    if (scene.root == apex::scene::invalid_node_id || scene.find_node(scene.root) == nullptr) {
+        plan.reflection.mode = options.include_reflections ? ReflectionSelectionMode::fallback
+                                                            : ReflectionSelectionMode::disabled;
+        plan.reflection.reason = options.include_reflections ? "Scene has no visible geometry" : "Reflections disabled";
+        return plan;
+    }
+
+    const bool isolated = scene.isolated || options.isolated;
+    std::vector<WalkState> stack;
+    stack.push_back({scene.root, true, {}, {}, {}});
+    std::vector<bool> visited(scene.nodes.size(), false);
+    while (!stack.empty()) {
+        WalkState state = std::move(stack.back());
+        stack.pop_back();
+        const apex::scene::SceneNode* node = scene.find_node(state.node);
+        if (node == nullptr) continue;
+        const std::size_t node_index = static_cast<std::size_t>(node->id);
+        if (node_index >= visited.size() || visited[node_index]) continue;
+        visited[node_index] = true;
+
+        const bool branch_active = state.parent_active && node->active;
+        const std::string workspace_auxiliary = node->workspace_auxiliary.empty()
+                                                    ? state.workspace_auxiliary
+                                                    : node->workspace_auxiliary;
+        const std::string workspace_file = node->workspace_file.empty() ? state.workspace_file : node->workspace_file;
+        std::vector<apex::scene::NodeId> ancestors = state.ancestors;
+        ancestors.push_back(node->id);
+
+        if ((node->kind == apex::scene::NodeKind::mesh ||
+             node->kind == apex::scene::NodeKind::skinned_mesh) &&
+            branch_active && node->visible && node->renderable &&
+            (!isolated || node->id == options.isolated_node) &&
+            lod_visible(*node, safe_distance(node->bounds_center, options.camera_position))) {
+            const apex::scene::SceneMaterial* material = scene.find_material(node->material);
+            const bool material_alpha_blend = material != nullptr &&
+                                              material->blend_mode == apex::scene::BlendMode::alpha_blend;
+            const float distance = safe_distance(node->bounds_center, options.camera_position);
+            RenderItem item{
+                node->id,
+                node->material,
+                node->layer,
+                distance,
+                node->transparent || material_alpha_blend,
+                node->cast_shadows,
+                workspace_auxiliary,
+                workspace_file,
+                ancestors,
+            };
+            plan.items.push_back(item);
+            if (item.casts_shadows && options.include_shadows) plan.shadow_casters.push_back(item);
+        }
+
+        // Reverse push preserves the source child order with a LIFO walk and
+        // avoids recursive stack growth for deeply nested untrusted scenes.
+        for (auto child = node->children.rbegin(); child != node->children.rend(); ++child) {
+            if (scene.find_node(*child) == nullptr) continue;
+            stack.push_back({*child, branch_active, workspace_auxiliary, workspace_file, ancestors});
+        }
+    }
+
+    sort_capture_items(plan.items);
+    for (const RenderItem& item : plan.items) {
+        if (item.transparent) {
+            plan.transparent_items.push_back(item);
+        } else {
+            plan.opaque_items.push_back(item);
+        }
+    }
+
+    if (!options.include_reflections || isolated) {
+        plan.reflection.mode = ReflectionSelectionMode::disabled;
+        plan.reflection.reason = isolated ? "Isolated mesh preview" : "Reflections disabled";
+        return plan;
+    }
+
+    const apex::scene::NodeId explicit_root = options.explicit_reflection_root;
+    if (explicit_root != apex::scene::invalid_node_id) {
+        plan.reflection.mode = ReflectionSelectionMode::explicit_subtree;
+        plan.reflection.root = explicit_root;
+        if (const auto* root = scene.find_node(explicit_root); root != nullptr) {
+            plan.reflection.root_name = root->name.empty() ? "Selected subtree" : root->name;
+        } else {
+            plan.reflection.root_name = "Selected subtree";
+        }
+        for (const RenderItem& item : plan.items) {
+            if (contains(item.reflection_ancestors, explicit_root)) plan.reflection.items.push_back(item);
+        }
+        sort_capture_items(plan.reflection.items);
+        if (plan.reflection.items.empty()) {
+            plan.reflection.reason = "Selected reflection subtree has no visible geometry";
+        }
+        return plan;
+    }
+
+    for (const RenderItem& item : plan.items) {
+        if (item.workspace_auxiliary == "reflectionEnvironment") plan.reflection.items.push_back(item);
+    }
+    if (!plan.reflection.items.empty()) {
+        plan.reflection.mode = ReflectionSelectionMode::environment;
+        plan.reflection.root_name = plan.reflection.items.front().workspace_file.empty()
+                                        ? "Reflection environment"
+                                        : plan.reflection.items.front().workspace_file;
+        sort_capture_items(plan.reflection.items);
+        return plan;
+    }
+
+    if (effective_workspace_kind(scene, options) == "track" || effective_bounds_radius(scene, options) > 20.0F) {
+        plan.reflection.mode = ReflectionSelectionMode::scene;
+        plan.reflection.root_name = "Whole scene";
+        plan.reflection.items = plan.items;
+        if (plan.reflection.items.empty()) plan.reflection.reason = "Scene has no visible geometry";
+        return plan;
+    }
+
+    plan.reflection.mode = ReflectionSelectionMode::fallback;
+    plan.reflection.reason = "No separate environment geometry";
+    return plan;
+}
+
+}  // namespace apex::render

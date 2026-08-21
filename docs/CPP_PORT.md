@@ -81,6 +81,29 @@ The scene model is the single source of truth. GPU resources are rebuildable
 from it, and project/recovery/KN5/CSP exports consume the same transaction
 state.
 
+## Current implementation status
+
+As of 2026-08-20, the native port is additive and the JavaScript/WebGL editor
+remains unchanged and feature-complete.
+
+- P0 is partial: CMake, strict warnings, sanitizers, cross-platform CI,
+  portable security checks, a native inspection CLI, a backend-neutral device
+  API, and headless Vulkan/D3D12 device creation are implemented.
+- P1 is partial: bounded KN5 v4/v5/v6, DDS, ACD, INI/CSP, KSANIM v1/v2, and
+  KNH readers are implemented. KN5 writing/baking, FBX, VAO, surfaces,
+  cameras, asset indexing, and the remaining image formats are not ported.
+- P2 has only its initial neutral scene snapshot and deterministic render-plan
+  selection. Authoring, undo/recovery, workspaces, validation, and export are
+  not ported.
+- P3–P7 are not complete. The native graphics backends create real devices,
+  but do not yet create windows/swapchains, upload scene resources, execute
+  shaders, draw pixels, or provide golden-image parity evidence.
+
+DDS BC6H and BC7 are recognized and routed as GPU-required formats. The
+current native slice deliberately does not substitute an approximate CPU
+decoder. A software fallback remains parity work because the WebGL editor has
+one. These limitations must stay visible until their roadmap gates are met.
+
 ## Source-module mapping
 
 | Current module | Port boundary and retained responsibility |

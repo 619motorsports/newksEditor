@@ -5,11 +5,12 @@ JavaScript/WebGL application remains the feature-complete reference while the
 native implementation works through the parity gates in
 [`docs/CPP_PORT.md`](../docs/CPP_PORT.md).
 
-The first slice provides shared bounded input utilities, KSANIM v1/v2 and KNH
-parsers, a backend-neutral device contract, headless Vulkan and Windows D3D12
-implementations, and portable desktop-boundary validation. Backend API types
-stay inside `src/render`; format and authoring libraries do not depend on a
-graphics API.
+The current slices provide shared bounded input utilities; KN5 v4/v5/v6,
+DDS, ACD, ordered INI/CSP, KSANIM v1/v2, and KNH readers; stock material-state
+classification; a backend-neutral render planner and device contract;
+headless Vulkan and Windows D3D12 implementations; and portable desktop-boundary
+validation. Backend API types stay inside `src/render`; format and authoring
+libraries do not depend on a graphics API.
 
 ## Build and test
 
@@ -26,11 +27,19 @@ Probe an available backend or inspect a KSANIM file:
 
 ```sh
 out/native/dev/native/apex-native --backend vulkan
+out/native/dev/native/apex-native --inspect-kn5 model.kn5
+out/native/dev/native/apex-native --inspect-dds texture.dds
+out/native/dev/native/apex-native --inspect-acd car_directory data.acd
+out/native/dev/native/apex-native --inspect-ini ext_config.ini
 out/native/dev/native/apex-native --inspect-ksanim animation.ksanim
 ```
 
 An unavailable SDK, driver, validation layer, or adapter is reported
 explicitly. It is never presented as a successful backend initialization.
+The current backends initialize devices only: window surfaces, swapchains,
+resource upload, shader execution, and production pixel comparisons remain
+roadmap work. BC6H/BC7 DDS files currently require a capable GPU path; the
+existing WebGL CPU fallback has not yet been ported.
 
 ## Contribution rules
 

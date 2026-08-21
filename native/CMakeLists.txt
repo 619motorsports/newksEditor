@@ -61,6 +61,10 @@ add_library(ApexEditor::Core ALIAS apex_core)
 target_link_libraries(apex_core PUBLIC ApexEditor::Native)
 
 add_library(apex_formats STATIC
+  src/formats/acd.cpp
+  src/formats/dds.cpp
+  src/formats/ini.cpp
+  src/formats/kn5.cpp
   src/formats/knh.cpp
   src/formats/ksanim.cpp
 )
@@ -75,6 +79,8 @@ target_link_libraries(apex_platform PUBLIC ApexEditor::Native)
 
 add_library(apex_render STATIC
   src/render/device.cpp
+  src/render/material_profile.cpp
+  src/render/render_plan.cpp
   src/render/vulkan_device.cpp
   src/render/d3d12_device.cpp
 )
@@ -118,7 +124,13 @@ endfunction()
 
 apex_add_native_test(ksanim_tests.cpp ksanim_tests ApexEditor::Formats)
 apex_add_native_test(knh_tests.cpp knh_tests ApexEditor::Formats)
+apex_add_native_test(kn5_tests.cpp kn5_tests ApexEditor::Formats)
+apex_add_native_test(dds_tests.cpp dds_tests ApexEditor::Formats)
+apex_add_native_test(acd_tests.cpp acd_tests ApexEditor::Formats)
+apex_add_native_test(ini_tests.cpp ini_tests ApexEditor::Formats)
 apex_add_native_test(render_backend_tests.cpp render_backend_tests ApexEditor::Render)
+apex_add_native_test(material_profile_tests.cpp material_profile_tests ApexEditor::Render)
+apex_add_native_test(render_plan_tests.cpp render_plan_tests ApexEditor::Render)
 apex_add_native_test(platform_security_tests.cpp platform_security_tests ApexEditor::Platform)
 
 if(TEST ksanim_tests)
@@ -127,8 +139,19 @@ endif()
 if(TEST knh_tests)
   set_tests_properties(knh_tests PROPERTIES LABELS "unit;malformed")
 endif()
+foreach(parser_test IN ITEMS kn5_tests dds_tests acd_tests ini_tests)
+  if(TEST ${parser_test})
+    set_tests_properties(${parser_test} PROPERTIES LABELS "unit;malformed")
+  endif()
+endforeach()
 if(TEST render_backend_tests)
   set_tests_properties(render_backend_tests PROPERTIES LABELS "unit;render")
+endif()
+if(TEST material_profile_tests)
+  set_tests_properties(material_profile_tests PROPERTIES LABELS "unit;render")
+endif()
+if(TEST render_plan_tests)
+  set_tests_properties(render_plan_tests PROPERTIES LABELS "unit;render")
 endif()
 if(TEST platform_security_tests)
   set_tests_properties(platform_security_tests PROPERTIES LABELS "unit;security")
