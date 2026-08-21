@@ -548,6 +548,35 @@ private:
     return state;
 }
 
+[[nodiscard]] bool validate_d3d12_sample_count(const std::shared_ptr<D3D12Context>& context,
+                                               DXGI_FORMAT format,
+                                               std::uint32_t samples,
+                                               Diagnostic& diagnostic) {
+    if (samples == 1U) return true;
+    if (samples != 4U) {
+        diagnostic = {"d3d12_multisample_count_unsupported",
+                      "D3D12 multisample targets support only one or four samples"};
+        return false;
+    }
+    D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS quality{};
+    quality.Format = format;
+    quality.SampleCount = samples;
+    quality.Flags = D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE;
+    const HRESULT result = context->device->CheckFeatureSupport(
+        D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &quality, sizeof(quality));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("ID3D12Device::CheckFeatureSupport(MSAA)", result);
+        diagnostic.code = "d3d12_multisample_query_failed";
+        return false;
+    }
+    if (quality.NumQualityLevels == 0U) {
+        diagnostic = {"d3d12_multisample_unsupported",
+                      "The D3D12 adapter does not support the requested multisample format"};
+        return false;
+    }
+    return true;
+}
+
 [[nodiscard]] D3D12_RESOURCE_FLAGS texture_flags(TextureUsage usage) noexcept {
     const auto raw = static_cast<std::uint32_t>(usage);
     D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE;
@@ -1059,7 +1088,7 @@ const char* d3d12_pipeline_semantic(PipelineVertexSemantic semantic) noexcept {
 
 void configure_d3d12_blend_state(const PipelineBlendState& source,
                                  D3D12_BLEND_DESC& destination) noexcept {
-    destination.AlphaToCoverageEnable = FALSE;
+    destination.AlphaToCoverageEnable = source.alpha_to_coverage ? TRUE : FALSE;
     destination.IndependentBlendEnable = FALSE;
     D3D12_RENDER_TARGET_BLEND_DESC& target = destination.RenderTarget[0];
     target.BlendEnable = source.enabled ? TRUE : FALSE;
@@ -1124,6 +1153,23 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     const bool use_depth = depth_attachment != nullptr;
     const bool depth_test = use_depth && request.pipeline->depth.test_enabled;
     const bool depth_write = use_depth && request.pipeline->depth.write_enabled;
+    if (request.pipeline->targets.colors.empty() ||
+        request.pipeline->targets.colors.front().samples != description.samples) {
+        diagnostic = {"d3d12_sample_count_mismatch",
+                      "D3D12 color texture and pipeline sample counts must match"};
+        return false;
+    }
+    if (!validate_d3d12_sample_count(context, dxgi_texture_format(description.format),
+                                     description.samples, diagnostic))
+        return false;
+    if (use_depth && depth_attachment->info().description.samples != description.samples) {
+        diagnostic = {"d3d12_depth_sample_count_mismatch",
+                      "D3D12 color and depth attachment sample counts must match"};
+        return false;
+    }
+    if (use_depth && !validate_d3d12_sample_count(context, DXGI_FORMAT_D32_FLOAT,
+                                                   depth_attachment->info().description.samples, diagnostic))
+        return false;
     const D3D12_RESOURCE_STATES depth_draw_state = depth_write ? D3D12_RESOURCE_STATE_DEPTH_WRITE
                                                                 : D3D12_RESOURCE_STATE_DEPTH_READ;
     if (use_depth && !clear_depth && !depth_attachment->cleared()) {
@@ -1463,7 +1509,8 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     pipeline_description.RTVFormats[0] = dxgi_texture_format(description.format);
     pipeline_description.DSVFormat = use_depth ? DXGI_FORMAT_D32_FLOAT : DXGI_FORMAT_UNKNOWN;
     pipeline_description.SampleMask = std::numeric_limits<UINT>::max();
-    pipeline_description.SampleDesc.Count = 1U;
+    pipeline_description.SampleDesc.Count = description.samples;
+    pipeline_description.SampleDesc.Quality = 0U;
     ComPtr<ID3D12PipelineState> pipeline;
     result = context->device->CreateGraphicsPipelineState(&pipeline_description, IID_PPV_ARGS(&pipeline));
     if (FAILED(result)) {
@@ -1484,11 +1531,31 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     }
     D3D12_RENDER_TARGET_VIEW_DESC rtv_description{};
     rtv_description.Format = dxgi_texture_format(description.format);
-    rtv_description.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+    rtv_description.ViewDimension = description.samples > 1U ? D3D12_RTV_DIMENSION_TEXTURE2DMS
+                                                               : D3D12_RTV_DIMENSION_TEXTURE2D;
     rtv_description.Texture2D.MipSlice = 0U;
     const D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
     context->device->CreateRenderTargetView(destination, &rtv_description, rtv);
     D3D12_RESOURCE_DESC resource_description = destination->GetDesc();
+    ComPtr<ID3D12Resource> resolve_resource;
+    ID3D12Resource* readback_source = destination;
+    if (description.samples > 1U) {
+        D3D12_RESOURCE_DESC resolve_description = resource_description;
+        resolve_description.SampleDesc.Count = 1U;
+        resolve_description.SampleDesc.Quality = 0U;
+        D3D12_HEAP_PROPERTIES resolve_heap{};
+        resolve_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        result = context->device->CreateCommittedResource(
+            &resolve_heap, D3D12_HEAP_FLAG_NONE, &resolve_description,
+            D3D12_RESOURCE_STATE_RESOLVE_DEST, nullptr, IID_PPV_ARGS(&resolve_resource));
+        if (FAILED(result)) {
+            diagnostic = hresult_error("CreateCommittedResource(MSAA resolve)", result);
+            diagnostic.code = "triangle_execution_failed";
+            return false;
+        }
+        readback_source = resolve_resource.Get();
+        resource_description = resolve_description;
+    }
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
     UINT row_count = 0U;
     UINT64 row_size = 0U;
@@ -1669,15 +1736,35 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     list->RSSetScissorRects(1U, &scissor);
     if (geometry.indexed) list->DrawIndexedInstanced(geometry.index_count, 1U, 0U, 0, 0U);
     else list->DrawInstanced(request.vertex_count, 1U, 0U, 0U);
-    D3D12_RESOURCE_BARRIER to_copy{};
-    to_copy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    to_copy.Transition.pResource = destination;
-    to_copy.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    to_copy.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    to_copy.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    list->ResourceBarrier(1U, &to_copy);
+    const D3D12_RESOURCE_STATES final_state = texture_state(description.usage);
+    if (description.samples > 1U) {
+        D3D12_RESOURCE_BARRIER resolve_source{};
+        resolve_source.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        resolve_source.Transition.pResource = destination;
+        resolve_source.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        resolve_source.Transition.StateAfter = D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
+        resolve_source.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &resolve_source);
+        list->ResolveSubresource(resolve_resource.Get(), 0U, destination, 0U,
+                                 dxgi_texture_format(description.format));
+        D3D12_RESOURCE_BARRIER resolve_copy{};
+        resolve_copy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        resolve_copy.Transition.pResource = resolve_resource.Get();
+        resolve_copy.Transition.StateBefore = D3D12_RESOURCE_STATE_RESOLVE_DEST;
+        resolve_copy.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        resolve_copy.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &resolve_copy);
+    } else {
+        D3D12_RESOURCE_BARRIER to_copy{};
+        to_copy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        to_copy.Transition.pResource = destination;
+        to_copy.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        to_copy.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        to_copy.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &to_copy);
+    }
     D3D12_TEXTURE_COPY_LOCATION source{};
-    source.pResource = destination;
+    source.pResource = readback_source;
     source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     source.SubresourceIndex = 0U;
     D3D12_TEXTURE_COPY_LOCATION target{};
@@ -1685,8 +1772,15 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     target.PlacedFootprint = footprint;
     list->CopyTextureRegion(&target, 0U, 0U, 0U, &source, nullptr);
-    const D3D12_RESOURCE_STATES final_state = texture_state(description.usage);
-    if (final_state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+    if (description.samples > 1U) {
+        D3D12_RESOURCE_BARRIER destination_final{};
+        destination_final.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        destination_final.Transition.pResource = destination;
+        destination_final.Transition.StateBefore = D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
+        destination_final.Transition.StateAfter = final_state;
+        destination_final.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &destination_final);
+    } else if (final_state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
         D3D12_RESOURCE_BARRIER barrier{};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barrier.Transition.pResource = destination;
@@ -1781,6 +1875,25 @@ bool draw_indexed_static_mesh_batch_and_readback(
         return false;
     }
     const bool use_depth = depth_attachment != nullptr;
+    if (!validate_d3d12_sample_count(context, dxgi_texture_format(description.format),
+                                     description.samples, diagnostic))
+        return false;
+    for (const IndexedStaticMeshDrawRequest& request : batch.draws) {
+        if (request.pipeline == nullptr || request.pipeline->targets.colors.empty() ||
+            request.pipeline->targets.colors.front().samples != description.samples) {
+            diagnostic = {"d3d12_sample_count_mismatch",
+                          "D3D12 color texture and every batch pipeline must use the same sample count"};
+            return false;
+        }
+    }
+    if (use_depth && depth_attachment->info().description.samples != description.samples) {
+        diagnostic = {"d3d12_depth_sample_count_mismatch",
+                      "D3D12 color and depth attachment sample counts must match"};
+        return false;
+    }
+    if (use_depth && !validate_d3d12_sample_count(context, DXGI_FORMAT_D32_FLOAT,
+                                                   depth_attachment->info().description.samples, diagnostic))
+        return false;
     if (use_depth && !batch.clear_depth && !depth_attachment->cleared()) {
         diagnostic = {"indexed_depth_load_before_clear",
                       "A depth load was requested before the D3D12 depth attachment was cleared"};
@@ -2135,7 +2248,8 @@ bool draw_indexed_static_mesh_batch_and_readback(
         pipeline_description.RTVFormats[0] = dxgi_texture_format(description.format);
         pipeline_description.DSVFormat = use_depth ? DXGI_FORMAT_D32_FLOAT : DXGI_FORMAT_UNKNOWN;
         pipeline_description.SampleMask = std::numeric_limits<UINT>::max();
-        pipeline_description.SampleDesc.Count = 1U;
+        pipeline_description.SampleDesc.Count = description.samples;
+        pipeline_description.SampleDesc.Quality = 0U;
         result = context->device->CreateGraphicsPipelineState(&pipeline_description, IID_PPV_ARGS(&pipelines[index]));
         if (FAILED(result)) {
             diagnostic = hresult_error("CreateGraphicsPipelineState(indexed batch)", result);
@@ -2157,12 +2271,32 @@ bool draw_indexed_static_mesh_batch_and_readback(
     }
     D3D12_RENDER_TARGET_VIEW_DESC rtv_description{};
     rtv_description.Format = dxgi_texture_format(description.format);
-    rtv_description.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+    rtv_description.ViewDimension = description.samples > 1U ? D3D12_RTV_DIMENSION_TEXTURE2DMS
+                                                               : D3D12_RTV_DIMENSION_TEXTURE2D;
     rtv_description.Texture2D.MipSlice = 0U;
     const D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
     context->device->CreateRenderTargetView(destination, &rtv_description, rtv);
 
     D3D12_RESOURCE_DESC resource_description = destination->GetDesc();
+    ComPtr<ID3D12Resource> resolve_resource;
+    ID3D12Resource* readback_source = destination;
+    if (description.samples > 1U) {
+        D3D12_RESOURCE_DESC resolve_description = resource_description;
+        resolve_description.SampleDesc.Count = 1U;
+        resolve_description.SampleDesc.Quality = 0U;
+        D3D12_HEAP_PROPERTIES resolve_heap{};
+        resolve_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        result = context->device->CreateCommittedResource(
+            &resolve_heap, D3D12_HEAP_FLAG_NONE, &resolve_description,
+            D3D12_RESOURCE_STATE_RESOLVE_DEST, nullptr, IID_PPV_ARGS(&resolve_resource));
+        if (FAILED(result)) {
+            diagnostic = hresult_error("CreateCommittedResource(MSAA resolve batch)", result);
+            diagnostic.code = "indexed_static_mesh_batch_execution_failed";
+            return false;
+        }
+        readback_source = resolve_resource.Get();
+        resource_description = resolve_description;
+    }
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
     UINT row_count = 0U;
     UINT64 row_size = 0U;
@@ -2337,15 +2471,35 @@ bool draw_indexed_static_mesh_batch_and_readback(
         list->RSSetScissorRects(1U, &scissor);
         list->DrawIndexedInstanced(draw.geometry.index_count, 1U, 0U, 0, 0U);
     }
-    D3D12_RESOURCE_BARRIER to_copy{};
-    to_copy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    to_copy.Transition.pResource = destination;
-    to_copy.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    to_copy.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    to_copy.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    list->ResourceBarrier(1U, &to_copy);
+    const D3D12_RESOURCE_STATES final_state = texture_state(description.usage);
+    if (description.samples > 1U) {
+        D3D12_RESOURCE_BARRIER resolve_source{};
+        resolve_source.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        resolve_source.Transition.pResource = destination;
+        resolve_source.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        resolve_source.Transition.StateAfter = D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
+        resolve_source.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &resolve_source);
+        list->ResolveSubresource(resolve_resource.Get(), 0U, destination, 0U,
+                                 dxgi_texture_format(description.format));
+        D3D12_RESOURCE_BARRIER resolve_copy{};
+        resolve_copy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        resolve_copy.Transition.pResource = resolve_resource.Get();
+        resolve_copy.Transition.StateBefore = D3D12_RESOURCE_STATE_RESOLVE_DEST;
+        resolve_copy.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        resolve_copy.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &resolve_copy);
+    } else {
+        D3D12_RESOURCE_BARRIER to_copy{};
+        to_copy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        to_copy.Transition.pResource = destination;
+        to_copy.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        to_copy.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        to_copy.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &to_copy);
+    }
     D3D12_TEXTURE_COPY_LOCATION source{};
-    source.pResource = destination;
+    source.pResource = readback_source;
     source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     source.SubresourceIndex = 0U;
     D3D12_TEXTURE_COPY_LOCATION target{};
@@ -2353,8 +2507,15 @@ bool draw_indexed_static_mesh_batch_and_readback(
     target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     target.PlacedFootprint = footprint;
     list->CopyTextureRegion(&target, 0U, 0U, 0U, &source, nullptr);
-    const D3D12_RESOURCE_STATES final_state = texture_state(description.usage);
-    if (final_state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+    if (description.samples > 1U) {
+        D3D12_RESOURCE_BARRIER destination_final{};
+        destination_final.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        destination_final.Transition.pResource = destination;
+        destination_final.Transition.StateBefore = D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
+        destination_final.Transition.StateAfter = final_state;
+        destination_final.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &destination_final);
+    } else if (final_state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
         D3D12_RESOURCE_BARRIER barrier{};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barrier.Transition.pResource = destination;
@@ -3478,12 +3639,15 @@ public:
             validate_depth_attachment_description(description, diagnostic);
         if (validation != DepthAttachmentStatus::ready)
             return {validation, std::move(diagnostic), nullptr};
-        if (description.format != DepthAttachmentFormat::d32_float || description.samples != 1U) {
+        if (description.format != DepthAttachmentFormat::d32_float ||
+            (description.samples != 1U && description.samples != 4U)) {
             return {DepthAttachmentStatus::unsupported,
                     {"d3d12_depth_attachment_format_unsupported",
-                     "D3D12 persistent depth attachments support only single-sample D32_FLOAT"},
+                     "D3D12 persistent depth attachments support only single- or four-sample D32_FLOAT"},
                     nullptr};
         }
+        if (!validate_d3d12_sample_count(context_, DXGI_FORMAT_D32_FLOAT, description.samples, diagnostic))
+            return {DepthAttachmentStatus::unsupported, std::move(diagnostic), nullptr};
         D3D12_RESOURCE_DESC resource_description{};
         resource_description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         resource_description.Width = description.width;
@@ -3492,6 +3656,7 @@ public:
         resource_description.MipLevels = 1U;
         resource_description.Format = DXGI_FORMAT_D32_FLOAT;
         resource_description.SampleDesc.Count = description.samples;
+        resource_description.SampleDesc.Quality = 0U;
         resource_description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
         resource_description.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
         D3D12_CLEAR_VALUE clear_value{};
@@ -3526,7 +3691,8 @@ public:
         read_dsv.ptr += static_cast<SIZE_T>(dsv_stride);
         D3D12_DEPTH_STENCIL_VIEW_DESC view_description{};
         view_description.Format = DXGI_FORMAT_D32_FLOAT;
-        view_description.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+        view_description.ViewDimension = description.samples > 1U ? D3D12_DSV_DIMENSION_TEXTURE2DMS
+                                                                     : D3D12_DSV_DIMENSION_TEXTURE2D;
         view_description.Texture2D.MipSlice = 0U;
         context_->device->CreateDepthStencilView(resource.Get(), &view_description, write_dsv);
         view_description.Flags = D3D12_DSV_FLAG_READ_ONLY_DEPTH;
@@ -3552,6 +3718,23 @@ public:
                      "D3D12 texture uploads use default-heap resources; host-visible texture memory is unsupported"},
                     nullptr};
         }
+        if (description.samples != 1U) {
+            const std::uint32_t usage = static_cast<std::uint32_t>(description.usage);
+            const std::uint32_t required_usage =
+                static_cast<std::uint32_t>(TextureUsage::color_attachment) |
+                static_cast<std::uint32_t>(TextureUsage::transfer_source);
+            if (description.samples != 4U || usage != required_usage ||
+                description.mip_levels != 1U || description.array_layers != 1U ||
+                !initial_uploads.subresources.empty()) {
+                return {TextureStatus::unsupported,
+                        {"d3d12_multisample_texture_unsupported",
+                         "D3D12 multisample textures require one-layer, one-mip color targets with transfer-source usage and no upload"},
+                        nullptr};
+            }
+            if (!validate_d3d12_sample_count(context_, dxgi_texture_format(description.format),
+                                             description.samples, diagnostic))
+                return {TextureStatus::unsupported, std::move(diagnostic), nullptr};
+        }
         const D3D12_RESOURCE_STATES final_state = texture_state(description.usage);
         const bool needs_upload = !initial_uploads.subresources.empty();
         const D3D12_RESOURCE_STATES initial_state = needs_upload ? D3D12_RESOURCE_STATE_COPY_DEST : final_state;
@@ -3562,7 +3745,8 @@ public:
         resource_description.DepthOrArraySize = static_cast<UINT16>(description.array_layers);
         resource_description.MipLevels = static_cast<UINT16>(description.mip_levels);
         resource_description.Format = dxgi_texture_format(description.format);
-        resource_description.SampleDesc.Count = 1;
+        resource_description.SampleDesc.Count = description.samples;
+        resource_description.SampleDesc.Quality = 0U;
         resource_description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
         resource_description.Flags = texture_flags(description.usage);
         D3D12_HEAP_PROPERTIES heap{};

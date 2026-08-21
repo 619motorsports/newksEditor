@@ -568,6 +568,13 @@ void contract_texture_readback_limits() {
     TextureClearReadbackRequest request{{0, 1, 0, 1}, 0U, 0U, 4U, 2U};
     require(validate_texture_clear_readback(texture, request, diagnostic) == TextureReadbackStatus::ready,
             "valid texture clear/readback request accepted");
+    TextureDescription multisample_description = description;
+    multisample_description.samples = 4U;
+    ContractTexture multisample_texture(multisample_description);
+    require(validate_texture_clear_readback(multisample_texture, request, diagnostic) ==
+                TextureReadbackStatus::unsupported &&
+                diagnostic.code == "texture_readback_multisample_unsupported",
+            "multisample clear/readback rejected explicitly");
     request.clear_color[0] = std::numeric_limits<float>::quiet_NaN();
     require(validate_texture_clear_readback(texture, request, diagnostic) == TextureReadbackStatus::invalid_request &&
                 diagnostic.code == "texture_clear_color_non_finite", "non-finite clear color rejected");
@@ -649,6 +656,13 @@ void contract_triangle_draw_limits() {
     TriangleDrawRequest request{&pipeline, vertices, 3U, 0U, 0U, {0.0F, 0.0F, 0.0F, 1.0F}};
     require(validate_triangle_draw_request(target, request, diagnostic) == TriangleDrawStatus::ready,
             "bounded triangle request accepted");
+    TextureDescription multisample_target_description = target_description;
+    multisample_target_description.samples = 4U;
+    ContractTexture multisample_target(multisample_target_description);
+    require(validate_triangle_draw_request(multisample_target, request, diagnostic) ==
+                TriangleDrawStatus::unsupported &&
+                diagnostic.code == "triangle_target_samples_unsupported",
+            "fixed triangle multisample target rejected explicitly");
     std::vector<std::uint8_t> truncated_spirv = pipeline_shader_fixture();
     truncated_spirv.resize(24U);
     pipeline.shaders[0].bytes = truncated_spirv;
@@ -1085,6 +1099,38 @@ bool contract_backend(apex::render::Backend backend) {
                 indexed_result.rgba8[2] == std::byte{0} && indexed_result.rgba8[3] == std::byte{255},
             "indexed static-mesh outside pixel retains clear color");
 
+    // Exercise the bounded 4x color/depth-independent path. The backend must
+    // render to the multisampled target, then resolve it to a single-sample
+    // image before producing the canonical readback. Alpha-to-coverage is
+    // enabled here so the PSO sample count and blend state are both covered.
+    TextureDescription msaa_a2c_description = triangle_description;
+    msaa_a2c_description.samples = 4U;
+    TextureResult msaa_a2c_texture = device.device->create_texture(msaa_a2c_description);
+    require(msaa_a2c_texture.ok(), "four-sample indexed target creation");
+    DepthAttachmentDescription msaa_a2c_depth_description;
+    msaa_a2c_depth_description.width = msaa_a2c_description.width;
+    msaa_a2c_depth_description.height = msaa_a2c_description.height;
+    msaa_a2c_depth_description.samples = 4U;
+    msaa_a2c_depth_description.format = DepthAttachmentFormat::d32_float;
+    DepthAttachmentResult msaa_a2c_depth =
+        device.device->create_depth_attachment(msaa_a2c_depth_description);
+    require(msaa_a2c_depth.ok(), "four-sample persistent depth creation");
+    DrawPacket msaa_a2c_packet = indexed_packet;
+    msaa_a2c_packet.flags.alpha_to_coverage = true;
+    StaticMeshUploadResult msaa_a2c_upload =
+        upload_static_mesh(*device.device, indexed_mesh, msaa_a2c_packet);
+    require(msaa_a2c_upload.ok(), "four-sample indexed static-mesh upload");
+    PipelineProgram msaa_a2c_pipeline = indexed_pipeline;
+    msaa_a2c_pipeline.name = "indexed-msaa-transform-triangle";
+    msaa_a2c_pipeline.targets.colors[0].samples = 4U;
+    msaa_a2c_pipeline.blend.alpha_to_coverage = true;
+    IndexedStaticMeshDrawRequest msaa_a2c_request =
+        msaa_a2c_upload.upload->make_request(msaa_a2c_pipeline, *indexed_camera.frame);
+    const IndexedStaticMeshDrawResult msaa_a2c_result =
+        device.device->draw_indexed_static_mesh_and_readback(*msaa_a2c_texture.texture, msaa_a2c_request);
+    require(msaa_a2c_result.ok() && msaa_a2c_result.rgba8.size() == 32U * 32U * 4U,
+            "four-sample indexed draw resolves and reads back");
+
     // Exercise the CPU-skinned mutable-vertex contract. The source stream is
     // the KN5 19-float layout; skin_vertices_reference produces the local
     // 19-float stream that the backend uploads before the next draw. This is
@@ -1289,6 +1335,33 @@ bool contract_backend(apex::render::Backend backend) {
                 sampled_result.rgba8[2] == std::byte{0} &&
                 sampled_result.rgba8[3] == std::byte{255},
             "portable diffuse outside pixel retains clear color");
+
+    if (backend == Backend::D3D12) {
+        TextureDescription msaa_diffuse_description = triangle_description;
+        msaa_diffuse_description.samples = 4U;
+        TextureResult msaa_diffuse_texture =
+            device.device->create_texture(msaa_diffuse_description);
+        require(msaa_diffuse_texture.ok(), "D3D12 4x multisample target creation");
+        PipelineProgram msaa_diffuse_pipeline = sampled_pipeline;
+        msaa_diffuse_pipeline.name = "d3d12-4x-resolve-diffuse";
+        msaa_diffuse_pipeline.targets.colors[0].samples = 4U;
+        IndexedStaticMeshDrawRequest msaa_diffuse_request = sampled_request;
+        msaa_diffuse_request.pipeline = &msaa_diffuse_pipeline;
+        const IndexedStaticMeshDrawResult msaa_diffuse_result =
+            device.device->draw_indexed_static_mesh_and_readback(*msaa_diffuse_texture.texture,
+                                                                   msaa_diffuse_request);
+        require(msaa_diffuse_result.ok() && msaa_diffuse_result.rgba8.size() == 32U * 32U * 4U,
+                "D3D12 4x single indexed draw resolves and reads back");
+        const std::array<IndexedStaticMeshDrawRequest, 2> msaa_diffuse_draws = {
+            msaa_diffuse_request, msaa_diffuse_request};
+        IndexedStaticMeshBatchDescription msaa_diffuse_batch;
+        msaa_diffuse_batch.draws = msaa_diffuse_draws;
+        const IndexedStaticMeshBatchResult msaa_diffuse_batch_result =
+            device.device->draw_indexed_static_mesh_batch_and_readback(*msaa_diffuse_texture.texture,
+                                                                          msaa_diffuse_batch);
+        require(msaa_diffuse_batch_result.ok() && msaa_diffuse_batch_result.rgba8.size() == 32U * 32U * 4U,
+                "D3D12 4x ordered batch resolves and reads back");
+    }
 
     // Prove one bounded per-draw constants record beside t0/s1. The shader is
     // a transport fixture, not a complete ksPerPixel lighting implementation.
@@ -2127,6 +2200,29 @@ bool contract_backend(apex::render::Backend backend) {
     require_alpha_center(alpha_result.rgba8,
                          "single draw blends half-alpha red over blue");
 
+    if (backend == Backend::Vulkan || backend == Backend::D3D12) {
+        TextureDescription a2c_description = triangle_description;
+        a2c_description.samples = 4U;
+        TextureResult a2c_texture = device.device->create_texture(a2c_description);
+        require(a2c_texture.ok(), "4x alpha-to-coverage target creation");
+        PipelineProgram a2c_pipeline = alpha_pipeline;
+        a2c_pipeline.name = "portable-4x-alpha-to-coverage";
+        a2c_pipeline.targets.colors[0].samples = 4U;
+        a2c_pipeline.blend.alpha_to_coverage = true;
+        DrawPacket a2c_packet = alpha_packet;
+        a2c_packet.flags.alpha_to_coverage = true;
+        IndexedStaticMeshDrawRequest a2c_request = alpha_request;
+        a2c_request.packet = &a2c_packet;
+        a2c_request.pipeline = &a2c_pipeline;
+        const IndexedStaticMeshDrawResult a2c_result =
+            device.device->draw_indexed_static_mesh_and_readback(*a2c_texture.texture, a2c_request);
+        require(a2c_result.ok(), "4x alpha-to-coverage draw/readback");
+        const std::uint8_t a2c_red = std::to_integer<std::uint8_t>(a2c_result.rgba8[center]);
+        const std::uint8_t a2c_blue = std::to_integer<std::uint8_t>(a2c_result.rgba8[center + 2U]);
+        require(a2c_red > 0U && a2c_red < 255U && a2c_blue > 0U && a2c_blue < 255U,
+                "4x alpha-to-coverage produces partial resolved coverage");
+    }
+
     IndexedStaticMeshDrawRequest alpha_batch_request = alpha_request;
     alpha_batch_request.clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
     const std::array<IndexedStaticMeshDrawRequest, 1> alpha_draws = {
@@ -2377,6 +2473,47 @@ bool contract_backend(apex::render::Backend backend) {
     DrawPacket right_packet = make_depth_packet(1.1F, 0.0F, true);
     StaticMeshUploadResult left_upload = make_depth_upload(left_packet);
     StaticMeshUploadResult right_upload = make_depth_upload(right_packet);
+
+    if (backend == Backend::Vulkan || backend == Backend::D3D12) {
+        TextureDescription msaa_depth_target_description = triangle_description;
+        msaa_depth_target_description.samples = 4U;
+        TextureResult msaa_depth_target =
+            device.device->create_texture(msaa_depth_target_description);
+        require(msaa_depth_target.ok(), "4x depth target creation");
+        DepthAttachmentDescription msaa_persistent_depth_description = depth_description;
+        msaa_persistent_depth_description.samples = 4U;
+        DepthAttachmentResult msaa_persistent_depth =
+            device.device->create_depth_attachment(msaa_persistent_depth_description);
+        require(msaa_persistent_depth.ok(), "4x persistent depth attachment creation");
+        PipelineProgram msaa_depth_pipeline = depth_pipeline;
+        msaa_depth_pipeline.name = "4x-depth-resolve";
+        msaa_depth_pipeline.targets.colors[0].samples = 4U;
+        msaa_depth_pipeline.targets.depth.samples = 4U;
+        IndexedStaticMeshDrawRequest msaa_depth_request =
+            left_upload.upload->make_request(msaa_depth_pipeline, *indexed_camera.frame);
+        msaa_depth_request.depth_attachment = msaa_persistent_depth.attachment.get();
+        msaa_depth_request.clear_depth = true;
+        const IndexedStaticMeshDrawResult msaa_depth_result =
+            device.device->draw_indexed_static_mesh_and_readback(*msaa_depth_target.texture,
+                                                                   msaa_depth_request);
+        require(msaa_depth_result.ok() && msaa_depth_result.rgba8.size() == 32U * 32U * 4U,
+                "4x single draw resolves with persistent depth");
+        IndexedStaticMeshDrawRequest msaa_batch_left =
+            left_upload.upload->make_request(msaa_depth_pipeline, *indexed_camera.frame);
+        IndexedStaticMeshDrawRequest msaa_batch_right =
+            right_upload.upload->make_request(msaa_depth_pipeline, *indexed_camera.frame);
+        const std::array<IndexedStaticMeshDrawRequest, 2> msaa_depth_draws = {
+            msaa_batch_left, msaa_batch_right};
+        IndexedStaticMeshBatchDescription msaa_depth_batch;
+        msaa_depth_batch.draws = msaa_depth_draws;
+        msaa_depth_batch.depth_attachment = msaa_persistent_depth.attachment.get();
+        msaa_depth_batch.clear_depth = true;
+        const IndexedStaticMeshBatchResult msaa_depth_batch_result =
+            device.device->draw_indexed_static_mesh_batch_and_readback(*msaa_depth_target.texture,
+                                                                         msaa_depth_batch);
+        require(msaa_depth_batch_result.ok() && msaa_depth_batch_result.rgba8.size() == 32U * 32U * 4U,
+                "4x ordered batch resolves with persistent depth");
+    }
 
     auto make_depth_request = [&](const StaticMeshUploadResult& upload, const PipelineProgram& pipeline,
                                   bool load_color, bool clear_depth, float depth_clear_value = 1.0F) {

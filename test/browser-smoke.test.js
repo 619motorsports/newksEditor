@@ -33,6 +33,20 @@ test("wireframe smoke records state and rejects identical or WebGL-error capture
   assert.match(source, /if\(errors\.length\|\|failedStates\.length\)throw new Error/);
 });
 
+test("alpha-to-coverage smoke advertises and parses the production profile assertion", () => {
+  const result = spawnSync(process.execPath, [toolPath, "--require-alpha-to-coverage"], { encoding: "utf8" });
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stdout}\n${result.stderr}`, /\[--require-alpha-to-coverage\]/);
+  assert.match(source, /const requireAlphaToCoverage = process\.argv\.includes\("--require-alpha-to-coverage"\)/);
+});
+
+test("alpha-to-coverage smoke records WebGL A2C state/profile counts and rejects missing profiles", () => {
+  assert.match(source, /alphaToCoverage: await evaluate\(`\(\(\)=>\{const gl=document\.querySelector\('#view'\)\.getContext\('webgl2'\);return gl\.isEnabled\(gl\.SAMPLE_ALPHA_TO_COVERAGE\);\}\)\(\)`\)/);
+  assert.match(source, /alphaToCoverageProfiles: await evaluate\(`window\.\__apexRenderer\?\.shaderProfileStatus\?\.alphaToCoverage\?\?0`\)/);
+  assert.match(source, /shaderProfileStatus\?\.alphaToCoverage>0/);
+  assert.match(source, /state\.alphaToCoverageProfiles<1/);
+});
+
 test("animation displacement gate validates its threshold and required animation state", () => {
   const result = spawnSync(process.execPath, [toolPath, "--model", "model.kn5", "--mesh", "SKIN", "--animation", "bone.ksanim", "--animation-position", "1", "--require-animation-displacement", "not-a-number"], { encoding: "utf8" });
   assert.notEqual(result.status, 0);

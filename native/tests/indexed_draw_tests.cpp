@@ -351,11 +351,104 @@ void accepts_source_evidenced_blend_state() {
     packet.flags.blend_enabled = true;
     pipeline.blend.alpha_to_coverage = true;
     packet.flags.alpha_to_coverage = true;
-    pipeline.targets.colors.front().samples = 4U;
     require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
                 IndexedStaticMeshDrawStatus::unsupported &&
-                diagnostic.code == "indexed_static_mesh_state_unsupported",
-            "alpha-to-coverage remains explicit until multisample targets exist");
+                diagnostic.code == "indexed_alpha_to_coverage_sample_count",
+            "alpha-to-coverage requires a multisampled target");
+    TextureDescription multisample_target_description = target_description();
+    multisample_target_description.samples = 4U;
+    FakeTexture multisample_target(Backend::Vulkan, multisample_target_description);
+    pipeline.blend.alpha_to_coverage = false;
+    packet.flags.alpha_to_coverage = false;
+    pipeline.targets.colors.front().samples = 4U;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_pipeline_target_samples_mismatch",
+            "pipeline and target sample counts must agree");
+    pipeline.blend.alpha_to_coverage = true;
+    packet.flags.alpha_to_coverage = true;
+    require(validate_indexed_static_mesh_draw_request(multisample_target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            "four-sample alpha-to-coverage contract accepted");
+}
+
+void validates_multisample_texture_contract() {
+    Diagnostic diagnostic;
+    TextureDescription description = target_description();
+    description.samples = 4U;
+    require(validate_texture_description(description, {}, diagnostic) == TextureStatus::ready,
+            "four-sample color target description accepted");
+
+    TextureDescription invalid_samples = description;
+    invalid_samples.samples = 2U;
+    require(validate_texture_description(invalid_samples, {}, diagnostic) == TextureStatus::unsupported &&
+                diagnostic.code == "texture_samples_unsupported",
+            "unsupported texture sample count rejected");
+
+    TextureDescription sampled = sampled_description();
+    sampled.samples = 4U;
+    require(validate_texture_description(sampled, {}, diagnostic) == TextureStatus::unsupported &&
+                diagnostic.code == "texture_multisample_usage_unsupported",
+            "multisampled sampled texture rejected");
+
+    TextureDescription upload = description;
+    upload.usage = TextureUsage::color_attachment | TextureUsage::transfer_destination;
+    require(validate_texture_description(upload, {}, diagnostic) == TextureStatus::unsupported &&
+                diagnostic.code == "texture_multisample_usage_unsupported",
+            "multisampled upload texture rejected");
+
+    TextureDescription storage = description;
+    storage.usage = TextureUsage::storage;
+    require(validate_texture_description(storage, {}, diagnostic) == TextureStatus::unsupported &&
+                diagnostic.code == "texture_multisample_usage_unsupported",
+            "multisampled storage texture rejected");
+
+    const std::array<std::byte, 4> upload_bytes{};
+    TextureUploadPlan uploads;
+    uploads.subresources.push_back({0U, 0U, 16U, 16U, 64U,
+                                    std::span<const std::byte>(upload_bytes)});
+    require(validate_texture_upload_plan(description, uploads, diagnostic) ==
+                TextureStatus::unsupported &&
+                diagnostic.code == "texture_multisample_upload_unsupported",
+            "multisampled color upload rejected");
+}
+
+void accepts_multisample_depth_and_indexed_contract() {
+    PipelineProgram pipeline = pipeline_fixture();
+    pipeline.targets.colors.front().samples = 4U;
+    pipeline.targets.has_depth = true;
+    pipeline.targets.depth = {PipelineRenderTargetFormat::depth32_float, 4U};
+    pipeline.depth.test_enabled = true;
+    pipeline.depth.write_enabled = true;
+    pipeline.depth.compare = PipelineCompareOperation::less;
+    DrawPacket packet = packet_fixture();
+    packet.flags.depth_test = true;
+    packet.flags.depth_write = true;
+    TextureDescription target_desc = target_description();
+    target_desc.samples = 4U;
+    FakeTexture target(Backend::Vulkan, target_desc);
+    FakeBuffer vertices(Backend::Vulkan, {132U, BufferUsage::vertex, BufferMemory::device_local,
+                                          BufferMutability::immutable});
+    FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index, BufferMemory::device_local,
+                                         BufferMutability::immutable});
+    FakeDepthAttachment depth(Backend::Vulkan, {16U, 16U, 4U, DepthAttachmentFormat::d32_float});
+    auto request = request_fixture(packet, pipeline, vertices, indices);
+    request.depth_attachment = &depth;
+    Diagnostic diagnostic;
+    require(validate_depth_attachment_description(depth.info().description, diagnostic) ==
+                DepthAttachmentStatus::ready,
+            "four-sample D32 depth attachment accepted");
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            "indexed color and depth sample counts accepted");
+
+    FakeDepthAttachment single_sample_depth(Backend::Vulkan,
+                                            {16U, 16U, 1U, DepthAttachmentFormat::d32_float});
+    request.depth_attachment = &single_sample_depth;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_depth_attachment_dimensions_mismatch",
+            "depth sample mismatch rejected");
 }
 
 void accepts_source_evidenced_wireframe_topology() {
@@ -462,6 +555,15 @@ void validates_portable_diffuse_resource_contract() {
                 diagnostic.code == "indexed_resource_feedback_loop",
             "color target sampling feedback loop rejected");
 
+    request.sampled_binding.texture = &sampled;
+    TextureDescription multisample_sampled_description = sampled_description();
+    multisample_sampled_description.samples = 4U;
+    FakeTexture multisample_sampled(Backend::Vulkan, multisample_sampled_description);
+    request.sampled_binding.texture = &multisample_sampled;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_resource_texture_description_unsupported",
+            "multisampled diffuse texture rejected");
     request.sampled_binding.texture = &sampled;
     FakeSampler foreign_sampler(Backend::D3D12);
     request.sampled_binding.sampler = &foreign_sampler;
@@ -1061,7 +1163,12 @@ void rejects_invalid_depth_attachment_descriptions() {
     require(validate_depth_attachment_description(description, diagnostic) ==
                 DepthAttachmentStatus::unsupported &&
                 diagnostic.code == "depth_attachment_samples_unsupported",
-            "multisample depth attachment rejected explicitly");
+            "unsupported multisample depth attachment rejected explicitly");
+
+    description.samples = 4U;
+    require(validate_depth_attachment_description(description, diagnostic) ==
+                DepthAttachmentStatus::ready,
+            "four-sample depth attachment accepted");
 
     description.samples = 1U;
     description.format = static_cast<DepthAttachmentFormat>(99);
@@ -1157,6 +1264,44 @@ void validates_ordered_indexed_batch_contract() {
                 !requests[0].clear_depth && !requests[1].clear_depth &&
                 requests[0].depth_attachment == nullptr && requests[1].depth_attachment == nullptr,
             "batch preflight preserves ordered requests and caller state");
+
+    PipelineProgram multisample_pipeline = pipeline_fixture();
+    multisample_pipeline.targets.colors.front().samples = 4U;
+    multisample_pipeline.targets.has_depth = true;
+    multisample_pipeline.targets.depth = {PipelineRenderTargetFormat::depth32_float, 4U};
+    multisample_pipeline.depth.test_enabled = true;
+    multisample_pipeline.depth.write_enabled = true;
+    multisample_pipeline.depth.compare = PipelineCompareOperation::less;
+    DrawPacket multisample_packet = packet_fixture();
+    multisample_packet.flags.depth_test = true;
+    multisample_packet.flags.depth_write = true;
+    FakeTexture multisample_target(Backend::Vulkan, [&] {
+        TextureDescription result = target_description();
+        result.samples = 4U;
+        return result;
+    }());
+    auto multisample_request = request_fixture(multisample_packet, multisample_pipeline,
+                                               vertices, indices);
+    const std::array<IndexedStaticMeshDrawRequest, 1> multisample_requests = {multisample_request};
+    FakeDepthAttachment multisample_depth(Backend::Vulkan,
+                                          {16U, 16U, 4U, DepthAttachmentFormat::d32_float});
+    IndexedStaticMeshBatchDescription multisample_description;
+    multisample_description.draws = multisample_requests;
+    multisample_description.depth_attachment = &multisample_depth;
+    require(validate_indexed_static_mesh_batch_description(multisample_target,
+                                                           multisample_description,
+                                                           diagnostic) ==
+                IndexedStaticMeshBatchStatus::ready,
+            "four-sample indexed batch accepted");
+    FakeDepthAttachment mismatched_depth(Backend::Vulkan,
+                                         {16U, 16U, 1U, DepthAttachmentFormat::d32_float});
+    multisample_description.depth_attachment = &mismatched_depth;
+    require(validate_indexed_static_mesh_batch_description(multisample_target,
+                                                           multisample_description,
+                                                           diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "indexed_static_mesh_batch_depth_dimensions_mismatch",
+            "batch depth sample mismatch rejected");
 
     requests[1].packet = nullptr;
     require(validate_indexed_static_mesh_batch_description(target, description, diagnostic) ==
@@ -1356,6 +1501,8 @@ int main() {
         accepts_static_and_skinned_buffer_contracts();
         accepts_explicit_d32_depth_contract();
         accepts_source_evidenced_blend_state();
+        validates_multisample_texture_contract();
+        accepts_multisample_depth_and_indexed_contract();
         accepts_source_evidenced_wireframe_topology();
         validates_portable_diffuse_resource_contract();
         validates_portable_material_buffer_contract();

@@ -563,6 +563,14 @@ VkFormat vk_texture_format(TextureFormat format) {
     }
 }
 
+VkSampleCountFlagBits vk_sample_count(std::uint32_t samples) noexcept {
+    switch (samples) {
+    case 1U: return VK_SAMPLE_COUNT_1_BIT;
+    case 4U: return VK_SAMPLE_COUNT_4_BIT;
+    default: return static_cast<VkSampleCountFlagBits>(0U);
+    }
+}
+
 VkImageUsageFlags vk_texture_usage(TextureUsage usage) {
     VkImageUsageFlags flags = 0;
     const auto raw = static_cast<std::uint32_t>(usage);
@@ -683,6 +691,12 @@ bool create_raw_image(const std::shared_ptr<VulkanContext>& context,
                       Diagnostic& diagnostic) {
     raw.reset();
     raw.context = context;
+    const VkSampleCountFlagBits sample_count = vk_sample_count(description.samples);
+    if (sample_count == 0U) {
+        diagnostic = {"vulkan_texture_samples_unsupported",
+                      "Vulkan textures support only one or four samples in the bounded contract"};
+        return false;
+    }
     VkImageCreateInfo image_info{};
     image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     image_info.imageType = VK_IMAGE_TYPE_2D;
@@ -690,14 +704,14 @@ bool create_raw_image(const std::shared_ptr<VulkanContext>& context,
     image_info.extent = {description.width, description.height, 1};
     image_info.mipLevels = description.mip_levels;
     image_info.arrayLayers = description.array_layers;
-    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.samples = sample_count;
     image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
     image_info.usage = vk_texture_usage(description.usage);
     // The first contract always permits synchronous uploads. A later
     // resource policy can remove this bit when immutable no-upload images are
     // introduced, but doing so now would make update validation backend-state
     // dependent.
-    image_info.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    if (description.samples == 1U) image_info.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImageFormatProperties format_properties{};
@@ -707,6 +721,11 @@ bool create_raw_image(const std::shared_ptr<VulkanContext>& context,
     if (result != VK_SUCCESS) {
         diagnostic = vk_error("vkGetPhysicalDeviceImageFormatProperties", result);
         diagnostic.code = "texture_format_unsupported";
+        return false;
+    }
+    if ((format_properties.sampleCounts & static_cast<VkSampleCountFlags>(sample_count)) == 0U) {
+        diagnostic = {"vulkan_texture_samples_unsupported",
+                      "The Vulkan device does not support the requested texture sample count"};
         return false;
     }
     result = vkCreateImage(context->device, &image_info, nullptr, &raw.image);
@@ -762,6 +781,13 @@ bool create_raw_depth_attachment(const std::shared_ptr<VulkanContext>& context,
     raw.reset();
     raw.context = context;
 
+    const VkSampleCountFlagBits sample_count = vk_sample_count(description.samples);
+    if (sample_count == 0U) {
+        diagnostic = {"vulkan_depth_samples_unsupported",
+                      "Vulkan depth attachments support only one or four samples in the bounded contract"};
+        return false;
+    }
+
     VkImageCreateInfo image_info{};
     image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     image_info.imageType = VK_IMAGE_TYPE_2D;
@@ -769,7 +795,7 @@ bool create_raw_depth_attachment(const std::shared_ptr<VulkanContext>& context,
     image_info.extent = {description.width, description.height, 1U};
     image_info.mipLevels = 1U;
     image_info.arrayLayers = 1U;
-    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.samples = sample_count;
     image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
     image_info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -782,6 +808,12 @@ bool create_raw_depth_attachment(const std::shared_ptr<VulkanContext>& context,
     if (result != VK_SUCCESS) {
         diagnostic = vk_error("vkGetPhysicalDeviceImageFormatProperties(depth)", result);
         diagnostic.code = "depth_attachment_format_unsupported";
+        raw.reset();
+        return false;
+    }
+    if ((format_properties.sampleCounts & static_cast<VkSampleCountFlags>(sample_count)) == 0U) {
+        diagnostic = {"vulkan_depth_samples_unsupported",
+                      "The Vulkan device does not support the requested depth sample count"};
         raw.reset();
         return false;
     }
@@ -873,6 +905,15 @@ bool copy_texture_uploads(const std::shared_ptr<VulkanContext>& context,
                           const TextureUploadPlan& uploads,
                           VkImageLayout& current_layout,
                           Diagnostic& diagnostic) {
+    if (uploads.subresources.empty()) {
+        current_layout = texture_final_layout(description.usage);
+        return true;
+    }
+    if (description.samples != 1U) {
+        diagnostic = {"vulkan_multisample_texture_upload_unsupported",
+                      "Multisampled Vulkan textures cannot receive transfer uploads"};
+        return false;
+    }
     if (!texture_format_cpu_upload_supported(description.format)) {
         diagnostic = {"texture_compressed_format_unsupported",
                       "Block-compressed texture uploads require a dedicated GPU upload path"};
@@ -1018,6 +1059,11 @@ bool clear_texture_and_readback(const std::shared_ptr<VulkanContext>& context,
                                 VkImageLayout& current_layout,
                                 std::vector<std::byte>& output,
                                 Diagnostic& diagnostic) {
+    if (description.samples != 1U) {
+        diagnostic = {"vulkan_multisample_clear_readback_unsupported",
+                      "Vulkan clear/readback uses a single-sample color target"};
+        return false;
+    }
     const std::size_t output_size = static_cast<std::size_t>(request.output_width) *
                                     static_cast<std::size_t>(request.output_height) * 4U;
     BufferDescription staging_description;
@@ -1477,7 +1523,15 @@ bool create_batch_pipeline(const std::shared_ptr<VulkanContext>& context,
     raster.lineWidth = 1.0F;
     VkPipelineMultisampleStateCreateInfo multisample{};
     multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    const VkSampleCountFlagBits sample_count = vk_sample_count(description.samples);
+    if (sample_count == 0U) {
+        diagnostic = {"vulkan_draw_samples_unsupported",
+                      "Vulkan draws support only one or four samples in the bounded contract"};
+        output.reset();
+        return false;
+    }
+    multisample.rasterizationSamples = sample_count;
+    multisample.alphaToCoverageEnable = program.blend.alpha_to_coverage ? VK_TRUE : VK_FALSE;
     VkPipelineColorBlendAttachmentState blend{};
     blend.blendEnable = program.blend.enabled ? VK_TRUE : VK_FALSE;
     blend.srcColorBlendFactor = vk_pipeline_blend_factor(program.blend.source_color);
@@ -1886,10 +1940,21 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
                                 std::vector<std::byte>& output,
                                 Diagnostic& diagnostic) {
     std::lock_guard command_guard(context->command_mutex);
+    const VkSampleCountFlagBits sample_count = vk_sample_count(description.samples);
+    if (sample_count == 0U) {
+        diagnostic = {"vulkan_draw_samples_unsupported",
+                      "Vulkan draws support only one or four samples in the bounded contract"};
+        return false;
+    }
     if (depth_attachment != nullptr) {
         if (depth_attachment->context().get() != context.get()) {
             diagnostic = {"indexed_depth_attachment_context_mismatch",
                           "The depth attachment belongs to another Vulkan device"};
+            return false;
+        }
+        if (depth_attachment->info().description.samples != description.samples) {
+            diagnostic = {"vulkan_depth_samples_mismatch",
+                          "Vulkan color and depth attachments must use the same sample count"};
             return false;
         }
         if (!clear_depth && !depth_attachment->initialized()) {
@@ -1923,6 +1988,16 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
                            BufferMemory::host_visible, readback, diagnostic)) {
         diagnostic.code = "vulkan_draw_execution_failed";
         return false;
+    }
+    RawVulkanImage resolve_image;
+    if (description.samples != 1U) {
+        TextureDescription resolve_description = description;
+        resolve_description.samples = 1U;
+        resolve_description.usage = TextureUsage::color_attachment | TextureUsage::transfer_source;
+        if (!create_raw_image(context, resolve_description, resolve_image, diagnostic)) {
+            diagnostic.code = diagnostic.code.empty() ? "vulkan_resolve_attachment_failed" : diagnostic.code;
+            return false;
+        }
     }
 
     std::vector<VkShaderModule> shader_modules;
@@ -1963,7 +2038,7 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
 
     VkAttachmentDescription color_attachment{};
     color_attachment.format = vk_texture_format(description.format);
-    color_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    color_attachment.samples = sample_count;
     color_attachment.loadOp = load_color ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
     color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     color_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
@@ -1973,7 +2048,7 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
     VkAttachmentDescription depth_attachment_description{};
     if (depth_attachment != nullptr) {
         depth_attachment_description.format = VK_FORMAT_D32_SFLOAT;
-        depth_attachment_description.samples = VK_SAMPLE_COUNT_1_BIT;
+        depth_attachment_description.samples = sample_count;
         depth_attachment_description.loadOp = clear_depth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
         depth_attachment_description.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         depth_attachment_description.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
@@ -1981,17 +2056,36 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
         depth_attachment_description.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         depth_attachment_description.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     }
-    std::array<VkAttachmentDescription, 2> attachments = {color_attachment, depth_attachment_description};
+    VkAttachmentDescription resolve_attachment{};
+    if (description.samples != 1U) {
+        resolve_attachment.format = vk_texture_format(description.format);
+        resolve_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        resolve_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        resolve_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        resolve_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        resolve_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        resolve_attachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        resolve_attachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    }
+    std::array<VkAttachmentDescription, 3> attachments{};
+    attachments[0] = color_attachment;
+    const std::uint32_t resolve_attachment_index = depth_attachment == nullptr ? 1U : 2U;
+    const std::uint32_t attachment_count =
+        (depth_attachment == nullptr ? 1U : 2U) + (description.samples == 1U ? 0U : 1U);
+    if (depth_attachment != nullptr) attachments[1] = depth_attachment_description;
+    if (description.samples != 1U) attachments[resolve_attachment_index] = resolve_attachment;
     VkAttachmentReference color_reference{0U, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
     VkAttachmentReference depth_reference{1U, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference resolve_reference{resolve_attachment_index, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1U;
     subpass.pColorAttachments = &color_reference;
     subpass.pDepthStencilAttachment = depth_attachment == nullptr ? nullptr : &depth_reference;
+    subpass.pResolveAttachments = description.samples == 1U ? nullptr : &resolve_reference;
     VkRenderPassCreateInfo render_pass_info{};
     render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    render_pass_info.attachmentCount = depth_attachment == nullptr ? 1U : 2U;
+    render_pass_info.attachmentCount = attachment_count;
     render_pass_info.pAttachments = attachments.data();
     render_pass_info.subpassCount = 1U;
     render_pass_info.pSubpasses = &subpass;
@@ -2006,9 +2100,11 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
     VkFramebufferCreateInfo framebuffer_info{};
     framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     framebuffer_info.renderPass = render_pass;
-    std::array<VkImageView, 2> framebuffer_attachments = {
-        image.view, depth_attachment == nullptr ? VK_NULL_HANDLE : depth_attachment->view()};
-    framebuffer_info.attachmentCount = depth_attachment == nullptr ? 1U : 2U;
+    std::array<VkImageView, 3> framebuffer_attachments{};
+    framebuffer_attachments[0] = image.view;
+    if (depth_attachment != nullptr) framebuffer_attachments[1] = depth_attachment->view();
+    if (description.samples != 1U) framebuffer_attachments[resolve_attachment_index] = resolve_image.view;
+    framebuffer_info.attachmentCount = render_pass_info.attachmentCount;
     framebuffer_info.pAttachments = framebuffer_attachments.data();
     framebuffer_info.width = description.width;
     framebuffer_info.height = description.height;
@@ -2082,7 +2178,8 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
         raster.lineWidth = 1.0F;
         VkPipelineMultisampleStateCreateInfo multisample{};
         multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-        multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        multisample.rasterizationSamples = sample_count;
+        multisample.alphaToCoverageEnable = program.blend.alpha_to_coverage ? VK_TRUE : VK_FALSE;
         VkPipelineColorBlendAttachmentState blend{};
         blend.blendEnable = program.blend.enabled ? VK_TRUE : VK_FALSE;
         blend.srcColorBlendFactor = vk_pipeline_blend_factor(program.blend.source_color);
@@ -2188,7 +2285,23 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
                     VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                     0U, 0U, nullptr, 0U, nullptr, 1U, &depth_barrier);
             }
-            std::array<VkClearValue, 2> clear_values{};
+            if (description.samples != 1U) {
+                VkImageMemoryBarrier resolve_barrier{};
+                resolve_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                resolve_barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                resolve_barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                resolve_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                resolve_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                resolve_barrier.image = resolve_image.image;
+                resolve_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                resolve_barrier.subresourceRange.levelCount = 1U;
+                resolve_barrier.subresourceRange.layerCount = 1U;
+                resolve_barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0U, 0U, nullptr,
+                                     0U, nullptr, 1U, &resolve_barrier);
+            }
+            std::array<VkClearValue, 3> clear_values{};
             for (std::size_t index = 0; index < 4U; ++index) clear_values[0].color.float32[index] = clear_color[index];
             if (depth_attachment != nullptr) clear_values[1].depthStencil.depth = depth_clear_value;
             VkRenderPassBeginInfo render_begin{};
@@ -2196,7 +2309,7 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
             render_begin.renderPass = render_pass;
             render_begin.framebuffer = framebuffer;
             render_begin.renderArea.extent = {description.width, description.height};
-            render_begin.clearValueCount = depth_attachment == nullptr ? 1U : 2U;
+            render_begin.clearValueCount = render_pass_info.attachmentCount;
             render_begin.pClearValues = clear_values.data();
             vkCmdBeginRenderPass(command, &render_begin, VK_SUBPASS_CONTENTS_INLINE);
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -2214,14 +2327,15 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
             vkCmdEndRenderPass(command);
             VkImageMemoryBarrier barrier{};
             barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            barrier.oldLayout = description.samples == 1U ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                                                           : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
             barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
             barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barrier.image = image.image;
+            barrier.image = description.samples == 1U ? image.image : resolve_image.image;
             barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            barrier.subresourceRange.levelCount = description.mip_levels;
-            barrier.subresourceRange.layerCount = description.array_layers;
+            barrier.subresourceRange.levelCount = description.samples == 1U ? description.mip_levels : 1U;
+            barrier.subresourceRange.layerCount = description.samples == 1U ? description.array_layers : 1U;
             barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
             barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
             vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -2230,14 +2344,17 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
             copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             copy.imageSubresource.layerCount = 1U;
             copy.imageExtent = {description.width, description.height, 1U};
-            vkCmdCopyImageToBuffer(command, image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            vkCmdCopyImageToBuffer(command, description.samples == 1U ? image.image : resolve_image.image,
+                                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                    readback.buffer, 1U, &copy);
-            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            barrier.newLayout = texture_final_layout(description.usage);
-            barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-            vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                                 0, 0, nullptr, 0, nullptr, 1, &barrier);
+            if (description.samples == 1U) {
+                barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                barrier.newLayout = texture_final_layout(description.usage);
+                barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+                vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                     0, 0, nullptr, 0, nullptr, 1U, &barrier);
+            }
             result = vkEndCommandBuffer(command);
         }
     }
@@ -2361,10 +2478,21 @@ bool draw_indexed_batch_and_readback(
         diagnostic = {"indexed_static_mesh_batch_empty", "The Vulkan indexed batch contains no draws"};
         return false;
     }
+    const VkSampleCountFlagBits sample_count = vk_sample_count(description.samples);
+    if (sample_count == 0U) {
+        diagnostic = {"vulkan_draw_samples_unsupported",
+                      "Vulkan draws support only one or four samples in the bounded contract"};
+        return false;
+    }
     if (depth_attachment != nullptr) {
         if (depth_attachment->context().get() != context.get()) {
             diagnostic = {"indexed_depth_attachment_context_mismatch",
                           "The depth attachment belongs to another Vulkan device"};
+            return false;
+        }
+        if (depth_attachment->info().description.samples != description.samples) {
+            diagnostic = {"vulkan_depth_samples_mismatch",
+                          "Vulkan color and depth attachments must use the same sample count"};
             return false;
         }
         if (!clear_depth && !depth_attachment->initialized()) {
@@ -2396,6 +2524,16 @@ bool draw_indexed_batch_and_readback(
         diagnostic.code = "vulkan_draw_execution_failed";
         return false;
     }
+    RawVulkanImage resolve_image;
+    if (description.samples != 1U) {
+        TextureDescription resolve_description = description;
+        resolve_description.samples = 1U;
+        resolve_description.usage = TextureUsage::color_attachment | TextureUsage::transfer_source;
+        if (!create_raw_image(context, resolve_description, resolve_image, diagnostic)) {
+            diagnostic.code = diagnostic.code.empty() ? "vulkan_resolve_attachment_failed" : diagnostic.code;
+            return false;
+        }
+    }
 
     bool has_sampled_binding = false;
     bool has_material_binding = false;
@@ -2423,7 +2561,7 @@ bool draw_indexed_batch_and_readback(
 
     VkAttachmentDescription color_attachment{};
     color_attachment.format = vk_texture_format(description.format);
-    color_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    color_attachment.samples = sample_count;
     color_attachment.loadOp = load_color ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
     color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     color_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
@@ -2433,7 +2571,7 @@ bool draw_indexed_batch_and_readback(
     VkAttachmentDescription depth_description{};
     if (depth_attachment != nullptr) {
         depth_description.format = VK_FORMAT_D32_SFLOAT;
-        depth_description.samples = VK_SAMPLE_COUNT_1_BIT;
+        depth_description.samples = sample_count;
         depth_description.loadOp = clear_depth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
         depth_description.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         depth_description.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
@@ -2441,17 +2579,36 @@ bool draw_indexed_batch_and_readback(
         depth_description.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         depth_description.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     }
-    std::array<VkAttachmentDescription, 2> attachments = {color_attachment, depth_description};
+    VkAttachmentDescription resolve_attachment{};
+    if (description.samples != 1U) {
+        resolve_attachment.format = vk_texture_format(description.format);
+        resolve_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        resolve_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        resolve_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        resolve_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        resolve_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        resolve_attachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        resolve_attachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    }
+    std::array<VkAttachmentDescription, 3> attachments{};
+    attachments[0] = color_attachment;
+    const std::uint32_t resolve_attachment_index = depth_attachment == nullptr ? 1U : 2U;
+    const std::uint32_t attachment_count =
+        (depth_attachment == nullptr ? 1U : 2U) + (description.samples == 1U ? 0U : 1U);
+    if (depth_attachment != nullptr) attachments[1] = depth_description;
+    if (description.samples != 1U) attachments[resolve_attachment_index] = resolve_attachment;
     VkAttachmentReference color_reference{0U, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
     VkAttachmentReference depth_reference{1U, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference resolve_reference{resolve_attachment_index, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1U;
     subpass.pColorAttachments = &color_reference;
     subpass.pDepthStencilAttachment = depth_attachment == nullptr ? nullptr : &depth_reference;
+    subpass.pResolveAttachments = description.samples == 1U ? nullptr : &resolve_reference;
     VkRenderPassCreateInfo render_pass_info{};
     render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    render_pass_info.attachmentCount = depth_attachment == nullptr ? 1U : 2U;
+    render_pass_info.attachmentCount = attachment_count;
     render_pass_info.pAttachments = attachments.data();
     render_pass_info.subpassCount = 1U;
     render_pass_info.pSubpasses = &subpass;
@@ -2462,12 +2619,14 @@ bool draw_indexed_batch_and_readback(
         diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "vulkan_draw_execution_failed";
         return false;
     }
-    std::array<VkImageView, 2> framebuffer_attachments = {
-        image.view, depth_attachment == nullptr ? VK_NULL_HANDLE : depth_attachment->view()};
+    std::array<VkImageView, 3> framebuffer_attachments{};
+    framebuffer_attachments[0] = image.view;
+    if (depth_attachment != nullptr) framebuffer_attachments[1] = depth_attachment->view();
+    if (description.samples != 1U) framebuffer_attachments[resolve_attachment_index] = resolve_image.view;
     VkFramebufferCreateInfo framebuffer_info{};
     framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     framebuffer_info.renderPass = render_pass;
-    framebuffer_info.attachmentCount = depth_attachment == nullptr ? 1U : 2U;
+    framebuffer_info.attachmentCount = render_pass_info.attachmentCount;
     framebuffer_info.pAttachments = framebuffer_attachments.data();
     framebuffer_info.width = description.width;
     framebuffer_info.height = description.height;
@@ -2575,7 +2734,23 @@ bool draw_indexed_batch_and_readback(
                                      VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                                  0U, 0U, nullptr, 0U, nullptr, 1U, &barrier);
         }
-        std::array<VkClearValue, 2> clear_values{};
+        if (description.samples != 1U) {
+            VkImageMemoryBarrier resolve_barrier{};
+            resolve_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            resolve_barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            resolve_barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            resolve_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            resolve_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            resolve_barrier.image = resolve_image.image;
+            resolve_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            resolve_barrier.subresourceRange.levelCount = 1U;
+            resolve_barrier.subresourceRange.layerCount = 1U;
+            resolve_barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0U, 0U, nullptr,
+                                 0U, nullptr, 1U, &resolve_barrier);
+        }
+        std::array<VkClearValue, 3> clear_values{};
         for (std::size_t index = 0; index < 4U; ++index) clear_values[0].color.float32[index] = clear_color[index];
         if (depth_attachment != nullptr) clear_values[1].depthStencil.depth = depth_clear_value;
         VkRenderPassBeginInfo render_begin{};
@@ -2583,7 +2758,7 @@ bool draw_indexed_batch_and_readback(
         render_begin.renderPass = render_pass;
         render_begin.framebuffer = framebuffer;
         render_begin.renderArea.extent = {description.width, description.height};
-        render_begin.clearValueCount = depth_attachment == nullptr ? 1U : 2U;
+        render_begin.clearValueCount = render_pass_info.attachmentCount;
         render_begin.pClearValues = clear_values.data();
         vkCmdBeginRenderPass(command, &render_begin, VK_SUBPASS_CONTENTS_INLINE);
         for (std::size_t index = 0; index < draws.size(); ++index) {
@@ -2605,14 +2780,15 @@ bool draw_indexed_batch_and_readback(
         vkCmdEndRenderPass(command);
         VkImageMemoryBarrier barrier{};
         barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        barrier.oldLayout = description.samples == 1U ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                                                       : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image = image.image;
+        barrier.image = description.samples == 1U ? image.image : resolve_image.image;
         barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        barrier.subresourceRange.levelCount = description.mip_levels;
-        barrier.subresourceRange.layerCount = description.array_layers;
+        barrier.subresourceRange.levelCount = description.samples == 1U ? description.mip_levels : 1U;
+        barrier.subresourceRange.layerCount = description.samples == 1U ? description.array_layers : 1U;
         barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
         vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -2621,14 +2797,17 @@ bool draw_indexed_batch_and_readback(
         copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         copy.imageSubresource.layerCount = 1U;
         copy.imageExtent = {description.width, description.height, 1U};
-        vkCmdCopyImageToBuffer(command, image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        vkCmdCopyImageToBuffer(command, description.samples == 1U ? image.image : resolve_image.image,
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                readback.buffer, 1U, &copy);
-        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        barrier.newLayout = texture_final_layout(description.usage);
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-        vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                             0U, 0U, nullptr, 0U, nullptr, 1U, &barrier);
+        if (description.samples == 1U) {
+            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barrier.newLayout = texture_final_layout(description.usage);
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                 0U, 0U, nullptr, 0U, nullptr, 1U, &barrier);
+        }
         result = vkEndCommandBuffer(command);
     }
     if (result == VK_SUCCESS) {

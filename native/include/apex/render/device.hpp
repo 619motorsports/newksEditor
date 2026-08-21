@@ -191,6 +191,7 @@ struct TextureDescription {
     TextureUsage usage = TextureUsage::none;
     TextureMemory memory = TextureMemory::device_local;
     TextureMutability mutability = TextureMutability::immutable;
+    std::uint32_t samples = 1;
 };
 
 struct TextureUpload {

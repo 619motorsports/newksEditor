@@ -73,14 +73,15 @@ malformed geometry, non-finite values, invalid packet ranges, and unsafe
 indices. The execution path accepts finite world and camera transforms.
 Vulkan uses a 128-byte vertex push-constant block. D3D12 uses an equivalent
 root-constant block. Each camera must use the clip-space convention for its
-backend. Both backends create persistent single-sample D32 attachments.
+backend. Both backends create persistent 1x or 4x D32 attachments.
 Indexed requests use explicit color-load and depth-clear controls. The
 source-evidenced main path uses `LESS` depth testing. The execution path accepts
 opaque and explicitly blended packets. The packet and pipeline blend flags must
 match. Ordinary alpha, multiply, and transparent-as-black factors match
 `applyItemRenderState` in the production WebGL renderer. Vulkan and D3D12 apply
-these factors in single draws and ordered batches. Alpha-to-coverage remains
-unsupported because the current targets are single-sample. Indexed wireframe
+these factors in single draws and ordered batches. The indexed path supports
+4x multisample targets and alpha-to-coverage. Each backend resolves the final
+color to one sample before readback. Indexed wireframe
 uses line-list topology over the source index stream. This behavior matches the
 production `GL_LINES` selection in `public/app.js`. It does not use polygon-line
 rasterization. Vulkan and D3D12 apply this topology in single draws and ordered
@@ -90,7 +91,7 @@ authority can enable one portable diffuse resource pair: a sampled image at set
 pair for single draws and ordered batches. The pair is a portable test ABI. It
 is not a recovered stock KN5 or CSP shader contract. An optional uniform buffer
 at set 0, binding 2 carries one aligned material record. D3D12 maps it to
-`b2`. Its first 48 bytes use source-evidenced `ksPerPixel` defaults in this
+`b2`. Its first 64 bytes use source-evidenced `ksPerPixel` defaults in this
 port's std140/HLSL-compatible packing. A bounded resolver reads parsed KN5
 values and typed CSP overrides. It preserves CSP precedence and the WebGL
 emissive conversion. Pixel tests prove per-draw record selection. The complete
@@ -101,9 +102,12 @@ An exact tangent-space extension adds `txNormal` at bindings 4 and 5. A second
 extension adds linear `txMaps` at bindings 6 and 7. D3D12 uses `t4`, `s5`,
 `t6`, and `s7`. The maps shader uses `maps.r` for specular strength. It uses
 `maps.g` for the source exponent equation. The maps ABI requires zero Fresnel,
-so `maps.b` remains staged. Detail normals, reflections, and shadows also
-remain staged. Runtime tests cover known pixels, independent samplers, and
-mixed six-binding and eight-binding batches.
+so `maps.b` remains staged. A fourth ABI adds `txDetail` at bindings 8 and 9.
+It adds `txNormalDetail` at bindings 10 and 11. The legacy `txDetailNM` name is
+an alias for `txNormalDetail`. The 64-byte material record includes the detail
+UV multiplier, normal-detail strength, and detail enable value. Reflections
+and shadows remain staged. Runtime tests cover known pixels, independent
+samplers, and mixed six-binding, eight-binding, and twelve-binding batches.
 The serialized KN5 resource ID remains a shader bind point, not a
 texture-table index. A bounded static-scene adapter maps the final KN5 tree to
 dense scene IDs. It validates all packets and pipelines before buffer creation.
@@ -125,10 +129,11 @@ arrays, cubemaps, and RGB24 conversion. The embedded static-scene mode rejects
 arrays, cubemaps, 1D/3D textures, BC6H, and legacy D3D9 float textures.
 The maps path rejects sRGB payloads before backend allocation. Source, decoded,
 and host-preparation budgets include the maps resource and its retained tables.
-The FBX converter handles
-static positions, triangulation, hierarchy, a bounded transform subset, and
-first material assignment. It explicitly diagnoses unsupported images,
-skinning, animation, layer mappings, and advanced transform semantics.
+The FBX converter handles static positions, triangulation, hierarchy, a
+bounded transform subset, and first material assignment. Its aggregate budget
+includes temporary containers, copied strings, and output containers. It
+explicitly diagnoses unsupported images, skinning, animation, layer mappings,
+and advanced transform semantics.
 
 The strict Linux builds detect the Vulkan SDK. Local runtime checks use the
 SwiftShader ICD. CI runs the same checks with a software Vulkan device. The

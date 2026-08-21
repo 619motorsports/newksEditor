@@ -45,6 +45,7 @@ const disableBptc = process.argv.includes("--disable-bptc");
 const requireSharedGeometry = process.argv.includes("--require-shared-geometry");
 const requireDynamicShadowRefresh = process.argv.includes("--require-dynamic-shadow-refresh");
 const wireframe = process.argv.includes("--wireframe");
+const requireAlphaToCoverage = process.argv.includes("--require-alpha-to-coverage");
 const weatherName = option("weather");
 const sunHeading = option("sun-heading");
 const sunHeight = option("sun-height");
@@ -83,7 +84,7 @@ const conditionChanges = process.argv.flatMap((argument, index) => argument === 
   return [entry.slice(0, separator).toUpperCase(), Number(entry.slice(separator + 1))];
 });
 const animationPositions = process.argv.flatMap((argument, index) => argument === "--animation-position" ? [Number(process.argv[index + 1])] : []);
-if ((!modelPath && !layoutName) || !meshName || (layoutName && !assetsPath)) throw new Error("Usage: node tools/browser-smoke.mjs (--model FILE.kn5 | --workspace MANIFEST.ini --assets FOLDER) --mesh NAME [--assembled --show-hidden] [--wireframe] [--rpm 1000 --compare-rpm 6000] [--dynamic-advance 2] [--require-shared-geometry] [--require-dynamic-shadow-refresh] [--csp-assets assettocorsa/extension/textures --clouds] [--reflection-environment SHOWROOM.kn5 --reflection-root NODE] [--seasons --year-progress 0.5 --compare-year-progress 0] [--vao FILE.vao-patch] [--lighting --weather PRESET --sun-heading 40 --sun-height 55 --compare-sun-height 10 --manual-exposure 0.35] [--shadows] [--reflection-compare] [--surface-overlay] [--grass-fx] [--rain-fx --rain-wetness 1] [--tyre-blur 0 --tyre-dirt 0 --compare-tyre-blur 1 --compare-tyre-dirt 1] [--brake-temperature 160 --brake-front-glow 64 --brake-rear-glow 24 --brake-blur 0 --compare-brake-temperature 10 --compare-brake-blur 1] [--blurred-rims] [--cockpit-resolution] [--damage-preview] [--grid] [--view-axis] [--selection-axis] [--track-camera LABEL --track-camera-position 0.5 --play-track-camera] [--driver FILE.kn5 --driver-cockpit] [--skin NAME] [--animation NAME --animation-position 0.5 --require-animation-displacement 0.1] [--lod auto|INDEX] [--config FILE.ini] [--input NAME=VALUE] [--port 9222] [--app-port 4173]");
+if ((!modelPath && !layoutName) || !meshName || (layoutName && !assetsPath)) throw new Error("Usage: node tools/browser-smoke.mjs (--model FILE.kn5 | --workspace MANIFEST.ini --assets FOLDER) --mesh NAME [--assembled --show-hidden] [--wireframe] [--require-alpha-to-coverage] [--rpm 1000 --compare-rpm 6000] [--dynamic-advance 2] [--require-shared-geometry] [--require-dynamic-shadow-refresh] [--csp-assets assettocorsa/extension/textures --clouds] [--reflection-environment SHOWROOM.kn5 --reflection-root NODE] [--seasons --year-progress 0.5 --compare-year-progress 0] [--vao FILE.vao-patch] [--lighting --weather PRESET --sun-heading 40 --sun-height 55 --compare-sun-height 10 --manual-exposure 0.35] [--shadows] [--reflection-compare] [--surface-overlay] [--grass-fx] [--rain-fx --rain-wetness 1] [--tyre-blur 0 --tyre-dirt 0 --compare-tyre-blur 1 --compare-tyre-dirt 1] [--brake-temperature 160 --brake-front-glow 64 --brake-rear-glow 24 --brake-blur 0 --compare-brake-temperature 10 --compare-brake-blur 1] [--blurred-rims] [--cockpit-resolution] [--damage-preview] [--grid] [--view-axis] [--selection-axis] [--track-camera LABEL --track-camera-position 0.5 --play-track-camera] [--driver FILE.kn5 --driver-cockpit] [--skin NAME] [--animation NAME --animation-position 0.5 --require-animation-displacement 0.1] [--lod auto|INDEX] [--config FILE.ini] [--input NAME=VALUE] [--port 9222] [--app-port 4173]");
 if (requireDynamicShadowRefresh && dynamicAdvance === "") throw new Error("--require-dynamic-shadow-refresh requires --dynamic-advance");
 if (requireAnimationDisplacement !== "") {
   if (!Number.isFinite(requireAnimationDisplacementThreshold) || requireAnimationDisplacementThreshold <= 0) throw new Error("--require-animation-displacement requires a finite positive threshold");
@@ -140,6 +141,8 @@ async function screenshotState(path = "") {
     hash: createHash("sha256").update(data).digest("hex").slice(0, 16),
     bytes: bytes.length,
     glError: await evaluate(`document.querySelector('#view').getContext('webgl2').getError()`),
+    alphaToCoverage: await evaluate(`(()=>{const gl=document.querySelector('#view').getContext('webgl2');return gl.isEnabled(gl.SAMPLE_ALPHA_TO_COVERAGE);})()`),
+    alphaToCoverageProfiles: await evaluate(`window.__apexRenderer?.shaderProfileStatus?.alphaToCoverage??0`),
     wireframe: await evaluate(`Boolean(window.__apexRenderer?.wireframe)`),
     animation: await evaluate(`window.__apexRenderer?.animationStatus??null`)
   };
@@ -285,6 +288,12 @@ if (wireframe) {
   trace("wireframe preview captured and cleared");
 } else {
   states[surfaceOverlay ? "surface-overlay" : grassFx ? "grass-fx" : rainFx ? "rain-fx" : gridPreview ? "grid=on" : viewAxis ? "view-axis=on" : selectionAxis ? "selection=active" : damagePreview ? "damage=broken" : cockpitResolution ? "cockpit=low" : blurredRims ? "rims=blurred" : brakePreview ? `brake=${Number(brakeTemperature || 10)},${Number(brakeBlur || 0)}` : tyrePreview ? `tyre=${Number(tyreBlur || 0)},${Number(tyreDirt || 0)}` : seasons ? `year-progress=${yearProgress}` : vaoPath ? "vao" : reflectionCompare ? "reflections" : clouds ? "clouds" : lighting ? "lighting" : shadows ? "shadows" : animationName ? "animation=0" : rpmValue!=="" ? `rpm=${rpmValue}` : dynamicAdvance!=="" ? `dynamic=${dynamicAdvance}` : "off"] = await screenshotState(screenshotPath);
+}
+if(requireAlphaToCoverage){
+  await waitFor(`window.__apexRenderer?.shaderProfileStatus?.alphaToCoverage>0`);
+  const alphaStates=Object.entries(states).filter(([,state])=>state);
+  if(!alphaStates.length||alphaStates.some(([,state])=>state.alphaToCoverageProfiles<1))throw new Error(`No alpha-to-coverage production profiles were present in the captured AT material: ${JSON.stringify(alphaStates)}`);
+  trace(`alpha-to-coverage profiles present in ${alphaStates.length} capture state${alphaStates.length===1?"":"s"}`);
 }
 if(selectionAxis){await evaluate(`window.__apexRenderer.select(null)`);await waitFor(`window.__apexRenderer?.selectionAxisStatus.visible===false`);states["selection=cleared"]=await screenshotState();trace("selected-node axis cleared");}
 if(showHidden){const enabled=await evaluate(`(()=>{const button=document.querySelector('#show-hidden');if(!button||button.disabled)return false;if(!button.classList.contains('active'))button.click();return true;})()`);if(!enabled)throw new Error("Show hidden mode was not available");await waitFor(`window.__apexRenderer?.sceneStatus.showHidden===true`);const sceneAfterShowHidden=await evaluate(`window.__apexRenderer?.sceneStatus`);if(sceneAfterShowHidden.gameVisible!==sceneBeforeShowHidden.gameVisible||sceneAfterShowHidden.gameHidden!==sceneBeforeShowHidden.gameHidden)throw new Error("Show hidden changed the parsed KN5 visibility counts");if(sceneAfterShowHidden.previewVisible<sceneBeforeShowHidden.previewVisible)throw new Error("Show hidden removed preview meshes");states["hidden-shown"]=await screenshotState();trace("hidden KN5 meshes shown");}

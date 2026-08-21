@@ -17,6 +17,36 @@ namespace {
 inline constexpr std::uint32_t max_spirv_id_bound = 1U << 24U;
 inline constexpr std::uint32_t max_dxbc_chunks = 4096U;
 
+bool valid_render_sample_count(std::uint32_t samples) noexcept {
+    return samples == 1U || samples == 4U;
+}
+
+TextureStatus validate_texture_sample_contract(const TextureDescription& description,
+                                               bool has_uploads,
+                                               Diagnostic& diagnostic) {
+    if (!valid_render_sample_count(description.samples)) {
+        diagnostic = {"texture_samples_unsupported",
+                      "Texture sample count must be exactly 1 or 4"};
+        return TextureStatus::unsupported;
+    }
+    if (description.samples != 1U && has_uploads) {
+        diagnostic = {"texture_multisample_upload_unsupported",
+                      "Multisampled textures cannot have initial or update uploads"};
+        return TextureStatus::unsupported;
+    }
+    constexpr std::uint32_t multisample_forbidden_usage =
+        static_cast<std::uint32_t>(TextureUsage::sampled) |
+        static_cast<std::uint32_t>(TextureUsage::transfer_destination) |
+        static_cast<std::uint32_t>(TextureUsage::storage);
+    if (description.samples != 1U &&
+        (static_cast<std::uint32_t>(description.usage) & multisample_forbidden_usage) != 0U) {
+        diagnostic = {"texture_multisample_usage_unsupported",
+                      "Multisampled textures cannot be sampled, uploaded, or used as storage"};
+        return TextureStatus::unsupported;
+    }
+    return TextureStatus::ready;
+}
+
 AdapterResult unavailable(const char* code, std::string message) {
     AdapterResult result;
     result.status = DeviceStatus::unavailable;
@@ -128,6 +158,9 @@ TextureStatus validate_texture_upload_plan(const TextureDescription& description
         diagnostic = {"texture_dimensions_invalid", "Texture dimensions, mip levels, and array layers must be non-zero"};
         return TextureStatus::invalid_description;
     }
+    const TextureStatus sample_status =
+        validate_texture_sample_contract(description, !uploads.subresources.empty(), diagnostic);
+    if (sample_status != TextureStatus::ready) return sample_status;
     if (description.width > max_texture_dimension || description.height > max_texture_dimension ||
         description.mip_levels > 32U) {
         diagnostic = {"texture_dimension_limit", "Texture upload dimensions exceed the backend-neutral safety limit"};
@@ -219,6 +252,9 @@ TextureStatus validate_texture_description(const TextureDescription& description
         diagnostic = {"texture_dimensions_invalid", "Texture dimensions, mip levels, and array layers must be non-zero"};
         return TextureStatus::invalid_description;
     }
+    const TextureStatus sample_status =
+        validate_texture_sample_contract(description, !initial_uploads.subresources.empty(), diagnostic);
+    if (sample_status != TextureStatus::ready) return sample_status;
     if (description.width > max_texture_dimension || description.height > max_texture_dimension) {
         diagnostic = {"texture_dimension_limit", "Texture dimensions exceed the backend-neutral safety limit"};
         return TextureStatus::invalid_description;
@@ -314,9 +350,9 @@ DepthAttachmentStatus validate_depth_attachment_description(
                       "Depth attachment dimensions exceed the backend-neutral safety limit"};
         return DepthAttachmentStatus::invalid_description;
     }
-    if (description.samples != 1U) {
+    if (!valid_render_sample_count(description.samples)) {
         diagnostic = {"depth_attachment_samples_unsupported",
-                      "Only single-sample depth attachments are supported by the neutral contract"};
+                      "Depth attachment sample count must be exactly 1 or 4"};
         return DepthAttachmentStatus::unsupported;
     }
     constexpr std::uint64_t max_size_t = static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max());
@@ -351,6 +387,11 @@ DepthAttachmentStatus validate_depth_attachment_description(
 TextureReadbackStatus validate_texture_clear_readback(
     const Texture& texture, const TextureClearReadbackRequest& request, Diagnostic& diagnostic) {
     const TextureDescription& description = texture.info().description;
+    if (description.samples != 1U) {
+        diagnostic = {"texture_readback_multisample_unsupported",
+                      "Texture clear/readback supports only single-sample textures"};
+        return TextureReadbackStatus::unsupported;
+    }
     for (const float component : request.clear_color) {
         if (!std::isfinite(component)) {
             diagnostic = {"texture_clear_color_non_finite", "Texture clear color components must be finite"};
@@ -409,6 +450,11 @@ TriangleDrawStatus validate_triangle_draw_request(const Texture& texture,
         return TriangleDrawStatus::invalid_request;
     }
     const TextureDescription& description = texture.info().description;
+    if (description.samples != 1U) {
+        diagnostic = {"triangle_target_samples_unsupported",
+                      "The fixed triangle path supports only single-sample targets"};
+        return TriangleDrawStatus::unsupported;
+    }
     for (const float component : request.clear_color) {
         if (!std::isfinite(component)) {
             diagnostic = {"triangle_clear_color_non_finite", "Triangle clear color components must be finite"};
@@ -687,6 +733,11 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
         return IndexedStaticMeshDrawStatus::unsupported;
     }
     const TextureDescription& target = texture.info().description;
+    if (!valid_render_sample_count(target.samples)) {
+        diagnostic = {"indexed_static_mesh_target_samples_unsupported",
+                      "Indexed static-mesh color targets require exactly 1 or 4 samples"};
+        return IndexedStaticMeshDrawStatus::unsupported;
+    }
     if (request.depth_attachment != nullptr) {
         const DepthAttachment& depth = *request.depth_attachment;
         if (depth.backend() != texture.backend()) {
@@ -707,7 +758,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
         }
         const DepthAttachmentDescription& depth_description = depth.info().description;
         if (depth_description.width != target.width || depth_description.height != target.height ||
-            depth_description.samples != 1U) {
+            depth_description.samples != target.samples) {
             diagnostic = {"indexed_depth_attachment_dimensions_mismatch",
                           "Depth attachment dimensions and samples must match the color target"};
             return IndexedStaticMeshDrawStatus::invalid_request;
@@ -811,9 +862,9 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             return IndexedStaticMeshDrawStatus::invalid_request;
         }
     }
-    if (packet.flags.alpha_to_coverage) {
-        diagnostic = {"indexed_static_mesh_state_unsupported",
-                      "Indexed static-mesh execution does not support alpha-to-coverage"};
+    if (packet.flags.alpha_to_coverage && target.samples != 4U) {
+        diagnostic = {"indexed_alpha_to_coverage_sample_count",
+                      "Alpha-to-coverage requires a 4x indexed color target"};
         return IndexedStaticMeshDrawStatus::unsupported;
     }
     if (packet.flags.depth_write && !packet.flags.depth_test) {
@@ -845,11 +896,29 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
         }
         return IndexedStaticMeshDrawStatus::invalid_request;
     }
-    if (pipeline.targets.colors.size() != 1U ||
-        pipeline.targets.colors[0].samples != 1U || pipeline.targets.colors[0].format != expected_format ||
-        pipeline.blend.alpha_to_coverage) {
+    if (pipeline.targets.colors.size() != 1U) {
         diagnostic = {"indexed_pipeline_state_unsupported",
-                      "Indexed static-mesh execution requires one single-sample color target without alpha-to-coverage"};
+                      "Indexed static-mesh execution requires one color target"};
+        return IndexedStaticMeshDrawStatus::unsupported;
+    }
+    if (!valid_render_sample_count(pipeline.targets.colors[0].samples)) {
+        diagnostic = {"indexed_pipeline_target_samples_unsupported",
+                      "Indexed pipeline color targets require exactly 1 or 4 samples"};
+        return IndexedStaticMeshDrawStatus::unsupported;
+    }
+    if (pipeline.targets.colors[0].samples != target.samples) {
+        diagnostic = {"indexed_pipeline_target_samples_mismatch",
+                      "Indexed pipeline color samples must match the supplied color target"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (pipeline.targets.colors[0].format != expected_format) {
+        diagnostic = {"indexed_pipeline_state_unsupported",
+                      "Indexed pipeline color format must match the supplied color target"};
+        return IndexedStaticMeshDrawStatus::unsupported;
+    }
+    if (pipeline.blend.alpha_to_coverage && target.samples != 4U) {
+        diagnostic = {"indexed_alpha_to_coverage_sample_count",
+                      "Alpha-to-coverage requires a 4x indexed color target"};
         return IndexedStaticMeshDrawStatus::unsupported;
     }
     const bool pipeline_wireframe = pipeline.raster.fill == PipelineFillMode::wireframe;
@@ -1071,7 +1140,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             return IndexedStaticMeshDrawStatus::unsupported;
         }
         if (sampled.width == 0U || sampled.height == 0U || sampled.mip_levels == 0U ||
-            sampled.array_layers != 1U ||
+            sampled.array_layers != 1U || sampled.samples != 1U ||
             (sampled.format != TextureFormat::rgba8_unorm &&
              sampled.format != TextureFormat::rgba8_srgb &&
              sampled.format != TextureFormat::bgra8_unorm &&
@@ -1118,7 +1187,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                 return IndexedStaticMeshDrawStatus::unsupported;
             }
             if (normal.width == 0U || normal.height == 0U || normal.mip_levels == 0U ||
-                normal.array_layers != 1U ||
+                normal.array_layers != 1U || normal.samples != 1U ||
                 (normal.format != TextureFormat::rgba8_unorm &&
                  normal.format != TextureFormat::rgba8_srgb &&
                  normal.format != TextureFormat::bgra8_unorm &&
@@ -1167,7 +1236,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                 return IndexedStaticMeshDrawStatus::unsupported;
             }
             if (maps.width == 0U || maps.height == 0U || maps.mip_levels == 0U ||
-                maps.array_layers != 1U ||
+                maps.array_layers != 1U || maps.samples != 1U ||
                 (maps.format != TextureFormat::rgba8_unorm &&
                  maps.format != TextureFormat::bgra8_unorm)) {
                 diagnostic = {"indexed_maps_texture_description_unsupported",
@@ -1214,7 +1283,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                 return IndexedStaticMeshDrawStatus::unsupported;
             }
             if (detail.width == 0U || detail.height == 0U || detail.mip_levels == 0U ||
-                detail.array_layers != 1U ||
+                detail.array_layers != 1U || detail.samples != 1U ||
                 (detail.format != TextureFormat::rgba8_unorm &&
                  detail.format != TextureFormat::rgba8_srgb &&
                  detail.format != TextureFormat::bgra8_unorm &&
@@ -1264,6 +1333,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             }
             if (normal_detail.width == 0U || normal_detail.height == 0U ||
                 normal_detail.mip_levels == 0U || normal_detail.array_layers != 1U ||
+                normal_detail.samples != 1U ||
                 (normal_detail.format != TextureFormat::rgba8_unorm &&
                  normal_detail.format != TextureFormat::bgra8_unorm)) {
                 diagnostic = {"indexed_normal_detail_texture_description_unsupported",
@@ -1302,9 +1372,9 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     }
     if (pipeline.targets.has_depth &&
         (pipeline.targets.depth.format != PipelineRenderTargetFormat::depth32_float ||
-         pipeline.targets.depth.samples != 1U)) {
+         pipeline.targets.depth.samples != target.samples)) {
         diagnostic = {"indexed_pipeline_depth_target_invalid",
-                      "Indexed static-mesh drawing requires a single-sample D32 target"};
+                      "Indexed pipeline depth samples must match the supplied color target and use D32"};
         return IndexedStaticMeshDrawStatus::invalid_request;
     }
     if (pipeline.depth.test_enabled) {
@@ -1455,7 +1525,7 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
         const TextureDescription& target = texture.info().description;
         const DepthAttachmentDescription& depth_description = depth.info().description;
         if (depth_description.width != target.width || depth_description.height != target.height ||
-            depth_description.samples != 1U) {
+            depth_description.samples != target.samples) {
             diagnostic = {"indexed_static_mesh_batch_depth_dimensions_mismatch",
                           "Batch depth attachment dimensions and samples must match the color target"};
             return IndexedStaticMeshBatchStatus::invalid_request;

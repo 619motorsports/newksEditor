@@ -100,13 +100,14 @@ remains unchanged and feature-complete.
   allocation. A 128-byte draw-matrix contract binds world and
   camera transforms. Vulkan uses vertex push constants. D3D12 uses root
   constants at `b0`. Backend-specific camera frames make the clip-space
-  conversion explicit. Both backends also create persistent single-sample D32
+  conversion explicit. Both backends create persistent 1x or 4x D32
   attachments. Explicit load and clear controls retain color and depth across
   indexed draws. The executable main-pass subset uses the source-evidenced
   `LESS` depth comparison. It also executes explicitly blended packets. The
   ordinary alpha, multiply, and transparent-as-black factors match
-  `applyItemRenderState` in `public/app.js`. Alpha-to-coverage remains staged
-  until the target contract supports multisampling. Indexed wireframe uses
+  `applyItemRenderState` in `public/app.js`. The indexed path supports 4x
+  multisample targets and alpha-to-coverage. Each backend resolves the final
+  color to one sample before readback. Indexed wireframe uses
   line-list topology over the source index stream. This matches the production
   `GL_LINES` selection in `public/app.js`. It does not use polygon-line
   rasterization. Both native backends execute this topology in single draws and
@@ -115,7 +116,7 @@ remains unchanged and feature-complete.
   one final readback. The backend also executes one explicitly authorized
   portable diffuse pair. The pair uses a sampled image at set 0, binding 0,
   and a sampler at set 0, binding 1. An optional uniform at binding 2 carries
-  one aligned material record. Its first 48 bytes use the current WebGL
+  one aligned material record. Its first 64 bytes use the current WebGL
   `ksPerPixel` defaults in a port-defined std140/HLSL-compatible layout.
   Vulkan maps it to a uniform descriptor.
   D3D12 maps it to `b2`. The executor also accepts one optional frame record at
@@ -142,9 +143,15 @@ remains unchanged and feature-complete.
   the exponent as `max(1, ksSpecularEXP * maps.g + 1)`. Known-pixel tests cover
   zero strength, low exponent, and full exponent. They also cover independent
   samplers and mixed six-binding and eight-binding batches. This ABI requires
-  zero Fresnel, so it does not consume `maps.b`. Detail normals, Fresnel,
-  reflections, and shadows remain staged. Tests cover missing pairs, invalid
-  handles, per-draw selection, and known pixels.
+  zero Fresnel, so it does not consume `maps.b`. A fourth bounded ABI executes
+  `ksPerPixelMultiMap_NMDetail`. It adds `txDetail` at bindings 8 and 9. It
+  adds `txNormalDetail` at bindings 10 and 11. The legacy `txDetailNM` name is
+  an alias for `txNormalDetail`. The material record includes the detail UV
+  multiplier, normal-detail strength, and detail enable value. Tests cover
+  detail alpha, repeated UVs, normal blending, descriptor selection, and mixed
+  six-binding, eight-binding, and twelve-binding batches. Fresnel,
+  reflections, and shadows remain staged. Tests also cover missing pairs,
+  invalid handles, per-draw selection, and known pixels.
   The resolver rejects oversized CSP shader, blend, depth, and cull strings
   before profile selection.
   A bounded static-scene adapter validates the complete packet set before
@@ -172,6 +179,8 @@ remains unchanged and feature-complete.
   supports static positions, polygon triangulation, hierarchy, local/world
   transforms, and first material assignment. It rejects or diagnoses skinning,
   animation, embedded images, layer mappings, and advanced transform semantics.
+  The conversion budget includes temporary vectors, maps, sets, child lists,
+  flattened property views, copied strings, and output containers.
   A bounded VAO binder matches decoded records to mesh views. It uses exact
   names, vertex counts, and first positions. It binds primary, secondary, and
   eligible normal channels. The VAO reader also limits aggregate native
@@ -206,10 +215,11 @@ remains unchanged and feature-complete.
   dispatch bounded resource-free packets and the portable `txDiffuse` pair.
   It can dispatch the bounded `txDiffuse` and `txNormal` pair for
   `ksPerPixelNM`. It can also dispatch the bounded `txDiffuse`, `txNormal`, and
-  `txMaps` set. Caller tables or embedded KN5 ownership can supply these
-  textures. Preparation rejects incomplete or duplicated packet resources
+  `txMaps` set. It can dispatch `txDetail` and `txNormalDetail` for the bounded
+  `ksPerPixelMultiMap_NMDetail` stack. Caller tables or embedded KN5 ownership
+  can supply these textures. Preparation rejects incomplete or duplicated packet resources
   before backend allocation. It also rejects sRGB maps and malformed maps
-  before allocation. The texture budgets include all three source payloads and
+  before allocation. The texture budgets include all five source payloads and
   their decoded pixels. A separate aggregate limit bounds host-side preparation
   tables and retained copies.
   It can also bind a source-valued material record for explicitly authorized
@@ -230,18 +240,20 @@ remains unchanged and feature-complete.
   D3D12/WARP CI path. A production WebGL gate uses the same one-bone behavior.
   It reports distinct captures, a `1.0` displacement, and no WebGL errors. The
   indexed path executes only a deliberately
-  restricted draw-packet subset. It supports as many as three portable sampled
-  images and three samplers. A request-local material record and frame record
+  restricted draw-packet subset. It supports as many as five portable sampled
+  images and five samplers. A request-local material record and frame record
   supply the bounded lighting constants. It executes
   the three source-evidenced WebGL blend
-  modes, but not complete scene resources or alpha-to-coverage. It also maps
+  modes. It supports 4x alpha-to-coverage with explicit color and depth sample
+  counts. It does not support complete scene resources. It also maps
   the production `GL_LINES` wireframe behavior to native line-list topology.
   An odd final source index does not form a line primitive. It executes
   finite non-identity world and camera
-  transforms through an explicit shader contract. It preserves D32
+  transforms through an explicit shader contract. It preserves 1x or 4x D32
   depth across synchronous draws and supports explicit test/write state. The
   ordered multi-draw path clears or loads attachments once and submits one
-  pass. The static-scene path requires explicit backend shader bytecode. It
+  pass. Each backend resolves a 4x color target once after the final draw. The
+  static-scene path requires explicit backend shader bytecode. It
   does not execute stock KN5 shader packages. The port does not create windows
   or swapchains, bind complete materials, or provide golden-image parity
   evidence.
@@ -272,6 +284,22 @@ WebGL reported no errors, and all 63 textures were ready. This gate identifies
 an exact source fixture for the bounded maps equation. Production packets and
 stock shader translation remain staged. The gate does not prove native pixel
 parity for `ksPerPixelMultiMap` or `ksPerPixelMultiMap_NMDetail`.
+
+The production WebGL detail-stack gate uses `GEO_Fabric1`, material `Fabric1`,
+and shader `ksPerPixelMultiMap_NMDetail`. Its active resources include
+`txDetail` and `txNormalDetail`. Its detail controls are `1`, `50`, and `1`.
+All 63 textures were ready. WebGL reported no errors. Sun heights of 55 and 10
+degrees produced hashes `7f8a40c621fa8c79` and `162274111c068324`.
+
+The production alpha-to-coverage gate selects `GEO_SEAT_SUB1` and material
+`Seat`. The shader is `ksPerPixelMultiMap_AT_NMDetail`. The scene reported
+five alpha-to-coverage profiles and 63 ready textures. WebGL reported no
+errors. The capture hash was `3c76ed8c4207647b`. The PNG SHA-256 was
+`7145342632b9adee7ad61948c15c5d8ba0026795dd9c1e4405d47f29689065db`.
+The final WebGL state is false because the post-process pass disables
+alpha-to-coverage. Thus, this gate proves profile selection and an error-free
+production capture. It does not prove the per-draw state or native pixel
+parity.
 
 DDS BC7 has a bounded CPU decoder with differential fixtures for all eight
 modes. BC6H remains explicit and requires a GPU path. The checked upload
