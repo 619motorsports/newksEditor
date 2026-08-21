@@ -18,6 +18,7 @@
 namespace apex::render {
 
 struct DrawPacket;
+class Sampler;
 
 /** Graphics APIs supported by the native renderer. */
 enum class Backend {
@@ -356,6 +357,22 @@ enum class IndexedShaderAuthority : std::uint8_t {
     explicit_pipeline,
 };
 
+// Material resources remain staged unless a caller supplies the complete
+// portable diffuse-resource ABI for one synchronous request. This authority
+// does not claim that a stock KN5 or CSP shader contract was recovered.
+enum class IndexedResourceAuthority : std::uint8_t {
+    packet_contract,
+    explicit_bindings,
+};
+
+struct IndexedSampledTextureBinding {
+    // Non-owning. Keep both handles alive until the synchronous draw returns.
+    // The executable pipeline must declare sampled_texture at set 0/binding 0
+    // and sampler at set 0/binding 1.
+    const Texture* texture = nullptr;
+    const Sampler* sampler = nullptr;
+};
+
 inline constexpr std::uint32_t max_indexed_static_mesh_vertices = 10'000'000U;
 inline constexpr std::uint32_t max_indexed_static_mesh_indices = 20'000'000U;
 
@@ -392,6 +409,8 @@ struct IndexedStaticMeshDrawRequest {
     bool clear_depth = false;
     float depth_clear_value = 1.0F;
     IndexedShaderAuthority shader_authority = IndexedShaderAuthority::packet_contract;
+    IndexedResourceAuthority resource_authority = IndexedResourceAuthority::packet_contract;
+    IndexedSampledTextureBinding sampled_binding{};
 };
 
 enum class IndexedStaticMeshDrawStatus {

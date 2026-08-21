@@ -44,6 +44,19 @@ private:
     TextureInfo info_;
 };
 
+class FakeSampler final : public Sampler {
+public:
+    FakeSampler(Backend backend, SamplerDescription description = {})
+        : backend_(backend), info_({description}) {}
+
+    Backend backend() const noexcept override { return backend_; }
+    const SamplerInfo& info() const noexcept override { return info_; }
+
+private:
+    Backend backend_;
+    SamplerInfo info_;
+};
+
 class FakeDepthAttachment final : public DepthAttachment {
 public:
     FakeDepthAttachment(Backend backend, DepthAttachmentDescription description)
@@ -108,6 +121,11 @@ TextureDescription target_description() {
     return {16U, 16U, 1U, 1U, TextureFormat::rgba8_unorm,
             TextureUsage::color_attachment | TextureUsage::transfer_source,
             TextureMemory::device_local, TextureMutability::mutable_data};
+}
+
+TextureDescription sampled_description() {
+    return {2U, 2U, 1U, 1U, TextureFormat::rgba8_unorm, TextureUsage::sampled,
+            TextureMemory::device_local, TextureMutability::immutable};
 }
 
 IndexedStaticMeshDrawRequest request_fixture(const DrawPacket& packet, const PipelineProgram& pipeline,
@@ -176,6 +194,104 @@ void accepts_explicit_d32_depth_contract() {
             "indexed draw accepts explicit D32 depth attachment");
     require(std::string(depth_attachment_status_name(DepthAttachmentStatus::ready)) == "ready",
             "depth attachment status name");
+}
+
+void validates_portable_diffuse_resource_contract() {
+    PipelineProgram pipeline = pipeline_fixture();
+    pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "txDiffuse"},
+        {PipelineResourceKind::sampler, 0U, 1U, "txDiffuseSampler"},
+    };
+    DrawPacket packet = packet_fixture();
+    FakeTexture target(Backend::Vulkan, target_description());
+    FakeTexture sampled(Backend::Vulkan, sampled_description());
+    FakeSampler sampler(Backend::Vulkan);
+    FakeBuffer vertices(Backend::Vulkan, {36U, BufferUsage::vertex, BufferMemory::device_local,
+                                          BufferMutability::immutable});
+    FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index, BufferMemory::device_local,
+                                         BufferMutability::immutable});
+    auto request = request_fixture(packet, pipeline, vertices, indices);
+    request.resource_authority = IndexedResourceAuthority::explicit_bindings;
+    request.sampled_binding = {&sampled, &sampler};
+    Diagnostic diagnostic;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            "portable diffuse texture and sampler contract accepted");
+
+    request.resource_authority = IndexedResourceAuthority::packet_contract;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_resource_execution_staged",
+            "resource declarations remain staged without explicit authority");
+
+    request.resource_authority = IndexedResourceAuthority::explicit_bindings;
+    request.sampled_binding.sampler = nullptr;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_resource_binding_missing",
+            "partial diffuse resource binding rejected");
+
+    request.sampled_binding = {&sampled, &sampler};
+    pipeline.resources[1].binding = 0U;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request,
+            "duplicate resource binding rejected by bounded pipeline validation");
+    pipeline.resources[1].binding = 2U;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_resource_layout_unsupported",
+            "non-portable sampler binding rejected");
+    pipeline.resources[1].binding = 1U;
+
+    FakeTexture missing_usage(Backend::Vulkan,
+                              {2U, 2U, 1U, 1U, TextureFormat::rgba8_unorm,
+                               TextureUsage::transfer_source, TextureMemory::device_local,
+                               TextureMutability::immutable});
+    request.sampled_binding.texture = &missing_usage;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_resource_texture_usage_invalid",
+            "texture without sampled usage rejected");
+
+    FakeTexture writable(Backend::Vulkan,
+                         {2U, 2U, 1U, 1U, TextureFormat::rgba8_unorm,
+                          TextureUsage::sampled | TextureUsage::storage,
+                          TextureMemory::device_local, TextureMutability::immutable});
+    request.sampled_binding.texture = &writable;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_resource_texture_usage_unsupported",
+            "writable sampled texture rejected from the first resource baseline");
+
+    request.sampled_binding.texture = &target;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_resource_feedback_loop",
+            "color target sampling feedback loop rejected");
+
+    request.sampled_binding.texture = &sampled;
+    FakeSampler foreign_sampler(Backend::D3D12);
+    request.sampled_binding.sampler = &foreign_sampler;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_resource_backend_mismatch",
+            "foreign sampler backend rejected");
+
+    SamplerDescription malformed_sampler;
+    malformed_sampler.min_lod = 4.0F;
+    malformed_sampler.max_lod = 1.0F;
+    FakeSampler malformed(Backend::Vulkan, malformed_sampler);
+    request.sampled_binding.sampler = &malformed;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request,
+            "malformed sampler metadata rejected");
+
+    pipeline.resources.clear();
+    request.sampled_binding = {};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_resource_binding_unexpected",
+            "explicit resource authority rejected for a resource-free pipeline");
 }
 
 void rejects_invalid_depth_attachment_descriptions() {
@@ -485,6 +601,7 @@ int main() {
     try {
         accepts_bounded_static_indexed_contract();
         accepts_explicit_d32_depth_contract();
+        validates_portable_diffuse_resource_contract();
         rejects_invalid_depth_attachment_descriptions();
         rejects_invalid_depth_contract();
         validates_ordered_indexed_batch_contract();

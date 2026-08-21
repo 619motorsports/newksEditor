@@ -663,11 +663,6 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                       "The draw packet does not contain an executable shader contract"};
         return IndexedStaticMeshDrawStatus::unsupported;
     }
-    if (!packet.resources.empty()) {
-        diagnostic = {"indexed_static_mesh_resources_unsupported",
-                      "Indexed static-mesh baseline does not bind material resources"};
-        return IndexedStaticMeshDrawStatus::unsupported;
-    }
     if (!packet.bone_palette.empty()) {
         diagnostic = {"indexed_static_mesh_skinning_unsupported",
                       "Indexed static-mesh drawing does not consume a bone palette"};
@@ -743,11 +738,105 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     }
     if (pipeline.targets.colors.size() != 1U ||
         pipeline.targets.colors[0].samples != 1U || pipeline.targets.colors[0].format != expected_format ||
-        !pipeline.resources.empty() || pipeline.raster.fill != PipelineFillMode::solid ||
+        pipeline.raster.fill != PipelineFillMode::solid ||
         pipeline.blend.enabled || pipeline.blend.alpha_to_coverage) {
         diagnostic = {"indexed_pipeline_state_unsupported",
-                      "Indexed static-mesh baseline supports one opaque single-sample color target without resources"};
+                      "Indexed static-mesh execution requires one opaque single-sample color target"};
         return IndexedStaticMeshDrawStatus::unsupported;
+    }
+    const bool has_sampled_texture = request.sampled_binding.texture != nullptr;
+    const bool has_sampler = request.sampled_binding.sampler != nullptr;
+    if (pipeline.resources.empty()) {
+        if (has_sampled_texture || has_sampler ||
+            request.resource_authority != IndexedResourceAuthority::packet_contract) {
+            diagnostic = {"indexed_resource_binding_unexpected",
+                          "A resource-free pipeline cannot receive explicit material bindings"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        if (!packet.resources.empty()) {
+            diagnostic = {"indexed_static_mesh_resources_unsupported",
+                          "The resource-free indexed baseline cannot execute material packet resources"};
+            return IndexedStaticMeshDrawStatus::unsupported;
+        }
+    } else {
+        bool sampled_declaration = false;
+        bool sampler_declaration = false;
+        for (const PipelineResourceBinding& resource : pipeline.resources) {
+            if (resource.set == 0U && resource.binding == 0U &&
+                resource.kind == PipelineResourceKind::sampled_texture) {
+                sampled_declaration = true;
+            } else if (resource.set == 0U && resource.binding == 1U &&
+                       resource.kind == PipelineResourceKind::sampler) {
+                sampler_declaration = true;
+            } else {
+                diagnostic = {"indexed_resource_layout_unsupported",
+                              "The portable diffuse baseline requires a sampled texture at set 0 binding 0 and sampler at set 0 binding 1"};
+                return IndexedStaticMeshDrawStatus::unsupported;
+            }
+        }
+        if (pipeline.resources.size() != 2U || !sampled_declaration || !sampler_declaration) {
+            diagnostic = {"indexed_resource_layout_unsupported",
+                          "The portable diffuse baseline requires exactly one sampled texture and one sampler"};
+            return IndexedStaticMeshDrawStatus::unsupported;
+        }
+        if (request.resource_authority != IndexedResourceAuthority::explicit_bindings) {
+            diagnostic = {"indexed_resource_execution_staged",
+                          "Material resources require explicit request-local binding authority"};
+            return IndexedStaticMeshDrawStatus::unsupported;
+        }
+        if (!has_sampled_texture || !has_sampler) {
+            diagnostic = {"indexed_resource_binding_missing",
+                          "The portable diffuse baseline requires both a sampled texture and sampler"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        const Texture& sampled_texture = *request.sampled_binding.texture;
+        const Sampler& sampler = *request.sampled_binding.sampler;
+        if (&sampled_texture == &texture) {
+            diagnostic = {"indexed_resource_feedback_loop",
+                          "The color target cannot also be sampled by the same draw"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        if (sampled_texture.backend() != texture.backend() || sampler.backend() != texture.backend()) {
+            diagnostic = {"indexed_resource_backend_mismatch",
+                          "Sampled texture, sampler, and color target must use the same backend"};
+            return IndexedStaticMeshDrawStatus::unsupported;
+        }
+        const TextureDescription& sampled = sampled_texture.info().description;
+        const auto sampled_usage = static_cast<std::uint32_t>(sampled.usage);
+        const auto forbidden_usage = static_cast<std::uint32_t>(TextureUsage::color_attachment) |
+                                     static_cast<std::uint32_t>(TextureUsage::storage) |
+                                     static_cast<std::uint32_t>(TextureUsage::transfer_destination);
+        if ((sampled_usage & static_cast<std::uint32_t>(TextureUsage::sampled)) == 0U) {
+            diagnostic = {"indexed_resource_texture_usage_invalid",
+                          "The diffuse texture requires sampled usage"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        if ((sampled_usage & forbidden_usage) != 0U) {
+            diagnostic = {"indexed_resource_texture_usage_unsupported",
+                          "The portable diffuse baseline rejects writable or attachment texture usage"};
+            return IndexedStaticMeshDrawStatus::unsupported;
+        }
+        if (sampled.width == 0U || sampled.height == 0U || sampled.mip_levels == 0U ||
+            sampled.array_layers != 1U ||
+            (sampled.format != TextureFormat::rgba8_unorm &&
+             sampled.format != TextureFormat::rgba8_srgb &&
+             sampled.format != TextureFormat::bgra8_unorm &&
+             sampled.format != TextureFormat::bgra8_srgb)) {
+            diagnostic = {"indexed_resource_texture_description_unsupported",
+                          "The portable diffuse baseline requires one-layer RGBA8 or BGRA8 texture data"};
+            return IndexedStaticMeshDrawStatus::unsupported;
+        }
+        Diagnostic sampler_diagnostic;
+        const SamplerStatus sampler_status =
+            validate_sampler_description(sampler.info().description, sampler_diagnostic);
+        if (sampler_status != SamplerStatus::ready) {
+            diagnostic = {sampler_diagnostic.code.empty() ? "indexed_resource_sampler_invalid"
+                                                           : "indexed_resource_" + sampler_diagnostic.code,
+                          sampler_diagnostic.message};
+            return sampler_status == SamplerStatus::unsupported
+                       ? IndexedStaticMeshDrawStatus::unsupported
+                       : IndexedStaticMeshDrawStatus::invalid_request;
+        }
     }
     if (pipeline.depth.test_enabled != packet.flags.depth_test ||
         pipeline.depth.write_enabled != packet.flags.depth_write) {

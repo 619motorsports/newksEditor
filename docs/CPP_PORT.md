@@ -103,8 +103,10 @@ remains unchanged and feature-complete.
   indexed draws. The executable main-pass subset uses the source-evidenced
   `LESS` depth comparison. A bounded batch preflights every request, preserves
   packet order, and records all draws in one pass with one final readback. The
-  backend still accepts only resource-free opaque packets. A bounded
-  static-scene adapter validates the complete packet set before allocation.
+  backend also executes one explicitly authorized portable diffuse pair. The
+  pair uses a sampled image at set 0, binding 0, and a sampler at set 0,
+  binding 1. It is a test ABI, not recovered stock KN5 or CSP behavior. A
+  bounded static-scene adapter validates the complete packet set before allocation.
   It uploads each referenced node once and retains duplicate ordered draws.
   Caller-supplied SPIR-V or DXIL pipelines authorize only their local requests.
   Production packets remain marked as staged. This work proves basic pipeline
@@ -143,12 +145,13 @@ remains unchanged and feature-complete.
   define the Vulkan and D3D12 clip-space conversions. The indexed backend
   shader contract uses these camera matrices. The static-scene adapter can
   dispatch a bounded resource-free packet set. Stock shader translation and
-  material-resource binding remain staged.
+  complete material-resource resolution remain staged.
   Vulkan and D3D12 create a basic graphics pipeline and execute fixed and
   indexed R16 static-mesh draws. The indexed path executes only a deliberately
-  restricted draw-packet subset. It has no descriptors, scene resources,
-  blending, or alpha-to-coverage. It executes finite non-identity world and
-  camera transforms through an explicit shader contract. It preserves D32
+  restricted draw-packet subset. It supports one portable sampled-image and
+  sampler descriptor pair, but not complete scene resources, blending, or
+  alpha-to-coverage. It executes finite non-identity world and camera
+  transforms through an explicit shader contract. It preserves D32
   depth across synchronous draws and supports explicit test/write state. The
   ordered multi-draw path clears or loads attachments once and submits one
   pass. The static-scene path requires explicit backend shader bytecode. It

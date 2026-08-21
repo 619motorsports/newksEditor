@@ -106,6 +106,31 @@ std::vector<std::uint8_t> executable_transform_vertex_shader() {
     return result;
 }
 
+std::vector<std::uint8_t> executable_sampled_vertex_shader() {
+    // Generated from tests/shaders/indexed_static_mesh_sampled.vert. This is
+    // an executable test ABI, not a recovered stock KN5 shader.
+    constexpr std::string_view hex =
+        "03022307000001000b000800300000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00090000000000040000006d61696e00000000090000000b0000001b0000002800000047000400090000001e00000000000000470004000b0000001e0000000200000047000300110000000200000048000400110000000000000005000000480005001100000000000000070000001000000048000500110000000000000023000000000000004800040011000000010000000500000048000500110000000100000007000000100000004800050011000000010000002300000040000000470004001b0000001e000000000000004700030026000000020000004800050026000000000000000b000000000000004800050026000000010000000b000000010000004800050026000000020000000b000000030000004800050026000000030000000b00000004000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000002000000200004000800000003000000070000003b000400080000000900000003000000200004000a00000001000000070000003b0004000a0000000b00000001000000170004000d000000060000000400000018000400100000000d000000040000001e000400110000001000000010000000200004001200000009000000110000003b000400120000001300000009000000150004001400000020000000010000002b0004001400000015000000000000002000040016000000090000001000000017000400190000000600000003000000200004001a00000001000000190000003b0004001a0000001b000000010000002b000400060000001d0000000000803f150004002300000020000000000000002b0004002300000024000000010000001c0004002500000006000000240000001e000600260000000d000000060000002500000025000000200004002700000003000000260000003b0004002700000028000000030000002b000400140000002900000001000000200004002e000000030000000d0000003600050002000000040000000000000003000000f8000200050000003d000400070000000c0000000b0000003e000300090000000c00000041000500160000001700000013000000150000003d0004001000000018000000170000003d000400190000001c0000001b00000051000500060000001e0000001c0000000000000051000500060000001f0000001c000000010000005100050006000000200000001c00000002000000500007000d000000210000001e0000001f000000200000001d000000910005000d00000022000000180000002100000041000500160000002a00000013000000290000003d000400100000002b0000002a000000910005000d0000002d0000002b00000022000000410005002e0000002f00000028000000150000003e0003002f0000002d000000fd00010038000100";
+    require(hex.size() % 2U == 0U, "embedded sampled vertex shader hex alignment");
+    std::vector<std::uint8_t> result(hex.size() / 2U);
+    for (std::size_t index = 0U; index < result.size(); ++index)
+        result[index] = static_cast<std::uint8_t>((hex_digit(hex[index * 2U]) << 4U) |
+                                                   hex_digit(hex[index * 2U + 1U]));
+    return result;
+}
+
+std::vector<std::uint8_t> executable_sampled_fragment_shader() {
+    // Generated from tests/shaders/indexed_static_mesh_sampled.frag.
+    constexpr std::string_view hex =
+        "03022307000001000b000800190000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00070004000000040000006d61696e00000000090000001600000010000300040000000700000047000400090000001e00000000000000470004000c0000002100000000000000470004000c0000002200000000000000470004001000000021000000010000004700040010000000220000000000000047000400160000001e00000000000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000004000000200004000800000003000000070000003b000400080000000900000003000000190009000a00000006000000010000000000000000000000000000000100000000000000200004000b000000000000000a0000003b0004000b0000000c000000000000001a0002000e000000200004000f000000000000000e0000003b0004000f00000010000000000000001b000300120000000a00000017000400140000000600000002000000200004001500000001000000140000003b0004001500000016000000010000003600050002000000040000000000000003000000f8000200050000003d0004000a0000000d0000000c0000003d0004000e00000011000000100000005600050012000000130000000d000000110000003d00040014000000170000001600000057000500070000001800000013000000170000003e0003000900000018000000fd00010038000100";
+    require(hex.size() % 2U == 0U, "embedded sampled fragment shader hex alignment");
+    std::vector<std::uint8_t> result(hex.size() / 2U);
+    for (std::size_t index = 0U; index < result.size(); ++index)
+        result[index] = static_cast<std::uint8_t>((hex_digit(hex[index * 2U]) << 4U) |
+                                                   hex_digit(hex[index * 2U + 1U]));
+    return result;
+}
+
 std::vector<std::uint8_t> executable_fragment_shader() {
     constexpr std::string_view hex =
         "03022307000001000b000d000d0000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00060004000000040000006d61696e000000000900000010000300040000000700000047000400090000001e00000000000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000004000000200004000800000003000000070000003b0004000800000009000000030000002b000400060000000a0000000000803f2b000400060000000b000000000000002c000700070000000c0000000a0000000b0000000b0000000a0000003600050002000000040000000000000003000000f8000200050000003e000300090000000c000000fd00010038000100";
@@ -932,6 +957,103 @@ bool contract_backend(apex::render::Backend backend) {
     require(indexed_result.rgba8[0] == std::byte{0} && indexed_result.rgba8[1] == std::byte{0} &&
                 indexed_result.rgba8[2] == std::byte{0} && indexed_result.rgba8[3] == std::byte{255},
             "indexed static-mesh outside pixel retains clear color");
+
+    // Exercise the explicitly labeled portable diffuse-resource ABI. This
+    // proves backend descriptor execution; it is not a stock ksPerPixel claim.
+    const std::array<std::byte, 4> diffuse_pixel = {
+        std::byte{17}, std::byte{201}, std::byte{83}, std::byte{255}};
+    const TextureDescription diffuse_description{
+        1U, 1U, 1U, 1U, TextureFormat::rgba8_unorm, TextureUsage::sampled,
+        TextureMemory::device_local, TextureMutability::immutable};
+    const TextureUploadPlan diffuse_uploads{{
+        TextureUpload{0U, 0U, 1U, 1U, 4U, diffuse_pixel}}};
+    TextureResult diffuse_texture =
+        device.device->create_texture(diffuse_description, diffuse_uploads);
+    require(diffuse_texture.ok(), "portable diffuse texture upload");
+
+    DrawPacket sampled_packet = indexed_packet;
+    sampled_packet.world_matrix = apex::scene::identity_matrix;
+    StaticMeshUploadResult sampled_upload =
+        upload_static_mesh(*device.device, indexed_mesh, sampled_packet);
+    require(sampled_upload.ok(), "portable diffuse static-mesh upload");
+    PipelineProgram sampled_pipeline = indexed_pipeline;
+    sampled_pipeline.name = "portable-diffuse-resource-baseline";
+    sampled_pipeline.vertex_layout.attributes.push_back(
+        {PipelineVertexSemantic::texcoord0, PipelineVertexAttributeFormat::float32x2, 2U, 24U});
+    sampled_pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+    };
+    if (backend == Backend::Vulkan) {
+        sampled_pipeline.shaders[0].bytes = executable_sampled_vertex_shader();
+        sampled_pipeline.shaders[1].bytes = executable_sampled_fragment_shader();
+    } else {
+#if defined(_WIN32)
+        constexpr std::string_view sampled_vertex_source =
+            "cbuffer DrawMatrices : register(b0) { column_major float4x4 world; column_major float4x4 viewProjection; };"
+            "struct Input { float3 position : POSITION; float2 texcoord : TEXCOORD0; };"
+            "struct Output { float4 position : SV_Position; float2 texcoord : TEXCOORD0; };"
+            "Output main(Input input) { Output output;"
+            "output.position = mul(viewProjection, mul(world, float4(input.position, 1.0)));"
+            "output.texcoord = input.texcoord; return output; }";
+        constexpr std::string_view sampled_fragment_source =
+            "Texture2D diffuseTexture : register(t0);"
+            "SamplerState diffuseSampler : register(s1);"
+            "float4 main(float4 position : SV_Position, float2 texcoord : TEXCOORD0) : SV_Target {"
+            "return diffuseTexture.Sample(diffuseSampler, texcoord); }";
+        sampled_pipeline.shaders[0].bytes =
+            executable_d3d_shader(sampled_vertex_source, "vs_5_0");
+        sampled_pipeline.shaders[1].bytes =
+            executable_d3d_shader(sampled_fragment_source, "ps_5_0");
+#else
+        require(false, "D3D12 sampled shader test requires Windows D3DCompile");
+#endif
+    }
+    IndexedStaticMeshDrawRequest sampled_request =
+        sampled_upload.upload->make_request(sampled_pipeline, *indexed_camera.frame);
+    sampled_request.resource_authority = IndexedResourceAuthority::explicit_bindings;
+    sampled_request.sampled_binding = {diffuse_texture.texture.get(), sampler.sampler.get()};
+    const IndexedStaticMeshDrawResult sampled_result =
+        device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture,
+                                                              sampled_request);
+    require(sampled_result.ok(), "portable diffuse indexed draw/readback");
+    require(sampled_result.rgba8[center] == std::byte{17} &&
+                sampled_result.rgba8[center + 1U] == std::byte{201} &&
+                sampled_result.rgba8[center + 2U] == std::byte{83} &&
+                sampled_result.rgba8[center + 3U] == std::byte{255},
+            "portable diffuse center pixel matches sampled texture");
+    require(sampled_result.rgba8[0] == std::byte{0} &&
+                sampled_result.rgba8[1] == std::byte{0} &&
+                sampled_result.rgba8[2] == std::byte{0} &&
+                sampled_result.rgba8[3] == std::byte{255},
+            "portable diffuse outside pixel retains clear color");
+
+    const std::array<IndexedStaticMeshDrawRequest, 2> sampled_draws = {
+        sampled_request, sampled_request};
+    IndexedStaticMeshBatchDescription sampled_batch;
+    sampled_batch.draws = sampled_draws;
+    const IndexedStaticMeshBatchResult sampled_batch_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *triangle_texture.texture, sampled_batch);
+    require(sampled_batch_result.ok(), "portable diffuse ordered batch draw/readback");
+    require(sampled_batch_result.rgba8[center] == std::byte{17} &&
+                sampled_batch_result.rgba8[center + 1U] == std::byte{201} &&
+                sampled_batch_result.rgba8[center + 2U] == std::byte{83} &&
+                sampled_batch_result.rgba8[center + 3U] == std::byte{255},
+            "portable diffuse ordered batch preserves sampled color");
+
+    TextureResult uninitialized_diffuse =
+        device.device->create_texture(diffuse_description);
+    require(uninitialized_diffuse.ok(), "uninitialized diffuse texture allocation");
+    sampled_request.sampled_binding.texture = uninitialized_diffuse.texture.get();
+    const IndexedStaticMeshDrawResult uninitialized_sampled_result =
+        device.device->draw_indexed_static_mesh_and_readback(
+            *triangle_texture.texture, sampled_request);
+    require(uninitialized_sampled_result.status ==
+                IndexedStaticMeshDrawStatus::execution_failed &&
+                !uninitialized_sampled_result.diagnostic.code.empty(),
+            "uninitialized diffuse texture rejected before command recording");
+
     indexed_upload.upload->packet.world_matrix = apex::scene::identity_matrix;
     indexed_camera_request.eye = {1.5F, 0.0F, 2.0F};
     indexed_camera_request.target = {1.5F, 0.0F, 0.0F};

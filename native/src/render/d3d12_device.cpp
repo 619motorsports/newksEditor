@@ -1,6 +1,7 @@
 #include "backend_internal.hpp"
 #include "apex/render/draw_packet.hpp"
 
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <cstdio>
@@ -26,7 +27,7 @@ namespace {
 
 using Microsoft::WRL::ComPtr;
 
-// Keep the CPU sampler heap within the SDK's documented sampler capacity.
+// Keep the shader-visible sampler heap within the SDK's documented capacity.
 inline constexpr UINT kD3d12SamplerDescriptorCapacity = D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE;
 
 Diagnostic hresult_error(const char* operation, HRESULT result) {
@@ -142,6 +143,24 @@ struct D3D12Context {
         return success;
     }
 };
+
+struct D3D12MaterialDescriptorBinding {
+    // Keep the per-draw SRV heap alive until the synchronous fence completes.
+    // The sampler descriptor is persistent in the context-owned shader-visible
+    // sampler heap, so only its GPU handle is needed here.
+    ComPtr<ID3D12DescriptorHeap> srv_heap;
+    D3D12_GPU_DESCRIPTOR_HANDLE srv_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE sampler_gpu{};
+    bool enabled = false;
+};
+
+[[nodiscard]] bool prepare_d3d12_material_binding(
+    const std::shared_ptr<D3D12Context>& context,
+    const IndexedStaticMeshDrawRequest& request,
+    ID3D12DescriptorHeap* srv_heap,
+    UINT srv_index,
+    D3D12MaterialDescriptorBinding& output,
+    Diagnostic& diagnostic);
 
 [[nodiscard]] bool valid_d3d12_usage(BufferUsage usage, Diagnostic& diagnostic) noexcept {
     const auto raw = static_cast<std::uint32_t>(usage);
@@ -933,7 +952,8 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
                                 D3D12DepthAttachment* depth_attachment = nullptr,
                                 bool clear_depth = false,
                                 float depth_clear_value = 1.0F,
-                                bool load_color = false) {
+                                bool load_color = false,
+                                const IndexedStaticMeshDrawRequest* indexed_request = nullptr) {
     const auto& shaders = request.pipeline->shaders;
     const PipelineShaderModule* vertex_shader = nullptr;
     const PipelineShaderModule* fragment_shader = nullptr;
@@ -1001,9 +1021,38 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
         geometry.vertex_stride = request.pipeline->vertex_layout.stride;
     }
 
+    D3D12MaterialDescriptorBinding material_binding;
+    if (!request.pipeline->resources.empty()) {
+        D3D12_DESCRIPTOR_HEAP_DESC srv_heap_description{};
+        srv_heap_description.NumDescriptors = 1U;
+        srv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        srv_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        ComPtr<ID3D12DescriptorHeap> srv_heap;
+        if (indexed_request == nullptr) {
+            diagnostic = {"indexed_resource_request_missing",
+                          "D3D12 resource-enabled indexed drawing requires its indexed request"};
+            return false;
+        }
+        result = context->device->CreateDescriptorHeap(&srv_heap_description, IID_PPV_ARGS(&srv_heap));
+        if (FAILED(result)) {
+            diagnostic = hresult_error("CreateDescriptorHeap(indexed resource SRV)", result);
+            diagnostic.code = "indexed_resource_descriptor_heap_failed";
+            return false;
+        }
+        if (!prepare_d3d12_material_binding(context, *indexed_request, srv_heap.Get(), 0U,
+                                             material_binding, diagnostic))
+            return false;
+    }
+
     D3D12_ROOT_SIGNATURE_DESC root_description{};
     root_description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
     D3D12_ROOT_PARAMETER transform_parameter{};
+    D3D12_DESCRIPTOR_RANGE srv_range{};
+    D3D12_DESCRIPTOR_RANGE sampler_range{};
+    D3D12_ROOT_PARAMETER srv_parameter{};
+    D3D12_ROOT_PARAMETER sampler_parameter{};
+    std::array<D3D12_ROOT_PARAMETER, 3> root_parameters{};
+    UINT root_parameter_count = 0U;
     if (draw_matrices != nullptr) {
         transform_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         transform_parameter.Constants.ShaderRegister = 0U;
@@ -1011,9 +1060,33 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
         transform_parameter.Constants.Num32BitValues =
             static_cast<UINT>(sizeof(DrawMatrices) / sizeof(std::uint32_t));
         transform_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
-        root_description.NumParameters = 1U;
-        root_description.pParameters = &transform_parameter;
+        root_parameters[root_parameter_count++] = transform_parameter;
     }
+    if (!request.pipeline->resources.empty()) {
+        srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        srv_range.NumDescriptors = 1U;
+        srv_range.BaseShaderRegister = 0U;
+        srv_range.RegisterSpace = 0U;
+        srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        srv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        srv_parameter.DescriptorTable.NumDescriptorRanges = 1U;
+        srv_parameter.DescriptorTable.pDescriptorRanges = &srv_range;
+        srv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        root_parameters[root_parameter_count++] = srv_parameter;
+
+        sampler_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+        sampler_range.NumDescriptors = 1U;
+        sampler_range.BaseShaderRegister = 1U;
+        sampler_range.RegisterSpace = 0U;
+        sampler_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        sampler_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        sampler_parameter.DescriptorTable.NumDescriptorRanges = 1U;
+        sampler_parameter.DescriptorTable.pDescriptorRanges = &sampler_range;
+        sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        root_parameters[root_parameter_count++] = sampler_parameter;
+    }
+    root_description.NumParameters = root_parameter_count;
+    root_description.pParameters = root_parameters.data();
     ComPtr<ID3DBlob> root_blob;
     ComPtr<ID3DBlob> root_error;
     result = D3D12SerializeRootSignature(&root_description, D3D_ROOT_SIGNATURE_VERSION_1,
@@ -1203,6 +1276,13 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     list->OMSetRenderTargets(1U, &rtv, FALSE, use_depth ? &depth_dsv : nullptr);
     if (!load_color) list->ClearRenderTargetView(rtv, clear_color, 0U, nullptr);
     list->SetGraphicsRootSignature(root_signature.Get());
+    if (material_binding.enabled) {
+        ID3D12DescriptorHeap* descriptor_heaps[] = {material_binding.srv_heap.Get(), context->sampler_heap.Get()};
+        list->SetDescriptorHeaps(2U, descriptor_heaps);
+        const UINT resource_root_index = draw_matrices != nullptr ? 1U : 0U;
+        list->SetGraphicsRootDescriptorTable(resource_root_index, material_binding.srv_gpu);
+        list->SetGraphicsRootDescriptorTable(resource_root_index + 1U, material_binding.sampler_gpu);
+    }
     if (draw_matrices != nullptr) {
         list->SetGraphicsRoot32BitConstants(
             0U, static_cast<UINT>(sizeof(DrawMatrices) / sizeof(std::uint32_t)),
@@ -1352,11 +1432,44 @@ bool draw_indexed_static_mesh_batch_and_readback(
         return false;
     }
 
+    HRESULT result = S_OK;
+    bool has_material_resources = false;
+    for (const IndexedStaticMeshDrawRequest& request : batch.draws) {
+        if (!request.pipeline->resources.empty()) {
+            has_material_resources = true;
+            break;
+        }
+    }
+    if (has_material_resources && draws.size() > static_cast<std::size_t>(std::numeric_limits<UINT>::max())) {
+        diagnostic = {"indexed_resource_descriptor_heap_size_invalid",
+                      "D3D12 material descriptor heap size exceeds the descriptor-count limit"};
+        return false;
+    }
+    ComPtr<ID3D12DescriptorHeap> srv_heap;
+    std::vector<D3D12MaterialDescriptorBinding> material_bindings;
+    if (has_material_resources) {
+        D3D12_DESCRIPTOR_HEAP_DESC srv_heap_description{};
+        srv_heap_description.NumDescriptors = static_cast<UINT>(draws.size());
+        srv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        srv_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        result = context->device->CreateDescriptorHeap(&srv_heap_description, IID_PPV_ARGS(&srv_heap));
+        if (FAILED(result)) {
+            diagnostic = hresult_error("CreateDescriptorHeap(indexed batch SRV)", result);
+            diagnostic.code = "indexed_resource_descriptor_heap_failed";
+            return false;
+        }
+        material_bindings.resize(draws.size());
+        for (std::size_t index = 0; index < draws.size(); ++index) {
+            if (!prepare_d3d12_material_binding(context, batch.draws[index], srv_heap.Get(),
+                                                 static_cast<UINT>(index), material_bindings[index], diagnostic))
+                return false;
+        }
+    }
+
     std::vector<ComPtr<ID3D12RootSignature>> root_signatures;
     std::vector<ComPtr<ID3D12PipelineState>> pipelines;
     root_signatures.resize(draws.size());
     pipelines.resize(draws.size());
-    HRESULT result = S_OK;
     for (std::size_t index = 0; index < draws.size(); ++index) {
         const PipelineProgram& program = *draws[index].pipeline;
         const PipelineShaderModule* vertex_shader = nullptr;
@@ -1381,10 +1494,40 @@ bool draw_indexed_static_mesh_batch_and_readback(
         transform_parameter.Constants.RegisterSpace = 0U;
         transform_parameter.Constants.Num32BitValues = static_cast<UINT>(sizeof(DrawMatrices) / sizeof(std::uint32_t));
         transform_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+        D3D12_DESCRIPTOR_RANGE srv_range{};
+        D3D12_DESCRIPTOR_RANGE sampler_range{};
+        D3D12_ROOT_PARAMETER srv_parameter{};
+        D3D12_ROOT_PARAMETER sampler_parameter{};
+        std::array<D3D12_ROOT_PARAMETER, 3> root_parameters{};
+        UINT root_parameter_count = 1U;
+        root_parameters[0] = transform_parameter;
+        if (!program.resources.empty()) {
+            srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            srv_range.NumDescriptors = 1U;
+            srv_range.BaseShaderRegister = 0U;
+            srv_range.RegisterSpace = 0U;
+            srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+            srv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            srv_parameter.DescriptorTable.NumDescriptorRanges = 1U;
+            srv_parameter.DescriptorTable.pDescriptorRanges = &srv_range;
+            srv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            root_parameters[root_parameter_count++] = srv_parameter;
+
+            sampler_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+            sampler_range.NumDescriptors = 1U;
+            sampler_range.BaseShaderRegister = 1U;
+            sampler_range.RegisterSpace = 0U;
+            sampler_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+            sampler_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            sampler_parameter.DescriptorTable.NumDescriptorRanges = 1U;
+            sampler_parameter.DescriptorTable.pDescriptorRanges = &sampler_range;
+            sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            root_parameters[root_parameter_count++] = sampler_parameter;
+        }
         D3D12_ROOT_SIGNATURE_DESC root_description{};
         root_description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-        root_description.NumParameters = 1U;
-        root_description.pParameters = &transform_parameter;
+        root_description.NumParameters = root_parameter_count;
+        root_description.pParameters = root_parameters.data();
         ComPtr<ID3DBlob> root_blob;
         ComPtr<ID3DBlob> root_error;
         result = D3D12SerializeRootSignature(&root_description, D3D_ROOT_SIGNATURE_VERSION_1,
@@ -1551,6 +1694,10 @@ bool draw_indexed_static_mesh_batch_and_readback(
         list->ClearDepthStencilView(depth_attachment->dsv(true), D3D12_CLEAR_FLAG_DEPTH,
                                     batch.depth_clear_value, 0U, 0U, nullptr);
     if (!batch.load_color) list->ClearRenderTargetView(rtv, batch.clear_color.data(), 0U, nullptr);
+    if (has_material_resources) {
+        ID3D12DescriptorHeap* descriptor_heaps[] = {srv_heap.Get(), context->sampler_heap.Get()};
+        list->SetDescriptorHeaps(2U, descriptor_heaps);
+    }
 
     for (std::size_t index = 0; index < draws.size(); ++index) {
         const auto& draw = draws[index];
@@ -1573,6 +1720,10 @@ bool draw_indexed_static_mesh_batch_and_readback(
         list->SetGraphicsRootSignature(root_signatures[index].Get());
         list->SetGraphicsRoot32BitConstants(0U, static_cast<UINT>(sizeof(DrawMatrices) / sizeof(std::uint32_t)),
                                              &draw.matrices, 0U);
+        if (!material_bindings.empty() && material_bindings[index].enabled) {
+            list->SetGraphicsRootDescriptorTable(1U, material_bindings[index].srv_gpu);
+            list->SetGraphicsRootDescriptorTable(2U, material_bindings[index].sampler_gpu);
+        }
         list->SetPipelineState(pipelines[index].Get());
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         D3D12_VERTEX_BUFFER_VIEW vertex_view{};
@@ -1777,7 +1928,7 @@ bool draw_indexed_static_mesh_and_readback(
     const DrawMatrices draw_matrices{packet.world_matrix, request.camera_frame->view_projection};
     return draw_graphics_and_readback(context, destination, description, render_request, destination_state, output,
                                       diagnostic, &geometry, &draw_matrices, depth_attachment,
-                                      request.clear_depth, request.depth_clear_value, request.load_color);
+                                      request.clear_depth, request.depth_clear_value, request.load_color, &request);
 }
 
 class D3D12Texture final : public Texture {
@@ -1796,6 +1947,9 @@ public:
     Backend backend() const noexcept override { return Backend::D3D12; }
     const TextureInfo& info() const noexcept override { return info_; }
     [[nodiscard]] const D3D12Context* context() const noexcept { return context_.get(); }
+    [[nodiscard]] ID3D12Resource* resource() const noexcept { return resource_.Get(); }
+    [[nodiscard]] D3D12_RESOURCE_STATES state() const noexcept { return state_; }
+    [[nodiscard]] bool initialized() const noexcept { return initialized_; }
 
     bool upload(const TextureUploadPlan& uploads, Diagnostic& diagnostic) {
         const bool uploaded = execute_texture_upload(context_, resource_.Get(), info_.description, uploads,
@@ -1870,16 +2024,124 @@ class D3D12Sampler final : public Sampler {
 public:
     D3D12Sampler(std::shared_ptr<D3D12Context> context,
                  D3D12_CPU_DESCRIPTOR_HANDLE descriptor,
+                 D3D12_GPU_DESCRIPTOR_HANDLE gpu_descriptor,
                  SamplerDescription description)
-        : context_(std::move(context)), descriptor_(descriptor), info_({description}) {}
+        : context_(std::move(context)), descriptor_(descriptor), gpu_descriptor_(gpu_descriptor), info_({description}) {}
     Backend backend() const noexcept override { return Backend::D3D12; }
     const SamplerInfo& info() const noexcept override { return info_; }
+    [[nodiscard]] const D3D12Context* context() const noexcept { return context_.get(); }
+    [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE descriptor() const noexcept { return descriptor_; }
+    [[nodiscard]] D3D12_GPU_DESCRIPTOR_HANDLE gpu_descriptor() const noexcept { return gpu_descriptor_; }
 
 private:
     std::shared_ptr<D3D12Context> context_;
     D3D12_CPU_DESCRIPTOR_HANDLE descriptor_{};
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu_descriptor_{};
     SamplerInfo info_;
 };
+
+bool prepare_d3d12_material_binding(
+    const std::shared_ptr<D3D12Context>& context,
+    const IndexedStaticMeshDrawRequest& request,
+    ID3D12DescriptorHeap* srv_heap,
+    UINT srv_index,
+    D3D12MaterialDescriptorBinding& output,
+    Diagnostic& diagnostic) {
+    output = {};
+    if (request.pipeline == nullptr) {
+        diagnostic = {"indexed_resource_pipeline_missing",
+                      "D3D12 material binding preparation requires a pipeline"};
+        return false;
+    }
+    if (request.pipeline->resources.empty()) {
+        if (request.sampled_binding.texture != nullptr || request.sampled_binding.sampler != nullptr) {
+            diagnostic = {"indexed_resource_binding_unexpected",
+                          "A resource-free D3D12 pipeline cannot receive material bindings"};
+            return false;
+        }
+        return true;
+    }
+    if (request.sampled_binding.texture == nullptr || request.sampled_binding.sampler == nullptr) {
+        diagnostic = {"indexed_resource_binding_missing",
+                      "D3D12 material binding requires both a sampled texture and sampler"};
+        return false;
+    }
+    const auto* texture = dynamic_cast<const D3D12Texture*>(request.sampled_binding.texture);
+    const auto* sampler = dynamic_cast<const D3D12Sampler*>(request.sampled_binding.sampler);
+    if (texture == nullptr || sampler == nullptr) {
+        diagnostic = {"indexed_resource_type_unsupported",
+                      "The D3D12 device received an unknown material resource handle"};
+        return false;
+    }
+    if (texture->context() != context.get() || sampler->context() != context.get()) {
+        diagnostic = {"indexed_resource_context_mismatch",
+                      "D3D12 material resources belong to another device"};
+        return false;
+    }
+    if (texture->resource() == nullptr || !texture->initialized()) {
+        diagnostic = {"indexed_resource_texture_uninitialized",
+                      "A D3D12 sampled texture must contain uploaded data before drawing"};
+        return false;
+    }
+    constexpr UINT required_state = static_cast<UINT>(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    if ((static_cast<UINT>(texture->state()) & required_state) == 0U) {
+        diagnostic = {"indexed_resource_texture_state_invalid",
+                      "A D3D12 sampled texture is not in pixel-shader-resource state"};
+        return false;
+    }
+    if (srv_heap == nullptr) {
+        diagnostic = {"indexed_resource_descriptor_heap_missing",
+                      "D3D12 material binding requires a shader-visible SRV heap"};
+        return false;
+    }
+    if (context == nullptr || context->device == nullptr || context->sampler_heap == nullptr) {
+        diagnostic = {"indexed_resource_context_unavailable",
+                      "D3D12 material binding requires an initialized device and sampler heap"};
+        return false;
+    }
+    const D3D12_DESCRIPTOR_HEAP_DESC heap_description = srv_heap->GetDesc();
+    if (heap_description.Type != D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
+        (heap_description.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) == 0U ||
+        srv_index >= heap_description.NumDescriptors) {
+        diagnostic = {"indexed_resource_descriptor_slot_invalid",
+                      "D3D12 material SRV descriptor slot is outside its bounded shader-visible heap"};
+        return false;
+    }
+    const TextureDescription& texture_description = texture->info().description;
+    const DXGI_FORMAT format = dxgi_texture_format(texture_description.format);
+    if (format == DXGI_FORMAT_UNKNOWN || texture_description.mip_levels == 0U) {
+        diagnostic = {"indexed_resource_texture_format_unsupported",
+                      "D3D12 material texture format or mip count is unsupported"};
+        return false;
+    }
+    const UINT descriptor_size = context->device->GetDescriptorHandleIncrementSize(
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    const UINT64 index = static_cast<UINT64>(srv_index);
+    if (descriptor_size == 0U || index > std::numeric_limits<SIZE_T>::max() / descriptor_size ||
+        index > std::numeric_limits<UINT64>::max() / descriptor_size) {
+        diagnostic = {"indexed_resource_descriptor_offset_overflow",
+                      "D3D12 material descriptor offset exceeds handle addressability"};
+        return false;
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu = srv_heap->GetCPUDescriptorHandleForHeapStart();
+    cpu.ptr += static_cast<SIZE_T>(index * descriptor_size);
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu = srv_heap->GetGPUDescriptorHandleForHeapStart();
+    gpu.ptr += index * descriptor_size;
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = format;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Texture2D.MostDetailedMip = 0U;
+    srv.Texture2D.MipLevels = texture_description.mip_levels;
+    srv.Texture2D.PlaneSlice = 0U;
+    srv.Texture2D.ResourceMinLODClamp = 0.0F;
+    context->device->CreateShaderResourceView(texture->resource(), &srv, cpu);
+    output.srv_heap = srv_heap;
+    output.srv_gpu = gpu;
+    output.sampler_gpu = sampler->gpu_descriptor();
+    output.enabled = true;
+    return true;
+}
 
 class D3D12ShaderModule final : public ShaderModule {
 public:
@@ -2371,9 +2633,12 @@ public:
         sampler.BorderColor[3] = 0.0F;
         auto descriptor = context_->sampler_heap->GetCPUDescriptorHandleForHeapStart();
         descriptor.ptr += static_cast<SIZE_T>(context_->next_sampler) * context_->sampler_descriptor_size;
+        auto gpu_descriptor = context_->sampler_heap->GetGPUDescriptorHandleForHeapStart();
+        gpu_descriptor.ptr += static_cast<UINT64>(context_->next_sampler) * context_->sampler_descriptor_size;
         ++context_->next_sampler;
         context_->device->CreateSampler(&sampler, descriptor);
-        return {SamplerStatus::ready, {}, std::make_unique<D3D12Sampler>(context_, descriptor, description)};
+        return {SamplerStatus::ready, {},
+                std::make_unique<D3D12Sampler>(context_, descriptor, gpu_descriptor, description)};
     }
 
     ShaderModuleResult create_shader_module(const ShaderModuleDescription& description) override {
@@ -2492,7 +2757,7 @@ DeviceResult create_d3d12_device(const DeviceOptions& options) {
     D3D12_DESCRIPTOR_HEAP_DESC sampler_heap_description{};
     sampler_heap_description.NumDescriptors = kD3d12SamplerDescriptorCapacity;
     sampler_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
-    sampler_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    sampler_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     result_code = context->device->CreateDescriptorHeap(&sampler_heap_description, IID_PPV_ARGS(&context->sampler_heap));
     if (FAILED(result_code)) {
         result.status = DeviceStatus::initialization_failed;

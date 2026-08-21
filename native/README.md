@@ -67,11 +67,14 @@ Vulkan uses a 128-byte vertex push-constant block. D3D12 uses an equivalent
 root-constant block. Each camera must use the clip-space convention for its
 backend. Both backends create persistent single-sample D32 attachments.
 Indexed requests use explicit color-load and depth-clear controls. The
-source-evidenced main path uses `LESS` depth testing. The execution path still
-accepts only resource-free opaque packets. A bounded ordered batch preflights
-all requests, clears or loads attachments once, submits one render pass, and
-returns one final readback. Draw-packet texture resources resolve by canonical
-name.
+source-evidenced main path uses `LESS` depth testing. The execution path accepts
+opaque packets. A request-local authority can enable one portable diffuse
+resource pair: a sampled image at set 0, binding 0, and a sampler at set 0,
+binding 1. Vulkan and D3D12 execute this pair for single draws and ordered
+batches. The pair is a portable test ABI. It is not a recovered stock KN5 or
+CSP shader contract. A bounded ordered batch preflights all requests, clears or
+loads attachments once, submits one render pass, and returns one final
+readback. Draw-packet texture resources resolve by canonical name.
 The serialized KN5 resource ID remains a shader bind point, not a
 texture-table index. A bounded static-scene adapter maps the final KN5 tree to
 dense scene IDs. It validates all packets and pipelines before buffer creation.
@@ -79,8 +82,9 @@ The adapter uploads each referenced node once. It retains duplicate packets as
 ordered draw instances. It submits one batch with caller-supplied SPIR-V or
 DXIL pipelines. Production packets remain marked as staged. The adapter does
 not claim that stock KN5 shaders are executable. Window surfaces, swapchains,
-descriptor binding, material resources, and production pixel comparisons
-remain roadmap work. BC7 has an exact, bounded CPU fallback.
+complete material binding, and production pixel comparisons remain roadmap
+work. The static-scene adapter still requires resource-free pipelines. BC7 has
+an exact, bounded CPU fallback.
 BC6H still requires a capable GPU path. The upload planner supports DX10 2D
 arrays, cubemaps, and RGB24 conversion. It rejects 1D/3D textures and legacy
 D3D9 float textures.
