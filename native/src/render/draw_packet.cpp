@@ -1,4 +1,5 @@
 #include "apex/render/draw_packet.hpp"
+#include "apex/render/kn5_scene_node_map.hpp"
 
 #include <algorithm>
 #include <array>
@@ -285,63 +286,17 @@ DrawPacketBuildResult build_draw_packets(
         return result;
     }
 
-    std::vector<const apex::formats::Kn5Node*> raw_nodes;
-    std::vector<std::pair<const apex::formats::Kn5Node*, std::size_t>> stack;
-    stack.push_back({&model.root, 0});
-    while (!stack.empty()) {
-        const auto [raw, depth] = stack.back();
-        stack.pop_back();
-        if (depth > limits.max_scene_nodes) {
-            add_diagnostic(result, limits, DrawPacketDiagnostic::Severity::error, "DEPTH_LIMIT", "KN5 node hierarchy exceeds draw-packet limits");
-            result.limit_exceeded = true;
-            return result;
-        }
-        if (raw_nodes.size() >= limits.max_scene_nodes) {
-            add_diagnostic(result, limits, DrawPacketDiagnostic::Severity::error, "NODE_LIMIT", "KN5 node input exceeds draw-packet limits");
-            result.limit_exceeded = true;
-            return result;
-        }
-        if (!finite_matrix(raw->transform) || raw->name.size() > limits.max_string_bytes) {
-            add_diagnostic(result, limits, DrawPacketDiagnostic::Severity::error,
-                           !finite_matrix(raw->transform) ? "NON_FINITE_MATRIX" : "STRING_LIMIT",
-                           "KN5 node transform or name is invalid");
-            return result;
-        }
-        raw_nodes.push_back(raw);
-        if (stack.size() > limits.max_scene_nodes - raw_nodes.size()) {
-            add_diagnostic(result, limits, DrawPacketDiagnostic::Severity::error, "NODE_LIMIT", "KN5 traversal work exceeds draw-packet limits");
-            result.limit_exceeded = true;
-            return result;
-        }
-        for (auto child = raw->children.rbegin(); child != raw->children.rend(); ++child)
-            stack.push_back({&*child, depth + 1});
-    }
-    if (raw_nodes.size() != scene.nodes.size()) {
-        add_diagnostic(result, limits, DrawPacketDiagnostic::Severity::error, "SCENE_MODEL_MISMATCH", "scene node IDs do not correspond to KN5 pre-order nodes");
+    const Kn5SceneNodeMapLimits map_limits{limits.max_scene_nodes, limits.max_scene_nodes,
+                                            limits.max_scene_nodes, limits.max_string_bytes};
+    const Kn5SceneNodeMapResult node_map = map_kn5_scene_nodes(model.root, scene, map_limits);
+    if (!node_map.ok()) {
+        add_diagnostic(result, limits, DrawPacketDiagnostic::Severity::error,
+                       node_map.diagnostic.code, node_map.diagnostic.message,
+                       node_map.diagnostic.node);
+        result.limit_exceeded = node_map.diagnostic.limit_exceeded;
         return result;
     }
-    if (!scene.nodes.empty() && scene.root != 0U) {
-        add_diagnostic(result, limits, DrawPacketDiagnostic::Severity::error, "INVALID_NODE_ID",
-                       "scene root must be the first source-ordered node");
-        return result;
-    }
-    for (std::size_t index = 0; index < scene.nodes.size(); ++index) {
-        if (scene.nodes[index].id != static_cast<apex::scene::NodeId>(index)) {
-            add_diagnostic(result, limits, DrawPacketDiagnostic::Severity::error, "INVALID_NODE_ID", "scene node IDs must be dense and source ordered");
-            return result;
-        }
-        const auto* raw = raw_nodes[index];
-        const auto& node = scene.nodes[index];
-        const bool kind_matches =
-            (raw->type == 1U && node.kind == apex::scene::NodeKind::node) ||
-            (raw->type == 2U && node.kind == apex::scene::NodeKind::mesh) ||
-            (raw->type == 3U && node.kind == apex::scene::NodeKind::skinned_mesh);
-        if (!kind_matches || node.name != raw->name) {
-            add_diagnostic(result, limits, DrawPacketDiagnostic::Severity::error, "SCENE_MODEL_IDENTITY",
-                           "scene node name or kind does not match the source KN5 node", node.id, node.material);
-            return result;
-        }
-    }
+    const std::vector<const apex::formats::Kn5Node*>& raw_nodes = node_map.source_nodes;
 
     using TextureScopeKey = std::pair<std::optional<std::size_t>, std::string>;
     std::map<TextureScopeKey, std::optional<std::uint32_t>> texture_indices;

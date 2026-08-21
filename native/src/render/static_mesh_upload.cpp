@@ -48,14 +48,88 @@ StaticMeshUploadStatus map_buffer_failure(const BufferResult& result,
     return StaticMeshUploadStatus::upload_failed;
 }
 
+bool valid_packet_range(const DrawPacket& draw_packet,
+                        const StaticMeshUpload& upload,
+                        Diagnostic& diagnostic) noexcept {
+    if (draw_packet.primitive != DrawPrimitiveKind::static_mesh) {
+        diagnostic = {"static_mesh_primitive_required", "The draw packet is not a static mesh"};
+        return false;
+    }
+    if (draw_packet.node != upload.packet.node) {
+        diagnostic = {"static_mesh_packet_node_mismatch",
+                      "The draw packet node does not own the uploaded source geometry"};
+        return false;
+    }
+    if (upload.source_vertex_count() == 0U || upload.source_index_count() == 0U ||
+        upload.source_vertex_stride_floats() == 0U) {
+        diagnostic = {"static_mesh_upload_metadata_invalid",
+                      "The static mesh upload has no valid source geometry metadata"};
+        return false;
+    }
+    if (draw_packet.vertex_stride_floats != upload.source_vertex_stride_floats()) {
+        diagnostic = {"static_mesh_stride_invalid",
+                      "The draw packet stride does not match the uploaded source geometry"};
+        return false;
+    }
+    if (draw_packet.vertex_count == 0U || draw_packet.index_count == 0U ||
+        draw_packet.index_count % 3U != 0U ||
+        static_cast<std::size_t>(draw_packet.vertex_offset) > upload.source_vertex_count() ||
+        static_cast<std::size_t>(draw_packet.vertex_count) >
+            upload.source_vertex_count() - draw_packet.vertex_offset ||
+        static_cast<std::size_t>(draw_packet.index_offset) > upload.source_index_count() ||
+        static_cast<std::size_t>(draw_packet.index_count) >
+            upload.source_index_count() - draw_packet.index_offset) {
+        diagnostic = {"static_mesh_packet_range_invalid",
+                      "The draw packet range exceeds the uploaded source geometry"};
+        return false;
+    }
+    if (!finite_matrix(draw_packet.world_matrix)) {
+        diagnostic = {"static_mesh_world_non_finite",
+                      "The draw packet world matrix is not finite"};
+        return false;
+    }
+    const auto selected_indices = upload.source_indices().subspan(
+        draw_packet.index_offset, draw_packet.index_count);
+    for (const std::uint16_t index : selected_indices) {
+        if (index >= draw_packet.vertex_count) {
+            diagnostic = {"static_mesh_packet_index_out_of_range",
+                          "The draw packet contains an index outside its selected vertex range"};
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
+
+std::optional<IndexedStaticMeshDrawRequest> StaticMeshUpload::make_request(
+    const DrawPacket& draw_packet, const PipelineProgram& pipeline,
+    const CameraFrame& camera_frame, std::uint32_t mip_level,
+    std::uint32_t array_layer, std::array<float, 4> clear_color,
+    Diagnostic& diagnostic) const noexcept {
+    diagnostic = {};
+    if (vertex_buffer == nullptr || index_buffer == nullptr) {
+        diagnostic = {"static_mesh_upload_uninitialized",
+                      "The static mesh upload has no immutable geometry buffers"};
+        return std::nullopt;
+    }
+    if (!valid_packet_range(draw_packet, *this, diagnostic)) return std::nullopt;
+    return IndexedStaticMeshDrawRequest{&draw_packet, &pipeline, vertex_buffer.get(), index_buffer.get(),
+                                        StaticMeshIndexType::uint16, mip_level, array_layer,
+                                        clear_color, camera_frame};
+}
 
 IndexedStaticMeshDrawRequest StaticMeshUpload::make_request(
     const PipelineProgram& pipeline, const CameraFrame& camera_frame,
     std::uint32_t mip_level, std::uint32_t array_layer,
     std::array<float, 4> clear_color) const noexcept {
-    return {&packet, &pipeline, vertex_buffer.get(), index_buffer.get(), StaticMeshIndexType::uint16,
-            mip_level, array_layer, clear_color, camera_frame};
+    Diagnostic diagnostic;
+    const auto request = make_request(packet, pipeline, camera_frame, mip_level, array_layer,
+                                       clear_color, diagnostic);
+    // A valid upload is expected to contain a valid original packet. Return
+    // the neutral request on a mutated/incomplete public object rather than
+    // exposing an unchecked range to a backend.
+    return request.value_or(IndexedStaticMeshDrawRequest{});
 }
 
 const char* static_mesh_upload_status_name(StaticMeshUploadStatus status) noexcept {
@@ -177,6 +251,10 @@ StaticMeshUploadResult upload_static_mesh(
 
     auto upload = std::make_unique<StaticMeshUpload>();
     upload->packet = packet;
+    upload->source_vertex_count_ = static_cast<std::uint32_t>(mesh.vertices.size() / mesh.vertexStride);
+    upload->source_index_count_ = static_cast<std::uint32_t>(mesh.indices.size());
+    upload->source_vertex_stride_floats_ = static_cast<std::uint32_t>(mesh.vertexStride);
+    upload->source_indices_ = mesh.indices;
     upload->vertex_buffer = std::move(vertex_result.buffer);
     upload->index_buffer = std::move(index_result.buffer);
     return {StaticMeshUploadStatus::ready, {}, std::move(upload)};

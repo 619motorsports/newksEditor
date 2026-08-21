@@ -73,9 +73,14 @@ all requests, clears or loads attachments once, submits one render pass, and
 returns one final readback. Draw-packet texture resources resolve by canonical
 name.
 The serialized KN5 resource ID remains a shader bind point, not a
-texture-table index. This work does not show complete scene pixels. Window
-surfaces, swapchains, descriptor binding, complete scene draws, and production
-pixel comparisons remain roadmap work. BC7 has an exact, bounded CPU fallback.
+texture-table index. A bounded static-scene adapter maps the final KN5 tree to
+dense scene IDs. It validates all packets and pipelines before buffer creation.
+The adapter uploads each referenced node once. It retains duplicate packets as
+ordered draw instances. It submits one batch with caller-supplied SPIR-V or
+DXIL pipelines. Production packets remain marked as staged. The adapter does
+not claim that stock KN5 shaders are executable. Window surfaces, swapchains,
+descriptor binding, material resources, and production pixel comparisons
+remain roadmap work. BC7 has an exact, bounded CPU fallback.
 BC6H still requires a capable GPU path. The upload planner supports DX10 2D
 arrays, cubemaps, and RGB24 conversion. It rejects 1D/3D textures and legacy
 D3D9 float textures.

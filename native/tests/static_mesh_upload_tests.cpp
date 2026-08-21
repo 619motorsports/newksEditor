@@ -120,14 +120,14 @@ apex::formats::Kn5Node mesh_fixture() {
     mesh.type = 2U;
     mesh.kind = "mesh";
     mesh.vertexStride = 11U;
-    mesh.vertices.resize(33U, 0.0F);
+    mesh.vertices.resize(66U, 0.0F);
     mesh.vertices[0] = -0.75F;
     mesh.vertices[11] = 0.75F;
     mesh.vertices[22] = 0.0F;
     mesh.vertices[1] = -0.75F;
     mesh.vertices[12] = -0.75F;
     mesh.vertices[23] = 0.75F;
-    mesh.indices = {0U, 1U, 2U};
+    mesh.indices = {0U, 1U, 2U, 0U, 1U, 2U};
     return mesh;
 }
 
@@ -191,7 +191,7 @@ void rejects_malformed_geometry_and_ranges() {
             "truncated vertex payload rejected");
 
     mesh = mesh_fixture();
-    mesh.indices[2] = 3U;
+    mesh.indices[2] = 6U;
     require(validate_static_mesh_upload(mesh, packet, diagnostic) == StaticMeshUploadStatus::invalid_request &&
                 diagnostic.code == "static_mesh_index_out_of_range",
             "out-of-range index rejected");
@@ -209,7 +209,7 @@ void rejects_malformed_geometry_and_ranges() {
                 diagnostic.code == "static_mesh_packet_range_invalid",
             "overflowing vertex range rejected");
     ranged_packet = packet_fixture();
-    ranged_packet.index_offset = 2U;
+    ranged_packet.index_offset = 4U;
     require(validate_static_mesh_upload(mesh, ranged_packet, diagnostic) == StaticMeshUploadStatus::invalid_request &&
                 diagnostic.code == "static_mesh_packet_range_invalid",
             "out-of-range index span rejected");
@@ -248,6 +248,92 @@ void rejects_limits_and_backend_failures() {
             "buffer allocation failure is propagated");
 }
 
+void reuses_one_upload_for_distinct_packet_ranges_and_transforms() {
+    const auto mesh = mesh_fixture();
+    const auto first_packet = packet_fixture();
+    FakeDevice device;
+    const auto result = upload_static_mesh(device, mesh, first_packet);
+    require(result.ok(), "shared static mesh upload succeeds");
+
+    DrawPacket second_packet = first_packet;
+    second_packet.vertex_offset = 3U;
+    second_packet.index_offset = 3U;
+    second_packet.world_matrix[12] = 2.0F;
+
+    PipelineProgram pipeline;
+    pipeline.transform_contract = PipelineTransformContract::draw_matrices;
+    CameraFrame camera;
+    camera.clip_space = CameraClipSpace::vulkan;
+    Diagnostic diagnostic;
+    const auto first_request = result.upload->make_request(
+        first_packet, pipeline, camera, 0U, 0U, {0.0F, 0.0F, 0.0F, 1.0F}, diagnostic);
+    require(first_request.has_value() && diagnostic.code.empty(),
+            "first packet creates a request from the shared upload");
+    const auto second_request = result.upload->make_request(
+        second_packet, pipeline, camera, 0U, 0U, {0.0F, 0.0F, 0.0F, 1.0F}, diagnostic);
+    require(second_request.has_value() && diagnostic.code.empty(),
+            "second packet creates a request from the shared upload");
+    require(first_request->packet == &first_packet && second_request->packet == &second_packet &&
+                first_request->packet != second_request->packet &&
+                first_request->vertex_buffer == second_request->vertex_buffer &&
+                first_request->index_buffer == second_request->index_buffer &&
+                second_request->packet->vertex_offset == 3U &&
+                second_request->packet->index_offset == 3U &&
+                second_request->packet->world_matrix[12] == 2.0F &&
+                result.upload->source_vertex_count() == 6U &&
+                result.upload->source_index_count() == 6U &&
+                result.upload->source_vertex_stride_floats() == 11U,
+            "shared upload preserves independent packet ranges and transforms");
+}
+
+void rejects_malformed_packet_overrides() {
+    const auto mesh = mesh_fixture();
+    const auto packet = packet_fixture();
+    FakeDevice device;
+    const auto result = upload_static_mesh(device, mesh, packet);
+    require(result.ok(), "upload for override validation succeeds");
+    PipelineProgram pipeline;
+    CameraFrame camera;
+    Diagnostic diagnostic;
+
+    auto malformed = packet;
+    malformed.vertex_offset = 4U;
+    require(!result.upload->make_request(malformed, pipeline, camera, 0U, 0U,
+                                         {0.0F, 0.0F, 0.0F, 1.0F}, diagnostic) &&
+                diagnostic.code == "static_mesh_packet_range_invalid",
+            "alternate vertex range outside source is rejected");
+    malformed = packet;
+    malformed.index_offset = 4U;
+    require(!result.upload->make_request(malformed, pipeline, camera, 0U, 0U,
+                                         {0.0F, 0.0F, 0.0F, 1.0F}, diagnostic) &&
+                diagnostic.code == "static_mesh_packet_range_invalid",
+            "alternate index range outside source is rejected");
+    malformed = packet;
+    malformed.vertex_stride_floats = 19U;
+    require(!result.upload->make_request(malformed, pipeline, camera, 0U, 0U,
+                                         {0.0F, 0.0F, 0.0F, 1.0F}, diagnostic) &&
+                diagnostic.code == "static_mesh_stride_invalid",
+            "alternate stride is rejected");
+    malformed = packet;
+    malformed.node = 99U;
+    require(!result.upload->make_request(malformed, pipeline, camera, 0U, 0U,
+                                         {0.0F, 0.0F, 0.0F, 1.0F}, diagnostic) &&
+                diagnostic.code == "static_mesh_packet_node_mismatch",
+            "alternate source node is rejected");
+    malformed = packet;
+    malformed.vertex_count = 2U;
+    require(!result.upload->make_request(malformed, pipeline, camera, 0U, 0U,
+                                         {0.0F, 0.0F, 0.0F, 1.0F}, diagnostic) &&
+                diagnostic.code == "static_mesh_packet_index_out_of_range",
+            "alternate selected indices are revalidated");
+    malformed = packet;
+    malformed.world_matrix[0] = std::numeric_limits<float>::quiet_NaN();
+    require(!result.upload->make_request(malformed, pipeline, camera, 0U, 0U,
+                                         {0.0F, 0.0F, 0.0F, 1.0F}, diagnostic) &&
+                diagnostic.code == "static_mesh_world_non_finite",
+            "alternate non-finite transform is rejected");
+}
+
 }  // namespace
 
 int main() {
@@ -255,6 +341,8 @@ int main() {
         accepts_valid_mesh_and_uploads_immutable_buffers();
         rejects_malformed_geometry_and_ranges();
         rejects_limits_and_backend_failures();
+        reuses_one_upload_for_distinct_packet_ranges_and_transforms();
+        rejects_malformed_packet_overrides();
         std::cout << "Static mesh upload tests passed\n";
         return 0;
     } catch (const std::exception& error) {

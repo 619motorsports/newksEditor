@@ -348,6 +348,14 @@ struct TriangleDrawResult {
 // execution uses the explicit PipelineTransformContract::draw_matrices ABI.
 enum class StaticMeshIndexType : std::uint8_t { uint16 };
 
+// Production draw packets remain neutral until their material shaders are
+// linked. A caller that supplies backend-executable shader modules can grant
+// that authority to one request without mutating or relabeling the packet.
+enum class IndexedShaderAuthority : std::uint8_t {
+    packet_contract,
+    explicit_pipeline,
+};
+
 inline constexpr std::uint32_t max_indexed_static_mesh_vertices = 10'000'000U;
 inline constexpr std::uint32_t max_indexed_static_mesh_indices = 20'000'000U;
 
@@ -383,6 +391,7 @@ struct IndexedStaticMeshDrawRequest {
     // attachment contents. The clear value is the normalized D32 depth.
     bool clear_depth = false;
     float depth_clear_value = 1.0F;
+    IndexedShaderAuthority shader_authority = IndexedShaderAuthority::packet_contract;
 };
 
 enum class IndexedStaticMeshDrawStatus {

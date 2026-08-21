@@ -1,0 +1,107 @@
+#pragma once
+
+#include "apex/formats/kn5.hpp"
+#include "apex/render/kn5_scene_node_map.hpp"
+#include "apex/render/static_mesh_upload.hpp"
+#include "apex/scene/scene.hpp"
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <span>
+#include <vector>
+
+namespace apex::render {
+
+struct StaticSceneResourceLimits {
+    Kn5SceneNodeMapLimits node_map{};
+    StaticMeshUploadLimits mesh{};
+    PipelineLimits pipeline{};
+    std::size_t max_draws = max_indexed_static_mesh_batch_draws;
+    std::size_t max_materials = 4096U;
+    std::uint64_t max_total_vertex_bytes = 512ULL * 1024ULL * 1024ULL;
+    std::uint64_t max_total_index_bytes = 256ULL * 1024ULL * 1024ULL;
+    std::uint64_t max_total_shader_bytes = 64ULL * 1024ULL * 1024ULL;
+    // Counts full source payloads once per packet. This limit bounds repeated
+    // validation work when many packets reference one large mesh.
+    std::uint64_t max_validation_bytes = 1024ULL * 1024ULL * 1024ULL;
+};
+
+struct StaticScenePrepareRequest {
+    const formats::Kn5File* model = nullptr;
+    const apex::scene::SceneSnapshot* scene = nullptr;
+    std::span<const DrawPacket> packets{};
+    // Indexed by the final model's global MaterialId. Used programs are
+    // copied into the returned resources.
+    std::span<const PipelineProgram* const> pipelines_by_material{};
+    StaticSceneResourceLimits limits{};
+};
+
+enum class StaticSceneResourceStatus {
+    ready,
+    invalid_request,
+    unsupported,
+    allocation_failed,
+    upload_failed,
+};
+
+struct StaticSceneFrameDescription {
+    CameraFrame camera{};
+    DepthAttachment* depth_attachment = nullptr;
+    bool load_color = false;
+    std::array<float, 4> clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
+    bool clear_depth = false;
+    float depth_clear_value = 1.0F;
+};
+
+struct StaticSceneResourceResult;
+
+class StaticSceneResources final {
+public:
+    [[nodiscard]] Backend backend() const noexcept { return backend_; }
+    [[nodiscard]] std::size_t draw_count() const noexcept { return packets_.size(); }
+    [[nodiscard]] std::size_t unique_geometry_count() const noexcept { return uploads_.size(); }
+
+    // Keep the preparing device alive and use it for every draw. The call is
+    // synchronous. The target and optional depth attachment must remain alive
+    // until it returns.
+    [[nodiscard]] IndexedStaticMeshBatchResult draw_and_readback(
+        Device& device, Texture& target,
+        const StaticSceneFrameDescription& frame) const;
+
+private:
+    Backend backend_ = Backend::Vulkan;
+    // Non-owning. The preparing device must remain alive until the final draw.
+    const Device* device_ = nullptr;
+    std::vector<DrawPacket> packets_;
+    std::vector<PipelineProgram> pipelines_;
+    std::vector<std::unique_ptr<StaticMeshUpload>> uploads_;
+    std::vector<std::size_t> upload_for_packet_;
+    std::vector<std::size_t> pipeline_for_packet_;
+
+    friend struct StaticSceneResourceResult;
+    friend StaticSceneResourceResult prepare_static_scene_resources(
+        Device&, const StaticScenePrepareRequest&);
+};
+
+struct StaticSceneResourceResult {
+    StaticSceneResourceStatus status = StaticSceneResourceStatus::unsupported;
+    Diagnostic diagnostic;
+    std::unique_ptr<StaticSceneResources> resources;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == StaticSceneResourceStatus::ready && resources != nullptr;
+    }
+};
+
+[[nodiscard]] const char* static_scene_resource_status_name(
+    StaticSceneResourceStatus status) noexcept;
+
+// Validate every source node, packet, pipeline, and aggregate limit before
+// creating the first backend buffer. Geometry is uploaded once per NodeId;
+// duplicate packets remain distinct ordered draw instances.
+[[nodiscard]] StaticSceneResourceResult prepare_static_scene_resources(
+    Device& device, const StaticScenePrepareRequest& request);
+
+}  // namespace apex::render

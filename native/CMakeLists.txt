@@ -132,12 +132,14 @@ add_library(apex_render STATIC
   src/render/device.cpp
   src/render/draw_packet.cpp
   src/render/frame_plan.cpp
+  src/render/kn5_scene_node_map.cpp
   src/render/lighting.cpp
   src/render/material_binding.cpp
   src/render/material_profile.cpp
   src/render/pipeline.cpp
   src/render/render_plan.cpp
   src/render/static_mesh_upload.cpp
+  src/render/static_scene.cpp
   src/render/texture_upload.cpp
   src/render/vulkan_device.cpp
   src/render/d3d12_device.cpp
@@ -211,6 +213,7 @@ apex_add_native_test(draw_packet_tests.cpp draw_packet_tests ApexEditor::Render)
 apex_add_native_test(frame_plan_tests.cpp frame_plan_tests ApexEditor::Render)
 apex_add_native_test(indexed_draw_tests.cpp indexed_draw_tests ApexEditor::Render)
 apex_add_native_test(static_mesh_upload_tests.cpp static_mesh_upload_tests ApexEditor::Render)
+apex_add_native_test(static_scene_tests.cpp static_scene_tests ApexEditor::Render)
 apex_add_native_test(lighting_tests.cpp lighting_tests ApexEditor::Render)
 apex_add_native_test(material_binding_tests.cpp material_binding_tests ApexEditor::Render)
 apex_add_native_test(material_profile_tests.cpp material_profile_tests ApexEditor::Render)
@@ -256,7 +259,7 @@ if(TEST render_backend_tests)
       ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")
   endif()
 endif()
-foreach(render_test IN ITEMS camera_tests draw_packet_tests frame_plan_tests indexed_draw_tests static_mesh_upload_tests lighting_tests material_binding_tests
+foreach(render_test IN ITEMS camera_tests draw_packet_tests frame_plan_tests indexed_draw_tests static_mesh_upload_tests static_scene_tests lighting_tests material_binding_tests
                              material_profile_tests pipeline_tests render_plan_tests texture_upload_tests)
   if(TEST ${render_test})
     set_tests_properties(${render_test} PROPERTIES LABELS "unit;render")

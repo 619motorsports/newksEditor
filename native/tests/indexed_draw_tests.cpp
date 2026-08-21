@@ -448,17 +448,35 @@ void rejects_staged_draw_packet() {
             "current packet builder marks shader execution staged");
 
     PipelineProgram pipeline = pipeline_fixture();
+    pipeline.vertex_layout.stride = 11U * sizeof(float);
     FakeTexture target(Backend::Vulkan, target_description());
     FakeBuffer vertices(Backend::Vulkan, {132U, BufferUsage::vertex, BufferMemory::device_local,
                                           BufferMutability::immutable});
     FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index, BufferMemory::device_local,
                                          BufferMutability::immutable});
     Diagnostic diagnostic;
-    const auto request = request_fixture(built.packets.front(), pipeline, vertices, indices);
+    auto request = request_fixture(built.packets.front(), pipeline, vertices, indices);
     require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
                 IndexedStaticMeshDrawStatus::unsupported &&
                 diagnostic.code == "indexed_shader_execution_staged",
             "staged packet rejected before execution");
+
+    DrawPacket executable_packet = built.packets.front();
+    executable_packet.flags.depth_test = false;
+    executable_packet.flags.depth_write = false;
+    request = request_fixture(executable_packet, pipeline, vertices, indices);
+    request.shader_authority = IndexedShaderAuthority::explicit_pipeline;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready &&
+                !built.packets.front().shader_execution_supported &&
+                !executable_packet.shader_execution_supported,
+            "an explicit executable pipeline authorizes only its request");
+
+    pipeline.transform_contract = PipelineTransformContract::none;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_transform_contract_required",
+            "explicit pipeline authority still requires the transform contract");
 }
 
 } // namespace

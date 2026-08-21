@@ -103,10 +103,13 @@ remains unchanged and feature-complete.
   indexed draws. The executable main-pass subset uses the source-evidenced
   `LESS` depth comparison. A bounded batch preflights every request, preserves
   packet order, and records all draws in one pass with one final readback. The
-  backend still accepts only resource-free opaque packets. This proves basic
-  pipeline creation, persistent attachment and geometry binding, ordered
-  command submission, rasterization, and resource-state handling. It does not
-  prove scene-rendering parity.
+  backend still accepts only resource-free opaque packets. A bounded
+  static-scene adapter validates the complete packet set before allocation.
+  It uploads each referenced node once and retains duplicate ordered draws.
+  Caller-supplied SPIR-V or DXIL pipelines authorize only their local requests.
+  Production packets remain marked as staged. This work proves basic pipeline
+  creation, geometry binding, ordered submission, and rasterization. It does
+  not prove scene-rendering parity.
 - P1 is partial. Bounded readers support KN5 v4/v5/v6, DDS, ACD, INI/CSP,
   KSANIM v1/v2, and KNH. The port also supports byte-stable KN5 writing, VAO
   ZIP decoding, and track surfaces, cameras, and splines. Bounded asset support
@@ -138,8 +141,9 @@ remains unchanged and feature-complete.
   deterministic plans. Source-based camera math matches the `perspective`,
   `lookAt`, and `multiply` functions in `public/app.js`. Separate projections
   define the Vulkan and D3D12 clip-space conversions. The indexed backend
-  shader contract uses these camera matrices. Complete scene dispatch remains
-  staged.
+  shader contract uses these camera matrices. The static-scene adapter can
+  dispatch a bounded resource-free packet set. Stock shader translation and
+  material-resource binding remain staged.
   Vulkan and D3D12 create a basic graphics pipeline and execute fixed and
   indexed R16 static-mesh draws. The indexed path executes only a deliberately
   restricted draw-packet subset. It has no descriptors, scene resources,
@@ -147,9 +151,10 @@ remains unchanged and feature-complete.
   camera transforms through an explicit shader contract. It preserves D32
   depth across synchronous draws and supports explicit test/write state. The
   ordered multi-draw path clears or loads attachments once and submits one
-  pass. Complete scene dispatch remains staged. The port does not create
-  windows or swapchains, draw complete KN5 scenes, or provide golden-image
-  parity evidence.
+  pass. The static-scene path requires explicit backend shader bytecode. It
+  does not execute stock KN5 shader packages. The port does not create windows
+  or swapchains, bind complete materials, or provide golden-image parity
+  evidence.
 
 DDS BC7 now has a bounded CPU decoder covered by differential fixtures for all
 eight modes. BC6H remains recognized and explicitly GPU-required. The port

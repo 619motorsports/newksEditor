@@ -1,5 +1,6 @@
 #include "apex/core/parse_error.hpp"
 #include "apex/render/draw_packet.hpp"
+#include "apex/render/kn5_scene_node_map.hpp"
 
 #include <array>
 #include <cmath>
@@ -79,6 +80,95 @@ apex::formats::Kn5File static_model(std::string shader = "ksPerPixel") {
     model.root.active = true;
     model.root.children.push_back(static_mesh("BODY", 3));
     return model;
+}
+
+void validates_bounded_kn5_scene_node_mapping_directly() {
+    apex::formats::Kn5Node source_root;
+    source_root.type = 1;
+    source_root.kind = "node";
+    source_root.name = "ROOT";
+
+    apex::scene::SceneSnapshot scene;
+    apex::scene::SceneNode scene_root;
+    scene_root.name = "ROOT";
+    const auto root_id = scene.add_node(std::move(scene_root));
+    auto* source_parent = &source_root;
+    auto scene_parent = root_id;
+    constexpr std::size_t depth = 8U;
+    for (std::size_t index = 0; index < depth; ++index) {
+        apex::formats::Kn5Node child;
+        child.type = index + 1U == depth ? 2U : 1U;
+        child.kind = index + 1U == depth ? "mesh" : "node";
+        child.name = "NODE_" + std::to_string(index);
+        source_parent->children.push_back(std::move(child));
+        source_parent = &source_parent->children.back();
+
+        apex::scene::SceneNode scene_child;
+        scene_child.name = source_parent->name;
+        scene_child.kind = index + 1U == depth ? apex::scene::NodeKind::mesh
+                                                : apex::scene::NodeKind::node;
+        const auto child_id = scene.add_node(std::move(scene_child), scene_parent);
+        scene_parent = child_id;
+    }
+
+    apex::render::Kn5SceneNodeMapLimits limits;
+    limits.max_depth = depth;
+    limits.max_nodes = depth + 1U;
+    limits.max_work_items = depth + 1U;
+    const auto valid = apex::render::map_kn5_scene_nodes(source_root, scene, limits);
+    require(valid.ok() && valid.source_nodes.size() == scene.nodes.size() &&
+                valid.source_nodes.back()->name == "NODE_7",
+            "direct source/scene pre-order mapping succeeds");
+
+    auto deep_limits = limits;
+    deep_limits.max_depth = 2U;
+    const auto deep = apex::render::map_kn5_scene_nodes(source_root, scene, deep_limits);
+    require(!deep.ok() && deep.diagnostic.code == "DEPTH_LIMIT" && deep.diagnostic.limit_exceeded,
+            "deep source hierarchy is bounded before recursion or allocation");
+
+    auto work_limits = limits;
+    work_limits.max_work_items = 4U;
+    const auto work = apex::render::map_kn5_scene_nodes(source_root, scene, work_limits);
+    require(!work.ok() && work.diagnostic.code == "WORK_LIMIT" && work.diagnostic.limit_exceeded,
+            "source traversal work count is bounded");
+
+    auto node_limits = limits;
+    node_limits.max_nodes = 4U;
+    const auto node_count = apex::render::map_kn5_scene_nodes(source_root, scene, node_limits);
+    require(!node_count.ok() && node_count.diagnostic.code == "NODE_LIMIT" &&
+                node_count.diagnostic.limit_exceeded,
+            "source and scene node counts obey the node limit");
+
+    auto count_scene = scene;
+    count_scene.nodes.pop_back();
+    const auto count = apex::render::map_kn5_scene_nodes(source_root, count_scene, limits);
+    require(!count.ok() && count.diagnostic.code == "SCENE_MODEL_MISMATCH",
+            "source and scene node counts must match");
+
+    auto name_scene = scene;
+    name_scene.nodes[2].name = "RENAMED";
+    const auto name = apex::render::map_kn5_scene_nodes(source_root, name_scene, limits);
+    require(!name.ok() && name.diagnostic.code == "SCENE_MODEL_IDENTITY" && name.diagnostic.node == 2U,
+            "scene node names must match source pre-order");
+
+    auto kind_scene = scene;
+    kind_scene.nodes.back().kind = apex::scene::NodeKind::node;
+    const auto kind = apex::render::map_kn5_scene_nodes(source_root, kind_scene, limits);
+    require(!kind.ok() && kind.diagnostic.code == "SCENE_MODEL_IDENTITY" &&
+                kind.diagnostic.node == static_cast<apex::scene::NodeId>(scene.nodes.size() - 1U),
+            "scene node kinds must match source pre-order");
+
+    auto dense_scene = scene;
+    dense_scene.nodes[3].id = 99U;
+    const auto dense = apex::render::map_kn5_scene_nodes(source_root, dense_scene, limits);
+    require(!dense.ok() && dense.diagnostic.code == "INVALID_NODE_ID" && dense.diagnostic.node == 99U,
+            "scene node IDs must be dense");
+
+    auto root_scene = scene;
+    root_scene.root = 1U;
+    const auto invalid_root = apex::render::map_kn5_scene_nodes(source_root, root_scene, limits);
+    require(!invalid_root.ok() && invalid_root.diagnostic.code == "INVALID_NODE_ID",
+            "scene root must be the first source node");
 }
 
 apex::render::RenderPlan one_item_plan(bool transparent = false) {
@@ -322,6 +412,7 @@ void rejects_nonfinite_scene_and_ambiguous_resource_inputs() {
 
 int main() {
     try {
+        validates_bounded_kn5_scene_node_mapping_directly();
         builds_static_packet_with_stock_state_and_ranges();
         preserves_deterministic_transparent_order_and_unknown_shader_diagnostic();
         cpu_skinning_matches_reference_transform_and_validates_influences();

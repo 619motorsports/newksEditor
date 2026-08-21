@@ -657,7 +657,8 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                       "Indexed static-mesh drawing does not execute skinned packets"};
         return IndexedStaticMeshDrawStatus::unsupported;
     }
-    if (!packet.shader_execution_supported) {
+    if (!packet.shader_execution_supported &&
+        request.shader_authority != IndexedShaderAuthority::explicit_pipeline) {
         diagnostic = {"indexed_shader_execution_staged",
                       "The draw packet does not contain an executable shader contract"};
         return IndexedStaticMeshDrawStatus::unsupported;
