@@ -2328,6 +2328,87 @@ bool contract_backend(apex::render::Backend backend) {
                 "4x alpha-to-coverage produces partial resolved coverage");
     }
 
+    // Exercise the source-equivalent ksPerPixelMultiMap_AT_NMDetail main
+    // color path with the complete twelve-binding detail stack. The generic
+    // fixture intentionally leaves alphaRef at zero, matching the public
+    // main-pass setup for this bounded coverage test; this checks A2C and
+    // resource selection without claiming recovered stock shader bytecode.
+    const std::array<std::byte, 4> at_detail_diffuse_pixel = {
+        std::byte{80}, std::byte{160}, std::byte{96}, std::byte{128}};
+    const TextureUploadPlan at_detail_diffuse_uploads{{
+        TextureUpload{0U, 0U, 1U, 1U, 4U, at_detail_diffuse_pixel}}};
+    TextureResult at_detail_diffuse_texture =
+        device.device->create_texture(diffuse_description, at_detail_diffuse_uploads);
+    require(at_detail_diffuse_texture.ok(),
+            "source-equivalent ksPerPixelMultiMap_AT_NMDetail diffuse upload");
+
+    PipelineProgram at_detail_pipeline = nm_detail_pipeline;
+    at_detail_pipeline.name = "source-equivalent-ks-per-pixel-multimap-at-nmdetail";
+    at_detail_pipeline.targets.colors[0].samples = 1U;
+    at_detail_pipeline.blend.alpha_to_coverage = false;
+    IndexedStaticMeshDrawRequest at_detail_request = make_detail_request(
+        detail_alpha_one_texture.texture.get(), normal_detail_texture.texture.get(),
+        {0.0F, 1.0F, 0.0F, 0.0F}, maps_zero_texture.texture.get());
+    at_detail_request.pipeline = &at_detail_pipeline;
+    at_detail_request.sampled_binding = {
+        at_detail_diffuse_texture.texture.get(), sampler.sampler.get()};
+    require(at_detail_request.sampled_binding.texture == at_detail_diffuse_texture.texture.get() &&
+                at_detail_request.normal_binding.texture == flat_normal_texture.texture.get() &&
+                at_detail_request.maps_binding.texture == maps_zero_texture.texture.get() &&
+                at_detail_request.detail_binding.texture == detail_alpha_one_texture.texture.get() &&
+                at_detail_request.normal_detail_binding.texture == normal_detail_texture.texture.get(),
+            "source-equivalent AT_NMDetail selects all five twelve-binding textures");
+    DrawPacket at_detail_packet = *at_detail_request.packet;
+    at_detail_packet.flags.alpha_to_coverage = false;
+    at_detail_request.packet = &at_detail_packet;
+    TextureResult at_detail_baseline_texture =
+        device.device->create_texture(triangle_description);
+    require(at_detail_baseline_texture.ok(),
+            "source-equivalent AT_NMDetail single-sample baseline target creation");
+    const IndexedStaticMeshDrawResult at_detail_baseline_result =
+        device.device->draw_indexed_static_mesh_and_readback(
+            *at_detail_baseline_texture.texture, at_detail_request);
+    require(at_detail_baseline_result.ok(),
+            "source-equivalent AT_NMDetail single-sample baseline draw/readback");
+    const std::uint8_t baseline_red =
+        std::to_integer<std::uint8_t>(at_detail_baseline_result.rgba8[center]);
+    const std::uint8_t baseline_green =
+        std::to_integer<std::uint8_t>(at_detail_baseline_result.rgba8[center + 1U]);
+    const std::uint8_t baseline_blue =
+        std::to_integer<std::uint8_t>(at_detail_baseline_result.rgba8[center + 2U]);
+    require(baseline_red > 0U && baseline_green > 0U && baseline_blue > 0U,
+            "source-equivalent AT_NMDetail baseline has nonzero main color");
+
+    TextureDescription at_detail_msaa_description = triangle_description;
+    at_detail_msaa_description.samples = 4U;
+    TextureResult at_detail_msaa_texture =
+        device.device->create_texture(at_detail_msaa_description);
+    require(at_detail_msaa_texture.ok(),
+            "source-equivalent AT_NMDetail four-sample target creation");
+    PipelineProgram at_detail_msaa_pipeline = at_detail_pipeline;
+    at_detail_msaa_pipeline.targets.colors[0].samples = 4U;
+    at_detail_msaa_pipeline.blend.alpha_to_coverage = true;
+    DrawPacket at_detail_msaa_packet = at_detail_packet;
+    at_detail_msaa_packet.flags.alpha_to_coverage = true;
+    IndexedStaticMeshDrawRequest at_detail_msaa_request = at_detail_request;
+    at_detail_msaa_request.pipeline = &at_detail_msaa_pipeline;
+    at_detail_msaa_request.packet = &at_detail_msaa_packet;
+    const IndexedStaticMeshDrawResult at_detail_msaa_result =
+        device.device->draw_indexed_static_mesh_and_readback(
+            *at_detail_msaa_texture.texture, at_detail_msaa_request);
+    require(at_detail_msaa_result.ok(),
+            "source-equivalent AT_NMDetail four-sample draw/readback");
+    const std::uint8_t msaa_red =
+        std::to_integer<std::uint8_t>(at_detail_msaa_result.rgba8[center]);
+    const std::uint8_t msaa_green =
+        std::to_integer<std::uint8_t>(at_detail_msaa_result.rgba8[center + 1U]);
+    const std::uint8_t msaa_blue =
+        std::to_integer<std::uint8_t>(at_detail_msaa_result.rgba8[center + 2U]);
+    require(msaa_red > 0U && msaa_red < baseline_red &&
+                msaa_green > 0U && msaa_green < baseline_green &&
+                msaa_blue > 0U && msaa_blue < baseline_blue,
+            "source-equivalent AT_NMDetail A2C resolves partial main-color coverage");
+
     IndexedStaticMeshDrawRequest alpha_batch_request = alpha_request;
     alpha_batch_request.clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
     const std::array<IndexedStaticMeshDrawRequest, 1> alpha_draws = {

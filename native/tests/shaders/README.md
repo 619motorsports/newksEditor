@@ -200,9 +200,10 @@ detailNormalBlend, reserved)`. The fragment source follows
 `public/app.js:2074` for the detail color/mask, `:2077` for tangent-space
 normal detail, and `:2080` for detail-alpha specular modulation and maps.r/g.
 It excludes Fresnel/reflection, multilayer world-XZ resources, damage, rain,
-seasons, AO, shadows, local/CSP lights, custom emissions, alpha test/A2C,
-transparency, and overlays. This is an exact bounded execution fixture, not a
-claim of complete stock shader parity.
+seasons, AO, shadows, local/CSP lights, custom emissions, shadow cutouts,
+transparency, and overlays. A pipeline can pair this main-color fixture with
+4x A2C because the production main pass uses output alpha without a discard.
+This is an exact bounded execution fixture, not complete stock shader parity.
 
 Detail-stack identities, compiled with glslang `16.4.0` and validated with
 SPIRV-Tools `2026.3` (`vulkan-sdk-1.4.357.0-0-g9a49b0883`), target SPIR-V 1.0

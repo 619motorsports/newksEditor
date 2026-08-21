@@ -479,6 +479,91 @@ void resolves_bounded_nmdetail_stack() {
             "NMDdetail rejects non-finite detail controls");
 }
 
+void resolves_bounded_at_nmdetail_stack() {
+    Kn5Material material;
+    material.shader = "ksPerPixelMultiMap_AT_NMDetail";
+    material.properties = {
+        {"useDetail", 0.8F, {}, {}, {}},
+        {"detailUVMultiplier", 1.75F, {}, {}, {}},
+        {"detailNormalBlend", 0.4F, {}, {}, {}},
+        {"nmObjectSpace", 0.0F, {}, {}, {}},
+        {"fresnelMaxLevel", 0.0F, {}, {}, {}},
+    };
+    material.resources = {
+        {"txDiffuse", 21U, "body.dds"},
+        {"txNormal", 22U, "body_nm.dds"},
+        {"txMaps", 23U, "body_maps.dds"},
+        {"txDetail", 24U, "body_detail.dds"},
+        {"txNormalDetail", 25U, "body_detail_nm.dds"},
+    };
+
+    const MaterialBinding complete = build_material_binding(material, 5U);
+    require(complete.status == MaterialBindingStatus::complete &&
+                complete.profile.alpha_to_coverage && complete.profile.shadow_alpha_tested,
+            "AT_NMDetail resolves as a complete alpha-tested material family");
+    const auto resolved = resolve_ks_per_pixel_material_constants(complete);
+    require(resolved.ok() &&
+                resolved.constants.detail == std::array<float, 4>{0.8F, 1.75F, 0.4F, 0.0F} &&
+                resolved.constants.fresnel[3] == 0.0F,
+            "AT_NMDetail preserves detail controls and ordinary main-pass alpha semantics");
+
+    MaterialBindingOverrides overrides;
+    overrides.properties.emplace("detailNormalBlend",
+                                 MaterialPropertyOverride::scalar_value(0.25F));
+    const auto overridden = resolve_ks_per_pixel_material_constants(
+        build_material_binding(material, 5U, &overrides));
+    require(overridden.ok() && overridden.constants.detail[2] == 0.25F,
+            "AT_NMDetail accepts the existing CSP detail override path");
+
+    material.resources.back().slot = "txDetailNM";
+    const MaterialBinding alias = build_material_binding(material, 5U);
+    const auto alias_result = resolve_ks_per_pixel_material_constants(alias);
+    require(alias.status == MaterialBindingStatus::complete && alias_result.ok() &&
+                find_material_texture(alias, "txDetailNM") != nullptr,
+            "AT_NMDetail accepts the txDetailNM normal-detail alias");
+
+    material.resources.clear();
+    const MaterialBinding missing = build_material_binding(material, 0U);
+    const auto missing_result = resolve_ks_per_pixel_material_constants(missing);
+    require(missing.status == MaterialBindingStatus::incomplete &&
+                !missing_result.ok() &&
+                missing_result.diagnostic.code == "ks_per_pixel_nmdetail_resources_incomplete",
+            "AT_NMDetail rejects an incomplete five-resource stack");
+
+    material.resources = {
+        {"txDiffuse", 21U, "body.dds"},
+        {"txNormal", 22U, "body_nm.dds"},
+        {"txMaps", 23U, "body_maps.dds"},
+        {"txDetail", 24U, "body_detail.dds"},
+        {"txNormalDetail", 25U, "body_detail_nm.dds"},
+    };
+    MaterialBinding malformed = build_material_binding(material, 5U);
+    malformed.properties.at("detailnormalblend").scalar =
+        std::numeric_limits<float>::infinity();
+    const auto non_finite = resolve_ks_per_pixel_material_constants(malformed);
+    require(!non_finite.ok() &&
+                non_finite.status == KsPerPixelMaterialResolveStatus::invalid_input &&
+                non_finite.diagnostic.code == "non_finite_constants",
+            "AT_NMDetail rejects non-finite detail controls");
+
+    material.properties[3].value = 1.0F;
+    const auto object_space = resolve_ks_per_pixel_material_constants(
+        build_material_binding(material, 5U));
+    require(!object_space.ok() &&
+                object_space.status == KsPerPixelMaterialResolveStatus::unsupported &&
+                object_space.diagnostic.code == "ks_per_pixel_nm_object_space_unsupported",
+            "AT_NMDetail keeps object-space normals outside the bounded family");
+
+    material.properties[3].value = 0.0F;
+    material.properties[4].value = 0.05F;
+    const auto fresnel = resolve_ks_per_pixel_material_constants(
+        build_material_binding(material, 5U));
+    require(!fresnel.ok() &&
+                fresnel.status == KsPerPixelMaterialResolveStatus::unsupported &&
+                fresnel.diagnostic.code == "ks_per_pixel_nm_fresnel_unsupported",
+            "AT_NMDetail keeps Fresnel reflection outside the bounded family");
+}
+
 } // namespace
 
 int main() {
@@ -495,6 +580,7 @@ int main() {
         rejects_invalid_ks_per_pixel_constants();
         resolves_bounded_tangent_space_nm_variant();
         resolves_bounded_nmdetail_stack();
+        resolves_bounded_at_nmdetail_stack();
         std::cout << "material binding tests passed\n";
         return 0;
     } catch (const std::exception& error) {

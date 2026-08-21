@@ -756,6 +756,122 @@ void rejects_invalid_late_inputs_before_backend_allocation() {
             "duplicate-packet source validation has an aggregate work limit");
 }
 
+void validates_alpha_to_coverage_sample_contract_before_allocation() {
+    const auto configure_a2c = [](Fixture& value, std::uint32_t color_samples) {
+        value.first_pipeline.targets.colors.front().samples = color_samples;
+        value.second_pipeline.targets.colors.front().samples = color_samples;
+        value.first_pipeline.blend.alpha_to_coverage = true;
+        value.second_pipeline.blend.alpha_to_coverage = true;
+        for (DrawPacket& packet : value.packets)
+            packet.flags.alpha_to_coverage = true;
+    };
+
+    Fixture valid = fixture();
+    configure_a2c(valid, 4U);
+    RecordingDevice valid_device;
+    const auto prepared = prepare_static_scene_resources(valid_device, request_for(valid));
+    require(prepared.ok() && valid_device.buffer_calls == 4U,
+            "four-sample alpha-to-coverage scene prepares");
+    FakeTexture target({16U, 16U, 1U, 1U, TextureFormat::rgba8_unorm,
+                        TextureUsage::color_attachment | TextureUsage::transfer_source,
+                        TextureMemory::device_local, TextureMutability::mutable_data, 4U});
+    StaticSceneFrameDescription frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    const auto drawn = prepared.resources->draw_and_readback(valid_device, target, frame);
+    require(drawn.ok() && valid_device.batch_calls == 1U,
+            "four-sample alpha-to-coverage scene reaches the ordered batch");
+
+    Fixture shared_msaa = fixture();
+    shared_msaa.first_pipeline.targets.colors.front().samples = 4U;
+    shared_msaa.first_pipeline.blend.alpha_to_coverage = true;
+    shared_msaa.second_pipeline.targets.colors.front().samples = 4U;
+    shared_msaa.packets[0].flags.alpha_to_coverage = true;
+    shared_msaa.packets[2].flags.alpha_to_coverage = true;
+    RecordingDevice shared_msaa_device;
+    const auto shared_msaa_prepared =
+        prepare_static_scene_resources(shared_msaa_device, request_for(shared_msaa));
+    require(shared_msaa_prepared.ok(),
+            "ordinary and alpha-to-coverage pipelines share a four-sample batch");
+    const auto shared_msaa_drawn =
+        shared_msaa_prepared.resources->draw_and_readback(shared_msaa_device, target, frame);
+    require(shared_msaa_drawn.ok() && shared_msaa_device.batch_calls == 1U,
+            "shared four-sample ordinary and alpha-to-coverage batch executes");
+
+    Fixture one_sample = fixture();
+    configure_a2c(one_sample, 1U);
+    RecordingDevice one_sample_device;
+    const auto one_sample_result =
+        prepare_static_scene_resources(one_sample_device, request_for(one_sample));
+    require(!one_sample_result.ok() &&
+                one_sample_result.status == StaticSceneResourceStatus::invalid_request &&
+                one_sample_result.diagnostic.code == "static_scene_material_pipeline_invalid" &&
+                one_sample_device.buffer_calls == 0U,
+            "one-sample alpha-to-coverage is rejected before allocation");
+
+    Fixture mismatched = fixture();
+    mismatched.first_pipeline.targets.colors.front().samples = 4U;
+    mismatched.first_pipeline.blend.alpha_to_coverage = true;
+    mismatched.packets[0].flags.alpha_to_coverage = true;
+    mismatched.packets[2].flags.alpha_to_coverage = true;
+    RecordingDevice mismatched_device;
+    const auto mismatched_result =
+        prepare_static_scene_resources(mismatched_device, request_for(mismatched));
+    require(!mismatched_result.ok() &&
+                mismatched_result.status == StaticSceneResourceStatus::unsupported &&
+                mismatched_result.diagnostic.code == "static_scene_mixed_color_samples_unsupported" &&
+                mismatched_device.buffer_calls == 0U,
+            "mixed one- and four-sample packets are rejected before allocation");
+
+    Fixture bad_depth = fixture();
+    configure_a2c(bad_depth, 4U);
+    bad_depth.first_pipeline.targets.has_depth = true;
+    bad_depth.first_pipeline.targets.depth =
+        {PipelineRenderTargetFormat::depth32_float, 1U};
+    bad_depth.first_pipeline.depth.test_enabled = true;
+    bad_depth.packets[0].flags.depth_test = true;
+    bad_depth.packets[2].flags.depth_test = true;
+    RecordingDevice bad_depth_device;
+    const auto bad_depth_result =
+        prepare_static_scene_resources(bad_depth_device, request_for(bad_depth));
+    require(!bad_depth_result.ok() &&
+                bad_depth_result.status == StaticSceneResourceStatus::invalid_request &&
+                bad_depth_result.diagnostic.code == "static_scene_material_pipeline_invalid" &&
+                bad_depth_device.buffer_calls == 0U,
+            "alpha-to-coverage depth sample mismatch is rejected before allocation");
+
+    Fixture valid_depth = fixture();
+    configure_a2c(valid_depth, 4U);
+    for (PipelineProgram* pipeline : {&valid_depth.first_pipeline,
+                                      &valid_depth.second_pipeline}) {
+        pipeline->targets.has_depth = true;
+        pipeline->targets.depth =
+            {PipelineRenderTargetFormat::depth32_float, 4U};
+        pipeline->depth.test_enabled = true;
+        pipeline->depth.compare = PipelineCompareOperation::less;
+    }
+    for (DrawPacket& packet : valid_depth.packets)
+        packet.flags.depth_test = true;
+    RecordingDevice valid_depth_device;
+    const auto valid_depth_result =
+        prepare_static_scene_resources(valid_depth_device, request_for(valid_depth));
+    require(valid_depth_result.ok(),
+            "alpha-to-coverage accepts matching four-sample D32 depth targets");
+
+    Fixture opaque = fixture();
+    RecordingDevice opaque_device;
+    const auto opaque_result = prepare_static_scene_resources(opaque_device, request_for(opaque));
+    require(opaque_result.ok(), "non-alpha-to-coverage scenes remain single-sample valid");
+
+    Fixture ordinary_msaa = fixture();
+    ordinary_msaa.first_pipeline.targets.colors.front().samples = 4U;
+    ordinary_msaa.second_pipeline.targets.colors.front().samples = 4U;
+    RecordingDevice ordinary_msaa_device;
+    const auto ordinary_msaa_result =
+        prepare_static_scene_resources(ordinary_msaa_device, request_for(ordinary_msaa));
+    require(ordinary_msaa_result.ok(),
+            "non-alpha-to-coverage scenes remain four-sample valid");
+}
+
 void resolves_portable_diffuse_tables_without_owning_handles() {
     Fixture value = fixture();
     value.model.textures.push_back({true, "body.dds", 4U,
@@ -1178,6 +1294,23 @@ void bounds_host_preparation_metadata_before_allocation() {
                 embedded_device.texture_calls == 0U &&
                 embedded_device.sampler_calls == 0U,
             "decoded upload-plan metadata consumes the host budget before allocation");
+
+    Fixture many_skinned = fixture();
+    make_second_mesh_skinned(many_skinned);
+    const DrawPacket skinned_packet = many_skinned.packets[1];
+    many_skinned.packets.assign(64U, skinned_packet);
+    for (std::size_t index = 0U; index < many_skinned.packets.size(); ++index)
+        many_skinned.packets[index].order = index;
+    auto many_skinned_request = request_for(many_skinned);
+    many_skinned_request.limits.max_preparation_bytes = 32U * 1024U;
+    RecordingDevice many_skinned_device;
+    const auto many_skinned_result =
+        prepare_static_scene_resources(many_skinned_device, many_skinned_request);
+    require(!many_skinned_result.ok() &&
+                many_skinned_result.diagnostic.code ==
+                    "static_scene_preparation_aggregate_limit" &&
+                many_skinned_device.buffer_calls == 0U,
+            "many skinned packets consume the host-preparation budget before allocation");
 }
 
 void owns_and_reuses_material_constant_records() {
@@ -2312,6 +2445,7 @@ int main() {
         prepares_mixed_static_and_skinned_scene_and_updates_only_after_preflight();
         prepares_source_evidenced_wireframe_batch_state();
         rejects_invalid_late_inputs_before_backend_allocation();
+        validates_alpha_to_coverage_sample_contract_before_allocation();
         resolves_portable_diffuse_tables_without_owning_handles();
         owns_embedded_diffuse_resources_after_source_lifetime();
         rejects_malformed_embedded_textures_before_allocation();

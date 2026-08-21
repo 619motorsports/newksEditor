@@ -144,14 +144,14 @@ remains unchanged and feature-complete.
   zero strength, low exponent, and full exponent. They also cover independent
   samplers and mixed six-binding and eight-binding batches. This ABI requires
   zero Fresnel, so it does not consume `maps.b`. A fourth bounded ABI executes
-  `ksPerPixelMultiMap_NMDetail`. It adds `txDetail` at bindings 8 and 9. It
-  adds `txNormalDetail` at bindings 10 and 11. The legacy `txDetailNM` name is
-  an alias for `txNormalDetail`. The material record includes the detail UV
-  multiplier, normal-detail strength, and detail enable value. Tests cover
-  detail alpha, repeated UVs, normal blending, descriptor selection, and mixed
-  six-binding, eight-binding, and twelve-binding batches. Fresnel,
-  reflections, and shadows remain staged. Tests also cover missing pairs,
-  invalid handles, per-draw selection, and known pixels.
+  the `ksPerPixelMultiMap_NMDetail` family. This family includes
+  `ksPerPixelMultiMap_AT_NMDetail`. It adds `txDetail` at bindings 8 and 9.
+  It adds `txNormalDetail` at bindings 10 and 11. The legacy `txDetailNM` name
+  is an alias for `txNormalDetail`. The material record includes the detail UV
+  multiplier, normal-detail strength, and detail enable value. The AT profile
+  retains the production alpha-to-coverage state. Tests cover detail alpha,
+  repeated UVs, normal blending, descriptor selection, and mixed resource
+  layouts. Fresnel, reflections, shadow cutouts, and shadows remain staged.
   The resolver rejects oversized CSP shader, blend, depth, and cull strings
   before profile selection.
   A bounded static-scene adapter validates the complete packet set before
@@ -163,11 +163,14 @@ remains unchanged and feature-complete.
   a failed upload prevents batch submission but can leave earlier successful
   mutable uploads committed. Retrying the complete frame restores consistency.
   It owns one 256-byte material buffer per used material. Duplicate packets
-  reuse the same buffer. Count and byte limits bound these allocations.
-  Caller-supplied SPIR-V or DXIL pipelines authorize only their local requests.
-  Production packets remain marked as staged. This work proves basic pipeline
-  creation, geometry binding, ordered submission, and rasterization. It does
-  not prove scene-rendering parity.
+  reuse the same buffer. Count and byte limits bound these allocations. Static
+  scenes accept 1x or 4x pipelines. An alpha-to-coverage pipeline requires 4x
+  color and matching depth samples. A bounded material handoff derives the
+  supported resource layouts, constants, and profile state from KN5 materials.
+  The caller must supply explicit SPIR-V or DXIL modules. The handoff does not
+  translate stock shader containers. Production packets remain marked as
+  staged. This work proves an explicit production-material boundary. It does
+  not prove complete scene-rendering parity.
 - P1 is partial. Bounded readers support KN5 v4/v5/v6, DDS, ACD, INI/CSP,
   KSANIM v1/v2, and KNH. The port also supports byte-stable KN5 writing, VAO
   ZIP decoding, and track surfaces, cameras, and splines. KN5 object creation
@@ -216,12 +219,12 @@ remains unchanged and feature-complete.
   It can dispatch the bounded `txDiffuse` and `txNormal` pair for
   `ksPerPixelNM`. It can also dispatch the bounded `txDiffuse`, `txNormal`, and
   `txMaps` set. It can dispatch `txDetail` and `txNormalDetail` for the bounded
-  `ksPerPixelMultiMap_NMDetail` stack. Caller tables or embedded KN5 ownership
-  can supply these textures. Preparation rejects incomplete or duplicated packet resources
-  before backend allocation. It also rejects sRGB maps and malformed maps
-  before allocation. The texture budgets include all five source payloads and
-  their decoded pixels. A separate aggregate limit bounds host-side preparation
-  tables and retained copies.
+  `ksPerPixelMultiMap_NMDetail` family. This includes the AT variant. Caller
+  tables or embedded KN5 ownership can supply these textures. Preparation
+  rejects incomplete or duplicated packet resources before backend allocation.
+  It also rejects sRGB maps and malformed maps before allocation. The texture
+  budgets include all five source payloads and their decoded pixels. A separate
+  aggregate limit bounds host-side preparation tables and retained copies.
   It can also bind a source-valued material record for explicitly authorized
   pipelines. An explicitly authorized pipeline can also bind one source-valued
   frame-light record. Vulkan uses descriptor bindings 2 and 3 for these
@@ -258,10 +261,11 @@ remains unchanged and feature-complete.
   Vulkan and D3D12 query format support before image creation. Direct BC5
   normal uploads remain staged because the bounded shader reads three normal
   channels. The embedded static-scene path still uses its exact CPU decode.
-  static-scene path requires explicit backend shader bytecode. It
-  does not execute stock KN5 shader packages. The port does not create windows
-  or swapchains, bind complete materials, or provide golden-image parity
-  evidence.
+  The static-scene path requires explicit backend shader bytecode. The bounded
+  material handoff selects modules by material or shader family. It derives
+  the 12-binding layout, material constants, A2C state, culling, and depth
+  state. It does not execute stock KN5 shader containers. The port does not
+  create windows or swapchains. It does not provide full golden-image parity.
 
 The production WebGL material gate uses the synthetic `BC7_PLANE` scene. The
 baseline screenshot SHA-256 is
@@ -303,8 +307,11 @@ errors. The capture hash was `3c76ed8c4207647b`. The PNG SHA-256 was
 `7145342632b9adee7ad61948c15c5d8ba0026795dd9c1e4405d47f29689065db`.
 The final WebGL state is false because the post-process pass disables
 alpha-to-coverage. Thus, this gate proves profile selection and an error-free
-production capture. It does not prove the per-draw state or native pixel
-parity.
+production capture. The diffuse texture has zero alpha in this capture. Thus,
+the screenshot is not a useful color-parity reference. A controlled native
+test proves partial 4x coverage with all five detail-stack textures. This test
+runs on Vulkan and the D3D12/WARP CI path. It uses source-equivalent modules,
+not recovered stock bytecode.
 
 The production compressed-texture gate selects `ford13_body_SUB2` and material
 `ford13_skin`. Its color resources use BC1 and BC3 mip chains. All 63 textures

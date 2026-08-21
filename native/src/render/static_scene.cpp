@@ -256,9 +256,6 @@ ExecutorPipelineValidation validate_executor_pipeline(
     if (pipeline.transform_contract != PipelineTransformContract::draw_matrices)
         return {StaticSceneResourceStatus::unsupported,
                 "Static-scene execution requires the draw-matrices transform contract", 0U};
-    if (pipeline.blend.alpha_to_coverage)
-        return {StaticSceneResourceStatus::unsupported,
-                "Static-scene execution does not support alpha-to-coverage", 0U};
     if (classify_indexed_portable_resource_layout(pipeline) ==
         IndexedPortableResourceLayout::unsupported)
         return {StaticSceneResourceStatus::unsupported,
@@ -266,9 +263,18 @@ ExecutorPipelineValidation validate_executor_pipeline(
     if (pipeline.resources.empty() != packet.resources.empty())
         return {StaticSceneResourceStatus::invalid_request,
                 "Pipeline and draw-packet resource declarations do not match", 0U};
-    if (pipeline.targets.colors.size() != 1U || pipeline.targets.colors.front().samples != 1U)
+    const std::uint32_t color_samples = pipeline.targets.colors.empty()
+                                             ? 0U
+                                             : pipeline.targets.colors.front().samples;
+    if (pipeline.targets.colors.size() != 1U ||
+        (pipeline.blend.alpha_to_coverage
+             ? color_samples != 4U
+             : (color_samples != 1U && color_samples != 4U)))
         return {StaticSceneResourceStatus::unsupported,
-                "Static-scene execution requires one single-sample color target", 0U};
+                pipeline.blend.alpha_to_coverage
+                    ? "Static-scene alpha-to-coverage requires one four-sample color target"
+                    : "Static-scene execution requires one single- or four-sample color target",
+                0U};
     const PipelineRenderTargetFormat color_format = pipeline.targets.colors.front().format;
     if (color_format != PipelineRenderTargetFormat::rgba8_unorm &&
         color_format != PipelineRenderTargetFormat::rgba8_srgb &&
@@ -300,9 +306,12 @@ ExecutorPipelineValidation validate_executor_pipeline(
                 "Static-scene execution requires the source-evidenced LESS depth comparison", 0U};
     if (pipeline.targets.has_depth &&
         (pipeline.targets.depth.format != PipelineRenderTargetFormat::depth32_float ||
-         pipeline.targets.depth.samples != 1U))
+         pipeline.targets.depth.samples != color_samples))
         return {StaticSceneResourceStatus::unsupported,
-                "Static-scene execution requires a single-sample D32 depth target", 0U};
+                pipeline.blend.alpha_to_coverage
+                    ? "Static-scene alpha-to-coverage requires a matching four-sample D32 depth target"
+                    : "Static-scene execution requires a matching D32 depth target",
+                0U};
     if (packet.vertex_stride_floats == 0U ||
         static_cast<std::uint64_t>(packet.vertex_stride_floats) * sizeof(float) !=
             pipeline.vertex_layout.stride)
@@ -415,7 +424,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
                     sizeof(StaticSceneResources::PacketTextureIndices)) ||
         !charge(model.materials.size(), 2U * sizeof(std::size_t)) ||
         !charge(request.packets.size(),
-                3U * sizeof(std::size_t) + 2U * sizeof(const formats::Kn5Node*)) ||
+                4U * sizeof(std::size_t) + 2U * sizeof(const formats::Kn5Node*)) ||
         (embedded_textures &&
          (!charge(model.textures.size(),
                   sizeof(std::optional<DecodedDdsTexturePlan>) + 2U * sizeof(bool)) ||
@@ -498,6 +507,8 @@ StaticSceneResourceResult prepare_static_scene_resources(
     std::vector<KsPerPixelMaterialConstants> material_constants;
     unique_meshes.reserve(request.packets.size());
     representative_packets.reserve(request.packets.size());
+    skinned_meshes.reserve(request.packets.size());
+    skinned_packet_indices.reserve(request.packets.size());
     pipelines.reserve(request.packets.size());
     material_constants.reserve(std::min(request.packets.size(),
                                         limits.max_material_constant_buffers));
@@ -510,6 +521,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
     std::uint64_t validation_bytes = 0U;
     std::optional<bool> batch_has_depth;
     std::optional<PipelineRenderTargetFormat> batch_color_format;
+    std::optional<std::uint32_t> batch_color_samples;
     bool requires_frame_constants = false;
     for (std::size_t packet_index = 0U; packet_index < request.packets.size(); ++packet_index) {
         const DrawPacket& packet = request.packets[packet_index];
@@ -517,10 +529,10 @@ StaticSceneResourceResult prepare_static_scene_resources(
         const auto material_index = static_cast<std::size_t>(packet.material);
         const bool static_mesh = packet.primitive == DrawPrimitiveKind::static_mesh;
         const bool skinned_mesh = packet.primitive == DrawPrimitiveKind::skinned_mesh;
-        if ((!static_mesh && !skinned_mesh) || packet.flags.alpha_to_coverage)
+        if (!static_mesh && !skinned_mesh)
             return fail(StaticSceneResourceStatus::unsupported,
                         "static_scene_packet_unsupported",
-                        "Static-scene execution supports static or skinned meshes without alpha-to-coverage");
+                        "Static-scene execution supports static or skinned meshes");
         if ((static_mesh && !packet.bone_palette.empty()) ||
             (skinned_mesh && packet.bone_palette.empty()))
             return fail(StaticSceneResourceStatus::invalid_request,
@@ -789,6 +801,12 @@ StaticSceneResourceResult prepare_static_scene_resources(
                         "static_scene_mixed_color_targets_unsupported",
                         "One ordered static-scene batch requires one color-target format");
         batch_color_format = color_format;
+        const std::uint32_t color_samples = pipeline->targets.colors.front().samples;
+        if (batch_color_samples.has_value() && *batch_color_samples != color_samples)
+            return fail(StaticSceneResourceStatus::unsupported,
+                        "static_scene_mixed_color_samples_unsupported",
+                        "One ordered static-scene batch requires one color-target sample count");
+        batch_color_samples = color_samples;
         if (pipeline_by_material[material_index] == invalid_resource_index) {
             if (!checked_add(pipeline_validation.shader_bytes, total_shader_bytes) ||
                 total_shader_bytes > limits.max_total_shader_bytes)
@@ -1020,7 +1038,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
 }
 
 IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
-    Device& device, Texture& target, const StaticSceneFrameDescription& frame) {
+    Device& device, Texture& target, const StaticSceneFrameDescription& frame) try {
     if (&device != device_ || device.info().backend != backend_ || target.backend() != backend_)
         return {IndexedStaticMeshBatchStatus::unsupported,
                 {"static_scene_device_mismatch",
@@ -1293,6 +1311,11 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
                      updated.diagnostic.message}, {}};
     }
     return device.draw_indexed_static_mesh_batch_and_readback(target, batch);
+} catch (const std::bad_alloc&) {
+    return {IndexedStaticMeshBatchStatus::execution_failed,
+            {"static_scene_frame_allocation_failed",
+             "Static-scene frame preparation has insufficient memory for bounded storage"},
+            {}};
 }
 
 }  // namespace apex::render

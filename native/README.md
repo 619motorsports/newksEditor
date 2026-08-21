@@ -106,12 +106,14 @@ An exact tangent-space extension adds `txNormal` at bindings 4 and 5. A second
 extension adds linear `txMaps` at bindings 6 and 7. D3D12 uses `t4`, `s5`,
 `t6`, and `s7`. The maps shader uses `maps.r` for specular strength. It uses
 `maps.g` for the source exponent equation. The maps ABI requires zero Fresnel,
-so `maps.b` remains staged. A fourth ABI adds `txDetail` at bindings 8 and 9.
-It adds `txNormalDetail` at bindings 10 and 11. The legacy `txDetailNM` name is
-an alias for `txNormalDetail`. The 64-byte material record includes the detail
-UV multiplier, normal-detail strength, and detail enable value. Reflections
-and shadows remain staged. Runtime tests cover known pixels, independent
-samplers, and mixed six-binding, eight-binding, and twelve-binding batches.
+so `maps.b` remains staged. A fourth ABI supports the
+`ksPerPixelMultiMap_NMDetail` family. This family includes
+`ksPerPixelMultiMap_AT_NMDetail`. It adds `txDetail` at bindings 8 and 9. It
+adds `txNormalDetail` at bindings 10 and 11. The legacy `txDetailNM` name is an
+alias for `txNormalDetail`. The 64-byte material record includes the detail UV
+multiplier, normal-detail strength, and detail enable value. The AT profile
+retains the production A2C state. Reflections and shadows remain staged.
+Runtime tests cover known pixels and mixed resource layouts.
 The serialized KN5 resource ID remains a shader bind point, not a
 texture-table index. A bounded static-scene adapter maps the final KN5 tree to
 dense scene IDs. It validates all packets and pipelines before buffer creation.
@@ -120,9 +122,13 @@ ordered draw instances. It submits one batch with caller-supplied SPIR-V or
 DXIL pipelines. A constants-enabled pipeline requires an explicit table in
 final material order. The adapter validates this table before allocation. It
 owns one 256-byte buffer per used material and reuses it for duplicate packets.
-Production packets remain marked as staged. The adapter does not claim that
-stock KN5 shaders are executable. Window surfaces, swapchains, and complete
-stock material execution remain roadmap work. The static-scene adapter has two texture-authority modes. The first mode
+Static scenes accept 1x and 4x pipelines. A2C requires 4x color and matching
+depth samples. A bounded material handoff derives the supported resource
+layouts, constants, and profile state from KN5 materials. The caller must
+supply explicit SPIR-V or DXIL modules. Production packets remain marked as
+staged. The handoff does not translate stock shader containers. Window
+surfaces, swapchains, and complete stock execution remain roadmap work.
+The static-scene adapter has two texture-authority modes. The first mode
 uses caller-owned tables in the final KN5 texture order. The second mode owns
 the used embedded KN5 textures and one linear-repeat sampler. It validates all
 used DDS payloads before backend allocation. It decodes supported 2D mip chains

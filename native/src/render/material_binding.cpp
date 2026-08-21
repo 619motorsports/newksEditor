@@ -158,6 +158,11 @@ void add_default(std::map<std::string, MaterialPropertyValue>& properties,
     return value.size() >= prefix.size() && value.substr(0, prefix.size()) == prefix;
 }
 
+[[nodiscard]] bool is_nmdetail_family(std::string_view canonical_shader) noexcept {
+    return canonical_shader == "ksperpixelmultimap_nmdetail" ||
+           canonical_shader == "ksperpixelmultimap_at_nmdetail";
+}
+
 [[nodiscard]] std::vector<std::string> required_slots(std::string_view shader) {
     const std::string key = canonical(shader);
     if (key == "kstyres" || key == "newstefano_kstyres")
@@ -166,7 +171,7 @@ void add_default(std::map<std::string, MaterialPropertyValue>& properties,
         return {"txDiffuse", "txNormal", "txGlow", "txBlur", "txNormalBlur"};
     if (key == "ksperpixelmultimap_damage" || key == "ksperpixelmultimap_damage_dirt")
         return {"txDamage", "txDamageMask"};
-    if (key == "ksperpixelmultimap_nmdetail")
+    if (is_nmdetail_family(key))
         return {"txDiffuse", "txNormal", "txMaps", "txDetail", "txNormalDetail"};
     if (starts_with(key, "ksmultilayer"))
         return {"txMask", "txDetailR", "txDetailG", "txDetailB", "txDetailA"};
@@ -389,7 +394,7 @@ MaterialBinding build_material_binding(const Kn5Material& material, std::size_t 
         // generic txNormalDetail slot. Preserve that source fallback while
         // keeping one required logical binding in the native projection.
         if (key == "txnormaldetail" &&
-            canonical(result.shader) == "ksperpixelmultimap_nmdetail" &&
+            is_nmdetail_family(canonical(result.shader)) &&
             result.textures.find("txdetailnm") != result.textures.end()) {
             result.textures.at("txdetailnm").required = true;
             continue;
@@ -465,12 +470,12 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
     const MaterialBinding& binding, KsPerPixelMaterialResolveOptions options) {
     KsPerPixelMaterialResolveResult result;
     const std::string shader = canonical(binding.shader);
-    const bool detail_stack_variant = shader == "ksperpixelmultimap_nmdetail";
+    const bool detail_stack_variant = is_nmdetail_family(shader);
     const bool normal_variant = shader == "ksperpixelnm" || detail_stack_variant;
     if (shader != "ksperpixel" && !normal_variant) {
         result.status = KsPerPixelMaterialResolveStatus::unsupported;
         result.diagnostic = {"ks_per_pixel_shader_unsupported", "shader",
-                             "The bounded material resolver accepts exact ksPerPixel, ksPerPixelNM, and ksPerPixelMultiMap_NMDetail shaders"};
+                             "The bounded material resolver accepts exact ksPerPixel, ksPerPixelNM, ksPerPixelMultiMap_NMDetail, and ksPerPixelMultiMap_AT_NMDetail shaders"};
         return result;
     }
 
@@ -565,7 +570,7 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
     if (detail_stack_variant && binding.status != MaterialBindingStatus::complete) {
         result.status = KsPerPixelMaterialResolveStatus::unsupported;
         result.diagnostic = {"ks_per_pixel_nmdetail_resources_incomplete", "resources",
-                             "The bounded ksPerPixelMultiMap_NMDetail stack requires txDiffuse, txNormal, txMaps, txDetail, and txNormalDetail"};
+                             "The bounded ksPerPixelMultiMap_NMDetail family requires txDiffuse, txNormal, txMaps, txDetail, and txNormalDetail"};
         return result;
     }
 
