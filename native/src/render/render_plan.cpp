@@ -27,12 +27,12 @@ struct WalkState {
     return std::sqrt(std::max(0.0F, squared));
 }
 
-[[nodiscard]] bool lod_visible(const apex::scene::SceneNode& node,
+[[nodiscard]] bool lod_visible(double lod_in, double lod_out,
                                float distance) noexcept {
     // A finite authored LOD interval is required. A non-positive OUT means
     // open-ended, matching the current JS viewport condition.
-    const float lod_in = std::isfinite(node.lod_in) ? node.lod_in : 0.0F;
-    const float lod_out = std::isfinite(node.lod_out) ? node.lod_out : 0.0F;
+    lod_in = std::isfinite(lod_in) ? lod_in : 0.0;
+    lod_out = std::isfinite(lod_out) ? lod_out : 0.0;
     if (!std::isfinite(distance)) return false;
     return distance >= lod_in && (lod_out <= 0.0F || distance <= lod_out);
 }
@@ -106,6 +106,7 @@ RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
     std::vector<bool> excluded_roots(scene.nodes.size(), false);
     std::vector<bool> suppressed_roots(scene.nodes.size(), false);
     std::vector<std::int8_t> activity_overrides(scene.nodes.size(), -1);
+    std::vector<const NodeRenderStateOverride*> node_state_overrides(scene.nodes.size(), nullptr);
     for (const apex::scene::NodeId id : options.excluded_subtree_roots) {
         if (id != apex::scene::invalid_node_id &&
             static_cast<std::size_t>(id) < excluded_roots.size()) {
@@ -123,6 +124,12 @@ RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
             static_cast<std::size_t>(override_value.node) < activity_overrides.size()) {
             activity_overrides[static_cast<std::size_t>(override_value.node)] =
                 override_value.active ? 1 : 0;
+        }
+    }
+    for (const NodeRenderStateOverride& override_value : options.node_state_overrides) {
+        if (override_value.node != apex::scene::invalid_node_id &&
+            static_cast<std::size_t>(override_value.node) < node_state_overrides.size()) {
+            node_state_overrides[static_cast<std::size_t>(override_value.node)] = &override_value;
         }
     }
     stack.push_back({scene.root, true, false, {}, {}, {}});
@@ -152,22 +159,39 @@ RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
                               node->kind == apex::scene::NodeKind::skinned_mesh;
         const bool isolated_item = isolated && node->id == options.isolated_node;
         const float distance = safe_distance(node->bounds_center, options.camera_position);
+        const NodeRenderStateOverride* state_override = node_state_overrides[node_index];
+        const double lod_in = state_override != nullptr && state_override->lod_in.has_value()
+                                  ? *state_override->lod_in
+                                  : static_cast<double>(node->lod_in);
+        const double lod_out = state_override != nullptr && state_override->lod_out.has_value()
+                                   ? *state_override->lod_out
+                                   : static_cast<double>(node->lod_out);
         const bool normally_visible =
             !isolated && !excluded && branch_active &&
             (options.show_hidden || (node->visible && node->renderable)) &&
-            lod_visible(*node, distance);
-        const bool isolated_visible = isolated_item && lod_visible(*node, distance);
+            lod_visible(lod_in, lod_out, distance);
+        const bool isolated_visible = isolated_item && lod_visible(lod_in, lod_out, distance);
         if (geometry && (isolated_visible || normally_visible)) {
             const apex::scene::SceneMaterial* material = scene.find_material(node->material);
             const bool material_alpha_blend = material != nullptr &&
                                               material->blend_mode == apex::scene::BlendMode::alpha_blend;
+            const bool transparency_overridden =
+                state_override != nullptr && state_override->is_transparent.has_value();
+            const bool transparent = transparency_overridden
+                                         ? *state_override->is_transparent
+                                         : node->transparent || material_alpha_blend;
             RenderItem item{
                 node->id,
                 node->material,
-                node->layer,
+                state_override != nullptr && state_override->layer.has_value()
+                    ? *state_override->layer
+                    : static_cast<double>(node->layer),
                 distance,
-                node->transparent || material_alpha_blend,
-                node->cast_shadows,
+                transparent,
+                transparency_overridden,
+                state_override != nullptr && state_override->cast_shadows.has_value()
+                    ? *state_override->cast_shadows
+                    : node->cast_shadows,
                 workspace_auxiliary,
                 workspace_file,
                 ancestors,

@@ -287,14 +287,14 @@ bool estimate_adapter_copy(const StockMaterialExecutionRequest& request,
         largest_module_set_bytes = std::max(largest_module_set_bytes,
                                             module_set_bytes);
     }
-    const std::uint64_t copied_pipeline_count =
-        std::min(request.model->materials.size(), request.packets.size());
-    if (copied_pipeline_count == std::numeric_limits<std::uint64_t>::max()) {
+    const std::uint64_t copied_pipeline_count = request.packets.size();
+    if (copied_pipeline_count >
+        (std::numeric_limits<std::uint64_t>::max() - 1U) / 2U) {
         diagnostic = diag("stock_material_preparation_limit",
                           "Copied shader bytecode exceeds the adapter preparation limit");
         return false;
     }
-    const std::uint64_t peak_pipeline_copy_count = copied_pipeline_count + 1U;
+    const std::uint64_t peak_pipeline_copy_count = copied_pipeline_count * 2U + 1U;
     if (peak_pipeline_copy_count != 0U &&
         largest_module_set_bytes >
             std::numeric_limits<std::uint64_t>::max() / peak_pipeline_copy_count) {
@@ -308,9 +308,12 @@ bool estimate_adapter_copy(const StockMaterialExecutionRequest& request,
         return false;
     }
     if (!charge_count(request.model->materials.size(), sizeof(formats::Kn5Material)) ||
-        !charge_count(request.model->materials.size(), sizeof(PipelineProgram)) ||
+        !charge_count(request.packets.size(), sizeof(PipelineProgram)) ||
+        !charge_count(request.packets.size(), sizeof(MaterialRenderProfile)) ||
         !charge_count(request.model->materials.size(), sizeof(KsPerPixelMaterialConstants)) ||
-        !charge_count(request.model->materials.size(), sizeof(const PipelineProgram*))) {
+        !charge_count(request.model->materials.size(), sizeof(bool) + sizeof(std::size_t) +
+                                                           2U * sizeof(std::size_t)) ||
+        !charge_count(request.packets.size(), sizeof(const PipelineProgram*))) {
         diagnostic = diag("stock_material_preparation_limit",
                           "Copied material and pipeline tables exceed the adapter preparation limit");
         return false;
@@ -402,11 +405,18 @@ StockMaterialExecutionResult prepare_stock_material_execution(
             return {StaticSceneResourceStatus::invalid_request, std::move(module_diagnostic), nullptr};
 
         std::vector<DrawPacket> packets(request.packets.begin(), request.packets.end());
-        std::vector<PipelineProgram> pipelines(request.model->materials.size());
-        std::vector<const PipelineProgram*> pipeline_ptrs(request.model->materials.size(), nullptr);
+        std::vector<PipelineProgram> pipelines;
+        pipelines.reserve(packets.size());
+        std::vector<MaterialRenderProfile> pipeline_profiles;
+        pipeline_profiles.reserve(packets.size());
+        std::vector<const PipelineProgram*> pipeline_ptrs(packets.size(), nullptr);
         std::vector<KsPerPixelMaterialConstants> constants(request.model->materials.size());
         std::vector<bool> used(request.model->materials.size(), false);
         std::vector<std::size_t> first_packet(request.model->materials.size(), 0U);
+        std::vector<std::array<std::size_t, 2U>> pipeline_indices(
+            request.model->materials.size(),
+            {std::numeric_limits<std::size_t>::max(),
+             std::numeric_limits<std::size_t>::max()});
 
         for (std::size_t packet_index = 0U; packet_index < packets.size(); ++packet_index) {
             DrawPacket& packet = packets[packet_index];
@@ -439,10 +449,6 @@ StockMaterialExecutionResult prepare_stock_material_execution(
             if (!supported_family(binding.shader))
                 return fail(StaticSceneResourceStatus::unsupported,
                             "stock_material_family_unsupported", "The material shader family is outside the bounded production handoff");
-            if (!packet_resources_match(representative, binding.shader,
-                                         request.limits.scene.max_resource_string_bytes,
-                                         module_diagnostic))
-                return {StaticSceneResourceStatus::invalid_request, std::move(module_diagnostic), nullptr};
             if (overrides != nullptr && !overrides->resources.empty())
                 return fail(StaticSceneResourceStatus::unsupported,
                             "stock_material_texture_override_unsupported", "Texture overrides require an explicit caller texture authority and are not silently translated");
@@ -479,44 +485,72 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                 source.depthMode > static_cast<std::uint32_t>(std::numeric_limits<int>::max()))
                 return fail(StaticSceneResourceStatus::invalid_request,
                             "stock_material_state_invalid", "Serialized material state exceeds the supported integer range");
-            MaterialInput material_input{source.shader, static_cast<int>(source.serializedBlendMode),
-                                         static_cast<int>(source.depthMode)};
-            const MaterialOverride profile_override = state_override(overrides);
-            const bool has_profile_override = overrides != nullptr &&
-                                              (overrides->shader.has_value() || overrides->blend_mode.has_value() ||
-                                               overrides->depth_mode.has_value() || overrides->cull_mode.has_value() ||
-                                               overrides->is_transparent.has_value());
-            StockPipelineRequest pipeline_request;
-            pipeline_request.material = std::move(material_input);
-            pipeline_request.node = {node != nullptr && node->transparent};
-            pipeline_request.override_values = has_profile_override ? &profile_override : nullptr;
-            pipeline_request.shaders.assign(modules->modules.begin(), modules->modules.end());
-            pipeline_request.targets = request.targets;
-            pipeline_request.resources = resources_for(binding.shader);
-            pipeline_request.wireframe = request.wireframe;
-            StockPipelineResult built = build_stock_pipeline(pipeline_request, request.limits.scene.pipeline);
-            if (!built.validation.valid)
-                return fail(StaticSceneResourceStatus::invalid_request,
-                            "stock_material_pipeline_invalid", built.validation.diagnostics.empty()
-                                ? "Stock pipeline validation failed"
-                                : built.validation.diagnostics.front().message);
-            built.program.transform_contract = PipelineTransformContract::draw_matrices;
-            built.program.depth.compare = PipelineCompareOperation::less;
-            built.program.depth.write_enabled = built.profile.depth_write && !built.profile.transparent;
-            const PipelineValidationResult final_validation =
-                validate_pipeline(built.program, request.limits.scene.pipeline);
-            if (!final_validation.valid)
-                return fail(StaticSceneResourceStatus::invalid_request,
-                            "stock_material_pipeline_invalid", final_validation.diagnostics.empty()
-                                ? "Stock pipeline validation failed after explicit execution state"
-                                : final_validation.diagnostics.front().message);
-            pipelines[material_index] = std::move(built.program);
-            pipeline_ptrs[material_index] = &pipelines[material_index];
-            for (DrawPacket& packet : packets) {
+            for (std::size_t packet_index = 0U; packet_index < packets.size(); ++packet_index) {
+                DrawPacket& packet = packets[packet_index];
                 if (packet.material != material_index) continue;
+                if (!packet_resources_match(packet, binding.shader,
+                                            request.limits.scene.max_resource_string_bytes,
+                                            module_diagnostic))
+                    return {StaticSceneResourceStatus::invalid_request,
+                            std::move(module_diagnostic), nullptr};
                 if (packet.flags.wireframe != request.wireframe)
                     return fail(StaticSceneResourceStatus::invalid_request,
                                 "stock_material_wireframe_mismatch", "Packet wireframe state does not match the handoff request");
+                MaterialInput material_input{source.shader,
+                                             static_cast<int>(source.serializedBlendMode),
+                                             static_cast<int>(source.depthMode)};
+                MaterialOverride profile_override = state_override(overrides);
+                if (!profile_override.is_transparent.has_value())
+                    profile_override.is_transparent = packet.flags.transparent;
+                const bool desired_transparent = *profile_override.is_transparent;
+                const std::size_t state_index = desired_transparent ? 1U : 0U;
+                const apex::scene::SceneNode* packet_node = request.scene->find_node(packet.node);
+                if (pipeline_indices[material_index][state_index] !=
+                    std::numeric_limits<std::size_t>::max()) {
+                    const std::size_t pipeline_index =
+                        pipeline_indices[material_index][state_index];
+                    pipeline_ptrs[packet_index] = &pipelines[pipeline_index];
+                    const MaterialRenderProfile& profile = pipeline_profiles[pipeline_index];
+                    packet.material_profile = profile;
+                    packet.flags.transparent = profile.transparent;
+                    packet.flags.blend_enabled = profile.blend_enabled;
+                    packet.flags.alpha_to_coverage = profile.alpha_to_coverage;
+                    packet.flags.depth_test = profile.depth_test;
+                    packet.flags.depth_write = profile.depth_write && !profile.transparent;
+                    continue;
+                }
+                StockPipelineRequest pipeline_request;
+                pipeline_request.material = std::move(material_input);
+                pipeline_request.node = {packet_node != nullptr && packet_node->transparent};
+                pipeline_request.override_values = &profile_override;
+                pipeline_request.shaders.assign(modules->modules.begin(), modules->modules.end());
+                pipeline_request.targets = request.targets;
+                pipeline_request.resources = resources_for(binding.shader);
+                pipeline_request.wireframe = request.wireframe;
+                StockPipelineResult built =
+                    build_stock_pipeline(pipeline_request, request.limits.scene.pipeline);
+                if (!built.validation.valid)
+                    return fail(StaticSceneResourceStatus::invalid_request,
+                                "stock_material_pipeline_invalid",
+                                built.validation.diagnostics.empty()
+                                    ? "Stock pipeline validation failed"
+                                    : built.validation.diagnostics.front().message);
+                built.program.transform_contract = PipelineTransformContract::draw_matrices;
+                built.program.depth.compare = PipelineCompareOperation::less;
+                built.program.depth.write_enabled =
+                    built.profile.depth_write && !built.profile.transparent;
+                const PipelineValidationResult final_validation =
+                    validate_pipeline(built.program, request.limits.scene.pipeline);
+                if (!final_validation.valid)
+                    return fail(StaticSceneResourceStatus::invalid_request,
+                                "stock_material_pipeline_invalid",
+                                final_validation.diagnostics.empty()
+                                    ? "Stock pipeline validation failed after explicit execution state"
+                                    : final_validation.diagnostics.front().message);
+                pipeline_indices[material_index][state_index] = pipelines.size();
+                pipelines.push_back(std::move(built.program));
+                pipeline_profiles.push_back(built.profile);
+                pipeline_ptrs[packet_index] = &pipelines.back();
                 packet.material_profile = built.profile;
                 packet.flags.transparent = built.profile.transparent;
                 packet.flags.blend_enabled = built.profile.blend_enabled;
@@ -530,7 +564,7 @@ StockMaterialExecutionResult prepare_stock_material_execution(
         scene_request.model = request.model;
         scene_request.scene = request.scene;
         scene_request.packets = packets;
-        scene_request.pipelines_by_material = pipeline_ptrs;
+        scene_request.pipelines_by_packet = pipeline_ptrs;
         scene_request.material_constants_by_material = constants;
         scene_request.texture_authority = request.texture_authority;
         scene_request.limits = request.limits.scene;

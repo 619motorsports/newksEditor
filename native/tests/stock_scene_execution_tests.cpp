@@ -5,7 +5,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -234,6 +236,31 @@ void test_resolved_subtree_filter_and_isolation_reach_facade() {
             "facade isolation must bypass authored visibility and subtree filters");
 }
 
+void test_csp_node_state_reaches_per_packet_pipelines() {
+    Fixture fixture_value = fixture();
+    FakeDevice device;
+    auto request = request_for(fixture_value);
+    const std::array<NodeRenderStateOverride, 3U> overrides = {{
+        {fixture_value.scene.nodes[1U].id, true, 5.5, std::nullopt,
+         std::nullopt, false},
+        {fixture_value.scene.nodes[2U].id, false, 0.25, std::nullopt,
+         std::nullopt, std::nullopt},
+        {fixture_value.scene.nodes[4U].id, std::nullopt, std::nullopt, 0.0,
+         0.0, std::nullopt},
+    }};
+    request.render.node_state_overrides = overrides;
+    const auto result = prepare_stock_scene_execution(device, request);
+    require(result.ok(), "CSP node state should reach executable scene preparation");
+    require(result.render_plan.items.size() == 6U,
+            "CSP LOD state should change facade item inclusion");
+    require(result.render_plan.transparent_items.size() == 2U,
+            "explicit CSP transparency should replace authored classification");
+    require(result.render_plan.shadow_casters.size() == 5U,
+            "CSP cast-shadow state should reach facade shadow evidence");
+    require(result.resources->unique_pipeline_count() == 2U,
+            "shared materials should retain distinct per-node transparency pipelines");
+}
+
 void test_preflight_and_missing_modules() {
     Fixture fixture_value = fixture();
     FakeDevice device;
@@ -322,6 +349,42 @@ void test_preflight_and_missing_modules() {
             "render-option counts must be bounded by scene size");
 
     request = request_for(fixture_value);
+    const std::array<NodeRenderStateOverride, 2U> duplicate_node_state = {{
+        {fixture_value.scene.nodes[1U].id, true, std::nullopt, std::nullopt,
+         std::nullopt, std::nullopt},
+        {fixture_value.scene.nodes[1U].id, false, std::nullopt, std::nullopt,
+         std::nullopt, std::nullopt},
+    }};
+    request.render.node_state_overrides = duplicate_node_state;
+    const auto duplicate_state = prepare_stock_scene_execution(device, request);
+    require(duplicate_state.diagnostic.code ==
+                "stock_scene_node_state_override_duplicate",
+            "duplicate node-state overrides need a precise diagnostic");
+
+    request = request_for(fixture_value);
+    const std::array<NodeRenderStateOverride, 1U> invalid_node_state = {{
+        {apex::scene::invalid_node_id, true, std::nullopt, std::nullopt,
+         std::nullopt, std::nullopt},
+    }};
+    request.render.node_state_overrides = invalid_node_state;
+    const auto invalid_state = prepare_stock_scene_execution(device, request);
+    require(invalid_state.diagnostic.code ==
+                "stock_scene_node_state_override_invalid",
+            "unknown node-state override IDs need a precise diagnostic");
+
+    request = request_for(fixture_value);
+    const std::array<NodeRenderStateOverride, 1U> non_finite_node_state = {{
+        {fixture_value.scene.nodes[1U].id, std::nullopt,
+         std::numeric_limits<double>::infinity(), std::nullopt, std::nullopt,
+         std::nullopt},
+    }};
+    request.render.node_state_overrides = non_finite_node_state;
+    const auto non_finite_state = prepare_stock_scene_execution(device, request);
+    require(non_finite_state.diagnostic.code ==
+                "stock_scene_node_state_override_non_finite",
+            "non-finite node-state overrides need a precise diagnostic");
+
+    request = request_for(fixture_value);
     request.render.isolated = true;
     request.render.isolated_node = apex::scene::invalid_node_id;
     const auto invalid_isolation = prepare_stock_scene_execution(device, request);
@@ -358,6 +421,7 @@ int main() {
     try {
         test_success_and_plan_evidence();
         test_resolved_subtree_filter_and_isolation_reach_facade();
+        test_csp_node_state_reaches_per_packet_pipelines();
         test_preflight_and_missing_modules();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

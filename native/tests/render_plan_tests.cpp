@@ -159,6 +159,43 @@ void preview_visibility_precedence_is_immutable() {
             "preview planning does not mutate authored scene state");
 }
 
+void csp_node_state_controls_order_lod_transparency_and_shadows() {
+    const auto scene = fixture();
+    const auto floor = scene.nodes[2U].id;
+    const auto glass = scene.nodes[3U].id;
+    const auto out_of_lod = scene.nodes[6U].id;
+    const std::array<apex::render::NodeRenderStateOverride, 3U> overrides = {{
+        {floor, true, 0.5, std::nullopt, std::nullopt, false},
+        {glass, false, 4.25, std::nullopt, std::nullopt, std::nullopt},
+        {out_of_lod, std::nullopt, std::nullopt, 0.0, 0.0, false},
+    }};
+    apex::render::RenderPlanOptions options;
+    options.node_state_overrides = overrides;
+    const auto plan = apex::render::build_render_plan(scene, options);
+    require(plan.items.size() == 4U, "CSP LOD override includes an authored out-of-LOD mesh");
+    const auto* floor_item = [&]() -> const apex::render::RenderItem* {
+        const auto found = std::find_if(plan.items.begin(), plan.items.end(),
+                                        [&](const auto& item) { return item.node == floor; });
+        return found == plan.items.end() ? nullptr : &*found;
+    }();
+    const auto* glass_item = [&]() -> const apex::render::RenderItem* {
+        const auto found = std::find_if(plan.items.begin(), plan.items.end(),
+                                        [&](const auto& item) { return item.node == glass; });
+        return found == plan.items.end() ? nullptr : &*found;
+    }();
+    require(floor_item != nullptr && floor_item->transparent &&
+                floor_item->transparency_overridden && floor_item->layer == 0.5,
+            "CSP transparency and fractional layer override authored state");
+    require(glass_item != nullptr && !glass_item->transparent &&
+                glass_item->transparency_overridden && glass_item->layer == 4.25,
+            "explicit false transparency overrides an alpha material default");
+    require(plan.items.back().node == floor,
+            "CSP transparent classification controls final pass ordering");
+    require(plan.shadow_casters.size() == 1U &&
+                plan.shadow_casters.front().node == glass,
+            "CSP cast-shadow state controls shadow submission");
+}
+
 void reflection_selection_matches_js_contract() {
     auto scene = fixture();
     apex::render::RenderPlanOptions options;
@@ -208,6 +245,7 @@ int main() {
         lod_uses_each_item_world_distance_and_inclusive_out();
         color_order_matches_viewport();
         preview_visibility_precedence_is_immutable();
+        csp_node_state_controls_order_lod_transparency_and_shadows();
         reflection_selection_matches_js_contract();
         malformed_tree_is_bounded();
         std::cout << "render plan tests passed\n";

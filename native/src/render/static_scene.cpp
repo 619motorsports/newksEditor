@@ -189,6 +189,7 @@ bool same_prepared_draw_contract(const DrawPacket& prepared,
            prepared.index_count == refreshed.index_count &&
            prepared.vertex_stride_floats == refreshed.vertex_stride_floats &&
            prepared.order == refreshed.order && prepared.layer == refreshed.layer &&
+           prepared.transparency_overridden == refreshed.transparency_overridden &&
            same_material_profile(prepared.material_profile, refreshed.material_profile) &&
            same_draw_flags(prepared.flags, refreshed.flags) &&
            same_draw_resources(prepared, refreshed) &&
@@ -391,11 +392,16 @@ StaticSceneResourceResult prepare_static_scene_resources(
     if (request.packets.empty() || request.packets.size() > limits.max_draws)
         return fail(StaticSceneResourceStatus::invalid_request, "static_scene_packet_limit",
                     "Static-scene packet count is outside the bounded batch limit");
+    const bool material_pipeline_table =
+        request.pipelines_by_material.size() == model.materials.size() &&
+        request.pipelines_by_packet.empty();
+    const bool packet_pipeline_table = request.pipelines_by_material.empty() &&
+                                       request.pipelines_by_packet.size() == request.packets.size();
     if (model.materials.size() != scene.materials.size() ||
         model.materials.size() > limits.max_materials ||
-        request.pipelines_by_material.size() != model.materials.size())
+        (!material_pipeline_table && !packet_pipeline_table))
         return fail(StaticSceneResourceStatus::invalid_request, "static_scene_material_table_invalid",
-                    "Model, scene, and pipeline material tables must have the same bounded size");
+                    "Model and scene material tables must match, with one complete pipeline authority");
     if (model.textures.size() > limits.max_textures ||
         model.textures.size() > static_cast<std::size_t>(
             std::numeric_limits<std::uint32_t>::max()))
@@ -425,6 +431,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
         !charge(model.materials.size(), 2U * sizeof(std::size_t)) ||
         !charge(request.packets.size(),
                 4U * sizeof(std::size_t) + 2U * sizeof(const formats::Kn5Node*)) ||
+        !charge(request.packets.size(), 4U * sizeof(void*)) ||
         (embedded_textures &&
          (!charge(model.textures.size(),
                   sizeof(std::optional<DecodedDdsTexturePlan>) + 2U * sizeof(bool)) ||
@@ -493,6 +500,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
     std::vector<std::size_t> upload_for_packet(request.packets.size(), invalid_resource_index);
     std::vector<std::size_t> skinned_upload_for_packet(request.packets.size(), invalid_resource_index);
     std::vector<std::size_t> pipeline_for_packet(request.packets.size(), invalid_resource_index);
+    std::map<const PipelineProgram*, std::size_t> packet_pipeline_indices;
     std::vector<StaticSceneResources::PacketTextureIndices> textures_for_packet(
         request.packets.size());
     std::vector<std::size_t> material_constant_by_material(model.materials.size(),
@@ -606,7 +614,9 @@ StaticSceneResourceResult prepare_static_scene_resources(
                             "Unique static-scene geometry exceeds aggregate byte limits");
         }
 
-        const PipelineProgram* pipeline = request.pipelines_by_material[material_index];
+        const PipelineProgram* pipeline = packet_pipeline_table
+                                              ? request.pipelines_by_packet[packet_index]
+                                              : request.pipelines_by_material[material_index];
         if (pipeline == nullptr)
             return fail(StaticSceneResourceStatus::invalid_request,
                         "static_scene_material_pipeline_missing",
@@ -807,7 +817,41 @@ StaticSceneResourceResult prepare_static_scene_resources(
                         "static_scene_mixed_color_samples_unsupported",
                         "One ordered static-scene batch requires one color-target sample count");
         batch_color_samples = color_samples;
-        if (pipeline_by_material[material_index] == invalid_resource_index) {
+        if (packet_pipeline_table) {
+            const auto existing_pipeline = packet_pipeline_indices.find(pipeline);
+            if (existing_pipeline != packet_pipeline_indices.end()) {
+                pipeline_for_packet[packet_index] = existing_pipeline->second;
+                continue;
+            }
+            if (!checked_add(pipeline_validation.shader_bytes, total_shader_bytes) ||
+                total_shader_bytes > limits.max_total_shader_bytes)
+                return fail(StaticSceneResourceStatus::invalid_request,
+                            "static_scene_shader_aggregate_limit",
+                            "Used static-scene pipelines exceed the aggregate shader byte limit");
+            if (batch_has_depth.has_value() && *batch_has_depth != pipeline->targets.has_depth)
+                return fail(StaticSceneResourceStatus::unsupported,
+                            "static_scene_mixed_depth_targets_unsupported",
+                            "One ordered static-scene batch requires one depth-target contract");
+            batch_has_depth = pipeline->targets.has_depth;
+            if (!charge(pipeline->name.size(), sizeof(char)) ||
+                !charge(pipeline->shaders.size(), sizeof(PipelineShaderModule)) ||
+                !charge(pipeline->vertex_layout.attributes.size(),
+                        sizeof(PipelineVertexAttribute)) ||
+                !charge(pipeline->targets.colors.size(), sizeof(PipelineRenderTarget)) ||
+                !charge(pipeline->resources.size(), sizeof(PipelineResourceBinding)))
+                return preparation_limit();
+            for (const PipelineShaderModule& shader : pipeline->shaders) {
+                if (!charge(shader.bytes.size(), sizeof(std::uint8_t)))
+                    return preparation_limit();
+            }
+            for (const PipelineResourceBinding& resource : pipeline->resources) {
+                if (!charge(resource.name.size(), sizeof(char)))
+                    return preparation_limit();
+            }
+            pipeline_for_packet[packet_index] = pipelines.size();
+            pipelines.push_back(*pipeline);
+            packet_pipeline_indices.emplace(pipeline, pipeline_for_packet[packet_index]);
+        } else if (pipeline_by_material[material_index] == invalid_resource_index) {
             if (!checked_add(pipeline_validation.shader_bytes, total_shader_bytes) ||
                 total_shader_bytes > limits.max_total_shader_bytes)
                 return fail(StaticSceneResourceStatus::invalid_request,
@@ -837,7 +881,8 @@ StaticSceneResourceResult prepare_static_scene_resources(
             pipeline_by_material[material_index] = pipelines.size();
             pipelines.push_back(*pipeline);
         }
-        pipeline_for_packet[packet_index] = pipeline_by_material[material_index];
+        if (!packet_pipeline_table)
+            pipeline_for_packet[packet_index] = pipeline_by_material[material_index];
     }
 
     if (requires_frame_constants &&

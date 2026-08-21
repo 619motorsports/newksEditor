@@ -131,6 +131,7 @@ target_link_libraries(apex_platform PUBLIC ApexEditor::Native)
 
 add_library(apex_render STATIC
   src/render/camera.cpp
+  src/render/csp_node_state.cpp
   src/render/decoded_dds_texture.cpp
   src/render/device.cpp
   src/render/draw_packet.cpp
@@ -151,7 +152,7 @@ add_library(apex_render STATIC
   src/render/d3d12_device.cpp
 )
 add_library(ApexEditor::Render ALIAS apex_render)
-target_link_libraries(apex_render PUBLIC ApexEditor::Scene)
+target_link_libraries(apex_render PUBLIC ApexEditor::Scene ApexEditor::Csp)
 
 add_executable(apex_native_app src/app/main.cpp)
 set_target_properties(apex_native_app PROPERTIES OUTPUT_NAME apex-native)
@@ -218,6 +219,7 @@ if(TARGET workspace_scene_tests)
   target_link_libraries(workspace_scene_tests PRIVATE ApexEditor::Render)
 endif()
 apex_add_native_test(camera_tests.cpp camera_tests ApexEditor::Render)
+apex_add_native_test(csp_node_state_tests.cpp csp_node_state_tests ApexEditor::Render)
 apex_add_native_test(render_backend_tests.cpp render_backend_tests ApexEditor::Render)
 apex_add_native_test(draw_packet_tests.cpp draw_packet_tests ApexEditor::Render)
 apex_add_native_test(frame_plan_tests.cpp frame_plan_tests ApexEditor::Render)
@@ -272,7 +274,7 @@ if(TEST render_backend_tests)
       ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")
   endif()
 endif()
-foreach(render_test IN ITEMS camera_tests draw_packet_tests frame_plan_tests indexed_draw_tests static_mesh_upload_tests skinned_mesh_upload_tests static_scene_tests stock_material_execution_tests stock_scene_execution_tests lighting_tests material_binding_tests
+foreach(render_test IN ITEMS camera_tests csp_node_state_tests draw_packet_tests frame_plan_tests indexed_draw_tests static_mesh_upload_tests skinned_mesh_upload_tests static_scene_tests stock_material_execution_tests stock_scene_execution_tests lighting_tests material_binding_tests
                              material_profile_tests pipeline_tests render_plan_tests texture_upload_tests)
   if(TEST ${render_test})
     set_tests_properties(${render_test} PROPERTIES LABELS "unit;render")

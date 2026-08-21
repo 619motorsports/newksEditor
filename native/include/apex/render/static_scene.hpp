@@ -59,8 +59,12 @@ struct StaticScenePrepareRequest {
     const apex::scene::SceneSnapshot* scene = nullptr;
     std::span<const DrawPacket> packets{};
     // Indexed by the final model's global MaterialId. Used programs are
-    // copied into the returned resources.
+    // copied into the returned resources. Supply this table or the per-packet
+    // table below, but not both.
     std::span<const PipelineProgram* const> pipelines_by_material{};
+    // Indexed by packet. This preserves source-evidenced per-node CSP render
+    // state when meshes share one material but require different pipelines.
+    std::span<const PipelineProgram* const> pipelines_by_packet{};
     // This optional table uses the same material order. A used pipeline that
     // declares the portable constants binding requires the complete table.
     // Preparation copies each used value into an owned 256-byte GPU record.
@@ -116,6 +120,9 @@ class StaticSceneResources final {
 public:
     [[nodiscard]] Backend backend() const noexcept { return backend_; }
     [[nodiscard]] std::size_t draw_count() const noexcept { return packets_.size(); }
+    [[nodiscard]] std::size_t unique_pipeline_count() const noexcept {
+        return pipelines_.size();
+    }
     [[nodiscard]] std::size_t unique_geometry_count() const noexcept {
         return uploads_.size() + skinned_uploads_.size();
     }

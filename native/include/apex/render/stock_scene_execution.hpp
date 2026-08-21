@@ -12,7 +12,8 @@ namespace apex::render {
 
 // This is the bounded main-color scene boundary. It deliberately does not
 // execute frame-plan effects such as shadows, reflections, sky, CSP lights,
-// or post-processing; those remain explicit evidence in render_plan.
+// or post-processing. Per-node CSP mesh state is supported, while CSP shader,
+// property, and resource changes remain explicit evidence in render_plan.
 struct StockSceneExecutionLimits {
     std::size_t max_scene_nodes = 1'000'000U;
     std::size_t max_scene_materials = 1'000'000U;

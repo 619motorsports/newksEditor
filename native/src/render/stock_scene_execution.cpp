@@ -1,6 +1,7 @@
 #include "apex/render/stock_scene_execution.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <initializer_list>
 #include <limits>
 #include <new>
@@ -184,10 +185,12 @@ bool preplan_within_limit(const apex::scene::SceneSnapshot& scene,
     }
 
     // build_render_plan allocates visited, hard-exclusion, suppression, and
-    // activity-override arrays plus a LIFO WalkState stack. The stack capacity
+    // activity-override and node-state pointer arrays plus a LIFO WalkState
+    // stack. The stack capacity
     // can approach the node count on a wide tree. Ancestor vectors are charged
     // separately with the authored maximum depth.
-    if (!add_count(node_count, 3U * sizeof(bool) + sizeof(std::int8_t), bytes,
+    if (!add_count(node_count, 3U * sizeof(bool) + sizeof(std::int8_t) +
+                                   sizeof(const NodeRenderStateOverride*), bytes,
                    limit) ||
         !add_count(node_count, sizeof(std::uint32_t) + sizeof(bool) +
                                2U * sizeof(std::string) + sizeof(std::vector<std::uint32_t>),
@@ -271,6 +274,34 @@ bool validate_render_options(const apex::scene::SceneSnapshot& scene,
         if (seen[index]) {
             diagnostic = {"stock_scene_activity_override_duplicate",
                           "Activity overrides contain a duplicate scene node"};
+            return false;
+        }
+        seen[index] = true;
+    }
+    if (options.node_state_overrides.size() > node_count) {
+        diagnostic = {"stock_scene_render_option_limit",
+                      "Node-state override count exceeds the scene node count"};
+        return false;
+    }
+    reset_seen();
+    for (const NodeRenderStateOverride& override_value : options.node_state_overrides) {
+        if (override_value.node == apex::scene::invalid_node_id ||
+            static_cast<std::size_t>(override_value.node) >= node_count) {
+            diagnostic = {"stock_scene_node_state_override_invalid",
+                          "A node-state override references an unknown scene node"};
+            return false;
+        }
+        const std::size_t index = static_cast<std::size_t>(override_value.node);
+        if (seen[index]) {
+            diagnostic = {"stock_scene_node_state_override_duplicate",
+                          "Node-state overrides contain a duplicate scene node"};
+            return false;
+        }
+        if ((override_value.layer.has_value() && !std::isfinite(*override_value.layer)) ||
+            (override_value.lod_in.has_value() && !std::isfinite(*override_value.lod_in)) ||
+            (override_value.lod_out.has_value() && !std::isfinite(*override_value.lod_out))) {
+            diagnostic = {"stock_scene_node_state_override_non_finite",
+                          "Node-state override numeric values must be finite"};
             return false;
         }
         seen[index] = true;
@@ -377,7 +408,7 @@ StockSceneExecutionResult prepare_stock_scene_execution(
         result.render_plan = build_render_plan(*request.scene, request.render);
         result.render_plan.unsupported_effects.push_back({
             "stock_scene_snapshot_staged",
-            "Workspace LOD/FOV and damage modes, per-node CSP overrides, and surface overlays must be resolved by the caller before this main-color handoff.",
+            "Workspace LOD/FOV, CSP shader and resource changes, damage modes, and surface overlays remain outside this main-color handoff.",
         });
         if (result.render_plan.items.size() > request.limits.max_plan_items ||
             !plan_within_limit(result.render_plan, request.limits.max_plan_bytes)) {

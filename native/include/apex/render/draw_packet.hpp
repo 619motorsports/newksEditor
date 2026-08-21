@@ -54,7 +54,10 @@ struct DrawPacket {
     std::uint32_t vertex_stride_floats = 0;
     std::size_t order = 0;
     float distance = 0.0F;
-    std::uint32_t layer = 0;
+    double layer = 0.0;
+    // True when CSP explicitly replaced transparent classification. This is
+    // needed because false must override an alpha-blended material default.
+    bool transparency_overridden = false;
     apex::scene::Matrix4 world_matrix = apex::scene::identity_matrix;
     std::vector<apex::scene::Matrix4> bone_palette;
     MaterialRenderProfile material_profile;

@@ -588,6 +588,7 @@ DrawPacketBuildResult build_draw_packets(
             packet.order = result.packets.size();
             packet.distance = item.distance;
             packet.layer = item.layer;
+            packet.transparency_overridden = item.transparency_overridden;
             packet.world_matrix = scene_node->transform;
             packet.material_profile = profile;
             const bool packet_transparent = item.transparent || profile.transparent;

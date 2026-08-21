@@ -62,9 +62,10 @@ struct StockMaterialExecutionResult {
     }
 };
 
-// Build one explicit executable PipelineProgram and one resolved 64-byte
-// material record per used material, then synchronously hand the copied
-// request to prepare_static_scene_resources(). Supported shader families are
+// Build up to two explicit PipelineProgram values per used material. The two
+// variants preserve opaque and transparent node state. Build one resolved
+// 64-byte material record per used material, then synchronously prepare the
+// static scene. Supported shader families are
 // ksPerPixel, ksPerPixelNM, ksPerPixelMultiMap,
 // ksPerPixelMultiMap_AT, ksPerPixelMultiMap_NMDetail, and
 // ksPerPixelMultiMap_AT_NMDetail. Both AT profiles retain their A2C state.

@@ -3,11 +3,23 @@
 #include "apex/scene/scene.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
 
 namespace apex::render {
+
+// A render-time projection of one CSP MESH_ADJUSTMENT. Optional fields retain
+// the difference between an explicit false/zero and an absent override.
+struct NodeRenderStateOverride {
+    apex::scene::NodeId node = apex::scene::invalid_node_id;
+    std::optional<bool> is_transparent;
+    std::optional<double> layer;
+    std::optional<double> lod_in;
+    std::optional<double> lod_out;
+    std::optional<bool> cast_shadows;
+};
 
 enum class ReflectionSelectionMode {
     disabled,
@@ -33,6 +45,9 @@ struct RenderPlanOptions {
     // mutating the source scene. The stock-scene facade rejects invalid or
     // duplicate IDs before it calls the backend-neutral planner.
     std::span<const apex::scene::NodeActivityOverride> activity_overrides{};
+    // CSP mesh-state overrides are applied per node after authored KN5 state.
+    // The stock-scene facade rejects invalid, duplicate, or non-finite values.
+    std::span<const NodeRenderStateOverride> node_state_overrides{};
     // A pre-resolution layer can exclude whole subtrees without changing the
     // immutable scene. Workspace LOD uses this hard exclusion. Show-hidden
     // does not bypass it; isolation does.
@@ -48,9 +63,10 @@ struct RenderPlanOptions {
 struct RenderItem {
     apex::scene::NodeId node = apex::scene::invalid_node_id;
     apex::scene::MaterialId material = apex::scene::invalid_material_id;
-    std::uint32_t layer = 0;
+    double layer = 0.0;
     float distance = 0.0F;
     bool transparent = false;
+    bool transparency_overridden = false;
     bool casts_shadows = false;
     std::string workspace_auxiliary;
     std::string workspace_file;

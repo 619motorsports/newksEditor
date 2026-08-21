@@ -183,8 +183,17 @@ remains unchanged and feature-complete.
   A second facade test executes the three-texture MultiMap path. It checks the
   exact bounded `maps.r` and `maps.g` result. It also executes the AT family on
   a 4x target and checks partial resolved coverage. The same tests run on the
-  D3D12/WARP CI path. The caller must first resolve damage preview, per-node
-  CSP overrides, and surface overlays. A bounded
+  D3D12/WARP CI path. A bounded CSP adapter resolves the exact per-node
+  `IS_TRANSPARENT`, `LAYER`, `LOD_IN`, `LOD_OUT`, and `CAST_SHADOWS` fields.
+  Later matching sections replace earlier fields in source order. The adapter
+  maps KN5 preorder identities to dense scene IDs. It rejects mismatched and
+  over-budget input. The facade rejects unknown, duplicate, and non-finite
+  overrides before backend allocation.
+  The render plan applies CSP LOD, order, pass, and shadow state per node.
+  Static scenes can select a pipeline per packet. Nodes that share one material
+  can therefore retain different transparent and depth-write states. CSP
+  shader, property, and resource changes remain staged. The caller must still
+  resolve damage preview and surface overlays. A bounded
   workspace adapter maps metadata to merged scene roots. It attaches file and
   auxiliary labels without partial mutation. A bounded resolver implements
   half-open workspace LOD ranges and the production FOV formula. The caller
@@ -296,7 +305,8 @@ remains unchanged and feature-complete.
   material handoff selects modules by material or shader family. It derives
   the eight-binding or 12-binding layout, material constants, A2C state,
   culling, and depth state. The stock-scene facade composes this handoff with visibility, LOD,
-  stable draw ordering, and packet validation for a pre-resolved snapshot.
+  stable draw ordering, CSP mesh state, and packet validation for a
+  pre-resolved snapshot.
   It does not execute stock KN5 shader containers. The port does not create
   windows or swapchains. It does not provide full golden-image parity.
 
