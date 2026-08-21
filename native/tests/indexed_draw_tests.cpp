@@ -558,6 +558,70 @@ void validates_portable_material_buffer_contract() {
             "foreign-backend material buffer rejected");
 }
 
+void validates_portable_frame_buffer_contract() {
+    PipelineProgram pipeline = pipeline_fixture();
+    pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 2U, "ksPerPixelMaterial"},
+        {PipelineResourceKind::uniform_buffer, 0U, 3U, "ksPerPixelFrame"},
+    };
+    require(classify_indexed_portable_resource_layout(pipeline) ==
+                IndexedPortableResourceLayout::diffuse_with_constants_and_frame,
+            "portable material and frame resource layout classified");
+    DrawPacket packet = packet_fixture();
+    packet.resources.push_back({"txDiffuse", 21U, 0U, "body.dds"});
+    FakeTexture target(Backend::Vulkan, target_description());
+    FakeTexture diffuse(Backend::Vulkan, sampled_description());
+    FakeSampler sampler(Backend::Vulkan);
+    FakeBuffer vertices(Backend::Vulkan, {132U, BufferUsage::vertex,
+                                          BufferMemory::device_local,
+                                          BufferMutability::immutable});
+    FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index,
+                                         BufferMemory::device_local,
+                                         BufferMutability::immutable});
+    FakeBuffer material(Backend::Vulkan,
+                        {256U, BufferUsage::uniform, BufferMemory::host_visible,
+                         BufferMutability::mutable_data});
+    FakeBuffer frame(Backend::Vulkan,
+                     {256U, BufferUsage::uniform, BufferMemory::host_visible,
+                      BufferMutability::mutable_data});
+    auto request = request_fixture(packet, pipeline, vertices, indices);
+    request.resource_authority = IndexedResourceAuthority::explicit_bindings;
+    request.sampled_binding = {&diffuse, &sampler};
+    request.material_binding = {&material, 0U, portable_material_buffer_view_bytes};
+    request.frame_binding = {&frame, 0U, portable_frame_buffer_view_bytes};
+    Diagnostic diagnostic;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            "portable frame constants buffer accepted");
+
+    request.frame_binding.range_bytes = portable_frame_constant_bytes;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_frame_buffer_alignment_invalid",
+            "short D3D12-incompatible frame view rejected");
+    request.frame_binding.range_bytes = portable_frame_buffer_view_bytes;
+    request.frame_binding.offset_bytes = 1U;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_frame_buffer_alignment_invalid",
+            "unaligned frame view rejected");
+    request.frame_binding = {};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_frame_buffer_missing",
+            "missing frame constants buffer rejected");
+    FakeBuffer wrong_usage(Backend::Vulkan,
+                           {256U, BufferUsage::vertex, BufferMemory::host_visible,
+                            BufferMutability::immutable});
+    request.frame_binding = {&wrong_usage, 0U, portable_frame_buffer_view_bytes};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_frame_buffer_usage_invalid",
+            "non-uniform frame buffer rejected");
+}
+
 void rejects_invalid_depth_attachment_descriptions() {
     Diagnostic diagnostic;
     DepthAttachmentDescription description;
@@ -870,6 +934,7 @@ int main() {
         accepts_source_evidenced_wireframe_topology();
         validates_portable_diffuse_resource_contract();
         validates_portable_material_buffer_contract();
+        validates_portable_frame_buffer_contract();
         rejects_invalid_depth_attachment_descriptions();
         rejects_invalid_depth_contract();
         validates_ordered_indexed_batch_contract();

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <stdexcept>
@@ -379,6 +380,22 @@ void plansPortableDecodedTextureResources() {
             "decoded DDS plan preserves the explicit BC6H GPU boundary");
 }
 
+void rejectsOversizedUploadSubresourceLists() {
+    const std::array<std::byte, 4> pixel = {
+        std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+    TextureDescription description{
+        1U, 1U, 1U, 1U, TextureFormat::rgba8_unorm, TextureUsage::sampled,
+        TextureMemory::device_local, TextureMutability::immutable};
+    TextureUploadPlan uploads;
+    uploads.subresources.resize(65536U);
+    uploads.subresources.front() = {0U, 0U, 1U, 1U, 4U, pixel};
+    Diagnostic diagnostic;
+    require(validate_texture_upload_plan(description, uploads, diagnostic) ==
+                TextureStatus::invalid_description &&
+                diagnostic.code == "texture_upload_subresource_count",
+            "an oversized upload list is rejected before iteration");
+}
+
 } // namespace
 
 int main() {
@@ -390,6 +407,7 @@ int main() {
         rejectsUnsupportedDx10LayoutsAndInvalidBits();
         rejectsUnsupportedWithoutApproximation();
         plansPortableDecodedTextureResources();
+        rejectsOversizedUploadSubresourceLists();
         std::cout << "texture upload tests passed\n";
         return 0;
     } catch (const std::exception& error) {

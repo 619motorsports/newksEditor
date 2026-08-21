@@ -67,12 +67,16 @@ public:
     BufferResult create_buffer(const BufferDescription& description,
                                std::span<const std::byte> initial_data) override {
         ++buffer_calls;
-        buffer_descriptions.push_back(description);
+        BufferDescription stored_description = description;
+        if (truncate_frame_buffer && description.usage == BufferUsage::uniform &&
+            description.mutability == BufferMutability::mutable_data)
+            stored_description.size_bytes = portable_frame_buffer_view_bytes / 2U;
+        buffer_descriptions.push_back(stored_description);
         uploaded_bytes.emplace_back(initial_data.begin(), initial_data.end());
         if (fail_buffer_call != 0U && buffer_calls == fail_buffer_call)
             return {BufferStatus::allocation_failed,
                     {"recording_buffer_failure", "injected buffer allocation failure"}, nullptr};
-        return {BufferStatus::ready, {}, std::make_unique<FakeBuffer>(description)};
+        return {BufferStatus::ready, {}, std::make_unique<FakeBuffer>(stored_description)};
     }
     BufferUpdateResult update_buffer(Buffer&, std::uint64_t offset,
                                      std::span<const std::byte> data) override {
@@ -142,6 +146,9 @@ public:
         material_buffers.clear();
         material_offsets.clear();
         material_ranges.clear();
+        frame_buffers.clear();
+        frame_offsets.clear();
+        frame_ranges.clear();
         for (const auto& draw : batch.draws) {
             nodes.push_back(draw.packet->node);
             pipeline_names.push_back(draw.pipeline->name);
@@ -158,6 +165,9 @@ public:
             material_buffers.push_back(draw.material_binding.buffer);
             material_offsets.push_back(draw.material_binding.offset_bytes);
             material_ranges.push_back(draw.material_binding.range_bytes);
+            frame_buffers.push_back(draw.frame_binding.buffer);
+            frame_offsets.push_back(draw.frame_binding.offset_bytes);
+            frame_ranges.push_back(draw.frame_binding.range_bytes);
         }
         Diagnostic diagnostic;
         const auto validation = validate_indexed_static_mesh_batch_description(texture, batch, diagnostic);
@@ -174,6 +184,7 @@ public:
     std::size_t fail_buffer_call = 0U;
     std::size_t update_calls = 0U;
     std::size_t fail_update_call = 0U;
+    bool truncate_frame_buffer = false;
     std::size_t batch_calls = 0U;
     std::size_t texture_calls = 0U;
     std::size_t fail_texture_call = 0U;
@@ -204,6 +215,9 @@ public:
     std::vector<const Buffer*> material_buffers;
     std::vector<std::uint64_t> material_offsets;
     std::vector<std::uint32_t> material_ranges;
+    std::vector<const Buffer*> frame_buffers;
+    std::vector<std::uint64_t> frame_offsets;
+    std::vector<std::uint32_t> frame_ranges;
 
 private:
     DeviceInfo info_{Backend::Vulkan, "recording", "test", 1U, 0U, 0U, 0U, 0U, true};
@@ -1141,6 +1155,191 @@ void owns_and_reuses_material_constant_records() {
             "material IDs keep distinct records while duplicate packets reuse one record");
 }
 
+void owns_and_updates_frame_constant_record_for_mixed_packets() {
+    Fixture value = fixture();
+    value.model.textures.push_back({true, "body.dds", 0U, {}, {}});
+    value.first_pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 3U, "ksPerPixelFrame"},
+    };
+    value.second_pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+    };
+    for (DrawPacket& packet : value.packets)
+        packet.resources = { {"txDiffuse", 21U, 0U, "body.dds"} };
+
+    auto request = request_for(value);
+    RecordingDevice device;
+    auto prepared = prepare_static_scene_resources(device, request);
+    require(prepared.ok() && prepared.resources->owns_frame_constants() &&
+                device.buffer_calls == 5U,
+            "a mixed scene owns one mutable frame record beside geometry");
+    const auto frame_upload = std::find_if(
+        device.buffer_descriptions.begin(), device.buffer_descriptions.end(),
+        [](const BufferDescription& description) {
+            return description.usage == BufferUsage::uniform &&
+                   description.mutability == BufferMutability::mutable_data;
+        });
+    require(frame_upload != device.buffer_descriptions.end() &&
+                frame_upload->size_bytes == portable_frame_buffer_view_bytes,
+            "frame record uses one bounded mutable uniform view");
+
+    const TextureDescription sampled_description{
+        1U, 1U, 1U, 1U, TextureFormat::rgba8_unorm, TextureUsage::sampled,
+        TextureMemory::device_local, TextureMutability::immutable};
+    FakeTexture diffuse(sampled_description);
+    FakeSampler sampler;
+    const std::array<const Texture*, 1> textures = {&diffuse};
+    const std::array<const Sampler*, 1> samplers = {&sampler};
+    StaticSceneFrameDescription frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.textures_by_global_index = textures;
+    frame.samplers_by_global_index = samplers;
+    FakeTexture target;
+
+    auto missing = prepared.resources->draw_and_readback(device, target, frame);
+    require(missing.status == IndexedStaticMeshBatchStatus::invalid_request &&
+                missing.diagnostic.code == "static_scene_frame_constants_missing" &&
+                device.update_calls == 0U && device.batch_calls == 0U,
+            "missing frame constants fail before update or recording");
+
+    KsPerPixelFrameConstants constants{};
+    constants.sun_color[0] = std::numeric_limits<float>::infinity();
+    frame.frame_constants = constants;
+    auto non_finite = prepared.resources->draw_and_readback(device, target, frame);
+    require(non_finite.status == IndexedStaticMeshBatchStatus::invalid_request &&
+                non_finite.diagnostic.code == "static_scene_frame_constants_non_finite" &&
+                device.update_calls == 0U && device.batch_calls == 0U,
+            "non-finite frame constants fail before update or recording");
+
+    constants = KsPerPixelFrameConstants{};
+    constants.sun_direction = {0.0F, 0.0F, 0.0F, 0.0F};
+    frame.frame_constants = constants;
+    auto zero_direction = prepared.resources->draw_and_readback(device, target, frame);
+    require(zero_direction.status == IndexedStaticMeshBatchStatus::invalid_request &&
+                zero_direction.diagnostic.code ==
+                    "static_scene_frame_sun_direction_invalid" &&
+                device.update_calls == 0U && device.batch_calls == 0U,
+            "a zero sun direction fails before update or recording");
+
+    constants = KsPerPixelFrameConstants{};
+    constants.sun_direction = {1.0F, 2.0F, 3.0F, 4.0F};
+    frame.frame_constants = constants;
+    device.fail_update_call = 1U;
+    auto update_failure = prepared.resources->draw_and_readback(device, target, frame);
+    require(update_failure.status == IndexedStaticMeshBatchStatus::execution_failed &&
+                update_failure.diagnostic.code == "recording_update_failure" &&
+                device.update_calls == 1U && device.batch_calls == 0U,
+            "frame update failure prevents recording");
+
+    RecordingDevice truncated_device;
+    truncated_device.truncate_frame_buffer = true;
+    auto truncated_prepared = prepare_static_scene_resources(
+        truncated_device, request_for(value));
+    require(truncated_prepared.ok(), "truncated frame fixture prepares before draw validation");
+    auto truncated_frame = frame;
+    auto range_failure = truncated_prepared.resources->draw_and_readback(
+        truncated_device, target, truncated_frame);
+    require(range_failure.status == IndexedStaticMeshBatchStatus::invalid_request &&
+                range_failure.diagnostic.code == "static_scene_frame_constant_range_invalid" &&
+                truncated_device.update_calls == 0U && truncated_device.batch_calls == 0U,
+            "a truncated frame buffer fails its range preflight");
+
+    require(device.frame_buffers.size() == 0U,
+            "a failed frame update does not submit a mixed batch");
+    device.fail_update_call = 0U;
+    const auto drawn = prepared.resources->draw_and_readback(device, target, frame);
+    require(drawn.ok() && device.frame_buffers.size() == 3U &&
+                device.frame_buffers[0] != nullptr && device.frame_buffers[1] == nullptr &&
+                device.frame_buffers[2] == device.frame_buffers[0] &&
+                device.frame_offsets == std::vector<std::uint64_t>{0U, 0U, 0U} &&
+                device.frame_ranges == std::vector<std::uint32_t>{portable_frame_buffer_view_bytes, 0U,
+                                                                     portable_frame_buffer_view_bytes},
+            "one frame record binds only to applicable mixed packets");
+}
+
+void orders_skin_updates_before_the_shared_frame_record() {
+    Fixture value = fixture();
+    make_second_mesh_skinned(value);
+    value.model.textures.push_back({true, "body.dds", 0U, {}, {}});
+    value.first_pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 3U, "ksPerPixelFrame"},
+    };
+    value.packets[0].resources = {{"txDiffuse", 21U, 0U, "body.dds"}};
+    value.packets[2].resources = value.packets[0].resources;
+
+    RecordingDevice device;
+    auto prepared = prepare_static_scene_resources(device, request_for(value));
+    require(prepared.ok() && prepared.resources->owns_frame_constants(),
+            "mixed skinned scene owns its shared frame record");
+
+    const TextureDescription sampled_description{
+        1U, 1U, 1U, 1U, TextureFormat::rgba8_unorm, TextureUsage::sampled,
+        TextureMemory::device_local, TextureMutability::immutable};
+    FakeTexture diffuse(sampled_description);
+    FakeSampler sampler;
+    const std::array<const Texture*, 1> textures = {&diffuse};
+    const std::array<const Sampler*, 1> samplers = {&sampler};
+    KsPerPixelFrameConstants constants{};
+    constants.sun_direction = {0.0F, 1.0F, 0.0F, 0.0F};
+    StaticSceneFrameDescription frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.frame_constants = constants;
+    frame.textures_by_global_index = textures;
+    frame.samplers_by_global_index = samplers;
+    FakeTexture target;
+
+    device.fail_update_call = 1U;
+    const auto failed_skin =
+        prepared.resources->draw_and_readback(device, target, frame);
+    require(failed_skin.status == IndexedStaticMeshBatchStatus::execution_failed &&
+                failed_skin.diagnostic.code == "recording_update_failure" &&
+                device.update_calls == 1U && device.batch_calls == 0U &&
+                device.updated_bytes.front().size() == 57U * sizeof(float),
+            "a failed skin upload does not advance the shared frame record");
+
+    device.fail_update_call = 0U;
+    const auto drawn = prepared.resources->draw_and_readback(device, target, frame);
+    require(drawn.ok() && device.update_calls == 3U && device.batch_calls == 1U &&
+                device.updated_bytes[1].size() == 57U * sizeof(float) &&
+                device.updated_bytes[2].size() == portable_frame_buffer_view_bytes,
+            "a complete retry commits skin data before frame data and submits once");
+
+    device.fail_update_call = 5U;
+    const auto failed_frame =
+        prepared.resources->draw_and_readback(device, target, frame);
+    require(failed_frame.status == IndexedStaticMeshBatchStatus::execution_failed &&
+                failed_frame.diagnostic.code == "recording_update_failure" &&
+                device.update_calls == 5U && device.batch_calls == 1U &&
+                device.updated_bytes[3].size() == 57U * sizeof(float) &&
+                device.updated_bytes[4].size() == portable_frame_buffer_view_bytes,
+            "a late frame failure keeps the sequential partial-update contract");
+}
+
+void rejects_frame_constant_budget_before_allocation() {
+    Fixture value = fixture();
+    value.first_pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 3U, "ksPerPixelFrame"},
+    };
+    value.model.textures.push_back({true, "body.dds", 0U, {}, {}});
+    value.packets[0].resources = { {"txDiffuse", 21U, 0U, "body.dds"} };
+    value.packets[2].resources = { {"txDiffuse", 21U, 0U, "body.dds"} };
+    auto request = request_for(value);
+    request.limits.max_total_frame_constant_bytes = portable_frame_buffer_view_bytes - 1U;
+    RecordingDevice device;
+    const auto result = prepare_static_scene_resources(device, request);
+    require(!result.ok() &&
+                result.diagnostic.code == "static_scene_frame_constant_aggregate_limit" &&
+                device.buffer_calls == 0U,
+            "a truncated-equivalent frame budget fails before allocation");
+}
+
 void rejects_invalid_material_constant_inputs_before_allocation() {
     Fixture diffuse_only = fixture();
     auto diffuse_only_request = request_for(diffuse_only);
@@ -1223,7 +1422,7 @@ void rejects_invalid_material_constant_inputs_before_allocation() {
     Fixture malformed_layout = fixture();
     malformed_layout.model.textures.push_back({true, "body.dds", 0U, {}, {}});
     malformed_layout.first_pipeline.resources = constants_layout;
-    malformed_layout.first_pipeline.resources.back().binding = 3U;
+    malformed_layout.first_pipeline.resources.back().binding = 4U;
     malformed_layout.packets[0].resources = {{"txDiffuse", 21U, 0U, "body.dds"}};
     malformed_layout.packets[2].resources = {{"txDiffuse", 21U, 0U, "body.dds"}};
     auto malformed_layout_request = request_for(malformed_layout);
@@ -1301,6 +1500,9 @@ int main() {
         rejects_malformed_embedded_textures_before_allocation();
         rejects_malformed_diffuse_packets_before_allocation();
         owns_and_reuses_material_constant_records();
+        owns_and_updates_frame_constant_record_for_mixed_packets();
+        orders_skin_updates_before_the_shared_frame_record();
+        rejects_frame_constant_budget_before_allocation();
         rejects_invalid_material_constant_inputs_before_allocation();
         propagates_embedded_resource_failures();
         propagates_upload_and_batch_failures();

@@ -178,6 +178,32 @@ std::vector<std::uint8_t> executable_material_fragment_shader() {
     return result;
 }
 
+std::vector<std::uint8_t> executable_ks_per_pixel_vertex_shader() {
+    // Generated from tests/shaders/indexed_ks_per_pixel.vert with:
+    // glslangValidator -V --target-env vulkan1.0 -Os -g0 -S vert
+    constexpr std::string_view hex =
+        "03022307000001000b0008003f0000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f000b0000000000040000006d61696e00000000150000001e000000290000002e0000003000000037000000470003000b00000002000000480004000b0000000000000005000000480005000b000000000000000700000010000000480005000b000000000000002300000000000000480004000b0000000100000005000000480005000b000000010000000700000010000000480005000b00000001000000230000004000000047000400150000001e00000000000000470004001e0000001e0000000000000047000400290000001e00000001000000470004002e0000001e0000000100000047000400300000001e000000020000004700030035000000020000004800050035000000000000000b000000000000004800050035000000010000000b000000010000004800050035000000020000000b000000030000004800050035000000030000000b00000004000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000004000000180004000a00000007000000040000001e0004000b0000000a0000000a000000200004000c000000090000000b0000003b0004000c0000000d00000009000000150004000e00000020000000010000002b0004000e0000000f000000000000002000040010000000090000000a00000017000400130000000600000003000000200004001400000001000000130000003b0004001400000015000000010000002b00040006000000170000000000803f200004001d00000003000000130000003b0004001d0000001e00000003000000180004002100000013000000030000003b000400140000002900000001000000170004002c0000000600000002000000200004002d000000030000002c0000003b0004002d0000002e00000003000000200004002f000000010000002c0000003b0004002f0000003000000001000000150004003200000020000000000000002b0004003200000033000000010000001c0004003400000006000000330000001e0006003500000007000000060000003400000034000000200004003600000003000000350000003b0004003600000037000000030000002b0004000e0000003800000001000000200004003d00000003000000070000003600050002000000040000000000000003000000f8000200050000004100050010000000110000000d0000000f0000003d0004000a00000012000000110000003d0004001300000016000000150000005100050006000000180000001600000000000000510005000600000019000000160000000100000051000500060000001a000000160000000200000050000700070000001b00000018000000190000001a0000001700000091000500070000001c000000120000001b00000051000500070000002200000012000000000000004f0008001300000023000000220000002200000000000000010000000200000051000500070000002400000012000000010000004f0008001300000025000000240000002400000000000000010000000200000051000500070000002600000012000000020000004f000800130000002700000026000000260000000000000001000000020000005000060021000000280000002300000025000000270000003d000400130000002a0000002900000091000500130000002b000000280000002a0000003e0003001e0000002b0000003d0004002c00000031000000300000003e0003002e000000310000004100050010000000390000000d000000380000003d0004000a0000003a0000003900000091000500070000003c0000003a0000001c000000410005003d0000003e000000370000000f0000003e0003003e0000003c000000fd00010038000100";
+    require(hex.size() % 2U == 0U, "embedded ksPerPixel vertex shader hex alignment");
+    std::vector<std::uint8_t> result(hex.size() / 2U);
+    for (std::size_t index = 0U; index < result.size(); ++index)
+        result[index] = static_cast<std::uint8_t>((hex_digit(hex[index * 2U]) << 4U) |
+                                                   hex_digit(hex[index * 2U + 1U]));
+    return result;
+}
+
+std::vector<std::uint8_t> executable_ks_per_pixel_fragment_shader() {
+    // Generated from tests/shaders/indexed_ks_per_pixel.frag with:
+    // glslangValidator -V --target-env vulkan1.0 -Os -g0 -S frag
+    constexpr std::string_view hex =
+        "03022307000001000b000800590000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00080004000000040000006d61696e00000000160000001d00000052000000100003000400000007000000470004000c0000002100000000000000470004000c0000002200000000000000470004001000000021000000010000004700040010000000220000000000000047000400160000001e00000001000000470004001d0000001e0000000000000047000300210000000200000048000500210000000000000023000000000000004800050021000000010000002300000010000000480005002100000002000000230000002000000048000500210000000300000023000000300000004700040023000000210000000300000047000400230000002200000000000000470003003800000002000000480005003800000000000000230000000000000048000500380000000100000023000000100000004800050038000000020000002300000020000000470004003a0000002100000002000000470004003a000000220000000000000047000400520000001e00000000000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000003000000190009000a00000006000000010000000000000000000000000000000100000000000000200004000b000000000000000a0000003b0004000b0000000c000000000000001a0002000e000000200004000f000000000000000e0000003b0004000f00000010000000000000001b000300120000000a00000017000400140000000600000002000000200004001500000001000000140000003b00040015000000160000000100000017000400180000000600000004000000200004001c00000001000000070000003b0004001c0000001d000000010000001e0006002100000018000000180000001800000018000000200004002200000002000000210000003b000400220000002300000002000000150004002400000020000000010000002b000400240000002500000000000000200004002600000002000000180000002b0004000600000030000000000000002b0004002400000034000000020000001e00050038000000180000001800000018000000200004003900000002000000380000003b000400390000003a00000002000000150004003b00000020000000000000002b0004003b0000003c00000000000000200004003d00000002000000060000002b0004002400000041000000010000002b0004003b0000004500000001000000200004005100000003000000180000003b0004005100000052000000030000002b00040006000000540000000000803f3600050002000000040000000000000003000000f8000200050000003d0004000a0000000d0000000c0000003d0004000e00000011000000100000005600050012000000130000000d000000110000003d00040014000000170000001600000057000500180000001900000013000000170000004f000800070000001a00000019000000190000000000000001000000020000003d000400070000001e0000001d0000000c000600070000001f00000001000000450000001e00000041000500260000002700000023000000250000003d0004001800000028000000270000004f000800070000002900000028000000280000000000000001000000020000000c000600070000002a00000001000000450000002900000094000500060000002f0000001f0000002a0000000c000700060000003100000001000000280000002f0000003000000041000500260000003500000023000000340000003d0004001800000036000000350000004f00080007000000370000003600000036000000000000000100000002000000410006003d0000003e0000003a000000250000003c0000003d000400060000003f0000003e0000008e0005000700000040000000370000003f00000041000500260000004200000023000000410000003d0004001800000043000000420000004f00080007000000440000004300000043000000000000000100000002000000410006003d000000460000003a00000025000000450000003d0004000600000047000000460000008e000500070000004800000044000000470000008e000500070000004a000000480000003100000081000500070000004b000000400000004a00000041000500260000004c0000003a000000340000003d000400180000004d0000004c0000004f000800070000004e0000004d0000004d00000000000000010000000200000081000500070000004f0000004b0000004e0000008500050007000000500000001a0000004f000000510005000600000055000000500000000000000051000500060000005600000050000000010000005100050006000000570000005000000002000000500007001800000058000000550000005600000057000000540000003e0003005200000058000000fd00010038000100";
+    require(hex.size() % 2U == 0U, "embedded ksPerPixel fragment shader hex alignment");
+    std::vector<std::uint8_t> result(hex.size() / 2U);
+    for (std::size_t index = 0U; index < result.size(); ++index)
+        result[index] = static_cast<std::uint8_t>((hex_digit(hex[index * 2U]) << 4U) |
+                                                   hex_digit(hex[index * 2U + 1U]));
+    return result;
+}
+
 std::vector<std::uint8_t> executable_fragment_shader() {
     constexpr std::string_view hex =
         "03022307000001000b000d000d0000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00060004000000040000006d61696e000000000900000010000300040000000700000047000400090000001e00000000000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000004000000200004000800000003000000070000003b0004000800000009000000030000002b000400060000000a0000000000803f2b000400060000000b000000000000002c000700070000000c0000000a0000000b0000000b0000000a0000003600050002000000040000000000000003000000f8000200050000003e000300090000000c000000fd00010038000100";
@@ -1276,6 +1302,135 @@ bool contract_backend(apex::render::Backend backend) {
                 near_material_channel(material_batch_result.rgba8[center + 2U], 21U) &&
                 near_material_channel(material_batch_result.rgba8[center + 3U], 64U),
             "second batch draw selects its aligned material constants record");
+
+    // Execute the bounded source-evidenced ambient + directional diffuse +
+    // emissive equation. This is deliberately separate from the constants
+    // transport fixture above: both real backends must execute the same
+    // equation, with the frame UBO at b3 and the material UBO at b2.
+    KsPerPixelMaterialConstants ks_material;
+    ks_material.lighting = {0.5F, 0.75F, 0.0F, 0.0F};
+    ks_material.emissive = {0.1F, 0.05F, 0.02F, 0.0F};
+    std::array<std::byte, portable_material_buffer_view_bytes> ks_material_bytes{};
+    std::memcpy(ks_material_bytes.data(), &ks_material, sizeof(ks_material));
+    BufferResult ks_material_buffer = device.device->create_buffer(
+        {portable_material_buffer_view_bytes, BufferUsage::uniform, BufferMemory::host_visible,
+         BufferMutability::immutable}, ks_material_bytes);
+    require(ks_material_buffer.ok(), "bounded ksPerPixel material buffer upload");
+
+    KsPerPixelFrameConstants front_frame;
+    front_frame.sun_direction = {0.0F, 1.0F, 0.0F, 0.0F};
+    front_frame.sun_color = {1.0F, 0.5F, 0.25F, 0.0F};
+    front_frame.ambient_color = {0.2F, 0.3F, 0.4F, 0.0F};
+    KsPerPixelFrameConstants reverse_frame = front_frame;
+    reverse_frame.sun_direction = {0.0F, -1.0F, 0.0F, 0.0F};
+    std::array<std::byte, portable_frame_buffer_view_bytes> frame_bytes{};
+    std::memcpy(frame_bytes.data(), &front_frame, sizeof(front_frame));
+    BufferResult frame_buffer = device.device->create_buffer(
+        {portable_frame_buffer_view_bytes, BufferUsage::uniform, BufferMemory::host_visible,
+         BufferMutability::mutable_data}, frame_bytes);
+    require(frame_buffer.ok(), "bounded ksPerPixel frame buffer upload");
+
+    PipelineProgram ks_pipeline = indexed_pipeline;
+    ks_pipeline.name = "source-evidenced-ks-per-pixel-diffuse-emissive";
+    ks_pipeline.vertex_layout.attributes.push_back(
+        {PipelineVertexSemantic::normal, PipelineVertexAttributeFormat::float32x3, 1U, 12U});
+    ks_pipeline.vertex_layout.attributes.push_back(
+        {PipelineVertexSemantic::texcoord0, PipelineVertexAttributeFormat::float32x2, 2U, 24U});
+    ks_pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 2U, "ksPerPixelMaterial"},
+        {PipelineResourceKind::uniform_buffer, 0U, 3U, "ksPerPixelFrame"},
+    };
+    if (backend == Backend::Vulkan) {
+        ks_pipeline.shaders[0].bytes = executable_ks_per_pixel_vertex_shader();
+        ks_pipeline.shaders[1].bytes = executable_ks_per_pixel_fragment_shader();
+    } else {
+#if defined(_WIN32)
+        constexpr std::string_view ks_vertex_source =
+            "cbuffer DrawMatrices : register(b0) { column_major float4x4 world; column_major float4x4 viewProjection; };"
+            "struct Input { float3 position : POSITION; float3 normal : NORMAL; float2 texcoord : TEXCOORD0; };"
+            "struct Output { float4 position : SV_Position; float3 normal : NORMAL; float2 texcoord : TEXCOORD0; };"
+            "Output main(Input input) { Output output; float4 worldPosition = mul(world, float4(input.position, 1.0));"
+            "output.position = mul(viewProjection, worldPosition); output.normal = mul((float3x3)world, input.normal);"
+            "output.texcoord = input.texcoord; return output; }";
+        constexpr std::string_view ks_fragment_source =
+            "Texture2D diffuseTexture : register(t0); SamplerState diffuseSampler : register(s1);"
+            "cbuffer KsPerPixelMaterial : register(b2) { float4 lighting; float4 fresnel; float4 emissive; };"
+            "cbuffer KsPerPixelFrame : register(b3) { float4 sun_direction; float4 sun_color; float4 ambient_color; float4 camera_position; };"
+            "float4 main(float4 position : SV_Position, float3 normal : NORMAL, float2 texcoord : TEXCOORD0) : SV_Target {"
+            "float3 texel = diffuseTexture.Sample(diffuseSampler, texcoord).rgb; float3 n = normalize(normal);"
+            "float3 l = normalize(sun_direction.xyz); float ndl = max(dot(n, l), 0.0);"
+            "float3 lit = texel * (ambient_color.rgb * lighting.x + sun_color.rgb * lighting.y * ndl + emissive.rgb);"
+            "return float4(lit, 1.0); }";
+        ks_pipeline.shaders[0].bytes = executable_d3d_shader(ks_vertex_source, "vs_5_0");
+        ks_pipeline.shaders[1].bytes = executable_d3d_shader(ks_fragment_source, "ps_5_0");
+#else
+        require(false, "D3D12 ksPerPixel shader test requires Windows D3DCompile");
+#endif
+    }
+    IndexedStaticMeshDrawRequest ks_request =
+        sampled_upload.upload->make_request(ks_pipeline, *indexed_camera.frame);
+    ks_request.resource_authority = IndexedResourceAuthority::explicit_bindings;
+    ks_request.sampled_binding = {diffuse_texture.texture.get(), sampler.sampler.get()};
+    ks_request.material_binding = {
+        ks_material_buffer.buffer.get(), 0U, portable_material_buffer_view_bytes};
+    ks_request.frame_binding = {
+        frame_buffer.buffer.get(), 0U, portable_frame_buffer_view_bytes};
+    const IndexedStaticMeshDrawResult front_lit_result =
+        device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture, ks_request);
+    require(front_lit_result.ok(), "bounded ksPerPixel front-lit draw/readback");
+    require(front_lit_result.rgba8[center] == std::byte{16} &&
+                front_lit_result.rgba8[center + 1U] == std::byte{116} &&
+                front_lit_result.rgba8[center + 2U] == std::byte{34} &&
+                front_lit_result.rgba8[center + 3U] == std::byte{255},
+            "front-lit ksPerPixel pixel matches the source equation");
+
+    std::array<std::byte, portable_frame_buffer_view_bytes> reverse_frame_bytes{};
+    std::memcpy(reverse_frame_bytes.data(), &reverse_frame, sizeof(reverse_frame));
+    const BufferUpdateResult frame_update = device.device->update_buffer(
+        *frame_buffer.buffer, 0U, reverse_frame_bytes);
+    require(frame_update.ok(), "bounded ksPerPixel frame UBO update");
+    const IndexedStaticMeshDrawResult reverse_lit_result =
+        device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture, ks_request);
+    require(reverse_lit_result.ok(), "bounded ksPerPixel reversed-light draw/readback");
+    require(reverse_lit_result.rgba8[center] == std::byte{3} &&
+                reverse_lit_result.rgba8[center + 1U] == std::byte{40} &&
+                reverse_lit_result.rgba8[center + 2U] == std::byte{18} &&
+                reverse_lit_result.rgba8[center + 3U] == std::byte{255},
+            "reversed light clamps directional diffuse to zero");
+
+    // Two frame records in one batch prove that frame selection is per draw,
+    // not a stale backend-global uniform. The later reversed draw is the
+    // visible result at the overlap center.
+    std::array<std::byte, 2U * portable_frame_buffer_view_bytes> mixed_frame_bytes{};
+    std::memcpy(mixed_frame_bytes.data(), &front_frame, sizeof(front_frame));
+    std::memcpy(mixed_frame_bytes.data() + portable_frame_buffer_view_bytes,
+                &reverse_frame, sizeof(reverse_frame));
+    BufferResult mixed_frame_buffer = device.device->create_buffer(
+        {mixed_frame_bytes.size(), BufferUsage::uniform, BufferMemory::host_visible,
+         BufferMutability::immutable}, mixed_frame_bytes);
+    require(mixed_frame_buffer.ok(), "mixed ksPerPixel frame buffer upload");
+    IndexedStaticMeshDrawRequest mixed_front = ks_request;
+    mixed_front.frame_binding = {
+        mixed_frame_buffer.buffer.get(), 0U, portable_frame_buffer_view_bytes};
+    IndexedStaticMeshDrawRequest mixed_reverse = mixed_front;
+    mixed_reverse.frame_binding = {
+        mixed_frame_buffer.buffer.get(), portable_frame_buffer_view_bytes,
+        portable_frame_buffer_view_bytes};
+    const std::array<IndexedStaticMeshDrawRequest, 2> mixed_draws = {
+        mixed_front, mixed_reverse};
+    IndexedStaticMeshBatchDescription mixed_batch;
+    mixed_batch.draws = mixed_draws;
+    const IndexedStaticMeshBatchResult mixed_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(*triangle_texture.texture,
+                                                                    mixed_batch);
+    require(mixed_result.ok(), "mixed ksPerPixel frame batch/readback");
+    require(mixed_result.rgba8[center] == std::byte{3} &&
+                mixed_result.rgba8[center + 1U] == std::byte{40} &&
+                mixed_result.rgba8[center + 2U] == std::byte{18} &&
+                mixed_result.rgba8[center + 3U] == std::byte{255},
+            "mixed frame batch selects the later reversed-light record");
 
     // public/app.js applyItemRenderState is the source authority for this
     // alpha blend. Prove the equivalent native factors in both draw paths.

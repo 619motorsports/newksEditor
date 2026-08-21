@@ -85,3 +85,32 @@ sha256sum native/tests/shaders/indexed_static_mesh_material.frag \
 
 `render_backend_tests.cpp` contains the embedded SPIR-V bytes. Windows uses
 equivalent HLSL and compiles it to DXBC with `D3DCompile` for the WARP test.
+
+`indexed_ks_per_pixel.vert` and `indexed_ks_per_pixel.frag` are the bounded
+directional-diffuse fixture. They use the existing draw-matrices push-constant
+vertex ABI and the exact resource ABI requested by the native material path:
+sampled image `set=0,binding=0`, sampler `set=0,binding=1`, material UBO
+`set=0,binding=2`, and frame UBO `set=0,binding=3` (D3D12 `t0`, `s1`, `b2`,
+and `b3`). The fragment equation is intentionally limited to ambient plus
+directional diffuse and emissive:
+
+```text
+texel.rgb * (ambientColor * ksAmbient
+  + sunColor * ksDiffuse * max(dot(normalize(worldNormal), normalize(sunDirection)), 0)
+  + emissive)
+```
+
+No specular, Fresnel, reflection, fog, shadows, alpha test, normal map, detail
+map, CSP light, or overlay behavior is implied by this fixture. It is a
+source-evidenced execution fixture for the explicitly bounded P3 slice, not a
+complete stock `ksPerPixel` implementation.
+
+Fixture identities:
+
+- Vertex source SHA-256: `71d50209737d8caa1b88261125bd59e2e417214772684f96b98fe98f9212d408`
+- Vertex SPIR-V SHA-256: `98b395551eaa3f269962a338645fad99c1e80df6bd2352d9bfab41d6c6a0765b`
+- Fragment source SHA-256: `defffb89e94d8149d3662c469621f3d7aed6f1bc82693a54dac1163e7bcd676f`
+- Fragment SPIR-V SHA-256: `c44686b795e26512d7a623c37a60ed646ddf1914e946959aebf8c8798a3c55eb`
+- Compiler: glslang `16.4.0`
+- Validator: SPIRV-Tools `2026.3` (`vulkan-sdk-1.4.357.0-0-g9a49b0883`)
+- Target: SPIR-V 1.0 for Vulkan 1.0

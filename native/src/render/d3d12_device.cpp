@@ -152,7 +152,9 @@ struct D3D12MaterialDescriptorBinding {
     D3D12_GPU_DESCRIPTOR_HANDLE srv_gpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE sampler_gpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE cbv_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE frame_cbv_gpu{};
     bool constant_enabled = false;
+    bool frame_enabled = false;
     bool enabled = false;
 };
 
@@ -166,12 +168,23 @@ struct D3D12MaterialDescriptorBinding {
     return false;
 }
 
+[[nodiscard]] bool d3d12_pipeline_has_frame_constants(const PipelineProgram& pipeline) noexcept {
+    for (const PipelineResourceBinding& resource : pipeline.resources) {
+        if (resource.set == 0U && resource.binding == 3U &&
+            resource.kind == PipelineResourceKind::uniform_buffer) {
+            return true;
+        }
+    }
+    return false;
+}
+
 [[nodiscard]] bool prepare_d3d12_material_binding(
     const std::shared_ptr<D3D12Context>& context,
     const IndexedStaticMeshDrawRequest& request,
     ID3D12DescriptorHeap* srv_heap,
     UINT srv_index,
     UINT cbv_index,
+    UINT frame_cbv_index,
     D3D12MaterialDescriptorBinding& output,
     Diagnostic& diagnostic);
 
@@ -1097,7 +1110,9 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
             return false;
         }
         const bool has_material_constants = d3d12_pipeline_has_material_constants(*request.pipeline);
-        srv_heap_description.NumDescriptors = has_material_constants ? 2U : 1U;
+        const bool has_frame_constants = d3d12_pipeline_has_frame_constants(*request.pipeline);
+        srv_heap_description.NumDescriptors = 1U + static_cast<UINT>(has_material_constants) +
+                                              static_cast<UINT>(has_frame_constants);
         srv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         srv_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         ComPtr<ID3D12DescriptorHeap> srv_heap;
@@ -1109,6 +1124,7 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
         }
         if (!prepare_d3d12_material_binding(context, *indexed_request, srv_heap.Get(), 0U,
                                              has_material_constants ? 1U : 0U,
+                                             has_frame_constants ? 1U + static_cast<UINT>(has_material_constants) : 0U,
                                              material_binding, diagnostic))
             return false;
     }
@@ -1122,7 +1138,9 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     D3D12_ROOT_PARAMETER sampler_parameter{};
     D3D12_DESCRIPTOR_RANGE cbv_range{};
     D3D12_ROOT_PARAMETER cbv_parameter{};
-    std::array<D3D12_ROOT_PARAMETER, 4> root_parameters{};
+    D3D12_DESCRIPTOR_RANGE frame_cbv_range{};
+    D3D12_ROOT_PARAMETER frame_cbv_parameter{};
+    std::array<D3D12_ROOT_PARAMETER, 5> root_parameters{};
     UINT root_parameter_count = 0U;
     if (draw_matrices != nullptr) {
         transform_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -1166,6 +1184,18 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
             cbv_parameter.DescriptorTable.pDescriptorRanges = &cbv_range;
             cbv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
             root_parameters[root_parameter_count++] = cbv_parameter;
+        }
+        if (d3d12_pipeline_has_frame_constants(*request.pipeline)) {
+            frame_cbv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+            frame_cbv_range.NumDescriptors = 1U;
+            frame_cbv_range.BaseShaderRegister = 3U;
+            frame_cbv_range.RegisterSpace = 0U;
+            frame_cbv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+            frame_cbv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            frame_cbv_parameter.DescriptorTable.NumDescriptorRanges = 1U;
+            frame_cbv_parameter.DescriptorTable.pDescriptorRanges = &frame_cbv_range;
+            frame_cbv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            root_parameters[root_parameter_count++] = frame_cbv_parameter;
         }
     }
     root_description.NumParameters = root_parameter_count;
@@ -1366,8 +1396,11 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
         const UINT resource_root_index = draw_matrices != nullptr ? 1U : 0U;
         list->SetGraphicsRootDescriptorTable(resource_root_index, material_binding.srv_gpu);
         list->SetGraphicsRootDescriptorTable(resource_root_index + 1U, material_binding.sampler_gpu);
+        UINT constant_root_index = resource_root_index + 2U;
         if (material_binding.constant_enabled)
-            list->SetGraphicsRootDescriptorTable(resource_root_index + 2U, material_binding.cbv_gpu);
+            list->SetGraphicsRootDescriptorTable(constant_root_index++, material_binding.cbv_gpu);
+        if (material_binding.frame_enabled)
+            list->SetGraphicsRootDescriptorTable(constant_root_index, material_binding.frame_cbv_gpu);
     }
     if (draw_matrices != nullptr) {
         list->SetGraphicsRoot32BitConstants(
@@ -1521,14 +1554,19 @@ bool draw_indexed_static_mesh_batch_and_readback(
     HRESULT result = S_OK;
     bool has_material_resources = false;
     bool has_material_constants = false;
+    bool has_frame_constants = false;
     for (const IndexedStaticMeshDrawRequest& request : batch.draws) {
         if (!request.pipeline->resources.empty()) {
             has_material_resources = true;
             has_material_constants = has_material_constants ||
                                      d3d12_pipeline_has_material_constants(*request.pipeline);
+            has_frame_constants = has_frame_constants ||
+                                  d3d12_pipeline_has_frame_constants(*request.pipeline);
         }
     }
-    const std::size_t material_descriptor_stride = has_material_constants ? 2U : 1U;
+    const std::size_t material_descriptor_stride =
+        1U + static_cast<std::size_t>(has_material_constants) +
+        static_cast<std::size_t>(has_frame_constants);
     if (has_material_resources &&
         (draws.size() > std::numeric_limits<std::size_t>::max() / material_descriptor_stride ||
          draws.size() * material_descriptor_stride > static_cast<std::size_t>(std::numeric_limits<UINT>::max()))) {
@@ -1556,6 +1594,9 @@ bool draw_indexed_static_mesh_batch_and_readback(
                                                  static_cast<UINT>(descriptor_index),
                                                  static_cast<UINT>(descriptor_index +
                                                                    (has_material_constants ? 1U : 0U)),
+                                                 static_cast<UINT>(descriptor_index +
+                                                                   (has_material_constants ? 1U : 0U) +
+                                                                   (has_frame_constants ? 1U : 0U)),
                                                  material_bindings[index], diagnostic))
                 return false;
         }
@@ -1595,7 +1636,9 @@ bool draw_indexed_static_mesh_batch_and_readback(
         D3D12_ROOT_PARAMETER sampler_parameter{};
         D3D12_DESCRIPTOR_RANGE cbv_range{};
         D3D12_ROOT_PARAMETER cbv_parameter{};
-        std::array<D3D12_ROOT_PARAMETER, 4> root_parameters{};
+        D3D12_DESCRIPTOR_RANGE frame_cbv_range{};
+        D3D12_ROOT_PARAMETER frame_cbv_parameter{};
+        std::array<D3D12_ROOT_PARAMETER, 5> root_parameters{};
         UINT root_parameter_count = 1U;
         root_parameters[0] = transform_parameter;
         if (!program.resources.empty()) {
@@ -1631,6 +1674,18 @@ bool draw_indexed_static_mesh_batch_and_readback(
                 cbv_parameter.DescriptorTable.pDescriptorRanges = &cbv_range;
                 cbv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
                 root_parameters[root_parameter_count++] = cbv_parameter;
+            }
+            if (d3d12_pipeline_has_frame_constants(program)) {
+                frame_cbv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+                frame_cbv_range.NumDescriptors = 1U;
+                frame_cbv_range.BaseShaderRegister = 3U;
+                frame_cbv_range.RegisterSpace = 0U;
+                frame_cbv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+                frame_cbv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                frame_cbv_parameter.DescriptorTable.NumDescriptorRanges = 1U;
+                frame_cbv_parameter.DescriptorTable.pDescriptorRanges = &frame_cbv_range;
+                frame_cbv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                root_parameters[root_parameter_count++] = frame_cbv_parameter;
             }
         }
         D3D12_ROOT_SIGNATURE_DESC root_description{};
@@ -1833,8 +1888,11 @@ bool draw_indexed_static_mesh_batch_and_readback(
         if (!material_bindings.empty() && material_bindings[index].enabled) {
             list->SetGraphicsRootDescriptorTable(1U, material_bindings[index].srv_gpu);
             list->SetGraphicsRootDescriptorTable(2U, material_bindings[index].sampler_gpu);
+            UINT constant_root_index = 3U;
             if (material_bindings[index].constant_enabled)
-                list->SetGraphicsRootDescriptorTable(3U, material_bindings[index].cbv_gpu);
+                list->SetGraphicsRootDescriptorTable(constant_root_index++, material_bindings[index].cbv_gpu);
+            if (material_bindings[index].frame_enabled)
+                list->SetGraphicsRootDescriptorTable(constant_root_index, material_bindings[index].frame_cbv_gpu);
         }
         list->SetPipelineState(pipelines[index].Get());
         list->IASetPrimitiveTopology(d3d12_pipeline_topology(draw.pipeline->raster.fill));
@@ -2158,6 +2216,7 @@ bool prepare_d3d12_material_binding(
     ID3D12DescriptorHeap* srv_heap,
     UINT srv_index,
     UINT cbv_index,
+    UINT frame_cbv_index,
     D3D12MaterialDescriptorBinding& output,
     Diagnostic& diagnostic) {
     output = {};
@@ -2169,7 +2228,8 @@ bool prepare_d3d12_material_binding(
     if (request.pipeline->resources.empty()) {
         if (request.sampled_binding.texture != nullptr || request.sampled_binding.sampler != nullptr ||
             request.material_binding.buffer != nullptr || request.material_binding.offset_bytes != 0U ||
-            request.material_binding.range_bytes != 0U) {
+            request.material_binding.range_bytes != 0U || request.frame_binding.buffer != nullptr ||
+            request.frame_binding.offset_bytes != 0U || request.frame_binding.range_bytes != 0U) {
             diagnostic = {"indexed_resource_binding_unexpected",
                           "A resource-free D3D12 pipeline cannot receive material bindings"};
             return false;
@@ -2222,8 +2282,10 @@ bool prepare_d3d12_material_binding(
         return false;
     }
     const bool has_material_constants = d3d12_pipeline_has_material_constants(*request.pipeline);
+    const bool has_frame_constants = d3d12_pipeline_has_frame_constants(*request.pipeline);
     if (srv_index >= heap_description.NumDescriptors ||
-        (has_material_constants && cbv_index >= heap_description.NumDescriptors)) {
+        (has_material_constants && cbv_index >= heap_description.NumDescriptors) ||
+        (has_frame_constants && frame_cbv_index >= heap_description.NumDescriptors)) {
         diagnostic = {"indexed_resource_descriptor_slot_invalid",
                       "D3D12 material descriptor slot is outside its bounded shader-visible heap"};
         return false;
@@ -2237,13 +2299,20 @@ bool prepare_d3d12_material_binding(
     }
     const UINT descriptor_size = context->device->GetDescriptorHandleIncrementSize(
         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-    const UINT64 srv_offset = static_cast<UINT64>(srv_index) * descriptor_size;
-    const UINT64 cbv_offset = static_cast<UINT64>(cbv_index) * descriptor_size;
     if (descriptor_size == 0U ||
         static_cast<UINT64>(srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
         static_cast<UINT64>(cbv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
-        srv_offset > std::numeric_limits<SIZE_T>::max() ||
-        cbv_offset > std::numeric_limits<SIZE_T>::max()) {
+        static_cast<UINT64>(frame_cbv_index) > std::numeric_limits<UINT64>::max() / descriptor_size) {
+        diagnostic = {"indexed_resource_descriptor_offset_overflow",
+                      "D3D12 material descriptor offset exceeds handle addressability"};
+        return false;
+    }
+    const UINT64 srv_offset = static_cast<UINT64>(srv_index) * descriptor_size;
+    const UINT64 cbv_offset = static_cast<UINT64>(cbv_index) * descriptor_size;
+    const UINT64 frame_cbv_offset = static_cast<UINT64>(frame_cbv_index) * descriptor_size;
+    if (srv_offset > std::numeric_limits<SIZE_T>::max() ||
+        cbv_offset > std::numeric_limits<SIZE_T>::max() ||
+        frame_cbv_offset > std::numeric_limits<SIZE_T>::max()) {
         diagnostic = {"indexed_resource_descriptor_offset_overflow",
                       "D3D12 material descriptor offset exceeds handle addressability"};
         return false;
@@ -2352,6 +2421,84 @@ bool prepare_d3d12_material_binding(
         context->device->CreateConstantBufferView(&cbv, cbv_cpu);
         output.cbv_gpu = cbv_gpu;
         output.constant_enabled = true;
+    }
+    if (has_frame_constants) {
+        const auto* frame_buffer = dynamic_cast<const D3D12Buffer*>(request.frame_binding.buffer);
+        if (frame_buffer == nullptr) {
+            diagnostic = {"indexed_frame_buffer_type_unsupported",
+                          "The D3D12 frame constants binding did not reference a D3D12 buffer"};
+            return false;
+        }
+        if (frame_buffer->context() != context.get()) {
+            diagnostic = {"indexed_frame_buffer_context_mismatch",
+                          "D3D12 frame constants belong to another device"};
+            return false;
+        }
+        if (frame_buffer->resource() == nullptr || frame_buffer->info().description.usage != BufferUsage::uniform) {
+            diagnostic = {"indexed_frame_buffer_usage_invalid",
+                          "D3D12 frame constants require an initialized uniform buffer"};
+            return false;
+        }
+        constexpr UINT required_buffer_state =
+            static_cast<UINT>(D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+        if ((static_cast<UINT>(frame_buffer->state()) & required_buffer_state) == 0U) {
+            diagnostic = {"indexed_frame_buffer_state_invalid",
+                          "D3D12 frame constants are not in constant-buffer state"};
+            return false;
+        }
+        const std::uint64_t offset = request.frame_binding.offset_bytes;
+        constexpr std::uint64_t range = portable_frame_buffer_view_bytes;
+        const std::uint64_t buffer_size = frame_buffer->info().description.size_bytes;
+        if (offset % portable_frame_buffer_view_bytes != 0U ||
+            request.frame_binding.range_bytes != portable_frame_buffer_view_bytes ||
+            offset > buffer_size || range > buffer_size - offset) {
+            diagnostic = {"indexed_frame_buffer_range_invalid",
+                          "D3D12 frame constants require one bounded 256-byte buffer view"};
+            return false;
+        }
+        const D3D12_RESOURCE_DESC resource_description = frame_buffer->resource()->GetDesc();
+        if (offset > resource_description.Width || range > resource_description.Width - offset) {
+            diagnostic = {"indexed_frame_buffer_range_invalid",
+                          "D3D12 frame constants exceed the native resource size"};
+            return false;
+        }
+        const UINT64 gpu_base = frame_buffer->resource()->GetGPUVirtualAddress();
+        if (gpu_base == 0U || gpu_base > std::numeric_limits<UINT64>::max() - offset) {
+            diagnostic = {"indexed_frame_buffer_gpu_address_invalid",
+                          "D3D12 frame constants GPU address is unavailable or overflows"};
+            return false;
+        }
+        const UINT64 gpu_address = gpu_base + offset;
+        if (gpu_address > std::numeric_limits<UINT64>::max() - range) {
+            diagnostic = {"indexed_frame_buffer_gpu_address_invalid",
+                          "D3D12 frame constants GPU view range overflows"};
+            return false;
+        }
+        if ((gpu_address % D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT) != 0U) {
+            diagnostic = {"indexed_frame_buffer_alignment_invalid",
+                          "D3D12 frame constants require a 256-byte aligned GPU address"};
+            return false;
+        }
+        D3D12_CPU_DESCRIPTOR_HANDLE frame_cpu = srv_heap->GetCPUDescriptorHandleForHeapStart();
+        if (frame_cpu.ptr > std::numeric_limits<SIZE_T>::max() - static_cast<SIZE_T>(frame_cbv_offset)) {
+            diagnostic = {"indexed_resource_descriptor_offset_overflow",
+                          "D3D12 frame CBV descriptor CPU handle overflows"};
+            return false;
+        }
+        frame_cpu.ptr += static_cast<SIZE_T>(frame_cbv_offset);
+        D3D12_GPU_DESCRIPTOR_HANDLE frame_gpu = srv_heap->GetGPUDescriptorHandleForHeapStart();
+        if (frame_gpu.ptr > std::numeric_limits<UINT64>::max() - frame_cbv_offset) {
+            diagnostic = {"indexed_resource_descriptor_offset_overflow",
+                          "D3D12 frame CBV descriptor GPU handle overflows"};
+            return false;
+        }
+        frame_gpu.ptr += frame_cbv_offset;
+        D3D12_CONSTANT_BUFFER_VIEW_DESC frame_cbv{};
+        frame_cbv.BufferLocation = gpu_address;
+        frame_cbv.SizeInBytes = static_cast<UINT>(range);
+        context->device->CreateConstantBufferView(&frame_cbv, frame_cpu);
+        output.frame_cbv_gpu = frame_gpu;
+        output.frame_enabled = true;
     }
     output.enabled = true;
     return true;

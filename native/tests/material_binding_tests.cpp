@@ -169,6 +169,42 @@ void external_override_and_limits() {
     require(threw, "string limit must be enforced");
 }
 
+void rejects_oversized_state_overrides() {
+    Kn5Material material;
+    material.shader = "ksPerPixel";
+    MaterialBindingLimits limits;
+    limits.max_string_bytes = 32U;
+
+    const auto require_rejected = [&](MaterialBindingOverrides overrides,
+                                      std::string_view message) {
+        bool threw = false;
+        try {
+            (void)build_material_binding(material, 0, &overrides, limits);
+        } catch (const MaterialBindingError& error) {
+            threw = true;
+            require(error.code() == "string_limit", message);
+        }
+        require(threw, message);
+    };
+
+    const std::string oversized(33U, 'x');
+    MaterialBindingOverrides shader;
+    shader.shader = oversized;
+    require_rejected(shader, "oversized CSP shader override is rejected");
+
+    MaterialBindingOverrides blend;
+    blend.blend_mode = oversized;
+    require_rejected(blend, "oversized CSP blend-mode override is rejected");
+
+    MaterialBindingOverrides depth;
+    depth.depth_mode = oversized;
+    require_rejected(depth, "oversized CSP depth-mode override is rejected");
+
+    MaterialBindingOverrides cull;
+    cull.cull_mode = oversized;
+    require_rejected(cull, "oversized CSP cull-mode override is rejected");
+}
+
 void resolves_ks_per_pixel_defaults_and_kn5_values() {
     Kn5Material material;
     material.shader = "ksPerPixel";
@@ -320,6 +356,7 @@ int main() {
         missing_and_duplicate_resources();
         unknown_and_bind_point_references();
         external_override_and_limits();
+        rejects_oversized_state_overrides();
         resolves_ks_per_pixel_defaults_and_kn5_values();
         adapts_the_bounded_kn5_parser_model();
         resolves_ks_per_pixel_csp_precedence_and_alpha_capture();

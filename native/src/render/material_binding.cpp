@@ -259,6 +259,14 @@ MaterialBinding build_material_binding(const Kn5Material& material, std::size_t 
     NodeMaterialInput node_input{material.transparent};
     MaterialOverride profile_override;
     if (overrides) {
+        if (overrides->shader.has_value())
+            check_string(*overrides->shader, "CSP shader override", limits);
+        if (overrides->blend_mode.has_value())
+            check_string(*overrides->blend_mode, "CSP blend-mode override", limits);
+        if (overrides->depth_mode.has_value())
+            check_string(*overrides->depth_mode, "CSP depth-mode override", limits);
+        if (overrides->cull_mode.has_value())
+            check_string(*overrides->cull_mode, "CSP cull-mode override", limits);
         profile_override.shader = overrides->shader;
         profile_override.blend_mode = overrides->blend_mode;
         profile_override.depth_mode = overrides->depth_mode;

@@ -72,6 +72,26 @@ bool finite_material_constants(const KsPerPixelMaterialConstants& constants) noe
     return true;
 }
 
+bool finite_frame_constants(const KsPerPixelFrameConstants& constants) noexcept {
+    for (const float value : constants.sun_direction)
+        if (!std::isfinite(value)) return false;
+    for (const float value : constants.sun_color)
+        if (!std::isfinite(value)) return false;
+    for (const float value : constants.ambient_color)
+        if (!std::isfinite(value)) return false;
+    for (const float value : constants.camera_position)
+        if (!std::isfinite(value)) return false;
+    return true;
+}
+
+bool valid_frame_sun_direction(const KsPerPixelFrameConstants& constants) noexcept {
+    const double x = constants.sun_direction[0];
+    const double y = constants.sun_direction[1];
+    const double z = constants.sun_direction[2];
+    const double length_squared = x * x + y * y + z * z;
+    return std::isfinite(length_squared) && length_squared > 1.0e-12;
+}
+
 StaticSceneResourceStatus map_upload_status(StaticMeshUploadStatus status) noexcept {
     switch (status) {
     case StaticMeshUploadStatus::ready: return StaticSceneResourceStatus::ready;
@@ -382,6 +402,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
     std::uint64_t validation_bytes = 0U;
     std::optional<bool> batch_has_depth;
     std::optional<PipelineRenderTargetFormat> batch_color_format;
+    bool requires_frame_constants = false;
     for (std::size_t packet_index = 0U; packet_index < request.packets.size(); ++packet_index) {
         const DrawPacket& packet = request.packets[packet_index];
         const auto node_index = static_cast<std::size_t>(packet.node);
@@ -519,7 +540,11 @@ StaticSceneResourceResult prepare_static_scene_resources(
                             "A txDiffuse packet resource does not match its active scoped global KN5 texture");
             texture_for_packet[packet_index] = diffuse.texture_index;
         }
-        if (material_layout == IndexedPortableResourceLayout::diffuse_with_constants) {
+        if (material_layout == IndexedPortableResourceLayout::diffuse_with_frame ||
+            material_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame)
+            requires_frame_constants = true;
+        if (material_layout == IndexedPortableResourceLayout::diffuse_with_constants ||
+            material_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame) {
             if (limits.max_material_constant_buffers == 0U ||
                 limits.max_total_material_constant_bytes == 0U)
                 return fail(StaticSceneResourceStatus::invalid_request,
@@ -576,6 +601,12 @@ StaticSceneResourceResult prepare_static_scene_resources(
         pipeline_for_packet[packet_index] = pipeline_by_material[material_index];
     }
 
+    if (requires_frame_constants &&
+        limits.max_total_frame_constant_bytes < portable_frame_buffer_view_bytes)
+        return fail(StaticSceneResourceStatus::invalid_request,
+                    "static_scene_frame_constant_aggregate_limit",
+                    "The frame-constant buffer exceeds the static-scene aggregate limit");
+
     std::vector<std::optional<DecodedDdsTexturePlan>> decoded_textures;
     if (embedded_textures) {
         decoded_textures.resize(model.textures.size());
@@ -598,9 +629,22 @@ StaticSceneResourceResult prepare_static_scene_resources(
                             "static_scene_texture_source_aggregate_limit",
                             "Used embedded KN5 texture bytes exceed the aggregate limit");
 
+            const std::uint64_t remaining_decoded_bytes =
+                limits.max_total_decoded_texture_bytes - total_decoded_bytes;
+            apex::core::ParseLimits decode_limits = limits.texture_decode;
+            decode_limits.maxOutputBytes = std::min(
+                decode_limits.maxOutputBytes,
+                static_cast<std::size_t>(std::min<std::uint64_t>(
+                    remaining_decoded_bytes,
+                    std::numeric_limits<std::size_t>::max())));
             DecodedDdsTexturePlanResult decoded = plan_decoded_dds_texture(
-                source_texture.data, source_texture.name, limits.texture_decode);
+                source_texture.data, source_texture.name, decode_limits);
             if (!decoded.ok()) {
+                if (decoded.diagnostic.code == "output_too_large" &&
+                    decode_limits.maxOutputBytes < limits.texture_decode.maxOutputBytes)
+                    return fail(StaticSceneResourceStatus::invalid_request,
+                                "static_scene_texture_decode_aggregate_limit",
+                                "Decoded embedded KN5 textures exceed the aggregate limit");
                 const StaticSceneResourceStatus status =
                     decoded.status == TextureUploadStatus::unsupported
                         ? StaticSceneResourceStatus::unsupported
@@ -652,6 +696,16 @@ StaticSceneResourceResult prepare_static_scene_resources(
         if (!buffer.ok())
             return {map_buffer_status(buffer.status), std::move(buffer.diagnostic), nullptr};
         resources->owned_material_constants_.push_back(std::move(buffer.buffer));
+    }
+    if (requires_frame_constants) {
+        std::array<std::byte, portable_frame_buffer_view_bytes> bytes{};
+        const BufferDescription description{
+            bytes.size(), BufferUsage::uniform, BufferMemory::device_local,
+            BufferMutability::mutable_data};
+        BufferResult buffer = device.create_buffer(description, bytes);
+        if (!buffer.ok())
+            return {map_buffer_status(buffer.status), std::move(buffer.diagnostic), nullptr};
+        resources->owned_frame_constants_ = std::move(buffer.buffer);
     }
     if (resources->has_texture_resources_ &&
         request.texture_authority == StaticSceneTextureAuthority::embedded_kn5) {
@@ -739,6 +793,26 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         return {IndexedStaticMeshBatchStatus::invalid_request,
                 {"static_scene_resource_table_size_invalid",
                  "Static-scene texture and sampler tables must match the final KN5 texture count"}, {}};
+
+    if (owns_frame_constants()) {
+        if (!frame.frame_constants.has_value())
+            return {IndexedStaticMeshBatchStatus::invalid_request,
+                    {"static_scene_frame_constants_missing",
+                     "A prepared pipeline requires per-frame constants"}, {}};
+        if (!finite_frame_constants(*frame.frame_constants))
+            return {IndexedStaticMeshBatchStatus::invalid_request,
+                    {"static_scene_frame_constants_non_finite",
+                     "Per-frame constants must contain only finite values"}, {}};
+        if (!valid_frame_sun_direction(*frame.frame_constants))
+            return {IndexedStaticMeshBatchStatus::invalid_request,
+                    {"static_scene_frame_sun_direction_invalid",
+                     "Per-frame lighting requires a nonzero sun direction"}, {}};
+        if (owned_frame_constants_->info().description.size_bytes <
+            portable_frame_buffer_view_bytes)
+            return {IndexedStaticMeshBatchStatus::invalid_request,
+                    {"static_scene_frame_constant_range_invalid",
+                     "The owned frame-constant buffer is smaller than its portable view"}, {}};
+    }
 
     const auto packet_for_frame = [&](std::size_t index) -> const DrawPacket& {
         return frame.refreshed_packets.empty() ? packets_[index] : frame.refreshed_packets[index];
@@ -866,6 +940,18 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
                 owned_material_constants_[material_index].get(), 0U,
                 portable_material_buffer_view_bytes};
         }
+        const IndexedPortableResourceLayout resource_layout =
+            classify_indexed_portable_resource_layout(*draw->pipeline);
+        if (resource_layout == IndexedPortableResourceLayout::diffuse_with_frame ||
+            resource_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame) {
+            if (!owns_frame_constants())
+                return {IndexedStaticMeshBatchStatus::invalid_request,
+                        {"static_scene_owned_frame_constant_missing",
+                         "A used pipeline requires an owned frame-constant buffer"}, {}};
+            draw->resource_authority = IndexedResourceAuthority::explicit_bindings;
+            draw->frame_binding = {
+                owned_frame_constants_.get(), 0U, portable_frame_buffer_view_bytes};
+        }
         draws.push_back(std::move(*draw));
     }
     const IndexedStaticMeshBatchDescription batch{
@@ -876,8 +962,12 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         validate_indexed_static_mesh_batch_description(target, batch, batch_diagnostic);
     if (batch_validation != IndexedStaticMeshBatchStatus::ready)
         return {batch_validation, std::move(batch_diagnostic), {}};
-    // Every frame pose and every draw/resource mapping is now validated. Only
-    // after this point may a mutable skinned buffer be touched.
+    // Every frame pose, frame/resource mapping, and draw contract is now
+    // validated. Backend updates are sequential, so a runtime upload failure
+    // can leave earlier mutable uploads committed even though no batch is
+    // submitted. A caller can safely retry the complete frame. Commit the
+    // shared frame record last so a failed skin upload cannot advance lighting
+    // independently of the requested pose.
     for (PendingSkinUpdate& pending : pending_skin_updates) {
         SkinnedMeshPoseUpdateResult committed = skinned_uploads_[pending.upload_index]->commit_pose(
             device, *pending.packet, pending.vertices);
@@ -886,6 +976,34 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
                         ? IndexedStaticMeshBatchStatus::unsupported
                         : IndexedStaticMeshBatchStatus::execution_failed,
                     std::move(committed.diagnostic), {}};
+    }
+    if (owns_frame_constants()) {
+        std::array<std::byte, portable_frame_buffer_view_bytes> bytes{};
+        std::memcpy(bytes.data(), &*frame.frame_constants,
+                    sizeof(*frame.frame_constants));
+        Diagnostic update_diagnostic;
+        const BufferStatus range_status = validate_buffer_update(
+            *owned_frame_constants_, 0U, bytes.size(), update_diagnostic);
+        if (range_status != BufferStatus::ready)
+            return {range_status == BufferStatus::unsupported
+                        ? IndexedStaticMeshBatchStatus::unsupported
+                        : range_status == BufferStatus::invalid_description
+                              ? IndexedStaticMeshBatchStatus::invalid_request
+                              : IndexedStaticMeshBatchStatus::execution_failed,
+                    {"static_scene_frame_constant_range_invalid",
+                     update_diagnostic.message}, {}};
+        const BufferUpdateResult updated =
+            device.update_buffer(*owned_frame_constants_, 0U, bytes);
+        if (!updated.ok())
+            return {updated.status == BufferStatus::unsupported
+                        ? IndexedStaticMeshBatchStatus::unsupported
+                        : updated.status == BufferStatus::invalid_description
+                              ? IndexedStaticMeshBatchStatus::invalid_request
+                              : IndexedStaticMeshBatchStatus::execution_failed,
+                    {updated.diagnostic.code.empty()
+                         ? "static_scene_frame_constant_update_failed"
+                         : updated.diagnostic.code,
+                     updated.diagnostic.message}, {}};
     }
     return device.draw_indexed_static_mesh_batch_and_readback(target, batch);
 }

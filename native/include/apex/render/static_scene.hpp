@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -33,6 +34,9 @@ struct StaticSceneResourceLimits {
     std::uint64_t max_total_index_bytes = 256ULL * 1024ULL * 1024ULL;
     std::uint64_t max_total_shader_bytes = 64ULL * 1024ULL * 1024ULL;
     std::uint64_t max_total_material_constant_bytes = 1ULL * 1024ULL * 1024ULL;
+    // One D3D12/Vulkan-aligned frame record is allocated when a prepared
+    // pipeline declares the portable frame binding.
+    std::uint64_t max_total_frame_constant_bytes = portable_frame_buffer_view_bytes;
     std::uint64_t max_total_update_bytes = 512ULL * 1024ULL * 1024ULL;
     // Counts full source payloads once per packet. This limit bounds repeated
     // validation work when many packets reference one large mesh.
@@ -87,6 +91,10 @@ struct StaticSceneFrameDescription {
     // true, each skinned upload is CPU-skinned from refreshed_packets (or the
     // prepared packets when the span is empty) before the batch is submitted.
     bool apply_skinning = false;
+    // Optional per-frame values for pipelines that declare set 0/binding 3.
+    // The prepared scene validates and uploads one bounded record before the
+    // ordered batch is recorded.
+    std::optional<KsPerPixelFrameConstants> frame_constants;
     // For caller_tables authority, these non-owning tables use the final
     // Kn5File::textures ordering. When a prepared packet uses txDiffuse, both
     // lengths must equal the final texture count. Used entries must remain
@@ -109,10 +117,16 @@ public:
     [[nodiscard]] std::size_t owned_material_constant_count() const noexcept {
         return owned_material_constants_.size();
     }
+    [[nodiscard]] bool owns_frame_constants() const noexcept {
+        return owned_frame_constants_ != nullptr;
+    }
 
     // Keep the preparing device alive and use it for every draw. The call is
     // synchronous. The target and optional depth attachment must remain alive
-    // until it returns.
+    // until it returns. Input validation is failure-atomic. Backend buffer
+    // updates are sequential: an upload failure prevents batch submission but
+    // can leave earlier successful mutable updates committed. Retry the full
+    // frame after such a failure.
     [[nodiscard]] IndexedStaticMeshBatchResult draw_and_readback(
         Device& device, Texture& target,
         const StaticSceneFrameDescription& frame);
@@ -132,6 +146,7 @@ private:
     std::vector<std::size_t> material_constant_for_packet_;
     std::vector<std::unique_ptr<Texture>> owned_textures_;
     std::vector<std::unique_ptr<Buffer>> owned_material_constants_;
+    std::unique_ptr<Buffer> owned_frame_constants_;
     std::unique_ptr<Sampler> owned_sampler_;
     std::size_t texture_count_ = 0U;
     bool has_texture_resources_ = false;

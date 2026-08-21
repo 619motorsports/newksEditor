@@ -138,6 +138,11 @@ TextureStatus validate_texture_upload_plan(const TextureDescription& description
         diagnostic = {"texture_subresource_limit", "Texture upload subresources exceed the backend-neutral safety limit"};
         return TextureStatus::invalid_description;
     }
+    if (uploads.subresources.size() > 65535U) {
+        diagnostic = {"texture_upload_subresource_count",
+                      "The texture upload plan exceeds the bounded subresource-entry limit"};
+        return TextureStatus::invalid_description;
+    }
     if (!texture_format_is_known(description.format)) {
         diagnostic = {"texture_format_unknown", "The texture format is not recognized by the native contract"};
         return TextureStatus::unsupported;
@@ -561,11 +566,13 @@ IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
     const PipelineProgram& pipeline) noexcept {
     if (pipeline.resources.empty())
         return IndexedPortableResourceLayout::resource_free;
-    if (pipeline.resources.size() != 2U && pipeline.resources.size() != 3U)
+    if (pipeline.resources.size() != 2U && pipeline.resources.size() != 3U &&
+        pipeline.resources.size() != 4U)
         return IndexedPortableResourceLayout::unsupported;
     bool sampled_texture = false;
     bool sampler = false;
     bool material_constants = false;
+    bool frame_constants = false;
     for (const PipelineResourceBinding& resource : pipeline.resources) {
         if (resource.set == 0U && resource.binding == 0U &&
             resource.kind == PipelineResourceKind::sampled_texture) {
@@ -579,16 +586,24 @@ IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
                    resource.kind == PipelineResourceKind::uniform_buffer) {
             if (material_constants) return IndexedPortableResourceLayout::unsupported;
             material_constants = true;
+        } else if (resource.set == 0U && resource.binding == 3U &&
+                   resource.kind == PipelineResourceKind::uniform_buffer) {
+            if (frame_constants) return IndexedPortableResourceLayout::unsupported;
+            frame_constants = true;
         } else {
             return IndexedPortableResourceLayout::unsupported;
         }
     }
     if (!sampled_texture || !sampler)
         return IndexedPortableResourceLayout::unsupported;
-    if (pipeline.resources.size() == 2U && !material_constants)
+    if (pipeline.resources.size() == 2U && !material_constants && !frame_constants)
         return IndexedPortableResourceLayout::diffuse;
-    if (pipeline.resources.size() == 3U && material_constants)
+    if (pipeline.resources.size() == 3U && material_constants && !frame_constants)
         return IndexedPortableResourceLayout::diffuse_with_constants;
+    if (pipeline.resources.size() == 3U && !material_constants && frame_constants)
+        return IndexedPortableResourceLayout::diffuse_with_frame;
+    if (pipeline.resources.size() == 4U && material_constants && frame_constants)
+        return IndexedPortableResourceLayout::diffuse_with_constants_and_frame;
     return IndexedPortableResourceLayout::unsupported;
 }
 
@@ -801,10 +816,14 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     const bool has_material_buffer = request.material_binding.buffer != nullptr;
     const bool has_material_range = request.material_binding.offset_bytes != 0U ||
                                     request.material_binding.range_bytes != 0U;
+    const bool has_frame_buffer = request.frame_binding.buffer != nullptr;
+    const bool has_frame_range = request.frame_binding.offset_bytes != 0U ||
+                                 request.frame_binding.range_bytes != 0U;
     const IndexedPortableResourceLayout resource_layout =
         classify_indexed_portable_resource_layout(pipeline);
     if (resource_layout == IndexedPortableResourceLayout::resource_free) {
         if (has_sampled_texture || has_sampler || has_material_buffer || has_material_range ||
+            has_frame_buffer || has_frame_range ||
             request.resource_authority != IndexedResourceAuthority::packet_contract) {
             diagnostic = {"indexed_resource_binding_unexpected",
                           "A resource-free pipeline cannot receive explicit material bindings"};
@@ -818,11 +837,15 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     } else {
         if (resource_layout == IndexedPortableResourceLayout::unsupported) {
             diagnostic = {"indexed_resource_layout_unsupported",
-                          "The portable material ABI requires one texture, one sampler, and at most one constants buffer"};
+                          "The portable material ABI requires one texture, one sampler, and optional material/frame buffers"};
             return IndexedStaticMeshDrawStatus::unsupported;
         }
         const bool material_declaration =
-            resource_layout == IndexedPortableResourceLayout::diffuse_with_constants;
+            resource_layout == IndexedPortableResourceLayout::diffuse_with_constants ||
+            resource_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame;
+        const bool frame_declaration =
+            resource_layout == IndexedPortableResourceLayout::diffuse_with_frame ||
+            resource_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame;
         if (request.resource_authority != IndexedResourceAuthority::explicit_bindings) {
             diagnostic = {"indexed_resource_execution_staged",
                           "Material resources require explicit request-local binding authority"};
@@ -866,6 +889,41 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                     material.size_bytes - request.material_binding.offset_bytes) {
                 diagnostic = {"indexed_material_buffer_range_invalid",
                               "The material buffer view exceeds the declared buffer size"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+        }
+        if (frame_declaration != has_frame_buffer || (!frame_declaration && has_frame_range)) {
+            diagnostic = {frame_declaration ? "indexed_frame_buffer_missing"
+                                            : "indexed_frame_buffer_unexpected",
+                          frame_declaration
+                              ? "The portable lighting ABI requires its frame constants buffer"
+                              : "The diffuse/material ABI cannot receive a frame constants buffer"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        if (frame_declaration) {
+            const Buffer& frame_buffer = *request.frame_binding.buffer;
+            if (frame_buffer.backend() != texture.backend()) {
+                diagnostic = {"indexed_frame_buffer_backend_mismatch",
+                              "Frame constants and the color target must use the same backend"};
+                return IndexedStaticMeshDrawStatus::unsupported;
+            }
+            const BufferDescription& frame = frame_buffer.info().description;
+            if (frame.usage != BufferUsage::uniform) {
+                diagnostic = {"indexed_frame_buffer_usage_invalid",
+                              "The portable frame constants buffer requires exclusive uniform usage"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+            if (request.frame_binding.offset_bytes % portable_frame_buffer_view_bytes != 0U ||
+                request.frame_binding.range_bytes != portable_frame_buffer_view_bytes) {
+                diagnostic = {"indexed_frame_buffer_alignment_invalid",
+                              "Frame constants buffer views require a 256-byte aligned offset and 256-byte range"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+            if (request.frame_binding.offset_bytes > frame.size_bytes ||
+                static_cast<std::uint64_t>(request.frame_binding.range_bytes) >
+                    frame.size_bytes - request.frame_binding.offset_bytes) {
+                diagnostic = {"indexed_frame_buffer_range_invalid",
+                              "The frame constants buffer view exceeds the declared buffer size"};
                 return IndexedStaticMeshDrawStatus::invalid_request;
             }
         }

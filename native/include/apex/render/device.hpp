@@ -388,8 +388,23 @@ struct KsPerPixelMaterialConstants {
 static_assert(sizeof(KsPerPixelMaterialConstants) == 48U);
 static_assert(std::is_trivially_copyable_v<KsPerPixelMaterialConstants>);
 
+// Per-frame directional lighting values follow the production WebGL
+// ksPerPixel binder. The camera slot is reserved for the next specular slice;
+// the current directional-diffuse fixture does not read it.
+struct KsPerPixelFrameConstants {
+    std::array<float, 4> sun_direction = {0.0F, 1.0F, 0.0F, 0.0F};
+    std::array<float, 4> sun_color = {1.0F, 1.0F, 1.0F, 0.0F};
+    std::array<float, 4> ambient_color = {0.2F, 0.2F, 0.2F, 0.0F};
+    std::array<float, 4> camera_position = {0.0F, 0.0F, 0.0F, 0.0F};
+};
+
+static_assert(sizeof(KsPerPixelFrameConstants) == 64U);
+static_assert(std::is_trivially_copyable_v<KsPerPixelFrameConstants>);
+
 inline constexpr std::uint32_t portable_material_constant_bytes = 48U;
 inline constexpr std::uint32_t portable_material_buffer_view_bytes = 256U;
+inline constexpr std::uint32_t portable_frame_constant_bytes = 64U;
+inline constexpr std::uint32_t portable_frame_buffer_view_bytes = 256U;
 
 struct IndexedMaterialBufferBinding {
     // Non-owning. Keep this buffer alive until the synchronous draw returns.
@@ -400,10 +415,21 @@ struct IndexedMaterialBufferBinding {
     std::uint32_t range_bytes = 0U;
 };
 
+struct IndexedFrameBufferBinding {
+    // Non-owning. Keep this buffer alive until the synchronous draw returns.
+    // The executable pipeline must declare a uniform buffer at set 0/binding
+    // 3. The view is one D3D12/Vulkan-aligned 256-byte record.
+    const Buffer* buffer = nullptr;
+    std::uint64_t offset_bytes = 0U;
+    std::uint32_t range_bytes = 0U;
+};
+
 enum class IndexedPortableResourceLayout : std::uint8_t {
     resource_free,
     diffuse,
     diffuse_with_constants,
+    diffuse_with_frame,
+    diffuse_with_constants_and_frame,
     unsupported,
 };
 
@@ -451,6 +477,7 @@ struct IndexedStaticMeshDrawRequest {
     IndexedResourceAuthority resource_authority = IndexedResourceAuthority::packet_contract;
     IndexedSampledTextureBinding sampled_binding{};
     IndexedMaterialBufferBinding material_binding{};
+    IndexedFrameBufferBinding frame_binding{};
 };
 
 enum class IndexedStaticMeshDrawStatus {

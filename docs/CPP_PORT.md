@@ -118,16 +118,28 @@ remains unchanged and feature-complete.
   one aligned material record. Its first 48 bytes use the current WebGL
   `ksPerPixel` defaults in a port-defined std140/HLSL-compatible layout.
   Vulkan maps it to a uniform descriptor.
-  D3D12 maps it to `b2`. Per-draw pixel tests prove transport, but not the
-  complete lighting formula. This remains a test ABI, not recovered stock KN5
-  or CSP behavior. A bounded resolver reads parsed KN5 values and typed CSP
+  D3D12 maps it to `b2`. The executor also accepts one optional frame record at
+  binding 3. D3D12 maps this record to `b3`.
+  The first 64 bytes contain the sun direction, sun color, ambient color, and
+  a reserved camera position. Static scenes own one bounded mutable record and
+  update it before an ordered batch.
+  Both backends execute the source-evidenced ambient, directional diffuse, and
+  emissive equation. Known-pixel tests cover light reversal, frame updates,
+  and per-draw frame selection. This fixture does not include specular,
+  Fresnel, reflections, fog, shadows, alpha tests, normal maps, detail maps,
+  CSP lights, or overlays. This remains a bounded test ABI, not a complete
+  stock KN5 or CSP shader. A bounded resolver reads parsed KN5 values and typed CSP
   overrides. It preserves override precedence and WebGL emissive conversion.
+  The resolver rejects oversized CSP shader, blend, depth, and cull strings
+  before profile selection.
   A bounded static-scene adapter validates the complete packet set before
   allocation. It uploads each static node once and retains duplicate ordered
   draws. It owns one mutable skinned upload for each skinned packet.
   A frame can supply new world matrices and bone palettes. The adapter computes
   all skinned vertices before it updates the first buffer. It restores exact
-  bind-pose bytes when animation is not active.
+  bind-pose bytes when animation is not active. Backend uploads are sequential:
+  a failed upload prevents batch submission but can leave earlier successful
+  mutable uploads committed. Retrying the complete frame restores consistency.
   It owns one 256-byte material buffer per used material. Duplicate packets
   reuse the same buffer. Count and byte limits bound these allocations.
   Caller-supplied SPIR-V or DXIL pipelines authorize only their local requests.
@@ -177,7 +189,11 @@ remains unchanged and feature-complete.
   shader contract uses these camera matrices. The static-scene adapter can
   dispatch bounded resource-free packets and the portable `txDiffuse` pair.
   It can also bind a source-valued material record for explicitly authorized
-  pipelines. The record table uses final material order. Preparation copies
+  pipelines. An explicitly authorized pipeline can also bind one source-valued
+  frame-light record. Vulkan uses descriptor bindings 2 and 3 for these
+  records. D3D12 uses `b2` and `b3`.
+  The frame record drives the exact bounded WebGL equation for ambient,
+  directional diffuse, and emissive output. The record table uses final material order. Preparation copies
   only used records and rejects non-finite values before backend allocation.
   One authority resolves the pair through caller-owned tables in the final KN5
   texture order. A second authority owns the used embedded KN5 textures. This
@@ -215,11 +231,20 @@ SHA-256 is
 This gate proves override consumption. Source inspection remains the authority
 for absent-property defaults and emissive normalization.
 
+The production WebGL lighting gate uses `GEO_Fabric1` from the repository car.
+All 63 embedded textures were ready, and WebGL reported no errors. The capture
+at a sun height of 55 degrees had hash `9eb6de45a8e0c07f`. The capture at 10
+degrees had hash `cb993d752a7af5db`. This difference proves that the production
+lighting path responds to the sun direction. It does not prove native pixel
+parity for the complete `ksPerPixelMultiMap_NMDetail` shader.
+
 DDS BC7 has a bounded CPU decoder with differential fixtures for all eight
 modes. BC6H remains explicit and requires a GPU path. The checked upload
 planner supports DX10 2D arrays and cubemaps. It also converts legacy RGB24 to
 RGBA8 without a color change. The embedded static-scene path uses the bounded
-CPU decoder for supported 2D mip chains. This path retains the DDS sRGB flag.
+CPU decoder for supported 2D mip chains. Each decode receives the remaining
+aggregate byte budget before it allocates output. Upload plans also reject
+subresource-entry floods before iteration. This path retains the DDS sRGB flag.
 It rejects arrays, cubemaps, BC6H, and legacy D3D9 float data. This portable
 decode does not prove native compressed-resource or stock-shader parity.
 
