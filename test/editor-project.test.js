@@ -65,9 +65,9 @@ test("normalizes skin metadata edits as non-CSP project fields", () => {
 test("classifies surface edits without marking scene geometry as changed", () => {
   const before = createEditorProject({ name: "track.kn5", size: 42, kn5Version: 6 }), surface = cloneEditorProject(before);
   surface.surfaceEdits["0"] = { friction: 1.05 };
-  assert.deepEqual(classifyEditorProjectChanges(before, surface), { geometryChanged: false, nodeChanged: false, workspaceChanged: false, surfaceChanged: true, skinChanged: false, colliderChanged: false, sceneChanged: false });
+  assert.deepEqual(classifyEditorProjectChanges(before, surface), { geometryChanged: false, nodeChanged: false, workspaceChanged: false, surfaceChanged: true, skinChanged: false, colliderChanged: false, damageChanged: false, sceneChanged: false });
   const node = cloneEditorProject(surface); node.nodeEdits["0"] = { active: false };
-  assert.deepEqual(classifyEditorProjectChanges(surface, node), { geometryChanged: false, nodeChanged: true, workspaceChanged: false, surfaceChanged: false, skinChanged: false, colliderChanged: false, sceneChanged: true });
+  assert.deepEqual(classifyEditorProjectChanges(surface, node), { geometryChanged: false, nodeChanged: true, workspaceChanged: false, surfaceChanged: false, skinChanged: false, colliderChanged: false, damageChanged: false, sceneChanged: true });
 });
 
 test("normalizes collider geometry edits as non-CSP project fields", () => {
@@ -89,6 +89,52 @@ test("drops malformed collider identity without applying it to old projects", ()
   assert.equal(createEditorProject().colliderAsset, null);
   const orphan = normalizeEditorProject({ format: "apex-editor-project", version: 1, colliderAsset: { name: "collider.kn5", size: 10, sha256: "ab".repeat(32) } });
   assert.equal(orphan.colliderAsset, null);
+});
+
+test("normalizes car damage edits as separate non-CSP project fields", () => {
+  const damageAsset = { name: "data/damage.ini", size: 500, sha256: "cd".repeat(32) };
+  const project = normalizeEditorProject({ format: "apex-editor-project", version: 1, damageAsset, damageEdits: {
+    SCRATCHES: { minSpeed: 0, maxSpeed: 30, enabled: true },
+    DAMAGE: { initialLevel: 40 },
+    VISUAL_OBJECT_0: { name: "HOOD_DAMAGE", damageZone: "front", staticRotationAxis: [1, 0, 0], fullSpeed: 90 },
+    VISUAL_OBJECT_1: { name: "bad;name", damageZone: "bad zone", staticRotationAxis: [1, 2], minSpeed: -1 }
+  } });
+  assert.deepEqual(project.damageAsset, damageAsset);
+  assert.deepEqual(project.damageEdits.SCRATCHES, { minSpeed: 0, maxSpeed: 30 });
+  assert.deepEqual(project.damageEdits.DAMAGE, { initialLevel: 40 });
+  assert.deepEqual(project.damageEdits.VISUAL_OBJECT_0, { name: "HOOD_DAMAGE", staticRotationAxis: [1, 0, 0], damageZone: "FRONT", fullSpeed: 90 });
+  assert.equal(project.damageEdits.VISUAL_OBJECT_1, undefined);
+  assert.equal(editorProjectEditCount(project), 7);
+  assert.equal(editorProjectCspEditCount(project), 0);
+  assert.doesNotMatch(serializeEditorCsp(project), /damage/i);
+  assert.equal(createEditorProject().damageAsset, null);
+});
+
+test("keeps stale car damage edits but drops their malformed identity", () => {
+  const project = normalizeEditorProject({ format: "apex-editor-project", version: 1, damageAsset: { name: "damage.ini", size: 10, sha256: "short" }, damageEdits: { OSCILLATIONS: { enabled: false } } });
+  assert.equal(project.damageAsset, null);
+  assert.deepEqual(project.damageEdits.OSCILLATIONS, { enabled: false });
+});
+
+test("normalizes bottom-collider edits as separate non-CSP project fields", () => {
+  const bottomColliderAsset = { name: "data/colliders.ini", size: 95, sha256: "cd".repeat(32) };
+  const project = normalizeEditorProject({ format: "apex-editor-project", version: 1, bottomColliderAsset, bottomColliderEdits: {
+    "0": { centre: [0.1, -0.3, 0.6], size: [1.9, 0.2, 4], groundEnabled: false },
+    "1": { centre: [1e999, 0, 0], size: [1e-50, 1, 1], groundEnabled: "no" }
+  } });
+  assert.deepEqual(project.bottomColliderAsset, bottomColliderAsset);
+  assert.deepEqual(project.bottomColliderEdits["0"], { centre: [0.1, -0.3, 0.6], size: [1.9, 0.2, 4], groundEnabled: false });
+  assert.equal(project.bottomColliderEdits["1"], undefined);
+  assert.equal(editorProjectEditCount(project), 3);
+  assert.equal(editorProjectCspEditCount(project), 0);
+  assert.doesNotMatch(serializeEditorCsp(project), /collider/i);
+  assert.equal(createEditorProject().bottomColliderAsset, null);
+});
+
+test("keeps stale bottom-collider edits but drops their malformed identity", () => {
+  const project = normalizeEditorProject({ format: "apex-editor-project", version: 1, bottomColliderAsset: { name: "colliders.ini", size: 10, sha256: "short" }, bottomColliderEdits: { "0": { groundEnabled: false } } });
+  assert.equal(project.bottomColliderAsset, null);
+  assert.deepEqual(project.bottomColliderEdits["0"], { groundEnabled: false });
 });
 
 test("parses and formats scalar and vector editor values", () => {

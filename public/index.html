@@ -24,6 +24,7 @@
       <select id="skin-select" hidden aria-label="Car or track skin"><option value="">Embedded textures</option></select>
       <select id="animation-select" hidden aria-label="KSANIM animation"><option value="">Bind pose</option></select>
       <label id="animation-position-control" class="toolbar-range" hidden><span>Animation</span><input id="animation-position" type="range" min="0" max="1" step="0.001" value="0"><output id="animation-position-output">0.000</output></label>
+      <label id="analog-rpm-control" class="toolbar-range" hidden><span>RPM</span><input id="analog-rpm" type="range" min="1000" max="15000" step="10" value="1000"><output id="analog-rpm-output">1,000 rpm</output></label>
       <select id="lod-preview" hidden aria-label="Car LOD preview"><option value="auto">LOD auto (45° camera)</option></select>
       <label id="dynamic-track-seed-control" class="toolbar-range" hidden title="Use a reproducible MSVCR120 random state for native dynamic-object sampling"><span>Object seed</span><input id="dynamic-track-seed" type="number" min="0" max="4294967295" step="1" value="1"></label>
       <button id="dynamic-track-play" hidden disabled title="Play native dynamic-object velocity updates">Play objects</button>
@@ -35,8 +36,8 @@
       <button id="collider-overlay" hidden disabled title="Overlay collider.kn5 on the active car LOD">Collider overlay</button>
       <button id="surface-overlay" hidden disabled title="Color physics meshes by their exact runtime surface binding">Surface physics</button>
       <button id="grass-fx-toggle" hidden disabled title="Toggle the generated CSP GrassFX authoring preview">GrassFX</button>
-      <button id="rain-fx-toggle" hidden disabled title="Toggle the CSP RainFX wet-surface authoring preview">RainFX</button>
-      <label id="rain-wetness-control" class="toolbar-range" hidden><span>Wetness</span><input id="rain-wetness" type="range" min="0" max="1" step="0.01" value="1"><output id="rain-wetness-output">1.00</output></label>
+      <button id="rain-fx-toggle" hidden disabled title="Toggle the CSP RainFX and GrassFX weather preview">RainFX</button>
+      <label id="rain-wetness-control" class="toolbar-range" hidden><span>Rain / snow</span><input id="rain-wetness" type="range" min="-1" max="1" step="0.01" value="1"><output id="rain-wetness-output">1.00</output></label>
       <label id="tyre-blur-control" class="toolbar-range" hidden title="Preview the stock tyre blurLevel input"><span>Tyre blur</span><input id="tyre-blur" type="range" min="0" max="1" step="0.01" value="0"><output id="tyre-blur-output">0.00</output></label>
       <label id="tyre-dirt-control" class="toolbar-range" hidden title="Preview the stock tyre dirtyLevel input"><span>Tyre dirt</span><input id="tyre-dirt" type="range" min="0" max="1" step="0.01" value="0"><output id="tyre-dirt-output">0.00</output></label>
       <label id="brake-temperature-control" class="toolbar-range" hidden title="Preview the recovered stock brake-disc temperature response"><span>Disc temp</span><input id="brake-temperature" type="range" min="0" max="200" step="1" value="10"><output id="brake-temperature-output">10 °C</output></label>

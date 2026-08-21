@@ -97,6 +97,20 @@ export function brakeDiscGlowTarget(temperatureValue, maxGlowValue, multiplierVa
   return maxGlow * multiplier * saturate((Math.abs(temperature) - 10) / 150);
 }
 
+/** Return the independent front and rear steady-state targets shown by the inspector. */
+export function brakeDiscGlowTargets(temperatureValue, frontMaxGlowValue, rearMaxGlowValue) {
+  return {
+    frontGlowLevel: brakeDiscGlowTarget(temperatureValue, frontMaxGlowValue),
+    rearGlowLevel: brakeDiscGlowTarget(temperatureValue, rearMaxGlowValue)
+  };
+}
+
+/** Keep an unresolved wheel dark instead of guessing an axle. */
+export function brakeDiscGlowForAxle(temperatureValue, axle, frontMaxGlowValue, rearMaxGlowValue) {
+  const maximum = axle === "front" ? frontMaxGlowValue : axle === "rear" ? rearMaxGlowValue : 0;
+  return brakeDiscGlowTarget(temperatureValue, maximum);
+}
+
 /** Reproduce one runtime hot/cool lag step. */
 export function brakeDiscGlowStep(currentValue, targetValue, deltaTimeValue, lagHotValue, lagCoolValue) {
   const current = finiteNumber(currentValue, "Current brake glow"), target = finiteNumber(targetValue, "Target brake glow"), deltaTime = nonnegative(deltaTimeValue, "Brake glow delta time"), lagHot = nonnegative(lagHotValue, "Hot brake lag"), lagCool = nonnegative(lagCoolValue, "Cool brake lag");

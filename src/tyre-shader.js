@@ -66,19 +66,25 @@ export function stockTyreFresnelCap(fresnelMaxLevel, dirtyLevelValue) {
   return level * Math.max(0, Math.min(1, 1 - dirtyLevel));
 }
 
-/** Audit the resources required for the exact stock tyre path. */
-export function auditStockTyreMaterials(materials = []) {
+/** Audit declared tyre slots, and only call a path exact when every resolved texture is usable. */
+export function auditStockTyreMaterials(materials = [], resourceUsable = null) {
   if (!Array.isArray(materials)) throw new TypeError("Tyre material audit needs an array");
+  if (resourceUsable !== null && typeof resourceUsable !== "function") throw new TypeError("Tyre resource validation must be a function");
   const entries = [];
   for (let materialId = 0; materialId < materials.length; materialId++) {
     const material = materials[materialId];
     if (!isStockTyreShader(material?.shader)) continue;
-    const slots = new Set((Array.isArray(material?.resources) ? material.resources : []).map((resource) => String(resource?.slot || "").toLowerCase()));
-    const missingResources = REQUIRED_TYRE_RESOURCES.filter((slot) => !slots.has(slot.toLowerCase()));
-    entries.push({ materialId, name: String(material?.name || `Material ${materialId}`), shader: material.shader, complete: missingResources.length === 0, missingResources });
+    const resources = Array.isArray(material?.resources) ? material.resources : [], bySlot = new Map(resources.map((resource) => [String(resource?.slot || "").toLowerCase(), resource]));
+    const missingResources = REQUIRED_TYRE_RESOURCES.filter((slot) => {
+      const resource = bySlot.get(slot.toLowerCase());
+      return !resource || (resourceUsable ? !resourceUsable(material, resource, slot, materialId) : false);
+    });
+    const declaredComplete = REQUIRED_TYRE_RESOURCES.every((slot) => bySlot.has(slot.toLowerCase())), verified = Boolean(resourceUsable), complete = verified && missingResources.length === 0;
+    entries.push({ materialId, name: String(material?.name || `Material ${materialId}`), shader: material.shader, declaredComplete, verified, complete, missingResources });
   }
   return {
     materials: entries.length,
+    declaredCompleteMaterials: entries.filter((entry) => entry.declaredComplete).length,
     completeMaterials: entries.filter((entry) => entry.complete).length,
     incompleteMaterials: entries.filter((entry) => !entry.complete).length,
     entries
