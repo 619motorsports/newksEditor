@@ -25,6 +25,19 @@ The sampled shader identities are:
 - Compiler: glslang `16.4.0`
 - Target: SPIR-V 1.0 for Vulkan 1.0
 
+`indexed_static_mesh_material.frag` extends the portable diffuse ABI with one
+uniform buffer at set 0, binding 2. D3D12 maps the same record to `b2`. The
+fixture reads the port-packed `KsPerPixelMaterialConstants` values. Its
+small output equation proves constant transport and per-draw selection. It is
+not the complete production lighting equation.
+
+The material fixture identities are:
+
+- Fragment source SHA-256: `0b39c1820e2a1176ca78fd4c3e070076dec79b6e356cd72d83d4f4f1ab65e2b7`
+- Fragment SPIR-V SHA-256: `4686b1f9145bf11e2f018280d091a97c9a34064d6f868f551859168732fdc355`
+- Compiler: glslang `16.4.0`
+- Target: SPIR-V 1.0 for Vulkan 1.0
+
 The embedded transform artifact has these identities:
 
 - Source SHA-256: `0e97d9331b5f3f84b07018c48919c88a3f53e7efede1e07830c649678f3f65c1`
@@ -61,6 +74,13 @@ sha256sum native/tests/shaders/indexed_static_mesh_sampled.vert \
   /tmp/apex_indexed_sampled_vert.spv \
   native/tests/shaders/indexed_static_mesh_sampled.frag \
   /tmp/apex_indexed_sampled_frag.spv
+
+glslangValidator -V --target-env vulkan1.0 -Os -g0 -S frag \
+  -o /tmp/apex_indexed_material_frag.spv \
+  native/tests/shaders/indexed_static_mesh_material.frag
+spirv-val --target-env vulkan1.0 /tmp/apex_indexed_material_frag.spv
+sha256sum native/tests/shaders/indexed_static_mesh_material.frag \
+  /tmp/apex_indexed_material_frag.spv
 ```
 
 `render_backend_tests.cpp` contains the embedded SPIR-V bytes. Windows uses

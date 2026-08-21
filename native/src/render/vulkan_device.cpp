@@ -185,6 +185,8 @@ struct VulkanContext {
     std::mutex command_mutex;
     bool sampler_anisotropy = false;
     float max_sampler_anisotropy = 1.0F;
+    VkDeviceSize max_uniform_buffer_range = 0U;
+    VkDeviceSize min_uniform_buffer_offset_alignment = 1U;
     DeviceInfo info;
 
     VulkanContext(Instance instance_value,
@@ -194,10 +196,16 @@ struct VulkanContext {
                   std::uint32_t family,
                   DeviceInfo info_value,
                   bool sampler_anisotropy_value,
-                  float max_sampler_anisotropy_value)
+                  float max_sampler_anisotropy_value,
+                  VkDeviceSize max_uniform_buffer_range_value,
+                  VkDeviceSize min_uniform_buffer_offset_alignment_value)
         : instance(std::move(instance_value)), physical_device(physical), device(device_value),
           queue(queue_value), queue_family(family), sampler_anisotropy(sampler_anisotropy_value),
-          max_sampler_anisotropy(max_sampler_anisotropy_value), info(std::move(info_value)) {}
+          max_sampler_anisotropy(max_sampler_anisotropy_value),
+          max_uniform_buffer_range(max_uniform_buffer_range_value),
+          min_uniform_buffer_offset_alignment(min_uniform_buffer_offset_alignment_value == 0U
+                                                  ? 1U : min_uniform_buffer_offset_alignment_value),
+          info(std::move(info_value)) {}
 
     ~VulkanContext() {
         if (device != VK_NULL_HANDLE) {
@@ -1227,28 +1235,36 @@ struct VulkanIndexedBatchDraw {
     VkImage sampled_image = VK_NULL_HANDLE;
     VkImageView sampled_view = VK_NULL_HANDLE;
     VkSampler sampled_sampler = VK_NULL_HANDLE;
+    bool has_material_binding = false;
+    VkBuffer material_buffer = VK_NULL_HANDLE;
+    VkDeviceSize material_offset = 0U;
+    VkDeviceSize material_range = 0U;
 };
 
-// The portable diffuse ABI uses one sampled image and one sampler. Descriptor
-// objects are transient because indexed batches are synchronous and the
-// backend waits for the submitted fence before returning.
+// The portable resource ABI uses one sampled image, one sampler, and an
+// optional constants buffer. Descriptor objects are transient because indexed
+// batches are synchronous and the backend waits for the submitted fence before
+// returning.
 struct VulkanTransientSampledDescriptors {
     std::shared_ptr<VulkanContext> context;
     VkDescriptorSetLayout layout = VK_NULL_HANDLE;
     VkDescriptorPool pool = VK_NULL_HANDLE;
+    bool includes_material_buffer = false;
 
     VulkanTransientSampledDescriptors() = default;
     VulkanTransientSampledDescriptors(const VulkanTransientSampledDescriptors&) = delete;
     VulkanTransientSampledDescriptors& operator=(const VulkanTransientSampledDescriptors&) = delete;
     VulkanTransientSampledDescriptors(VulkanTransientSampledDescriptors&& other) noexcept
         : context(std::move(other.context)), layout(std::exchange(other.layout, VK_NULL_HANDLE)),
-          pool(std::exchange(other.pool, VK_NULL_HANDLE)) {}
+          pool(std::exchange(other.pool, VK_NULL_HANDLE)),
+          includes_material_buffer(std::exchange(other.includes_material_buffer, false)) {}
     VulkanTransientSampledDescriptors& operator=(VulkanTransientSampledDescriptors&& other) noexcept {
         if (this == &other) return *this;
         reset();
         context = std::move(other.context);
         layout = std::exchange(other.layout, VK_NULL_HANDLE);
         pool = std::exchange(other.pool, VK_NULL_HANDLE);
+        includes_material_buffer = std::exchange(other.includes_material_buffer, false);
         return *this;
     }
     ~VulkanTransientSampledDescriptors() { reset(); }
@@ -1260,6 +1276,7 @@ struct VulkanTransientSampledDescriptors {
         }
         pool = VK_NULL_HANDLE;
         layout = VK_NULL_HANDLE;
+        includes_material_buffer = false;
         context.reset();
     }
 };
@@ -1461,10 +1478,12 @@ bool create_batch_pipeline(const std::shared_ptr<VulkanContext>& context,
 
 bool create_sampled_descriptor_layout(const std::shared_ptr<VulkanContext>& context,
                                       VulkanTransientSampledDescriptors& descriptors,
+                                      bool includes_material_buffer,
                                       Diagnostic& diagnostic) {
     descriptors.reset();
     descriptors.context = context;
-    std::array<VkDescriptorSetLayoutBinding, 2> bindings{};
+    descriptors.includes_material_buffer = includes_material_buffer;
+    std::array<VkDescriptorSetLayoutBinding, 3> bindings{};
     bindings[0].binding = 0U;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     bindings[0].descriptorCount = 1U;
@@ -1473,9 +1492,13 @@ bool create_sampled_descriptor_layout(const std::shared_ptr<VulkanContext>& cont
     bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
     bindings[1].descriptorCount = 1U;
     bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[2].binding = 2U;
+    bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    bindings[2].descriptorCount = 1U;
+    bindings[2].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     VkDescriptorSetLayoutCreateInfo layout_info{};
     layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layout_info.bindingCount = static_cast<std::uint32_t>(bindings.size());
+    layout_info.bindingCount = includes_material_buffer ? static_cast<std::uint32_t>(bindings.size()) : 2U;
     layout_info.pBindings = bindings.data();
     const VkResult result = vkCreateDescriptorSetLayout(context->device, &layout_info, nullptr,
                                                         &descriptors.layout);
@@ -1494,26 +1517,31 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
                                       std::span<const VulkanIndexedBatchDraw> draws,
                                       std::vector<VkDescriptorSet>& sets,
                                       Diagnostic& diagnostic) {
-    std::size_t sampled_count = 0U;
+    std::size_t descriptor_count = 0U;
     for (const VulkanIndexedBatchDraw& draw : draws) {
-        if (draw.has_sampled_binding) ++sampled_count;
+        if (draw.has_sampled_binding || draw.has_material_binding) ++descriptor_count;
     }
-    if (sampled_count == 0U) return true;
-    if (sampled_count > max_indexed_static_mesh_batch_draws ||
-        sampled_count > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+    if (descriptor_count == 0U) return true;
+    if (descriptor_count > max_indexed_static_mesh_batch_draws ||
+        descriptor_count > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
         diagnostic = {"vulkan_descriptor_count_limit",
-                      "The sampled descriptor count exceeds the bounded indexed batch limit"};
+                      "The indexed descriptor count exceeds the bounded batch limit"};
         return false;
     }
-    VkDescriptorPoolSize pool_sizes[2]{};
+    // The layout always contains the diffuse bindings. Pool accounting must
+    // reserve every descriptor in every allocated set, even when a particular
+    // shader does not read one of the optional bindings.
+    VkDescriptorPoolSize pool_sizes[3]{};
     pool_sizes[0].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    pool_sizes[0].descriptorCount = static_cast<std::uint32_t>(sampled_count);
+    pool_sizes[0].descriptorCount = static_cast<std::uint32_t>(descriptor_count);
     pool_sizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLER;
-    pool_sizes[1].descriptorCount = static_cast<std::uint32_t>(sampled_count);
+    pool_sizes[1].descriptorCount = static_cast<std::uint32_t>(descriptor_count);
+    pool_sizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    pool_sizes[2].descriptorCount = static_cast<std::uint32_t>(descriptor_count);
     VkDescriptorPoolCreateInfo pool_info{};
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    pool_info.maxSets = static_cast<std::uint32_t>(sampled_count);
-    pool_info.poolSizeCount = 2U;
+    pool_info.maxSets = static_cast<std::uint32_t>(descriptor_count);
+    pool_info.poolSizeCount = descriptors.includes_material_buffer ? 3U : 2U;
     pool_info.pPoolSizes = pool_sizes;
     VkResult result = vkCreateDescriptorPool(context->device, &pool_info, nullptr, &descriptors.pool);
     if (result != VK_SUCCESS) {
@@ -1522,12 +1550,12 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
                                                           : "vulkan_descriptor_pool_failed";
         return false;
     }
-    std::vector<VkDescriptorSetLayout> layouts(sampled_count, descriptors.layout);
-    std::vector<VkDescriptorSet> allocated(sampled_count, VK_NULL_HANDLE);
+    std::vector<VkDescriptorSetLayout> layouts(descriptor_count, descriptors.layout);
+    std::vector<VkDescriptorSet> allocated(descriptor_count, VK_NULL_HANDLE);
     VkDescriptorSetAllocateInfo allocation{};
     allocation.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     allocation.descriptorPool = descriptors.pool;
-    allocation.descriptorSetCount = static_cast<std::uint32_t>(sampled_count);
+    allocation.descriptorSetCount = static_cast<std::uint32_t>(descriptor_count);
     allocation.pSetLayouts = layouts.data();
     result = vkAllocateDescriptorSets(context->device, &allocation, allocated.data());
     if (result != VK_SUCCESS) {
@@ -1540,28 +1568,45 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
     std::size_t next = 0U;
     for (std::size_t index = 0U; index < draws.size(); ++index) {
         const VulkanIndexedBatchDraw& draw = draws[index];
-        if (!draw.has_sampled_binding) continue;
+        if (!draw.has_sampled_binding && !draw.has_material_binding) continue;
         const VkDescriptorSet set = allocated[next++];
         VkDescriptorImageInfo image_info{};
         image_info.imageView = draw.sampled_view;
         image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         VkDescriptorImageInfo sampler_info{};
         sampler_info.sampler = draw.sampled_sampler;
-        std::array<VkWriteDescriptorSet, 2> writes{};
-        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = set;
-        writes[0].dstBinding = 0U;
-        writes[0].descriptorCount = 1U;
-        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-        writes[0].pImageInfo = &image_info;
-        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[1].dstSet = set;
-        writes[1].dstBinding = 1U;
-        writes[1].descriptorCount = 1U;
-        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-        writes[1].pImageInfo = &sampler_info;
-        vkUpdateDescriptorSets(context->device, static_cast<std::uint32_t>(writes.size()),
-                                writes.data(), 0U, nullptr);
+        VkDescriptorBufferInfo material_info{};
+        material_info.buffer = draw.material_buffer;
+        material_info.offset = draw.material_offset;
+        material_info.range = draw.material_range;
+        std::array<VkWriteDescriptorSet, 3> writes{};
+        std::uint32_t write_count = 0U;
+        if (draw.has_sampled_binding) {
+            writes[write_count].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[write_count].dstSet = set;
+            writes[write_count].dstBinding = 0U;
+            writes[write_count].descriptorCount = 1U;
+            writes[write_count].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+            writes[write_count].pImageInfo = &image_info;
+            ++write_count;
+            writes[write_count].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[write_count].dstSet = set;
+            writes[write_count].dstBinding = 1U;
+            writes[write_count].descriptorCount = 1U;
+            writes[write_count].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+            writes[write_count].pImageInfo = &sampler_info;
+            ++write_count;
+        }
+        if (draw.has_material_binding) {
+            writes[write_count].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[write_count].dstSet = set;
+            writes[write_count].dstBinding = 2U;
+            writes[write_count].descriptorCount = 1U;
+            writes[write_count].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            writes[write_count].pBufferInfo = &material_info;
+            ++write_count;
+        }
+        vkUpdateDescriptorSets(context->device, write_count, writes.data(), 0U, nullptr);
         sets[index] = set;
     }
     return true;
@@ -2094,10 +2139,14 @@ bool draw_indexed_batch_and_readback(
     }
 
     bool has_sampled_binding = false;
-    for (const VulkanIndexedBatchDraw& draw : draws)
+    bool has_material_binding = false;
+    for (const VulkanIndexedBatchDraw& draw : draws) {
         has_sampled_binding = has_sampled_binding || draw.has_sampled_binding;
+        has_material_binding = has_material_binding || draw.has_material_binding;
+    }
     VulkanTransientSampledDescriptors descriptors;
-    if (has_sampled_binding && !create_sampled_descriptor_layout(context, descriptors, diagnostic))
+    if ((has_sampled_binding || has_material_binding) &&
+        !create_sampled_descriptor_layout(context, descriptors, has_material_binding, diagnostic))
         return false;
 
     VkAttachmentDescription color_attachment{};
@@ -2182,7 +2231,7 @@ bool draw_indexed_batch_and_readback(
     }
 
     std::vector<VkDescriptorSet> descriptor_sets;
-    if (has_sampled_binding && !allocate_sampled_descriptor_sets(
+    if ((has_sampled_binding || has_material_binding) && !allocate_sampled_descriptor_sets(
                                   context, descriptors, draws, descriptor_sets, diagnostic)) {
         pipelines.clear();
         vkDestroyFramebuffer(context->device, framebuffer, nullptr);
@@ -2271,7 +2320,7 @@ bool draw_indexed_batch_and_readback(
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline);
             vkCmdPushConstants(command, pipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0U,
                                static_cast<std::uint32_t>(sizeof(DrawMatrices)), &draw.matrices);
-            if (draw.has_sampled_binding) {
+            if (!descriptor_sets.empty() && descriptor_sets[index] != VK_NULL_HANDLE) {
                 vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.layout,
                                         0U, 1U, &descriptor_sets[index], 0U, nullptr);
             }
@@ -2619,6 +2668,23 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
                                     VulkanIndexedBatchDraw& draw,
                                     Diagnostic& diagnostic) {
     if (request.pipeline == nullptr || request.pipeline->resources.empty()) return true;
+    bool sampled_declaration = false;
+    bool sampler_declaration = false;
+    bool material_declaration = false;
+    for (const PipelineResourceBinding& resource : request.pipeline->resources) {
+        if (resource.set != 0U) continue;
+        if (resource.binding == 0U && resource.kind == PipelineResourceKind::sampled_texture)
+            sampled_declaration = true;
+        else if (resource.binding == 1U && resource.kind == PipelineResourceKind::sampler)
+            sampler_declaration = true;
+        else if (resource.binding == 2U && resource.kind == PipelineResourceKind::uniform_buffer)
+            material_declaration = true;
+    }
+    if (!sampled_declaration || !sampler_declaration) {
+        diagnostic = {"vulkan_indexed_resource_layout_unsupported",
+                      "Vulkan indexed resources require set 0 texture and sampler bindings"};
+        return false;
+    }
     auto* sampled_texture = dynamic_cast<const VulkanTexture*>(request.sampled_binding.texture);
     auto* sampler = dynamic_cast<const VulkanSampler*>(request.sampled_binding.sampler);
     if (sampled_texture == nullptr || sampler == nullptr) {
@@ -2651,6 +2717,54 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
     draw.sampled_image = sampled_texture->image();
     draw.sampled_view = sampled_texture->view();
     draw.sampled_sampler = sampler->sampler();
+
+    if (material_declaration) {
+        const auto* material_buffer = dynamic_cast<const VulkanBuffer*>(request.material_binding.buffer);
+        if (material_buffer == nullptr) {
+            diagnostic = {"vulkan_indexed_material_buffer_type_unsupported",
+                          "Vulkan indexed material constants must use a Vulkan uniform buffer"};
+            return false;
+        }
+        if (material_buffer->context() != context) {
+            diagnostic = {"vulkan_indexed_material_buffer_context_mismatch",
+                          "Vulkan indexed material constants must belong to the draw device"};
+            return false;
+        }
+        const BufferDescription& description = material_buffer->info().description;
+        if (description.usage != BufferUsage::uniform) {
+            diagnostic = {"vulkan_indexed_material_buffer_usage_invalid",
+                          "Vulkan indexed material constants require exclusive uniform buffer usage"};
+            return false;
+        }
+        const std::uint64_t offset = request.material_binding.offset_bytes;
+        const std::uint64_t range = request.material_binding.range_bytes;
+        if (request.material_binding.range_bytes != portable_material_buffer_view_bytes) {
+            diagnostic = {"vulkan_indexed_material_buffer_range_invalid",
+                          "Vulkan indexed material constants require a 256-byte descriptor range"};
+            return false;
+        }
+        if (offset % portable_material_buffer_view_bytes != 0U ||
+            offset % context->min_uniform_buffer_offset_alignment != 0U) {
+            diagnostic = {"vulkan_indexed_material_buffer_alignment_invalid",
+                          "Vulkan indexed material constants offset violates the device uniform-buffer alignment"};
+            return false;
+        }
+        if (range > context->max_uniform_buffer_range || offset > description.size_bytes ||
+            range > description.size_bytes - offset || offset > std::numeric_limits<VkDeviceSize>::max()) {
+            diagnostic = {"vulkan_indexed_material_buffer_range_invalid",
+                          "Vulkan indexed material constants exceed the device or buffer range"};
+            return false;
+        }
+        if (material_buffer->raw().buffer == VK_NULL_HANDLE) {
+            diagnostic = {"vulkan_indexed_material_buffer_handle_invalid",
+                          "Vulkan indexed material constants contain a null buffer handle"};
+            return false;
+        }
+        draw.has_material_binding = true;
+        draw.material_buffer = material_buffer->raw().buffer;
+        draw.material_offset = static_cast<VkDeviceSize>(offset);
+        draw.material_range = static_cast<VkDeviceSize>(range);
+    }
     return true;
 }
 
@@ -3123,7 +3237,9 @@ DeviceResult create_vulkan_device(const DeviceOptions& options) {
     auto context = std::make_shared<VulkanContext>(std::move(instance), selected.handle, device, queue,
                                                    selected.graphics_queue_family, info_from(selected.properties),
                                                    supported_features.samplerAnisotropy == VK_TRUE,
-                                                   selected.properties.limits.maxSamplerAnisotropy);
+                                                   selected.properties.limits.maxSamplerAnisotropy,
+                                                   selected.properties.limits.maxUniformBufferRange,
+                                                   selected.properties.limits.minUniformBufferOffsetAlignment);
     const VkResult pool_result = vkCreateCommandPool(device, &command_pool_info, nullptr, &context->command_pool);
     if (pool_result != VK_SUCCESS) {
         DeviceResult failure;

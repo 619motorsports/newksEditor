@@ -151,14 +151,27 @@ struct D3D12MaterialDescriptorBinding {
     ComPtr<ID3D12DescriptorHeap> srv_heap;
     D3D12_GPU_DESCRIPTOR_HANDLE srv_gpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE sampler_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE cbv_gpu{};
+    bool constant_enabled = false;
     bool enabled = false;
 };
+
+[[nodiscard]] bool d3d12_pipeline_has_material_constants(const PipelineProgram& pipeline) noexcept {
+    for (const PipelineResourceBinding& resource : pipeline.resources) {
+        if (resource.set == 0U && resource.binding == 2U &&
+            resource.kind == PipelineResourceKind::uniform_buffer) {
+            return true;
+        }
+    }
+    return false;
+}
 
 [[nodiscard]] bool prepare_d3d12_material_binding(
     const std::shared_ptr<D3D12Context>& context,
     const IndexedStaticMeshDrawRequest& request,
     ID3D12DescriptorHeap* srv_heap,
     UINT srv_index,
+    UINT cbv_index,
     D3D12MaterialDescriptorBinding& output,
     Diagnostic& diagnostic);
 
@@ -1064,15 +1077,16 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     D3D12MaterialDescriptorBinding material_binding;
     if (!request.pipeline->resources.empty()) {
         D3D12_DESCRIPTOR_HEAP_DESC srv_heap_description{};
-        srv_heap_description.NumDescriptors = 1U;
-        srv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        srv_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-        ComPtr<ID3D12DescriptorHeap> srv_heap;
         if (indexed_request == nullptr) {
             diagnostic = {"indexed_resource_request_missing",
                           "D3D12 resource-enabled indexed drawing requires its indexed request"};
             return false;
         }
+        const bool has_material_constants = d3d12_pipeline_has_material_constants(*request.pipeline);
+        srv_heap_description.NumDescriptors = has_material_constants ? 2U : 1U;
+        srv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        srv_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        ComPtr<ID3D12DescriptorHeap> srv_heap;
         result = context->device->CreateDescriptorHeap(&srv_heap_description, IID_PPV_ARGS(&srv_heap));
         if (FAILED(result)) {
             diagnostic = hresult_error("CreateDescriptorHeap(indexed resource SRV)", result);
@@ -1080,6 +1094,7 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
             return false;
         }
         if (!prepare_d3d12_material_binding(context, *indexed_request, srv_heap.Get(), 0U,
+                                             has_material_constants ? 1U : 0U,
                                              material_binding, diagnostic))
             return false;
     }
@@ -1091,7 +1106,9 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     D3D12_DESCRIPTOR_RANGE sampler_range{};
     D3D12_ROOT_PARAMETER srv_parameter{};
     D3D12_ROOT_PARAMETER sampler_parameter{};
-    std::array<D3D12_ROOT_PARAMETER, 3> root_parameters{};
+    D3D12_DESCRIPTOR_RANGE cbv_range{};
+    D3D12_ROOT_PARAMETER cbv_parameter{};
+    std::array<D3D12_ROOT_PARAMETER, 4> root_parameters{};
     UINT root_parameter_count = 0U;
     if (draw_matrices != nullptr) {
         transform_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -1124,6 +1141,18 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
         sampler_parameter.DescriptorTable.pDescriptorRanges = &sampler_range;
         sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
         root_parameters[root_parameter_count++] = sampler_parameter;
+        if (d3d12_pipeline_has_material_constants(*request.pipeline)) {
+            cbv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+            cbv_range.NumDescriptors = 1U;
+            cbv_range.BaseShaderRegister = 2U;
+            cbv_range.RegisterSpace = 0U;
+            cbv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+            cbv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            cbv_parameter.DescriptorTable.NumDescriptorRanges = 1U;
+            cbv_parameter.DescriptorTable.pDescriptorRanges = &cbv_range;
+            cbv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            root_parameters[root_parameter_count++] = cbv_parameter;
+        }
     }
     root_description.NumParameters = root_parameter_count;
     root_description.pParameters = root_parameters.data();
@@ -1322,6 +1351,8 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
         const UINT resource_root_index = draw_matrices != nullptr ? 1U : 0U;
         list->SetGraphicsRootDescriptorTable(resource_root_index, material_binding.srv_gpu);
         list->SetGraphicsRootDescriptorTable(resource_root_index + 1U, material_binding.sampler_gpu);
+        if (material_binding.constant_enabled)
+            list->SetGraphicsRootDescriptorTable(resource_root_index + 2U, material_binding.cbv_gpu);
     }
     if (draw_matrices != nullptr) {
         list->SetGraphicsRoot32BitConstants(
@@ -1474,13 +1505,18 @@ bool draw_indexed_static_mesh_batch_and_readback(
 
     HRESULT result = S_OK;
     bool has_material_resources = false;
+    bool has_material_constants = false;
     for (const IndexedStaticMeshDrawRequest& request : batch.draws) {
         if (!request.pipeline->resources.empty()) {
             has_material_resources = true;
-            break;
+            has_material_constants = has_material_constants ||
+                                     d3d12_pipeline_has_material_constants(*request.pipeline);
         }
     }
-    if (has_material_resources && draws.size() > static_cast<std::size_t>(std::numeric_limits<UINT>::max())) {
+    const std::size_t material_descriptor_stride = has_material_constants ? 2U : 1U;
+    if (has_material_resources &&
+        (draws.size() > std::numeric_limits<std::size_t>::max() / material_descriptor_stride ||
+         draws.size() * material_descriptor_stride > static_cast<std::size_t>(std::numeric_limits<UINT>::max()))) {
         diagnostic = {"indexed_resource_descriptor_heap_size_invalid",
                       "D3D12 material descriptor heap size exceeds the descriptor-count limit"};
         return false;
@@ -1489,7 +1525,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
     std::vector<D3D12MaterialDescriptorBinding> material_bindings;
     if (has_material_resources) {
         D3D12_DESCRIPTOR_HEAP_DESC srv_heap_description{};
-        srv_heap_description.NumDescriptors = static_cast<UINT>(draws.size());
+        srv_heap_description.NumDescriptors = static_cast<UINT>(draws.size() * material_descriptor_stride);
         srv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         srv_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         result = context->device->CreateDescriptorHeap(&srv_heap_description, IID_PPV_ARGS(&srv_heap));
@@ -1500,8 +1536,12 @@ bool draw_indexed_static_mesh_batch_and_readback(
         }
         material_bindings.resize(draws.size());
         for (std::size_t index = 0; index < draws.size(); ++index) {
+            const std::size_t descriptor_index = index * material_descriptor_stride;
             if (!prepare_d3d12_material_binding(context, batch.draws[index], srv_heap.Get(),
-                                                 static_cast<UINT>(index), material_bindings[index], diagnostic))
+                                                 static_cast<UINT>(descriptor_index),
+                                                 static_cast<UINT>(descriptor_index +
+                                                                   (has_material_constants ? 1U : 0U)),
+                                                 material_bindings[index], diagnostic))
                 return false;
         }
     }
@@ -1538,7 +1578,9 @@ bool draw_indexed_static_mesh_batch_and_readback(
         D3D12_DESCRIPTOR_RANGE sampler_range{};
         D3D12_ROOT_PARAMETER srv_parameter{};
         D3D12_ROOT_PARAMETER sampler_parameter{};
-        std::array<D3D12_ROOT_PARAMETER, 3> root_parameters{};
+        D3D12_DESCRIPTOR_RANGE cbv_range{};
+        D3D12_ROOT_PARAMETER cbv_parameter{};
+        std::array<D3D12_ROOT_PARAMETER, 4> root_parameters{};
         UINT root_parameter_count = 1U;
         root_parameters[0] = transform_parameter;
         if (!program.resources.empty()) {
@@ -1563,6 +1605,18 @@ bool draw_indexed_static_mesh_batch_and_readback(
             sampler_parameter.DescriptorTable.pDescriptorRanges = &sampler_range;
             sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
             root_parameters[root_parameter_count++] = sampler_parameter;
+            if (d3d12_pipeline_has_material_constants(program)) {
+                cbv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+                cbv_range.NumDescriptors = 1U;
+                cbv_range.BaseShaderRegister = 2U;
+                cbv_range.RegisterSpace = 0U;
+                cbv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+                cbv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                cbv_parameter.DescriptorTable.NumDescriptorRanges = 1U;
+                cbv_parameter.DescriptorTable.pDescriptorRanges = &cbv_range;
+                cbv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                root_parameters[root_parameter_count++] = cbv_parameter;
+            }
         }
         D3D12_ROOT_SIGNATURE_DESC root_description{};
         root_description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
@@ -1763,6 +1817,8 @@ bool draw_indexed_static_mesh_batch_and_readback(
         if (!material_bindings.empty() && material_bindings[index].enabled) {
             list->SetGraphicsRootDescriptorTable(1U, material_bindings[index].srv_gpu);
             list->SetGraphicsRootDescriptorTable(2U, material_bindings[index].sampler_gpu);
+            if (material_bindings[index].constant_enabled)
+                list->SetGraphicsRootDescriptorTable(3U, material_bindings[index].cbv_gpu);
         }
         list->SetPipelineState(pipelines[index].Get());
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -2085,6 +2141,7 @@ bool prepare_d3d12_material_binding(
     const IndexedStaticMeshDrawRequest& request,
     ID3D12DescriptorHeap* srv_heap,
     UINT srv_index,
+    UINT cbv_index,
     D3D12MaterialDescriptorBinding& output,
     Diagnostic& diagnostic) {
     output = {};
@@ -2094,7 +2151,9 @@ bool prepare_d3d12_material_binding(
         return false;
     }
     if (request.pipeline->resources.empty()) {
-        if (request.sampled_binding.texture != nullptr || request.sampled_binding.sampler != nullptr) {
+        if (request.sampled_binding.texture != nullptr || request.sampled_binding.sampler != nullptr ||
+            request.material_binding.buffer != nullptr || request.material_binding.offset_bytes != 0U ||
+            request.material_binding.range_bytes != 0U) {
             diagnostic = {"indexed_resource_binding_unexpected",
                           "A resource-free D3D12 pipeline cannot receive material bindings"};
             return false;
@@ -2141,10 +2200,16 @@ bool prepare_d3d12_material_binding(
     }
     const D3D12_DESCRIPTOR_HEAP_DESC heap_description = srv_heap->GetDesc();
     if (heap_description.Type != D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
-        (heap_description.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) == 0U ||
-        srv_index >= heap_description.NumDescriptors) {
+        (heap_description.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) == 0U) {
         diagnostic = {"indexed_resource_descriptor_slot_invalid",
                       "D3D12 material SRV descriptor slot is outside its bounded shader-visible heap"};
+        return false;
+    }
+    const bool has_material_constants = d3d12_pipeline_has_material_constants(*request.pipeline);
+    if (srv_index >= heap_description.NumDescriptors ||
+        (has_material_constants && cbv_index >= heap_description.NumDescriptors)) {
+        diagnostic = {"indexed_resource_descriptor_slot_invalid",
+                      "D3D12 material descriptor slot is outside its bounded shader-visible heap"};
         return false;
     }
     const TextureDescription& texture_description = texture->info().description;
@@ -2156,17 +2221,31 @@ bool prepare_d3d12_material_binding(
     }
     const UINT descriptor_size = context->device->GetDescriptorHandleIncrementSize(
         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-    const UINT64 index = static_cast<UINT64>(srv_index);
-    if (descriptor_size == 0U || index > std::numeric_limits<SIZE_T>::max() / descriptor_size ||
-        index > std::numeric_limits<UINT64>::max() / descriptor_size) {
+    const UINT64 srv_offset = static_cast<UINT64>(srv_index) * descriptor_size;
+    const UINT64 cbv_offset = static_cast<UINT64>(cbv_index) * descriptor_size;
+    if (descriptor_size == 0U ||
+        static_cast<UINT64>(srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
+        static_cast<UINT64>(cbv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
+        srv_offset > std::numeric_limits<SIZE_T>::max() ||
+        cbv_offset > std::numeric_limits<SIZE_T>::max()) {
         diagnostic = {"indexed_resource_descriptor_offset_overflow",
                       "D3D12 material descriptor offset exceeds handle addressability"};
         return false;
     }
     D3D12_CPU_DESCRIPTOR_HANDLE cpu = srv_heap->GetCPUDescriptorHandleForHeapStart();
-    cpu.ptr += static_cast<SIZE_T>(index * descriptor_size);
+    if (cpu.ptr > std::numeric_limits<SIZE_T>::max() - static_cast<SIZE_T>(srv_offset)) {
+        diagnostic = {"indexed_resource_descriptor_offset_overflow",
+                      "D3D12 material SRV descriptor CPU handle overflows"};
+        return false;
+    }
+    cpu.ptr += static_cast<SIZE_T>(srv_offset);
     D3D12_GPU_DESCRIPTOR_HANDLE gpu = srv_heap->GetGPUDescriptorHandleForHeapStart();
-    gpu.ptr += index * descriptor_size;
+    if (gpu.ptr > std::numeric_limits<UINT64>::max() - srv_offset) {
+        diagnostic = {"indexed_resource_descriptor_offset_overflow",
+                      "D3D12 material SRV descriptor GPU handle overflows"};
+        return false;
+    }
+    gpu.ptr += srv_offset;
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
     srv.Format = format;
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -2179,6 +2258,85 @@ bool prepare_d3d12_material_binding(
     output.srv_heap = srv_heap;
     output.srv_gpu = gpu;
     output.sampler_gpu = sampler->gpu_descriptor();
+
+    if (has_material_constants) {
+        const auto* material_buffer = dynamic_cast<const D3D12Buffer*>(request.material_binding.buffer);
+        if (material_buffer == nullptr) {
+            diagnostic = {"indexed_material_buffer_type_unsupported",
+                          "The D3D12 material constants binding did not reference a D3D12 buffer"};
+            return false;
+        }
+        if (material_buffer->context() != context.get()) {
+            diagnostic = {"indexed_material_buffer_context_mismatch",
+                          "D3D12 material constants belong to another device"};
+            return false;
+        }
+        if (material_buffer->resource() == nullptr || material_buffer->info().description.usage != BufferUsage::uniform) {
+            diagnostic = {"indexed_material_buffer_usage_invalid",
+                          "D3D12 material constants require an initialized uniform buffer"};
+            return false;
+        }
+        constexpr UINT required_buffer_state =
+            static_cast<UINT>(D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+        if ((static_cast<UINT>(material_buffer->state()) & required_buffer_state) == 0U) {
+            diagnostic = {"indexed_material_buffer_state_invalid",
+                          "D3D12 material constants are not in constant-buffer state"};
+            return false;
+        }
+        const std::uint64_t offset = request.material_binding.offset_bytes;
+        constexpr std::uint64_t range = portable_material_buffer_view_bytes;
+        const std::uint64_t buffer_size = material_buffer->info().description.size_bytes;
+        if (offset % portable_material_buffer_view_bytes != 0U ||
+            request.material_binding.range_bytes != portable_material_buffer_view_bytes ||
+            offset > buffer_size || range > buffer_size - offset) {
+            diagnostic = {"indexed_material_buffer_range_invalid",
+                          "D3D12 material constants require one bounded 256-byte buffer view"};
+            return false;
+        }
+        const D3D12_RESOURCE_DESC resource_description = material_buffer->resource()->GetDesc();
+        if (offset > resource_description.Width || range > resource_description.Width - offset) {
+            diagnostic = {"indexed_material_buffer_range_invalid",
+                          "D3D12 material constants exceed the native resource size"};
+            return false;
+        }
+        const UINT64 gpu_base = material_buffer->resource()->GetGPUVirtualAddress();
+        if (gpu_base == 0U || gpu_base > std::numeric_limits<UINT64>::max() - offset) {
+            diagnostic = {"indexed_material_buffer_gpu_address_invalid",
+                          "D3D12 material constants GPU address is unavailable or overflows"};
+            return false;
+        }
+        const UINT64 gpu_address = gpu_base + offset;
+        if (gpu_address > std::numeric_limits<UINT64>::max() - range) {
+            diagnostic = {"indexed_material_buffer_gpu_address_invalid",
+                          "D3D12 material constants GPU view range overflows"};
+            return false;
+        }
+        if ((gpu_address % D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT) != 0U) {
+            diagnostic = {"indexed_material_buffer_alignment_invalid",
+                          "D3D12 material constants require a 256-byte aligned GPU address"};
+            return false;
+        }
+        D3D12_CPU_DESCRIPTOR_HANDLE cbv_cpu = srv_heap->GetCPUDescriptorHandleForHeapStart();
+        if (cbv_cpu.ptr > std::numeric_limits<SIZE_T>::max() - static_cast<SIZE_T>(cbv_offset)) {
+            diagnostic = {"indexed_resource_descriptor_offset_overflow",
+                          "D3D12 material CBV descriptor CPU handle overflows"};
+            return false;
+        }
+        cbv_cpu.ptr += static_cast<SIZE_T>(cbv_offset);
+        D3D12_GPU_DESCRIPTOR_HANDLE cbv_gpu = srv_heap->GetGPUDescriptorHandleForHeapStart();
+        if (cbv_gpu.ptr > std::numeric_limits<UINT64>::max() - cbv_offset) {
+            diagnostic = {"indexed_resource_descriptor_offset_overflow",
+                          "D3D12 material CBV descriptor GPU handle overflows"};
+            return false;
+        }
+        cbv_gpu.ptr += cbv_offset;
+        D3D12_CONSTANT_BUFFER_VIEW_DESC cbv{};
+        cbv.BufferLocation = gpu_address;
+        cbv.SizeInBytes = static_cast<UINT>(range);
+        context->device->CreateConstantBufferView(&cbv, cbv_cpu);
+        output.cbv_gpu = cbv_gpu;
+        output.constant_enabled = true;
+    }
     output.enabled = true;
     return true;
 }

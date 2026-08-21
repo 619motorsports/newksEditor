@@ -373,6 +373,33 @@ struct IndexedSampledTextureBinding {
     const Sampler* sampler = nullptr;
 };
 
+// Values and semantic order follow the current production WebGL ksPerPixel
+// binder. The std140/HLSL-compatible packing is this portable test ABI.
+// Shader execution remains a separate, explicitly authorized contract.
+struct KsPerPixelMaterialConstants {
+    // ksAmbient, ksDiffuse, ksSpecular, ksSpecularEXP.
+    std::array<float, 4> lighting = {0.35F, 0.80F, 0.20F, 30.0F};
+    // fresnelC, fresnelEXP, fresnelMaxLevel, opaque-main-pass alphaRef.
+    std::array<float, 4> fresnel = {0.0F, 5.0F, 0.05F, 0.0F};
+    // RGB emissive color and reserved padding.
+    std::array<float, 4> emissive = {0.0F, 0.0F, 0.0F, 0.0F};
+};
+
+static_assert(sizeof(KsPerPixelMaterialConstants) == 48U);
+static_assert(std::is_trivially_copyable_v<KsPerPixelMaterialConstants>);
+
+inline constexpr std::uint32_t portable_material_constant_bytes = 48U;
+inline constexpr std::uint32_t portable_material_buffer_view_bytes = 256U;
+
+struct IndexedMaterialBufferBinding {
+    // Non-owning. Keep this buffer alive until the synchronous draw returns.
+    const Buffer* buffer = nullptr;
+    std::uint64_t offset_bytes = 0U;
+    // The cross-backend view is one D3D12-aligned 256-byte record. The typed
+    // ksPerPixel values occupy its first 48 bytes.
+    std::uint32_t range_bytes = 0U;
+};
+
 inline constexpr std::uint32_t max_indexed_static_mesh_vertices = 10'000'000U;
 inline constexpr std::uint32_t max_indexed_static_mesh_indices = 20'000'000U;
 
@@ -411,6 +438,7 @@ struct IndexedStaticMeshDrawRequest {
     IndexedShaderAuthority shader_authority = IndexedShaderAuthority::packet_contract;
     IndexedResourceAuthority resource_authority = IndexedResourceAuthority::packet_contract;
     IndexedSampledTextureBinding sampled_binding{};
+    IndexedMaterialBufferBinding material_binding{};
 };
 
 enum class IndexedStaticMeshDrawStatus {

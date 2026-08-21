@@ -332,6 +332,77 @@ void validates_portable_diffuse_resource_contract() {
             "explicit resource authority rejected for a resource-free pipeline");
 }
 
+void validates_portable_material_buffer_contract() {
+    PipelineProgram pipeline = pipeline_fixture();
+    pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 2U, "ksPerPixelMaterial"},
+    };
+    DrawPacket packet = packet_fixture();
+    packet.resources.push_back({"txDiffuse", 21U, 0U, "body.dds"});
+    FakeTexture target(Backend::Vulkan, target_description());
+    FakeTexture diffuse(Backend::Vulkan, sampled_description());
+    FakeSampler sampler(Backend::Vulkan);
+    FakeBuffer vertices(Backend::Vulkan, {36U, BufferUsage::vertex,
+                                          BufferMemory::device_local,
+                                          BufferMutability::immutable});
+    FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index,
+                                         BufferMemory::device_local,
+                                         BufferMutability::immutable});
+    FakeBuffer material(Backend::Vulkan,
+                        {512U, BufferUsage::uniform, BufferMemory::host_visible,
+                         BufferMutability::mutable_data});
+    auto request = request_fixture(packet, pipeline, vertices, indices);
+    request.resource_authority = IndexedResourceAuthority::explicit_bindings;
+    request.sampled_binding = {&diffuse, &sampler};
+    request.material_binding = {&material, 256U,
+                                portable_material_buffer_view_bytes};
+    Diagnostic diagnostic;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            "portable material constants buffer accepted");
+
+    request.material_binding.range_bytes = portable_material_constant_bytes;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_material_buffer_alignment_invalid",
+            "short D3D12-incompatible material view rejected");
+    request.material_binding.range_bytes = portable_material_buffer_view_bytes;
+    request.material_binding.offset_bytes = 1U;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_material_buffer_alignment_invalid",
+            "unaligned material view rejected");
+    request.material_binding.offset_bytes = 512U;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_material_buffer_range_invalid",
+            "out-of-range material view rejected");
+    request.material_binding = {};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_material_buffer_missing",
+            "missing material constants buffer rejected");
+    FakeBuffer wrong_usage(Backend::Vulkan,
+                           {256U, BufferUsage::vertex, BufferMemory::host_visible,
+                            BufferMutability::immutable});
+    request.material_binding = {&wrong_usage, 0U,
+                                portable_material_buffer_view_bytes};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_material_buffer_usage_invalid",
+            "non-uniform material buffer rejected");
+    FakeBuffer foreign(Backend::D3D12,
+                       {256U, BufferUsage::uniform, BufferMemory::host_visible,
+                        BufferMutability::immutable});
+    request.material_binding.buffer = &foreign;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_material_buffer_backend_mismatch",
+            "foreign-backend material buffer rejected");
+}
+
 void rejects_invalid_depth_attachment_descriptions() {
     Diagnostic diagnostic;
     DepthAttachmentDescription description;
@@ -641,6 +712,7 @@ int main() {
         accepts_explicit_d32_depth_contract();
         accepts_source_evidenced_blend_state();
         validates_portable_diffuse_resource_contract();
+        validates_portable_material_buffer_contract();
         rejects_invalid_depth_attachment_descriptions();
         rejects_invalid_depth_contract();
         validates_ordered_indexed_batch_contract();

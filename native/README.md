@@ -78,7 +78,11 @@ unsupported because the current targets are single-sample. A request-local
 authority can enable one portable diffuse resource pair: a sampled image at set
 0, binding 0, and a sampler at set 0, binding 1. Vulkan and D3D12 execute this
 pair for single draws and ordered batches. The pair is a portable test ABI. It
-is not a recovered stock KN5 or CSP shader contract. A bounded ordered batch
+is not a recovered stock KN5 or CSP shader contract. An optional uniform buffer
+at set 0, binding 2 carries one aligned material record. D3D12 maps it to
+`b2`. Its first 48 bytes use source-evidenced `ksPerPixel` defaults in this
+port's std140/HLSL-compatible packing. Pixel tests prove per-draw record selection.
+The complete lighting and reflection equations remain staged. A bounded batch
 preflights all requests, clears or loads attachments once, submits one render
 pass, and returns one final readback. Draw-packet texture resources resolve by
 canonical name.

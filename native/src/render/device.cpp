@@ -751,8 +751,11 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     }
     const bool has_sampled_texture = request.sampled_binding.texture != nullptr;
     const bool has_sampler = request.sampled_binding.sampler != nullptr;
+    const bool has_material_buffer = request.material_binding.buffer != nullptr;
+    const bool has_material_range = request.material_binding.offset_bytes != 0U ||
+                                    request.material_binding.range_bytes != 0U;
     if (pipeline.resources.empty()) {
-        if (has_sampled_texture || has_sampler ||
+        if (has_sampled_texture || has_sampler || has_material_buffer || has_material_range ||
             request.resource_authority != IndexedResourceAuthority::packet_contract) {
             diagnostic = {"indexed_resource_binding_unexpected",
                           "A resource-free pipeline cannot receive explicit material bindings"};
@@ -766,6 +769,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     } else {
         bool sampled_declaration = false;
         bool sampler_declaration = false;
+        bool material_declaration = false;
         for (const PipelineResourceBinding& resource : pipeline.resources) {
             if (resource.set == 0U && resource.binding == 0U &&
                 resource.kind == PipelineResourceKind::sampled_texture) {
@@ -773,15 +777,20 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             } else if (resource.set == 0U && resource.binding == 1U &&
                        resource.kind == PipelineResourceKind::sampler) {
                 sampler_declaration = true;
+            } else if (resource.set == 0U && resource.binding == 2U &&
+                       resource.kind == PipelineResourceKind::uniform_buffer) {
+                material_declaration = true;
             } else {
                 diagnostic = {"indexed_resource_layout_unsupported",
-                              "The portable diffuse baseline requires a sampled texture at set 0 binding 0 and sampler at set 0 binding 1"};
+                              "The portable material ABI uses set 0 bindings 0 for texture, 1 for sampler, and optional 2 for constants"};
                 return IndexedStaticMeshDrawStatus::unsupported;
             }
         }
-        if (pipeline.resources.size() != 2U || !sampled_declaration || !sampler_declaration) {
+        const std::size_t expected_resources = material_declaration ? 3U : 2U;
+        if (pipeline.resources.size() != expected_resources || !sampled_declaration ||
+            !sampler_declaration) {
             diagnostic = {"indexed_resource_layout_unsupported",
-                          "The portable diffuse baseline requires exactly one sampled texture and one sampler"};
+                          "The portable material ABI requires one texture, one sampler, and at most one constants buffer"};
             return IndexedStaticMeshDrawStatus::unsupported;
         }
         if (request.resource_authority != IndexedResourceAuthority::explicit_bindings) {
@@ -793,6 +802,42 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             diagnostic = {"indexed_resource_binding_missing",
                           "The portable diffuse baseline requires both a sampled texture and sampler"};
             return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        if (material_declaration != has_material_buffer ||
+            (!material_declaration && has_material_range)) {
+            diagnostic = {material_declaration ? "indexed_material_buffer_missing"
+                                               : "indexed_material_buffer_unexpected",
+                          material_declaration
+                              ? "The portable material ABI requires its constants buffer"
+                              : "The diffuse-only ABI cannot receive a constants buffer"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        if (material_declaration) {
+            const Buffer& material_buffer = *request.material_binding.buffer;
+            if (material_buffer.backend() != texture.backend()) {
+                diagnostic = {"indexed_material_buffer_backend_mismatch",
+                              "Material constants and the color target must use the same backend"};
+                return IndexedStaticMeshDrawStatus::unsupported;
+            }
+            const BufferDescription& material = material_buffer.info().description;
+            if (material.usage != BufferUsage::uniform) {
+                diagnostic = {"indexed_material_buffer_usage_invalid",
+                              "The portable material buffer requires exclusive uniform usage"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+            if (request.material_binding.offset_bytes % portable_material_buffer_view_bytes != 0U ||
+                request.material_binding.range_bytes != portable_material_buffer_view_bytes) {
+                diagnostic = {"indexed_material_buffer_alignment_invalid",
+                              "Material buffer views require a 256-byte aligned offset and 256-byte range"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+            if (request.material_binding.offset_bytes > material.size_bytes ||
+                static_cast<std::uint64_t>(request.material_binding.range_bytes) >
+                    material.size_bytes - request.material_binding.offset_bytes) {
+                diagnostic = {"indexed_material_buffer_range_invalid",
+                              "The material buffer view exceeds the declared buffer size"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
         }
         const Texture& sampled_texture = *request.sampled_binding.texture;
         const Sampler& sampler = *request.sampled_binding.sampler;

@@ -107,9 +107,14 @@ remains unchanged and feature-complete.
   until the target contract supports multisampling. A bounded batch preflights
   every request, preserves packet order, and records all draws in one pass with
   one final readback. The backend also executes one explicitly authorized
-  portable diffuse pair. The
-  pair uses a sampled image at set 0, binding 0, and a sampler at set 0,
-  binding 1. It is a test ABI, not recovered stock KN5 or CSP behavior. A
+  portable diffuse pair. The pair uses a sampled image at set 0, binding 0,
+  and a sampler at set 0, binding 1. An optional uniform at binding 2 carries
+  one aligned material record. Its first 48 bytes use the current WebGL
+  `ksPerPixel` defaults in a port-defined std140/HLSL-compatible layout.
+  Vulkan maps it to a uniform descriptor.
+  D3D12 maps it to `b2`. Per-draw pixel tests prove transport, but not the
+  complete lighting formula. This remains a test ABI, not recovered stock KN5
+  or CSP behavior. A
   bounded static-scene adapter validates the complete packet set before allocation.
   It uploads each referenced node once and retains duplicate ordered draws.
   Caller-supplied SPIR-V or DXIL pipelines authorize only their local requests.
@@ -159,7 +164,8 @@ remains unchanged and feature-complete.
   Vulkan and D3D12 create a basic graphics pipeline and execute fixed and
   indexed R16 static-mesh draws. The indexed path executes only a deliberately
   restricted draw-packet subset. It supports one portable sampled-image and
-  sampler descriptor pair. It executes the three source-evidenced WebGL blend
+  sampler descriptor pair plus a request-local material record. It executes
+  the three source-evidenced WebGL blend
   modes, but not complete scene resources or alpha-to-coverage. It executes
   finite non-identity world and camera
   transforms through an explicit shader contract. It preserves D32

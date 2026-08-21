@@ -164,6 +164,19 @@ std::vector<std::uint8_t> executable_sampled_fragment_shader() {
     return result;
 }
 
+std::vector<std::uint8_t> executable_material_fragment_shader() {
+    // Generated from tests/shaders/indexed_static_mesh_material.frag. This
+    // proves the portable constants ABI, not a complete stock material.
+    constexpr std::string_view hex =
+        "03022307000001000b000800330000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00070004000000040000006d61696e00000000160000001a000000100003000400000007000000470004000c0000002100000000000000470004000c0000002200000000000000470004001000000021000000010000004700040010000000220000000000000047000400160000001e00000000000000470004001a0000001e00000000000000470003001c00000002000000480005001c000000000000002300000000000000480005001c000000010000002300000010000000480005001c000000020000002300000020000000470004001e0000002100000002000000470004001e0000002200000000000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000004000000190009000a00000006000000010000000000000000000000000000000100000000000000200004000b000000000000000a0000003b0004000b0000000c000000000000001a0002000e000000200004000f000000000000000e0000003b0004000f00000010000000000000001b000300120000000a00000017000400140000000600000002000000200004001500000001000000140000003b000400150000001600000001000000200004001900000003000000070000003b000400190000001a000000030000001e0005001c000000070000000700000007000000200004001d000000020000001c0000003b0004001d0000001e00000002000000150004001f00000020000000010000002b0004001f0000002000000000000000150004002100000020000000000000002b000400210000002200000001000000200004002300000002000000060000002b0004001f0000002700000002000000200004002900000002000000070000002b000400060000002d000000000000003600050002000000040000000000000003000000f8000200050000003d0004000a0000000d0000000c0000003d0004000e00000011000000100000005600050012000000130000000d000000110000003d00040014000000170000001600000057000500070000001800000013000000170000004100060023000000240000001e00000020000000220000003d0004000600000025000000240000008e0005000700000026000000180000002500000041000500290000002a0000001e000000270000003d000400070000002b0000002a00000051000500060000002e0000002b0000000000000051000500060000002f0000002b000000010000005100050006000000300000002b000000020000005000070007000000310000002e0000002f000000300000002d00000081000500070000003200000026000000310000003e0003001a00000032000000fd00010038000100";
+    require(hex.size() % 2U == 0U, "embedded material fragment shader hex alignment");
+    std::vector<std::uint8_t> result(hex.size() / 2U);
+    for (std::size_t index = 0U; index < result.size(); ++index)
+        result[index] = static_cast<std::uint8_t>((hex_digit(hex[index * 2U]) << 4U) |
+                                                   hex_digit(hex[index * 2U + 1U]));
+    return result;
+}
+
 std::vector<std::uint8_t> executable_fragment_shader() {
     constexpr std::string_view hex =
         "03022307000001000b000d000d0000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00060004000000040000006d61696e000000000900000010000300040000000700000047000400090000001e00000000000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000004000000200004000800000003000000070000003b0004000800000009000000030000002b000400060000000a0000000000803f2b000400060000000b000000000000002c000700070000000c0000000a0000000b0000000b0000000a0000003600050002000000040000000000000003000000f8000200050000003e000300090000000c000000fd00010038000100";
@@ -1047,6 +1060,86 @@ bool contract_backend(apex::render::Backend backend) {
                 sampled_result.rgba8[2] == std::byte{0} &&
                 sampled_result.rgba8[3] == std::byte{255},
             "portable diffuse outside pixel retains clear color");
+
+    // Prove one bounded per-draw constants record beside t0/s1. The shader is
+    // a transport fixture, not a complete ksPerPixel lighting implementation.
+    KsPerPixelMaterialConstants first_material;
+    first_material.lighting[1] = 0.5F;
+    first_material.emissive = {0.1F, 0.0F, 0.2F, 0.0F};
+    KsPerPixelMaterialConstants second_material;
+    second_material.lighting[1] = 0.25F;
+    second_material.emissive = {0.0F, 0.1F, 0.0F, 0.0F};
+    std::array<std::byte, 2U * portable_material_buffer_view_bytes> material_bytes{};
+    std::memcpy(material_bytes.data(), &first_material, sizeof(first_material));
+    std::memcpy(material_bytes.data() + portable_material_buffer_view_bytes,
+                &second_material, sizeof(second_material));
+    const BufferDescription material_description{
+        material_bytes.size(), BufferUsage::uniform, BufferMemory::host_visible,
+        BufferMutability::immutable};
+    BufferResult material_buffer =
+        device.device->create_buffer(material_description, material_bytes);
+    require(material_buffer.ok(), "portable material constants buffer upload");
+
+    PipelineProgram material_pipeline = sampled_pipeline;
+    material_pipeline.name = "portable-ks-per-pixel-material-constants";
+    material_pipeline.resources.push_back(
+        {PipelineResourceKind::uniform_buffer, 0U, 2U, "ksPerPixelMaterial"});
+    if (backend == Backend::Vulkan) {
+        material_pipeline.shaders[1].bytes = executable_material_fragment_shader();
+    } else {
+#if defined(_WIN32)
+        constexpr std::string_view material_fragment_source =
+            "Texture2D diffuseTexture : register(t0);"
+            "SamplerState diffuseSampler : register(s1);"
+            "cbuffer KsPerPixelMaterial : register(b2) {"
+            "float4 lighting; float4 fresnel; float4 emissive; };"
+            "float4 main(float4 position : SV_Position, float2 texcoord : TEXCOORD0) : SV_Target {"
+            "return diffuseTexture.Sample(diffuseSampler, texcoord) * lighting.y + "
+            "float4(emissive.rgb, 0.0); }";
+        material_pipeline.shaders[1].bytes =
+            executable_d3d_shader(material_fragment_source, "ps_5_0");
+#else
+        require(false, "D3D12 material shader test requires Windows D3DCompile");
+#endif
+    }
+    IndexedStaticMeshDrawRequest material_request =
+        sampled_upload.upload->make_request(material_pipeline, *indexed_camera.frame);
+    material_request.resource_authority = IndexedResourceAuthority::explicit_bindings;
+    material_request.sampled_binding = {diffuse_texture.texture.get(), sampler.sampler.get()};
+    material_request.material_binding = {
+        material_buffer.buffer.get(), 0U, portable_material_buffer_view_bytes};
+    const auto near_material_channel = [](std::byte actual, std::uint8_t expected) {
+        const int value = static_cast<int>(std::to_integer<std::uint8_t>(actual));
+        return value >= static_cast<int>(expected) - 1 &&
+               value <= static_cast<int>(expected) + 1;
+    };
+    const IndexedStaticMeshDrawResult material_result =
+        device.device->draw_indexed_static_mesh_and_readback(
+            *triangle_texture.texture, material_request);
+    require(material_result.ok(), "portable material constants draw/readback");
+    require(near_material_channel(material_result.rgba8[center], 34U) &&
+                near_material_channel(material_result.rgba8[center + 1U], 101U) &&
+                near_material_channel(material_result.rgba8[center + 2U], 93U) &&
+                near_material_channel(material_result.rgba8[center + 3U], 128U),
+            "first material constants record changes the sampled pixel");
+
+    IndexedStaticMeshDrawRequest second_material_request = material_request;
+    second_material_request.material_binding.offset_bytes =
+        portable_material_buffer_view_bytes;
+    const std::array<IndexedStaticMeshDrawRequest, 2> material_draws = {
+        material_request, second_material_request};
+    IndexedStaticMeshBatchDescription material_batch;
+    material_batch.draws = material_draws;
+    const IndexedStaticMeshBatchResult material_batch_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *triangle_texture.texture, material_batch);
+    require(material_batch_result.ok(),
+            "portable per-draw material constants batch/readback");
+    require(near_material_channel(material_batch_result.rgba8[center], 4U) &&
+                near_material_channel(material_batch_result.rgba8[center + 1U], 76U) &&
+                near_material_channel(material_batch_result.rgba8[center + 2U], 21U) &&
+                near_material_channel(material_batch_result.rgba8[center + 3U], 64U),
+            "second batch draw selects its aligned material constants record");
 
     // public/app.js applyItemRenderState is the source authority for this
     // alpha blend. Prove the equivalent native factors in both draw paths.
