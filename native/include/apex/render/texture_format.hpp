@@ -47,9 +47,9 @@ struct TextureFormatInfo {
     bool signed_channels = false;
 };
 
-// This metadata is deliberately independent of Vulkan/DXGI headers.  The
-// native texture contract currently accepts the uncompressed entries for CPU
-// uploads; block-compressed entries remain explicit GPU-format capabilities.
+// This metadata is deliberately independent of Vulkan/DXGI headers. The
+// native texture contract accepts all uncompressed entries. A separate
+// predicate selects the bounded block-compressed upload subset.
 [[nodiscard]] constexpr TextureFormatInfo texture_format_info(TextureFormat format) noexcept {
     switch (format) {
     case TextureFormat::r8_unorm: return {TextureFormatClass::uncompressed, 1, 0, 0, 0, false, false};
@@ -87,6 +87,20 @@ struct TextureFormatInfo {
 
 [[nodiscard]] constexpr bool texture_format_cpu_upload_supported(TextureFormat format) noexcept {
     return texture_format_info(format).classification == TextureFormatClass::uncompressed;
+}
+
+// The neutral upload validator deliberately admits only the block formats
+// whose layout is fully described by the backend-independent metadata.
+[[nodiscard]] constexpr bool texture_format_neutral_block_upload_supported(TextureFormat format) noexcept {
+    switch (format) {
+    case TextureFormat::bc1_unorm:
+    case TextureFormat::bc1_srgb:
+    case TextureFormat::bc3_unorm:
+    case TextureFormat::bc3_srgb:
+        return true;
+    default:
+        return false;
+    }
 }
 
 } // namespace apex::render

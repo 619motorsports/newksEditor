@@ -558,9 +558,52 @@ VkFormat vk_texture_format(TextureFormat format) {
         return VK_FORMAT_R8_UNORM;
     case TextureFormat::r5g6b5_unorm:
         return VK_FORMAT_R5G6B5_UNORM_PACK16;
+    case TextureFormat::bc1_unorm:
+        return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+    case TextureFormat::bc1_srgb:
+        return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+    case TextureFormat::bc3_unorm:
+        return VK_FORMAT_BC3_UNORM_BLOCK;
+    case TextureFormat::bc3_srgb:
+        return VK_FORMAT_BC3_SRGB_BLOCK;
     default:
         return VK_FORMAT_UNDEFINED;
     }
+}
+
+bool vk_block_upload_format(TextureFormat format) noexcept {
+    return format == TextureFormat::bc1_unorm || format == TextureFormat::bc1_srgb ||
+           format == TextureFormat::bc3_unorm || format == TextureFormat::bc3_srgb;
+}
+
+bool validate_vulkan_texture_format_capabilities(const std::shared_ptr<VulkanContext>& context,
+                                                 const TextureDescription& description,
+                                                 VkFormat format,
+                                                 Diagnostic& diagnostic) {
+    if (!vk_block_upload_format(description.format)) return true;
+    if (description.samples != 1U) {
+        diagnostic = {"vulkan_compressed_samples_unsupported",
+                      "Vulkan BC1/BC3 uploads require a single-sample texture"};
+        return false;
+    }
+    VkFormatProperties properties{};
+    vkGetPhysicalDeviceFormatProperties(context->physical_device, format, &properties);
+    VkFormatFeatureFlags required = VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    const auto usage = static_cast<std::uint32_t>(description.usage);
+    if ((usage & static_cast<std::uint32_t>(TextureUsage::sampled)) != 0U)
+        required |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+    if ((usage & static_cast<std::uint32_t>(TextureUsage::transfer_source)) != 0U)
+        required |= VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+    if ((usage & static_cast<std::uint32_t>(TextureUsage::color_attachment)) != 0U)
+        required |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+    if ((usage & static_cast<std::uint32_t>(TextureUsage::storage)) != 0U)
+        required |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+    if ((properties.optimalTilingFeatures & required) != required) {
+        diagnostic = {"vulkan_compressed_format_unsupported",
+                      "The Vulkan device does not support the requested BC1/BC3 texture usage"};
+        return false;
+    }
+    return true;
 }
 
 VkSampleCountFlagBits vk_sample_count(std::uint32_t samples) noexcept {
@@ -714,6 +757,8 @@ bool create_raw_image(const std::shared_ptr<VulkanContext>& context,
     if (description.samples == 1U) image_info.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (!validate_vulkan_texture_format_capabilities(context, description, image_info.format, diagnostic))
+        return false;
     VkImageFormatProperties format_properties{};
     VkResult result = vkGetPhysicalDeviceImageFormatProperties(
         context->physical_device, image_info.format, image_info.imageType, image_info.tiling,
@@ -906,7 +951,9 @@ bool copy_texture_uploads(const std::shared_ptr<VulkanContext>& context,
                           VkImageLayout& current_layout,
                           Diagnostic& diagnostic) {
     if (uploads.subresources.empty()) {
-        current_layout = texture_final_layout(description.usage);
+        // No command transitioned this image. Keep the tracked layout
+        // undefined so a later clear/draw emits the required first barrier;
+        // sampled-resource validation separately rejects uninitialized data.
         return true;
     }
     if (description.samples != 1U) {
@@ -914,13 +961,15 @@ bool copy_texture_uploads(const std::shared_ptr<VulkanContext>& context,
                       "Multisampled Vulkan textures cannot receive transfer uploads"};
         return false;
     }
-    if (!texture_format_cpu_upload_supported(description.format)) {
+    const bool block_compressed = vk_block_upload_format(description.format);
+    if (!texture_format_cpu_upload_supported(description.format) && !block_compressed) {
         diagnostic = {"texture_compressed_format_unsupported",
                       "Block-compressed texture uploads require a dedicated GPU upload path"};
         return false;
     }
+    const TextureFormatInfo format_info = texture_format_info(description.format);
     const auto bytes_per_pixel = texture_format_bytes_per_pixel(description.format);
-    if (bytes_per_pixel == 0U) {
+    if (!block_compressed && bytes_per_pixel == 0U) {
         diagnostic = {"texture_format_unknown", "Texture upload format has no byte layout"};
         return false;
     }
@@ -940,8 +989,42 @@ bool copy_texture_uploads(const std::shared_ptr<VulkanContext>& context,
         }
         VkBufferImageCopy copy{};
         copy.bufferOffset = staging_size;
-        copy.bufferRowLength = static_cast<std::uint32_t>(upload.row_pitch / bytes_per_pixel);
-        copy.bufferImageHeight = upload.height;
+        std::uint64_t row_bytes = 0U;
+        std::uint64_t row_count = 0U;
+        std::uint64_t buffer_row_length = 0U;
+        std::uint64_t buffer_image_height = 0U;
+        if (block_compressed) {
+            const std::uint64_t blocks_wide = (static_cast<std::uint64_t>(upload.width) + 3U) / 4U;
+            const std::uint64_t blocks_high = (static_cast<std::uint64_t>(upload.height) + 3U) / 4U;
+            row_bytes = blocks_wide * format_info.block_bytes;
+            row_count = blocks_high;
+            if (row_bytes == 0U || upload.row_pitch < row_bytes ||
+                static_cast<std::uint64_t>(upload.row_pitch) % format_info.block_bytes != 0U ||
+                row_count > std::numeric_limits<std::uint64_t>::max() / format_info.block_height) {
+                diagnostic = {"texture_upload_block_layout_invalid",
+                              "Compressed texture upload pitch does not match its block layout"};
+                return false;
+            }
+            buffer_row_length = (static_cast<std::uint64_t>(upload.row_pitch) / format_info.block_bytes) *
+                                format_info.block_width;
+            buffer_image_height = row_count * format_info.block_height;
+        } else {
+            row_bytes = static_cast<std::uint64_t>(upload.width) * bytes_per_pixel;
+            row_count = upload.height;
+            buffer_row_length = upload.row_pitch / bytes_per_pixel;
+            buffer_image_height = upload.height;
+        }
+        if (upload.row_pitch == 0U ||
+            buffer_row_length == 0U || buffer_row_length > std::numeric_limits<std::uint32_t>::max() ||
+            buffer_image_height == 0U || buffer_image_height > std::numeric_limits<std::uint32_t>::max() ||
+            row_count > std::numeric_limits<std::size_t>::max() / upload.row_pitch ||
+            row_count * upload.row_pitch > upload.data.size()) {
+            diagnostic = {"texture_upload_block_layout_invalid",
+                          "Texture upload rows exceed the declared source data"};
+            return false;
+        }
+        copy.bufferRowLength = static_cast<std::uint32_t>(buffer_row_length);
+        copy.bufferImageHeight = static_cast<std::uint32_t>(buffer_image_height);
         copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         copy.imageSubresource.mipLevel = upload.mip_level;
         copy.imageSubresource.baseArrayLayer = upload.array_layer;
@@ -3337,9 +3420,11 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
         if (maps_description.width == 0U || maps_description.height == 0U ||
             maps_description.mip_levels == 0U || maps_description.array_layers != 1U ||
             (maps_description.format != TextureFormat::rgba8_unorm &&
-             maps_description.format != TextureFormat::bgra8_unorm)) {
+             maps_description.format != TextureFormat::bgra8_unorm &&
+             maps_description.format != TextureFormat::bc1_unorm &&
+             maps_description.format != TextureFormat::bc3_unorm)) {
             diagnostic = {"vulkan_indexed_maps_resource_format_unsupported",
-                          "Vulkan indexed maps textures require one-layer linear RGBA8 or BGRA8 UNORM image data"};
+                          "Vulkan indexed maps textures require one-layer linear RGBA8, BGRA8, BC1, or BC3 UNORM image data"};
             return false;
         }
         if (!maps_texture->initialized()) {
@@ -3404,9 +3489,13 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
             (detail_description.format != TextureFormat::rgba8_unorm &&
              detail_description.format != TextureFormat::rgba8_srgb &&
              detail_description.format != TextureFormat::bgra8_unorm &&
-             detail_description.format != TextureFormat::bgra8_srgb)) {
+             detail_description.format != TextureFormat::bgra8_srgb &&
+             detail_description.format != TextureFormat::bc1_unorm &&
+             detail_description.format != TextureFormat::bc1_srgb &&
+             detail_description.format != TextureFormat::bc3_unorm &&
+             detail_description.format != TextureFormat::bc3_srgb)) {
             diagnostic = {"vulkan_indexed_detail_resource_format_unsupported",
-                          "Vulkan indexed detail textures require one-layer RGBA8 or BGRA8 image data"};
+                          "Vulkan indexed detail textures require one-layer RGBA8, BGRA8, BC1, or BC3 image data"};
             return false;
         }
         if (!detail_texture->initialized()) {
@@ -3716,8 +3805,13 @@ public:
                     nullptr};
         }
         RawVulkanImage raw;
-        if (!create_raw_image(context_, description, raw, diagnostic))
-            return {TextureStatus::allocation_failed, std::move(diagnostic), nullptr};
+        if (!create_raw_image(context_, description, raw, diagnostic)) {
+            const bool unsupported = diagnostic.code == "texture_format_unsupported" ||
+                                     diagnostic.code == "vulkan_compressed_format_unsupported" ||
+                                     diagnostic.code == "vulkan_texture_samples_unsupported";
+            return {unsupported ? TextureStatus::unsupported : TextureStatus::allocation_failed,
+                    std::move(diagnostic), nullptr};
+        }
         auto texture = std::make_unique<VulkanTexture>(context_, std::move(raw), description,
                                                        VK_IMAGE_LAYOUT_UNDEFINED, false);
         if (!texture->upload(initial_uploads, diagnostic))

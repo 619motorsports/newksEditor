@@ -253,6 +253,11 @@ remains unchanged and feature-complete.
   depth across synchronous draws and supports explicit test/write state. The
   ordered multi-draw path clears or loads attachments once and submits one
   pass. Each backend resolves a 4x color target once after the final draw. The
+  device API directly uploads immutable, one-layer BC1 and BC3 sampled
+  textures. The upload path validates compressed block rows before allocation.
+  Vulkan and D3D12 query format support before image creation. Direct BC5
+  normal uploads remain staged because the bounded shader reads three normal
+  channels. The embedded static-scene path still uses its exact CPU decode.
   static-scene path requires explicit backend shader bytecode. It
   does not execute stock KN5 shader packages. The port does not create windows
   or swapchains, bind complete materials, or provide golden-image parity
@@ -301,6 +306,14 @@ alpha-to-coverage. Thus, this gate proves profile selection and an error-free
 production capture. It does not prove the per-draw state or native pixel
 parity.
 
+The production compressed-texture gate selects `ford13_body_SUB2` and material
+`ford13_skin`. Its color resources use BC1 and BC3 mip chains. All 63 textures
+were ready. WebGL reported no errors. The capture hash was
+`02f639e082e1e5b2`. The PNG SHA-256 was
+`c64caf51986b652c5cd71e6093e7311a281bdf10924cf7eb05afbe591692497f`.
+This gate proves the production fixture and WebGL path. Native pixel tests
+separately prove direct BC1 and BC3 upload and sampling.
+
 DDS BC7 has a bounded CPU decoder with differential fixtures for all eight
 modes. BC6H remains explicit and requires a GPU path. The checked upload
 planner supports DX10 2D arrays and cubemaps. It also converts legacy RGB24 to
@@ -309,7 +322,8 @@ CPU decoder for supported 2D mip chains. Each decode receives the remaining
 aggregate byte budget before it allocates output. Upload plans also reject
 subresource-entry floods before iteration. This path retains the DDS sRGB flag.
 It rejects arrays, cubemaps, BC6H, and legacy D3D9 float data. This portable
-decode does not prove native compressed-resource or stock-shader parity.
+decode is still the embedded static-scene path. The separate device path
+uploads BC1 and BC3 blocks directly. It does not prove stock-shader parity.
 
 ## Source-module mapping
 

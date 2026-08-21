@@ -473,6 +473,67 @@ void contract_texture_limits() {
                 bc7_info.block_height == 4U && bc7_info.block_bytes == 16U && bc7_info.srgb &&
                 texture_format_is_compressed(TextureFormat::bc7_srgb),
             "BC7 texture metadata");
+
+    // BC uploads use logical texture dimensions but a block-row footprint.
+    // A 5x3 image has two 4x4 blocks across and one block row. Keep these
+    // checks at the neutral validation boundary. The device tests cover
+    // backend allocation and direct compressed sampling.
+    const auto check_bc_upload = [&](TextureFormat format, std::uint32_t block_bytes,
+                                     std::string_view label) {
+        TextureDescription compressed{5U, 3U, 1U, 1U, format, TextureUsage::sampled,
+                                      TextureMemory::device_local, TextureMutability::immutable};
+        std::vector<std::byte> blocks(static_cast<std::size_t>(block_bytes) * 2U);
+        TextureUpload upload{0U, 0U, 5U, 3U, block_bytes * 2U, blocks};
+        TextureUploadPlan plan{{upload}};
+        require(validate_texture_description(compressed, plan, diagnostic) == TextureStatus::ready,
+                std::string(label) + " 5x3 block upload accepted");
+        require(validate_texture_upload_plan(compressed, plan, diagnostic) == TextureStatus::ready,
+                std::string(label) + " 5x3 upload plan accepted");
+
+        // A larger, block-aligned pitch is legal and still has one block row.
+        blocks.resize(static_cast<std::size_t>(block_bytes) * 3U);
+        upload.row_pitch = block_bytes * 3U;
+        upload.data = blocks;
+        plan.subresources[0] = upload;
+        require(validate_texture_upload_plan(compressed, plan, diagnostic) == TextureStatus::ready,
+                std::string(label) + " padded block row accepted");
+
+        // One block is insufficient for the two-block-wide 5x3 edge level.
+        upload.row_pitch = block_bytes;
+        upload.data = blocks;
+        plan.subresources[0] = upload;
+        require(validate_texture_upload_plan(compressed, plan, diagnostic) ==
+                    TextureStatus::invalid_description &&
+                    diagnostic.code == "texture_row_pitch_too_small",
+                std::string(label) + " short block row rejected");
+
+        // The row pitch describes two blocks, but the payload ends part-way
+        // through that row.
+        upload.row_pitch = block_bytes * 2U;
+        blocks.resize(static_cast<std::size_t>(block_bytes) * 2U - 1U);
+        upload.data = blocks;
+        plan.subresources[0] = upload;
+        require(validate_texture_upload_plan(compressed, plan, diagnostic) ==
+                    TextureStatus::invalid_description &&
+                    diagnostic.code == "texture_upload_truncated",
+                std::string(label) + " truncated block row rejected");
+    };
+    check_bc_upload(TextureFormat::bc1_unorm, 8U, "BC1");
+    check_bc_upload(TextureFormat::bc1_srgb, 8U, "BC1 sRGB");
+    check_bc_upload(TextureFormat::bc3_unorm, 16U, "BC3");
+    check_bc_upload(TextureFormat::bc3_srgb, 16U, "BC3 sRGB");
+
+    const TextureDescription incomplete_bc{
+        4U, 4U, 2U, 1U, TextureFormat::bc1_unorm, TextureUsage::sampled,
+        TextureMemory::device_local, TextureMutability::immutable};
+    const std::array<std::byte, 8> one_bc1_block{};
+    const TextureUploadPlan incomplete_bc_uploads{{
+        TextureUpload{0U, 0U, 4U, 4U, 8U, one_bc1_block}}};
+    require(validate_texture_description(incomplete_bc, incomplete_bc_uploads, diagnostic) ==
+                TextureStatus::invalid_description &&
+                diagnostic.code == "texture_compressed_upload_incomplete",
+            "immutable compressed mip chain requires every subresource");
+
     TextureDescription description;
     TextureUploadPlan empty;
     require(validate_texture_description(description, empty, diagnostic) == TextureStatus::invalid_description,
@@ -494,9 +555,9 @@ void contract_texture_limits() {
     require(validate_texture_description(description, empty, diagnostic) == TextureStatus::unsupported,
             "unknown texture format rejected");
     require(diagnostic.code == "texture_format_unknown", "unknown texture format diagnostic");
-    description.format = TextureFormat::bc1_unorm;
+    description.format = TextureFormat::bc7_unorm;
     require(validate_texture_description(description, empty, diagnostic) == TextureStatus::unsupported,
-            "compressed texture format rejected explicitly");
+            "unsupported compressed texture format rejected explicitly");
     require(diagnostic.code == "texture_compressed_format_unsupported",
             "compressed texture format diagnostic");
     description.format = TextureFormat::rgba8_unorm;
@@ -1335,6 +1396,50 @@ bool contract_backend(apex::render::Backend backend) {
                 sampled_result.rgba8[2] == std::byte{0} &&
                 sampled_result.rgba8[3] == std::byte{255},
             "portable diffuse outside pixel retains clear color");
+
+    // Exercise the real backend sampled path with direct BC1/BC3 block
+    // uploads. The one-block fixtures are uniform, so filtering cannot alter
+    // the expected center texel.
+    const auto draw_compressed_source = [&](std::string_view name,
+                                            TextureFormat format,
+                                            std::span<const std::uint8_t> block,
+                                            std::uint32_t row_pitch,
+                                            std::array<std::uint8_t, 4> expected) {
+        require((format == TextureFormat::bc1_unorm && block.size() == 8U) ||
+                    (format == TextureFormat::bc3_unorm && block.size() == 16U),
+                std::string(name) + " compressed fixture layout");
+        const TextureDescription compressed_description{
+            4U, 4U, 1U, 1U, format, TextureUsage::sampled,
+            TextureMemory::device_local, TextureMutability::immutable};
+        const TextureUploadPlan compressed_uploads{{
+            TextureUpload{0U, 0U, 4U, 4U, row_pitch, std::as_bytes(block)}}};
+        TextureResult compressed_source = device.device->create_texture(
+            compressed_description, compressed_uploads);
+        require(compressed_source.ok(), std::string(name) + " sampled texture creation");
+        IndexedStaticMeshDrawRequest compressed_request = sampled_request;
+        compressed_request.sampled_binding.texture = compressed_source.texture.get();
+        const IndexedStaticMeshDrawResult compressed_result =
+            device.device->draw_indexed_static_mesh_and_readback(
+                *triangle_texture.texture, compressed_request);
+        require(compressed_result.ok(), std::string(name) + " sampled draw/readback: " +
+                                            compressed_result.diagnostic.code + ": " +
+                                            compressed_result.diagnostic.message);
+        require(compressed_result.rgba8[center] == std::byte{expected[0]} &&
+                    compressed_result.rgba8[center + 1U] == std::byte{expected[1]} &&
+                    compressed_result.rgba8[center + 2U] == std::byte{expected[2]} &&
+                    compressed_result.rgba8[center + 3U] == std::byte{expected[3]},
+                std::string(name) + " center pixel matches decoded compressed texel");
+    };
+    const std::array<std::uint8_t, 8> bc1_block = {
+        0x00U, 0xF8U, 0x00U, 0xF8U, 0x00U, 0x00U, 0x00U, 0x00U};
+    draw_compressed_source("BC1", TextureFormat::bc1_unorm, bc1_block, 8U,
+                           {255U, 0U, 0U, 255U});
+
+    const std::array<std::uint8_t, 16> bc3_block = {
+        128U, 0U, 0U, 0U, 0U, 0U, 0U, 0U,
+        0xE0U, 0x07U, 0xE0U, 0x07U, 0x00U, 0x00U, 0x00U, 0x00U};
+    draw_compressed_source("BC3", TextureFormat::bc3_unorm, bc3_block, 16U,
+                           {0U, 255U, 0U, 128U});
 
     if (backend == Backend::D3D12) {
         TextureDescription msaa_diffuse_description = triangle_description;

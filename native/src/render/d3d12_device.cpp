@@ -521,9 +521,46 @@ private:
         return DXGI_FORMAT_R8_UNORM;
     case TextureFormat::r5g6b5_unorm:
         return DXGI_FORMAT_B5G6R5_UNORM;
+    case TextureFormat::bc1_unorm:
+        return DXGI_FORMAT_BC1_UNORM;
+    case TextureFormat::bc1_srgb:
+        return DXGI_FORMAT_BC1_UNORM_SRGB;
+    case TextureFormat::bc3_unorm:
+        return DXGI_FORMAT_BC3_UNORM;
+    case TextureFormat::bc3_srgb:
+        return DXGI_FORMAT_BC3_UNORM_SRGB;
     default:
         return DXGI_FORMAT_UNKNOWN;
     }
+}
+
+[[nodiscard]] bool is_d3d12_bc13_format(TextureFormat format) noexcept {
+    return format == TextureFormat::bc1_unorm || format == TextureFormat::bc1_srgb ||
+           format == TextureFormat::bc3_unorm || format == TextureFormat::bc3_srgb;
+}
+
+[[nodiscard]] bool validate_d3d12_texture_format_support(
+    const std::shared_ptr<D3D12Context>& context, DXGI_FORMAT format,
+    std::uint32_t mip_levels, Diagnostic& diagnostic) {
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT support{};
+    support.Format = format;
+    const HRESULT result = context->device->CheckFeatureSupport(
+        D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("ID3D12Device::CheckFeatureSupport(format)", result);
+        diagnostic.code = "d3d12_texture_format_query_failed";
+        return false;
+    }
+    constexpr UINT required = static_cast<UINT>(D3D12_FORMAT_SUPPORT1_TEXTURE2D) |
+                              static_cast<UINT>(D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE);
+    const UINT support1 = static_cast<UINT>(support.Support1);
+    if ((support1 & required) != required ||
+        (mip_levels > 1U && (support1 & static_cast<UINT>(D3D12_FORMAT_SUPPORT1_MIP)) == 0U)) {
+        diagnostic = {"d3d12_texture_format_unsupported",
+                      "The D3D12 adapter does not support the requested BC1/BC3 sampled texture format"};
+        return false;
+    }
+    return true;
 }
 
 [[nodiscard]] D3D12_RESOURCE_STATES texture_state(TextureUsage usage) noexcept {
@@ -620,13 +657,22 @@ bool execute_texture_upload(const std::shared_ptr<D3D12Context>& context,
                             D3D12_RESOURCE_STATES& destination_state,
                             D3D12_RESOURCE_STATES final_state,
                             Diagnostic& diagnostic) {
-    if (!texture_format_cpu_upload_supported(description.format)) {
+    const bool compressed = texture_format_is_compressed(description.format);
+    if (compressed && !is_d3d12_bc13_format(description.format)) {
+        diagnostic = {"texture_compressed_format_unsupported",
+                      "D3D12 texture uploads support only BC1 and BC3 block-compressed formats"};
+        return false;
+    }
+    if (!compressed && !texture_format_cpu_upload_supported(description.format)) {
         diagnostic = {"texture_compressed_format_unsupported",
                       "Block-compressed texture uploads require a dedicated GPU upload path"};
         return false;
     }
     const auto bytes_per_pixel = texture_format_bytes_per_pixel(description.format);
-    if (bytes_per_pixel == 0U) {
+    const TextureFormatInfo format_info = texture_format_info(description.format);
+    if ((!compressed && bytes_per_pixel == 0U) ||
+        (compressed && (format_info.block_width == 0U || format_info.block_height == 0U ||
+                        format_info.block_bytes == 0U))) {
         diagnostic = {"texture_format_unknown", "Texture upload format has no byte layout"};
         return false;
     }
@@ -681,11 +727,28 @@ bool execute_texture_upload(const std::shared_ptr<D3D12Context>& context,
         for (const TextureUpload& upload : uploads.subresources) {
             const UINT subresource = upload.array_layer * description.mip_levels + upload.mip_level;
             const auto& footprint = footprints[subresource];
-            const std::size_t row_bytes = static_cast<std::size_t>(upload.width) * bytes_per_pixel;
+            const std::size_t row_bytes = compressed
+                                              ? ((static_cast<std::size_t>(upload.width) +
+                                                  format_info.block_width - 1U) /
+                                                 format_info.block_width) *
+                                                    format_info.block_bytes
+                                              : static_cast<std::size_t>(upload.width) * bytes_per_pixel;
+            const std::size_t row_count = compressed
+                                              ? (static_cast<std::size_t>(upload.height) +
+                                                 format_info.block_height - 1U) /
+                                                    format_info.block_height
+                                              : upload.height;
+            if (row_bytes > footprint.Footprint.RowPitch || row_count > row_counts[subresource] ||
+                static_cast<std::uint64_t>(upload.row_pitch) * row_count > upload.data.size()) {
+                diagnostic = {"texture_upload_footprint_invalid",
+                              "D3D12 texture upload data does not fit its block or texel footprint"};
+                upload_resource->Unmap(0, nullptr);
+                return false;
+            }
             auto* destination_bytes = static_cast<std::byte*>(mapped) + static_cast<std::size_t>(footprint.Offset);
-            for (std::uint32_t row = 0; row < upload.height; ++row) {
+            for (std::size_t row = 0; row < row_count; ++row) {
                 std::memcpy(destination_bytes + static_cast<std::size_t>(row) * footprint.Footprint.RowPitch,
-                            upload.data.data() + static_cast<std::size_t>(row) * upload.row_pitch, row_bytes);
+                            upload.data.data() + row * upload.row_pitch, row_bytes);
             }
         }
         upload_resource->Unmap(0, nullptr);
@@ -3090,13 +3153,15 @@ bool prepare_d3d12_material_binding(
                           "D3D12 maps textures require sampled-only usage"};
             return false;
         }
-        const bool linear_rgba8 = maps_description.format == TextureFormat::rgba8_unorm ||
-                                  maps_description.format == TextureFormat::bgra8_unorm;
-        if (!linear_rgba8 || maps_format == DXGI_FORMAT_UNKNOWN || maps_description.width == 0U ||
+        const bool linear_color = maps_description.format == TextureFormat::rgba8_unorm ||
+                                  maps_description.format == TextureFormat::bgra8_unorm ||
+                                  maps_description.format == TextureFormat::bc1_unorm ||
+                                  maps_description.format == TextureFormat::bc3_unorm;
+        if (!linear_color || maps_format == DXGI_FORMAT_UNKNOWN || maps_description.width == 0U ||
             maps_description.height == 0U || maps_description.mip_levels == 0U ||
             maps_description.array_layers != 1U) {
             diagnostic = {"indexed_maps_texture_format_unsupported",
-                          "D3D12 maps textures require nonempty one-layer linear RGBA8 or BGRA8 data"};
+                          "D3D12 maps textures require nonempty one-layer linear RGBA8, BGRA8, BC1, or BC3 data"};
             return false;
         }
     }
@@ -3115,15 +3180,19 @@ bool prepare_d3d12_material_binding(
                           "D3D12 detail textures require sampled-only usage"};
             return false;
         }
-        const bool rgba8 = detail_description.format == TextureFormat::rgba8_unorm ||
+        const bool color = detail_description.format == TextureFormat::rgba8_unorm ||
                            detail_description.format == TextureFormat::rgba8_srgb ||
                            detail_description.format == TextureFormat::bgra8_unorm ||
-                           detail_description.format == TextureFormat::bgra8_srgb;
-        if (!rgba8 || detail_format == DXGI_FORMAT_UNKNOWN || detail_description.width == 0U ||
+                           detail_description.format == TextureFormat::bgra8_srgb ||
+                           detail_description.format == TextureFormat::bc1_unorm ||
+                           detail_description.format == TextureFormat::bc1_srgb ||
+                           detail_description.format == TextureFormat::bc3_unorm ||
+                           detail_description.format == TextureFormat::bc3_srgb;
+        if (!color || detail_format == DXGI_FORMAT_UNKNOWN || detail_description.width == 0U ||
             detail_description.height == 0U || detail_description.mip_levels == 0U ||
             detail_description.array_layers != 1U) {
             diagnostic = {"indexed_detail_texture_format_unsupported",
-                          "D3D12 detail textures require nonempty one-layer RGBA8 or BGRA8 data"};
+                          "D3D12 detail textures require nonempty one-layer RGBA8, BGRA8, BC1, or BC3 data"};
             return false;
         }
     }
@@ -3717,6 +3786,25 @@ public:
                     {"d3d12_host_visible_texture_unsupported",
                      "D3D12 texture uploads use default-heap resources; host-visible texture memory is unsupported"},
                     nullptr};
+        }
+        if (texture_format_is_compressed(description.format)) {
+            if (!is_d3d12_bc13_format(description.format)) {
+                return {TextureStatus::unsupported,
+                        {"d3d12_compressed_format_unsupported",
+                         "D3D12 supports only BC1 and BC3 compressed sampled textures"},
+                        nullptr};
+            }
+            if (description.usage != TextureUsage::sampled ||
+                description.mutability != TextureMutability::immutable ||
+                description.samples != 1U || description.array_layers != 1U) {
+                return {TextureStatus::unsupported,
+                        {"d3d12_compressed_texture_unsupported",
+                         "D3D12 BC1 and BC3 textures require immutable sampled one-layer, single-sample resources"},
+                        nullptr};
+            }
+            if (!validate_d3d12_texture_format_support(
+                    context_, dxgi_texture_format(description.format), description.mip_levels, diagnostic))
+                return {TextureStatus::unsupported, std::move(diagnostic), nullptr};
         }
         if (description.samples != 1U) {
             const std::uint32_t usage = static_cast<std::uint32_t>(description.usage);

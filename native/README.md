@@ -67,6 +67,10 @@ The current backends initialize devices and create/upload buffers and bounded
 2D textures, samplers, and immutable shader modules. They execute bounded
 RGBA8/BGRA8 texture clears and canonical RGBA8 readback. They also validate a
 pipeline and execute fixed and indexed R16 static-mesh draws with readback.
+The device API uploads immutable, one-layer BC1 and BC3 sampled textures.
+It validates each block row before allocation. Vulkan and D3D12 query format
+support before they create a compressed image. Other block formats remain
+outside this direct-upload path.
 The indexed path validates 11-float KN5 static geometry before allocation.
 It uploads immutable vertex and R16 index buffers. The adapter rejects
 malformed geometry, non-finite values, invalid packet ranges, and unsafe
@@ -123,7 +127,8 @@ uses caller-owned tables in the final KN5 texture order. The second mode owns
 the used embedded KN5 textures and one linear-repeat sampler. It validates all
 used DDS payloads before backend allocation. It decodes supported 2D mip chains
 to RGBA8 and retains explicit sRGB metadata. This portable CPU decode is not a
-native block-compressed upload path. BC7 has an exact, bounded CPU fallback.
+direct block-compressed path. The separate device API supports direct BC1 and
+BC3 uploads. BC7 has an exact, bounded CPU fallback.
 BC6H still requires a capable GPU path. The upload planner supports DX10 2D
 arrays, cubemaps, and RGB24 conversion. The embedded static-scene mode rejects
 arrays, cubemaps, 1D/3D textures, BC6H, and legacy D3D9 float textures.

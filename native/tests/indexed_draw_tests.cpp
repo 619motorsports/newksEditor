@@ -854,6 +854,15 @@ void validates_portable_maps_contract() {
     require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
                 IndexedStaticMeshDrawStatus::ready,
             "portable linear maps contract accepted");
+    FakeTexture compressed_maps(
+        Backend::Vulkan,
+        {4U, 4U, 1U, 1U, TextureFormat::bc3_unorm, TextureUsage::sampled,
+         TextureMemory::device_local, TextureMutability::immutable});
+    request.maps_binding = {&compressed_maps, &maps_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            "portable linear maps contract accepts BC3 data");
+    request.maps_binding = {&maps, &maps_sampler};
 
     request.maps_binding = {};
     require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
@@ -1004,6 +1013,15 @@ void validates_portable_detail_stack_contract() {
     require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
                 IndexedStaticMeshDrawStatus::ready,
             "portable detail-stack contract accepts sRGB detail and linear normal-detail");
+    FakeTexture compressed_detail(
+        Backend::Vulkan,
+        {4U, 4U, 1U, 1U, TextureFormat::bc1_srgb, TextureUsage::sampled,
+         TextureMemory::device_local, TextureMutability::immutable});
+    request.detail_binding = {&compressed_detail, &detail_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            "portable detail-stack contract accepts BC1 sRGB detail data");
+    request.detail_binding = {&detail, &detail_sampler};
 
     request.detail_binding = {};
     require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==

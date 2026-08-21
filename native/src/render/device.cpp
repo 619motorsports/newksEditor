@@ -21,6 +21,69 @@ bool valid_render_sample_count(std::uint32_t samples) noexcept {
     return samples == 1U || samples == 4U;
 }
 
+bool checked_texture_size_multiply(std::uint64_t left, std::uint64_t right,
+                                   std::uint64_t& output) noexcept {
+    if (right != 0U && left > std::numeric_limits<std::uint64_t>::max() / right) return false;
+    output = left * right;
+    return true;
+}
+
+bool checked_texture_size_add(std::uint64_t left, std::uint64_t right,
+                              std::uint64_t& output) noexcept {
+    if (left > std::numeric_limits<std::uint64_t>::max() - right) return false;
+    output = left + right;
+    return true;
+}
+
+TextureStatus validate_texture_block_upload_contract(const TextureDescription& description,
+                                                     Diagnostic& diagnostic) {
+    if (!texture_format_is_compressed(description.format)) return TextureStatus::ready;
+    if (!texture_format_neutral_block_upload_supported(description.format)) {
+        diagnostic = {"texture_compressed_format_unsupported",
+                      "This block-compressed texture format is not supported by the neutral upload contract"};
+        return TextureStatus::unsupported;
+    }
+    if (description.samples != 1U || description.mutability != TextureMutability::immutable ||
+        description.array_layers != 1U || description.usage != TextureUsage::sampled) {
+        diagnostic = {"texture_compressed_upload_unsupported",
+                      "BC1 and BC3 uploads require one-layer, one-sample immutable sampled texture resources"};
+        return TextureStatus::unsupported;
+    }
+    return TextureStatus::ready;
+}
+
+bool texture_upload_layout(TextureFormat format, std::uint32_t width, std::uint32_t height,
+                           std::uint64_t& row_bytes, std::uint64_t& row_count,
+                           std::uint64_t& level_bytes) noexcept {
+    const auto info = texture_format_info(format);
+    if (info.classification == TextureFormatClass::block_compressed) {
+        const std::uint64_t block_width = info.block_width;
+        const std::uint64_t block_height = info.block_height;
+        std::uint64_t width_rounded = 0U;
+        std::uint64_t height_rounded = 0U;
+        if (!checked_texture_size_add(width, block_width - 1U, width_rounded) ||
+            !checked_texture_size_add(height, block_height - 1U, height_rounded))
+            return false;
+        const std::uint64_t blocks_w = width_rounded / block_width;
+        const std::uint64_t blocks_h = height_rounded / block_height;
+        if (!checked_texture_size_multiply(blocks_w, info.block_bytes, row_bytes)) return false;
+        row_count = blocks_h;
+    } else {
+        if (!checked_texture_size_multiply(width, info.bytes_per_pixel, row_bytes)) return false;
+        row_count = height;
+    }
+    return checked_texture_size_multiply(row_bytes, row_count, level_bytes);
+}
+
+bool portable_sampled_color_format(TextureFormat format, bool allow_srgb) noexcept {
+    if (format == TextureFormat::rgba8_unorm || format == TextureFormat::bgra8_unorm ||
+        format == TextureFormat::bc1_unorm || format == TextureFormat::bc3_unorm)
+        return true;
+    return allow_srgb &&
+           (format == TextureFormat::rgba8_srgb || format == TextureFormat::bgra8_srgb ||
+            format == TextureFormat::bc1_srgb || format == TextureFormat::bc3_srgb);
+}
+
 TextureStatus validate_texture_sample_contract(const TextureDescription& description,
                                                bool has_uploads,
                                                Diagnostic& diagnostic) {
@@ -180,11 +243,8 @@ TextureStatus validate_texture_upload_plan(const TextureDescription& description
         diagnostic = {"texture_format_unknown", "The texture format is not recognized by the native contract"};
         return TextureStatus::unsupported;
     }
-    if (!texture_format_cpu_upload_supported(description.format)) {
-        diagnostic = {"texture_compressed_format_unsupported",
-                      "Block-compressed texture resources require a GPU upload path"};
-        return TextureStatus::unsupported;
-    }
+    const TextureStatus block_status = validate_texture_block_upload_contract(description, diagnostic);
+    if (block_status != TextureStatus::ready) return block_status;
     std::uint32_t largest_dimension = std::max(description.width, description.height);
     std::uint32_t possible_mips = 1U;
     while (largest_dimension > 1U) {
@@ -195,7 +255,8 @@ TextureStatus validate_texture_upload_plan(const TextureDescription& description
         diagnostic = {"texture_mip_limit", "The texture has too many mip levels"};
         return TextureStatus::invalid_description;
     }
-    const std::size_t bytes_per_pixel = texture_format_bytes_per_pixel(description.format);
+    const auto format_info = texture_format_info(description.format);
+    const bool block_compressed = format_info.classification == TextureFormatClass::block_compressed;
     std::set<std::uint64_t> seen;
     std::uint64_t upload_total = 0U;
     for (const TextureUpload& upload : uploads.subresources) {
@@ -209,16 +270,30 @@ TextureStatus validate_texture_upload_plan(const TextureDescription& description
             diagnostic = {"texture_upload_dimensions", "Texture upload dimensions do not match the mip level"};
             return TextureStatus::invalid_description;
         }
-        const std::uint64_t minimum_pitch = static_cast<std::uint64_t>(expected_width) * bytes_per_pixel;
+        std::uint64_t minimum_pitch = 0U;
+        std::uint64_t expected_rows = 0U;
+        std::uint64_t level_bytes = 0U;
+        if (!texture_upload_layout(description.format, expected_width, expected_height,
+                                   minimum_pitch, expected_rows, level_bytes)) {
+            diagnostic = {"texture_upload_size_overflow",
+                          "Texture upload block dimensions or footprint overflow"};
+            return TextureStatus::invalid_description;
+        }
+        (void)level_bytes;
         if (upload.row_pitch < minimum_pitch) {
             diagnostic = {"texture_row_pitch_too_small", "Texture upload row pitch is smaller than one packed row"};
             return TextureStatus::invalid_description;
         }
-        if (static_cast<std::uint64_t>(upload.row_pitch) % bytes_per_pixel != 0U) {
-            diagnostic = {"texture_row_pitch_alignment", "Texture upload row pitch must align to the format texel size"};
+        const std::uint64_t row_alignment = block_compressed ? format_info.block_bytes : format_info.bytes_per_pixel;
+        if (row_alignment == 0U || static_cast<std::uint64_t>(upload.row_pitch) % row_alignment != 0U) {
+            diagnostic = {"texture_row_pitch_alignment", "Texture upload row pitch must align to the format texel or block size"};
             return TextureStatus::invalid_description;
         }
-        const std::uint64_t upload_bytes = static_cast<std::uint64_t>(upload.row_pitch) * upload.height;
+        std::uint64_t upload_bytes = 0U;
+        if (!checked_texture_size_multiply(upload.row_pitch, expected_rows, upload_bytes)) {
+            diagnostic = {"texture_upload_size_overflow", "Texture upload row-pitch footprint overflows"};
+            return TextureStatus::invalid_description;
+        }
         if (upload_bytes > static_cast<std::uint64_t>(upload.data.size())) {
             diagnostic = {"texture_upload_truncated", "Texture upload data is shorter than its row-pitch footprint"};
             return TextureStatus::invalid_description;
@@ -275,11 +350,6 @@ TextureStatus validate_texture_description(const TextureDescription& description
         diagnostic = {"texture_format_unknown", "The texture format is not recognized by the native contract"};
         return TextureStatus::unsupported;
     }
-    if (!texture_format_cpu_upload_supported(description.format)) {
-        diagnostic = {"texture_compressed_format_unsupported",
-                      "Block-compressed texture resources require a GPU upload path"};
-        return TextureStatus::unsupported;
-    }
     const auto usage = static_cast<std::uint32_t>(description.usage);
     constexpr std::uint32_t known_usage = static_cast<std::uint32_t>(TextureUsage::sampled) |
                                            static_cast<std::uint32_t>(TextureUsage::transfer_source) |
@@ -290,6 +360,15 @@ TextureStatus validate_texture_description(const TextureDescription& description
         diagnostic = {"texture_usage_invalid", "A texture must specify only known non-empty usage bits"};
         return TextureStatus::invalid_description;
     }
+    const TextureStatus block_status = validate_texture_block_upload_contract(description, diagnostic);
+    if (block_status != TextureStatus::ready) return block_status;
+    if (texture_format_is_compressed(description.format) &&
+        initial_uploads.subresources.size() !=
+            static_cast<std::size_t>(description.mip_levels) * description.array_layers) {
+        diagnostic = {"texture_compressed_upload_incomplete",
+                      "Immutable BC1 and BC3 textures require one upload for every subresource"};
+        return TextureStatus::invalid_description;
+    }
     constexpr auto max_size_t = static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max());
     std::uint64_t total_bytes = 0U;
     for (std::uint32_t layer = 0; layer < description.array_layers; ++layer) {
@@ -297,7 +376,17 @@ TextureStatus validate_texture_description(const TextureDescription& description
         for (std::uint32_t mip = 0; mip < description.mip_levels; ++mip) {
             const std::uint64_t width = std::max(1U, description.width >> mip);
             const std::uint64_t height = std::max(1U, description.height >> mip);
-            const std::uint64_t level_bytes = width * height * texture_format_bytes_per_pixel(description.format);
+            std::uint64_t row_bytes = 0U;
+            std::uint64_t row_count = 0U;
+            std::uint64_t level_bytes = 0U;
+            if (!texture_upload_layout(description.format, static_cast<std::uint32_t>(width),
+                                       static_cast<std::uint32_t>(height), row_bytes, row_count, level_bytes)) {
+                diagnostic = {"texture_size_platform_limit",
+                              "The texture byte size cannot be represented by this platform"};
+                return TextureStatus::invalid_description;
+            }
+            (void)row_bytes;
+            (void)row_count;
             if (level_bytes > max_size_t || total_bytes > max_size_t - level_bytes) {
                 diagnostic = {"texture_size_platform_limit",
                               "The texture byte size cannot be represented by this platform"};
@@ -1141,12 +1230,11 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
         }
         if (sampled.width == 0U || sampled.height == 0U || sampled.mip_levels == 0U ||
             sampled.array_layers != 1U || sampled.samples != 1U ||
-            (sampled.format != TextureFormat::rgba8_unorm &&
-             sampled.format != TextureFormat::rgba8_srgb &&
-             sampled.format != TextureFormat::bgra8_unorm &&
-             sampled.format != TextureFormat::bgra8_srgb)) {
+            !portable_sampled_color_format(sampled.format, true) ||
+            (texture_format_is_compressed(sampled.format) &&
+             sampled.mutability != TextureMutability::immutable)) {
             diagnostic = {"indexed_resource_texture_description_unsupported",
-                          "The portable diffuse baseline requires one-layer RGBA8 or BGRA8 texture data"};
+                          "The portable diffuse baseline requires one-layer RGBA8, BGRA8, BC1, or BC3 texture data"};
             return IndexedStaticMeshDrawStatus::unsupported;
         }
         Diagnostic sampler_diagnostic;
@@ -1237,10 +1325,11 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             }
             if (maps.width == 0U || maps.height == 0U || maps.mip_levels == 0U ||
                 maps.array_layers != 1U || maps.samples != 1U ||
-                (maps.format != TextureFormat::rgba8_unorm &&
-                 maps.format != TextureFormat::bgra8_unorm)) {
+                !portable_sampled_color_format(maps.format, false) ||
+                (texture_format_is_compressed(maps.format) &&
+                 maps.mutability != TextureMutability::immutable)) {
                 diagnostic = {"indexed_maps_texture_description_unsupported",
-                              "The portable maps path requires one-layer linear RGBA8 or BGRA8 UNORM texture data"};
+                              "The portable maps path requires one-layer linear RGBA8, BGRA8, BC1, or BC3 UNORM texture data"};
                 return IndexedStaticMeshDrawStatus::unsupported;
             }
             Diagnostic maps_sampler_diagnostic;
@@ -1284,12 +1373,11 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             }
             if (detail.width == 0U || detail.height == 0U || detail.mip_levels == 0U ||
                 detail.array_layers != 1U || detail.samples != 1U ||
-                (detail.format != TextureFormat::rgba8_unorm &&
-                 detail.format != TextureFormat::rgba8_srgb &&
-                 detail.format != TextureFormat::bgra8_unorm &&
-                 detail.format != TextureFormat::bgra8_srgb)) {
+                !portable_sampled_color_format(detail.format, true) ||
+                (texture_format_is_compressed(detail.format) &&
+                 detail.mutability != TextureMutability::immutable)) {
                 diagnostic = {"indexed_detail_texture_description_unsupported",
-                              "The portable detail path requires one-layer RGBA8 or BGRA8 texture data"};
+                              "The portable detail path requires one-layer RGBA8, BGRA8, BC1, or BC3 texture data"};
                 return IndexedStaticMeshDrawStatus::unsupported;
             }
             Diagnostic detail_sampler_diagnostic;
