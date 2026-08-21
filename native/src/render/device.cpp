@@ -292,6 +292,57 @@ TextureStatus validate_texture_update(const Texture& texture,
     return validate_texture_upload_plan(texture.info().description, uploads, diagnostic);
 }
 
+DepthAttachmentStatus validate_depth_attachment_description(
+    const DepthAttachmentDescription& description, Diagnostic& diagnostic) {
+    if (description.format != DepthAttachmentFormat::d32_float) {
+        diagnostic = {"depth_attachment_format_unsupported",
+                      "Only D32 depth attachments are supported by the neutral contract"};
+        return DepthAttachmentStatus::unsupported;
+    }
+    if (description.width == 0U || description.height == 0U) {
+        diagnostic = {"depth_attachment_dimensions_invalid",
+                      "Depth attachment dimensions must be non-zero"};
+        return DepthAttachmentStatus::invalid_description;
+    }
+    if (description.width > max_texture_dimension || description.height > max_texture_dimension) {
+        diagnostic = {"depth_attachment_dimension_limit",
+                      "Depth attachment dimensions exceed the backend-neutral safety limit"};
+        return DepthAttachmentStatus::invalid_description;
+    }
+    if (description.samples != 1U) {
+        diagnostic = {"depth_attachment_samples_unsupported",
+                      "Only single-sample depth attachments are supported by the neutral contract"};
+        return DepthAttachmentStatus::unsupported;
+    }
+    constexpr std::uint64_t max_size_t = static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max());
+    const std::uint64_t width = description.width;
+    const std::uint64_t height = description.height;
+    if (width > std::numeric_limits<std::uint64_t>::max() / height) {
+        diagnostic = {"depth_attachment_size_overflow",
+                      "Depth attachment dimensions overflow byte arithmetic"};
+        return DepthAttachmentStatus::invalid_description;
+    }
+    const std::uint64_t texels = width * height;
+    if (texels > std::numeric_limits<std::uint64_t>::max() / sizeof(float)) {
+        diagnostic = {"depth_attachment_size_overflow",
+                      "Depth attachment byte size overflows byte arithmetic"};
+        return DepthAttachmentStatus::invalid_description;
+    }
+    const std::uint64_t bytes = texels * sizeof(float);
+    if (bytes > max_size_t) {
+        diagnostic = {"depth_attachment_size_platform_limit",
+                      "Depth attachment size cannot be represented by this platform"};
+        return DepthAttachmentStatus::invalid_description;
+    }
+    if (bytes > max_texture_bytes) {
+        diagnostic = {"depth_attachment_size_limit",
+                      "Depth attachment exceeds the backend-neutral safety limit"};
+        return DepthAttachmentStatus::invalid_description;
+    }
+    diagnostic = {};
+    return DepthAttachmentStatus::ready;
+}
+
 TextureReadbackStatus validate_texture_clear_readback(
     const Texture& texture, const TextureClearReadbackRequest& request, Diagnostic& diagnostic) {
     const TextureDescription& description = texture.info().description;
@@ -521,12 +572,44 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             return IndexedStaticMeshDrawStatus::invalid_request;
         }
     }
+    if (!std::isfinite(request.depth_clear_value) || request.depth_clear_value < 0.0F ||
+        request.depth_clear_value > 1.0F) {
+        diagnostic = {"indexed_static_mesh_depth_clear_invalid",
+                      "Indexed static-mesh depth clear value must be finite and within [0, 1]"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
     if (request.index_type != StaticMeshIndexType::uint16) {
         diagnostic = {"indexed_static_mesh_index_type_unsupported",
                       "Only uint16 indexed static-mesh draws are supported"};
         return IndexedStaticMeshDrawStatus::unsupported;
     }
     const TextureDescription& target = texture.info().description;
+    if (request.depth_attachment != nullptr) {
+        const DepthAttachment& depth = *request.depth_attachment;
+        if (depth.backend() != texture.backend()) {
+            diagnostic = {"indexed_depth_attachment_backend_mismatch",
+                          "Color target and depth attachment must belong to the same backend"};
+            return IndexedStaticMeshDrawStatus::unsupported;
+        }
+        Diagnostic depth_diagnostic;
+        const DepthAttachmentStatus depth_status =
+            validate_depth_attachment_description(depth.info().description, depth_diagnostic);
+        if (depth_status != DepthAttachmentStatus::ready) {
+            diagnostic = {depth_diagnostic.code.empty() ? "indexed_depth_attachment_invalid"
+                                                         : depth_diagnostic.code,
+                          depth_diagnostic.message};
+            return depth_status == DepthAttachmentStatus::unsupported
+                       ? IndexedStaticMeshDrawStatus::unsupported
+                       : IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        const DepthAttachmentDescription& depth_description = depth.info().description;
+        if (depth_description.width != target.width || depth_description.height != target.height ||
+            depth_description.samples != 1U) {
+            diagnostic = {"indexed_depth_attachment_dimensions_mismatch",
+                          "Depth attachment dimensions and samples must match the color target"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+    }
     if (request.mip_level != 0U || request.array_layer != 0U) {
         diagnostic = {"indexed_static_mesh_subresource_unsupported",
                       "Indexed static-mesh drawing targets mip zero and array layer zero"};
@@ -623,10 +706,20 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
         }
     }
     if (packet.flags.transparent || packet.flags.blend_enabled || packet.flags.alpha_to_coverage ||
-        packet.flags.depth_test || packet.flags.depth_write || packet.flags.wireframe) {
+        packet.flags.wireframe) {
         diagnostic = {"indexed_static_mesh_state_unsupported",
-                      "Indexed static-mesh baseline supports opaque solid rasterization without depth"};
+                      "Indexed static-mesh baseline supports opaque solid rasterization"};
         return IndexedStaticMeshDrawStatus::unsupported;
+    }
+    if (packet.flags.depth_write && !packet.flags.depth_test) {
+        diagnostic = {"indexed_depth_write_without_test",
+                      "Indexed static-mesh depth writes require depth testing"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (request.clear_depth && request.depth_attachment == nullptr) {
+        diagnostic = {"indexed_depth_attachment_missing",
+                      "A depth clear requires a persistent depth attachment"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
     }
     if (packet.vertex_count == 0U || packet.vertex_count > max_indexed_static_mesh_vertices ||
         packet.index_count == 0U || packet.index_count > max_indexed_static_mesh_indices ||
@@ -647,14 +740,43 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
         }
         return IndexedStaticMeshDrawStatus::invalid_request;
     }
-    if (pipeline.targets.colors.size() != 1U || pipeline.targets.has_depth ||
+    if (pipeline.targets.colors.size() != 1U ||
         pipeline.targets.colors[0].samples != 1U || pipeline.targets.colors[0].format != expected_format ||
         !pipeline.resources.empty() || pipeline.raster.fill != PipelineFillMode::solid ||
-        pipeline.blend.enabled || pipeline.blend.alpha_to_coverage || pipeline.depth.test_enabled ||
-        pipeline.depth.write_enabled) {
+        pipeline.blend.enabled || pipeline.blend.alpha_to_coverage) {
         diagnostic = {"indexed_pipeline_state_unsupported",
                       "Indexed static-mesh baseline supports one opaque single-sample color target without resources"};
         return IndexedStaticMeshDrawStatus::unsupported;
+    }
+    if (pipeline.depth.test_enabled != packet.flags.depth_test ||
+        pipeline.depth.write_enabled != packet.flags.depth_write) {
+        diagnostic = {"indexed_depth_state_mismatch",
+                      "Pipeline depth test/write state must match the draw packet"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (pipeline.depth.test_enabled && request.depth_attachment == nullptr) {
+        diagnostic = {"indexed_depth_attachment_missing",
+                      "Depth-enabled indexed static-mesh drawing requires a depth attachment"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (pipeline.targets.has_depth != (request.depth_attachment != nullptr)) {
+        diagnostic = {"indexed_depth_target_binding_mismatch",
+                      "Pipeline depth target declaration must match the supplied depth attachment"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (pipeline.targets.has_depth &&
+        (pipeline.targets.depth.format != PipelineRenderTargetFormat::depth32_float ||
+         pipeline.targets.depth.samples != 1U)) {
+        diagnostic = {"indexed_pipeline_depth_target_invalid",
+                      "Indexed static-mesh drawing requires a single-sample D32 target"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (pipeline.depth.test_enabled) {
+        if (pipeline.depth.compare != PipelineCompareOperation::less) {
+            diagnostic = {"indexed_depth_compare_unsupported",
+                          "Indexed static-mesh execution requires the source-evidenced LESS depth comparison"};
+            return IndexedStaticMeshDrawStatus::unsupported;
+        }
     }
     bool has_vertex = false;
     bool has_fragment = false;
@@ -1051,6 +1173,20 @@ const char* texture_status_name(TextureStatus status) noexcept {
         return "allocation_failed";
     case TextureStatus::upload_failed:
         return "upload_failed";
+    }
+    return "unknown";
+}
+
+const char* depth_attachment_status_name(DepthAttachmentStatus status) noexcept {
+    switch (status) {
+    case DepthAttachmentStatus::ready:
+        return "ready";
+    case DepthAttachmentStatus::invalid_description:
+        return "invalid_description";
+    case DepthAttachmentStatus::unsupported:
+        return "unsupported";
+    case DepthAttachmentStatus::allocation_failed:
+        return "allocation_failed";
     }
     return "unknown";
 }

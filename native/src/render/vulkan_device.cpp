@@ -618,6 +618,57 @@ struct RawVulkanImage {
     }
 };
 
+// Depth attachments are persistent frame resources rather than color
+// textures. Keep their layout and clear history with the image so a later
+// indexed draw can safely choose LOAD instead of reading an undefined image.
+struct RawVulkanDepthAttachment {
+    std::shared_ptr<VulkanContext> context;
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    bool initialized = false;
+
+    RawVulkanDepthAttachment() = default;
+    RawVulkanDepthAttachment(const RawVulkanDepthAttachment&) = delete;
+    RawVulkanDepthAttachment& operator=(const RawVulkanDepthAttachment&) = delete;
+    RawVulkanDepthAttachment(RawVulkanDepthAttachment&& other) noexcept
+        : context(std::move(other.context)), image(std::exchange(other.image, VK_NULL_HANDLE)),
+          memory(std::exchange(other.memory, VK_NULL_HANDLE)), view(std::exchange(other.view, VK_NULL_HANDLE)),
+          layout(other.layout), initialized(other.initialized) {
+        other.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        other.initialized = false;
+    }
+    RawVulkanDepthAttachment& operator=(RawVulkanDepthAttachment&& other) noexcept {
+        if (this == &other) return *this;
+        reset();
+        context = std::move(other.context);
+        image = std::exchange(other.image, VK_NULL_HANDLE);
+        memory = std::exchange(other.memory, VK_NULL_HANDLE);
+        view = std::exchange(other.view, VK_NULL_HANDLE);
+        layout = other.layout;
+        initialized = other.initialized;
+        other.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        other.initialized = false;
+        return *this;
+    }
+    ~RawVulkanDepthAttachment() { reset(); }
+
+    void reset() noexcept {
+        if (context && context->device != VK_NULL_HANDLE) {
+            if (view != VK_NULL_HANDLE) vkDestroyImageView(context->device, view, nullptr);
+            if (image != VK_NULL_HANDLE) vkDestroyImage(context->device, image, nullptr);
+            if (memory != VK_NULL_HANDLE) vkFreeMemory(context->device, memory, nullptr);
+        }
+        view = VK_NULL_HANDLE;
+        image = VK_NULL_HANDLE;
+        memory = VK_NULL_HANDLE;
+        layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        initialized = false;
+        context.reset();
+    }
+};
+
 bool create_raw_image(const std::shared_ptr<VulkanContext>& context,
                       const TextureDescription& description,
                       RawVulkanImage& raw,
@@ -695,6 +746,118 @@ bool create_raw_image(const std::shared_ptr<VulkanContext>& context,
     }
     return true;
 }
+
+bool create_raw_depth_attachment(const std::shared_ptr<VulkanContext>& context,
+                                 const DepthAttachmentDescription& description,
+                                 RawVulkanDepthAttachment& raw,
+                                 Diagnostic& diagnostic) {
+    raw.reset();
+    raw.context = context;
+
+    VkImageCreateInfo image_info{};
+    image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.format = VK_FORMAT_D32_SFLOAT;
+    image_info.extent = {description.width, description.height, 1U};
+    image_info.mipLevels = 1U;
+    image_info.arrayLayers = 1U;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VkImageFormatProperties format_properties{};
+    VkResult result = vkGetPhysicalDeviceImageFormatProperties(
+        context->physical_device, image_info.format, image_info.imageType, image_info.tiling,
+        image_info.usage, 0U, &format_properties);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkGetPhysicalDeviceImageFormatProperties(depth)", result);
+        diagnostic.code = "depth_attachment_format_unsupported";
+        raw.reset();
+        return false;
+    }
+    result = vkCreateImage(context->device, &image_info, nullptr, &raw.image);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkCreateImage(depth)", result);
+        diagnostic.code = "depth_attachment_allocation_failed";
+        raw.reset();
+        return false;
+    }
+
+    VkMemoryRequirements requirements{};
+    vkGetImageMemoryRequirements(context->device, raw.image, &requirements);
+    const auto type = memory_type(*context, requirements.memoryTypeBits,
+                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (!type.has_value()) {
+        diagnostic = {"depth_attachment_memory_unavailable",
+                      "Vulkan has no device-local memory type for the D32 depth attachment"};
+        raw.reset();
+        return false;
+    }
+    VkMemoryAllocateInfo allocation{};
+    allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocation.allocationSize = requirements.size;
+    allocation.memoryTypeIndex = *type;
+    result = vkAllocateMemory(context->device, &allocation, nullptr, &raw.memory);
+    if (result == VK_SUCCESS) result = vkBindImageMemory(context->device, raw.image, raw.memory, 0U);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("Vulkan depth image memory", result);
+        diagnostic.code = "depth_attachment_allocation_failed";
+        raw.reset();
+        return false;
+    }
+
+    VkImageViewCreateInfo view_info{};
+    view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = raw.image;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = VK_FORMAT_D32_SFLOAT;
+    view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    view_info.subresourceRange.levelCount = 1U;
+    view_info.subresourceRange.layerCount = 1U;
+    result = vkCreateImageView(context->device, &view_info, nullptr, &raw.view);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkCreateImageView(depth)", result);
+        diagnostic.code = "depth_attachment_allocation_failed";
+        raw.reset();
+        return false;
+    }
+    return true;
+}
+
+class VulkanDepthAttachment final : public DepthAttachment {
+public:
+    VulkanDepthAttachment(std::shared_ptr<VulkanContext> context,
+                          RawVulkanDepthAttachment raw,
+                          DepthAttachmentDescription description)
+        : context_(std::move(context)), raw_(std::move(raw)), info_({description}) {}
+
+    ~VulkanDepthAttachment() override = default;
+
+    Backend backend() const noexcept override { return Backend::Vulkan; }
+    const DepthAttachmentInfo& info() const noexcept override { return info_; }
+    const std::shared_ptr<VulkanContext>& context() const noexcept { return context_; }
+    VkImage image() const noexcept { return raw_.image; }
+    VkImageView view() const noexcept { return raw_.view; }
+    VkImageLayout layout() const noexcept { return raw_.layout; }
+    bool initialized() const noexcept { return raw_.initialized; }
+
+    void mark_rendered(bool initialized) noexcept {
+        raw_.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        raw_.initialized = raw_.initialized || initialized;
+    }
+    void mark_invalid() noexcept {
+        raw_.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        raw_.initialized = false;
+    }
+
+private:
+    std::shared_ptr<VulkanContext> context_;
+    RawVulkanDepthAttachment raw_;
+    DepthAttachmentInfo info_;
+};
 
 bool copy_texture_uploads(const std::shared_ptr<VulkanContext>& context,
                           RawVulkanImage& image,
@@ -1036,10 +1199,27 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
                                 const PipelineProgram& program,
                                 const VulkanDrawGeometry& geometry,
                                 const DrawMatrices* draw_matrices,
+                                VulkanDepthAttachment* depth_attachment,
+                                bool load_color,
+                                bool clear_depth,
+                                float depth_clear_value,
                                 const std::array<float, 4>& clear_color,
                                 VkImageLayout& current_layout,
                                 std::vector<std::byte>& output,
                                 Diagnostic& diagnostic) {
+    std::lock_guard command_guard(context->command_mutex);
+    if (depth_attachment != nullptr) {
+        if (depth_attachment->context().get() != context.get()) {
+            diagnostic = {"indexed_depth_attachment_context_mismatch",
+                          "The depth attachment belongs to another Vulkan device"};
+            return false;
+        }
+        if (!clear_depth && !depth_attachment->initialized()) {
+            diagnostic = {"indexed_depth_load_before_clear",
+                          "A depth load was requested before the depth attachment was cleared"};
+            return false;
+        }
+    }
     if (draw_matrices != nullptr) {
         VkPhysicalDeviceProperties properties{};
         vkGetPhysicalDeviceProperties(context->physical_device, &properties);
@@ -1049,7 +1229,6 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
             return false;
         }
     }
-    std::lock_guard command_guard(context->command_mutex);
     const std::uint64_t output_size_u64 = static_cast<std::uint64_t>(description.width) *
                                           static_cast<std::uint64_t>(description.height) * 4U;
     if (output_size_u64 > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
@@ -1104,24 +1283,38 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
         return false;
     }
 
-    VkAttachmentDescription attachment{};
-    attachment.format = vk_texture_format(description.format);
-    attachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    attachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    attachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    VkAttachmentDescription color_attachment{};
+    color_attachment.format = vk_texture_format(description.format);
+    color_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    color_attachment.loadOp = load_color ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
+    color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    color_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    color_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    color_attachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    color_attachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    VkAttachmentDescription depth_attachment_description{};
+    if (depth_attachment != nullptr) {
+        depth_attachment_description.format = VK_FORMAT_D32_SFLOAT;
+        depth_attachment_description.samples = VK_SAMPLE_COUNT_1_BIT;
+        depth_attachment_description.loadOp = clear_depth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+        depth_attachment_description.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        depth_attachment_description.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        depth_attachment_description.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depth_attachment_description.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        depth_attachment_description.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    }
+    std::array<VkAttachmentDescription, 2> attachments = {color_attachment, depth_attachment_description};
     VkAttachmentReference color_reference{0U, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference depth_reference{1U, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1U;
     subpass.pColorAttachments = &color_reference;
+    subpass.pDepthStencilAttachment = depth_attachment == nullptr ? nullptr : &depth_reference;
     VkRenderPassCreateInfo render_pass_info{};
     render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    render_pass_info.attachmentCount = 1U;
-    render_pass_info.pAttachments = &attachment;
+    render_pass_info.attachmentCount = depth_attachment == nullptr ? 1U : 2U;
+    render_pass_info.pAttachments = attachments.data();
     render_pass_info.subpassCount = 1U;
     render_pass_info.pSubpasses = &subpass;
     VkRenderPass render_pass = VK_NULL_HANDLE;
@@ -1135,8 +1328,10 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
     VkFramebufferCreateInfo framebuffer_info{};
     framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     framebuffer_info.renderPass = render_pass;
-    framebuffer_info.attachmentCount = 1U;
-    framebuffer_info.pAttachments = &image.view;
+    std::array<VkImageView, 2> framebuffer_attachments = {
+        image.view, depth_attachment == nullptr ? VK_NULL_HANDLE : depth_attachment->view()};
+    framebuffer_info.attachmentCount = depth_attachment == nullptr ? 1U : 2U;
+    framebuffer_info.pAttachments = framebuffer_attachments.data();
     framebuffer_info.width = description.width;
     framebuffer_info.height = description.height;
     framebuffer_info.layers = 1U;
@@ -1218,6 +1413,11 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
         color_blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
         color_blend.attachmentCount = 1U;
         color_blend.pAttachments = &blend;
+        VkPipelineDepthStencilStateCreateInfo depth_stencil{};
+        depth_stencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+        depth_stencil.depthTestEnable = depth_attachment != nullptr && program.depth.test_enabled ? VK_TRUE : VK_FALSE;
+        depth_stencil.depthWriteEnable = depth_attachment != nullptr && program.depth.write_enabled ? VK_TRUE : VK_FALSE;
+        depth_stencil.depthCompareOp = VK_COMPARE_OP_LESS;
         VkGraphicsPipelineCreateInfo pipeline_info{};
         pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
         pipeline_info.stageCount = static_cast<std::uint32_t>(stages.size());
@@ -1228,6 +1428,7 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
         pipeline_info.pRasterizationState = &raster;
         pipeline_info.pMultisampleState = &multisample;
         pipeline_info.pColorBlendState = &color_blend;
+        pipeline_info.pDepthStencilState = depth_attachment == nullptr ? nullptr : &depth_stencil;
         pipeline_info.layout = pipeline_layout;
         pipeline_info.renderPass = render_pass;
         pipeline_info.subpass = 0U;
@@ -1269,21 +1470,50 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
                 barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
                 barrier.subresourceRange.levelCount = description.mip_levels;
                 barrier.subresourceRange.layerCount = description.array_layers;
-                barrier.srcAccessMask = current_layout == VK_IMAGE_LAYOUT_UNDEFINED ? 0U : VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-                barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                barrier.srcAccessMask = current_layout == VK_IMAGE_LAYOUT_UNDEFINED
+                                            ? 0U
+                                            : VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
                 vkCmdPipelineBarrier(command,
                                      current_layout == VK_IMAGE_LAYOUT_UNDEFINED ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                                      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
             }
-            VkClearValue clear{};
-            for (std::size_t index = 0; index < 4U; ++index) clear.color.float32[index] = clear_color[index];
+            if (depth_attachment != nullptr &&
+                depth_attachment->layout() != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+                VkImageMemoryBarrier depth_barrier{};
+                depth_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                depth_barrier.oldLayout = depth_attachment->layout();
+                depth_barrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                depth_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                depth_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                depth_barrier.image = depth_attachment->image();
+                depth_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+                depth_barrier.subresourceRange.levelCount = 1U;
+                depth_barrier.subresourceRange.layerCount = 1U;
+                depth_barrier.srcAccessMask = depth_attachment->layout() == VK_IMAGE_LAYOUT_UNDEFINED
+                                                   ? 0U
+                                                   : VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                depth_barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                              VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                vkCmdPipelineBarrier(
+                    command,
+                    depth_attachment->layout() == VK_IMAGE_LAYOUT_UNDEFINED
+                        ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                        : VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                    0U, 0U, nullptr, 0U, nullptr, 1U, &depth_barrier);
+            }
+            std::array<VkClearValue, 2> clear_values{};
+            for (std::size_t index = 0; index < 4U; ++index) clear_values[0].color.float32[index] = clear_color[index];
+            if (depth_attachment != nullptr) clear_values[1].depthStencil.depth = depth_clear_value;
             VkRenderPassBeginInfo render_begin{};
             render_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
             render_begin.renderPass = render_pass;
             render_begin.framebuffer = framebuffer;
             render_begin.renderArea.extent = {description.width, description.height};
-            render_begin.clearValueCount = 1U;
-            render_begin.pClearValues = &clear;
+            render_begin.clearValueCount = depth_attachment == nullptr ? 1U : 2U;
+            render_begin.pClearValues = clear_values.data();
             vkCmdBeginRenderPass(command, &render_begin, VK_SUBPASS_CONTENTS_INLINE);
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
             if (draw_matrices != nullptr) {
@@ -1348,10 +1578,17 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
     }
     if (submitted && !completed) {
         const VkResult drain = vkDeviceWaitIdle(context->device);
-        if (drain == VK_SUCCESS) current_layout = texture_final_layout(description.usage);
-        else { current_layout = VK_IMAGE_LAYOUT_UNDEFINED; result = drain; }
+        if (drain == VK_SUCCESS) {
+            current_layout = texture_final_layout(description.usage);
+            if (depth_attachment != nullptr) depth_attachment->mark_rendered(clear_depth);
+        } else {
+            current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+            if (depth_attachment != nullptr) depth_attachment->mark_invalid();
+            result = drain;
+        }
     } else if (completed) {
         current_layout = texture_final_layout(description.usage);
+        if (depth_attachment != nullptr) depth_attachment->mark_rendered(clear_depth);
     }
     if (command != VK_NULL_HANDLE) vkFreeCommandBuffers(context->device, context->command_pool, 1U, &command);
     if (pipeline != VK_NULL_HANDLE) vkDestroyPipeline(context->device, pipeline, nullptr);
@@ -1410,7 +1647,8 @@ bool draw_triangle_and_readback(const std::shared_ptr<VulkanContext>& context,
     const VulkanDrawGeometry geometry{vertices, 0U, nullptr, 0U, request.vertex_count, 0U,
                                       VK_INDEX_TYPE_UINT16};
     if (!draw_graphics_and_readback(context, image, description, *request.pipeline, geometry, nullptr,
-                                    request.clear_color, current_layout, output, diagnostic)) {
+                                    nullptr, false, false, 1.0F, request.clear_color, current_layout,
+                                    output, diagnostic)) {
         if (diagnostic.code.rfind("vulkan_draw_", 0U) == 0U)
             diagnostic.code = "triangle_execution_failed";
         return false;
@@ -1423,8 +1661,10 @@ public:
     VulkanTexture(std::shared_ptr<VulkanContext> context,
                   RawVulkanImage raw,
                   TextureDescription description,
-                  VkImageLayout layout)
-        : context_(std::move(context)), raw_(std::move(raw)), info_({description}), layout_(layout) {}
+                  VkImageLayout layout,
+                  bool initialized)
+        : context_(std::move(context)), raw_(std::move(raw)), info_({description}),
+          layout_(layout), initialized_(initialized) {}
 
     ~VulkanTexture() override = default;
     Backend backend() const noexcept override { return Backend::Vulkan; }
@@ -1432,19 +1672,28 @@ public:
     const std::shared_ptr<VulkanContext>& context() const noexcept { return context_; }
 
     bool upload(const TextureUploadPlan& uploads, Diagnostic& diagnostic) {
-        return copy_texture_uploads(context_, raw_, info_.description, uploads, layout_, diagnostic);
+        const bool uploaded = copy_texture_uploads(context_, raw_, info_.description, uploads,
+                                                   layout_, diagnostic);
+        initialized_ = initialized_ || (uploaded && !uploads.subresources.empty());
+        return uploaded;
     }
 
     bool clear_readback(const TextureClearReadbackRequest& request,
                         std::vector<std::byte>& output,
                         Diagnostic& diagnostic) {
-        return clear_texture_and_readback(context_, raw_, info_.description, request, layout_, output, diagnostic);
+        const bool cleared = clear_texture_and_readback(context_, raw_, info_.description, request,
+                                                        layout_, output, diagnostic);
+        initialized_ = initialized_ || cleared;
+        return cleared;
     }
 
     bool draw_triangle(const TriangleDrawRequest& request,
                        std::vector<std::byte>& output,
                        Diagnostic& diagnostic) {
-        return draw_triangle_and_readback(context_, raw_, info_.description, request, layout_, output, diagnostic);
+        const bool drawn = draw_triangle_and_readback(context_, raw_, info_.description, request,
+                                                      layout_, output, diagnostic);
+        initialized_ = initialized_ || drawn;
+        return drawn;
     }
 
     bool draw_indexed_static_mesh(const IndexedStaticMeshDrawRequest& request,
@@ -1452,6 +1701,11 @@ public:
                                   const VulkanBuffer& index_buffer,
                                   std::vector<std::byte>& output,
                                   Diagnostic& diagnostic) {
+        if (request.load_color && !initialized_) {
+            diagnostic = {"indexed_color_load_before_clear",
+                          "A color load was requested before the color attachment was initialized"};
+            return false;
+        }
         const DrawPacket& packet = *request.packet;
         const std::uint64_t vertex_offset = static_cast<std::uint64_t>(packet.vertex_offset) *
                                             request.pipeline->vertex_layout.stride;
@@ -1467,8 +1721,26 @@ public:
                                           static_cast<VkDeviceSize>(index_offset), 0U,
                                           packet.index_count, VK_INDEX_TYPE_UINT16};
         const DrawMatrices draw_matrices{packet.world_matrix, request.camera_frame->view_projection};
-        return draw_graphics_and_readback(context_, raw_, info_.description, *request.pipeline, geometry,
-                                          &draw_matrices, request.clear_color, layout_, output, diagnostic);
+        VulkanDepthAttachment* depth_attachment = nullptr;
+        if (request.depth_attachment != nullptr) {
+            depth_attachment = dynamic_cast<VulkanDepthAttachment*>(request.depth_attachment);
+            if (depth_attachment == nullptr) {
+                diagnostic = {"indexed_depth_attachment_type_unsupported",
+                              "The Vulkan device received an unknown depth attachment handle"};
+                return false;
+            }
+            if (depth_attachment->context().get() != context_.get()) {
+                diagnostic = {"indexed_depth_attachment_context_mismatch",
+                              "The depth attachment belongs to another Vulkan device"};
+                return false;
+            }
+        }
+        const bool drawn = draw_graphics_and_readback(
+            context_, raw_, info_.description, *request.pipeline, geometry, &draw_matrices,
+            depth_attachment, request.load_color, request.clear_depth, request.depth_clear_value,
+            request.clear_color, layout_, output, diagnostic);
+        initialized_ = initialized_ || drawn;
+        return drawn;
     }
 
 private:
@@ -1476,6 +1748,7 @@ private:
     RawVulkanImage raw_;
     TextureInfo info_;
     VkImageLayout layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    bool initialized_ = false;
 };
 
 struct RawVulkanSampler {
@@ -1654,7 +1927,7 @@ public:
         if (!create_raw_image(context_, description, raw, diagnostic))
             return {TextureStatus::allocation_failed, std::move(diagnostic), nullptr};
         auto texture = std::make_unique<VulkanTexture>(context_, std::move(raw), description,
-                                                       VK_IMAGE_LAYOUT_UNDEFINED);
+                                                       VK_IMAGE_LAYOUT_UNDEFINED, false);
         if (!texture->upload(initial_uploads, diagnostic))
             return {TextureStatus::upload_failed, std::move(diagnostic), nullptr};
         return {TextureStatus::ready, {}, std::move(texture)};
@@ -1675,6 +1948,24 @@ public:
         return vulkan_texture->upload(uploads, diagnostic)
                    ? TextureUpdateResult{TextureStatus::ready, {}}
                    : TextureUpdateResult{TextureStatus::upload_failed, std::move(diagnostic)};
+    }
+
+    DepthAttachmentResult create_depth_attachment(
+        const DepthAttachmentDescription& description) override {
+        Diagnostic diagnostic;
+        const DepthAttachmentStatus validation =
+            validate_depth_attachment_description(description, diagnostic);
+        if (validation != DepthAttachmentStatus::ready)
+            return {validation, std::move(diagnostic), nullptr};
+        RawVulkanDepthAttachment raw;
+        if (!create_raw_depth_attachment(context_, description, raw, diagnostic)) {
+            const DepthAttachmentStatus status = diagnostic.code == "depth_attachment_format_unsupported"
+                                                     ? DepthAttachmentStatus::unsupported
+                                                     : DepthAttachmentStatus::allocation_failed;
+            return {status, std::move(diagnostic), nullptr};
+        }
+        return {DepthAttachmentStatus::ready, {},
+                std::make_unique<VulkanDepthAttachment>(context_, std::move(raw), description)};
     }
 
     TextureClearReadbackResult clear_texture_and_readback(

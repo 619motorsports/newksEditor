@@ -224,6 +224,49 @@ public:
     [[nodiscard]] virtual const TextureInfo& info() const noexcept = 0;
 };
 
+// A persistent, backend-neutral D32 depth attachment. It is deliberately
+// separate from Texture: depth images are not CPU-uploadable color textures,
+// and their lifetime/state must persist across multiple indexed draws.
+enum class DepthAttachmentFormat : std::uint8_t {
+    d32_float,
+};
+
+struct DepthAttachmentDescription {
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint32_t samples = 1;
+    DepthAttachmentFormat format = DepthAttachmentFormat::d32_float;
+};
+
+struct DepthAttachmentInfo {
+    DepthAttachmentDescription description{};
+};
+
+class DepthAttachment {
+public:
+    virtual ~DepthAttachment() = default;
+
+    [[nodiscard]] virtual Backend backend() const noexcept = 0;
+    [[nodiscard]] virtual const DepthAttachmentInfo& info() const noexcept = 0;
+};
+
+enum class DepthAttachmentStatus {
+    ready,
+    invalid_description,
+    unsupported,
+    allocation_failed,
+};
+
+struct DepthAttachmentResult {
+    DepthAttachmentStatus status = DepthAttachmentStatus::unsupported;
+    Diagnostic diagnostic;
+    std::unique_ptr<DepthAttachment> attachment;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == DepthAttachmentStatus::ready && attachment != nullptr;
+    }
+};
+
 struct TextureResult {
     TextureStatus status = TextureStatus::unsupported;
     Diagnostic diagnostic;
@@ -329,6 +372,16 @@ struct IndexedStaticMeshDrawRequest {
     // The request owns this copy. The clip-space convention must match the
     // target backend before command recording begins.
     std::optional<CameraFrame> camera_frame;
+    // Non-owning. Keep the attachment alive across all indexed draws in a
+    // frame so depth contents persist between requests.
+    DepthAttachment* depth_attachment = nullptr;
+    // The default preserves the existing one-draw behavior. Set load_color
+    // for subsequent draws that must retain the color attachment contents.
+    bool load_color = false;
+    // Clear depth on the first draw of a frame. Later draws load the existing
+    // attachment contents. The clear value is the normalized D32 depth.
+    bool clear_depth = false;
+    float depth_clear_value = 1.0F;
 };
 
 enum class IndexedStaticMeshDrawStatus {
@@ -494,6 +547,10 @@ inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
     const TextureUploadPlan& uploads,
     Diagnostic& diagnostic);
 
+[[nodiscard]] DepthAttachmentStatus validate_depth_attachment_description(
+    const DepthAttachmentDescription& description,
+    Diagnostic& diagnostic);
+
 [[nodiscard]] TextureReadbackStatus validate_texture_clear_readback(
     const Texture& texture,
     const TextureClearReadbackRequest& request,
@@ -547,6 +604,16 @@ public:
         Texture& texture,
         const TextureUploadPlan& uploads) = 0;
 
+    // Backends opt into persistent D32 attachments independently. Keeping a
+    // default implementation preserves discovery-only and fake devices.
+    [[nodiscard]] virtual DepthAttachmentResult create_depth_attachment(
+        const DepthAttachmentDescription&) {
+        return {DepthAttachmentStatus::unsupported,
+                {"depth_attachment_execution_unsupported",
+                 "This backend has not enabled persistent depth attachments"},
+                nullptr};
+    }
+
     [[nodiscard]] virtual TextureClearReadbackResult clear_texture_and_readback(
         Texture& texture,
         const TextureClearReadbackRequest& request) = 0;
@@ -588,6 +655,7 @@ struct DeviceResult {
 [[nodiscard]] const char* device_status_name(DeviceStatus status) noexcept;
 [[nodiscard]] const char* buffer_status_name(BufferStatus status) noexcept;
 [[nodiscard]] const char* texture_status_name(TextureStatus status) noexcept;
+[[nodiscard]] const char* depth_attachment_status_name(DepthAttachmentStatus status) noexcept;
 [[nodiscard]] const char* texture_readback_status_name(TextureReadbackStatus status) noexcept;
 [[nodiscard]] const char* triangle_draw_status_name(TriangleDrawStatus status) noexcept;
 [[nodiscard]] const char* indexed_static_mesh_draw_status_name(

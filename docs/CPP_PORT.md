@@ -98,10 +98,13 @@ remains unchanged and feature-complete.
   ranges before allocation. A 128-byte draw-matrix contract binds world and
   camera transforms. Vulkan uses vertex push constants. D3D12 uses root
   constants at `b0`. Backend-specific camera frames make the clip-space
-  conversion explicit. The backend accepts only resource-free, no-depth
-  packets. This proves basic pipeline creation, persistent geometry binding,
-  command submission, rasterization, and resource-state handling. It does not
-  prove scene-rendering parity.
+  conversion explicit. Both backends also create persistent single-sample D32
+  attachments. Explicit load and clear controls retain color and depth across
+  indexed draws. The executable main-pass subset uses the source-evidenced
+  `LESS` depth comparison. The backend still accepts only resource-free opaque
+  packets. This proves basic pipeline creation, persistent attachment and
+  geometry binding, command submission, rasterization, and resource-state
+  handling. It does not prove scene-rendering parity.
 - P1 is partial. Bounded readers support KN5 v4/v5/v6, DDS, ACD, INI/CSP,
   KSANIM v1/v2, and KNH. The port also supports byte-stable KN5 writing, VAO
   ZIP decoding, and track surfaces, cameras, and splines. Bounded asset support
@@ -138,9 +141,11 @@ remains unchanged and feature-complete.
   Vulkan and D3D12 create a basic graphics pipeline and execute fixed and
   indexed R16 static-mesh draws. The indexed path executes only a deliberately
   restricted draw-packet subset. It has no descriptors, scene resources,
-  depth, blending, or alpha-to-coverage. It executes finite non-identity world
-  and camera transforms through an explicit shader contract. The port does not
-  create windows or swapchains, draw complete KN5 scenes, or provide
+  blending, or alpha-to-coverage. It executes finite non-identity world and
+  camera transforms through an explicit shader contract. It preserves D32
+  depth across synchronous draws and supports explicit test/write state. A
+  bounded multi-draw pass and complete scene dispatch remain staged. The port
+  does not create windows or swapchains, draw complete KN5 scenes, or provide
   golden-image parity evidence.
 
 DDS BC7 now has a bounded CPU decoder covered by differential fixtures for all

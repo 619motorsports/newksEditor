@@ -117,6 +117,25 @@ std::vector<std::uint8_t> executable_fragment_shader() {
     return result;
 }
 
+std::vector<std::uint8_t> executable_blue_fragment_shader() {
+    // Generated from this exact source with:
+    // glslangValidator -V --target-env vulkan1.0 -Os -g0 -S frag
+    // spirv-val --target-env vulkan1.0
+    // Source SHA-256: 6b3ae3948ecab07330849819ce22f015f015c44ad614e6dee89bbca1e167f821
+    // SPIR-V SHA-256: b250bd205a32b206f37fdf169a37aa449b75a381376d46c56e08dfba21e3ce52
+    // #version 450
+    // layout(location = 0) out vec4 color;
+    // void main() { color = vec4(0.0, 0.0, 1.0, 1.0); }
+    constexpr std::string_view hex =
+        "03022307000001000b0008000d0000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00060004000000040000006d61696e000000000900000010000300040000000700000047000400090000001e00000000000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000004000000200004000800000003000000070000003b0004000800000009000000030000002b000400060000000a000000000000002b000400060000000b0000000000803f2c000700070000000c0000000a0000000a0000000b0000000b0000003600050002000000040000000000000003000000f8000200050000003e000300090000000c000000fd00010038000100";
+    require(hex.size() % 2U == 0U, "embedded blue fragment shader hex alignment");
+    std::vector<std::uint8_t> result(hex.size() / 2U);
+    for (std::size_t index = 0U; index < result.size(); ++index)
+        result[index] = static_cast<std::uint8_t>((hex_digit(hex[index * 2U]) << 4U) |
+                                                   hex_digit(hex[index * 2U + 1U]));
+    return result;
+}
+
 #if defined(_WIN32)
 std::vector<std::uint8_t> executable_d3d_shader(std::string_view source, std::string_view profile) {
     using Microsoft::WRL::ComPtr;
@@ -931,6 +950,198 @@ bool contract_backend(apex::render::Backend backend) {
                 shifted_result.rgba8[left + 2U] == std::byte{0} &&
                 shifted_result.rgba8[left + 3U] == std::byte{255},
             "camera view-projection moves geometry to the expected left pixel");
+
+    // Exercise the persistent depth/load contract with two real draws per
+    // frame. The depth attachment is deliberately kept alive across all
+    // requests below; load_color and clear_depth therefore describe actual
+    // attachment operations instead of an implementation-local shortcut.
+    PipelineProgram depth_pipeline = indexed_pipeline;
+    depth_pipeline.name = "indexed-depth-load";
+    depth_pipeline.targets.has_depth = true;
+    depth_pipeline.targets.depth = {PipelineRenderTargetFormat::depth32_float, 1U};
+    depth_pipeline.depth.test_enabled = true;
+    depth_pipeline.depth.write_enabled = true;
+    depth_pipeline.depth.compare = PipelineCompareOperation::less;
+
+    auto make_depth_pipeline = [&](bool blue) {
+        PipelineProgram pipeline = depth_pipeline;
+        if (backend == Backend::Vulkan) {
+            pipeline.shaders[1].bytes = blue ? executable_blue_fragment_shader() : executable_fragment_shader();
+        } else {
+#if defined(_WIN32)
+            constexpr std::string_view blue_fragment_source =
+                "float4 main(float4 position : SV_Position) : SV_Target { return float4(0, 0, 1, 1); }";
+            constexpr std::string_view red_fragment_source =
+                "float4 main(float4 position : SV_Position) : SV_Target { return float4(1, 0, 0, 1); }";
+            pipeline.shaders[1].bytes = executable_d3d_shader(
+                blue ? blue_fragment_source : red_fragment_source, "ps_5_0");
+#else
+            require(false, "D3D12 depth shader test requires Windows D3DCompile");
+#endif
+        }
+        return pipeline;
+    };
+    PipelineProgram depth_red_pipeline = make_depth_pipeline(false);
+    PipelineProgram depth_blue_pipeline = make_depth_pipeline(true);
+
+    DepthAttachmentDescription depth_description;
+    depth_description.width = 32U;
+    depth_description.height = 32U;
+    depth_description.samples = 1U;
+    depth_description.format = DepthAttachmentFormat::d32_float;
+    DepthAttachmentResult depth_result = device.device->create_depth_attachment(depth_description);
+    require(depth_result.ok(), "persistent depth attachment creation");
+
+    auto make_depth_packet = [&](float x, float z, bool write_enabled) {
+        DrawPacket packet = indexed_packet;
+        packet.world_matrix = apex::scene::identity_matrix;
+        packet.world_matrix[12] = x;
+        packet.world_matrix[14] = z;
+        packet.flags.depth_test = true;
+        packet.flags.depth_write = write_enabled;
+        return packet;
+    };
+    auto make_depth_upload = [&](const DrawPacket& packet) {
+        StaticMeshUploadResult result = upload_static_mesh(*device.device, indexed_mesh, packet);
+        require(result.ok(), "persistent depth static-mesh upload");
+        return result;
+    };
+    DrawPacket left_packet = make_depth_packet(-1.1F, 0.0F, true);
+    DrawPacket right_packet = make_depth_packet(1.1F, 0.0F, true);
+    StaticMeshUploadResult left_upload = make_depth_upload(left_packet);
+    StaticMeshUploadResult right_upload = make_depth_upload(right_packet);
+
+    auto make_depth_request = [&](const StaticMeshUploadResult& upload, const PipelineProgram& pipeline,
+                                  bool load_color, bool clear_depth, float depth_clear_value = 1.0F) {
+        IndexedStaticMeshDrawRequest request =
+            upload.upload->make_request(pipeline, *indexed_camera.frame);
+        request.depth_attachment = depth_result.attachment.get();
+        request.load_color = load_color;
+        request.clear_depth = clear_depth;
+        request.depth_clear_value = depth_clear_value;
+        return request;
+    };
+    auto require_pixel = [&](const std::vector<std::byte>& rgba8, std::size_t x, std::size_t y,
+                             std::byte red_value, std::byte green_value, std::byte blue_value,
+                             std::string_view message) {
+        require(rgba8.size() == 32U * 32U * 4U, "persistent depth readback size");
+        const std::size_t offset = (y * 32U + x) * 4U;
+        require(rgba8[offset] == red_value && rgba8[offset + 1U] == green_value &&
+                    rgba8[offset + 2U] == blue_value && rgba8[offset + 3U] == std::byte{255},
+                message);
+    };
+
+    // A second draw must load the first draw's color while its depth test is
+    // independent at a different pixel location.
+    IndexedStaticMeshDrawRequest left_request =
+        make_depth_request(left_upload, depth_red_pipeline, false, true);
+    TextureResult uninitialized_color = device.device->create_texture(triangle_description);
+    require(uninitialized_color.ok(), "uninitialized color-load target creation");
+    IndexedStaticMeshDrawRequest invalid_color_load = left_request;
+    invalid_color_load.load_color = true;
+    const IndexedStaticMeshDrawResult invalid_color_load_result =
+        device.device->draw_indexed_static_mesh_and_readback(*uninitialized_color.texture,
+                                                              invalid_color_load);
+    require(invalid_color_load_result.status == IndexedStaticMeshDrawStatus::execution_failed &&
+                invalid_color_load_result.diagnostic.code == "indexed_color_load_before_clear",
+            "color load before initialization rejected");
+
+    DepthAttachmentResult uninitialized_depth =
+        device.device->create_depth_attachment(depth_description);
+    require(uninitialized_depth.ok(), "uninitialized depth-load attachment creation");
+    IndexedStaticMeshDrawRequest invalid_depth_load = left_request;
+    invalid_depth_load.depth_attachment = uninitialized_depth.attachment.get();
+    invalid_depth_load.clear_depth = false;
+    const IndexedStaticMeshDrawResult invalid_depth_load_result =
+        device.device->draw_indexed_static_mesh_and_readback(*uninitialized_color.texture,
+                                                              invalid_depth_load);
+    require(invalid_depth_load_result.status == IndexedStaticMeshDrawStatus::execution_failed &&
+                invalid_depth_load_result.diagnostic.code == "indexed_depth_load_before_clear",
+            "depth load before initialization rejected");
+
+    const IndexedStaticMeshDrawResult left_result =
+        device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture, left_request);
+    require(left_result.ok(), "depth color-load first draw");
+    IndexedStaticMeshDrawRequest right_request =
+        make_depth_request(right_upload, depth_blue_pipeline, true, false);
+    const IndexedStaticMeshDrawResult right_result =
+        device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture, right_request);
+    require(right_result.ok(), "depth color-load second draw");
+    require_pixel(right_result.rgba8, 8U, 16U, std::byte{255}, std::byte{0}, std::byte{0},
+                  "load_color preserves the first draw's red pixels");
+    require_pixel(right_result.rgba8, 24U, 16U, std::byte{0}, std::byte{0}, std::byte{255},
+                  "load_color records the second draw's blue pixels");
+
+    DrawPacket near_packet = make_depth_packet(0.0F, 0.5F, true);
+    DrawPacket far_packet = make_depth_packet(0.0F, -0.5F, true);
+    StaticMeshUploadResult near_upload = make_depth_upload(near_packet);
+    StaticMeshUploadResult far_upload = make_depth_upload(far_packet);
+
+    // Far first, then near: LESS must allow the nearer red triangle to
+    // replace the farther blue triangle.
+    IndexedStaticMeshDrawRequest far_first_request =
+        make_depth_request(far_upload, depth_blue_pipeline, false, true);
+    const IndexedStaticMeshDrawResult far_first_result =
+        device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture, far_first_request);
+    require(far_first_result.ok(), "depth far-first draw");
+    IndexedStaticMeshDrawRequest near_second_request =
+        make_depth_request(near_upload, depth_red_pipeline, true, false);
+    const IndexedStaticMeshDrawResult near_second_result =
+        device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture, near_second_request);
+    require(near_second_result.ok(), "depth near-second draw");
+    require_pixel(near_second_result.rgba8, 16U, 16U, std::byte{255}, std::byte{0}, std::byte{0},
+                  "LESS depth accepts the nearer second draw");
+
+    // A new frame must clear the persistent depth attachment. Without that
+    // clear, this farther triangle would fail against the preceding near
+    // triangle even though the color attachment is reset.
+    IndexedStaticMeshDrawRequest cleared_far_request =
+        make_depth_request(far_upload, depth_blue_pipeline, false, true);
+    const IndexedStaticMeshDrawResult cleared_far_result =
+        device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture, cleared_far_request);
+    require(cleared_far_result.ok(), "new-frame depth clear draw");
+    require_pixel(cleared_far_result.rgba8, 16U, 16U, std::byte{0}, std::byte{0}, std::byte{255},
+                  "new-frame depth clear admits the farther draw");
+
+    // Near first, then far: the farther draw must fail LESS against the
+    // nearer depth, while the color attachment remains loaded.
+    IndexedStaticMeshDrawRequest near_first_request =
+        make_depth_request(near_upload, depth_red_pipeline, false, true);
+    const IndexedStaticMeshDrawResult near_first_result =
+        device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture, near_first_request);
+    require(near_first_result.ok(), "depth near-first draw");
+    IndexedStaticMeshDrawRequest far_second_request =
+        make_depth_request(far_upload, depth_blue_pipeline, true, false);
+    const IndexedStaticMeshDrawResult far_second_result =
+        device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture, far_second_request);
+    require(far_second_result.ok(), "depth far-second draw");
+    require_pixel(far_second_result.rgba8, 16U, 16U, std::byte{255}, std::byte{0}, std::byte{0},
+                  "LESS depth rejects the farther second draw");
+
+    // With depth writes disabled, both draws pass against the cleared depth
+    // value; the later far draw therefore replaces the earlier near color.
+    PipelineProgram depth_no_write_red_pipeline = make_depth_pipeline(false);
+    PipelineProgram depth_no_write_blue_pipeline = make_depth_pipeline(true);
+    depth_no_write_red_pipeline.name = "indexed-depth-no-write-red";
+    depth_no_write_blue_pipeline.name = "indexed-depth-no-write-blue";
+    depth_no_write_red_pipeline.depth.write_enabled = false;
+    depth_no_write_blue_pipeline.depth.write_enabled = false;
+    DrawPacket no_write_near_packet = make_depth_packet(0.0F, 0.5F, false);
+    DrawPacket no_write_far_packet = make_depth_packet(0.0F, -0.5F, false);
+    StaticMeshUploadResult no_write_near_upload = make_depth_upload(no_write_near_packet);
+    StaticMeshUploadResult no_write_far_upload = make_depth_upload(no_write_far_packet);
+    IndexedStaticMeshDrawRequest no_write_near_request =
+        make_depth_request(no_write_near_upload, depth_no_write_red_pipeline, false, true);
+    const IndexedStaticMeshDrawResult no_write_near_result =
+        device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture, no_write_near_request);
+    require(no_write_near_result.ok(), "depth-write-disabled near draw");
+    IndexedStaticMeshDrawRequest no_write_far_request =
+        make_depth_request(no_write_far_upload, depth_no_write_blue_pipeline, true, false);
+    const IndexedStaticMeshDrawResult no_write_far_result =
+        device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture, no_write_far_request);
+    require(no_write_far_result.ok(), "depth-write-disabled far draw");
+    require_pixel(no_write_far_result.rgba8, 16U, 16U, std::byte{0}, std::byte{0}, std::byte{255},
+                  "disabled depth writes allow the later far draw");
 
     const TextureDescription bgra_description{3U, 2U, 1U, 1U, TextureFormat::bgra8_unorm,
                                                TextureUsage::color_attachment | TextureUsage::transfer_source,

@@ -65,8 +65,11 @@ malformed geometry, non-finite values, invalid packet ranges, and unsafe
 indices. The execution path accepts finite world and camera transforms.
 Vulkan uses a 128-byte vertex push-constant block. D3D12 uses an equivalent
 root-constant block. Each camera must use the clip-space convention for its
-backend. The execution path accepts only resource-free, no-depth packets.
-Draw-packet texture resources resolve by canonical name.
+backend. Both backends create persistent single-sample D32 attachments.
+Indexed requests use explicit color-load and depth-clear controls. The
+source-evidenced main path uses `LESS` depth testing. The execution path still
+accepts only resource-free opaque packets. Draw-packet texture resources
+resolve by canonical name.
 The serialized KN5 resource ID remains a shader bind point, not a
 texture-table index. This work does not show complete scene pixels. Window
 surfaces, swapchains, descriptor binding, complete scene draws, and production
@@ -79,10 +82,11 @@ static positions, triangulation, hierarchy, a bounded transform subset, and
 first material assignment. It explicitly diagnoses unsupported images,
 skinning, animation, layer mappings, and advanced transform semantics.
 
-The Vulkan SDK is detected by the strict Linux builds. This machine has no
-usable Vulkan physical device, so the local runtime test reports a skip. CI can
-run the same test with a software Vulkan device. The production WebGL visual
-check is still required before any visible-rendering parity claim.
+The Vulkan SDK is detected by the strict Linux builds. The system Vulkan
+configuration has no usable device. Electron provides a bundled SwiftShader
+ICD, which runs the validation-enabled backend test locally. CI runs the same
+test with a software Vulkan device. The production WebGL visual check is still
+required before any visible-rendering parity claim.
 
 ## Contribution rules
 

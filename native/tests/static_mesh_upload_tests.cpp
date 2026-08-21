@@ -175,7 +175,9 @@ void accepts_valid_mesh_and_uploads_immutable_buffers() {
                 request.vertex_buffer == result.upload->vertex_buffer.get() &&
                 request.index_buffer == result.upload->index_buffer.get() &&
                 request.index_type == StaticMeshIndexType::uint16 && request.camera_frame.has_value() &&
-                request.camera_frame->clip_space == CameraClipSpace::vulkan,
+                request.camera_frame->clip_space == CameraClipSpace::vulkan &&
+                request.depth_attachment == nullptr && !request.load_color && !request.clear_depth &&
+                request.depth_clear_value == 1.0F,
             "upload produces an indexed request-ready object");
 }
 

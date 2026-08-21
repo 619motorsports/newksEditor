@@ -44,6 +44,19 @@ private:
     TextureInfo info_;
 };
 
+class FakeDepthAttachment final : public DepthAttachment {
+public:
+    FakeDepthAttachment(Backend backend, DepthAttachmentDescription description)
+        : backend_(backend), info_({description}) {}
+
+    Backend backend() const noexcept override { return backend_; }
+    const DepthAttachmentInfo& info() const noexcept override { return info_; }
+
+private:
+    Backend backend_;
+    DepthAttachmentInfo info_;
+};
+
 std::vector<std::uint8_t> shader_fixture() {
     constexpr std::array<std::uint32_t, 29> words = {
         0x07230203U, 0x00010000U, 0x00070000U, 0x00000005U, 0x00000000U,
@@ -133,6 +146,114 @@ void accepts_bounded_static_indexed_contract() {
     require(validate_indexed_static_mesh_draw_request(d3d_target, d3d_request, diagnostic) ==
                 IndexedStaticMeshDrawStatus::ready,
             "D3D12 camera clip contract accepted");
+}
+
+void accepts_explicit_d32_depth_contract() {
+    PipelineProgram pipeline = pipeline_fixture();
+    pipeline.targets.has_depth = true;
+    pipeline.targets.depth = {PipelineRenderTargetFormat::depth32_float, 1U};
+    pipeline.depth.test_enabled = true;
+    pipeline.depth.write_enabled = true;
+    pipeline.depth.compare = PipelineCompareOperation::less;
+    DrawPacket packet = packet_fixture();
+    packet.flags.depth_test = true;
+    packet.flags.depth_write = true;
+    FakeTexture target(Backend::Vulkan, target_description());
+    FakeBuffer vertices(Backend::Vulkan, {36U, BufferUsage::vertex, BufferMemory::device_local,
+                                          BufferMutability::immutable});
+    FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index, BufferMemory::device_local,
+                                         BufferMutability::immutable});
+    FakeDepthAttachment depth(Backend::Vulkan, {16U, 16U, 1U, DepthAttachmentFormat::d32_float});
+    auto request = request_fixture(packet, pipeline, vertices, indices);
+    request.depth_attachment = &depth;
+    request.clear_depth = true;
+    Diagnostic diagnostic;
+    require(validate_depth_attachment_description(depth.info().description, diagnostic) ==
+                DepthAttachmentStatus::ready,
+            "valid D32 depth attachment accepted");
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            "indexed draw accepts explicit D32 depth attachment");
+    require(std::string(depth_attachment_status_name(DepthAttachmentStatus::ready)) == "ready",
+            "depth attachment status name");
+}
+
+void rejects_invalid_depth_attachment_descriptions() {
+    Diagnostic diagnostic;
+    DepthAttachmentDescription description;
+    require(validate_depth_attachment_description(description, diagnostic) ==
+                DepthAttachmentStatus::invalid_description &&
+                diagnostic.code == "depth_attachment_dimensions_invalid",
+            "zero-sized depth attachment rejected");
+
+    description.width = 16U;
+    description.height = 16U;
+    description.samples = 2U;
+    require(validate_depth_attachment_description(description, diagnostic) ==
+                DepthAttachmentStatus::unsupported &&
+                diagnostic.code == "depth_attachment_samples_unsupported",
+            "multisample depth attachment rejected explicitly");
+
+    description.samples = 1U;
+    description.format = static_cast<DepthAttachmentFormat>(99);
+    require(validate_depth_attachment_description(description, diagnostic) ==
+                DepthAttachmentStatus::unsupported &&
+                diagnostic.code == "depth_attachment_format_unsupported",
+            "unknown depth attachment format rejected");
+}
+
+void rejects_invalid_depth_contract() {
+    PipelineProgram pipeline = pipeline_fixture();
+    pipeline.targets.has_depth = true;
+    pipeline.targets.depth = {PipelineRenderTargetFormat::depth32_float, 1U};
+    pipeline.depth.test_enabled = true;
+    pipeline.depth.write_enabled = true;
+    pipeline.depth.compare = PipelineCompareOperation::less;
+    DrawPacket packet = packet_fixture();
+    packet.flags.depth_test = true;
+    packet.flags.depth_write = true;
+    FakeTexture target(Backend::Vulkan, target_description());
+    FakeBuffer vertices(Backend::Vulkan, {36U, BufferUsage::vertex, BufferMemory::device_local,
+                                          BufferMutability::immutable});
+    FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index, BufferMemory::device_local,
+                                         BufferMutability::immutable});
+    auto request = request_fixture(packet, pipeline, vertices, indices);
+    Diagnostic diagnostic;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_depth_attachment_missing",
+            "depth-enabled draw requires an attachment");
+
+    FakeDepthAttachment depth(Backend::Vulkan, {8U, 16U, 1U, DepthAttachmentFormat::d32_float});
+    request.depth_attachment = &depth;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_depth_attachment_dimensions_mismatch",
+            "depth dimensions must match color target");
+
+    depth = FakeDepthAttachment(Backend::Vulkan, {16U, 16U, 1U, DepthAttachmentFormat::d32_float});
+    request.depth_attachment = &depth;
+    request.depth_clear_value = std::numeric_limits<float>::infinity();
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_static_mesh_depth_clear_invalid",
+            "non-finite depth clear rejected");
+
+    request.depth_clear_value = 1.0F;
+    pipeline.depth.compare = PipelineCompareOperation::less_or_equal;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_depth_compare_unsupported",
+            "non-source depth comparison rejected");
+
+    pipeline.depth.compare = PipelineCompareOperation::less;
+    packet.flags.depth_test = false;
+    packet.flags.depth_write = true;
+    request.depth_clear_value = 1.0F;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_depth_write_without_test",
+            "depth write without test rejected");
 }
 
 void rejects_static_indexed_limits_and_ownership() {
@@ -285,6 +406,9 @@ void rejects_staged_draw_packet() {
 int main() {
     try {
         accepts_bounded_static_indexed_contract();
+        accepts_explicit_d32_depth_contract();
+        rejects_invalid_depth_attachment_descriptions();
+        rejects_invalid_depth_contract();
         rejects_static_indexed_limits_and_ownership();
         rejects_staged_draw_packet();
         std::cout << "indexed draw tests passed\n";

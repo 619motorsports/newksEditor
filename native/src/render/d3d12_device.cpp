@@ -1,6 +1,7 @@
 #include "backend_internal.hpp"
 #include "apex/render/draw_packet.hpp"
 
+#include <cmath>
 #include <cstring>
 #include <cstdio>
 #include <memory>
@@ -343,6 +344,50 @@ private:
     ComPtr<ID3D12Resource> resource_;
     BufferInfo info_;
     D3D12_RESOURCE_STATES state_;
+};
+
+class D3D12DepthAttachment final : public DepthAttachment {
+public:
+    D3D12DepthAttachment(std::shared_ptr<D3D12Context> context,
+                         ComPtr<ID3D12Resource> resource,
+                         ComPtr<ID3D12DescriptorHeap> dsv_heap,
+                         DepthAttachmentDescription description,
+                         D3D12_RESOURCE_STATES state,
+                         D3D12_CPU_DESCRIPTOR_HANDLE write_dsv,
+                         D3D12_CPU_DESCRIPTOR_HANDLE read_dsv)
+        : context_(std::move(context)),
+          resource_(std::move(resource)),
+          dsv_heap_(std::move(dsv_heap)),
+          info_({description}),
+          state_(state),
+          write_dsv_(write_dsv),
+          read_dsv_(read_dsv) {}
+
+    ~D3D12DepthAttachment() override {
+        if (context_) context_->wait_idle();
+    }
+
+    Backend backend() const noexcept override { return Backend::D3D12; }
+    const DepthAttachmentInfo& info() const noexcept override { return info_; }
+    [[nodiscard]] ID3D12Resource* resource() const noexcept { return resource_.Get(); }
+    [[nodiscard]] D3D12_RESOURCE_STATES state() const noexcept { return state_; }
+    [[nodiscard]] const D3D12Context* context() const noexcept { return context_.get(); }
+    [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE dsv(bool writable) const noexcept {
+        return writable ? write_dsv_ : read_dsv_;
+    }
+    [[nodiscard]] bool cleared() const noexcept { return cleared_; }
+    void set_state(D3D12_RESOURCE_STATES state) noexcept { state_ = state; }
+    void set_cleared() noexcept { cleared_ = true; }
+
+private:
+    std::shared_ptr<D3D12Context> context_;
+    ComPtr<ID3D12Resource> resource_;
+    ComPtr<ID3D12DescriptorHeap> dsv_heap_;
+    DepthAttachmentInfo info_;
+    D3D12_RESOURCE_STATES state_ = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    D3D12_CPU_DESCRIPTOR_HANDLE write_dsv_{};
+    D3D12_CPU_DESCRIPTOR_HANDLE read_dsv_{};
+    bool cleared_ = false;
 };
 
 [[nodiscard]] DXGI_FORMAT dxgi_texture_format(TextureFormat format) noexcept {
@@ -844,6 +889,20 @@ const char* d3d12_pipeline_semantic(PipelineVertexSemantic semantic) noexcept {
     return "POSITION";
 }
 
+[[nodiscard]] D3D12_COMPARISON_FUNC d3d12_pipeline_compare(PipelineCompareOperation compare) noexcept {
+    switch (compare) {
+    case PipelineCompareOperation::never: return D3D12_COMPARISON_FUNC_NEVER;
+    case PipelineCompareOperation::less: return D3D12_COMPARISON_FUNC_LESS;
+    case PipelineCompareOperation::equal: return D3D12_COMPARISON_FUNC_EQUAL;
+    case PipelineCompareOperation::less_or_equal: return D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    case PipelineCompareOperation::greater: return D3D12_COMPARISON_FUNC_GREATER;
+    case PipelineCompareOperation::not_equal: return D3D12_COMPARISON_FUNC_NOT_EQUAL;
+    case PipelineCompareOperation::greater_or_equal: return D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+    case PipelineCompareOperation::always: return D3D12_COMPARISON_FUNC_ALWAYS;
+    }
+    return D3D12_COMPARISON_FUNC_ALWAYS;
+}
+
 struct D3D12GeometryDescriptor {
     ID3D12Resource* vertex_resource = nullptr;
     UINT64 vertex_offset = 0U;
@@ -864,7 +923,11 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
                                 std::vector<std::byte>& output,
                                 Diagnostic& diagnostic,
                                 const D3D12GeometryDescriptor* geometry_override = nullptr,
-                                const DrawMatrices* draw_matrices = nullptr) {
+                                const DrawMatrices* draw_matrices = nullptr,
+                                D3D12DepthAttachment* depth_attachment = nullptr,
+                                bool clear_depth = false,
+                                float depth_clear_value = 1.0F,
+                                bool load_color = false) {
     const auto& shaders = request.pipeline->shaders;
     const PipelineShaderModule* vertex_shader = nullptr;
     const PipelineShaderModule* fragment_shader = nullptr;
@@ -878,6 +941,20 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     }
     if (vertex_shader == nullptr || fragment_shader == nullptr) {
         diagnostic = {"triangle_shader_pair_invalid", "D3D12 triangle execution requires vertex and fragment shaders"};
+        return false;
+    }
+    const bool use_depth = depth_attachment != nullptr;
+    const bool depth_test = use_depth && request.pipeline->depth.test_enabled;
+    const bool depth_write = use_depth && request.pipeline->depth.write_enabled;
+    const D3D12_RESOURCE_STATES depth_draw_state = depth_write ? D3D12_RESOURCE_STATE_DEPTH_WRITE
+                                                                : D3D12_RESOURCE_STATE_DEPTH_READ;
+    if (use_depth && !clear_depth && !depth_attachment->cleared()) {
+        diagnostic = {"indexed_depth_load_before_clear",
+                      "A D3D12 depth attachment must be cleared before it is loaded"};
+        return false;
+    }
+    if (use_depth && (!std::isfinite(depth_clear_value) || depth_clear_value < 0.0F || depth_clear_value > 1.0F)) {
+        diagnostic = {"d3d12_depth_clear_value_invalid", "D3D12 depth clear value must be finite and in [0, 1]"};
         return false;
     }
     D3D12GeometryDescriptor geometry;
@@ -973,10 +1050,15 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     pipeline_description.RasterizerState.FrontCounterClockwise = request.pipeline->raster.front_face == PipelineFrontFace::counter_clockwise;
     pipeline_description.RasterizerState.DepthClipEnable = TRUE;
     pipeline_description.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    pipeline_description.DepthStencilState.DepthEnable = FALSE;
+    pipeline_description.DepthStencilState.DepthEnable = depth_test ? TRUE : FALSE;
+    pipeline_description.DepthStencilState.DepthWriteMask = depth_write ? D3D12_DEPTH_WRITE_MASK_ALL
+                                                                         : D3D12_DEPTH_WRITE_MASK_ZERO;
+    pipeline_description.DepthStencilState.DepthFunc =
+        use_depth ? d3d12_pipeline_compare(request.pipeline->depth.compare) : D3D12_COMPARISON_FUNC_ALWAYS;
     pipeline_description.DepthStencilState.StencilEnable = FALSE;
     pipeline_description.NumRenderTargets = 1U;
     pipeline_description.RTVFormats[0] = dxgi_texture_format(description.format);
+    pipeline_description.DSVFormat = use_depth ? DXGI_FORMAT_D32_FLOAT : DXGI_FORMAT_UNKNOWN;
     pipeline_description.SampleMask = std::numeric_limits<UINT>::max();
     pipeline_description.SampleDesc.Count = 1U;
     ComPtr<ID3D12PipelineState> pipeline;
@@ -1072,9 +1154,48 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         list->ResourceBarrier(1U, &barrier);
     }
+    if (use_depth) {
+        D3D12_RESOURCE_STATES depth_state = depth_attachment->state();
+        if (clear_depth && depth_state != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
+            D3D12_RESOURCE_BARRIER barrier{};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition.pResource = depth_attachment->resource();
+            barrier.Transition.StateBefore = depth_state;
+            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            list->ResourceBarrier(1U, &barrier);
+            depth_state = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+        }
+        if (!clear_depth && depth_state != depth_draw_state) {
+            D3D12_RESOURCE_BARRIER barrier{};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition.pResource = depth_attachment->resource();
+            barrier.Transition.StateBefore = depth_state;
+            barrier.Transition.StateAfter = depth_draw_state;
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            list->ResourceBarrier(1U, &barrier);
+            depth_state = depth_draw_state;
+        }
+        if (clear_depth) {
+            const D3D12_CPU_DESCRIPTOR_HANDLE clear_dsv = depth_attachment->dsv(true);
+            list->ClearDepthStencilView(clear_dsv, D3D12_CLEAR_FLAG_DEPTH, depth_clear_value, 0U, 0U, nullptr);
+            if (depth_state != depth_draw_state) {
+                D3D12_RESOURCE_BARRIER barrier{};
+                barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                barrier.Transition.pResource = depth_attachment->resource();
+                barrier.Transition.StateBefore = depth_state;
+                barrier.Transition.StateAfter = depth_draw_state;
+                barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                list->ResourceBarrier(1U, &barrier);
+                depth_state = depth_draw_state;
+            }
+        }
+    }
     const float clear_color[4] = {request.clear_color[0], request.clear_color[1], request.clear_color[2], request.clear_color[3]};
-    list->OMSetRenderTargets(1U, &rtv, FALSE, nullptr);
-    list->ClearRenderTargetView(rtv, clear_color, 0U, nullptr);
+    D3D12_CPU_DESCRIPTOR_HANDLE depth_dsv{};
+    if (use_depth) depth_dsv = depth_attachment->dsv(depth_write);
+    list->OMSetRenderTargets(1U, &rtv, FALSE, use_depth ? &depth_dsv : nullptr);
+    if (!load_color) list->ClearRenderTargetView(rtv, clear_color, 0U, nullptr);
     list->SetGraphicsRootSignature(root_signature.Get());
     if (draw_matrices != nullptr) {
         list->SetGraphicsRoot32BitConstants(
@@ -1154,12 +1275,18 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     if (FAILED(result)) {
         const bool drained = context->wait_idle();
         destination_state = drained ? final_state : D3D12_RESOURCE_STATE_COMMON;
+        if (use_depth)
+            depth_attachment->set_state(drained ? depth_draw_state : D3D12_RESOURCE_STATE_COMMON);
         diagnostic = hresult_error("D3D12 triangle fence", result);
         diagnostic.code = result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET
                               ? "d3d12_device_removed" : "triangle_execution_failed";
         return false;
     }
     destination_state = final_state;
+    if (use_depth) {
+        depth_attachment->set_state(depth_draw_state);
+        if (clear_depth) depth_attachment->set_cleared();
+    }
     void* mapped = nullptr;
     D3D12_RANGE read_range{0U, static_cast<SIZE_T>(readback_size)};
     result = readback->Map(0U, &read_range, &mapped);
@@ -1196,6 +1323,7 @@ bool draw_indexed_static_mesh_and_readback(
     D3D12_RESOURCE_STATES& destination_state,
     D3D12_RESOURCE_STATES vertex_state,
     D3D12_RESOURCE_STATES index_state,
+    D3D12DepthAttachment* depth_attachment,
     std::vector<std::byte>& output,
     Diagnostic& diagnostic) {
     const auto& pipeline = *request.pipeline;
@@ -1275,7 +1403,8 @@ bool draw_indexed_static_mesh_and_readback(
     render_request.clear_color = request.clear_color;
     const DrawMatrices draw_matrices{packet.world_matrix, request.camera_frame->view_projection};
     return draw_graphics_and_readback(context, destination, description, render_request, destination_state, output,
-                                      diagnostic, &geometry, &draw_matrices);
+                                      diagnostic, &geometry, &draw_matrices, depth_attachment,
+                                      request.clear_depth, request.depth_clear_value, request.load_color);
 }
 
 class D3D12Texture final : public Texture {
@@ -1283,8 +1412,10 @@ public:
     D3D12Texture(std::shared_ptr<D3D12Context> context,
                  ComPtr<ID3D12Resource> resource,
                  TextureDescription description,
-                 D3D12_RESOURCE_STATES state)
-        : context_(std::move(context)), resource_(std::move(resource)), info_({description}), state_(state) {}
+                 D3D12_RESOURCE_STATES state,
+                 bool initialized)
+        : context_(std::move(context)), resource_(std::move(resource)), info_({description}),
+          state_(state), initialized_(initialized) {}
 
     ~D3D12Texture() override {
         if (context_) context_->wait_idle();
@@ -1294,32 +1425,47 @@ public:
     [[nodiscard]] const D3D12Context* context() const noexcept { return context_.get(); }
 
     bool upload(const TextureUploadPlan& uploads, Diagnostic& diagnostic) {
-        return execute_texture_upload(context_, resource_.Get(), info_.description, uploads,
-                                      state_, texture_state(info_.description.usage), diagnostic);
+        const bool uploaded = execute_texture_upload(context_, resource_.Get(), info_.description, uploads,
+                                                     state_, texture_state(info_.description.usage), diagnostic);
+        initialized_ = initialized_ || uploaded;
+        return uploaded;
     }
 
     bool clear_readback(const TextureClearReadbackRequest& request,
                         std::vector<std::byte>& output,
                         Diagnostic& diagnostic) {
-        return clear_texture_readback(context_, resource_.Get(), info_.description, request, state_, output,
-                                      diagnostic);
+        const bool cleared = clear_texture_readback(context_, resource_.Get(), info_.description, request,
+                                                    state_, output, diagnostic);
+        initialized_ = initialized_ || cleared;
+        return cleared;
     }
 
     bool draw_triangle(const TriangleDrawRequest& request,
                        std::vector<std::byte>& output,
                        Diagnostic& diagnostic) {
-        return draw_graphics_and_readback(context_, resource_.Get(), info_.description, request, state_, output,
-                                          diagnostic);
+        const bool drawn = draw_graphics_and_readback(context_, resource_.Get(), info_.description, request,
+                                                      state_, output, diagnostic);
+        initialized_ = initialized_ || drawn;
+        return drawn;
     }
 
     bool draw_indexed_static_mesh(const IndexedStaticMeshDrawRequest& request,
                                   const D3D12Buffer& vertex_buffer,
                                   const D3D12Buffer& index_buffer,
+                                  D3D12DepthAttachment* depth_attachment,
                                   std::vector<std::byte>& output,
                                   Diagnostic& diagnostic) {
-        return draw_indexed_static_mesh_and_readback(context_, resource_.Get(), info_.description, request,
-                                                     vertex_buffer.resource(), index_buffer.resource(), state_,
-                                                     vertex_buffer.state(), index_buffer.state(), output, diagnostic);
+        if (request.load_color && !initialized_) {
+            diagnostic = {"indexed_color_load_before_clear",
+                          "A color load was requested before the color attachment was initialized"};
+            return false;
+        }
+        const bool drawn = draw_indexed_static_mesh_and_readback(
+            context_, resource_.Get(), info_.description, request, vertex_buffer.resource(),
+            index_buffer.resource(), state_, vertex_buffer.state(), index_buffer.state(), depth_attachment,
+            output, diagnostic);
+        initialized_ = initialized_ || drawn;
+        return drawn;
     }
 
 private:
@@ -1327,6 +1473,7 @@ private:
     ComPtr<ID3D12Resource> resource_;
     TextureInfo info_;
     D3D12_RESOURCE_STATES state_;
+    bool initialized_ = false;
 };
 
 class D3D12Sampler final : public Sampler {
@@ -1487,6 +1634,73 @@ public:
                        : BufferUpdateResult{BufferStatus::upload_failed, std::move(diagnostic)};
     }
 
+    DepthAttachmentResult create_depth_attachment(
+        const DepthAttachmentDescription& description) override {
+        Diagnostic diagnostic;
+        const DepthAttachmentStatus validation =
+            validate_depth_attachment_description(description, diagnostic);
+        if (validation != DepthAttachmentStatus::ready)
+            return {validation, std::move(diagnostic), nullptr};
+        if (description.format != DepthAttachmentFormat::d32_float || description.samples != 1U) {
+            return {DepthAttachmentStatus::unsupported,
+                    {"d3d12_depth_attachment_format_unsupported",
+                     "D3D12 persistent depth attachments support only single-sample D32_FLOAT"},
+                    nullptr};
+        }
+        D3D12_RESOURCE_DESC resource_description{};
+        resource_description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        resource_description.Width = description.width;
+        resource_description.Height = description.height;
+        resource_description.DepthOrArraySize = 1U;
+        resource_description.MipLevels = 1U;
+        resource_description.Format = DXGI_FORMAT_D32_FLOAT;
+        resource_description.SampleDesc.Count = description.samples;
+        resource_description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        resource_description.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+        D3D12_CLEAR_VALUE clear_value{};
+        clear_value.Format = DXGI_FORMAT_D32_FLOAT;
+        clear_value.DepthStencil.Depth = 1.0F;
+        clear_value.DepthStencil.Stencil = 0U;
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        ComPtr<ID3D12Resource> resource;
+        HRESULT result = context_->device->CreateCommittedResource(
+            &heap, D3D12_HEAP_FLAG_NONE, &resource_description, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+            &clear_value, IID_PPV_ARGS(&resource));
+        if (FAILED(result)) {
+            Diagnostic failure = hresult_error("ID3D12Device::CreateCommittedResource(depth)", result);
+            failure.code = "depth_attachment_allocation_failed";
+            return {DepthAttachmentStatus::allocation_failed, std::move(failure), nullptr};
+        }
+        D3D12_DESCRIPTOR_HEAP_DESC heap_description{};
+        heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+        heap_description.NumDescriptors = 2U;
+        heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+        ComPtr<ID3D12DescriptorHeap> dsv_heap;
+        result = context_->device->CreateDescriptorHeap(&heap_description, IID_PPV_ARGS(&dsv_heap));
+        if (FAILED(result)) {
+            Diagnostic failure = hresult_error("ID3D12Device::CreateDescriptorHeap(depth DSV)", result);
+            failure.code = "depth_attachment_allocation_failed";
+            return {DepthAttachmentStatus::allocation_failed, std::move(failure), nullptr};
+        }
+        const UINT dsv_stride = context_->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+        const D3D12_CPU_DESCRIPTOR_HANDLE write_dsv = dsv_heap->GetCPUDescriptorHandleForHeapStart();
+        D3D12_CPU_DESCRIPTOR_HANDLE read_dsv = write_dsv;
+        read_dsv.ptr += static_cast<SIZE_T>(dsv_stride);
+        D3D12_DEPTH_STENCIL_VIEW_DESC view_description{};
+        view_description.Format = DXGI_FORMAT_D32_FLOAT;
+        view_description.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+        view_description.Texture2D.MipSlice = 0U;
+        context_->device->CreateDepthStencilView(resource.Get(), &view_description, write_dsv);
+        view_description.Flags = D3D12_DSV_FLAG_READ_ONLY_DEPTH;
+        context_->device->CreateDepthStencilView(resource.Get(), &view_description, read_dsv);
+        return {DepthAttachmentStatus::ready,
+                {},
+                std::make_unique<D3D12DepthAttachment>(context_, std::move(resource), std::move(dsv_heap),
+                                                        description, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                                                        write_dsv, read_dsv)};
+    }
+
     TextureResult create_texture(const TextureDescription& description,
                                  const TextureUploadPlan& initial_uploads) override {
         Diagnostic diagnostic;
@@ -1525,7 +1739,8 @@ public:
             failure.code = "texture_allocation_failed";
             return {TextureStatus::allocation_failed, std::move(failure), nullptr};
         }
-        auto texture = std::make_unique<D3D12Texture>(context_, std::move(resource), description, initial_state);
+        auto texture = std::make_unique<D3D12Texture>(context_, std::move(resource), description,
+                                                      initial_state, needs_upload);
         if (!initial_uploads.subresources.empty() && !texture->upload(initial_uploads, diagnostic))
             return {TextureStatus::upload_failed, std::move(diagnostic), nullptr};
         return {TextureStatus::ready, {}, std::move(texture)};
@@ -1601,6 +1816,20 @@ public:
                     {"indexed_static_mesh_backend_mismatch",
                      "Indexed static-mesh resources must belong to the D3D12 backend"}, {}};
         }
+        D3D12DepthAttachment* d3d_depth = nullptr;
+        if (request.depth_attachment != nullptr) {
+            if (request.depth_attachment->backend() != Backend::D3D12) {
+                return {IndexedStaticMeshDrawStatus::unsupported,
+                        {"indexed_static_mesh_backend_mismatch",
+                         "Indexed static-mesh depth attachment must belong to the D3D12 backend"}, {}};
+            }
+            d3d_depth = dynamic_cast<D3D12DepthAttachment*>(request.depth_attachment);
+            if (d3d_depth == nullptr) {
+                return {IndexedStaticMeshDrawStatus::unsupported,
+                        {"indexed_static_mesh_type_unsupported",
+                         "The D3D12 device received an unknown depth attachment handle"}, {}};
+            }
+        }
         auto* d3d_texture = dynamic_cast<D3D12Texture*>(&texture);
         const auto* d3d_vertex = dynamic_cast<const D3D12Buffer*>(request.vertex_buffer);
         const auto* d3d_index = dynamic_cast<const D3D12Buffer*>(request.index_buffer);
@@ -1611,8 +1840,12 @@ public:
         if (d3d_texture->context() != context || d3d_vertex->context() != context || d3d_index->context() != context)
             return {IndexedStaticMeshDrawStatus::unsupported,
                     {"indexed_static_mesh_context_mismatch", "Indexed static-mesh resources belong to another D3D12 device"}, {}};
+        if (d3d_depth != nullptr && d3d_depth->context() != context)
+            return {IndexedStaticMeshDrawStatus::unsupported,
+                    {"indexed_static_mesh_context_mismatch",
+                     "Indexed static-mesh depth attachment belongs to another D3D12 device"}, {}};
         std::vector<std::byte> output;
-        if (!d3d_texture->draw_indexed_static_mesh(request, *d3d_vertex, *d3d_index, output, diagnostic))
+        if (!d3d_texture->draw_indexed_static_mesh(request, *d3d_vertex, *d3d_index, d3d_depth, output, diagnostic))
             return {IndexedStaticMeshDrawStatus::execution_failed, std::move(diagnostic), {}};
         return {IndexedStaticMeshDrawStatus::ready, {}, std::move(output)};
     }
