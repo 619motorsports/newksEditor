@@ -36,7 +36,7 @@ void stock_binding_and_defaults() {
             "pixel execution remains explicitly staged");
     const auto* diffuse = find_material_texture(binding, "TXDIFFUSE");
     require(diffuse != nullptr && diffuse->kind == MaterialTextureKind::embedded &&
-                diffuse->bind_point == 0 && diffuse->texture == "body.dds",
+                diffuse->bind_point == 0U && diffuse->texture == "body.dds",
             "embedded texture slot binding");
     require(material_scalar(binding, "ksAmbient", 0) == 0.42F, "KN5 scalar property");
     require(material_scalar(binding, "ksDiffuse", 0) == 0.8F, "stock diffuse default");
@@ -120,7 +120,7 @@ void unknown_and_bind_point_references() {
     damage.resources.push_back({"txDamageMask", 21, "damage_mask.dds"});
     const MaterialBinding binding = build_material_binding(damage, 21);
     const auto* mask = find_material_texture(binding, "txDamageMask");
-    require(mask != nullptr && mask->bind_point == 21 &&
+    require(mask != nullptr && mask->bind_point == 21U &&
                 binding.status == MaterialBindingStatus::complete,
             "KN5 shader bind point is not texture-table indexed");
 }
