@@ -25,10 +25,21 @@ struct RenderPlanOptions {
     bool include_reflections = true;
     bool isolated = false;
     apex::scene::NodeId isolated_node = apex::scene::invalid_node_id;
+    // Show-hidden bypasses authored active/visible/renderable state and
+    // preview activity overrides. It does not bypass hard subtree exclusions
+    // or mesh LOD intervals. Isolation takes precedence over show-hidden.
+    bool show_hidden = false;
+    // Cockpit/rim preview resolvers can replace selected active flags without
+    // mutating the source scene. The stock-scene facade rejects invalid or
+    // duplicate IDs before it calls the backend-neutral planner.
+    std::span<const apex::scene::NodeActivityOverride> activity_overrides{};
     // A pre-resolution layer can exclude whole subtrees without changing the
-    // immutable scene. Isolation bypasses these exclusions, as it does in the
-    // production WebGL preview.
+    // immutable scene. Workspace LOD uses this hard exclusion. Show-hidden
+    // does not bypass it; isolation does.
     std::span<const apex::scene::NodeId> excluded_subtree_roots{};
+    // Driver cockpit-hidden roots are suppressed after show-hidden, matching
+    // the production preview. Isolation still selects the exact mesh.
+    std::span<const apex::scene::NodeId> suppressed_subtree_roots{};
     apex::scene::NodeId explicit_reflection_root = apex::scene::invalid_node_id;
     std::string workspace_kind;
     float bounds_radius = 0.0F;

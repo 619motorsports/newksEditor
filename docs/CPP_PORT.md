@@ -183,15 +183,21 @@ remains unchanged and feature-complete.
   A second facade test executes the three-texture MultiMap path. It checks the
   exact bounded `maps.r` and `maps.g` result. It also executes the AT family on
   a 4x target and checks partial resolved coverage. The same tests run on the
-  D3D12/WARP CI path. The caller must first resolve
-  preview modes, per-node CSP overrides, and surface overlays. A bounded
+  D3D12/WARP CI path. The caller must first resolve damage preview, per-node
+  CSP overrides, and surface overlays. A bounded
   workspace adapter maps metadata to merged scene roots. It attaches file and
   auxiliary labels without partial mutation. A bounded resolver implements
   half-open workspace LOD ranges and the production FOV formula. The caller
   supplies the exact preview AABB center and camera position. The resolver
-  passes excluded roots to the stock-scene facade. Isolation bypasses these
-  roots, authored visibility, and mesh LOD ranges. Shadows, reflections, sky,
-  CSP lights, and post-processing remain staged with explicit evidence.
+  passes excluded roots to the stock-scene facade. A second bounded resolver
+  implements cockpit F3, rim F1, and driver cockpit-hidden state. It does not
+  change authored node flags. Show-hidden bypasses authored and preview state.
+  It keeps driver suppression, workspace LOD exclusions, and mesh LOD. Exact
+  mesh isolation bypasses visibility and subtree filters. It keeps the selected
+  mesh LOD range. These rules follow `itemPreviewVisible()` and the draw filter
+  in `public/app.js`. The cockpit pair follows `src/cockpit-preview.js`.
+  Shadows, reflections, sky, CSP lights, and post-processing remain staged
+  with explicit evidence.
 - P1 is partial. Bounded readers support KN5 v4/v5/v6, DDS, ACD, INI/CSP,
   KSANIM v1/v2, and KNH. The port also supports byte-stable KN5 writing, VAO
   ZIP decoding, and track surfaces, cameras, and splines. KN5 object creation
@@ -364,6 +370,17 @@ forced, overlapping, gapped, auxiliary, and track-camera cases. The
 stock-scene facade consumes the resolved root exclusions. The caller still
 supplies the production preview AABB center because the scene snapshot does
 not contain that exact value.
+
+The production preview-state gate uses the repository car and Sepang track.
+The car loaded all 63 textures. Its one HR root contains 48 meshes. Its one LR
+root contains three meshes. Low and high cockpit states produced distinct
+hashes `b31f311aa1602378` and `0a5057759735f01e`. The four regular and four
+blurred rim roots also produced distinct states. Their hashes were
+`24775ec55e0532cf` and `ba812a90bc832fcf`. Sepang loaded all 130 textures.
+Show-hidden increased its visible mesh count from 877 to 1,070. The off and on
+hashes were `768c5cb43a93cebc` and `b44c2b261a48c1dd`. Every capture reported
+WebGL error zero. The repository has no shared driver KN5 fixture. Bounded
+native tests therefore prove driver-name matching and subtree suppression.
 
 DDS BC7 has a bounded CPU decoder with differential fixtures for all eight
 modes. BC6H remains explicit and requires a GPU path. The checked upload

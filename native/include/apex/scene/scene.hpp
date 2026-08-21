@@ -44,6 +44,12 @@ struct SceneMaterial {
     BlendMode blend_mode = BlendMode::opaque;
 };
 
+/** An immutable preview-time replacement for one node's active flag. */
+struct NodeActivityOverride {
+    NodeId node = invalid_node_id;
+    bool active = true;
+};
+
 /**
  * A renderer-independent scene node.
  *

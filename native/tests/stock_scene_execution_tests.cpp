@@ -201,9 +201,31 @@ void test_resolved_subtree_filter_and_isolation_reach_facade() {
             "resolved subtree root must be absent from facade packets");
 
     request = request_for(fixture_value);
-    const std::array<apex::scene::NodeId, 1U> isolated_excluded = {
+    request.render.show_hidden = true;
+    result = prepare_stock_scene_execution(device, request);
+    require(result.ok() && result.render_plan.items.size() == 6U,
+            "show-hidden should reach the facade without bypassing mesh LOD");
+
+    request = request_for(fixture_value);
+    const std::array<apex::scene::NodeActivityOverride, 1U> inactive = {
+        apex::scene::NodeActivityOverride{fixture_value.scene.nodes[1U].id, false}};
+    request.render.activity_overrides = inactive;
+    result = prepare_stock_scene_execution(device, request);
+    require(result.ok() && result.render_plan.items.size() == 4U,
+            "preview activity overrides should reach the stock-scene facade");
+
+    request = request_for(fixture_value);
+    const std::array<apex::scene::NodeId, 1U> suppressed = {fixture_value.scene.nodes[1U].id};
+    request.render.show_hidden = true;
+    request.render.suppressed_subtree_roots = suppressed;
+    result = prepare_stock_scene_execution(device, request);
+    require(result.ok() && result.render_plan.items.size() == 5U,
+            "driver-style suppression should remain active during show-hidden");
+
+    request = request_for(fixture_value);
+    const std::array<apex::scene::NodeId, 1U> isolated_suppressed = {
         fixture_value.scene.nodes[3U].id};
-    request.render.excluded_subtree_roots = isolated_excluded;
+    request.render.suppressed_subtree_roots = isolated_suppressed;
     request.render.isolated = true;
     request.render.isolated_node = fixture_value.scene.nodes[3U].id;
     result = prepare_stock_scene_execution(device, request);
@@ -258,6 +280,55 @@ void test_preflight_and_missing_modules() {
             "parent IDs without matching child edges must be rejected");
     require(device.buffer_calls == 0U,
             "inconsistent topology must fail before backend allocation");
+
+    request = request_for(fixture_value);
+    const std::array<apex::scene::NodeActivityOverride, 1U> invalid_override = {
+        apex::scene::NodeActivityOverride{apex::scene::invalid_node_id, false}};
+    request.render.activity_overrides = invalid_override;
+    const auto invalid_activity = prepare_stock_scene_execution(device, request);
+    require(invalid_activity.diagnostic.code == "stock_scene_activity_override_invalid",
+            "invalid activity overrides need a precise diagnostic");
+
+    request = request_for(fixture_value);
+    const std::array<apex::scene::NodeActivityOverride, 2U> duplicate_overrides = {
+        apex::scene::NodeActivityOverride{fixture_value.scene.nodes[1U].id, false},
+        apex::scene::NodeActivityOverride{fixture_value.scene.nodes[1U].id, true}};
+    request.render.activity_overrides = duplicate_overrides;
+    const auto duplicate_activity = prepare_stock_scene_execution(device, request);
+    require(duplicate_activity.diagnostic.code == "stock_scene_activity_override_duplicate",
+            "duplicate activity overrides need a precise diagnostic");
+
+    request = request_for(fixture_value);
+    const std::array<apex::scene::NodeId, 1U> invalid_exclusion = {apex::scene::invalid_node_id};
+    request.render.excluded_subtree_roots = invalid_exclusion;
+    const auto invalid_excluded = prepare_stock_scene_execution(device, request);
+    require(invalid_excluded.diagnostic.code == "stock_scene_exclusion_invalid",
+            "invalid subtree exclusions need a precise diagnostic");
+
+    request = request_for(fixture_value);
+    const std::array<apex::scene::NodeId, 2U> duplicate_suppression = {
+        fixture_value.scene.nodes[1U].id, fixture_value.scene.nodes[1U].id};
+    request.render.suppressed_subtree_roots = duplicate_suppression;
+    const auto duplicate_suppressed = prepare_stock_scene_execution(device, request);
+    require(duplicate_suppressed.diagnostic.code == "stock_scene_suppression_duplicate",
+            "duplicate subtree suppressions need a precise diagnostic");
+
+    request = request_for(fixture_value);
+    std::vector<apex::scene::NodeId> too_many_options(fixture_value.scene.nodes.size() + 1U,
+                                                      fixture_value.scene.root);
+    request.render.excluded_subtree_roots = too_many_options;
+    const auto option_limited = prepare_stock_scene_execution(device, request);
+    require(option_limited.diagnostic.code == "stock_scene_render_option_limit",
+            "render-option counts must be bounded by scene size");
+
+    request = request_for(fixture_value);
+    request.render.isolated = true;
+    request.render.isolated_node = apex::scene::invalid_node_id;
+    const auto invalid_isolation = prepare_stock_scene_execution(device, request);
+    require(invalid_isolation.diagnostic.code == "stock_scene_isolation_invalid",
+            "invalid isolation targets need a precise diagnostic");
+    require(device.buffer_calls == 0U,
+            "malformed render options must fail before backend allocation");
 
     apex::scene::SceneSnapshot deep_scene;
     apex::scene::SceneNode deep_root;

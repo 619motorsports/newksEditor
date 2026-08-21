@@ -1,5 +1,7 @@
 #include "apex/render/render_plan.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -114,6 +116,49 @@ void color_order_matches_viewport() {
     require(plan.opaque_items.size() == 2U && plan.transparent_items.size() == 1U, "pass partitions");
 }
 
+void preview_visibility_precedence_is_immutable() {
+    auto scene = fixture();
+    const auto environment = scene.nodes[1U].id;
+    const auto hidden_branch = scene.nodes[4U].id;
+    const auto hidden_mesh = scene.nodes[5U].id;
+    const auto out_of_lod = scene.nodes[6U].id;
+    const bool authored_environment_active = scene.nodes[1U].active;
+    const bool authored_hidden_active = scene.nodes[4U].active;
+
+    const std::array<apex::scene::NodeActivityOverride, 1U> overrides = {
+        apex::scene::NodeActivityOverride{environment, false}};
+    apex::render::RenderPlanOptions options;
+    options.activity_overrides = overrides;
+    auto plan = apex::render::build_render_plan(scene, options);
+    require(plan.items.size() == 1U, "activity overrides replace authored branch state");
+
+    const std::array<apex::scene::NodeId, 1U> suppressed = {hidden_branch};
+    options.show_hidden = true;
+    options.suppressed_subtree_roots = suppressed;
+    plan = apex::render::build_render_plan(scene, options);
+    require(plan.items.size() == 3U, "show-hidden bypasses authored and preview "
+                                     "state but keeps suppression and mesh LOD");
+    require(std::none_of(plan.items.begin(), plan.items.end(),
+                         [&](const auto& item) {
+                             return item.node == hidden_mesh || item.node == out_of_lod;
+                         }),
+            "suppressed and out-of-LOD meshes stay hidden");
+
+    options.isolated = true;
+    options.isolated_node = hidden_mesh;
+    plan = apex::render::build_render_plan(scene, options);
+    require(plan.items.size() == 1U && plan.items.front().node == hidden_mesh,
+            "isolation bypasses authored state, preview state, and subtree "
+            "suppression");
+
+    options.isolated_node = out_of_lod;
+    plan = apex::render::build_render_plan(scene, options);
+    require(plan.items.empty(), "isolation still obeys the selected mesh LOD interval");
+    require(scene.nodes[1U].active == authored_environment_active &&
+                scene.nodes[4U].active == authored_hidden_active,
+            "preview planning does not mutate authored scene state");
+}
+
 void reflection_selection_matches_js_contract() {
     auto scene = fixture();
     apex::render::RenderPlanOptions options;
@@ -162,6 +207,7 @@ int main() {
         visibility_lod_and_shadow();
         lod_uses_each_item_world_distance_and_inclusive_out();
         color_order_matches_viewport();
+        preview_visibility_precedence_is_immutable();
         reflection_selection_matches_js_contract();
         malformed_tree_is_bounded();
         std::cout << "render plan tests passed\n";

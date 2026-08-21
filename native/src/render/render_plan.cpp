@@ -104,10 +104,25 @@ RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
     const bool isolated = scene.isolated || options.isolated;
     std::vector<WalkState> stack;
     std::vector<bool> excluded_roots(scene.nodes.size(), false);
+    std::vector<bool> suppressed_roots(scene.nodes.size(), false);
+    std::vector<std::int8_t> activity_overrides(scene.nodes.size(), -1);
     for (const apex::scene::NodeId id : options.excluded_subtree_roots) {
         if (id != apex::scene::invalid_node_id &&
             static_cast<std::size_t>(id) < excluded_roots.size()) {
             excluded_roots[static_cast<std::size_t>(id)] = true;
+        }
+    }
+    for (const apex::scene::NodeId id : options.suppressed_subtree_roots) {
+        if (id != apex::scene::invalid_node_id &&
+            static_cast<std::size_t>(id) < suppressed_roots.size()) {
+            suppressed_roots[static_cast<std::size_t>(id)] = true;
+        }
+    }
+    for (const apex::scene::NodeActivityOverride& override_value : options.activity_overrides) {
+        if (override_value.node != apex::scene::invalid_node_id &&
+            static_cast<std::size_t>(override_value.node) < activity_overrides.size()) {
+            activity_overrides[static_cast<std::size_t>(override_value.node)] =
+                override_value.active ? 1 : 0;
         }
     }
     stack.push_back({scene.root, true, false, {}, {}, {}});
@@ -121,8 +136,11 @@ RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
         if (node_index >= visited.size() || visited[node_index]) continue;
         visited[node_index] = true;
 
-        const bool branch_active = state.parent_active && node->active;
-        const bool excluded = state.excluded || excluded_roots[node_index];
+        const bool effective_active =
+            activity_overrides[node_index] < 0 ? node->active : activity_overrides[node_index] != 0;
+        const bool branch_active = state.parent_active && (options.show_hidden || effective_active);
+        const bool excluded =
+            state.excluded || excluded_roots[node_index] || suppressed_roots[node_index];
         const std::string workspace_auxiliary = node->workspace_auxiliary.empty()
                                                     ? state.workspace_auxiliary
                                                     : node->workspace_auxiliary;
@@ -134,10 +152,12 @@ RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
                               node->kind == apex::scene::NodeKind::skinned_mesh;
         const bool isolated_item = isolated && node->id == options.isolated_node;
         const float distance = safe_distance(node->bounds_center, options.camera_position);
-        const bool normally_visible = !isolated && !excluded && branch_active &&
-                                      node->visible && node->renderable &&
-                                      lod_visible(*node, distance);
-        if (geometry && (isolated_item || normally_visible)) {
+        const bool normally_visible =
+            !isolated && !excluded && branch_active &&
+            (options.show_hidden || (node->visible && node->renderable)) &&
+            lod_visible(*node, distance);
+        const bool isolated_visible = isolated_item && lod_visible(*node, distance);
+        if (geometry && (isolated_visible || normally_visible)) {
             const apex::scene::SceneMaterial* material = scene.find_material(node->material);
             const bool material_alpha_blend = material != nullptr &&
                                               material->blend_mode == apex::scene::BlendMode::alpha_blend;

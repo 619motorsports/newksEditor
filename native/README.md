@@ -149,7 +149,15 @@ auxiliary labels without partial mutation. A bounded LOD resolver uses the
 production half-open ranges and FOV formula. The caller must supply the exact
 preview AABB center and camera position. The resolver gives excluded roots to
 the stock-scene facade. Isolation bypasses these exclusions and authored
-visibility. Preview modes, surface overlays, shadows, reflections, and
+visibility. A second bounded resolver supplies cockpit, rim, and driver preview
+state without changing the scene. It uses exact cockpit and rim names. Driver
+hidden names are trimmed, matched with ASCII case ignored, and limited to driver
+subtrees. Show-hidden bypasses authored and preview state. It does not bypass
+driver suppression, workspace LOD exclusions, or mesh LOD. Isolation bypasses
+visibility and subtree filters. It still applies the selected mesh LOD range.
+The contract follows `itemPreviewVisible()` and the draw filter in
+`public/app.js`. The cockpit audit in `src/cockpit-preview.js` supplies the F3
+pair. Surface overlays, damage preview, shadows, reflections, and
 post-processing remain staged.
 The static-scene adapter has two texture-authority modes. The first mode
 uses caller-owned tables in the final KN5 texture order. The second mode owns

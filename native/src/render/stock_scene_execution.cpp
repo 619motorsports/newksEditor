@@ -183,10 +183,12 @@ bool preplan_within_limit(const apex::scene::SceneSnapshot& scene,
         return false;
     }
 
-    // build_render_plan allocates visited and a LIFO WalkState stack. The
-    // stack capacity can approach the node count on a wide tree; ancestor
-    // vectors are charged separately using the authored maximum depth.
-    if (!add_count(node_count, 2U * sizeof(bool), bytes, limit) ||
+    // build_render_plan allocates visited, hard-exclusion, suppression, and
+    // activity-override arrays plus a LIFO WalkState stack. The stack capacity
+    // can approach the node count on a wide tree. Ancestor vectors are charged
+    // separately with the authored maximum depth.
+    if (!add_count(node_count, 3U * sizeof(bool) + sizeof(std::int8_t), bytes,
+                   limit) ||
         !add_count(node_count, sizeof(std::uint32_t) + sizeof(bool) +
                                2U * sizeof(std::string) + sizeof(std::vector<std::uint32_t>),
                    bytes, limit) ||
@@ -211,6 +213,74 @@ bool preplan_within_limit(const apex::scene::SceneSnapshot& scene,
         return false;
     }
     return true;
+}
+
+bool validate_render_options(const apex::scene::SceneSnapshot& scene,
+                             const RenderPlanOptions& options, Diagnostic& diagnostic) {
+    const std::size_t node_count = scene.nodes.size();
+    const bool isolated = scene.isolated || options.isolated;
+    if (isolated && (options.isolated_node == apex::scene::invalid_node_id ||
+                     static_cast<std::size_t>(options.isolated_node) >= node_count)) {
+        diagnostic = {"stock_scene_isolation_invalid",
+                      "The isolated node does not reference a scene node"};
+        return false;
+    }
+
+    std::vector<bool> seen(node_count, false);
+    const auto reset_seen = [&]() { std::fill(seen.begin(), seen.end(), false); };
+    const auto validate_roots = [&](std::span<const apex::scene::NodeId> roots,
+                                    const char* invalid_code, const char* duplicate_code,
+                                    const char* label) {
+        if (roots.size() > node_count) {
+            diagnostic = {"stock_scene_render_option_limit",
+                          std::string(label) + " count exceeds the scene node count"};
+            return false;
+        }
+        reset_seen();
+        for (const apex::scene::NodeId id : roots) {
+            if (id == apex::scene::invalid_node_id || static_cast<std::size_t>(id) >= node_count) {
+                diagnostic = {invalid_code,
+                              std::string(label) + " references an unknown scene node"};
+                return false;
+            }
+            const std::size_t index = static_cast<std::size_t>(id);
+            if (seen[index]) {
+                diagnostic = {duplicate_code,
+                              std::string(label) + " contains a duplicate scene node"};
+                return false;
+            }
+            seen[index] = true;
+        }
+        return true;
+    };
+
+    if (options.activity_overrides.size() > node_count) {
+        diagnostic = {"stock_scene_render_option_limit",
+                      "Activity-override count exceeds the scene node count"};
+        return false;
+    }
+    reset_seen();
+    for (const apex::scene::NodeActivityOverride& override_value : options.activity_overrides) {
+        if (override_value.node == apex::scene::invalid_node_id ||
+            static_cast<std::size_t>(override_value.node) >= node_count) {
+            diagnostic = {"stock_scene_activity_override_invalid",
+                          "An activity override references an unknown scene node"};
+            return false;
+        }
+        const std::size_t index = static_cast<std::size_t>(override_value.node);
+        if (seen[index]) {
+            diagnostic = {"stock_scene_activity_override_duplicate",
+                          "Activity overrides contain a duplicate scene node"};
+            return false;
+        }
+        seen[index] = true;
+    }
+    if (!validate_roots(options.excluded_subtree_roots, "stock_scene_exclusion_invalid",
+                        "stock_scene_exclusion_duplicate", "Subtree exclusions")) {
+        return false;
+    }
+    return validate_roots(options.suppressed_subtree_roots, "stock_scene_suppression_invalid",
+                          "stock_scene_suppression_duplicate", "Subtree suppressions");
 }
 
 bool plan_within_limit(const RenderPlan& plan, std::uint64_t limit) noexcept {
@@ -299,10 +369,15 @@ StockSceneExecutionResult prepare_stock_scene_execution(
             result.diagnostic = std::move(preflight_diagnostic);
             return result;
         }
+        if (!validate_render_options(*request.scene, request.render, preflight_diagnostic)) {
+            result.status = StaticSceneResourceStatus::invalid_request;
+            result.diagnostic = std::move(preflight_diagnostic);
+            return result;
+        }
         result.render_plan = build_render_plan(*request.scene, request.render);
         result.render_plan.unsupported_effects.push_back({
             "stock_scene_snapshot_staged",
-            "Workspace LOD/FOV, showHidden/cockpit/rim/damage modes, per-node CSP overrides, and surface overlays must be resolved by the caller before this main-color handoff.",
+            "Workspace LOD/FOV and damage modes, per-node CSP overrides, and surface overlays must be resolved by the caller before this main-color handoff.",
         });
         if (result.render_plan.items.size() > request.limits.max_plan_items ||
             !plan_within_limit(result.render_plan, request.limits.max_plan_bytes)) {
