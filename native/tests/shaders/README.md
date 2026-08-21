@@ -200,8 +200,9 @@ and add `txDetail` at bindings 8/9 and `txNormalDetail` (or `txDetailNM`) at
 bindings 10/11. D3D12 uses the corresponding `t0/s1`, `b2/b3`, `t4/s5`,
 `t6/s7`, `t8/s9`, and `t10/s11` registers.
 
-The material record is the 64-byte portable layout: `lighting`, `fresnel`,
-`emissive`, and `detail`, where `detail = (useDetail, detailUVMultiplier,
+The material record is the 80-byte portable layout. The detail fixture reads
+`lighting`, `fresnel`, `emissive`, and `detail`. The final `damageZones` value
+is unused. The `detail` value is `(useDetail, detailUVMultiplier,
 detailNormalBlend, reserved)`. The fragment source follows
 `public/app.js:2074` for the detail color/mask, `:2077` for tangent-space
 normal detail, and `:2080` for detail-alpha specular modulation and maps.r/g.
@@ -241,3 +242,22 @@ SwiftShader execution uses a diffuse alpha of zero. This value gives the detail 
 - `detailNormalBlend=1`: `(26,13,16,0)`. The normal-detail texture changes the tangent-space normal.
 
 The same run passes descriptor-switch batches and a mixed 6/8/12-binding batch.
+
+`indexed_ks_per_pixel_damage.frag` implements the recovered dirt-zero branch of
+`ksPerPixelMultiMap_damage_dirt`. The installed shader container has SHA-256
+`76d6a625c34e386641667a44a0433c6d1dc2af5be9e4a8ebbd6a886181f97dc8`.
+The DXBC disassembly proves that the final alpha source is `txNormal.a`.
+
+The portable ABI uses `txDamage` at bindings 12/13. It uses `txDamageMask` at
+bindings 14/15. The 80-byte material record stores `damageZones` at byte 64.
+The fixture does not bind `txDust` because the exact zero-dirt factor is one.
+The source SHA-256 is
+`2ef09b44dd48c7043e8e1d9595acf5ca85ec1a3fc93ebbfc5cf12a3ba4012031`.
+The SPIR-V SHA-256 is
+`327868c20cd79ea8c7a0cb36bcaf5fb5f12212faca2e227239dcaad8c058aa82`.
+
+SwiftShader Vulkan pixel evidence is:
+
+- `damageZones=(0,0,0,0)`: `(74,155,103,255)`.
+- `damageZones=(1,0,0,0)`: `(81,81,60,255)`.
+- `damageZones=(1,0,0,0)` and `txNormal.a=0`: `(64,65,43,255)`.

@@ -1167,6 +1167,92 @@ void validates_portable_detail_stack_contract() {
             "malformed normal-detail sampler rejected");
 }
 
+void validates_portable_damage_stack_contract() {
+    PipelineProgram pipeline = pipeline_fixture();
+    pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 2U, "ksPerPixelMaterial"},
+        {PipelineResourceKind::uniform_buffer, 0U, 3U, "ksPerPixelFrame"},
+        {PipelineResourceKind::sampled_texture, 0U, 4U, "normalTexture"},
+        {PipelineResourceKind::sampler, 0U, 5U, "normalSampler"},
+        {PipelineResourceKind::sampled_texture, 0U, 6U, "mapsTexture"},
+        {PipelineResourceKind::sampler, 0U, 7U, "mapsSampler"},
+        {PipelineResourceKind::sampled_texture, 0U, 12U, "damageTexture"},
+        {PipelineResourceKind::sampler, 0U, 13U, "damageSampler"},
+        {PipelineResourceKind::sampled_texture, 0U, 14U, "damageMaskTexture"},
+        {PipelineResourceKind::sampler, 0U, 15U, "damageMaskSampler"},
+    };
+    require(classify_indexed_portable_resource_layout(pipeline) ==
+                IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame,
+            "portable damage-stack resource layout classified");
+    pipeline.resources.pop_back();
+    require(classify_indexed_portable_resource_layout(pipeline) ==
+                IndexedPortableResourceLayout::unsupported,
+            "incomplete damage-mask resource pair rejected");
+    pipeline.resources.push_back(
+        {PipelineResourceKind::sampler, 0U, 15U, "damageMaskSampler"});
+
+    DrawPacket packet = packet_fixture();
+    FakeTexture target(Backend::Vulkan, target_description());
+    FakeTexture diffuse(Backend::Vulkan, sampled_description());
+    FakeTexture normal(Backend::Vulkan, sampled_description());
+    FakeTexture maps(Backend::Vulkan, sampled_description());
+    FakeTexture damage(
+        Backend::Vulkan,
+        {2U, 2U, 1U, 1U, TextureFormat::rgba8_srgb, TextureUsage::sampled,
+         TextureMemory::device_local, TextureMutability::immutable});
+    FakeTexture damage_mask(Backend::Vulkan, sampled_description());
+    FakeSampler sampler(Backend::Vulkan);
+    FakeBuffer vertices(Backend::Vulkan,
+                        {132U, BufferUsage::vertex, BufferMemory::device_local,
+                         BufferMutability::immutable});
+    FakeBuffer indices(Backend::Vulkan,
+                       {6U, BufferUsage::index, BufferMemory::device_local,
+                        BufferMutability::immutable});
+    FakeBuffer material(Backend::Vulkan,
+                        {256U, BufferUsage::uniform, BufferMemory::host_visible,
+                         BufferMutability::immutable});
+    FakeBuffer frame(Backend::Vulkan,
+                     {256U, BufferUsage::uniform, BufferMemory::host_visible,
+                      BufferMutability::mutable_data});
+    auto request = request_fixture(packet, pipeline, vertices, indices);
+    request.resource_authority = IndexedResourceAuthority::explicit_bindings;
+    request.sampled_binding = {&diffuse, &sampler};
+    request.normal_binding = {&normal, &sampler};
+    request.maps_binding = {&maps, &sampler};
+    request.damage_binding = {&damage, &sampler};
+    request.damage_mask_binding = {&damage_mask, &sampler};
+    request.material_binding = {&material, 0U, portable_material_buffer_view_bytes};
+    request.frame_binding = {&frame, 0U, portable_frame_buffer_view_bytes};
+    Diagnostic diagnostic;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            "portable damage-stack contract accepts sRGB damage and linear mask data");
+
+    request.damage_binding = {};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_damage_binding_missing",
+            "missing damage pair rejected");
+    request.damage_binding = {&damage, &sampler};
+    request.damage_mask_binding = {};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_damage_mask_binding_missing",
+            "missing damage-mask pair rejected");
+
+    FakeTexture srgb_damage_mask(
+        Backend::Vulkan,
+        {2U, 2U, 1U, 1U, TextureFormat::rgba8_srgb, TextureUsage::sampled,
+         TextureMemory::device_local, TextureMutability::immutable});
+    request.damage_mask_binding = {&srgb_damage_mask, &sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_damage_mask_texture_description_unsupported",
+            "sRGB damage mask rejected in favor of linear UNORM");
+}
+
 void rejects_invalid_depth_attachment_descriptions() {
     Diagnostic diagnostic;
     DepthAttachmentDescription description;
@@ -1528,6 +1614,7 @@ int main() {
         validates_portable_normal_map_contract();
         validates_portable_maps_contract();
         validates_portable_detail_stack_contract();
+        validates_portable_damage_stack_contract();
         rejects_invalid_depth_attachment_descriptions();
         rejects_invalid_depth_contract();
         validates_ordered_indexed_batch_contract();

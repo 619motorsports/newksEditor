@@ -284,10 +284,10 @@ The stock `ksPerPixelMultiMap_damage_dirt` pixel shader samples `txDamageMask` a
 bind point 21 and `txDamage` at bind point 4. It computes a saturated damage factor
 from `txDamage.a * dot(txDamageMask, damageZones)`. It mixes the base diffuse with
 `txDamage.rgb` by that factor. With the installed Abarth material's `dirt` value of
-zero, it also scales the specular map by `(1 - factor)` and interpolates that result
-toward the sampled normal alpha. The portable exact path is gated on the effective
-`dirt` value being zero. Nonzero dirt uses the labeled base-material preview because
-the remaining stock dirt branch has not been implemented.
+zero, it scales the specular map by `(1 - factor)`. It then multiplies the result
+by `(1 + factor * (txNormal.a - 1))`. DXBC proves that the alpha source is
+`txNormal`. The portable Vulkan and D3D12 path requires an effective `dirt` value
+of zero. Nonzero dirt uses the labeled base-material preview.
 
 The installed Abarth 500 has nine selected damage-glass roots: two front, one rear,
 two left, two right, and two center. All nine roots are authored inactive. Five

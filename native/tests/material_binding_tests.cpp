@@ -117,6 +117,9 @@ void unknown_and_bind_point_references() {
     // (whose indices are 0 through 20).
     Kn5Material damage;
     damage.shader = "ksPerPixelMultiMap_damage_dirt";
+    damage.resources.push_back({"txDiffuse", 0, "body.dds"});
+    damage.resources.push_back({"txNormal", 1, "body_nm.dds"});
+    damage.resources.push_back({"txMaps", 2, "body_maps.dds"});
     damage.resources.push_back({"txDamage", 0, "damage.dds"});
     damage.resources.push_back({"txDamageMask", 21, "damage_mask.dds"});
     const MaterialBinding binding = build_material_binding(damage, 21);
@@ -124,6 +127,46 @@ void unknown_and_bind_point_references() {
     require(mask != nullptr && mask->bind_point == 21U &&
                 binding.status == MaterialBindingStatus::complete,
             "KN5 shader bind point is not texture-table indexed");
+}
+
+void resolves_exact_dirt_zero_damage_variant() {
+    Kn5Material material;
+    material.shader = "ksPerPixelMultiMap_damage_dirt";
+    material.properties = {
+        {"damageZones", 0.0F, {}, {}, {1.0F, 0.5F, 0.25F, 0.0F}},
+        {"dirt", 0.0F, {}, {}, {}},
+        {"fresnelMaxLevel", 0.0F, {}, {}, {}},
+    };
+    material.resources = {
+        {"txDiffuse", 0U, "body.dds"},
+        {"txNormal", 1U, "body_nm.dds"},
+        {"txMaps", 2U, "body_maps.dds"},
+        {"txDamage", 4U, "damage.dds"},
+        {"txDamageMask", 21U, "damage_mask.dds"},
+        {"txDust", 5U, "dust.dds"},
+    };
+    const MaterialBinding binding = build_material_binding(material, 6U);
+    const auto resolved = resolve_ks_per_pixel_material_constants(binding);
+    require(binding.status == MaterialBindingStatus::complete && resolved.ok() &&
+                resolved.constants.damage_zones ==
+                    std::array<float, 4>{1.0F, 0.5F, 0.25F, 0.0F},
+            "damage_dirt resolves the exact authored dirt-zero constants");
+
+    material.properties[1].value = 0.25F;
+    const auto dirty = resolve_ks_per_pixel_material_constants(
+        build_material_binding(material, 6U));
+    require(!dirty.ok() &&
+                dirty.status == KsPerPixelMaterialResolveStatus::unsupported &&
+                dirty.diagnostic.code == "ks_per_pixel_damage_dirt_unsupported",
+            "damage_dirt rejects the unrecovered nonzero dirt branch");
+
+    material.properties.erase(material.properties.begin() + 1);
+    const auto missing_property = resolve_ks_per_pixel_material_constants(
+        build_material_binding(material, 6U));
+    require(!missing_property.ok() &&
+                missing_property.diagnostic.code ==
+                    "ks_per_pixel_damage_properties_missing",
+            "damage_dirt requires an authored dirt property");
 }
 
 void external_override_and_limits() {
@@ -659,6 +702,7 @@ int main() {
         resolves_bounded_base_multimap_families();
         resolves_bounded_nmdetail_stack();
         resolves_bounded_at_nmdetail_stack();
+        resolves_exact_dirt_zero_damage_variant();
         std::cout << "material binding tests passed\n";
         return 0;
     } catch (const std::exception& error) {

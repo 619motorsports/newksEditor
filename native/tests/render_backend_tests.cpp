@@ -272,6 +272,21 @@ std::vector<std::uint8_t> executable_ks_per_pixel_nm_detail_stack_fragment_shade
     return result;
 }
 
+std::vector<std::uint8_t> executable_ks_per_pixel_damage_fragment_shader() {
+    // Generated from tests/shaders/indexed_ks_per_pixel_damage.frag with:
+    // glslangValidator -V --target-env vulkan1.0 -Os -g0 -S frag
+    constexpr std::string_view hex =
+        "03022307000001000b000800e90000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f000b0004000000040000006d61696e00000000160000002d000000360000003e000000a0000000ce000000100003000400000007000000470004000c0000002100000000000000470004000c0000002200000000000000470004001000000021000000010000004700040010000000220000000000000047000400160000001e00000004000000470004001a0000002100000004000000470004001a0000002200000000000000470004001c0000002100000005000000470004001c0000002200000000000000470004002d0000001e0000000100000047000400360000001e00000002000000470004003e0000001e000000000000004700040048000000210000000600000047000400480000002200000000000000470004004a0000002100000007000000470004004a00000022000000000000004700040051000000210000000c000000470004005100000022000000000000004700040053000000210000000d000000470004005300000022000000000000004700040059000000210000000e00000047000400590000002200000000000000470004005b000000210000000f000000470004005b00000022000000000000004700030065000000020000004800050065000000000000002300000000000000480005006500000001000000230000001000000048000500650000000200000023000000200000004800050065000000030000002300000030000000480005006500000004000000230000004000000047000400670000002100000002000000470004006700000022000000000000004700030094000000020000004800050094000000000000002300000000000000480005009400000001000000230000001000000048000500940000000200000023000000200000004800050094000000030000002300000030000000470004009600000021000000030000004700040096000000220000000000000047000400a00000001e0000000300000047000400ce0000001e00000000000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000004000000190009000a00000006000000010000000000000000000000000000000100000000000000200004000b000000000000000a0000003b0004000b0000000c000000000000001a0002000e000000200004000f000000000000000e0000003b0004000f00000010000000000000001b000300120000000a00000017000400140000000600000002000000200004001500000001000000140000003b0004001500000016000000010000003b0004000b0000001a000000000000003b0004000f0000001c00000000000000170004002100000006000000030000002b0004000600000026000000000000402b00040006000000280000000000803f200004002c00000001000000210000003b0004002c0000002d00000001000000150004003000000020000000000000002b0004003000000031000000000000003b0004002c00000036000000010000002b0004003000000039000000010000003b0004002c0000003e000000010000002b0004003000000041000000020000003b0004000b00000048000000000000003b0004000f0000004a000000000000003b0004000b00000051000000000000003b0004000f00000053000000000000003b0004000b00000059000000000000003b0004000f0000005b000000000000002b0004003000000061000000030000001e000700650000000700000007000000070000000700000007000000200004006600000002000000650000003b000400660000006700000002000000150004006800000020000000010000002b000400680000006900000004000000200004006a00000002000000070000002b000400060000006f000000000000002b000400680000007a00000000000000200004007b00000002000000060000001e0006009400000007000000070000000700000007000000200004009500000002000000940000003b0004009500000096000000020000002b000400680000009c000000030000003b0004002c000000a0000000010000002b00040068000000ab000000020000002b00040068000000b20000000100000020000400cd00000003000000070000003b000400cd000000ce000000030000002c00060021000000d80000006f0000006f0000006f0000002c00060021000000e80000002800000028000000280000003600050002000000040000000000000003000000f8000200050000003d0004000a0000000d0000000c0000003d0004000e00000011000000100000005600050012000000130000000d000000110000003d00040014000000170000001600000057000500070000001800000013000000170000003d0004000a0000001b0000001a0000003d0004000e0000001d0000001c00000056000500120000001e0000001b0000001d0000005700050007000000200000001e000000170000004f000800210000002500000020000000200000000000000001000000020000008e0005002100000027000000250000002600000083000500210000002a00000027000000e80000003d000400210000002e0000002d0000000c000600210000002f00000001000000450000002e0000005100050006000000340000002a000000000000008e00050021000000350000002f000000340000003d0004002100000037000000360000000c000600210000003800000001000000450000003700000051000500060000003b0000002a000000010000008e000500210000003c000000380000003b00000081000500210000003d000000350000003c0000003d000400210000003f0000003e0000000c000600210000004000000001000000450000003f0000005100050006000000430000002a000000020000008e000500210000004400000040000000430000008100050021000000450000003d000000440000000c00060021000000460000000100000045000000450000003d0004000a00000049000000480000003d0004000e0000004b0000004a00000056000500120000004c000000490000004b00000057000500070000004e0000004c000000170000003d0004000a00000052000000510000003d0004000e0000005400000053000000560005001200000055000000520000005400000057000500070000005700000055000000170000003d0004000a0000005a000000590000003d0004000e0000005c0000005b00000056000500120000005d0000005a0000005c00000057000500070000005f0000005d000000170000005100050006000000630000005700000003000000410005006a0000006b00000067000000690000003d000400070000006c0000006b00000094000500060000006d0000005f0000006c00000085000500060000006e000000630000006d0000000c0008000600000070000000010000002b0000006e0000006f000000280000004f000800210000007300000018000000180000000000000001000000020000004f000800210000007500000057000000570000000000000001000000020000005000060021000000770000007000000070000000700000000c0008002100000078000000010000002e000000730000007500000077000000410006007b0000007c000000670000007a000000410000003d000400060000007d0000007c00000051000500060000007f0000004e000000000000008500050006000000800000007d0000007f00000083000500060000008200000028000000700000008500050006000000830000008000000082000000510005000600000086000000200000000300000083000500060000008700000086000000280000008500050006000000880000007000000087000000810005000600000089000000280000008800000085000500060000008a0000008300000089000000410006007b0000008c000000670000007a000000610000003d000400060000008d0000008c00000051000500060000008f0000004e000000010000008500050006000000900000008d0000008f00000081000500060000009100000090000000280000000c000700060000009200000001000000280000002800000091000000410005006a00000097000000960000007a0000003d0004000700000098000000970000004f000800210000009900000098000000980000000000000001000000020000000c000600210000009a000000010000004500000099000000410005006a0000009d000000960000009c0000003d000400070000009e0000009d0000004f000800210000009f0000009e0000009e0000000000000001000000020000003d00040021000000a1000000a00000008300050021000000a20000009f000000a10000000c00060021000000a30000000100000045000000a20000009400050006000000a7000000460000009a0000000c00070006000000a80000000100000028000000a70000006f000000410005006a000000ac00000096000000ab0000003d00040007000000ad000000ac0000004f00080021000000ae000000ad000000ad000000000000000100000002000000410006007b000000af000000670000007a000000310000003d00040006000000b0000000af0000008e00050021000000b1000000ae000000b0000000410005006a000000b300000096000000b20000003d00040007000000b4000000b30000004f00080021000000b5000000b4000000b4000000000000000100000002000000410006007b000000b6000000670000007a000000390000003d00040006000000b7000000b60000008e00050021000000b8000000b5000000b70000008e00050021000000ba000000b8000000a80000008100050021000000bb000000b1000000ba0000008500050021000000bc00000078000000bb0000008100050021000000c40000009a000000a30000000c00060021000000c50000000100000045000000c40000009400050006000000c600000046000000c50000000c00070006000000c70000000100000028000000c60000006f0000000c00070006000000c9000000010000001a000000c7000000920000008500050006000000cb000000c90000008a0000008e00050021000000cc000000b5000000cb0000008100050021000000d1000000bc000000cc000000410005006a000000d300000067000000ab0000003d00040007000000d4000000d30000004f00080021000000d5000000d4000000d40000000000000001000000020000008500050021000000d600000078000000d50000008100050021000000d7000000d1000000d60000000c00070021000000d90000000100000028000000d7000000d80000005100050006000000db00000018000000030000005100050006000000dc000000d9000000000000005100050006000000dd000000d9000000010000005100050006000000de000000d9000000020000005000070007000000df000000dc000000dd000000de000000db0000003e000300ce000000df000000fd00010038000100";
+    require(hex.size() % 2U == 0U,
+            "embedded ksPerPixel damage fragment shader hex alignment");
+    std::vector<std::uint8_t> result(hex.size() / 2U);
+    for (std::size_t index = 0U; index < result.size(); ++index)
+        result[index] = static_cast<std::uint8_t>(
+            (hex_digit(hex[index * 2U]) << 4U) |
+            hex_digit(hex[index * 2U + 1U]));
+    return result;
+}
+
 std::vector<std::uint8_t> executable_fragment_shader() {
     constexpr std::string_view hex =
         "03022307000001000b000d000d0000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00060004000000040000006d61696e000000000900000010000300040000000700000047000400090000001e00000000000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000004000000200004000800000003000000070000003b0004000800000009000000030000002b000400060000000a0000000000803f2b000400060000000b000000000000002c000700070000000c0000000a0000000b0000000b0000000a0000003600050002000000040000000000000003000000f8000200050000003e000300090000000c000000fd00010038000100";
@@ -2025,6 +2040,147 @@ bool contract_backend(apex::render::Backend backend) {
     require(nm_maps_mixed_result.ok(), "mixed ksPerPixelNM six/eight-binding batch/readback");
     require_nm_pixel(nm_maps_mixed_result.rgba8, 74U, 155U, 103U,
                      "mixed batch selects the later maps descriptor");
+
+    // Execute the recovered dirt-zero damage equation at bindings 12-15.
+    const std::array<std::byte, 4> damage_pixel = {
+        std::byte{200}, std::byte{20}, std::byte{40}, std::byte{128}};
+    const std::array<std::byte, 4> damage_mask_pixel = {
+        std::byte{255}, std::byte{255}, std::byte{255}, std::byte{255}};
+    const std::array<std::byte, 4> flat_normal_alpha_zero_pixel = {
+        std::byte{128}, std::byte{128}, std::byte{255}, std::byte{0}};
+    TextureResult damage_texture = device.device->create_texture(
+        diffuse_description,
+        TextureUploadPlan{{TextureUpload{0U, 0U, 1U, 1U, 4U, damage_pixel}}});
+    TextureResult damage_mask_texture = device.device->create_texture(
+        diffuse_description,
+        TextureUploadPlan{{TextureUpload{0U, 0U, 1U, 1U, 4U, damage_mask_pixel}}});
+    TextureResult flat_normal_alpha_zero_texture = device.device->create_texture(
+        diffuse_description,
+        TextureUploadPlan{{TextureUpload{0U, 0U, 1U, 1U, 4U,
+                                         flat_normal_alpha_zero_pixel}}});
+    require(damage_texture.ok() && damage_mask_texture.ok() &&
+                flat_normal_alpha_zero_texture.ok(),
+            "dirt-zero damage texture uploads");
+    const SamplerResult damage_sampler =
+        device.device->create_sampler(normal_sampler_description);
+    const SamplerResult damage_mask_sampler =
+        device.device->create_sampler(normal_sampler_description);
+    require(damage_sampler.ok() && damage_mask_sampler.ok(),
+            "dirt-zero damage sampler creation");
+
+    PipelineProgram damage_pipeline = nm_maps_pipeline;
+    damage_pipeline.name = "source-evidenced-dirt-zero-damage";
+    damage_pipeline.resources.push_back(
+        {PipelineResourceKind::sampled_texture, 0U, 12U, "damageTexture"});
+    damage_pipeline.resources.push_back(
+        {PipelineResourceKind::sampler, 0U, 13U, "damageSampler"});
+    damage_pipeline.resources.push_back(
+        {PipelineResourceKind::sampled_texture, 0U, 14U, "damageMaskTexture"});
+    damage_pipeline.resources.push_back(
+        {PipelineResourceKind::sampler, 0U, 15U, "damageMaskSampler"});
+    if (backend == Backend::Vulkan) {
+        damage_pipeline.shaders[0].bytes =
+            executable_ks_per_pixel_nm_maps_vertex_shader();
+        damage_pipeline.shaders[1].bytes =
+            executable_ks_per_pixel_damage_fragment_shader();
+    } else {
+#if defined(_WIN32)
+        constexpr std::string_view damage_vertex_source =
+            "cbuffer DrawMatrices : register(b0) { column_major float4x4 world; column_major float4x4 viewProjection; };"
+            "struct Input { float3 position : POSITION; float3 normal : NORMAL; float2 texcoord : TEXCOORD0; float3 tangent : TANGENT; };"
+            "struct Output { float4 position : SV_Position; float3 normal : TEXCOORD1; float3 tangent : TEXCOORD2;"
+            "float3 bitangent : TEXCOORD3; float3 world : TEXCOORD4; float2 texcoord : TEXCOORD0; };"
+            "Output main(Input input) { Output output; float4 worldPosition = mul(world, float4(input.position, 1.0));"
+            "float3x3 world3 = (float3x3)world; output.position = mul(viewProjection, worldPosition);"
+            "output.world = worldPosition.xyz; output.normal = mul(world3, input.normal);"
+            "output.tangent = mul(world3, input.tangent); output.bitangent = mul(world3, cross(input.tangent, input.normal));"
+            "output.texcoord = input.texcoord; return output; }";
+        constexpr std::string_view damage_fragment_source =
+            "Texture2D diffuseTexture : register(t0); SamplerState diffuseSampler : register(s1);"
+            "cbuffer KsPerPixelMaterial : register(b2) { float4 lighting; float4 fresnel; float4 emissive; float4 detail; float4 damageZones; };"
+            "cbuffer KsPerPixelFrame : register(b3) { float4 sun_direction; float4 sun_color; float4 ambient_color; float4 camera_position; };"
+            "Texture2D normalTexture : register(t4); SamplerState normalSampler : register(s5);"
+            "Texture2D mapsTexture : register(t6); SamplerState mapsSampler : register(s7);"
+            "Texture2D damageTexture : register(t12); SamplerState damageSampler : register(s13);"
+            "Texture2D damageMaskTexture : register(t14); SamplerState damageMaskSampler : register(s15);"
+            "float4 main(float4 position : SV_Position, float3 normal : TEXCOORD1, float3 tangent : TEXCOORD2,"
+            "float3 bitangent : TEXCOORD3, float3 world : TEXCOORD4, float2 texcoord : TEXCOORD0) : SV_Target {"
+            "float4 diffuseTexel = diffuseTexture.Sample(diffuseSampler, texcoord);"
+            "float4 normalTexel = normalTexture.Sample(normalSampler, texcoord);"
+            "float3 sampledNormal = normalTexel.rgb * 2.0 - 1.0;"
+            "float3 n = normalize(normalize(tangent) * sampledNormal.x + normalize(bitangent) * sampledNormal.y + normalize(normal) * sampledNormal.z);"
+            "float3 maps = mapsTexture.Sample(mapsSampler, texcoord).rgb;"
+            "float4 damageTexel = damageTexture.Sample(damageSampler, texcoord);"
+            "float amount = saturate(damageTexel.a * dot(damageMaskTexture.Sample(damageMaskSampler, texcoord), damageZones));"
+            "float3 surface = lerp(diffuseTexel.rgb, damageTexel.rgb, amount);"
+            "float mappedSpecular = lighting.z * maps.r * (1.0 - amount) * (1.0 + amount * (normalTexel.a - 1.0));"
+            "float mappedPower = max(1.0, lighting.w * maps.g + 1.0); float3 l = normalize(sun_direction.xyz);"
+            "float3 v = normalize(camera_position.xyz - world); float ndl = max(dot(n, l), 0.0);"
+            "float3 diffuse = surface * (ambient_color.rgb * lighting.x + sun_color.rgb * lighting.y * ndl);"
+            "float3 spec = sun_color.rgb * (pow(max(dot(n, normalize(l + v)), 0.0), mappedPower) * mappedSpecular);"
+            "return float4(max(diffuse + spec + surface * emissive.rgb, 0.0), diffuseTexel.a); }";
+        damage_pipeline.shaders[0].bytes =
+            executable_d3d_shader(damage_vertex_source, "vs_5_0");
+        damage_pipeline.shaders[1].bytes =
+            executable_d3d_shader(damage_fragment_source, "ps_5_0");
+#else
+        require(false, "D3D12 damage shader test requires Windows D3DCompile");
+#endif
+    }
+    auto make_damage_request = [&](const Texture* normal_texture_value) {
+        IndexedStaticMeshDrawRequest request = sampled_upload.upload->make_request(
+            damage_pipeline, *indexed_camera.frame);
+        request.resource_authority = IndexedResourceAuthority::explicit_bindings;
+        request.sampled_binding = {diffuse_texture.texture.get(), sampler.sampler.get()};
+        request.normal_binding = {normal_texture_value, normal_sampler.sampler.get()};
+        request.maps_binding = {maps_full_texture.texture.get(), maps_sampler.sampler.get()};
+        request.damage_binding = {damage_texture.texture.get(), damage_sampler.sampler.get()};
+        request.damage_mask_binding = {damage_mask_texture.texture.get(),
+                                       damage_mask_sampler.sampler.get()};
+        request.material_binding = {nm_material_buffer.buffer.get(), 0U,
+                                    portable_material_buffer_view_bytes};
+        request.frame_binding = {nm_frame_buffer.buffer.get(), 0U,
+                                 portable_frame_buffer_view_bytes};
+        return request;
+    };
+    nm_material.damage_zones = {0.0F, 0.0F, 0.0F, 0.0F};
+    std::array<std::byte, portable_material_buffer_view_bytes> damage_material_bytes{};
+    std::memcpy(damage_material_bytes.data(), &nm_material, sizeof(nm_material));
+    require(device.device->update_buffer(*nm_material_buffer.buffer, 0U,
+                                         damage_material_bytes).ok(),
+            "dirt-zero damage disabled material update");
+    IndexedStaticMeshDrawRequest damage_disabled_request =
+        make_damage_request(flat_normal_texture.texture.get());
+    const IndexedStaticMeshDrawResult damage_disabled_result =
+        device.device->draw_indexed_static_mesh_and_readback(
+            *triangle_texture.texture, damage_disabled_request);
+    require(damage_disabled_result.ok(), "dirt-zero damage disabled draw/readback");
+    require_nm_pixel(damage_disabled_result.rgba8, 74U, 155U, 103U,
+                     "zero damageZones preserves the base MultiMap pixel");
+
+    nm_material.damage_zones = {1.0F, 0.0F, 0.0F, 0.0F};
+    std::memcpy(damage_material_bytes.data(), &nm_material, sizeof(nm_material));
+    require(device.device->update_buffer(*nm_material_buffer.buffer, 0U,
+                                         damage_material_bytes).ok(),
+            "dirt-zero damage enabled material update");
+    IndexedStaticMeshDrawRequest damage_enabled_request =
+        make_damage_request(flat_normal_texture.texture.get());
+    const IndexedStaticMeshDrawResult damage_enabled_result =
+        device.device->draw_indexed_static_mesh_and_readback(
+            *triangle_texture.texture, damage_enabled_request);
+    require(damage_enabled_result.ok(), "dirt-zero damage enabled draw/readback");
+    require_nm_pixel(damage_enabled_result.rgba8, 81U, 81U, 60U,
+                     "damage alpha and mask mix color and attenuate specular");
+
+    IndexedStaticMeshDrawRequest damage_normal_alpha_request =
+        make_damage_request(flat_normal_alpha_zero_texture.texture.get());
+    const IndexedStaticMeshDrawResult damage_normal_alpha_result =
+        device.device->draw_indexed_static_mesh_and_readback(
+            *triangle_texture.texture, damage_normal_alpha_request);
+    require(damage_normal_alpha_result.ok(),
+            "dirt-zero damage normal-alpha draw/readback");
+    require_nm_pixel(damage_normal_alpha_result.rgba8, 64U, 65U, 43U,
+                     "normal alpha applies the recovered damage specular attenuation");
 
     // Extend the same eight-binding NM maps fixture with the generic detail
     // stack at bindings 8/9 and 10/11. The detail records mirror the

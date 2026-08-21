@@ -169,13 +169,19 @@ void add_default(std::map<std::string, MaterialPropertyValue>& properties,
            canonical_shader == "ksperpixelmultimap_at";
 }
 
+[[nodiscard]] bool is_damage_dirt_family(std::string_view canonical_shader) noexcept {
+    return canonical_shader == "ksperpixelmultimap_damage_dirt";
+}
+
 [[nodiscard]] std::vector<std::string> required_slots(std::string_view shader) {
     const std::string key = canonical(shader);
     if (key == "kstyres" || key == "newstefano_kstyres")
         return {"txDiffuse", "txNormal", "txDirty", "txBlur", "txNormalBlur"};
     if (key == "ksbrakedisc")
         return {"txDiffuse", "txNormal", "txGlow", "txBlur", "txNormalBlur"};
-    if (key == "ksperpixelmultimap_damage" || key == "ksperpixelmultimap_damage_dirt")
+    if (key == "ksperpixelmultimap_damage_dirt")
+        return {"txDiffuse", "txNormal", "txMaps", "txDamage", "txDamageMask"};
+    if (key == "ksperpixelmultimap_damage")
         return {"txDamage", "txDamageMask"};
     if (is_nmdetail_family(key))
         return {"txDiffuse", "txNormal", "txMaps", "txDetail", "txNormalDetail"};
@@ -480,12 +486,14 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
     const std::string shader = canonical(binding.shader);
     const bool detail_stack_variant = is_nmdetail_family(shader);
     const bool base_multimap_variant = is_base_multimap_family(shader);
+    const bool damage_dirt_variant = is_damage_dirt_family(shader);
     const bool normal_variant = shader == "ksperpixelnm" ||
-                                base_multimap_variant || detail_stack_variant;
+                                base_multimap_variant || detail_stack_variant ||
+                                damage_dirt_variant;
     if (shader != "ksperpixel" && !normal_variant) {
         result.status = KsPerPixelMaterialResolveStatus::unsupported;
         result.diagnostic = {"ks_per_pixel_shader_unsupported", "shader",
-                             "The bounded material resolver accepts exact ksPerPixel, ksPerPixelNM, ksPerPixelMultiMap, ksPerPixelMultiMap_AT, ksPerPixelMultiMap_NMDetail, and ksPerPixelMultiMap_AT_NMDetail shaders"};
+                             "The bounded material resolver accepts exact ksPerPixel, ksPerPixelNM, ksPerPixelMultiMap, ksPerPixelMultiMap_AT, ksPerPixelMultiMap_NMDetail, ksPerPixelMultiMap_AT_NMDetail, and dirt-zero ksPerPixelMultiMap_damage_dirt shaders"};
         return result;
     }
 
@@ -507,6 +515,30 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
         material_scalar(binding, "detailNormalBlend", 1.0F),
         0.0F,
     };
+    if (damage_dirt_variant) {
+        const MaterialPropertyValue* damage_zones =
+            find_material_property(binding, "damageZones");
+        const MaterialPropertyValue* dirt = find_material_property(binding, "dirt");
+        if (damage_zones == nullptr || dirt == nullptr) {
+            result.status = KsPerPixelMaterialResolveStatus::unsupported;
+            result.diagnostic = {"ks_per_pixel_damage_properties_missing", "damageZones",
+                                 "The exact damage branch requires authored damageZones and dirt properties"};
+            return result;
+        }
+        if (!std::isfinite(dirt->scalar)) {
+            result.status = KsPerPixelMaterialResolveStatus::invalid_input;
+            result.diagnostic = {"non_finite_constants", "dirt",
+                                 "The resolved damage dirt value must be finite"};
+            return result;
+        }
+        if (dirt->scalar != 0.0F) {
+            result.status = KsPerPixelMaterialResolveStatus::unsupported;
+            result.diagnostic = {"ks_per_pixel_damage_dirt_unsupported", "dirt",
+                                 "The recovered exact damage branch supports dirt zero only"};
+            return result;
+        }
+        result.constants.damage_zones = damage_zones->vector4;
+    }
 
     const MaterialPropertyValue* emissive = find_material_property(binding, "ksEmissive");
     if (emissive == nullptr) {
@@ -550,7 +582,8 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
                            [](float value) { return std::isfinite(value); });
     };
     if (!finite(result.constants.lighting) || !finite(result.constants.fresnel) ||
-        !finite(result.constants.emissive) || !finite(result.constants.detail)) {
+        !finite(result.constants.emissive) || !finite(result.constants.detail) ||
+        !finite(result.constants.damage_zones)) {
         result.status = KsPerPixelMaterialResolveStatus::invalid_input;
         result.diagnostic = {"non_finite_constants", "ksPerPixel",
                              "Resolved ksPerPixel constants must contain only finite values"};
@@ -593,6 +626,12 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
         result.status = KsPerPixelMaterialResolveStatus::unsupported;
         result.diagnostic = {"ks_per_pixel_multimap_resources_incomplete", "resources",
                              "The bounded ksPerPixelMultiMap family requires txDiffuse, txNormal, and txMaps"};
+        return result;
+    }
+    if (damage_dirt_variant && binding.status != MaterialBindingStatus::complete) {
+        result.status = KsPerPixelMaterialResolveStatus::unsupported;
+        result.diagnostic = {"ks_per_pixel_damage_resources_incomplete", "resources",
+                             "The exact damage branch requires txDiffuse, txNormal, txMaps, txDamage, and txDamageMask"};
         return result;
     }
 

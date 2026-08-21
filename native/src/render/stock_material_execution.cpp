@@ -33,11 +33,13 @@ namespace {
            key == "ksperpixelmultimap" ||
            key == "ksperpixelmultimap_at" ||
            key == "ksperpixelmultimap_nmdetail" ||
-           key == "ksperpixelmultimap_at_nmdetail";
+           key == "ksperpixelmultimap_at_nmdetail" ||
+           key == "ksperpixelmultimap_damage_dirt";
 }
 
 [[nodiscard]] bool finite_material(const KsPerPixelMaterialConstants& value) {
-    for (const auto* values : {&value.lighting, &value.fresnel, &value.emissive, &value.detail})
+    for (const auto* values : {&value.lighting, &value.fresnel, &value.emissive,
+                               &value.detail, &value.damage_zones})
         for (const float component : *values)
             if (!std::isfinite(component)) return false;
     return true;
@@ -107,6 +109,15 @@ namespace {
         add(PipelineResourceKind::sampler, 9U, "txDetailSampler");
         add(PipelineResourceKind::sampled_texture, 10U, "txNormalDetail");
         add(PipelineResourceKind::sampler, 11U, "txNormalDetailSampler");
+    } else if (key == "ksperpixelmultimap_damage_dirt") {
+        add(PipelineResourceKind::sampled_texture, 4U, "txNormal");
+        add(PipelineResourceKind::sampler, 5U, "txNormalSampler");
+        add(PipelineResourceKind::sampled_texture, 6U, "txMaps");
+        add(PipelineResourceKind::sampler, 7U, "txMapsSampler");
+        add(PipelineResourceKind::sampled_texture, 12U, "txDamage");
+        add(PipelineResourceKind::sampler, 13U, "txDamageSampler");
+        add(PipelineResourceKind::sampled_texture, 14U, "txDamageMask");
+        add(PipelineResourceKind::sampler, 15U, "txDamageMaskSampler");
     }
     return resources;
 }
@@ -174,7 +185,10 @@ bool validate_module_sets(std::span<const StockMaterialShaderModules> sets,
 [[nodiscard]] bool packet_resources_match(const DrawPacket& packet, std::string_view shader,
                                           std::size_t max_string, Diagnostic& diagnostic) {
     const std::size_t expected = expected_texture_slots(shader);
-    if (packet.resources.size() != expected) {
+    const bool damage = canonical(shader) == "ksperpixelmultimap_damage_dirt";
+    if ((!damage && packet.resources.size() != expected) ||
+        (damage && packet.resources.size() != expected &&
+         packet.resources.size() != expected + 1U)) {
         diagnostic = diag("stock_material_resources_incomplete", "Draw packet resources do not contain the complete supported stock texture set");
         return false;
     }
@@ -191,7 +205,9 @@ bool validate_module_sets(std::span<const StockMaterialShaderModules> sets,
             return false;
         }
         if (key != "txdiffuse" && key != "txnormal" && key != "txmaps" &&
-            key != "txdetail" && key != "txnormaldetail" && key != "txdetailnm") {
+            key != "txdetail" && key != "txnormaldetail" && key != "txdetailnm" &&
+            (!damage || (key != "txdamage" && key != "txdamagemask" &&
+                         key != "txdust"))) {
             diagnostic = diag("stock_material_resource_unsupported", "Draw packet contains a resource outside the supported stock family");
             return false;
         }
@@ -199,11 +215,14 @@ bool validate_module_sets(std::span<const StockMaterialShaderModules> sets,
     const bool missing_diffuse = seen.count("txdiffuse") == 0U;
     const bool missing_normal = expected >= 2U && seen.count("txnormal") == 0U;
     const bool missing_maps = expected >= 3U && seen.count("txmaps") == 0U;
-    const bool missing_detail = expected == 5U &&
+    const bool missing_detail = expected == 5U && !damage &&
                                 (seen.count("txdetail") == 0U ||
                                  (seen.count("txnormaldetail") == 0U &&
                                   seen.count("txdetailnm") == 0U));
-    if (missing_diffuse || missing_normal || missing_maps || missing_detail) {
+    const bool missing_damage = damage &&
+                                (seen.count("txdamage") == 0U ||
+                                 seen.count("txdamagemask") == 0U);
+    if (missing_diffuse || missing_normal || missing_maps || missing_detail || missing_damage) {
         diagnostic = diag("stock_material_resources_incomplete", "Draw packet is missing a required stock texture role");
         return false;
     }

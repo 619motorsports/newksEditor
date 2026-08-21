@@ -182,6 +182,30 @@ Fixture fixture(std::string shader) {
     return result;
 }
 
+Fixture damage_fixture(float dirt = 0.0F, bool include_dust = true) {
+    Fixture result = fixture("ksPerPixelMultiMap_damage_dirt");
+    auto& material = result.model.materials.front();
+    material.properties.push_back(
+        {"damageZones", 0.0F, {}, {}, {1.0F, 0.5F, 0.25F, 0.0F}});
+    material.properties.push_back({"dirt", dirt, {}, {}, {}});
+    const std::array<const char*, 6> slots = {
+        "txDiffuse", "txNormal", "txMaps", "txDamage", "txDamageMask", "txDust"};
+    const std::array<std::uint32_t, 6> bind_points = {0U, 1U, 2U, 4U, 21U, 5U};
+    const std::size_t count = include_dust ? slots.size() : slots.size() - 1U;
+    material.resources.clear();
+    result.model.textures.clear();
+    result.packets.front().resources.clear();
+    for (std::size_t index = 0U; index < count; ++index) {
+        const std::string texture = std::string("damage_texture_") +
+                                    std::to_string(index);
+        material.resources.push_back({slots[index], bind_points[index], texture});
+        result.model.textures.push_back({true, texture, 4U, {}, std::nullopt});
+        result.packets.front().resources.push_back(
+            {slots[index], bind_points[index], static_cast<std::uint32_t>(index), texture});
+    }
+    return result;
+}
+
 StockMaterialExecutionRequest request_for(Fixture& fixture) {
     StockMaterialExecutionRequest request;
     request.model = &fixture.model;
@@ -209,6 +233,31 @@ void test_success_and_a2c() {
         prepare_stock_material_execution(device, request_for(base_at_fixture));
     require(base_at_result.ok() && base_at_result.resources->draw_count() == 1U,
             "base AT MultiMap handoff must retain A2C on a four-sample target");
+
+    Fixture damage = damage_fixture();
+    const auto damage_result =
+        prepare_stock_material_execution(device, request_for(damage));
+    require(damage_result.ok() && damage_result.resources->draw_count() == 1U,
+            "dirt-zero damage handoff accepts the exact five textures and optional txDust");
+    bool found_damage_constants = false;
+    for (const std::vector<std::byte>& bytes : device.initial_buffers) {
+        if (bytes.size() < sizeof(KsPerPixelMaterialConstants)) continue;
+        KsPerPixelMaterialConstants constants{};
+        std::memcpy(&constants, bytes.data(), sizeof(constants));
+        found_damage_constants = found_damage_constants ||
+                                 constants.damage_zones ==
+                                     std::array<float, 4>{1.0F, 0.5F, 0.25F, 0.0F};
+    }
+    require(found_damage_constants,
+            "dirt-zero damage handoff uploads the authored damageZones record");
+
+    Fixture dirty_damage = damage_fixture(0.25F);
+    const auto dirty_damage_result =
+        prepare_stock_material_execution(device, request_for(dirty_damage));
+    require(dirty_damage_result.status == StaticSceneResourceStatus::unsupported &&
+                dirty_damage_result.diagnostic.code ==
+                    "ks_per_pixel_damage_dirt_unsupported",
+            "nonzero damage dirt remains outside the exact handoff");
     const std::size_t calls_before_base_bad_target = device.buffer_calls;
     auto base_bad_target = request_for(base_at_fixture);
     base_bad_target.targets.colors.front().samples = 1U;

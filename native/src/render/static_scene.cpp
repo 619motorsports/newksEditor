@@ -96,6 +96,8 @@ bool finite_material_constants(const KsPerPixelMaterialConstants& constants) noe
         if (!std::isfinite(value)) return false;
     for (const float value : constants.detail)
         if (!std::isfinite(value)) return false;
+    for (const float value : constants.damage_zones)
+        if (!std::isfinite(value)) return false;
     return true;
 }
 
@@ -640,19 +642,27 @@ StaticSceneResourceResult prepare_static_scene_resources(
         const bool detail_stack_layout =
             material_layout ==
             IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame;
+        const bool damage_layout =
+            material_layout ==
+            IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame;
         if (!pipeline->resources.empty()) {
             const std::size_t expected_resources =
-                detail_stack_layout ? 5U : maps_layout ? 3U : normal_layout ? 2U : 1U;
-            if (packet.resources.size() != expected_resources)
+                (detail_stack_layout || damage_layout) ? 5U
+                                                      : maps_layout ? 3U : normal_layout ? 2U : 1U;
+            if (packet.resources.size() != expected_resources &&
+                !(damage_layout && packet.resources.size() == expected_resources + 1U))
                 return fail(StaticSceneResourceStatus::unsupported,
                             "static_scene_material_packet_unsupported",
-                            detail_stack_layout
+                            damage_layout
+                                ? "The portable damage path requires txDiffuse, txNormal, txMaps, txDamage, and txDamageMask; optional txDust is ignored only for exact dirt zero"
+                                : detail_stack_layout
                                 ? "The portable detail-stack path requires txDiffuse, txNormal, txMaps, txDetail, and txNormalDetail packet resources"
                                 : maps_layout
                                 ? "The portable txMaps path requires txDiffuse, txNormal, and txMaps packet resources"
                                 : normal_layout
                                     ? "The portable ksPerPixelNM path requires txDiffuse and txNormal packet resources"
                                     : "The portable diffuse path requires one txDiffuse packet resource");
+            std::uint32_t ignored_dust_index = invalid_draw_texture_index;
             for (const DrawResourceSlot& resource : packet.resources) {
                 if (resource.slot.size() > limits.max_resource_string_bytes ||
                     resource.texture.size() > limits.max_resource_string_bytes)
@@ -660,9 +670,10 @@ StaticSceneResourceResult prepare_static_scene_resources(
                                 "static_scene_resource_string_limit",
                                 "A static-scene resource string exceeds its byte limit");
                 const bool diffuse = canonical_resource_equals(resource.slot, "txdiffuse");
-                const bool normal = (normal_layout || maps_layout || detail_stack_layout) &&
+                const bool normal = (normal_layout || maps_layout || detail_stack_layout ||
+                                     damage_layout) &&
                                     canonical_resource_equals(resource.slot, "txnormal");
-                const bool maps = (maps_layout || detail_stack_layout) &&
+                const bool maps = (maps_layout || detail_stack_layout || damage_layout) &&
                                   canonical_resource_equals(resource.slot, "txmaps");
                 const bool detail = detail_stack_layout &&
                                     canonical_resource_equals(resource.slot, "txdetail");
@@ -670,10 +681,19 @@ StaticSceneResourceResult prepare_static_scene_resources(
                     detail_stack_layout &&
                     (canonical_resource_equals(resource.slot, "txnormaldetail") ||
                      canonical_resource_equals(resource.slot, "txdetailnm"));
-                if (!diffuse && !normal && !maps && !detail && !normal_detail)
+                const bool damage = damage_layout &&
+                                    canonical_resource_equals(resource.slot, "txdamage");
+                const bool damage_mask = damage_layout &&
+                                         canonical_resource_equals(resource.slot, "txdamagemask");
+                const bool dust = damage_layout &&
+                                  canonical_resource_equals(resource.slot, "txdust");
+                if (!diffuse && !normal && !maps && !detail && !normal_detail &&
+                    !damage && !damage_mask && !dust)
                     return fail(StaticSceneResourceStatus::unsupported,
                                 "static_scene_material_packet_unsupported",
-                                detail_stack_layout
+                                damage_layout
+                                    ? "The portable damage path accepts txDiffuse, txNormal, txMaps, txDamage, txDamageMask, and optional txDust"
+                                    : detail_stack_layout
                                     ? "The portable detail-stack path accepts only txDiffuse, txNormal, txMaps, txDetail, and txNormalDetail"
                                     : maps_layout
                                     ? "The portable txMaps path accepts only txDiffuse, txNormal, and txMaps"
@@ -688,7 +708,13 @@ StaticSceneResourceResult prepare_static_scene_resources(
                                                           ? textures_for_packet[packet_index].maps
                                                           : detail
                                                               ? textures_for_packet[packet_index].detail
-                                                              : textures_for_packet[packet_index].normal_detail;
+                                                              : normal_detail
+                                                                  ? textures_for_packet[packet_index].normal_detail
+                                                                  : damage
+                                                                      ? textures_for_packet[packet_index].damage
+                                                                      : damage_mask
+                                                                          ? textures_for_packet[packet_index].damage_mask
+                                                                          : ignored_dust_index;
                 if (stored_index != invalid_draw_texture_index)
                     return fail(StaticSceneResourceStatus::invalid_request,
                                 "static_scene_resource_slot_duplicate",
@@ -700,12 +726,18 @@ StaticSceneResourceResult prepare_static_scene_resources(
                                         : normal ? "static_scene_normal_texture_index_invalid"
                                                  : maps ? "static_scene_maps_texture_index_invalid"
                                                         : detail ? "static_scene_detail_texture_index_invalid"
-                                                                  : "static_scene_normal_detail_texture_index_invalid",
+                                                                 : normal_detail ? "static_scene_normal_detail_texture_index_invalid"
+                                                                 : damage ? "static_scene_damage_texture_index_invalid"
+                                                                 : damage_mask ? "static_scene_damage_mask_texture_index_invalid"
+                                                                               : "static_scene_dust_texture_index_invalid",
                                 diffuse ? "A txDiffuse resource has an invalid global texture index"
                                         : normal ? "A txNormal resource has an invalid global texture index"
                                                  : maps ? "A txMaps resource has an invalid global texture index"
                                                         : detail ? "A txDetail resource has an invalid global texture index"
-                                                                  : "A txNormalDetail resource has an invalid global texture index");
+                                                                 : normal_detail ? "A txNormalDetail resource has an invalid global texture index"
+                                                                 : damage ? "A txDamage resource has an invalid global texture index"
+                                                                 : damage_mask ? "A txDamageMask resource has an invalid global texture index"
+                                                                               : "A txDust resource has an invalid global texture index");
                 const formats::Kn5Texture& source_texture =
                     model.textures[static_cast<std::size_t>(resource.texture_index)];
                 if (source_texture.name.size() > limits.max_resource_string_bytes ||
@@ -731,7 +763,10 @@ StaticSceneResourceResult prepare_static_scene_resources(
                                         : normal ? "static_scene_normal_texture_identity_invalid"
                                                  : maps ? "static_scene_maps_texture_identity_invalid"
                                                         : detail ? "static_scene_detail_texture_identity_invalid"
-                                                                  : "static_scene_normal_detail_texture_identity_invalid",
+                                                                 : normal_detail ? "static_scene_normal_detail_texture_identity_invalid"
+                                                                 : damage ? "static_scene_damage_texture_identity_invalid"
+                                                                 : damage_mask ? "static_scene_damage_mask_texture_identity_invalid"
+                                                                               : "static_scene_dust_texture_identity_invalid",
                                 diffuse
                                     ? "A txDiffuse resource does not match its unique active scoped KN5 texture"
                                     : normal
@@ -740,20 +775,31 @@ StaticSceneResourceResult prepare_static_scene_resources(
                                             ? "A txMaps resource does not match its unique active scoped KN5 texture"
                                             : detail
                                                 ? "A txDetail resource does not match its unique active scoped KN5 texture"
-                                                : "A txNormalDetail resource does not match its unique active scoped KN5 texture");
+                                                : normal_detail
+                                                    ? "A txNormalDetail resource does not match its unique active scoped KN5 texture"
+                                                    : damage
+                                                        ? "A txDamage resource does not match its unique active scoped KN5 texture"
+                                                        : damage_mask
+                                                            ? "A txDamageMask resource does not match its unique active scoped KN5 texture"
+                                                            : "A txDust resource does not match its unique active scoped KN5 texture");
                 stored_index = resource.texture_index;
             }
             if (textures_for_packet[packet_index].diffuse == invalid_draw_texture_index ||
-                ((normal_layout || maps_layout || detail_stack_layout) &&
+                ((normal_layout || maps_layout || detail_stack_layout || damage_layout) &&
                  textures_for_packet[packet_index].normal == invalid_draw_texture_index) ||
-                ((maps_layout || detail_stack_layout) && textures_for_packet[packet_index].maps ==
+                ((maps_layout || detail_stack_layout || damage_layout) && textures_for_packet[packet_index].maps ==
                                     invalid_draw_texture_index) ||
                 (detail_stack_layout &&
                  (textures_for_packet[packet_index].detail == invalid_draw_texture_index ||
-                  textures_for_packet[packet_index].normal_detail == invalid_draw_texture_index)))
+                  textures_for_packet[packet_index].normal_detail == invalid_draw_texture_index)) ||
+                (damage_layout &&
+                 (textures_for_packet[packet_index].damage == invalid_draw_texture_index ||
+                  textures_for_packet[packet_index].damage_mask == invalid_draw_texture_index)))
                 return fail(StaticSceneResourceStatus::invalid_request,
                             "static_scene_resource_slot_missing",
-                            detail_stack_layout
+                            damage_layout
+                                ? "The portable damage resources are incomplete"
+                                : detail_stack_layout
                                 ? "The portable detail-stack resources are incomplete"
                                 : maps_layout
                                 ? "The portable txMaps resources are incomplete"
@@ -763,11 +809,11 @@ StaticSceneResourceResult prepare_static_scene_resources(
         }
         if (material_layout == IndexedPortableResourceLayout::diffuse_with_frame ||
             material_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame ||
-            normal_layout || maps_layout || detail_stack_layout)
+            normal_layout || maps_layout || detail_stack_layout || damage_layout)
             requires_frame_constants = true;
         if (material_layout == IndexedPortableResourceLayout::diffuse_with_constants ||
             material_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame ||
-            normal_layout || maps_layout || detail_stack_layout) {
+            normal_layout || maps_layout || detail_stack_layout || damage_layout) {
             if (limits.max_material_constant_buffers == 0U ||
                 limits.max_total_material_constant_bytes == 0U)
                 return fail(StaticSceneResourceStatus::invalid_request,
@@ -795,7 +841,8 @@ StaticSceneResourceResult prepare_static_scene_resources(
                     return fail(StaticSceneResourceStatus::invalid_request,
                                 "static_scene_material_constant_non_finite",
                                 "A used material constant contains a non-finite value");
-                if ((normal_layout || maps_layout || detail_stack_layout) && constants.fresnel[2] > 0.0F)
+                if ((normal_layout || maps_layout || detail_stack_layout || damage_layout) &&
+                    constants.fresnel[2] > 0.0F)
                     return fail(StaticSceneResourceStatus::unsupported,
                                 "static_scene_normal_fresnel_unsupported",
                                 "The bounded ksPerPixelNM path requires disabled Fresnel reflection");
@@ -896,6 +943,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
         decoded_textures.resize(model.textures.size());
         std::vector<bool> maps_texture_indices(model.textures.size(), false);
         std::vector<bool> normal_detail_texture_indices(model.textures.size(), false);
+        std::vector<bool> damage_mask_texture_indices(model.textures.size(), false);
         for (const StaticSceneResources::PacketTextureIndices& packet_textures :
              textures_for_packet) {
             if (packet_textures.maps != invalid_draw_texture_index)
@@ -903,6 +951,9 @@ StaticSceneResourceResult prepare_static_scene_resources(
             if (packet_textures.normal_detail != invalid_draw_texture_index)
                 normal_detail_texture_indices[
                     static_cast<std::size_t>(packet_textures.normal_detail)] = true;
+            if (packet_textures.damage_mask != invalid_draw_texture_index)
+                damage_mask_texture_indices[
+                    static_cast<std::size_t>(packet_textures.damage_mask)] = true;
         }
         std::uint64_t total_source_bytes = 0U;
         std::uint64_t total_decoded_bytes = 0U;
@@ -911,7 +962,8 @@ StaticSceneResourceResult prepare_static_scene_resources(
             for (const std::uint32_t raw_index :
                  {packet_textures.diffuse, packet_textures.normal,
                   packet_textures.maps, packet_textures.detail,
-                  packet_textures.normal_detail}) {
+                  packet_textures.normal_detail, packet_textures.damage,
+                  packet_textures.damage_mask}) {
                 if (raw_index == invalid_draw_texture_index) continue;
                 const std::size_t texture_index = static_cast<std::size_t>(raw_index);
                 if (decoded_textures[texture_index].has_value()) continue;
@@ -957,16 +1009,21 @@ StaticSceneResourceResult prepare_static_scene_resources(
                                     decoded.diagnostic.message);
                 }
                 if ((maps_texture_indices[texture_index] ||
-                     normal_detail_texture_indices[texture_index]) &&
+                     normal_detail_texture_indices[texture_index] ||
+                     damage_mask_texture_indices[texture_index]) &&
                     decoded.plan.description.format != TextureFormat::rgba8_unorm &&
                     decoded.plan.description.format != TextureFormat::bgra8_unorm)
                     return fail(StaticSceneResourceStatus::unsupported,
                                 maps_texture_indices[texture_index]
                                     ? "static_scene_maps_texture_format_unsupported"
-                                    : "static_scene_normal_detail_texture_format_unsupported",
+                                    : normal_detail_texture_indices[texture_index]
+                                        ? "static_scene_normal_detail_texture_format_unsupported"
+                                        : "static_scene_damage_mask_texture_format_unsupported",
                                 maps_texture_indices[texture_index]
                                     ? "An embedded txMaps texture must decode to linear RGBA8 or BGRA8"
-                                    : "An embedded txNormalDetail texture must decode to linear RGBA8 or BGRA8");
+                                    : normal_detail_texture_indices[texture_index]
+                                        ? "An embedded txNormalDetail texture must decode to linear RGBA8 or BGRA8"
+                                        : "An embedded txDamageMask texture must decode to linear RGBA8 or BGRA8");
                 if (!charge(decoded.plan.levels.size(), sizeof(formats::DdsLevel)) ||
                     !charge(decoded.plan.levels.size(), sizeof(TextureUpload)))
                     return preparation_limit();
@@ -1269,9 +1326,15 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         if (resource_failure.has_value()) return std::move(*resource_failure);
         draw->normal_detail_binding = resolve_texture(texture_indices.normal_detail, "normal-detail");
         if (resource_failure.has_value()) return std::move(*resource_failure);
+        draw->damage_binding = resolve_texture(texture_indices.damage, "damage");
+        if (resource_failure.has_value()) return std::move(*resource_failure);
+        draw->damage_mask_binding = resolve_texture(texture_indices.damage_mask, "damage-mask");
+        if (resource_failure.has_value()) return std::move(*resource_failure);
         if (draw->sampled_binding.texture != nullptr || draw->normal_binding.texture != nullptr ||
             draw->maps_binding.texture != nullptr || draw->detail_binding.texture != nullptr ||
-            draw->normal_detail_binding.texture != nullptr)
+            draw->normal_detail_binding.texture != nullptr ||
+            draw->damage_binding.texture != nullptr ||
+            draw->damage_mask_binding.texture != nullptr)
             draw->resource_authority = IndexedResourceAuthority::explicit_bindings;
         const std::size_t material_index = material_constant_for_packet_[index];
         if (material_index != invalid_resource_index) {
@@ -1291,7 +1354,8 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
             resource_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_with_constants_and_frame ||
-            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame) {
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame ||
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame) {
             if (!owns_frame_constants())
                 return {IndexedStaticMeshBatchStatus::invalid_request,
                         {"static_scene_owned_frame_constant_missing",

@@ -717,6 +717,10 @@ IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
     bool detail_sampler = false;
     bool normal_detail_texture = false;
     bool normal_detail_sampler = false;
+    bool damage_texture = false;
+    bool damage_sampler = false;
+    bool damage_mask_texture = false;
+    bool damage_mask_sampler = false;
     for (const PipelineResourceBinding& resource : pipeline.resources) {
         if (resource.set == 0U && resource.binding == 0U &&
             resource.kind == PipelineResourceKind::sampled_texture) {
@@ -766,13 +770,30 @@ IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
                    resource.kind == PipelineResourceKind::sampler) {
             if (normal_detail_sampler) return IndexedPortableResourceLayout::unsupported;
             normal_detail_sampler = true;
+        } else if (resource.set == 0U && resource.binding == 12U &&
+                   resource.kind == PipelineResourceKind::sampled_texture) {
+            if (damage_texture) return IndexedPortableResourceLayout::unsupported;
+            damage_texture = true;
+        } else if (resource.set == 0U && resource.binding == 13U &&
+                   resource.kind == PipelineResourceKind::sampler) {
+            if (damage_sampler) return IndexedPortableResourceLayout::unsupported;
+            damage_sampler = true;
+        } else if (resource.set == 0U && resource.binding == 14U &&
+                   resource.kind == PipelineResourceKind::sampled_texture) {
+            if (damage_mask_texture) return IndexedPortableResourceLayout::unsupported;
+            damage_mask_texture = true;
+        } else if (resource.set == 0U && resource.binding == 15U &&
+                   resource.kind == PipelineResourceKind::sampler) {
+            if (damage_mask_sampler) return IndexedPortableResourceLayout::unsupported;
+            damage_mask_sampler = true;
         } else {
             return IndexedPortableResourceLayout::unsupported;
         }
     }
     if (!sampled_texture || !sampler || normal_texture != normal_sampler ||
         maps_texture != maps_sampler || detail_texture != detail_sampler ||
-        normal_detail_texture != normal_detail_sampler)
+        normal_detail_texture != normal_detail_sampler || damage_texture != damage_sampler ||
+        damage_mask_texture != damage_mask_sampler)
         return IndexedPortableResourceLayout::unsupported;
     if (pipeline.resources.size() == 2U && !material_constants && !frame_constants)
         return IndexedPortableResourceLayout::diffuse;
@@ -792,6 +813,10 @@ IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
         normal_texture && normal_sampler && maps_texture && maps_sampler &&
         detail_texture && detail_sampler && normal_detail_texture && normal_detail_sampler)
         return IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame;
+    if (pipeline.resources.size() == 12U && material_constants && frame_constants &&
+        normal_texture && normal_sampler && maps_texture && maps_sampler &&
+        damage_texture && damage_sampler && damage_mask_texture && damage_mask_sampler)
+        return IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame;
     return IndexedPortableResourceLayout::unsupported;
 }
 
@@ -1028,6 +1053,10 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     const bool has_normal_sampler = request.normal_binding.sampler != nullptr;
     const bool has_maps_texture = request.maps_binding.texture != nullptr;
     const bool has_maps_sampler = request.maps_binding.sampler != nullptr;
+    const bool has_damage_texture = request.damage_binding.texture != nullptr;
+    const bool has_damage_sampler = request.damage_binding.sampler != nullptr;
+    const bool has_damage_mask_texture = request.damage_mask_binding.texture != nullptr;
+    const bool has_damage_mask_sampler = request.damage_mask_binding.sampler != nullptr;
     const bool has_material_buffer = request.material_binding.buffer != nullptr;
     const bool has_material_range = request.material_binding.offset_bytes != 0U ||
                                     request.material_binding.range_bytes != 0U;
@@ -1042,6 +1071,8 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             request.detail_binding.texture != nullptr || request.detail_binding.sampler != nullptr ||
             request.normal_detail_binding.texture != nullptr ||
             request.normal_detail_binding.sampler != nullptr ||
+            has_damage_texture || has_damage_sampler || has_damage_mask_texture ||
+            has_damage_mask_sampler ||
             has_material_buffer || has_material_range ||
             has_frame_buffer || has_frame_range ||
             request.resource_authority != IndexedResourceAuthority::packet_contract) {
@@ -1057,7 +1088,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     } else {
         if (resource_layout == IndexedPortableResourceLayout::unsupported) {
             diagnostic = {"indexed_resource_layout_unsupported",
-                          "The portable material ABI requires the bounded diffuse, diffuse-plus-normal, txMaps, or detail-stack layout"};
+                          "The portable material ABI requires the bounded diffuse, normal, txMaps, detail-stack, or damage layout"};
             return IndexedStaticMeshDrawStatus::unsupported;
         }
         const bool material_declaration =
@@ -1065,23 +1096,29 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             resource_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_with_constants_and_frame ||
-            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame;
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame ||
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame;
         const bool frame_declaration =
             resource_layout == IndexedPortableResourceLayout::diffuse_with_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_with_constants_and_frame ||
-            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame;
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame ||
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame;
         const bool normal_declaration =
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_with_constants_and_frame ||
-            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame;
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame ||
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame;
         const bool maps_declaration =
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_with_constants_and_frame ||
-            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame;
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame ||
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame;
         const bool detail_declaration =
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame;
         const bool normal_detail_declaration = detail_declaration;
+        const bool damage_declaration =
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame;
         if (request.resource_authority != IndexedResourceAuthority::explicit_bindings) {
             diagnostic = {"indexed_resource_execution_staged",
                           "Material resources require explicit request-local binding authority"};
@@ -1128,6 +1165,23 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                           normal_detail_declaration
                               ? "The portable detail-stack ABI requires its normal-detail texture and sampler"
                               : "The diffuse, normal, and txMaps ABIs cannot receive a normal-detail texture or sampler"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        if (damage_declaration != has_damage_texture || damage_declaration != has_damage_sampler) {
+            diagnostic = {damage_declaration ? "indexed_damage_binding_missing"
+                                             : "indexed_damage_binding_unexpected",
+                          damage_declaration
+                              ? "The portable damage ABI requires its damage texture and sampler"
+                              : "The non-damage ABIs cannot receive a damage texture or sampler"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        if (damage_declaration != has_damage_mask_texture ||
+            damage_declaration != has_damage_mask_sampler) {
+            diagnostic = {damage_declaration ? "indexed_damage_mask_binding_missing"
+                                             : "indexed_damage_mask_binding_unexpected",
+                          damage_declaration
+                              ? "The portable damage ABI requires its damage-mask texture and sampler"
+                              : "The non-damage ABIs cannot receive a damage-mask texture or sampler"};
             return IndexedStaticMeshDrawStatus::invalid_request;
         }
         if (material_declaration != has_material_buffer ||
@@ -1440,6 +1494,66 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                            ? IndexedStaticMeshDrawStatus::unsupported
                            : IndexedStaticMeshDrawStatus::invalid_request;
             }
+        }
+        const auto validate_damage_texture =
+            [&](const IndexedSampledTextureBinding& binding, const char* role,
+                bool allow_srgb) -> IndexedStaticMeshDrawStatus {
+                const Texture& source_texture = *binding.texture;
+                const Sampler& source_sampler = *binding.sampler;
+                const std::string code_prefix = std::string("indexed_") + role;
+                if (&source_texture == &texture) {
+                    diagnostic = {code_prefix + "_feedback_loop",
+                                  "The color target cannot also be a damage input texture"};
+                    return IndexedStaticMeshDrawStatus::invalid_request;
+                }
+                if (source_texture.backend() != texture.backend() ||
+                    source_sampler.backend() != texture.backend()) {
+                    diagnostic = {code_prefix + "_backend_mismatch",
+                                  "Damage input texture, sampler, and color target must use the same backend"};
+                    return IndexedStaticMeshDrawStatus::unsupported;
+                }
+                const TextureDescription& source = source_texture.info().description;
+                const auto source_usage = static_cast<std::uint32_t>(source.usage);
+                if ((source_usage & static_cast<std::uint32_t>(TextureUsage::sampled)) == 0U) {
+                    diagnostic = {code_prefix + "_texture_usage_invalid",
+                                  "A damage input texture requires sampled usage"};
+                    return IndexedStaticMeshDrawStatus::invalid_request;
+                }
+                if ((source_usage & forbidden_usage) != 0U) {
+                    diagnostic = {code_prefix + "_texture_usage_unsupported",
+                                  "The portable damage path rejects writable or attachment texture usage"};
+                    return IndexedStaticMeshDrawStatus::unsupported;
+                }
+                if (source.width == 0U || source.height == 0U || source.mip_levels == 0U ||
+                    source.array_layers != 1U || source.samples != 1U ||
+                    !portable_sampled_color_format(source.format, allow_srgb) ||
+                    (texture_format_is_compressed(source.format) &&
+                     source.mutability != TextureMutability::immutable)) {
+                    diagnostic = {code_prefix + "_texture_description_unsupported",
+                                  "The portable damage path requires one-layer RGBA8, BGRA8, BC1, or BC3 texture data"};
+                    return IndexedStaticMeshDrawStatus::unsupported;
+                }
+                Diagnostic damage_sampler_diagnostic;
+                const SamplerStatus damage_sampler_status = validate_sampler_description(
+                    source_sampler.info().description, damage_sampler_diagnostic);
+                if (damage_sampler_status != SamplerStatus::ready) {
+                    diagnostic = {damage_sampler_diagnostic.code.empty()
+                                      ? code_prefix + "_sampler_invalid"
+                                      : code_prefix + "_" + damage_sampler_diagnostic.code,
+                                  damage_sampler_diagnostic.message};
+                    return damage_sampler_status == SamplerStatus::unsupported
+                               ? IndexedStaticMeshDrawStatus::unsupported
+                               : IndexedStaticMeshDrawStatus::invalid_request;
+                }
+                return IndexedStaticMeshDrawStatus::ready;
+            };
+        if (damage_declaration) {
+            const IndexedStaticMeshDrawStatus damage_status =
+                validate_damage_texture(request.damage_binding, "damage", true);
+            if (damage_status != IndexedStaticMeshDrawStatus::ready) return damage_status;
+            const IndexedStaticMeshDrawStatus mask_status =
+                validate_damage_texture(request.damage_mask_binding, "damage_mask", false);
+            if (mask_status != IndexedStaticMeshDrawStatus::ready) return mask_status;
         }
     }
     if (pipeline.depth.test_enabled != packet.flags.depth_test ||

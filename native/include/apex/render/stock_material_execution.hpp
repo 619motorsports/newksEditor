@@ -64,11 +64,13 @@ struct StockMaterialExecutionResult {
 
 // Build up to two explicit PipelineProgram values per used material. The two
 // variants preserve opaque and transparent node state. Build one resolved
-// 64-byte material record per used material, then synchronously prepare the
+// 80-byte material record per used material, then synchronously prepare the
 // static scene. Supported shader families are
 // ksPerPixel, ksPerPixelNM, ksPerPixelMultiMap,
 // ksPerPixelMultiMap_AT, ksPerPixelMultiMap_NMDetail, and
-// ksPerPixelMultiMap_AT_NMDetail. Both AT profiles retain their A2C state.
+// ksPerPixelMultiMap_AT_NMDetail. The dirt-zero
+// ksPerPixelMultiMap_damage_dirt branch is also supported. Both AT profiles
+// retain their A2C state.
 [[nodiscard]] StockMaterialExecutionResult prepare_stock_material_execution(
     Device& device, const StockMaterialExecutionRequest& request);
 

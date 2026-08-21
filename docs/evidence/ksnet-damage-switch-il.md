@@ -100,6 +100,8 @@ mul_sat r2.w, r5.w, r1.w
 add r2.xyz, -r3.xyzx, r5.xyzx
 mad r2.xyz, r2.w, r2.xyzx, r3.xyzx
 ...
+sample r4.xyzw, v3.xyxx, t1.xyzw, s0
+...
 sample r3.xyzw, v3.xyxx, t5.xyzw, s0
 mul r1.w, r3.w, cb5[3].x
 add r3.x, -r2.w, l(1.00000000e+00)
@@ -111,8 +113,17 @@ mul r1.w, r2.w, r1.w
 mul r2.w, r1.w, r6.x
 ```
 
-Reflection maps t21 to `txDamageMask`, t4 to `txDamage`, t5 to the dirt texture,
-`cb5[2]` to `damageZones`, and `cb5[3].x` to `dirt`. With `dirt == 0`, the dirt
-factor becomes one and the final mapped-specular term reduces to the formula used
-by the exact preview. A nonzero `dirt` enters additional stock operations, so Apex
-does not label or enable its recovered damage shader path for that branch.
+Reflection maps t1 to `txNormal`, t4 to `txDamage`, and t5 to `txDust`. It maps
+t21 to `txDamageMask`. The shader overwrites r4 with the `txNormal` sample before
+the `add r3.y, r4.w, -1` instruction. Thus, r4.w is `txNormal.a`.
+
+Reflection maps `cb5[2]` to `damageZones` and `cb5[3].x` to `dirt`. With
+`dirt == 0`, the dirt factor is one. The final mapped-specular value is:
+
+```text
+ksSpecular * txMaps.r * (1 - damageAmount)
+* (1 + damageAmount * (txNormal.a - 1))
+```
+
+The Vulkan and D3D12 fixtures implement this exact bounded branch. A nonzero
+`dirt` value enters more stock operations. Apex does not execute that branch.

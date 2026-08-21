@@ -97,8 +97,9 @@ authority can enable one portable diffuse resource pair: a sampled image at set
 pair for single draws and ordered batches. The pair is a portable test ABI. It
 is not a recovered stock KN5 or CSP shader contract. An optional uniform buffer
 at set 0, binding 2 carries one aligned material record. D3D12 maps it to
-`b2`. Its first 64 bytes use source-evidenced `ksPerPixel` defaults in this
-port's std140/HLSL-compatible packing. A bounded resolver reads parsed KN5
+`b2`. The 80-byte record uses the port's std140/HLSL-compatible packing. Its
+first 64 bytes contain the existing `ksPerPixel` values. Its last 16 bytes
+contain `damageZones`. A bounded resolver reads parsed KN5
 values and typed CSP overrides. It preserves CSP precedence and the WebGL
 emissive conversion. The plain `ksPerPixel` fixture executes ambient,
 directional diffuse, direct Blinn specular, and emissive output. Pixel tests
@@ -117,10 +118,17 @@ Fresnel. The AT profile retains alpha-to-coverage on a 4x target. A fourth ABI s
 `ksPerPixelMultiMap_NMDetail` family. This family includes
 `ksPerPixelMultiMap_AT_NMDetail`. It adds `txDetail` at bindings 8 and 9. It
 adds `txNormalDetail` at bindings 10 and 11. The legacy `txDetailNM` name is an
-alias for `txNormalDetail`. The 64-byte material record includes the detail UV
+alias for `txNormalDetail`. The 80-byte material record includes the detail UV
 multiplier, normal-detail strength, and detail enable value. The AT profile
 retains the production A2C state. Reflections and shadows remain staged.
 Runtime tests cover known pixels and mixed resource layouts.
+The dirt-zero damage ABI uses the same diffuse, normal, and maps resources.
+It adds `txDamage` at bindings 12 and 13. It adds `txDamageMask` at bindings
+14 and 15. The handoff requires an authored `damageZones` value and exact zero
+`dirt`. It validates optional `txDust` but does not bind it. The recovered
+zero-dirt equation makes the dust factor one. Vulkan and D3D12 execute the
+damage mix and the two recovered specular factors. Pixel tests cover disabled
+damage, enabled damage, and normal-alpha attenuation.
 The serialized KN5 resource ID remains a shader bind point, not a
 texture-table index. A bounded static-scene adapter maps the final KN5 tree to
 dense scene IDs. It validates all packets and pipelines before buffer creation.
@@ -157,14 +165,14 @@ driver suppression, workspace LOD exclusions, or mesh LOD. Isolation bypasses
 visibility and subtree filters. It still applies the selected mesh LOD range.
 The contract follows `itemPreviewVisible()` and the draw filter in
 `public/app.js`. The cockpit audit in `src/cockpit-preview.js` supplies the F3
-pair. Surface overlays, damage shader execution, shadows, reflections, and
-post-processing remain staged. A separate bounded damage adapter resolves the
+pair. Surface overlays, shadows, reflections, and post-processing remain
+staged. A separate bounded damage adapter resolves the
 five exact F4 node sequences. It creates scene activity and material overrides
 without changing the parsed model. It applies `damageZones` after CSP values.
 It also retains the native one-way `glassDamage` write for shared materials.
-The adapter identifies the recovered dirt-zero branch. GPU execution of that
-branch remains staged until more disassembly evidence identifies the final
-specular alpha source.
+The adapter identifies the recovered dirt-zero branch. The bounded material
+handoff executes this branch with caller-supplied SPIR-V or DXIL modules.
+Nonzero dirt remains staged.
 The static-scene adapter has two texture-authority modes. The first mode
 uses caller-owned tables in the final KN5 texture order. The second mode owns
 the used embedded KN5 textures and one linear-repeat sampler. It validates all

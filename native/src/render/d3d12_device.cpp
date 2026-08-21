@@ -161,12 +161,18 @@ struct D3D12MaterialDescriptorBinding {
     D3D12_GPU_DESCRIPTOR_HANDLE detail_sampler_gpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE normal_detail_srv_gpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE normal_detail_sampler_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE damage_srv_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE damage_sampler_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE damage_mask_srv_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE damage_mask_sampler_gpu{};
     bool constant_enabled = false;
     bool frame_enabled = false;
     bool normal_enabled = false;
     bool maps_enabled = false;
     bool detail_enabled = false;
     bool normal_detail_enabled = false;
+    bool damage_enabled = false;
+    bool damage_mask_enabled = false;
     bool enabled = false;
 };
 
@@ -246,6 +252,34 @@ struct D3D12MaterialDescriptorBinding {
     return texture && sampler;
 }
 
+[[nodiscard]] bool d3d12_pipeline_has_damage_texture(const PipelineProgram& pipeline) noexcept {
+    bool texture = false;
+    bool sampler = false;
+    for (const PipelineResourceBinding& resource : pipeline.resources) {
+        if (resource.set == 0U && resource.binding == 12U &&
+            resource.kind == PipelineResourceKind::sampled_texture)
+            texture = true;
+        if (resource.set == 0U && resource.binding == 13U &&
+            resource.kind == PipelineResourceKind::sampler)
+            sampler = true;
+    }
+    return texture && sampler;
+}
+
+[[nodiscard]] bool d3d12_pipeline_has_damage_mask_texture(const PipelineProgram& pipeline) noexcept {
+    bool texture = false;
+    bool sampler = false;
+    for (const PipelineResourceBinding& resource : pipeline.resources) {
+        if (resource.set == 0U && resource.binding == 14U &&
+            resource.kind == PipelineResourceKind::sampled_texture)
+            texture = true;
+        if (resource.set == 0U && resource.binding == 15U &&
+            resource.kind == PipelineResourceKind::sampler)
+            sampler = true;
+    }
+    return texture && sampler;
+}
+
 [[nodiscard]] bool prepare_d3d12_material_binding(
     const std::shared_ptr<D3D12Context>& context,
     const IndexedStaticMeshDrawRequest& request,
@@ -257,6 +291,8 @@ struct D3D12MaterialDescriptorBinding {
     UINT maps_srv_index,
     UINT detail_srv_index,
     UINT normal_detail_srv_index,
+    UINT damage_srv_index,
+    UINT damage_mask_srv_index,
     D3D12MaterialDescriptorBinding& output,
     Diagnostic& diagnostic);
 
@@ -1296,12 +1332,16 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
         const bool has_maps_texture = d3d12_pipeline_has_maps_texture(*request.pipeline);
         const bool has_detail_texture = d3d12_pipeline_has_detail_texture(*request.pipeline);
         const bool has_normal_detail_texture = d3d12_pipeline_has_normal_detail_texture(*request.pipeline);
+        const bool has_damage_texture = d3d12_pipeline_has_damage_texture(*request.pipeline);
+        const bool has_damage_mask_texture = d3d12_pipeline_has_damage_mask_texture(*request.pipeline);
         srv_heap_description.NumDescriptors = 1U + static_cast<UINT>(has_material_constants) +
                                               static_cast<UINT>(has_frame_constants) +
                                               static_cast<UINT>(has_normal_texture) +
                                               static_cast<UINT>(has_maps_texture) +
                                               static_cast<UINT>(has_detail_texture) +
-                                              static_cast<UINT>(has_normal_detail_texture);
+                                              static_cast<UINT>(has_normal_detail_texture) +
+                                              static_cast<UINT>(has_damage_texture) +
+                                              static_cast<UINT>(has_damage_mask_texture);
         srv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         srv_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         ComPtr<ID3D12DescriptorHeap> srv_heap;
@@ -1336,6 +1376,23 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
                                                        static_cast<UINT>(has_maps_texture) +
                                                        static_cast<UINT>(has_detail_texture)
                                                  : 0U,
+                                             has_damage_texture
+                                                 ? 1U + static_cast<UINT>(has_material_constants) +
+                                                       static_cast<UINT>(has_frame_constants) +
+                                                       static_cast<UINT>(has_normal_texture) +
+                                                       static_cast<UINT>(has_maps_texture) +
+                                                       static_cast<UINT>(has_detail_texture) +
+                                                       static_cast<UINT>(has_normal_detail_texture)
+                                                 : 0U,
+                                             has_damage_mask_texture
+                                                 ? 1U + static_cast<UINT>(has_material_constants) +
+                                                       static_cast<UINT>(has_frame_constants) +
+                                                       static_cast<UINT>(has_normal_texture) +
+                                                       static_cast<UINT>(has_maps_texture) +
+                                                       static_cast<UINT>(has_detail_texture) +
+                                                       static_cast<UINT>(has_normal_detail_texture) +
+                                                       static_cast<UINT>(has_damage_texture)
+                                                 : 0U,
                                              material_binding, diagnostic))
             return false;
     }
@@ -1367,7 +1424,15 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     D3D12_ROOT_PARAMETER normal_detail_srv_parameter{};
     D3D12_DESCRIPTOR_RANGE normal_detail_sampler_range{};
     D3D12_ROOT_PARAMETER normal_detail_sampler_parameter{};
-    std::array<D3D12_ROOT_PARAMETER, 13> root_parameters{};
+    D3D12_DESCRIPTOR_RANGE damage_srv_range{};
+    D3D12_ROOT_PARAMETER damage_srv_parameter{};
+    D3D12_DESCRIPTOR_RANGE damage_sampler_range{};
+    D3D12_ROOT_PARAMETER damage_sampler_parameter{};
+    D3D12_DESCRIPTOR_RANGE damage_mask_srv_range{};
+    D3D12_ROOT_PARAMETER damage_mask_srv_parameter{};
+    D3D12_DESCRIPTOR_RANGE damage_mask_sampler_range{};
+    D3D12_ROOT_PARAMETER damage_mask_sampler_parameter{};
+    std::array<D3D12_ROOT_PARAMETER, 17> root_parameters{};
     UINT root_parameter_count = 0U;
     if (draw_matrices != nullptr) {
         transform_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -1515,6 +1580,34 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
             normal_detail_sampler_parameter.DescriptorTable.pDescriptorRanges = &normal_detail_sampler_range;
             normal_detail_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
             root_parameters[root_parameter_count++] = normal_detail_sampler_parameter;
+        }
+        if (d3d12_pipeline_has_damage_texture(*request.pipeline)) {
+            damage_srv_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1U, 12U, 0U,
+                                D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+            damage_srv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            damage_srv_parameter.DescriptorTable = {1U, &damage_srv_range};
+            damage_srv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            root_parameters[root_parameter_count++] = damage_srv_parameter;
+            damage_sampler_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1U, 13U, 0U,
+                                    D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+            damage_sampler_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            damage_sampler_parameter.DescriptorTable = {1U, &damage_sampler_range};
+            damage_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            root_parameters[root_parameter_count++] = damage_sampler_parameter;
+        }
+        if (d3d12_pipeline_has_damage_mask_texture(*request.pipeline)) {
+            damage_mask_srv_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1U, 14U, 0U,
+                                     D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+            damage_mask_srv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            damage_mask_srv_parameter.DescriptorTable = {1U, &damage_mask_srv_range};
+            damage_mask_srv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            root_parameters[root_parameter_count++] = damage_mask_srv_parameter;
+            damage_mask_sampler_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1U, 15U, 0U,
+                                         D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+            damage_mask_sampler_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            damage_mask_sampler_parameter.DescriptorTable = {1U, &damage_mask_sampler_range};
+            damage_mask_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            root_parameters[root_parameter_count++] = damage_mask_sampler_parameter;
         }
     }
     root_description.NumParameters = root_parameter_count;
@@ -1773,6 +1866,31 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
             list->SetGraphicsRootDescriptorTable(normal_detail_root_index + 1U,
                                                   material_binding.normal_detail_sampler_gpu);
         }
+        if (material_binding.damage_enabled) {
+            const UINT damage_root_index = constant_root_index +
+                                           static_cast<UINT>(material_binding.frame_enabled) +
+                                           2U * static_cast<UINT>(material_binding.normal_enabled) +
+                                           2U * static_cast<UINT>(material_binding.maps_enabled) +
+                                           2U * static_cast<UINT>(material_binding.detail_enabled) +
+                                           2U * static_cast<UINT>(material_binding.normal_detail_enabled);
+            list->SetGraphicsRootDescriptorTable(damage_root_index,
+                                                  material_binding.damage_srv_gpu);
+            list->SetGraphicsRootDescriptorTable(damage_root_index + 1U,
+                                                  material_binding.damage_sampler_gpu);
+        }
+        if (material_binding.damage_mask_enabled) {
+            const UINT damage_mask_root_index = constant_root_index +
+                                                static_cast<UINT>(material_binding.frame_enabled) +
+                                                2U * static_cast<UINT>(material_binding.normal_enabled) +
+                                                2U * static_cast<UINT>(material_binding.maps_enabled) +
+                                                2U * static_cast<UINT>(material_binding.detail_enabled) +
+                                                2U * static_cast<UINT>(material_binding.normal_detail_enabled) +
+                                                2U * static_cast<UINT>(material_binding.damage_enabled);
+            list->SetGraphicsRootDescriptorTable(damage_mask_root_index,
+                                                  material_binding.damage_mask_srv_gpu);
+            list->SetGraphicsRootDescriptorTable(damage_mask_root_index + 1U,
+                                                  material_binding.damage_mask_sampler_gpu);
+        }
     }
     if (draw_matrices != nullptr) {
         list->SetGraphicsRoot32BitConstants(
@@ -1977,6 +2095,8 @@ bool draw_indexed_static_mesh_batch_and_readback(
     bool has_maps_texture = false;
     bool has_detail_texture = false;
     bool has_normal_detail_texture = false;
+    bool has_damage_texture = false;
+    bool has_damage_mask_texture = false;
     for (const IndexedStaticMeshDrawRequest& request : batch.draws) {
         if (!request.pipeline->resources.empty()) {
             has_material_resources = true;
@@ -1992,6 +2112,10 @@ bool draw_indexed_static_mesh_batch_and_readback(
                                  d3d12_pipeline_has_detail_texture(*request.pipeline);
             has_normal_detail_texture = has_normal_detail_texture ||
                                         d3d12_pipeline_has_normal_detail_texture(*request.pipeline);
+            has_damage_texture = has_damage_texture ||
+                                 d3d12_pipeline_has_damage_texture(*request.pipeline);
+            has_damage_mask_texture = has_damage_mask_texture ||
+                                      d3d12_pipeline_has_damage_mask_texture(*request.pipeline);
         }
     }
     const std::size_t material_descriptor_stride =
@@ -2000,7 +2124,9 @@ bool draw_indexed_static_mesh_batch_and_readback(
         static_cast<std::size_t>(has_normal_texture) +
         static_cast<std::size_t>(has_maps_texture) +
         static_cast<std::size_t>(has_detail_texture) +
-        static_cast<std::size_t>(has_normal_detail_texture);
+        static_cast<std::size_t>(has_normal_detail_texture) +
+        static_cast<std::size_t>(has_damage_texture) +
+        static_cast<std::size_t>(has_damage_mask_texture);
     if (has_material_resources &&
         (draws.size() > std::numeric_limits<std::size_t>::max() / material_descriptor_stride ||
          draws.size() * material_descriptor_stride > static_cast<std::size_t>(std::numeric_limits<UINT>::max()))) {
@@ -2053,6 +2179,23 @@ bool draw_indexed_static_mesh_batch_and_readback(
                                                                    (has_maps_texture ? 1U : 0U) +
                                                                    (has_detail_texture ? 1U : 0U) +
                                                                    (has_normal_detail_texture ? 1U : 0U)),
+                                                 static_cast<UINT>(descriptor_index +
+                                                                   (has_material_constants ? 1U : 0U) +
+                                                                   (has_frame_constants ? 1U : 0U) +
+                                                                   (has_normal_texture ? 1U : 0U) +
+                                                                   (has_maps_texture ? 1U : 0U) +
+                                                                   (has_detail_texture ? 1U : 0U) +
+                                                                   (has_normal_detail_texture ? 1U : 0U) +
+                                                                   (has_damage_texture ? 1U : 0U)),
+                                                 static_cast<UINT>(descriptor_index +
+                                                                   (has_material_constants ? 1U : 0U) +
+                                                                   (has_frame_constants ? 1U : 0U) +
+                                                                   (has_normal_texture ? 1U : 0U) +
+                                                                   (has_maps_texture ? 1U : 0U) +
+                                                                   (has_detail_texture ? 1U : 0U) +
+                                                                   (has_normal_detail_texture ? 1U : 0U) +
+                                                                   (has_damage_texture ? 1U : 0U) +
+                                                                   (has_damage_mask_texture ? 1U : 0U)),
                                                  material_bindings[index], diagnostic))
                 return false;
         }
@@ -2110,7 +2253,15 @@ bool draw_indexed_static_mesh_batch_and_readback(
         D3D12_ROOT_PARAMETER normal_detail_srv_parameter{};
         D3D12_DESCRIPTOR_RANGE normal_detail_sampler_range{};
         D3D12_ROOT_PARAMETER normal_detail_sampler_parameter{};
-        std::array<D3D12_ROOT_PARAMETER, 13> root_parameters{};
+        D3D12_DESCRIPTOR_RANGE damage_srv_range{};
+        D3D12_ROOT_PARAMETER damage_srv_parameter{};
+        D3D12_DESCRIPTOR_RANGE damage_sampler_range{};
+        D3D12_ROOT_PARAMETER damage_sampler_parameter{};
+        D3D12_DESCRIPTOR_RANGE damage_mask_srv_range{};
+        D3D12_ROOT_PARAMETER damage_mask_srv_parameter{};
+        D3D12_DESCRIPTOR_RANGE damage_mask_sampler_range{};
+        D3D12_ROOT_PARAMETER damage_mask_sampler_parameter{};
+        std::array<D3D12_ROOT_PARAMETER, 17> root_parameters{};
         UINT root_parameter_count = 1U;
         root_parameters[0] = transform_parameter;
         if (!program.resources.empty()) {
@@ -2250,6 +2401,34 @@ bool draw_indexed_static_mesh_batch_and_readback(
                 normal_detail_sampler_parameter.DescriptorTable.pDescriptorRanges = &normal_detail_sampler_range;
                 normal_detail_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
                 root_parameters[root_parameter_count++] = normal_detail_sampler_parameter;
+            }
+            if (d3d12_pipeline_has_damage_texture(program)) {
+                damage_srv_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1U, 12U, 0U,
+                                    D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+                damage_srv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                damage_srv_parameter.DescriptorTable = {1U, &damage_srv_range};
+                damage_srv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                root_parameters[root_parameter_count++] = damage_srv_parameter;
+                damage_sampler_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1U, 13U, 0U,
+                                        D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+                damage_sampler_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                damage_sampler_parameter.DescriptorTable = {1U, &damage_sampler_range};
+                damage_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                root_parameters[root_parameter_count++] = damage_sampler_parameter;
+            }
+            if (d3d12_pipeline_has_damage_mask_texture(program)) {
+                damage_mask_srv_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1U, 14U, 0U,
+                                         D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+                damage_mask_srv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                damage_mask_srv_parameter.DescriptorTable = {1U, &damage_mask_srv_range};
+                damage_mask_srv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                root_parameters[root_parameter_count++] = damage_mask_srv_parameter;
+                damage_mask_sampler_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1U, 15U, 0U,
+                                             D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+                damage_mask_sampler_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                damage_mask_sampler_parameter.DescriptorTable = {1U, &damage_mask_sampler_range};
+                damage_mask_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                root_parameters[root_parameter_count++] = damage_mask_sampler_parameter;
             }
         }
         D3D12_ROOT_SIGNATURE_DESC root_description{};
@@ -2513,6 +2692,31 @@ bool draw_indexed_static_mesh_batch_and_readback(
                                                       material_bindings[index].normal_detail_srv_gpu);
                 list->SetGraphicsRootDescriptorTable(normal_detail_root_index + 1U,
                                                       material_bindings[index].normal_detail_sampler_gpu);
+            }
+            if (material_bindings[index].damage_enabled) {
+                const UINT damage_root_index = constant_root_index +
+                                               static_cast<UINT>(material_bindings[index].frame_enabled) +
+                                               2U * static_cast<UINT>(material_bindings[index].normal_enabled) +
+                                               2U * static_cast<UINT>(material_bindings[index].maps_enabled) +
+                                               2U * static_cast<UINT>(material_bindings[index].detail_enabled) +
+                                               2U * static_cast<UINT>(material_bindings[index].normal_detail_enabled);
+                list->SetGraphicsRootDescriptorTable(damage_root_index,
+                                                      material_bindings[index].damage_srv_gpu);
+                list->SetGraphicsRootDescriptorTable(damage_root_index + 1U,
+                                                      material_bindings[index].damage_sampler_gpu);
+            }
+            if (material_bindings[index].damage_mask_enabled) {
+                const UINT damage_mask_root_index = constant_root_index +
+                                                    static_cast<UINT>(material_bindings[index].frame_enabled) +
+                                                    2U * static_cast<UINT>(material_bindings[index].normal_enabled) +
+                                                    2U * static_cast<UINT>(material_bindings[index].maps_enabled) +
+                                                    2U * static_cast<UINT>(material_bindings[index].detail_enabled) +
+                                                    2U * static_cast<UINT>(material_bindings[index].normal_detail_enabled) +
+                                                    2U * static_cast<UINT>(material_bindings[index].damage_enabled);
+                list->SetGraphicsRootDescriptorTable(damage_mask_root_index,
+                                                      material_bindings[index].damage_mask_srv_gpu);
+                list->SetGraphicsRootDescriptorTable(damage_mask_root_index + 1U,
+                                                      material_bindings[index].damage_mask_sampler_gpu);
             }
         }
         list->SetPipelineState(pipelines[index].Get());
@@ -2869,6 +3073,8 @@ bool prepare_d3d12_material_binding(
     UINT maps_srv_index,
     UINT detail_srv_index,
     UINT normal_detail_srv_index,
+    UINT damage_srv_index,
+    UINT damage_mask_srv_index,
     D3D12MaterialDescriptorBinding& output,
     Diagnostic& diagnostic) {
     output = {};
@@ -2883,6 +3089,9 @@ bool prepare_d3d12_material_binding(
             request.maps_binding.texture != nullptr || request.maps_binding.sampler != nullptr ||
             request.detail_binding.texture != nullptr || request.detail_binding.sampler != nullptr ||
             request.normal_detail_binding.texture != nullptr || request.normal_detail_binding.sampler != nullptr ||
+            request.damage_binding.texture != nullptr || request.damage_binding.sampler != nullptr ||
+            request.damage_mask_binding.texture != nullptr ||
+            request.damage_mask_binding.sampler != nullptr ||
             request.material_binding.buffer != nullptr || request.material_binding.offset_bytes != 0U ||
             request.material_binding.range_bytes != 0U || request.frame_binding.buffer != nullptr ||
             request.frame_binding.offset_bytes != 0U || request.frame_binding.range_bytes != 0U) {
@@ -2910,6 +3119,8 @@ bool prepare_d3d12_material_binding(
     const bool has_maps_texture = d3d12_pipeline_has_maps_texture(*request.pipeline);
     const bool has_detail_texture = d3d12_pipeline_has_detail_texture(*request.pipeline);
     const bool has_normal_detail_texture = d3d12_pipeline_has_normal_detail_texture(*request.pipeline);
+    const bool has_damage_texture = d3d12_pipeline_has_damage_texture(*request.pipeline);
+    const bool has_damage_mask_texture = d3d12_pipeline_has_damage_mask_texture(*request.pipeline);
     const D3D12Texture* normal_texture = nullptr;
     const D3D12Sampler* normal_sampler = nullptr;
     const D3D12Texture* maps_texture = nullptr;
@@ -2918,6 +3129,10 @@ bool prepare_d3d12_material_binding(
     const D3D12Sampler* detail_sampler = nullptr;
     const D3D12Texture* normal_detail_texture = nullptr;
     const D3D12Sampler* normal_detail_sampler = nullptr;
+    const D3D12Texture* damage_texture = nullptr;
+    const D3D12Sampler* damage_sampler = nullptr;
+    const D3D12Texture* damage_mask_texture = nullptr;
+    const D3D12Sampler* damage_mask_sampler = nullptr;
     if (has_normal_texture) {
         if (request.normal_binding.texture == nullptr || request.normal_binding.sampler == nullptr) {
             diagnostic = {"indexed_normal_binding_missing",
@@ -2990,6 +3205,43 @@ bool prepare_d3d12_material_binding(
                       "The D3D12 material ABI cannot receive a normal-detail texture or sampler"};
         return false;
     }
+    const auto resolve_damage_binding =
+        [&](bool declared, const IndexedSampledTextureBinding& binding,
+            const char* role, const D3D12Texture*& output_texture,
+            const D3D12Sampler*& output_sampler) {
+            if (!declared) {
+                if (binding.texture != nullptr || binding.sampler != nullptr) {
+                    diagnostic = {std::string("indexed_") + role + "_binding_unexpected",
+                                  "The D3D12 material ABI cannot receive an undeclared damage binding"};
+                    return false;
+                }
+                return true;
+            }
+            if (binding.texture == nullptr || binding.sampler == nullptr) {
+                diagnostic = {std::string("indexed_") + role + "_binding_missing",
+                              "A D3D12 damage binding requires both a texture and sampler"};
+                return false;
+            }
+            output_texture = dynamic_cast<const D3D12Texture*>(binding.texture);
+            output_sampler = dynamic_cast<const D3D12Sampler*>(binding.sampler);
+            if (output_texture == nullptr || output_sampler == nullptr) {
+                diagnostic = {std::string("indexed_") + role + "_type_unsupported",
+                              "The D3D12 device received an unknown damage resource handle"};
+                return false;
+            }
+            return true;
+        };
+    if (!resolve_damage_binding(has_damage_texture, request.damage_binding, "damage",
+                                damage_texture, damage_sampler) ||
+        !resolve_damage_binding(has_damage_mask_texture, request.damage_mask_binding,
+                                "damage_mask", damage_mask_texture,
+                                damage_mask_sampler))
+        return false;
+    if (has_damage_texture != has_damage_mask_texture) {
+        diagnostic = {"indexed_damage_layout_unsupported",
+                      "The D3D12 damage ABI requires both damage and damage-mask bindings"};
+        return false;
+    }
     if (texture->context() != context.get() || sampler->context() != context.get()) {
         diagnostic = {"indexed_resource_context_mismatch",
                       "D3D12 material resources belong to another device"};
@@ -3020,6 +3272,14 @@ bool prepare_d3d12_material_binding(
                       "D3D12 normal-detail resources belong to another device"};
         return false;
     }
+    if (has_damage_texture &&
+        (damage_texture->context() != context.get() || damage_sampler->context() != context.get() ||
+         damage_mask_texture->context() != context.get() ||
+         damage_mask_sampler->context() != context.get())) {
+        diagnostic = {"indexed_damage_context_mismatch",
+                      "D3D12 damage resources belong to another device"};
+        return false;
+    }
     if (texture->resource() == nullptr || !texture->initialized()) {
         diagnostic = {"indexed_resource_texture_uninitialized",
                       "A D3D12 sampled texture must contain uploaded data before drawing"};
@@ -3044,6 +3304,13 @@ bool prepare_d3d12_material_binding(
         (normal_detail_texture->resource() == nullptr || !normal_detail_texture->initialized())) {
         diagnostic = {"indexed_normal_detail_texture_uninitialized",
                       "A D3D12 normal-detail texture must contain uploaded data before drawing"};
+        return false;
+    }
+    if (has_damage_texture &&
+        (damage_texture->resource() == nullptr || !damage_texture->initialized() ||
+         damage_mask_texture->resource() == nullptr || !damage_mask_texture->initialized())) {
+        diagnostic = {"indexed_damage_texture_uninitialized",
+                      "D3D12 damage textures must contain uploaded data before drawing"};
         return false;
     }
     constexpr UINT required_state = static_cast<UINT>(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -3076,6 +3343,13 @@ bool prepare_d3d12_material_binding(
                       "A D3D12 normal-detail texture is not in pixel-shader-resource state"};
         return false;
     }
+    if (has_damage_texture &&
+        (((static_cast<UINT>(damage_texture->state()) & required_state) == 0U) ||
+         ((static_cast<UINT>(damage_mask_texture->state()) & required_state) == 0U))) {
+        diagnostic = {"indexed_damage_texture_state_invalid",
+                      "D3D12 damage textures are not in pixel-shader-resource state"};
+        return false;
+    }
     if (srv_heap == nullptr) {
         diagnostic = {"indexed_resource_descriptor_heap_missing",
                       "D3D12 material binding requires a shader-visible SRV heap"};
@@ -3099,7 +3373,9 @@ bool prepare_d3d12_material_binding(
         (has_normal_texture && normal_srv_index >= heap_description.NumDescriptors) ||
         (has_maps_texture && maps_srv_index >= heap_description.NumDescriptors) ||
         (has_detail_texture && detail_srv_index >= heap_description.NumDescriptors) ||
-        (has_normal_detail_texture && normal_detail_srv_index >= heap_description.NumDescriptors)) {
+        (has_normal_detail_texture && normal_detail_srv_index >= heap_description.NumDescriptors) ||
+        (has_damage_texture && damage_srv_index >= heap_description.NumDescriptors) ||
+        (has_damage_mask_texture && damage_mask_srv_index >= heap_description.NumDescriptors)) {
         diagnostic = {"indexed_resource_descriptor_slot_invalid",
                       "D3D12 material descriptor slot is outside its bounded shader-visible heap"};
         return false;
@@ -3221,6 +3497,47 @@ bool prepare_d3d12_material_binding(
             return false;
         }
     }
+    DXGI_FORMAT damage_format = DXGI_FORMAT_UNKNOWN;
+    DXGI_FORMAT damage_mask_format = DXGI_FORMAT_UNKNOWN;
+    if (has_damage_texture) {
+        const auto validate_damage_format =
+            [&](const D3D12Texture& source_texture, bool allow_srgb,
+                const char* role, DXGI_FORMAT& output_format) {
+                const TextureDescription& source = source_texture.info().description;
+                output_format = dxgi_texture_format(source.format);
+                const std::uint32_t source_usage =
+                    static_cast<std::uint32_t>(source.usage);
+                const std::uint32_t forbidden_usage =
+                    static_cast<std::uint32_t>(TextureUsage::color_attachment) |
+                    static_cast<std::uint32_t>(TextureUsage::storage) |
+                    static_cast<std::uint32_t>(TextureUsage::transfer_destination);
+                const bool supported =
+                    source.format == TextureFormat::rgba8_unorm ||
+                    source.format == TextureFormat::bgra8_unorm ||
+                    source.format == TextureFormat::bc1_unorm ||
+                    source.format == TextureFormat::bc3_unorm ||
+                    (allow_srgb &&
+                     (source.format == TextureFormat::rgba8_srgb ||
+                      source.format == TextureFormat::bgra8_srgb ||
+                      source.format == TextureFormat::bc1_srgb ||
+                      source.format == TextureFormat::bc3_srgb));
+                if ((source_usage & static_cast<std::uint32_t>(TextureUsage::sampled)) == 0U ||
+                    (source_usage & forbidden_usage) != 0U || !supported ||
+                    output_format == DXGI_FORMAT_UNKNOWN ||
+                    source.width == 0U || source.height == 0U ||
+                    source.mip_levels == 0U || source.array_layers != 1U) {
+                    diagnostic = {std::string("indexed_") + role +
+                                      "_texture_format_unsupported",
+                                  "D3D12 damage textures require nonempty one-layer RGBA8, BGRA8, BC1, or BC3 data"};
+                    return false;
+                }
+                return true;
+            };
+        if (!validate_damage_format(*damage_texture, true, "damage", damage_format) ||
+            !validate_damage_format(*damage_mask_texture, false, "damage_mask",
+                                    damage_mask_format))
+            return false;
+    }
     const UINT descriptor_size = context->device->GetDescriptorHandleIncrementSize(
         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     if (descriptor_size == 0U ||
@@ -3230,7 +3547,9 @@ bool prepare_d3d12_material_binding(
         static_cast<UINT64>(normal_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
         static_cast<UINT64>(maps_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
         static_cast<UINT64>(detail_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
-        static_cast<UINT64>(normal_detail_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size) {
+        static_cast<UINT64>(normal_detail_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
+        static_cast<UINT64>(damage_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
+        static_cast<UINT64>(damage_mask_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size) {
         diagnostic = {"indexed_resource_descriptor_offset_overflow",
                       "D3D12 material descriptor offset exceeds handle addressability"};
         return false;
@@ -3242,13 +3561,17 @@ bool prepare_d3d12_material_binding(
     const UINT64 maps_srv_offset = static_cast<UINT64>(maps_srv_index) * descriptor_size;
     const UINT64 detail_srv_offset = static_cast<UINT64>(detail_srv_index) * descriptor_size;
     const UINT64 normal_detail_srv_offset = static_cast<UINT64>(normal_detail_srv_index) * descriptor_size;
+    const UINT64 damage_srv_offset = static_cast<UINT64>(damage_srv_index) * descriptor_size;
+    const UINT64 damage_mask_srv_offset = static_cast<UINT64>(damage_mask_srv_index) * descriptor_size;
     if (srv_offset > std::numeric_limits<SIZE_T>::max() ||
         cbv_offset > std::numeric_limits<SIZE_T>::max() ||
         frame_cbv_offset > std::numeric_limits<SIZE_T>::max() ||
         normal_srv_offset > std::numeric_limits<SIZE_T>::max() ||
         maps_srv_offset > std::numeric_limits<SIZE_T>::max() ||
         detail_srv_offset > std::numeric_limits<SIZE_T>::max() ||
-        normal_detail_srv_offset > std::numeric_limits<SIZE_T>::max()) {
+        normal_detail_srv_offset > std::numeric_limits<SIZE_T>::max() ||
+        damage_srv_offset > std::numeric_limits<SIZE_T>::max() ||
+        damage_mask_srv_offset > std::numeric_limits<SIZE_T>::max()) {
         diagnostic = {"indexed_resource_descriptor_offset_overflow",
                       "D3D12 material descriptor offset exceeds handle addressability"};
         return false;
@@ -3396,6 +3719,54 @@ bool prepare_d3d12_material_binding(
         output.normal_detail_srv_gpu = normal_detail_gpu;
         output.normal_detail_sampler_gpu = normal_detail_sampler->gpu_descriptor();
         output.normal_detail_enabled = true;
+    }
+    const auto create_damage_srv =
+        [&](const D3D12Texture& source_texture, const D3D12Sampler& source_sampler,
+            DXGI_FORMAT source_format, UINT64 offset,
+            D3D12_GPU_DESCRIPTOR_HANDLE& output_gpu,
+            D3D12_GPU_DESCRIPTOR_HANDLE& output_sampler) {
+            D3D12_CPU_DESCRIPTOR_HANDLE source_cpu =
+                srv_heap->GetCPUDescriptorHandleForHeapStart();
+            if (source_cpu.ptr > std::numeric_limits<SIZE_T>::max() -
+                                     static_cast<SIZE_T>(offset)) {
+                diagnostic = {"indexed_resource_descriptor_offset_overflow",
+                              "D3D12 damage SRV descriptor CPU handle overflows"};
+                return false;
+            }
+            source_cpu.ptr += static_cast<SIZE_T>(offset);
+            D3D12_GPU_DESCRIPTOR_HANDLE source_gpu =
+                srv_heap->GetGPUDescriptorHandleForHeapStart();
+            if (source_gpu.ptr > std::numeric_limits<UINT64>::max() - offset) {
+                diagnostic = {"indexed_resource_descriptor_offset_overflow",
+                              "D3D12 damage SRV descriptor GPU handle overflows"};
+                return false;
+            }
+            source_gpu.ptr += offset;
+            D3D12_SHADER_RESOURCE_VIEW_DESC source_srv{};
+            source_srv.Format = source_format;
+            source_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            source_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            source_srv.Texture2D.MostDetailedMip = 0U;
+            source_srv.Texture2D.MipLevels = source_texture.info().description.mip_levels;
+            source_srv.Texture2D.PlaneSlice = 0U;
+            source_srv.Texture2D.ResourceMinLODClamp = 0.0F;
+            context->device->CreateShaderResourceView(source_texture.resource(), &source_srv,
+                                                      source_cpu);
+            output_gpu = source_gpu;
+            output_sampler = source_sampler.gpu_descriptor();
+            return true;
+        };
+    if (has_damage_texture) {
+        if (!create_damage_srv(*damage_texture, *damage_sampler, damage_format,
+                               damage_srv_offset, output.damage_srv_gpu,
+                               output.damage_sampler_gpu) ||
+            !create_damage_srv(*damage_mask_texture, *damage_mask_sampler,
+                               damage_mask_format, damage_mask_srv_offset,
+                               output.damage_mask_srv_gpu,
+                               output.damage_mask_sampler_gpu))
+            return false;
+        output.damage_enabled = true;
+        output.damage_mask_enabled = true;
     }
 
     if (has_material_constants) {

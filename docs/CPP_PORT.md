@@ -116,8 +116,8 @@ remains unchanged and feature-complete.
   one final readback. The backend also executes one explicitly authorized
   portable diffuse pair. The pair uses a sampled image at set 0, binding 0,
   and a sampler at set 0, binding 1. An optional uniform at binding 2 carries
-  one aligned material record. Its first 64 bytes use the current WebGL
-  `ksPerPixel` defaults in a port-defined std140/HLSL-compatible layout.
+  one aligned material record. The 80-byte record uses a port-defined
+  std140/HLSL-compatible layout. Its last 16 bytes contain `damageZones`.
   Vulkan maps it to a uniform descriptor.
   D3D12 maps it to `b2`. The executor also accepts one optional frame record at
   binding 3. D3D12 maps this record to `b3`.
@@ -200,9 +200,10 @@ remains unchanged and feature-complete.
   `damageZones` writes replace CSP values. The one-way `glassDamage` write
   applies to shared material identities after each F4 edge. The adapter rejects
   mismatched identities, invalid material references, and over-budget output.
-  It identifies the recovered dirt-zero material branch. GPU execution of that
-  branch remains staged because the final specular alpha source needs more
-  disassembly evidence. The caller must still resolve surface overlays. A
+  It identifies the recovered dirt-zero material branch. The material handoff
+  executes this branch with explicit SPIR-V or DXIL modules. It binds
+  `txDamage` at 12/13 and `txDamageMask` at 14/15. The handoff rejects nonzero
+  dirt. The caller must still resolve surface overlays. A
   bounded workspace adapter maps metadata to merged scene roots. It attaches
   file and auxiliary labels without partial mutation. A bounded resolver implements
   half-open workspace LOD ranges and the production FOV formula. The caller
