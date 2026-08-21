@@ -410,6 +410,45 @@ void validatesDecodedOutputBudget() {
 
 }
 
+void enforcesNativeAllocationBudget() {
+    const auto valid = record("mesh", 1u, {0, 0, 0}, 2u, {0, 255});
+    VaoParseLimits zeroBudget;
+    zeroBudget.maxNativeObjectBytes = 0u;
+    expectsParseError([&] { (void)parseVaoDataWithLimits(valid, 5u, {}, "zero-budget", zeroBudget); },
+                      "ALLOCATION_LIMIT");
+
+    VaoParseLimits zeroRecords;
+    zeroRecords.maxTracks = 0u;
+    expectsParseError([&] { (void)parseVaoDataWithLimits(valid, 5u, {}, "zero-records", zeroRecords); },
+                      "COUNT_LIMIT");
+
+    std::vector<std::uint8_t> manyRecords;
+    const auto emptyRecord = record("x", 1u, {0, 0, 0}, 0u, {});
+    for (std::size_t index = 0; index < 64u; ++index)
+        manyRecords.insert(manyRecords.end(), emptyRecord.begin(), emptyRecord.end());
+    VaoParseLimits recordBudget;
+    recordBudget.maxNativeObjectBytes = 4096u;
+    expectsParseError([&] { (void)parseVaoDataWithLimits(manyRecords, 5u, {}, "record-budget", recordBudget); },
+                      "ALLOCATION_LIMIT");
+
+    std::vector<ZipInput> entries;
+    entries.push_back({"Patch_v5.data", valid, valid, 0u});
+    for (std::size_t index = 0; index < 128u; ++index)
+        entries.push_back({"aux" + std::to_string(index), {}, {}, 0u});
+    const auto manyEntries = zip(std::move(entries));
+    VaoParseLimits archiveBudget;
+    archiveBudget.maxNativeObjectBytes = 4096u;
+    expectsParseError([&] { (void)parseVaoPatchWithLimits(manyEntries, "archive-budget", archiveBudget); },
+                      "ALLOCATION_LIMIT");
+
+    auto truncatedRecord = valid;
+    truncatedRecord.pop_back();
+    expectsParseError([&] { (void)parseVaoData(truncatedRecord, 5u); }, "TRUNCATED");
+    auto truncatedZip = zip({{"Patch_v5.data", valid, valid, 0u}});
+    truncatedZip.resize(10u);
+    expectsParseError([&] { (void)parseVaoPatch(truncatedZip, "truncated-zip"); }, "TRUNCATED");
+}
+
 void rejectsMalformedAndEveryTruncatedPrefix() {
     const auto valid = record("mesh", 1u, {0, 0, 0}, 2u, {0, 255});
     for (std::size_t length = 0; length < valid.size(); ++length) {
@@ -444,6 +483,7 @@ int main() {
         supportsRawDeflateAndRejectsCrc();
         validatesZipStructureAndDeflateTrees();
         validatesDecodedOutputBudget();
+        enforcesNativeAllocationBudget();
         enforcesLimitsAndDeflateFailures();
         rejectsMalformedAndEveryTruncatedPrefix();
         std::cout << "vao tests passed\n";

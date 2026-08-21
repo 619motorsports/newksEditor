@@ -622,6 +622,90 @@ void validates_portable_frame_buffer_contract() {
             "non-uniform frame buffer rejected");
 }
 
+void validates_portable_normal_map_contract() {
+    PipelineProgram pipeline = pipeline_fixture();
+    pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 2U, "ksPerPixelMaterial"},
+        {PipelineResourceKind::uniform_buffer, 0U, 3U, "ksPerPixelFrame"},
+        {PipelineResourceKind::sampled_texture, 0U, 4U, "normalTexture"},
+        {PipelineResourceKind::sampler, 0U, 5U, "normalSampler"},
+    };
+    require(classify_indexed_portable_resource_layout(pipeline) ==
+                IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame,
+            "portable normal-map resource layout classified");
+    DrawPacket packet = packet_fixture();
+    FakeTexture target(Backend::Vulkan, target_description());
+    FakeTexture diffuse(Backend::Vulkan, sampled_description());
+    FakeTexture normal(Backend::Vulkan, sampled_description());
+    FakeSampler diffuse_sampler(Backend::Vulkan);
+    FakeSampler normal_sampler(Backend::Vulkan);
+    FakeBuffer vertices(Backend::Vulkan,
+                        {132U, BufferUsage::vertex, BufferMemory::device_local,
+                         BufferMutability::immutable});
+    FakeBuffer indices(Backend::Vulkan,
+                       {6U, BufferUsage::index, BufferMemory::device_local,
+                        BufferMutability::immutable});
+    FakeBuffer material(Backend::Vulkan,
+                        {256U, BufferUsage::uniform, BufferMemory::host_visible,
+                         BufferMutability::immutable});
+    FakeBuffer frame(Backend::Vulkan,
+                     {256U, BufferUsage::uniform, BufferMemory::host_visible,
+                      BufferMutability::mutable_data});
+    auto request = request_fixture(packet, pipeline, vertices, indices);
+    request.resource_authority = IndexedResourceAuthority::explicit_bindings;
+    request.sampled_binding = {&diffuse, &diffuse_sampler};
+    request.normal_binding = {&normal, &normal_sampler};
+    request.material_binding = {&material, 0U, portable_material_buffer_view_bytes};
+    request.frame_binding = {&frame, 0U, portable_frame_buffer_view_bytes};
+    Diagnostic diagnostic;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            "portable tangent-space normal-map contract accepted");
+
+    request.normal_binding = {};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_normal_binding_missing",
+            "missing normal texture and sampler rejected");
+    request.normal_binding = {&normal, nullptr};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_normal_binding_missing",
+            "partial normal binding rejected");
+
+    FakeTexture missing_usage(
+        Backend::Vulkan,
+        {2U, 2U, 1U, 1U, TextureFormat::rgba8_unorm, TextureUsage::transfer_source,
+         TextureMemory::device_local, TextureMutability::immutable});
+    request.normal_binding = {&missing_usage, &normal_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_normal_texture_usage_invalid",
+            "normal texture without sampled usage rejected");
+
+    FakeSampler foreign_sampler(Backend::D3D12);
+    request.normal_binding = {&normal, &foreign_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_normal_backend_mismatch",
+            "foreign normal sampler rejected");
+
+    request.normal_binding = {&target, &normal_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_normal_feedback_loop",
+            "normal-map render-target feedback rejected");
+
+    request.normal_binding = {&normal, &normal_sampler};
+    pipeline.resources.resize(4U);
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_normal_binding_unexpected",
+            "normal bindings are rejected from the diffuse-only constants layout");
+}
+
 void rejects_invalid_depth_attachment_descriptions() {
     Diagnostic diagnostic;
     DepthAttachmentDescription description;
@@ -935,6 +1019,7 @@ int main() {
         validates_portable_diffuse_resource_contract();
         validates_portable_material_buffer_contract();
         validates_portable_frame_buffer_contract();
+        validates_portable_normal_map_contract();
         rejects_invalid_depth_attachment_descriptions();
         rejects_invalid_depth_contract();
         validates_ordered_indexed_batch_contract();

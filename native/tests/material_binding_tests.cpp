@@ -339,12 +339,62 @@ void rejects_invalid_ks_per_pixel_constants() {
                 resolved.diagnostic.code == "non_finite_constants",
             "resolver rejects non-finite values even after binding construction");
 
-    malformed.shader = "ksPerPixelNM";
+    malformed.shader = "ksPerPixelReflection";
     const auto unsupported = resolve_ks_per_pixel_material_constants(malformed);
     require(!unsupported.ok() &&
                 unsupported.status == KsPerPixelMaterialResolveStatus::unsupported &&
                 unsupported.diagnostic.code == "ks_per_pixel_shader_unsupported",
             "resolver does not relabel unsupported stock shader variants");
+}
+
+void resolves_bounded_tangent_space_nm_variant() {
+    Kn5Material material;
+    material.shader = "ksPerPixelNM";
+    material.properties = {
+        {"ksSpecular", 0.4F, {}, {}, {}},
+        {"ksSpecularEXP", 20.0F, {}, {}, {}},
+        {"fresnelMaxLevel", 0.0F, {}, {}, {}},
+        {"nmObjectSpace", 0.0F, {}, {}, {}},
+    };
+    material.resources = {
+        {"txDiffuse", 21U, "body.dds"},
+        {"txNormal", 22U, "body_nm.dds"},
+    };
+    const auto resolved = resolve_ks_per_pixel_material_constants(
+        build_material_binding(material, 2U));
+    require(resolved.ok() && resolved.constants.lighting[2] == 0.4F &&
+                resolved.constants.lighting[3] == 20.0F &&
+                resolved.constants.fresnel[2] == 0.0F,
+            "bounded tangent-space ksPerPixelNM constants resolve");
+
+    material.properties.back().value = 1.0F;
+    const auto object_space = resolve_ks_per_pixel_material_constants(
+        build_material_binding(material, 2U));
+    require(!object_space.ok() &&
+                object_space.status == KsPerPixelMaterialResolveStatus::unsupported &&
+                object_space.diagnostic.code ==
+                    "ks_per_pixel_nm_object_space_unsupported",
+            "object-space normal maps remain explicit");
+
+    material.properties.back().value = 0.0F;
+    MaterialBinding non_finite_binding = build_material_binding(material, 2U);
+    non_finite_binding.properties["nmobjectspace"].scalar =
+        std::numeric_limits<float>::quiet_NaN();
+    const auto non_finite_space = resolve_ks_per_pixel_material_constants(
+        non_finite_binding);
+    require(!non_finite_space.ok() &&
+                non_finite_space.status == KsPerPixelMaterialResolveStatus::invalid_input &&
+                non_finite_space.diagnostic.code == "non_finite_constants",
+            "non-finite normal-space mode is rejected");
+
+    material.properties.back().value = 0.0F;
+    material.properties[2].value = 0.05F;
+    const auto fresnel = resolve_ks_per_pixel_material_constants(
+        build_material_binding(material, 2U));
+    require(!fresnel.ok() &&
+                fresnel.status == KsPerPixelMaterialResolveStatus::unsupported &&
+                fresnel.diagnostic.code == "ks_per_pixel_nm_fresnel_unsupported",
+            "normal-map Fresnel reflection remains explicit");
 }
 
 } // namespace
@@ -361,6 +411,7 @@ int main() {
         adapts_the_bounded_kn5_parser_model();
         resolves_ks_per_pixel_csp_precedence_and_alpha_capture();
         rejects_invalid_ks_per_pixel_constants();
+        resolves_bounded_tangent_space_nm_variant();
         std::cout << "material binding tests passed\n";
         return 0;
     } catch (const std::exception& error) {

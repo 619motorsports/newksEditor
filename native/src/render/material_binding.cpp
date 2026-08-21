@@ -453,10 +453,12 @@ MaterialBinding build_material_binding(
 KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
     const MaterialBinding& binding, KsPerPixelMaterialResolveOptions options) {
     KsPerPixelMaterialResolveResult result;
-    if (canonical(binding.shader) != "ksperpixel") {
+    const std::string shader = canonical(binding.shader);
+    const bool normal_variant = shader == "ksperpixelnm";
+    if (shader != "ksperpixel" && !normal_variant) {
         result.status = KsPerPixelMaterialResolveStatus::unsupported;
         result.diagnostic = {"ks_per_pixel_shader_unsupported", "shader",
-                             "The bounded material resolver only accepts the exact ksPerPixel shader"};
+                             "The bounded material resolver accepts exact ksPerPixel and ksPerPixelNM shaders"};
         return result;
     }
 
@@ -519,6 +521,26 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
         result.status = KsPerPixelMaterialResolveStatus::invalid_input;
         result.diagnostic = {"non_finite_constants", "ksPerPixel",
                              "Resolved ksPerPixel constants must contain only finite values"};
+        return result;
+    }
+    const float normal_object_space =
+        normal_variant ? material_scalar(binding, "nmObjectSpace", 0.0F) : 0.0F;
+    if (!std::isfinite(normal_object_space)) {
+        result.status = KsPerPixelMaterialResolveStatus::invalid_input;
+        result.diagnostic = {"non_finite_constants", "nmObjectSpace",
+                             "Resolved ksPerPixelNM normal-space mode must be finite"};
+        return result;
+    }
+    if (normal_variant && normal_object_space > 0.5F) {
+        result.status = KsPerPixelMaterialResolveStatus::unsupported;
+        result.diagnostic = {"ks_per_pixel_nm_object_space_unsupported", "nmObjectSpace",
+                             "The bounded ksPerPixelNM path supports tangent-space normals only"};
+        return result;
+    }
+    if (normal_variant && result.constants.fresnel[2] > 0.0F) {
+        result.status = KsPerPixelMaterialResolveStatus::unsupported;
+        result.diagnostic = {"ks_per_pixel_nm_fresnel_unsupported", "fresnelMaxLevel",
+                             "The bounded ksPerPixelNM path requires disabled Fresnel reflection"};
         return result;
     }
 

@@ -93,7 +93,8 @@ struct StaticSceneFrameDescription {
     bool apply_skinning = false;
     // Optional per-frame values for pipelines that declare set 0/binding 3.
     // The prepared scene validates and uploads one bounded record before the
-    // ordered batch is recorded.
+    // ordered batch is recorded. It always derives the record's camera
+    // position from camera.position.
     std::optional<KsPerPixelFrameConstants> frame_constants;
     // For caller_tables authority, these non-owning tables use the final
     // Kn5File::textures ordering. When a prepared packet uses txDiffuse, both
@@ -132,6 +133,11 @@ public:
         const StaticSceneFrameDescription& frame);
 
 private:
+    struct PacketTextureIndices {
+        std::uint32_t diffuse = invalid_draw_texture_index;
+        std::uint32_t normal = invalid_draw_texture_index;
+    };
+
     Backend backend_ = Backend::Vulkan;
     // Non-owning. The preparing device must remain alive until the final draw.
     const Device* device_ = nullptr;
@@ -142,7 +148,7 @@ private:
     std::vector<std::size_t> upload_for_packet_;
     std::vector<std::size_t> skinned_upload_for_packet_;
     std::vector<std::size_t> pipeline_for_packet_;
-    std::vector<std::uint32_t> texture_for_packet_;
+    std::vector<PacketTextureIndices> textures_for_packet_;
     std::vector<std::size_t> material_constant_for_packet_;
     std::vector<std::unique_ptr<Texture>> owned_textures_;
     std::vector<std::unique_ptr<Buffer>> owned_material_constants_;

@@ -121,8 +121,9 @@ remains unchanged and feature-complete.
   D3D12 maps it to `b2`. The executor also accepts one optional frame record at
   binding 3. D3D12 maps this record to `b3`.
   The first 64 bytes contain the sun direction, sun color, ambient color, and
-  a reserved camera position. Static scenes own one bounded mutable record and
-  update it before an ordered batch.
+  camera position. Static scenes derive the camera position from the active
+  `CameraFrame`. They own one bounded mutable record and update it before an
+  ordered batch.
   Both backends execute the source-evidenced ambient, directional diffuse, and
   emissive equation. Known-pixel tests cover light reversal, frame updates,
   and per-draw frame selection. This fixture does not include specular,
@@ -130,6 +131,14 @@ remains unchanged and feature-complete.
   CSP lights, or overlays. This remains a bounded test ABI, not a complete
   stock KN5 or CSP shader. A bounded resolver reads parsed KN5 values and typed CSP
   overrides. It preserves override precedence and WebGL emissive conversion.
+  A second bounded ABI executes tangent-space `ksPerPixelNM`. It adds a normal
+  image at binding 4 and a normal sampler at binding 5. D3D12 maps these
+  resources to `t4` and `s5`. Both backends reconstruct the tangent-space
+  normal and calculate the direct sun specular term. This behavior follows the
+  production no-maps fallback. The resolver rejects object-space normals and
+  nonzero Fresnel levels. Maps, detail normals, reflections, and shadows remain
+  staged. Tests cover missing pairs, invalid handles, per-draw selection, and
+  known pixels.
   The resolver rejects oversized CSP shader, blend, depth, and cull strings
   before profile selection.
   A bounded static-scene adapter validates the complete packet set before
@@ -159,8 +168,9 @@ remains unchanged and feature-complete.
   animation, embedded images, layer mappings, and advanced transform semantics.
   A bounded VAO binder matches decoded records to mesh views. It uses exact
   names, vertex counts, and first positions. It binds primary, secondary, and
-  eligible normal channels. Alternate records and split-AO application remain
-  staged with explicit diagnostics.
+  eligible normal channels. The VAO reader also limits aggregate native
+  objects, ZIP metadata, extracted payloads, and record arrays. Alternate
+  records and split-AO application remain staged with explicit diagnostics.
   KN5 baking is available. The remaining image formats are not ported.
 - P2 is partial. KN5 conversion feeds the neutral scene snapshot. Material
   binding is explicit. Track/car workspace manifests assemble
@@ -188,6 +198,10 @@ remains unchanged and feature-complete.
   define the Vulkan and D3D12 clip-space conversions. The indexed backend
   shader contract uses these camera matrices. The static-scene adapter can
   dispatch bounded resource-free packets and the portable `txDiffuse` pair.
+  It can dispatch the bounded `txDiffuse` and `txNormal` pair for
+  `ksPerPixelNM`. Caller tables or embedded KN5 ownership can supply both
+  textures. Preparation rejects incomplete or duplicated packet resources
+  before backend allocation.
   It can also bind a source-valued material record for explicitly authorized
   pipelines. An explicitly authorized pipeline can also bind one source-valued
   frame-light record. Vulkan uses descriptor bindings 2 and 3 for these

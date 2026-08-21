@@ -200,10 +200,11 @@ struct KsPerPixelMaterialResolveResult {
     }
 };
 
-// Resolve only the bounded ksPerPixel material-value subset. This copies the
-// source semantics from public/app.js; the 48-byte layout is the separately
-// documented portable test ABI in render/device.hpp, not a claim about the
-// native stock shader's constant-buffer layout.
+// Resolve the bounded ksPerPixel material-value subset. The ksPerPixelNM
+// variant is accepted only for tangent-space normals with Fresnel reflection
+// disabled. This copies source semantics from public/app.js; the 48-byte
+// layout is the separately documented portable test ABI in render/device.hpp,
+// not a claim about the native stock shader's constant-buffer layout.
 [[nodiscard]] KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
     const MaterialBinding& binding,
     KsPerPixelMaterialResolveOptions options = {});

@@ -13,6 +13,13 @@
 
 namespace apex::formats {
 
+// VAO parsing has aggregate native allocations in addition to the shared
+// binary input/output limits. This derived type keeps the original
+// ParseLimits aggregate layout source-compatible for other formats.
+struct VaoParseLimits : apex::core::ParseLimits {
+    std::size_t maxNativeObjectBytes = 512u * 1024u * 1024u;
+};
+
 enum class VaoChannel : std::uint8_t {
     primary,
     secondary,
@@ -164,12 +171,19 @@ struct VaoBindingResult {
     VaoLighting lighting = {}, std::string source = "Patch_v4.data",
     apex::core::ParseLimits limits = {});
 
+[[nodiscard]] VaoData parseVaoDataWithLimits(
+    std::span<const std::uint8_t> bytes, std::uint32_t version,
+    VaoLighting lighting, std::string source, VaoParseLimits limits);
+
 // Parse the ZIP VAO patch container. Deflate support is implemented in the
 // source file with a bounded RFC 1951 decoder, so this public API has no zlib
 // or minizip link/header dependency.
 [[nodiscard]] VaoPatch parseVaoPatch(
     std::span<const std::uint8_t> bytes, std::string source = "VAO patch",
     apex::core::ParseLimits limits = {});
+
+[[nodiscard]] VaoPatch parseVaoPatchWithLimits(
+    std::span<const std::uint8_t> bytes, std::string source, VaoParseLimits limits);
 
 [[nodiscard]] bool vaoNormalOverrideNameEligible(std::string_view name) noexcept;
 

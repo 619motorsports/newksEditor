@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <limits>
 #include <map>
+#include <new>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -69,11 +70,57 @@ void need(std::span<const std::uint8_t> bytes, std::size_t offset, std::size_t s
 }
 
 [[nodiscard]] std::size_t checkedMultiply(std::size_t left, std::size_t right,
-                                          std::string_view source, std::size_t offset,
-                                          std::string_view label) {
+                                           std::string_view source, std::size_t offset,
+                                           std::string_view label) {
     if (left != 0u && right > std::numeric_limits<std::size_t>::max() / left)
         throw vaoError(source, offset, "SIZE_OVERFLOW", std::string(label) + " size overflows");
     return left * right;
+}
+
+class NativeAllocationBudget final {
+public:
+    explicit NativeAllocationBudget(std::size_t limit) : limit_(limit) {}
+
+    void charge(std::size_t bytes, std::string_view source, std::size_t offset,
+                std::string_view what) {
+        if (bytes > limit_ - used_)
+            throw vaoError(source, offset, "ALLOCATION_LIMIT",
+                           "VAO native allocation budget exceeded before allocating " +
+                               std::string(what));
+        used_ += bytes;
+    }
+
+    void chargeCount(std::size_t count, std::size_t elementBytes,
+                     std::string_view source, std::size_t offset,
+                     std::string_view what) {
+        if (count != 0U && elementBytes > std::numeric_limits<std::size_t>::max() / count)
+            throw vaoError(source, offset, "SIZE_OVERFLOW",
+                           std::string(what) + " allocation size overflows");
+        charge(count * elementBytes, source, offset, what);
+    }
+
+    template <typename T>
+    void reserve(std::vector<T>& values, std::size_t count,
+                 std::string_view source, std::size_t offset,
+                 std::string_view what) {
+        if (count <= values.capacity()) return;
+        chargeCount(count - values.capacity(), sizeof(T), source, offset, what);
+        values.reserve(count);
+    }
+
+private:
+    std::size_t limit_ = 0U;
+    std::size_t used_ = 0U;
+};
+
+void reserveRecordCapacity(VaoData& result, NativeAllocationBudget& budget,
+                           std::string_view source, std::size_t offset) {
+    if (result.records.size() != result.records.capacity()) return;
+    const auto current = result.records.capacity();
+    const auto next = current == 0U
+                          ? 1U
+                          : checkedAdd(current, current, source, offset, "VAO record vector");
+    budget.reserve(result.records, next, source, offset, "VAO record objects");
 }
 
 [[nodiscard]] float halfToFloat(std::uint16_t value) noexcept {
@@ -111,6 +158,18 @@ void need(std::span<const std::uint8_t> bytes, std::size_t offset, std::size_t s
     for (auto& character : result)
         if (character >= 'A' && character <= 'Z') character = static_cast<char>(character - 'A' + 'a');
     return result;
+}
+
+[[nodiscard]] bool lowerEquals(std::string_view left, std::string_view right) noexcept {
+    if (left.size() != right.size()) return false;
+    for (std::size_t index = 0; index < left.size(); ++index) {
+        char a = left[index];
+        char b = right[index];
+        if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = static_cast<char>(b - 'A' + 'a');
+        if (a != b) return false;
+    }
+    return true;
 }
 
 [[nodiscard]] std::string upper(std::string_view value) {
@@ -399,7 +458,8 @@ struct ZipArchive {
 
 [[nodiscard]] ZipArchive readZipDirectory(std::span<const std::uint8_t> bytes,
                                            std::string_view source,
-                                           const apex::core::ParseLimits& limits) {
+                                           const apex::core::ParseLimits& limits,
+                                           NativeAllocationBudget& budget) {
     if (bytes.size() < 22u) throw vaoError(source, 0, "TRUNCATED", "ZIP end record is missing");
     const auto minimum = bytes.size() > 65557u ? bytes.size() - 65557u : 0u;
     std::optional<std::size_t> end;
@@ -431,6 +491,8 @@ struct ZipArchive {
         throw vaoError(source, endOffset + 12u, "INVALID_ZIP", "ZIP directory does not end at the end record");
     need(bytes, centralOffset, centralSize, source, "ZIP directory");
     ZipArchive archive;
+    budget.chargeCount(count, sizeof(ZipEntry), source, endOffset + 10u,
+                      "ZIP entry objects");
     archive.entries.reserve(count);
     std::map<std::string, bool> names;
     std::size_t offset = centralOffset;
@@ -454,12 +516,11 @@ struct ZipArchive {
                        source, offset, "ZIP entry"),
             source, offset, "ZIP entry");
         need(bytes, offset, body, source, "ZIP central entry");
+        budget.charge(nameLength, source, offset + 46u, "ZIP entry name");
         const auto nameBytes = bytes.subspan(offset + 46u, nameLength);
         const auto name = apex::core::ByteReader::decodeUtf8(nameBytes, "ZIP entry name", "VAO",
                                                              source, offset + 46u);
         if (!safeZipName(name)) throw vaoError(source, offset + 46u, "UNSAFE_NAME", "unsafe ZIP entry name");
-        if (names.emplace(lower(name), true).second == false)
-            throw vaoError(source, offset + 46u, "DUPLICATE_ENTRY", "duplicate ZIP entry name");
         if ((flags & ~0x0806u) != 0u || (method == 0u && (flags & 0x0006u) != 0u))
             throw vaoError(source, offset + 8u, "UNSUPPORTED_ZIP", "ZIP entry flags are unsupported");
         if (method != 0u && method != 8u)
@@ -470,6 +531,22 @@ struct ZipArchive {
         const auto maximumCompressed = std::min(MAX_ENTRY_BYTES, limits.maxInputBytes);
         if (compressedSize > maximumCompressed)
             throw vaoError(source, offset + 20u, "SIZE_LIMIT", "ZIP compressed entry exceeds configured size limit");
+        budget.charge(checkedAdd(
+                          checkedAdd(name.size(), sizeof(std::map<std::string, bool>::value_type),
+                                     source, offset + 46u, "ZIP name map node"),
+                          3U * sizeof(void*), source, offset + 46u,
+                          "ZIP name map node"),
+                      source, offset + 46u, "ZIP name map node");
+        // lower(name) creates a temporary key and the map stores its own
+        // string copy. Account for both dynamic string buffers before the
+        // duplicate check, in addition to the map node itself.
+        budget.chargeCount(2u, name.size(), source, offset + 46u,
+                           "ZIP normalized entry names");
+        if (names.emplace(lower(name), true).second == false)
+            throw vaoError(source, offset + 46u, "DUPLICATE_ENTRY", "duplicate ZIP entry name");
+        // ZipEntry owns a separate name string after the central-directory
+        // local variable is moved/copied into the archive vector.
+        budget.charge(name.size(), source, offset + 46u, "ZIP archive entry name");
         archive.entries.push_back({name, flags, method, crc, compressedSize, uncompressedSize, localOffset});
         offset += body;
     }
@@ -477,6 +554,8 @@ struct ZipArchive {
         throw vaoError(source, offset, "INVALID_ZIP", "ZIP central entries do not consume the directory");
 
     struct Range { std::size_t begin = 0; std::size_t end = 0; };
+    budget.chargeCount(archive.entries.size(), sizeof(Range), source, centralOffset,
+                       "ZIP entry ranges");
     std::vector<Range> ranges;
     ranges.reserve(archive.entries.size());
     for (const auto& entry : archive.entries) {
@@ -504,6 +583,8 @@ struct ZipArchive {
         const auto dataEnd = checkedAdd(dataStart, entry.compressedSize, source, localOffset, "ZIP data");
         if (dataEnd > centralOffset)
             throw vaoError(source, localOffset, "INVALID_ZIP", "ZIP entry overlaps the central directory");
+        budget.charge(localNameLength, source, localOffset + 30u,
+                      "ZIP local entry name");
         const auto localName = apex::core::ByteReader::decodeUtf8(
             bytes.subspan(localOffset + 30u, localNameLength), "ZIP local name", "VAO", source, localOffset + 30u);
         if (localName != entry.name)
@@ -522,7 +603,8 @@ struct ZipArchive {
 [[nodiscard]] std::vector<std::uint8_t> extractZipEntry(std::span<const std::uint8_t> bytes,
                                                         const ZipEntry& entry,
                                                         std::string_view source,
-                                                        const apex::core::ParseLimits& limits) {
+                                                        const apex::core::ParseLimits& limits,
+                                                        NativeAllocationBudget& budget) {
     const auto offset = static_cast<std::size_t>(entry.localOffset);
     need(bytes, offset, 30u, source, "ZIP local header");
     if (u32(bytes, offset) != ZIP_LOCAL) throw vaoError(source, offset, "INVALID_ZIP", "invalid ZIP local header");
@@ -536,10 +618,12 @@ struct ZipArchive {
     const auto localHeaderEnd = checkedAdd(offset, 30u, source, offset, "ZIP local header");
     const auto start = checkedAdd(localHeaderEnd, checkedAdd(nameLength, extraLength, source, offset, "ZIP local header"), source, offset, "ZIP data");
     need(bytes, start, entry.compressedSize, source, "ZIP entry data");
+    budget.charge(nameLength, source, offset + 30u, "ZIP extracted entry name");
     const auto localName = apex::core::ByteReader::decodeUtf8(bytes.subspan(offset + 30u, nameLength),
                                                                "ZIP local name", "VAO", source, offset + 30u);
     if (localName != entry.name) throw vaoError(source, offset, "INVALID_ZIP", "ZIP local and central names differ");
     const auto maximumEntry = std::min(MAX_ENTRY_BYTES, limits.maxOutputBytes);
+    budget.charge(entry.uncompressedSize, source, offset, "ZIP entry payload");
     std::vector<std::uint8_t> output;
     if (entry.method == 0u) {
         if (entry.compressedSize != entry.uncompressedSize) throw vaoError(source, offset, "INVALID_ZIP", "stored ZIP size mismatch");
@@ -558,11 +642,10 @@ struct ZipArchive {
     return output;
 }
 
-[[nodiscard]] std::optional<ZipEntry> findEntry(const ZipArchive& archive, std::string_view name) {
-    const auto wanted = lower(name);
+[[nodiscard]] const ZipEntry* findEntry(const ZipArchive& archive, std::string_view name) noexcept {
     for (const auto& entry : archive.entries)
-        if (lower(entry.name) == wanted) return entry;
-    return std::nullopt;
+        if (lowerEquals(entry.name, name)) return &entry;
+    return nullptr;
 }
 
 [[nodiscard]] float configFloat(const std::map<std::string, std::string>& values,
@@ -703,9 +786,10 @@ struct ZipArchive {
 
 } // namespace
 
-VaoData parseVaoData(std::span<const std::uint8_t> bytes, std::uint32_t version,
-                     VaoLighting lighting, std::string source,
-                     apex::core::ParseLimits limits) {
+VaoData parseVaoDataWithBudget(std::span<const std::uint8_t> bytes, std::uint32_t version,
+                               VaoLighting lighting, std::string source,
+                               apex::core::ParseLimits limits,
+                               NativeAllocationBudget& budget) {
     if (bytes.size() > limits.maxInputBytes)
         throw vaoError(source, 0, "INPUT_TOO_LARGE", "VAO data exceeds configured input size limit");
     if (version != 1u && version != 3u && version != 4u && version != 5u)
@@ -725,6 +809,10 @@ VaoData parseVaoData(std::span<const std::uint8_t> bytes, std::uint32_t version,
             throw vaoError(source, recordOffset, "INVALID_RECORD", "invalid record name length");
         const auto recordHeaderSize = checkedAdd(nameLength, 20u, source, recordOffset, "record header");
         need(bytes, offset, recordHeaderSize, source, "record header");
+        if (result.records.size() >= limits.maxTracks)
+            throw vaoError(source, recordOffset, "COUNT_LIMIT",
+                           "VAO record count exceeds configured limit");
+        budget.charge(nameLength, source, offset, "VAO record name");
         auto name = apex::core::ByteReader::decodeUtf8(bytes.subspan(offset, nameLength), "record name",
                                                        "VAO", source, offset);
         offset += nameLength;
@@ -739,6 +827,7 @@ VaoData parseVaoData(std::span<const std::uint8_t> bytes, std::uint32_t version,
         const auto vertexCount = u32(bytes, offset);
         offset += 4u;
         if (name == "@@__EXTRA_AO@" || type == 4u) {
+            budget.charge(name.size(), source, recordOffset, "VAO embedded extra-sample name");
             result.embeddedExtraSamples = VaoEmbeddedExtraSamples{name, 1u, vertexCount, bytes.size() - offset};
             result.bytesRead = bytes.size();
             break;
@@ -770,7 +859,9 @@ VaoData parseVaoData(std::span<const std::uint8_t> bytes, std::uint32_t version,
         record.vertexCount = vertexCount;
         record.offset = recordOffset;
         if (type == 2u) {
-            record.normals.resize(checkedMultiply(vertexCount, 3u, source, offset, "normal output"));
+            const auto normalCount = checkedMultiply(vertexCount, 3u, source, offset, "normal output");
+            budget.chargeCount(normalCount, sizeof(float), source, offset, "VAO normal values");
+            record.normals.resize(normalCount);
             for (std::size_t vertex = 0; vertex < vertexCount; ++vertex) {
                 float x = 0, y = 0, z = 0;
                 if (version >= 4u) {
@@ -793,6 +884,8 @@ VaoData parseVaoData(std::span<const std::uint8_t> bytes, std::uint32_t version,
                 record.normals[vertex * 3u + 2u] = z / length;
             }
         } else {
+            budget.chargeCount(vertexCount, sizeof(std::uint8_t), source, offset,
+                               "VAO values");
             record.values.resize(vertexCount);
             for (std::size_t vertex = 0; vertex < vertexCount; ++vertex) {
                 float sample = 0.0f;
@@ -813,14 +906,37 @@ VaoData parseVaoData(std::span<const std::uint8_t> bytes, std::uint32_t version,
                 record.values[vertex] = static_cast<std::uint8_t>(std::clamp(rounded, 0, 255));
             }
         }
+        reserveRecordCapacity(result, budget, source, recordOffset);
         result.records.push_back(std::move(record));
         offset += payloadBytes;
-        if (result.records.size() > limits.maxTracks)
-            throw vaoError(source, recordOffset, "COUNT_LIMIT", "record count exceeds configured limit");
     }
     result.recordCount = result.records.size();
     if (!result.embeddedExtraSamples) result.bytesRead = offset;
     return result;
+}
+
+VaoData parseVaoData(std::span<const std::uint8_t> bytes, std::uint32_t version,
+                     VaoLighting lighting, std::string source,
+                     apex::core::ParseLimits limits) {
+    try {
+        NativeAllocationBudget budget(VaoParseLimits{}.maxNativeObjectBytes);
+        return parseVaoDataWithBudget(bytes, version, lighting, source, limits, budget);
+    } catch (const std::bad_alloc&) {
+        throw vaoError(source, 0U, "ALLOCATION_LIMIT",
+                       "VAO native allocation failed within the configured budget");
+    }
+}
+
+VaoData parseVaoDataWithLimits(std::span<const std::uint8_t> bytes, std::uint32_t version,
+                               VaoLighting lighting, std::string source,
+                               VaoParseLimits limits) {
+    try {
+        NativeAllocationBudget budget(limits.maxNativeObjectBytes);
+        return parseVaoDataWithBudget(bytes, version, lighting, source, limits, budget);
+    } catch (const std::bad_alloc&) {
+        throw vaoError(source, 0U, "ALLOCATION_LIMIT",
+                       "VAO native allocation failed within the configured budget");
+    }
 }
 
 bool vaoNormalOverrideNameEligible(std::string_view name) noexcept {
@@ -1159,43 +1275,66 @@ VaoBindingResult bindVaoPatch(const VaoPatch& patch,
 
 VaoPatch parseVaoPatch(std::span<const std::uint8_t> bytes, std::string source,
                        apex::core::ParseLimits limits) {
-    if (bytes.size() > limits.maxInputBytes)
-        throw vaoError(source, 0, "INPUT_TOO_LARGE", "VAO archive exceeds configured input size limit");
-    const auto archive = readZipDirectory(bytes, source, limits);
-    const auto patchV5 = findEntry(archive, "Patch_v5.data");
-    const auto patchV4 = findEntry(archive, "Patch_v4.data");
-    const auto patchV3 = findEntry(archive, "Patch_v3.data");
-    const auto patchV1 = findEntry(archive, "Patch.data");
-    std::optional<ZipEntry> patchEntry;
-    std::uint32_t version = 0;
-    if (patchV5) { patchEntry = patchV5; version = 5; }
-    else if (patchV4) { patchEntry = patchV4; version = 4; }
-    else if (patchV3) { patchEntry = patchV3; version = 3; }
-    else if (patchV1) { patchEntry = patchV1; version = 1; }
-    if (!patchEntry) throw vaoError(source, 0, "UNSUPPORTED_VERSION", "archive has no supported Patch.data entry");
-    const auto configEntry = findEntry(archive, "config.ini");
-    if (configEntry && configEntry->uncompressedSize > MAX_CONFIG_BYTES)
-        throw vaoError(source, 0, "SIZE_LIMIT", "Config.ini exceeds configured size limit");
-    const auto payload = extractZipEntry(bytes, *patchEntry, source, limits);
-    std::vector<std::uint8_t> configBytes;
-    if (configEntry) configBytes = extractZipEntry(bytes, *configEntry, source, limits);
-    const auto configText = apex::core::ByteReader::decodeUtf8(configBytes, "Config.ini", "VAO", source, 0);
-    VaoPatch result;
-    result.source = source;
-    result.version = version;
-    result.entry = patchEntry->name;
-    result.configText = configText;
-    result.lighting = parseLighting(configText);
-    result.splitAo = parseSplitAo(configText);
-    result.data = parseVaoData(payload, version, result.lighting, source, limits);
-    for (const auto& entry : archive.entries)
-        result.archiveEntries.push_back({entry.name, entry.method, entry.compressedSize, entry.uncompressedSize});
-    if (const auto extra = findEntry(archive, "extrasamples.data"))
-        result.extraSamples = VaoEmbeddedExtraSamples{extra->name, 2u, 0u, extra->uncompressedSize};
-    if (const auto trees = findEntry(archive, "treesamples.data"))
-        result.treeSamples = VaoArchiveEntry{trees->name, trees->method, trees->compressedSize, trees->uncompressedSize};
-    if (result.data.embeddedExtraSamples && !result.extraSamples) result.extraSamples = result.data.embeddedExtraSamples;
-    return result;
+    VaoParseLimits vaoLimits;
+    static_cast<apex::core::ParseLimits&>(vaoLimits) = limits;
+    return parseVaoPatchWithLimits(bytes, std::move(source), std::move(vaoLimits));
+}
+
+VaoPatch parseVaoPatchWithLimits(std::span<const std::uint8_t> bytes, std::string source,
+                                 VaoParseLimits limits) {
+    try {
+        if (bytes.size() > limits.maxInputBytes)
+            throw vaoError(source, 0, "INPUT_TOO_LARGE", "VAO archive exceeds configured input size limit");
+        NativeAllocationBudget budget(limits.maxNativeObjectBytes);
+        const auto archive = readZipDirectory(bytes, source, limits, budget);
+        const auto patchV5 = findEntry(archive, "Patch_v5.data");
+        const auto patchV4 = findEntry(archive, "Patch_v4.data");
+        const auto patchV3 = findEntry(archive, "Patch_v3.data");
+        const auto patchV1 = findEntry(archive, "Patch.data");
+        const ZipEntry* patchEntry = nullptr;
+        std::uint32_t version = 0;
+        if (patchV5 != nullptr) { patchEntry = patchV5; version = 5; }
+        else if (patchV4 != nullptr) { patchEntry = patchV4; version = 4; }
+        else if (patchV3 != nullptr) { patchEntry = patchV3; version = 3; }
+        else if (patchV1 != nullptr) { patchEntry = patchV1; version = 1; }
+        if (!patchEntry) throw vaoError(source, 0, "UNSUPPORTED_VERSION", "archive has no supported Patch.data entry");
+        const ZipEntry* configEntry = findEntry(archive, "config.ini");
+        if (configEntry != nullptr && configEntry->uncompressedSize > MAX_CONFIG_BYTES)
+            throw vaoError(source, 0, "SIZE_LIMIT", "Config.ini exceeds configured size limit");
+        const auto payload = extractZipEntry(bytes, *patchEntry, source, limits, budget);
+        std::vector<std::uint8_t> configBytes;
+        if (configEntry) configBytes = extractZipEntry(bytes, *configEntry, source, limits, budget);
+        budget.charge(configBytes.size(), source, 0U, "Config.ini text");
+        VaoPatch result;
+        budget.charge(source.size(), source, 0U, "VAO source name");
+        budget.charge(patchEntry->name.size(), source, 0U, "VAO patch entry name");
+        result.source = source;
+        result.version = version;
+        result.entry = patchEntry->name;
+        result.configText = apex::core::ByteReader::decodeUtf8(configBytes, "Config.ini", "VAO", source, 0);
+        result.lighting = parseLighting(result.configText);
+        result.splitAo = parseSplitAo(result.configText);
+        result.data = parseVaoDataWithBudget(payload, version, result.lighting, source, limits, budget);
+        budget.reserve(result.archiveEntries, archive.entries.size(), source, 0U,
+                       "VAO archive records");
+        for (const auto& entry : archive.entries) {
+            budget.charge(entry.name.size(), source, 0U, "VAO archive record name");
+            result.archiveEntries.push_back({entry.name, entry.method, entry.compressedSize, entry.uncompressedSize});
+        }
+        if (const auto* extra = findEntry(archive, "extrasamples.data")) {
+            budget.charge(extra->name.size(), source, 0U, "VAO extra-sample entry name");
+            result.extraSamples = VaoEmbeddedExtraSamples{extra->name, 2u, 0u, extra->uncompressedSize};
+        }
+        if (const auto* trees = findEntry(archive, "treesamples.data")) {
+            budget.charge(trees->name.size(), source, 0U, "VAO tree-sample entry name");
+            result.treeSamples = VaoArchiveEntry{trees->name, trees->method, trees->compressedSize, trees->uncompressedSize};
+        }
+        if (result.data.embeddedExtraSamples && !result.extraSamples) result.extraSamples = result.data.embeddedExtraSamples;
+        return result;
+    } catch (const std::bad_alloc&) {
+        throw vaoError(source, 0U, "ALLOCATION_LIMIT",
+                       "VAO native allocation failed within the configured budget");
+    }
 }
 
 } // namespace apex::formats

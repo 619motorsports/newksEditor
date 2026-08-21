@@ -367,8 +367,6 @@ enum class IndexedResourceAuthority : std::uint8_t {
 
 struct IndexedSampledTextureBinding {
     // Non-owning. Keep both handles alive until the synchronous draw returns.
-    // The executable pipeline must declare sampled_texture at set 0/binding 0
-    // and sampler at set 0/binding 1.
     const Texture* texture = nullptr;
     const Sampler* sampler = nullptr;
 };
@@ -389,8 +387,8 @@ static_assert(sizeof(KsPerPixelMaterialConstants) == 48U);
 static_assert(std::is_trivially_copyable_v<KsPerPixelMaterialConstants>);
 
 // Per-frame directional lighting values follow the production WebGL
-// ksPerPixel binder. The camera slot is reserved for the next specular slice;
-// the current directional-diffuse fixture does not read it.
+// ksPerPixel binder. Static-scene execution derives camera_position from its
+// CameraFrame so view-dependent lighting cannot use stale duplicate state.
 struct KsPerPixelFrameConstants {
     std::array<float, 4> sun_direction = {0.0F, 1.0F, 0.0F, 0.0F};
     std::array<float, 4> sun_color = {1.0F, 1.0F, 1.0F, 0.0F};
@@ -430,6 +428,9 @@ enum class IndexedPortableResourceLayout : std::uint8_t {
     diffuse_with_constants,
     diffuse_with_frame,
     diffuse_with_constants_and_frame,
+    // Exact bounded ksPerPixelNM ABI: diffuse at bindings 0/1, material and
+    // frame uniforms at 2/3, and tangent-space normal texture at bindings 4/5.
+    diffuse_normal_with_constants_and_frame,
     unsupported,
 };
 
@@ -475,7 +476,10 @@ struct IndexedStaticMeshDrawRequest {
     float depth_clear_value = 1.0F;
     IndexedShaderAuthority shader_authority = IndexedShaderAuthority::packet_contract;
     IndexedResourceAuthority resource_authority = IndexedResourceAuthority::packet_contract;
+    // Diffuse sampled image and sampler at set 0/bindings 0 and 1.
     IndexedSampledTextureBinding sampled_binding{};
+    // Optional normal sampled image and sampler at set 0/bindings 4 and 5.
+    IndexedSampledTextureBinding normal_binding{};
     IndexedMaterialBufferBinding material_binding{};
     IndexedFrameBufferBinding frame_binding{};
 };

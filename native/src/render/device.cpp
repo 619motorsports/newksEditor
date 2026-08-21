@@ -567,12 +567,14 @@ IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
     if (pipeline.resources.empty())
         return IndexedPortableResourceLayout::resource_free;
     if (pipeline.resources.size() != 2U && pipeline.resources.size() != 3U &&
-        pipeline.resources.size() != 4U)
+        pipeline.resources.size() != 4U && pipeline.resources.size() != 6U)
         return IndexedPortableResourceLayout::unsupported;
     bool sampled_texture = false;
     bool sampler = false;
     bool material_constants = false;
     bool frame_constants = false;
+    bool normal_texture = false;
+    bool normal_sampler = false;
     for (const PipelineResourceBinding& resource : pipeline.resources) {
         if (resource.set == 0U && resource.binding == 0U &&
             resource.kind == PipelineResourceKind::sampled_texture) {
@@ -590,11 +592,19 @@ IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
                    resource.kind == PipelineResourceKind::uniform_buffer) {
             if (frame_constants) return IndexedPortableResourceLayout::unsupported;
             frame_constants = true;
+        } else if (resource.set == 0U && resource.binding == 4U &&
+                   resource.kind == PipelineResourceKind::sampled_texture) {
+            if (normal_texture) return IndexedPortableResourceLayout::unsupported;
+            normal_texture = true;
+        } else if (resource.set == 0U && resource.binding == 5U &&
+                   resource.kind == PipelineResourceKind::sampler) {
+            if (normal_sampler) return IndexedPortableResourceLayout::unsupported;
+            normal_sampler = true;
         } else {
             return IndexedPortableResourceLayout::unsupported;
         }
     }
-    if (!sampled_texture || !sampler)
+    if (!sampled_texture || !sampler || normal_texture != normal_sampler)
         return IndexedPortableResourceLayout::unsupported;
     if (pipeline.resources.size() == 2U && !material_constants && !frame_constants)
         return IndexedPortableResourceLayout::diffuse;
@@ -604,6 +614,9 @@ IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
         return IndexedPortableResourceLayout::diffuse_with_frame;
     if (pipeline.resources.size() == 4U && material_constants && frame_constants)
         return IndexedPortableResourceLayout::diffuse_with_constants_and_frame;
+    if (pipeline.resources.size() == 6U && material_constants && frame_constants &&
+        normal_texture && normal_sampler)
+        return IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame;
     return IndexedPortableResourceLayout::unsupported;
 }
 
@@ -813,6 +826,8 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     }
     const bool has_sampled_texture = request.sampled_binding.texture != nullptr;
     const bool has_sampler = request.sampled_binding.sampler != nullptr;
+    const bool has_normal_texture = request.normal_binding.texture != nullptr;
+    const bool has_normal_sampler = request.normal_binding.sampler != nullptr;
     const bool has_material_buffer = request.material_binding.buffer != nullptr;
     const bool has_material_range = request.material_binding.offset_bytes != 0U ||
                                     request.material_binding.range_bytes != 0U;
@@ -822,7 +837,8 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     const IndexedPortableResourceLayout resource_layout =
         classify_indexed_portable_resource_layout(pipeline);
     if (resource_layout == IndexedPortableResourceLayout::resource_free) {
-        if (has_sampled_texture || has_sampler || has_material_buffer || has_material_range ||
+        if (has_sampled_texture || has_sampler || has_normal_texture || has_normal_sampler ||
+            has_material_buffer || has_material_range ||
             has_frame_buffer || has_frame_range ||
             request.resource_authority != IndexedResourceAuthority::packet_contract) {
             diagnostic = {"indexed_resource_binding_unexpected",
@@ -837,15 +853,19 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     } else {
         if (resource_layout == IndexedPortableResourceLayout::unsupported) {
             diagnostic = {"indexed_resource_layout_unsupported",
-                          "The portable material ABI requires one texture, one sampler, and optional material/frame buffers"};
+                          "The portable material ABI requires the bounded diffuse or diffuse-plus-normal layout"};
             return IndexedStaticMeshDrawStatus::unsupported;
         }
         const bool material_declaration =
             resource_layout == IndexedPortableResourceLayout::diffuse_with_constants ||
-            resource_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame;
+            resource_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame ||
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame;
         const bool frame_declaration =
             resource_layout == IndexedPortableResourceLayout::diffuse_with_frame ||
-            resource_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame;
+            resource_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame ||
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame;
+        const bool normal_declaration =
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame;
         if (request.resource_authority != IndexedResourceAuthority::explicit_bindings) {
             diagnostic = {"indexed_resource_execution_staged",
                           "Material resources require explicit request-local binding authority"};
@@ -854,6 +874,15 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
         if (!has_sampled_texture || !has_sampler) {
             diagnostic = {"indexed_resource_binding_missing",
                           "The portable diffuse baseline requires both a sampled texture and sampler"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        if (normal_declaration != has_normal_texture ||
+            normal_declaration != has_normal_sampler) {
+            diagnostic = {normal_declaration ? "indexed_normal_binding_missing"
+                                             : "indexed_normal_binding_unexpected",
+                          normal_declaration
+                              ? "The portable ksPerPixelNM ABI requires its normal texture and sampler"
+                              : "The diffuse ABI cannot receive a normal texture or sampler"};
             return IndexedStaticMeshDrawStatus::invalid_request;
         }
         if (material_declaration != has_material_buffer ||
@@ -974,6 +1003,55 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             return sampler_status == SamplerStatus::unsupported
                        ? IndexedStaticMeshDrawStatus::unsupported
                        : IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        if (normal_declaration) {
+            const Texture& normal_texture = *request.normal_binding.texture;
+            const Sampler& normal_sampler = *request.normal_binding.sampler;
+            if (&normal_texture == &texture) {
+                diagnostic = {"indexed_normal_feedback_loop",
+                              "The color target cannot also be the normal texture"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+            if (normal_texture.backend() != texture.backend() ||
+                normal_sampler.backend() != texture.backend()) {
+                diagnostic = {"indexed_normal_backend_mismatch",
+                              "Normal texture, sampler, and color target must use the same backend"};
+                return IndexedStaticMeshDrawStatus::unsupported;
+            }
+            const TextureDescription& normal = normal_texture.info().description;
+            const auto normal_usage = static_cast<std::uint32_t>(normal.usage);
+            if ((normal_usage & static_cast<std::uint32_t>(TextureUsage::sampled)) == 0U) {
+                diagnostic = {"indexed_normal_texture_usage_invalid",
+                              "The normal texture requires sampled usage"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+            if ((normal_usage & forbidden_usage) != 0U) {
+                diagnostic = {"indexed_normal_texture_usage_unsupported",
+                              "The portable normal path rejects writable or attachment texture usage"};
+                return IndexedStaticMeshDrawStatus::unsupported;
+            }
+            if (normal.width == 0U || normal.height == 0U || normal.mip_levels == 0U ||
+                normal.array_layers != 1U ||
+                (normal.format != TextureFormat::rgba8_unorm &&
+                 normal.format != TextureFormat::rgba8_srgb &&
+                 normal.format != TextureFormat::bgra8_unorm &&
+                 normal.format != TextureFormat::bgra8_srgb)) {
+                diagnostic = {"indexed_normal_texture_description_unsupported",
+                              "The portable normal path requires one-layer RGBA8 or BGRA8 texture data"};
+                return IndexedStaticMeshDrawStatus::unsupported;
+            }
+            Diagnostic normal_sampler_diagnostic;
+            const SamplerStatus normal_sampler_status = validate_sampler_description(
+                normal_sampler.info().description, normal_sampler_diagnostic);
+            if (normal_sampler_status != SamplerStatus::ready) {
+                diagnostic = {normal_sampler_diagnostic.code.empty()
+                                  ? "indexed_normal_sampler_invalid"
+                                  : "indexed_normal_" + normal_sampler_diagnostic.code,
+                              normal_sampler_diagnostic.message};
+                return normal_sampler_status == SamplerStatus::unsupported
+                           ? IndexedStaticMeshDrawStatus::unsupported
+                           : IndexedStaticMeshDrawStatus::invalid_request;
+            }
         }
     }
     if (pipeline.depth.test_enabled != packet.flags.depth_test ||

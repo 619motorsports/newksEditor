@@ -143,6 +143,8 @@ public:
         resource_authorities.clear();
         sampled_textures.clear();
         sampled_samplers.clear();
+        normal_textures.clear();
+        normal_samplers.clear();
         material_buffers.clear();
         material_offsets.clear();
         material_ranges.clear();
@@ -162,6 +164,8 @@ public:
             resource_authorities.push_back(draw.resource_authority);
             sampled_textures.push_back(draw.sampled_binding.texture);
             sampled_samplers.push_back(draw.sampled_binding.sampler);
+            normal_textures.push_back(draw.normal_binding.texture);
+            normal_samplers.push_back(draw.normal_binding.sampler);
             material_buffers.push_back(draw.material_binding.buffer);
             material_offsets.push_back(draw.material_binding.offset_bytes);
             material_ranges.push_back(draw.material_binding.range_bytes);
@@ -212,6 +216,8 @@ public:
     std::vector<IndexedResourceAuthority> resource_authorities;
     std::vector<const Texture*> sampled_textures;
     std::vector<const Sampler*> sampled_samplers;
+    std::vector<const Texture*> normal_textures;
+    std::vector<const Sampler*> normal_samplers;
     std::vector<const Buffer*> material_buffers;
     std::vector<std::uint64_t> material_offsets;
     std::vector<std::uint32_t> material_ranges;
@@ -1225,7 +1231,20 @@ void owns_and_updates_frame_constant_record_for_mixed_packets() {
             "a zero sun direction fails before update or recording");
 
     constants = KsPerPixelFrameConstants{};
+    frame.frame_constants = constants;
+    frame.camera.position[0] = std::numeric_limits<float>::quiet_NaN();
+    auto non_finite_camera =
+        prepared.resources->draw_and_readback(device, target, frame);
+    require(non_finite_camera.status == IndexedStaticMeshBatchStatus::invalid_request &&
+                non_finite_camera.diagnostic.code ==
+                    "static_scene_frame_camera_position_invalid" &&
+                device.update_calls == 0U && device.batch_calls == 0U,
+            "a non-finite camera position fails before update or recording");
+
+    constants = KsPerPixelFrameConstants{};
     constants.sun_direction = {1.0F, 2.0F, 3.0F, 4.0F};
+    constants.camera_position = {91.0F, 92.0F, 93.0F, 94.0F};
+    frame.camera.position = {4.0F, 5.0F, 6.0F};
     frame.frame_constants = constants;
     device.fail_update_call = 1U;
     auto update_failure = prepared.resources->draw_and_readback(device, target, frame);
@@ -1251,13 +1270,167 @@ void owns_and_updates_frame_constant_record_for_mixed_packets() {
             "a failed frame update does not submit a mixed batch");
     device.fail_update_call = 0U;
     const auto drawn = prepared.resources->draw_and_readback(device, target, frame);
+    KsPerPixelFrameConstants uploaded_constants{};
+    require(!device.updated_bytes.empty() &&
+                device.updated_bytes.back().size() >= sizeof(uploaded_constants),
+            "successful frame update records the portable constants");
+    std::memcpy(&uploaded_constants, device.updated_bytes.back().data(),
+                sizeof(uploaded_constants));
     require(drawn.ok() && device.frame_buffers.size() == 3U &&
                 device.frame_buffers[0] != nullptr && device.frame_buffers[1] == nullptr &&
                 device.frame_buffers[2] == device.frame_buffers[0] &&
                 device.frame_offsets == std::vector<std::uint64_t>{0U, 0U, 0U} &&
                 device.frame_ranges == std::vector<std::uint32_t>{portable_frame_buffer_view_bytes, 0U,
-                                                                     portable_frame_buffer_view_bytes},
+                                                                    portable_frame_buffer_view_bytes},
             "one frame record binds only to applicable mixed packets");
+    require(uploaded_constants.camera_position ==
+                std::array<float, 4>{4.0F, 5.0F, 6.0F, 0.0F},
+            "static-scene frame upload derives camera position from CameraFrame");
+}
+
+void resolves_bounded_normal_map_resources_and_rejects_malformed_packets() {
+    const auto configure_normal_scene = [](Fixture& value,
+                                           bool embed_textures) {
+        const std::array<std::uint8_t, 4> diffuse_pixel = {17U, 34U, 51U, 255U};
+        const std::array<std::uint8_t, 4> normal_pixel = {128U, 255U, 128U, 255U};
+        value.model.textures.push_back(
+            {true, "body.dds", embed_textures ? 152U : 0U,
+             embed_textures ? rgba8_dds(true, diffuse_pixel)
+                            : std::vector<std::uint8_t>{}, {}});
+        value.model.textures.push_back(
+            {true, "body_nm.dds", embed_textures ? 152U : 0U,
+             embed_textures ? rgba8_dds(false, normal_pixel)
+                            : std::vector<std::uint8_t>{}, {}});
+        value.first_pipeline.vertex_layout.attributes = {
+            {PipelineVertexSemantic::position,
+             PipelineVertexAttributeFormat::float32x3, 0U, 0U},
+            {PipelineVertexSemantic::normal,
+             PipelineVertexAttributeFormat::float32x3, 1U, 12U},
+            {PipelineVertexSemantic::texcoord0,
+             PipelineVertexAttributeFormat::float32x2, 2U, 24U},
+            {PipelineVertexSemantic::tangent,
+             PipelineVertexAttributeFormat::float32x3, 3U, 32U},
+        };
+        value.first_pipeline.resources = {
+            {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+            {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+            {PipelineResourceKind::uniform_buffer, 0U, 2U, "ksPerPixelMaterial"},
+            {PipelineResourceKind::uniform_buffer, 0U, 3U, "ksPerPixelFrame"},
+            {PipelineResourceKind::sampled_texture, 0U, 4U, "normalTexture"},
+            {PipelineResourceKind::sampler, 0U, 5U, "normalSampler"},
+        };
+        const std::vector<DrawResourceSlot> slots = {
+            {"txDiffuse", 21U, 0U, "body.dds"},
+            {"txNormal", 22U, 1U, "body_nm.dds"},
+        };
+        value.packets[0].resources = slots;
+        value.packets[2].resources = slots;
+    };
+
+    Fixture value = fixture();
+    configure_normal_scene(value, false);
+    std::array<KsPerPixelMaterialConstants, 2> material_constants{};
+    material_constants[0].fresnel[2] = 0.0F;
+    auto request = request_for(value);
+    request.material_constants_by_material = material_constants;
+    RecordingDevice device;
+    auto prepared = prepare_static_scene_resources(device, request);
+    require(prepared.ok() && prepared.resources->owns_frame_constants() &&
+                prepared.resources->owned_material_constant_count() == 1U &&
+                device.buffer_calls == 6U,
+            "bounded ksPerPixelNM scene owns material and frame constants");
+
+    const TextureDescription sampled_description{
+        1U, 1U, 1U, 1U, TextureFormat::rgba8_unorm, TextureUsage::sampled,
+        TextureMemory::device_local, TextureMutability::immutable};
+    FakeTexture diffuse(sampled_description);
+    FakeTexture normal(sampled_description);
+    FakeSampler diffuse_sampler;
+    FakeSampler normal_sampler;
+    const std::array<const Texture*, 2> textures = {&diffuse, &normal};
+    const std::array<const Sampler*, 2> samplers = {&diffuse_sampler, &normal_sampler};
+    KsPerPixelFrameConstants frame_constants{};
+    StaticSceneFrameDescription frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.camera.position = {2.0F, 3.0F, 4.0F};
+    frame.frame_constants = frame_constants;
+    frame.textures_by_global_index = textures;
+    frame.samplers_by_global_index = samplers;
+    FakeTexture target;
+    const auto drawn = prepared.resources->draw_and_readback(device, target, frame);
+    require(drawn.ok() &&
+                device.sampled_textures ==
+                    std::vector<const Texture*>{&diffuse, nullptr, &diffuse} &&
+                device.normal_textures ==
+                    std::vector<const Texture*>{&normal, nullptr, &normal} &&
+                device.sampled_samplers ==
+                    std::vector<const Sampler*>{&diffuse_sampler, nullptr,
+                                                &diffuse_sampler} &&
+                device.normal_samplers ==
+                    std::vector<const Sampler*>{&normal_sampler, nullptr,
+                                                &normal_sampler},
+            "caller tables preserve distinct diffuse and normal bindings in packet order");
+
+    Fixture embedded = fixture();
+    configure_normal_scene(embedded, true);
+    auto embedded_request = request_for(embedded);
+    embedded_request.material_constants_by_material = material_constants;
+    embedded_request.texture_authority = StaticSceneTextureAuthority::embedded_kn5;
+    RecordingDevice embedded_device;
+    auto embedded_prepared =
+        prepare_static_scene_resources(embedded_device, embedded_request);
+    require(embedded_prepared.ok() &&
+                embedded_prepared.resources->owned_texture_count() == 2U &&
+                embedded_device.texture_calls == 2U && embedded_device.sampler_calls == 1U,
+            "embedded ksPerPixelNM resources decode and own both texture roles");
+    StaticSceneFrameDescription embedded_frame;
+    embedded_frame.camera.clip_space = CameraClipSpace::vulkan;
+    embedded_frame.camera.position = frame.camera.position;
+    embedded_frame.frame_constants = frame_constants;
+    const auto embedded_drawn = embedded_prepared.resources->draw_and_readback(
+        embedded_device, target, embedded_frame);
+    require(embedded_drawn.ok() && embedded_device.sampled_textures[0] != nullptr &&
+                embedded_device.normal_textures[0] != nullptr &&
+                embedded_device.sampled_textures[0] !=
+                    embedded_device.normal_textures[0],
+            "owned normal and diffuse bindings survive through batch submission");
+
+    Fixture malformed = fixture();
+    configure_normal_scene(malformed, false);
+    malformed.packets[2].resources[1] = malformed.packets[2].resources[0];
+    auto malformed_request = request_for(malformed);
+    malformed_request.material_constants_by_material = material_constants;
+    RecordingDevice malformed_device;
+    const auto duplicate =
+        prepare_static_scene_resources(malformed_device, malformed_request);
+    require(!duplicate.ok() &&
+                duplicate.diagnostic.code == "static_scene_resource_slot_duplicate" &&
+                malformed_device.buffer_calls == 0U,
+            "a duplicated later normal-map slot fails before backend allocation");
+
+    malformed = fixture();
+    configure_normal_scene(malformed, false);
+    malformed.packets[2].resources.pop_back();
+    malformed_request = request_for(malformed);
+    malformed_request.material_constants_by_material = material_constants;
+    const auto truncated =
+        prepare_static_scene_resources(malformed_device, malformed_request);
+    require(!truncated.ok() &&
+                truncated.diagnostic.code == "static_scene_material_packet_unsupported" &&
+                malformed_device.buffer_calls == 0U,
+            "a truncated later normal-map resource list fails before allocation");
+
+    malformed = fixture();
+    configure_normal_scene(malformed, false);
+    material_constants[0].fresnel[2] = 0.05F;
+    malformed_request = request_for(malformed);
+    malformed_request.material_constants_by_material = material_constants;
+    const auto fresnel =
+        prepare_static_scene_resources(malformed_device, malformed_request);
+    require(!fresnel.ok() &&
+                fresnel.diagnostic.code == "static_scene_normal_fresnel_unsupported" &&
+                malformed_device.buffer_calls == 0U,
+            "normal execution rejects production Fresnel until its behavior is implemented");
 }
 
 void orders_skin_updates_before_the_shared_frame_record() {
@@ -1501,6 +1674,7 @@ int main() {
         rejects_malformed_diffuse_packets_before_allocation();
         owns_and_reuses_material_constant_records();
         owns_and_updates_frame_constant_record_for_mixed_packets();
+        resolves_bounded_normal_map_resources_and_rejects_malformed_packets();
         orders_skin_updates_before_the_shared_frame_record();
         rejects_frame_constant_budget_before_allocation();
         rejects_invalid_material_constant_inputs_before_allocation();

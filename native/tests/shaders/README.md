@@ -114,3 +114,27 @@ Fixture identities:
 - Compiler: glslang `16.4.0`
 - Validator: SPIRV-Tools `2026.3` (`vulkan-sdk-1.4.357.0-0-g9a49b0883`)
 - Target: SPIR-V 1.0 for Vulkan 1.0
+
+`indexed_ks_per_pixel_nm.vert` and `indexed_ks_per_pixel_nm.frag` are the
+bounded tangent-space normal-map extension of that fixture. They retain the
+same draw-matrices push constant and material/frame UBOs, and add a normal
+image at `set=0,binding=4` plus a normal sampler at `set=0,binding=5`.
+D3D12 maps those resources to `t4` and `s5`. The vertex shader follows the
+production reconstruction in `public/app.js:2048`: world position, world
+normal, world tangent, and world `cross(tangent,normal)` bitangent. The
+fragment shader follows `public/app.js:2075-2076` for tangent-space normal
+decoding and `public/app.js:2080-2083` for the no-maps direct-light path.
+
+This fixture explicitly excludes maps/detail, object-space normals, Fresnel,
+reflection, shadows, AO/VAO, rain, seasons, local/CSP lights, damage,
+transparency, alpha test, and overlays. `maps=vec3(1)` is intentional, so the
+specular multiplier is `ksSpecular` and the exponent is
+`max(1,ksSpecularEXP+1)`. It is not a complete stock `ksPerPixelNM` shader.
+
+The NM fixture identities are recorded after compiling with glslang 16.4.0
+and validating with SPIRV-Tools 2026.3:
+
+- Vertex source SHA-256: `44a4366343584418a39008707ea0c629454b716ef43b1783ccb20b0ddae257a7`
+- Vertex SPIR-V SHA-256: `1d8fa2d0a866c374d42f55e9e92f4a39bbbf8abd6c9beceb8bb9f3de5945d34c`
+- Fragment source SHA-256: `59ec129cf2199a6363866bf57faa41be65fd37bff429885fdc4395074aef6bad`
+- Fragment SPIR-V SHA-256: `43a0c4b229eebc5153852d97c74f6acee67b4c252f627cd25ea349e68b9500d5`
