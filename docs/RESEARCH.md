@@ -114,6 +114,10 @@ the inspection override cannot be mistaken for source visibility.
 
 ### Native authoring grid
 
+The supporting IL opcodes, metadata tokens, enum constants, and installed-binary
+hashes are checked in at
+[`docs/evidence/ksnet-grid-il.md`](evidence/ksnet-grid-il.md).
+
 `ksEditor.Form1.btnShowGrid_Click` has token `0x060000e0` and RVA `0x766c`.
 The handler reads `ksGraphics.getGridVisibility`, inverts the value, and passes it to
 `ksGraphics.setGridVisibility`. Those methods read and write the static
@@ -128,11 +132,15 @@ magenta segments form an 11 by 11-line XZ grid across a 10 m square. Apex stores
 toggle as preview state and does not add grid geometry to the opened model.
 
 A production Chrome check used the installed Abarth 500. The grid-on and grid-off
-captures hashed to `197e3148237ea966` and `2db4c74a6ad57ae8`. All 80 textures loaded,
+captures hashed to `afa6b58d63432335` and `7b86ac9436a1cc24`. All 80 textures loaded,
 both captures returned WebGL error zero, and the browser log contained no errors.
 The grid remained visible through the car, which confirms the recovered depth-off state.
 
 ### Native selected-node axis marker
+
+The supporting IL opcodes, metadata tokens, and installed-binary hash are checked
+in at
+[`docs/evidence/ksnet-selection-axis-il.md`](evidence/ksnet-selection-axis-il.md).
 
 `ksNet.ksGraphics.render` has token `0x06000389` and RVA `0x27388`. After the grid
 pass, the method checks its selected-node argument. A null value skips the marker.
@@ -151,10 +159,13 @@ before GPU upload. This guard does not change valid native transforms.
 
 A production Chrome check used the installed Abarth 500 and selected `GEO_Cofano`.
 The recovered origin was `(0, 0.2583455, 0)`. The selected and cleared captures hashed
-to `debf7c810ffad716` and `06fcc72e4a117042`. All 80 textures loaded, both frames
+to `31b3b6869fe2c020` and `d711076968898938`. All 80 textures loaded, both frames
 returned WebGL error zero, and the browser log contained no errors.
 
 ### Native blurred-rim switch
+
+The supporting IL opcodes, metadata tokens, string RVAs, and installed-binary hash
+are checked in at [`docs/evidence/ksnet-rim-blur-il.md`](evidence/ksnet-rim-blur-il.md).
 
 `ksEditor.Form1.btnBlurred_Click` has token `0x060000da` and RVA `0x7460`.
 The handler sends `{F1}` when the scene tree contains at least one root node.
@@ -182,6 +193,9 @@ keyboard-repeat events, which matches the native edge trigger.
 
 ### Native cockpit-resolution switch
 
+The supporting IL opcodes, metadata tokens, string RVAs, and installed-binary hash
+are checked in at [`docs/evidence/ksnet-cockpit-switch-il.md`](evidence/ksnet-cockpit-switch-il.md).
+
 `ksEditor.Form1.btnCockpitHr_Click` has token `0x060000db` and RVA `0x747f`.
 The handler sends `{F3}` when the scene tree contains at least one root node.
 
@@ -204,6 +218,9 @@ captures hashed to `211f7398666869ab` and `26bfc49e12d08593`. Both captures retu
 WebGL error zero, and the browser log contained no errors.
 
 ### Native damage switch
+
+The checked-in [native F4 IL and stock damage DXBC evidence](evidence/ksnet-damage-switch-il.md)
+records the exact instruction excerpts, binary hashes, and shared-material write.
 
 `ksEditor.Form1.btnDamage_Click` has token `0x060000dc` and RVA `0x74a0`.
 The handler sends `{F4}` when the scene tree contains at least one root node. It then
@@ -233,19 +250,22 @@ bind point 21 and `txDamage` at bind point 4. It computes a saturated damage fac
 from `txDamage.a * dot(txDamageMask, damageZones)`. It mixes the base diffuse with
 `txDamage.rgb` by that factor. With the installed Abarth material's `dirt` value of
 zero, it also scales the specular map by `(1 - factor)` and interpolates that result
-toward the sampled normal alpha.
+toward the sampled normal alpha. The portable exact path is gated on the effective
+`dirt` value being zero. Nonzero dirt uses the labeled base-material preview because
+the remaining stock dirt branch has not been implemented.
 
 The installed Abarth 500 has nine selected damage-glass roots: two front, one rear,
 two left, two right, and two center. All nine roots are authored inactive. Five
 materials define `damageZones`; one uses the exact stock shader and provides both
 damage textures. The portable preview applies the recovered state only during
 visibility and uniform evaluation. It does not change parsed node flags or material
-values. After either previewed F4 state, descendant broken-glass meshes evaluate
-`glassDamage` as one, matching the native one-way write. Its F4 handler ignores
-keyboard-repeat events.
+values. After either previewed F4 state, the preview collects the material objects
+written through selected descendants. Every draw item sharing one of those material
+objects evaluates `glassDamage` as one, matching the native one-way shared-material
+write. Its F4 handler ignores keyboard-repeat events.
 
 A production Chrome check used the installed Abarth 500. The broken and intact
-captures hashed to `f0933250113ef03a` and `2db4c74a6ad57ae8`. Both captures returned
+captures hashed to `1273d5929eab32ac` and `7b86ac9436a1cc24`. Both captures returned
 WebGL error zero, all 80 textures loaded, and the browser log contained no errors.
 
 ## Rendering implication
@@ -505,6 +525,21 @@ and DX10 sRGB and uncompressed RGBA/BGRA/R8 mappings are recognized. A 144.5 MB
 Dallara IR18 fixture loaded 60 of 60 textures, including eight BC7 images, and its
 isolated Firestone sidewall rendered legibly without WebGL or JavaScript errors.
 
+When `EXT_texture_compression_bptc` is unavailable, Apex decodes BC7 to RGBA8 in
+software. The JavaScript decoder is based on `bcdec` commit
+`93628fe5627102fe5187b7eeb99122dec6612c36` under its MIT license. Tests cover all
+eight BC7 modes, clipped edge blocks, missing bytes, and an invalid mode. An
+independent ImageMagick 7.1.2-29 decode of the upstream 800×600 `dice_bc7.dds`
+matched Apex byte-for-byte across all 1,920,000 RGBA bytes. Both decodes have SHA-256
+`7f9bd5c018d7c8872e8b4c04ba724df08627d9b771877b56e2ee55a7a02b173f`.
+In development Electron and the packaged Linux application, a synthetic KN5 rendered
+the same BC7 material with BPTC enabled and with `EXT_texture_compression_bptc`
+forced unavailable. Both
+screenshots have SHA-256
+`39ff6b48044997d05c6cc72d35893963fe6f303faa387520f5b41b9d99ae38ec`.
+The software run loaded one of one textures, returned WebGL error zero, and reported
+no JavaScript or browser-log errors.
+
 After correcting the v5 header, both 100-file baseline groups audit with zero parse
 failures. A separate 300-file mixed-car slice also has zero texture-table failures
 and contains 4,477 textures, including the 49 BC7 images and 1,218 embedded PNGs.
@@ -589,9 +624,60 @@ Imola's ambulance rule also exercises repeated `KEY_...`/`VALUE_...` material
 adjustment pairs. Preserving their source order applies all four `ksEmissive`
 channels to five matching meshes. With the tested flag conditions enabled, the
 complete track evaluation retains 999 overridden meshes, five custom-emissive
-meshes, and 169 bounded light instances. Less-common color-mask, vertex-mask,
-bounce-back, exact soft-edge, and UV-remapping operations remain unsupported or
-approximated.
+meshes, and 169 bounded light instances. Exact soft-edge and raw-UV operations
+remain approximations.
+
+Weighted vertex selection now follows the public CSP shader source. The reference
+is [`emissiveMapping.hlsl`](https://gitlab.com/ac-custom-shaders-patch/public/acc-shaders/-/blob/4f05cc0ba26f7c363886ebb406b35f67157139d0/custom_objects/common/emissiveMapping.hlsl)
+at commit `4f05cc0ba26f7c363886ebb406b35f67157139d0`. Its SHA-256 is
+`736acc0ba6d0071dee752b02040cbe5d89b3d15eb1209af7795d6e859b8f55a2`.
+The renderer mirrors the local position before it calculates each squared distance.
+It divides that distance by `max(weight, 0.00001)`. It selects every tied minimum
+and every zero-weight channel. Multiply, add, and subtract composition use the same
+mask. The public [`custom_emissive.ini`](https://github.com/ac-custom-shaders-patch/acc-extension-config/blob/4dbf2bb909f44ac440414aec55f8c84e5e6b8c97/config/cars/common/custom_emissive.ini)
+template confirms the optional fourth weight and its default value of one. That file
+has SHA-256 `2c6aff18067eaed7911bacac28e2d81875c469f11e4de66cbc9a4d060c6f3f7d`.
+
+Public CSP shader commit `4f05cc0ba26f7c363886ebb406b35f67157139d0`
+defines `MirrorUV` in `custom_objects/common/emissiveMapping.hlsl`. The file SHA-256
+is `736acc0ba6d0071dee752b02040cbe5d89b3d15eb1209af7795d6e859b8f55a2`.
+The shader first takes the fractional UV unless raw UVs are active. It reflects only
+when `dot(emMirrorUV, uv) - emMirrorUVOffset` is negative. The installed common mixin
+negates the normalized direction and divides the pixel offset by the atlas width.
+The parser resolves the final local mixin atlas resolution before it performs this
+division. Reflected coordinates outside the bounded atlas are rejected before
+sampling, which prevents WebGL's repeating sampler from wrapping into unrelated shapes.
+
+The previous preview reflected the positive half-plane. It also left the fractional
+UV conversion to texture wrapping. The renderer now applies the source equation
+before it samples every bounded emissive atlas. The raw-UV mode remains labeled as an
+approximation because the bounded atlas cannot reproduce procedural shapes beyond one repeat.
+
+A production Electron check used the repository LOD-B car and its 7,310-vertex
+`ford13_nocam` mesh. A high-contrast `MirrorUV` rule produced capture hash
+`5f33ea269e1c18d0`. The same atlas without `MirrorUV` produced
+`61abc090dcec8ffc`. Visual inspection showed the reflected emissive region on the
+source-defined half-plane. Both frames returned WebGL error zero, with no browser exceptions.
+
+Public CSP shader commit `4f05cc0ba26f7c363886ebb406b35f67157139d0`
+provides the exact `CustomEmissive_BounceBack` equations. The evidence comes from
+`lightingBounceBack.hlsl`, `ksPerPixelMultiMap_emissive_ps.fx`, `utils_ps.fx`, and
+`ext_lightingfx/_include_ps.fx`. Their SHA-256 values start with `6ed90463`,
+`24dd348f`, `9d34aba4`, and `3a5050a4`.
+
+The rule saturates the dot product of `emissiveMap` and `extBounceBackMask`. It
+multiplies this value by the absolute intensity and twice the diffuse color. A
+negative intensity also multiplies the result by one minus diffuse alpha. The
+gamma-space shader uses exponent 80 for the view lobe. Apex uses this variant
+because its stock material path samples gamma-space texture values. The separate
+gamma-fixed CSP variant uses exponent 400.
+
+The base shader adds a shadowed sun lobe and reflection-cube mip 3 at `0.005`.
+Lighting FX adds point and spot lights when the light direction opposes the view.
+The public line-light bounce code is disabled, so Apex excludes line lights. The
+last bounce-back mixin wins because each mixin writes the same material properties.
+Public config commit `4dbf2bb909f44ac440414aec55f8c84e5e6b8c97` confirms the
+channel mask and default intensity of 20.
 
 An audit of all 236 installed loaded car and track configs currently finds 501
 recognized custom-emissive descriptors across 126 configs and 2,509 expanded
@@ -600,9 +686,9 @@ vertex-mask descriptors, 32 bounce-back rules, and one active MirrorUV rule.
 Declarative `@MIXIN` invocations
 are processed through the same bounded operation table, including their local atlas
 resolution. No installed operation name is silently dropped. Native-only or
-incompletely inferred behavior is surfaced as an approximation: bounce-back,
-vertex-anchor selection, MirrorUV folding, fog/open-door cast lights, flat-normal
-resource substitution, and the uncommon subtractive procedural-composition flags.
+incompletely inferred behavior is surfaced as an approximation: raw-UV procedural
+mapping, fog/open-door cast lights, flat-normal resource substitution, and uncommon
+procedural-composition flags.
 
 The reusable `tools/browser-smoke.mjs` check was run against production assets. The
 Nissan 370Z changes independently for reverse and both rear turn channels; the AE86
@@ -614,6 +700,11 @@ The same verifier now exercises the Nissan fabric-seat normal/detail material,
 Imola's four-way masked curb material, and the Yellowbird's solid-color `txMaps`
 replacement. All these checks completed with WebGL error zero and no browser
 exception.
+
+A packaged Linux WebGL check also exercised weighted vertex anchors on the
+repository car. Enabling the left-turn input changed the capture from
+`da2866f211ce1139` to `4647658e9b4faf36`. Both captures returned WebGL error zero,
+and the browser reported no exception.
 
 Visual inspection, rather than hashes alone, exposed a Direct3D-to-WebGL winding
 difference: copying the stock clockwise rasterizer state verbatim removed upward
@@ -988,9 +1079,9 @@ near-field specular factor as `saturate(extSceneWetness * 100) * AO * 0.5`, then
 multiplies the substrate-specular direction term by `lerp(1, 2, factor)`. Supported
 terrain shaders write AO one to the normal/AO target, so Apex can reproduce both
 terms directly from the live RainFX wetness slider. The same wet uniform is used by
-the viewport and non-recursive scene-probe grass draw. The source's negative-wetness
-snow whitening, local-light specular and cubemap-reflection extension remain outside
-this editor subset.
+the viewport and non-recursive scene-probe grass draw. Both draws also apply the
+source's negative-wetness, squared-height snow whitening. The disabled experimental
+cubemap-reflection extension remains outside this editor subset.
 
 GrassFX has a separate active LightingFX path that is independent of the zeroed
 experimental padding aliases above. Public `custom/grass/flgGrass_vs.fx` selects
@@ -1663,6 +1754,20 @@ The renderer uploads this separate model to an independent edge buffer. It draws
 orange cage over any automatic or forced car LOD. The collider stays separate from
 the visual car scene and its KN5 export.
 
+The same cage includes every parsed `COLLIDER_n` bottom-contact box. Each box keeps
+its section index, centre, size, and `GROUND_ENABLE` flag. The editor applies project
+edits to an immutable parsed baseline, recalculates bounds, and blocks stale edits
+with the file path, byte size, and SHA-256 digest. It rejects non-finite vectors and
+non-positive sizes before project storage or export. The reader caps the source at
+1 MiB and uses fatal UTF-8 decoding. Standalone export writes only `colliders.ini`;
+these car-physics edits do not enter KN5 or CSP output.
+
+A packaged software-WebGL run used the repository car's production LOD-D and bottom
+box. It changed the overlay hash from `78990e81cf782f2b` to `882c01655277409f` after
+centre and size edits. It also confirmed the ground flag, undo, redo, recovery,
+identity binding, standalone export, and disabled CSP export. Every capture returned
+WebGL error zero, and the browser reported no exception.
+
 Apex now stores static collider edits by stable root-relative node path. Each edit
 starts from copied source vertices and indices. Mesh controls apply offset, rotation,
 scale, degenerate-face removal, face reversal, and area-weighted normal rebuilding.
@@ -1676,6 +1781,28 @@ Standalone export serializes the edited collision model as `collider.kn5`. A wri
 test parses this output again and confirms that its topology stays closed. A production
 WebKit run used a synthetic car and closed collider. It confirmed live cage movement,
 zero audit findings, invalid-scale rejection, undo, redo, recovery, and overlay retention.
+
+## Car damage configuration evidence
+
+The repository car fixture contains packed and unpacked `damage.ini` data. Its sections
+define scratch-speed thresholds, an oscillation switch, an initial damage level, and
+two visual objects. Each visual object names a KN5 node and defines rotation, speed,
+damage-zone, oscillation, and allowed-G fields.
+
+Apex accepts at most 1 MiB and decodes UTF-8 in fatal mode. The parser requires finite
+float32 values, three-component vectors, ordered nonnegative speeds, ordered oscillation
+angles, safe names, and safe damage-zone tokens. It diagnoses duplicate and missing
+visual-object indices. Malformed input produces controlled warnings or a controlled load
+error. The serializer retains safe unknown entries and sections.
+
+Project edits use the file path, byte size, and SHA-256 digest. The app blocks stale edits
+when a selected file has a different identity. Undo, redo, local recovery, project JSON,
+reset, and standalone `damage.ini` export use the same normalized edit data. Node-name
+diagnostics compare each configured visual object with the open car hierarchy.
+
+This work does not claim a recovered runtime deformation formula. The viewport does not
+simulate collision damage or object oscillation. Those visible behaviors need separate
+native or CSP evidence and a production rendering comparison.
 
 ## Car hierarchy evidence
 
@@ -2046,6 +2173,31 @@ convention. `WeatherGenerator::loadPreset` at `0x10062940` loads cloud cover,
 cutoff, and color plus fog color, blend, and distance, and substitutes one metre for
 a zero fog distance.
 
+PDB-guided Ghidra decompilation resolves `SkyBox::SkyBox` at `0x10060bdb` and
+`SkyBox::renderClouds` at `0x10061b32`. The constructor reads cloud width, height,
+radius, count, and base speed from `weather.ini`. World detail five keeps the complete
+configured count because the native multiplier is `worldDetail × 0.2`.
+
+The constructor loads every DDS file from `content/texture/clouds`. It places each
+quad on a camera-relative sphere with the recovered `phi`, `theta`, and radius
+formulas. The editor uses the process-global Visual C++ `rand()` sequence. Apex uses
+the same random generator with a fixed local seed, which gives repeatable previews.
+
+The native cloud pass culls front faces, disables depth, and uses alpha blending.
+Each quad faces the camera and keeps the local normal `(0, -1, 0)`. The recovered
+`ksClouds` pixel program uses texture red for lighting and texture alpha for cover.
+It combines `ksLightColor`, remote ambient, cutoff, cloud color, and `900 / ksFogLinear`.
+The recreated pixel and vertex source hashes are `31cda90f3239d561e62fe837b3caeacb5145d0bb570c2c97d673222ae855f07a`
+and `c64f6d0057bdaebccb72cb0d65b632a214873b7d892af67eaadbeebebb6f8a0f`.
+
+A production Chrome check loaded all seven installed cloud textures as `RAW_32` DDS.
+The light-cloud preset drew 50 billboards and 100 triangles. Adjacent texture runs keep
+the recovered construction order for alpha blending instead of regrouping overlapping
+billboards by texture. Its frame
+hash was `c32f6f659d7838db`, compared with `c29e2972e101d933` for clear weather.
+Both frames returned WebGL error zero and no browser errors. A live environment
+cubemap also captured the cloud pass on all six initialized faces.
+
 Apex evaluates that native curve model once per frame and feeds one linear-HDR path:
 procedural horizon/sky gradient and sun disc, weather ambient and direct light,
 environment response, emissive and CSP local lights, and distance fog. It resolves a
@@ -2139,7 +2291,7 @@ and `4be34d217367d96a`. Every state returned WebGL error zero, and the browser l
 no exception. This proves the recovered Gaussian code executes in the production
 WebGL path. It does not prove pixel equality with the native editor.
 
-## CSP vertex ambient-occlusion evidence
+## CSP VAO and normal-override evidence
 
 The installed CSP distribution contains 225 `.vao-patch` files: 22 legacy
 `Patch.data` archives, 196 `Patch_v4.data` archives, and seven `Patch_v5.data`
@@ -2148,9 +2300,11 @@ archives. Each patch is a ZIP container with optional `Config.ini`, dynamic
 checks local-entry bounds, expands only stored or Deflate entries, verifies the
 declared uncompressed size and CRC-32, and rejects encryption or unsupported methods.
 
-Ghidra analysis of the installed 64-bit `dwrite.dll` resolves CSP's loader at
-`FUN_18110f450` (`0x18110f450`) and its application path at `FUN_181110cb0`
-(`0x181110cb0`). The loader prefers v5, then v4, v3, and legacy payloads. Each
+The analyzed `dwrite.dll` has SHA-256
+`3f73a60cc623688a58170ea954a22102695638e4e34ce37d5a98de75503693dd`.
+Ghidra resolves its VAO loader at `FUN_181100760` (`0x181100760`). The application
+path is `FUN_181101fc0` (`0x181101fc0`). The loader prefers v5, then v4, v3, and
+legacy payloads. Each
 ordinary record is a length-prefixed mesh name, a 32-bit record type, three float32
 identity coordinates, a 32-bit vertex count, and encoded per-vertex data. Types 1
 and 3 carry a scalar AO channel; the application writes them to two separate vertex
@@ -2158,7 +2312,7 @@ bytes at offsets `0x28` and `0x29`. Installed car patches commonly carry both,
 while track patches generally use the primary type-1 channel. Legacy type 0 carries
 three half-float color components and type 2 carries a half-float normal vector.
 
-`FUN_1811123e0` at `0x1811123e0` confirms the binding key. CSP first requires the
+`FUN_181103710` at `0x181103710` confirms the binding key. CSP first requires the
 record's vertex count to equal the candidate mesh count, then compares the record XYZ
 with the candidate's first vertex and accepts only a squared distance below exactly
 `0.01`. Record names prefixed with `@@__ALT@:` are stripped and treated as alternative
@@ -2166,7 +2320,7 @@ states. Apex uses the same case-sensitive name, count, and `< 0.01` first-positi
 test and retains alternate records for diagnostics rather than binding them as the
 default state.
 
-The scalar decoder at `FUN_181110890` (`0x181110890`) distinguishes payload versions.
+The scalar decoder at `FUN_181101ba0` (`0x181101ba0`) distinguishes payload versions.
 Version 5 copies its byte directly. Version 4 copies the byte and then computes
 `trunc(sqrt(byte / 255) × 255)`. Legacy/v3 payloads decode IEEE-754 half floats,
 apply `[LIGHTING]` opacity, brightness, and gamma, quantize to a byte, and apply the
@@ -2180,6 +2334,22 @@ directional shadows, CSP local lights, specular, and emissive terms remain indep
 This corresponds to vertex ambient occlusion rather than treating it as another
 shadow map.
 
+The type-2 vector reader is `FUN_181101980` (`0x181101980`). Legacy and v3 records
+contain three IEEE-754 half floats. Modern records contain three bytes divided by
+255. Version 5 squares each component. The function then normalizes every vector.
+`FUN_181101fc0` writes each result directly to the vertex normal at offset `0x0c`.
+It updates both observed vertex layouts and then refreshes the GPU resource.
+
+The application gate is `FUN_1810bf780` (`0x1810bf780`). It rejects special `AC_`
+runtime object names and ordinary names that contain digits. `AC_SEMAPHORE` is an
+explicit exception. The installed type-2 patches use eligible track names.
+
+An audit of all 225 installed archives found type-2 records in eight legacy patches.
+Those patches contain 1,062 normal records and 4,171,165 normal vectors. No installed
+v4 or v5 archive contains type-2 data. Barcelona's first matching patched normal differs
+from the KN5 normal, but both vectors remain near unit length. This confirms that the
+record replaces the mesh normal instead of supplying a diagnostic value.
+
 The [official CSP bakery](https://github.com/ac-custom-shaders-patch/acc-bakeryoptix/blob/master/bakeryoptix/baked_data.cpp)
 stores primary and secondary AO in a float pair. Its first animation bake updates only
 the primary value; the secondary value remains at the bind pose. CSP's public
@@ -2189,8 +2359,8 @@ then evaluates
 the animation channel, and a mix of one selects the bind-pose channel. Apex uploads both
 bytes and applies the equivalent blend with a primary-channel amount.
 
-The installed `dwrite.dll` parser at `FUN_181169ae0` (`0x181169ae0`) reads the
-`[SPLIT_AO]` section. It uses default exponents of two for doors and headlights and one
+The installed `dwrite.dll` reads the `[SPLIT_AO]` section. It uses default exponents
+of two for doors and headlights and one
 for wing animations. It also reads cockpit, door, headlight, steering-wheel, and up to
 100 contiguous wing node lists. The
 [official bakery mappings](https://github.com/ac-custom-shaders-patch/acc-bakeryoptix/blob/master/bakeryoptix/main.cpp)
@@ -2206,9 +2376,10 @@ native runtime rule.
 The native CPU function that converts animation position to `vaoSecondaryMix` is not
 yet recovered. Apex therefore labels `position^EXP` as a power preview; it does not
 claim that curve is exact. Steering-wheel split AO also remains at the bind pose until
-the native steering input and conversion are recovered. Legacy normal-override type-2
-records, `@@__ALT@:` states, embedded v1 extra samples, v2 `ExtraSamples.data`, and tree
-samples are diagnosed but not yet applied.
+the native steering input and conversion are recovered. Apex applies matching type-2
+normals in the viewport and reflection material path. It rejects truncated, zero-length,
+and non-finite normal data. Alternate states, extra samples, and tree samples remain
+diagnostics.
 
 Production Chrome proofs covered both asset scales. The Nissan 370Z patch supplied
 908 records; 416 default records bound both channels on 201 meshes, with 174 alternate
@@ -2222,6 +2393,19 @@ Both scenes retained complete texture coverage, RGBA16F with 4× MSAA, direction
 shadows and weather lighting, returned WebGL error zero for every state, and logged no
 browser exception. These comparisons prove the portable primary-channel path and its
 toggle, not the remaining animated or spatial extra-sample behavior.
+
+A production Electron run loaded Barcelona's 313.1 MB base KN5 and its GP patch.
+All 190 textures loaded. The native identity key bound 450 type-2 records and
+854,598 normal vectors without an unmatched normal record. The selected patched mesh
+contained 2,924 vertices. Its VAO-enabled frame hash was `935823e518160c85`; the
+disabled frame hash was `606082cd2910f2be`. Both states returned WebGL error zero,
+and the browser logged no error. The comparison also includes the primary AO channel.
+It therefore proves the normal upload and toggle path, but it does not isolate normal
+changes from AO changes.
+
+The same desktop run loaded 1,482 meshes and kept all renderer Node.js APIs undefined.
+It served the loopback application with its content security policy and rejected an
+external popup. This checks the cross-platform desktop boundary for the new path.
 
 A packaged Electron follow-up loaded the full Nissan 370Z, its v4 VAO patch, and
 `animations/car_door_L.ksanim`. All 201 matched meshes had primary and secondary AO.
@@ -2424,6 +2608,35 @@ live WebGL check reduced a two-triangle mesh to one triangle. Undo, redo, and re
 preserved all three topology operations, and KN5 export completed. CSP export stayed
 disabled because CSP cannot replace source geometry.
 
+## ksEditor analog RPM evidence
+
+The inspected `ksEditor.exe` has SHA-256
+`7df6a75e7b8be9c6aae7f0ac09a66ac904a06f2a7e22fdbef635aec96c5144a0`.
+The inspected `ksNet.dll` has SHA-256
+`b38dcb826a3311d7233cf0a6a58e5da16b6c8679f8490091e7b434bf730091ca`.
+
+CLR IL for `DashBoard_RPM_Analogic.update` is at method token `0x060001b9` and
+RVA `0x1e500`. It reads `ZERO`, `MIN_VALUE`, `STEP`, and the test RPM value.
+The control accepts values from 1,000 through 15,000 RPM.
+
+`ksNet.ksGraphics.changeTempAnalogic` is at method token `0x06000399` and RVA
+`0x28654`. The RPM wrapper calls this shared method. It finds the configured node
+by its exact name and caches the original matrix on the first call.
+
+The method converts `ZERO + (input - MIN_VALUE) * STEP` from degrees to radians.
+It creates an axis-angle rotation around `(0, 0, 1)`. It passes the original matrix,
+then the rotation matrix, to the native matrix multiply call. The result replaces
+the live node matrix. The method does not clamp its input.
+
+Apex reproduces this linear transform without changing the parsed KN5 matrix.
+The installed Porsche 917/30 binds `ARROW_RPM` once and uses `ZERO=3`,
+`MIN_VALUE=1000`, and `STEP=0.02766667`. LUT mappings and other analog instrument
+types are explicitly outside this implementation.
+
+A live browser check rendered the installed Porsche needle at 1,000 and 6,000 RPM.
+The capture hashes differed. Both captures returned WebGL error zero, with no browser errors.
+The desktop check loaded all 76 textures. Node APIs remained unavailable in the renderer.
+
 ## Desktop packaging evidence
 
 The desktop shell uses Electron 43.4.1 and serves the existing application from an
@@ -2445,3 +2658,29 @@ The Linux build produced these unsigned artifacts:
 
 The artifacts prove the Linux package path. They do not prove Windows or macOS
 packaging, code signing, or installer behavior.
+
+## GrassFX negative-wetness snow evidence
+
+The public CSP shader checkout is at commit
+`4f05cc0ba26f7c363886ebb406b35f67157139d0`. Its
+`custom/grass/flgGrass_ps.fx` file has SHA-256
+`6b446f52b35a6477d3a8b7a64318526e1e5fae6582d892c7b57c0a42092e5753`.
+The pixel shader interpolates the finished grass color toward white. Its blend is
+`pow(pin.PosY, 2) * saturate(-gWetK)`.
+
+Apex uses the normalized blade-height coordinate for `pin.PosY`. The shared
+viewport and reflection-probe GrassFX program applies the same squared-height blend.
+The RainFX control now covers −1 through 1. Positive values retain wet darkening and
+specular gain. Negative values set those wet terms to zero and apply snow only to
+GrassFX. The ordinary RainFX material preview clamps its input to the positive range.
+
+A packaged Linux WebGL check used a bounded 16 m square fixture with 540 generated
+grass fins. Snow mode produced capture hash `69bbb4d406be3bde`. Zero weather input
+produced `7aa7c1780fa0b195` with the same grass geometry. Both states returned WebGL
+error zero, and the browser reported no errors. The full portable suite passed 248
+tests and skipped 27 installed-game checks.
+
+A second packaged check removed GrassFX and kept one RainFX soaking surface. Its
+negative-input and disabled captures both produced `22fa65aa1df02d53`. This proves
+that snow input does not extrapolate the wet-material approximation. Visual inspection
+of the snow capture showed the expected white tips and green roots.

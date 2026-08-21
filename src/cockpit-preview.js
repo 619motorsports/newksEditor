@@ -57,10 +57,10 @@ export function stockCockpitRoleForPath(nodes) {
   return null;
 }
 
-/** Apply a native cockpit state without changing the parsed KN5 nodes. */
-export function cockpitPreviewBranchActive(nodes, highVisible) {
+/** Apply a native cockpit state to the audited pair without changing parsed KN5 nodes. */
+export function cockpitPreviewBranchActive(nodes, highVisible, audit) {
   for (const node of nodes || []) {
-    const role = stockCockpitNodeRole(node?.name);
+    const role = node === audit?.high ? "high" : node === audit?.low ? "low" : null;
     const active = role ? (role === "high" ? Boolean(highVisible) : !Boolean(highVisible)) : Boolean(node?.active);
     if (!active) return false;
   }
