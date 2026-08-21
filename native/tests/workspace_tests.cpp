@@ -182,7 +182,7 @@ void assemblesManifestInputsAndRejectsInvalidReferences() {
         input("first.kn5", &first), input("second.kn5", &second)};
     const auto manifest = parseModelsIni("[MODEL_0]\nFILE=first.kn5\nPOSITION=1,2,3\n[MODEL_1]\nFILE=second.kn5\n");
     const auto assembled = assembleTrackWorkspace(manifest, available);
-    require(assembled.workspace.files.size() == 2 && assembled.workspace.files[0].manifestIndex == 0,
+    require(assembled.workspace.files.size() == 2 && assembled.workspace.files[0].manifestIndex == 0U,
             "track manifest assembly");
     const auto carManifest = parseCarLodsIni("[LOD_0]\nFILE=first.kn5\nIN=0\nOUT=15\n[LOD_1]\nFILE=second.kn5\nIN=15\nOUT=45\n");
     const auto car = assembleCarLodWorkspace(carManifest, available);
