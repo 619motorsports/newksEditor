@@ -36,12 +36,12 @@ void roundTripsModeledFields() {
     node.active = false;
     edits.operations = {
         SetNodeEdit{"0", node},
-        SetWorkspaceFileEdit{2, [] { apex::authoring::WorkspaceFileEdit value; value.position = apex::authoring::Vector3{1, 2, 3}; value.lodIn = 15; return value; }()},
+        SetWorkspaceFileEdit{2, [] { apex::authoring::WorkspaceFileEdit value; value.position = apex::authoring::Vector3{1.0F, 2.0F, 3.0F}; value.lodIn = 15.0F; return value; }()},
         SetMaterialScalarEdit{"Body", "shader", std::string("ksPerPixel")},
-        SetMaterialVectorEdit{"Body", "ksDiffuse", MaterialVector{{1, .5F, 0, 1}, 4}},
+        SetMaterialVectorEdit{"Body", "ksDiffuse", MaterialVector{{1.0F, 0.5F, 0.0F, 1.0F}, 4}},
         SetMaterialResourceEdit{"Body", "txDiffuse", MaterialResource{false, std::string("textures/body.dds"), {}, {}}},
         SetSurfaceEdit{0, [] { apex::authoring::SurfaceEdit value; value.key = "TARMAC"; value.friction = 1.05F; return value; }()},
-        SetDamageEdit{"VISUAL_OBJECT_0", [] { apex::authoring::DamageEdit value; value.minSpeed = 25; value.damageZone = "FRONT"; return value; }()}
+        SetDamageEdit{"VISUAL_OBJECT_0", [] { apex::authoring::DamageEdit value; value.minSpeed = 25.0F; value.damageZone = "FRONT"; return value; }()}
     };
     session.commit(edits);
     const auto json = apex::authoring::serializeProject(session.state());
@@ -61,7 +61,7 @@ void exportsDeterministicCspAndReportsUnsupported() {
         SetMaterialScalarEdit{"Zed", "shader", std::string("ksPerPixel")},
         SetMaterialScalarEdit{"Zed", "blendMode", std::string("ALPHA_BLEND")},
         SetMaterialScalarEdit{"Zed", "zeta", 2.0F},
-        SetMaterialVectorEdit{"Zed", "ksDiffuse", MaterialVector{{1, .5F, 0, 1}, 4}},
+        SetMaterialVectorEdit{"Zed", "ksDiffuse", MaterialVector{{1.0F, 0.5F, 0.0F, 1.0F}, 4}},
         SetMaterialResourceEdit{"Zed", "txDiffuse", MaterialResource{false, std::string("body.dds"), {}, {}}},
         SetMaterialScalarEdit{"Alpha", "shader", std::string("ksPerPixel")}
     }});
