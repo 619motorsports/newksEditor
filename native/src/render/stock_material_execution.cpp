@@ -30,6 +30,8 @@ namespace {
 [[nodiscard]] bool supported_family(std::string_view shader) {
     const std::string key = canonical(shader);
     return key == "ksperpixel" || key == "ksperpixelnm" ||
+           key == "ksperpixelmultimap" ||
+           key == "ksperpixelmultimap_at" ||
            key == "ksperpixelmultimap_nmdetail" ||
            key == "ksperpixelmultimap_at_nmdetail";
 }
@@ -89,6 +91,12 @@ namespace {
     if (key == "ksperpixelnm") {
         add(PipelineResourceKind::sampled_texture, 4U, "txNormal");
         add(PipelineResourceKind::sampler, 5U, "txNormalSampler");
+    } else if (key == "ksperpixelmultimap" ||
+               key == "ksperpixelmultimap_at") {
+        add(PipelineResourceKind::sampled_texture, 4U, "txNormal");
+        add(PipelineResourceKind::sampler, 5U, "txNormalSampler");
+        add(PipelineResourceKind::sampled_texture, 6U, "txMaps");
+        add(PipelineResourceKind::sampler, 7U, "txMapsSampler");
     } else if (key == "ksperpixelmultimap_nmdetail" ||
                key == "ksperpixelmultimap_at_nmdetail") {
         add(PipelineResourceKind::sampled_texture, 4U, "txNormal");
@@ -107,6 +115,7 @@ namespace {
     const std::string key = canonical(shader);
     if (key == "ksperpixel") return 1U;
     if (key == "ksperpixelnm") return 2U;
+    if (key == "ksperpixelmultimap" || key == "ksperpixelmultimap_at") return 3U;
     return 5U;
 }
 
@@ -189,11 +198,12 @@ bool validate_module_sets(std::span<const StockMaterialShaderModules> sets,
     }
     const bool missing_diffuse = seen.count("txdiffuse") == 0U;
     const bool missing_normal = expected >= 2U && seen.count("txnormal") == 0U;
+    const bool missing_maps = expected >= 3U && seen.count("txmaps") == 0U;
     const bool missing_detail = expected == 5U &&
-                                (seen.count("txmaps") == 0U || seen.count("txdetail") == 0U ||
+                                (seen.count("txdetail") == 0U ||
                                  (seen.count("txnormaldetail") == 0U &&
                                   seen.count("txdetailnm") == 0U));
-    if (missing_diffuse || missing_normal || missing_detail) {
+    if (missing_diffuse || missing_normal || missing_maps || missing_detail) {
         diagnostic = diag("stock_material_resources_incomplete", "Draw packet is missing a required stock texture role");
         return false;
     }
@@ -422,6 +432,7 @@ StockMaterialExecutionResult prepare_stock_material_execution(
             const MaterialBinding binding = build_material_binding(
                 source, node != nullptr && node->transparent, request.model->textures.size(),
                 overrides, request.limits.material);
+            const std::string shader_key = canonical(binding.shader);
             if (binding.status != MaterialBindingStatus::complete)
                 return fail(StaticSceneResourceStatus::invalid_request,
                             "stock_material_binding_incomplete", "The material binding is incomplete or unsupported");
@@ -438,7 +449,8 @@ StockMaterialExecutionResult prepare_stock_material_execution(
 
             const KsPerPixelMaterialResolveResult resolved =
                 resolve_ks_per_pixel_material_constants(binding,
-                    {false, canonical(binding.shader) == "ksperpixelmultimap_at_nmdetail"});
+                    {false, shader_key == "ksperpixelmultimap_at" ||
+                                shader_key == "ksperpixelmultimap_at_nmdetail"});
             if (!resolved.ok()) {
                 const StaticSceneResourceStatus status =
                     resolved.status == KsPerPixelMaterialResolveStatus::unsupported

@@ -110,7 +110,10 @@ An exact tangent-space extension adds `txNormal` at bindings 4 and 5. A second
 extension adds linear `txMaps` at bindings 6 and 7. D3D12 uses `t4`, `s5`,
 `t6`, and `s7`. The maps shader uses `maps.r` for specular strength. It uses
 `maps.g` for the source exponent equation. The maps ABI requires zero Fresnel,
-so `maps.b` remains staged. A fourth ABI supports the
+so `maps.b` remains staged. The material handoff supports
+`ksPerPixelMultiMap` and `ksPerPixelMultiMap_AT` through this eight-binding
+ABI. It rejects active generic detail, object-space normals, and nonzero
+Fresnel. The AT profile retains alpha-to-coverage on a 4x target. A fourth ABI supports the
 `ksPerPixelMultiMap_NMDetail` family. This family includes
 `ksPerPixelMultiMap_AT_NMDetail`. It adds `txDetail` at bindings 8 and 9. It
 adds `txNormalDetail` at bindings 10 and 11. The legacy `txDetailNM` name is an
@@ -136,8 +139,11 @@ A bounded stock-scene facade composes the render plan, draw packets, material
 handoff, and static-scene preparation. It uses linear topology preflight and
 rejects malformed edges, cycles, and over-budget plans before backend
 allocation. A real SwiftShader test executes the complete facade through
-pixel readback. The same test runs through D3D12/WARP in CI. The input snapshot
-must contain resolved workspace and CSP state. A bounded workspace adapter
+pixel readback. A second test executes the three-texture MultiMap facade and
+checks the `maps.r` and `maps.g` result. It also executes the AT family on a
+4x target and checks partial resolved coverage. The same tests run through
+D3D12/WARP in CI. The input snapshot must contain resolved workspace and CSP
+state. A bounded workspace adapter
 maps files to merged scene roots in source order. It attaches file and
 auxiliary labels without partial mutation. A bounded LOD resolver uses the
 production half-open ranges and FOV formula. The caller must supply the exact

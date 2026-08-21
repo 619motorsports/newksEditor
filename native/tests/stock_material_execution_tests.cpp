@@ -117,7 +117,11 @@ Fixture fixture(std::string shader) {
     auto& material = result.model.materials.front();
     material.name = "seat_material";
     material.shader = std::move(shader);
-    material.serializedBlendMode = material.shader == "ksPerPixelMultiMap_AT_NMDetail" ? 2U : 0U;
+    material.serializedBlendMode =
+        material.shader == "ksPerPixelMultiMap_AT" ||
+                material.shader == "ksPerPixelMultiMap_AT_NMDetail"
+            ? 2U
+            : 0U;
     material.properties.push_back({"fresnelMaxLevel", 0.0F, {}, {}, {}});
     const std::array<const char*, 5> slots = {"txDiffuse", "txNormal", "txMaps", "txDetail", "txNormalDetail"};
     for (std::size_t index = 0U; index < slots.size(); ++index) {
@@ -159,7 +163,14 @@ Fixture fixture(std::string shader) {
     packet.vertex_stride_floats = 11U;
     packet.flags.wireframe = false;
     packet.resources.reserve(slots.size());
-    const std::size_t count = material.shader == "ksPerPixel" ? 1U : material.shader == "ksPerPixelNM" ? 2U : 5U;
+    const bool base_multimap = material.shader == "ksPerPixelMultiMap" ||
+                               material.shader == "ksPerPixelMultiMap_AT" ||
+                               material.shader == "ksPerPixelMultiMapSimpleRefl";
+    const std::size_t count = material.shader == "ksPerPixel"
+                                  ? 1U
+                                  : material.shader == "ksPerPixelNM"
+                                        ? 2U
+                                        : base_multimap ? 3U : 5U;
     for (std::size_t index = 0U; index < count; ++index)
         packet.resources.push_back({slots[index], static_cast<std::uint32_t>(index),
                                     static_cast<std::uint32_t>(index), std::string("texture_") + std::to_string(index)});
@@ -187,6 +198,28 @@ StockMaterialExecutionRequest request_for(Fixture& fixture) {
 
 void test_success_and_a2c() {
     FakeDevice device;
+    Fixture base_fixture = fixture("ksPerPixelMultiMap");
+    const auto base_result =
+        prepare_stock_material_execution(device, request_for(base_fixture));
+    require(base_result.ok() && base_result.resources->draw_count() == 1U,
+            "base MultiMap handoff must retain its three-resource packet");
+
+    Fixture base_at_fixture = fixture("ksPerPixelMultiMap_AT");
+    const auto base_at_result =
+        prepare_stock_material_execution(device, request_for(base_at_fixture));
+    require(base_at_result.ok() && base_at_result.resources->draw_count() == 1U,
+            "base AT MultiMap handoff must retain A2C on a four-sample target");
+    const std::size_t calls_before_base_bad_target = device.buffer_calls;
+    auto base_bad_target = request_for(base_at_fixture);
+    base_bad_target.targets.colors.front().samples = 1U;
+    base_bad_target.targets.depth.samples = 1U;
+    const auto base_bad_target_result =
+        prepare_stock_material_execution(device, base_bad_target);
+    require(base_bad_target_result.status != StaticSceneResourceStatus::ready,
+            "base AT MultiMap must reject a non-four-sample target");
+    require(device.buffer_calls == calls_before_base_bad_target,
+            "base AT target mismatch must fail before backend allocation");
+
     Fixture fixture_value = fixture("ksPerPixelMultiMap_AT_NMDetail");
     const auto result = prepare_stock_material_execution(device, request_for(fixture_value));
     if (!result.ok())
@@ -252,7 +285,27 @@ void test_preflight_failures() {
     result = prepare_stock_material_execution(device, request_for(incomplete));
     require(result.diagnostic.code == "stock_material_resources_incomplete", "incomplete resources need a precise diagnostic");
 
-    Fixture unsupported = fixture("ksPerPixelMultiMap");
+    Fixture incomplete_base = fixture("ksPerPixelMultiMap");
+    incomplete_base.packets.front().resources.pop_back();
+    result = prepare_stock_material_execution(device, request_for(incomplete_base));
+    require(result.diagnostic.code == "stock_material_resources_incomplete",
+            "base MultiMap requires txDiffuse, txNormal, and txMaps");
+
+    Fixture duplicate_base = fixture("ksPerPixelMultiMap");
+    duplicate_base.packets.front().resources.back().slot = "txNormal";
+    result = prepare_stock_material_execution(device, request_for(duplicate_base));
+    require(result.diagnostic.code == "stock_material_resource_duplicate",
+            "base MultiMap rejects a duplicated texture role");
+
+    Fixture detailed_base = fixture("ksPerPixelMultiMap");
+    detailed_base.model.materials.front().properties.push_back(
+        {"useDetail", 1.0F, {}, {}, {}});
+    result = prepare_stock_material_execution(device, request_for(detailed_base));
+    require(result.diagnostic.code ==
+                "ks_per_pixel_multimap_detail_unsupported",
+            "base MultiMap rejects active generic detail before allocation");
+
+    Fixture unsupported = fixture("ksPerPixelMultiMapSimpleRefl");
     result = prepare_stock_material_execution(device, request_for(unsupported));
     require(result.diagnostic.code == "stock_material_family_unsupported", "unsupported families must not be relabeled");
 

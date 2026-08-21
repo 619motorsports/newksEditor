@@ -162,7 +162,9 @@ fixture excludes `txDetail`/`txNormalDetail`, multilayer world-XZ resources,
 Fresnel/reflection (`maps.b` is sampled but has no consumer in this bounded
 fixture), shadows, AO/VAO, rain, seasons, local/CSP lights, damage, alpha
 testing, transparency, and overlays. This is an execution fixture for the
-maps channel semantics, not a complete `ksPerPixelMultiMap_NMDetail` shader.
+maps channel semantics. The stock facade uses it for the bounded
+`ksPerPixelMultiMap` and `ksPerPixelMultiMap_AT` families. Material preflight
+rejects active detail and Fresnel. This is not a complete stock shader.
 
 Maps fixture identities, compiled with glslang `16.4.0` and validated with
 SPIRV-Tools `2026.3` (`vulkan-sdk-1.4.357.0-0-g9a49b0883`), target SPIR-V 1.0

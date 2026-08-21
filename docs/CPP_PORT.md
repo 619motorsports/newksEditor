@@ -144,7 +144,10 @@ remains unchanged and feature-complete.
   the exponent as `max(1, ksSpecularEXP * maps.g + 1)`. Known-pixel tests cover
   zero strength, low exponent, and full exponent. They also cover independent
   samplers and mixed six-binding and eight-binding batches. This ABI requires
-  zero Fresnel, so it does not consume `maps.b`. A fourth bounded ABI executes
+  zero Fresnel, so it does not consume `maps.b`. The material handoff uses
+  this ABI for `ksPerPixelMultiMap` and `ksPerPixelMultiMap_AT`. It rejects
+  active generic detail and object-space normals. The AT profile requires a
+  4x target and retains alpha-to-coverage. A fourth bounded ABI executes
   the `ksPerPixelMultiMap_NMDetail` family. This family includes
   `ksPerPixelMultiMap_AT_NMDetail`. It adds `txDetail` at bindings 8 and 9.
   It adds `txNormalDetail` at bindings 10 and 11. The legacy `txDetailNM` name
@@ -177,7 +180,10 @@ remains unchanged and feature-complete.
   traversal. It rejects malformed edges, cycles, and over-budget plans before
   backend allocation. A real SwiftShader pixel test executes the complete
   facade with an embedded DDS texture and owned material and frame records.
-  The same test runs on the D3D12/WARP CI path. The caller must first resolve
+  A second facade test executes the three-texture MultiMap path. It checks the
+  exact bounded `maps.r` and `maps.g` result. It also executes the AT family on
+  a 4x target and checks partial resolved coverage. The same tests run on the
+  D3D12/WARP CI path. The caller must first resolve
   preview modes, per-node CSP overrides, and surface overlays. A bounded
   workspace adapter maps metadata to merged scene roots. It attaches file and
   auxiliary labels without partial mutation. A bounded resolver implements
@@ -282,8 +288,8 @@ remains unchanged and feature-complete.
   channels. The embedded static-scene path still uses its exact CPU decode.
   The static-scene path requires explicit backend shader bytecode. The bounded
   material handoff selects modules by material or shader family. It derives
-  the 12-binding layout, material constants, A2C state, culling, and depth
-  state. The stock-scene facade composes this handoff with visibility, LOD,
+  the eight-binding or 12-binding layout, material constants, A2C state,
+  culling, and depth state. The stock-scene facade composes this handoff with visibility, LOD,
   stable draw ordering, and packet validation for a pre-resolved snapshot.
   It does not execute stock KN5 shader containers. The port does not create
   windows or swapchains. It does not provide full golden-image parity.
@@ -311,9 +317,10 @@ resources are `txDiffuse`, `txNormal`, and `txMaps`. Its detail and Fresnel
 controls are zero. The capture at a sun height of 55 degrees had hash
 `f0c4a1d3753fa220`. The capture at 10 degrees had hash `cea4a0300ce8c9d4`.
 WebGL reported no errors, and all 63 textures were ready. This gate identifies
-an exact source fixture for the bounded maps equation. Production packets and
-stock shader translation remain staged. The gate does not prove native pixel
-parity for `ksPerPixelMultiMap` or `ksPerPixelMultiMap_NMDetail`.
+an exact source fixture for the bounded maps equation. The native stock-scene
+facade now executes this bounded three-texture family. Stock shader translation
+and full `ksPerPixelMultiMap` parity remain staged. The gate does not prove
+parity for Fresnel, reflection, detail, or `ksPerPixelMultiMap_NMDetail`.
 
 The production WebGL detail-stack gate uses `GEO_Fabric1`, material `Fabric1`,
 and shader `ksPerPixelMultiMap_NMDetail`. Its active resources include

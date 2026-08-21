@@ -65,8 +65,9 @@ struct StockMaterialExecutionResult {
 // Build one explicit executable PipelineProgram and one resolved 64-byte
 // material record per used material, then synchronously hand the copied
 // request to prepare_static_scene_resources(). Supported shader families are
-// ksPerPixel, ksPerPixelNM, ksPerPixelMultiMap_NMDetail, and
-// ksPerPixelMultiMap_AT_NMDetail. The latter retains the profile's A2C state.
+// ksPerPixel, ksPerPixelNM, ksPerPixelMultiMap,
+// ksPerPixelMultiMap_AT, ksPerPixelMultiMap_NMDetail, and
+// ksPerPixelMultiMap_AT_NMDetail. Both AT profiles retain their A2C state.
 [[nodiscard]] StockMaterialExecutionResult prepare_stock_material_execution(
     Device& device, const StockMaterialExecutionRequest& request);
 

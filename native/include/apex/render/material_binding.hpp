@@ -201,9 +201,9 @@ struct KsPerPixelMaterialResolveResult {
 };
 
 // Resolve the bounded ksPerPixel material-value subset. ksPerPixelNM and the
-// tangent-space ksPerPixelMultiMap_NMDetail family (including its
-// alpha-tested AT variant) are accepted only for tangent-space normals with
-// Fresnel reflection disabled. This copies source semantics from public/app.js;
+// tangent-space ksPerPixelMultiMap families (including their alpha-tested AT
+// variants) are accepted only for tangent-space normals with Fresnel
+// reflection disabled. This copies source semantics from public/app.js;
 // the 64-byte layout is the separately documented portable test ABI in
 // render/device.hpp, not a claim about the native stock shader's
 // constant-buffer layout.

@@ -163,6 +163,12 @@ void add_default(std::map<std::string, MaterialPropertyValue>& properties,
            canonical_shader == "ksperpixelmultimap_at_nmdetail";
 }
 
+[[nodiscard]] bool is_base_multimap_family(
+    std::string_view canonical_shader) noexcept {
+    return canonical_shader == "ksperpixelmultimap" ||
+           canonical_shader == "ksperpixelmultimap_at";
+}
+
 [[nodiscard]] std::vector<std::string> required_slots(std::string_view shader) {
     const std::string key = canonical(shader);
     if (key == "kstyres" || key == "newstefano_kstyres")
@@ -173,6 +179,8 @@ void add_default(std::map<std::string, MaterialPropertyValue>& properties,
         return {"txDamage", "txDamageMask"};
     if (is_nmdetail_family(key))
         return {"txDiffuse", "txNormal", "txMaps", "txDetail", "txNormalDetail"};
+    if (is_base_multimap_family(key))
+        return {"txDiffuse", "txNormal", "txMaps"};
     if (starts_with(key, "ksmultilayer"))
         return {"txMask", "txDetailR", "txDetailG", "txDetailB", "txDetailA"};
     if (starts_with(key, "ksperpixel") || starts_with(key, "ksskinnedmesh") ||
@@ -471,11 +479,13 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
     KsPerPixelMaterialResolveResult result;
     const std::string shader = canonical(binding.shader);
     const bool detail_stack_variant = is_nmdetail_family(shader);
-    const bool normal_variant = shader == "ksperpixelnm" || detail_stack_variant;
+    const bool base_multimap_variant = is_base_multimap_family(shader);
+    const bool normal_variant = shader == "ksperpixelnm" ||
+                                base_multimap_variant || detail_stack_variant;
     if (shader != "ksperpixel" && !normal_variant) {
         result.status = KsPerPixelMaterialResolveStatus::unsupported;
         result.diagnostic = {"ks_per_pixel_shader_unsupported", "shader",
-                             "The bounded material resolver accepts exact ksPerPixel, ksPerPixelNM, ksPerPixelMultiMap_NMDetail, and ksPerPixelMultiMap_AT_NMDetail shaders"};
+                             "The bounded material resolver accepts exact ksPerPixel, ksPerPixelNM, ksPerPixelMultiMap, ksPerPixelMultiMap_AT, ksPerPixelMultiMap_NMDetail, and ksPerPixelMultiMap_AT_NMDetail shaders"};
         return result;
     }
 
@@ -566,11 +576,23 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
                              "The bounded normal-map paths require disabled Fresnel reflection"};
         return result;
     }
+    if (base_multimap_variant && result.constants.detail[0] > 0.5F) {
+        result.status = KsPerPixelMaterialResolveStatus::unsupported;
+        result.diagnostic = {"ks_per_pixel_multimap_detail_unsupported", "useDetail",
+                             "The bounded eight-binding ksPerPixelMultiMap path does not execute the generic detail stack"};
+        return result;
+    }
 
     if (detail_stack_variant && binding.status != MaterialBindingStatus::complete) {
         result.status = KsPerPixelMaterialResolveStatus::unsupported;
         result.diagnostic = {"ks_per_pixel_nmdetail_resources_incomplete", "resources",
                              "The bounded ksPerPixelMultiMap_NMDetail family requires txDiffuse, txNormal, txMaps, txDetail, and txNormalDetail"};
+        return result;
+    }
+    if (base_multimap_variant && binding.status != MaterialBindingStatus::complete) {
+        result.status = KsPerPixelMaterialResolveStatus::unsupported;
+        result.diagnostic = {"ks_per_pixel_multimap_resources_incomplete", "resources",
+                             "The bounded ksPerPixelMultiMap family requires txDiffuse, txNormal, and txMaps"};
         return result;
     }
 

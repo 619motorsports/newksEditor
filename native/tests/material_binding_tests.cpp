@@ -397,6 +397,83 @@ void resolves_bounded_tangent_space_nm_variant() {
             "normal-map Fresnel reflection remains explicit");
 }
 
+void resolves_bounded_base_multimap_families() {
+    Kn5Material material;
+    material.shader = "ksPerPixelMultiMap";
+    material.properties = {
+        {"ksSpecular", 0.4F, {}, {}, {}},
+        {"ksSpecularEXP", 20.0F, {}, {}, {}},
+        {"fresnelMaxLevel", 0.0F, {}, {}, {}},
+        {"nmObjectSpace", 0.0F, {}, {}, {}},
+        {"useDetail", 0.0F, {}, {}, {}},
+    };
+    material.resources = {
+        {"txDiffuse", 21U, "body.dds"},
+        {"txNormal", 22U, "body_nm.dds"},
+        {"txMaps", 23U, "body_maps.dds"},
+    };
+    const MaterialBinding complete = build_material_binding(material, 3U);
+    const auto resolved = resolve_ks_per_pixel_material_constants(complete);
+    require(complete.status == MaterialBindingStatus::complete && resolved.ok() &&
+                resolved.constants.lighting[2] == 0.4F &&
+                resolved.constants.lighting[3] == 20.0F,
+            "bounded base MultiMap requires and resolves its three-resource stack");
+
+    MaterialBindingOverrides overrides;
+    overrides.properties.emplace(
+        "ksSpecular", MaterialPropertyOverride::scalar_value(0.7F));
+    overrides.properties.emplace(
+        "ksSpecularEXP", MaterialPropertyOverride::scalar_value(8.0F));
+    const auto overridden = resolve_ks_per_pixel_material_constants(
+        build_material_binding(material, 3U, &overrides));
+    require(overridden.ok() && overridden.constants.lighting[2] == 0.7F &&
+                overridden.constants.lighting[3] == 8.0F,
+            "base MultiMap keeps CSP specular overrides in the maps equation");
+
+    material.shader = "ksPerPixelMultiMap_AT";
+    const MaterialBinding at_binding = build_material_binding(material, 3U);
+    const auto at_result = resolve_ks_per_pixel_material_constants(at_binding);
+    require(at_binding.status == MaterialBindingStatus::complete && at_result.ok(),
+            "bounded base AT MultiMap uses the same three-resource constants path");
+
+    Kn5Material missing = material;
+    missing.resources.pop_back();
+    const MaterialBinding incomplete = build_material_binding(missing, 2U);
+    const auto incomplete_result =
+        resolve_ks_per_pixel_material_constants(incomplete);
+    require(incomplete.status == MaterialBindingStatus::incomplete &&
+                !incomplete_result.ok() &&
+                incomplete_result.diagnostic.code ==
+                    "ks_per_pixel_multimap_resources_incomplete",
+            "base MultiMap rejects a missing txMaps resource");
+
+    material.properties[4].value = 1.0F;
+    const auto detail = resolve_ks_per_pixel_material_constants(
+        build_material_binding(material, 3U));
+    require(!detail.ok() &&
+                detail.diagnostic.code ==
+                    "ks_per_pixel_multimap_detail_unsupported",
+            "eight-binding base MultiMap does not silently ignore an active detail stack");
+
+    material.properties[4].value = 0.0F;
+    material.properties[3].value = 1.0F;
+    const auto object_space = resolve_ks_per_pixel_material_constants(
+        build_material_binding(material, 3U));
+    require(!object_space.ok() &&
+                object_space.diagnostic.code ==
+                    "ks_per_pixel_nm_object_space_unsupported",
+            "base MultiMap keeps object-space normals outside the bounded path");
+
+    material.properties[3].value = 0.0F;
+    material.properties[2].value = 0.05F;
+    const auto fresnel = resolve_ks_per_pixel_material_constants(
+        build_material_binding(material, 3U));
+    require(!fresnel.ok() &&
+                fresnel.diagnostic.code ==
+                    "ks_per_pixel_nm_fresnel_unsupported",
+            "base MultiMap keeps maps.b reflection outside the bounded path");
+}
+
 void resolves_bounded_nmdetail_stack() {
     Kn5Material material;
     material.shader = "ksPerPixelMultiMap_NMDetail";
@@ -579,6 +656,7 @@ int main() {
         resolves_ks_per_pixel_csp_precedence_and_alpha_capture();
         rejects_invalid_ks_per_pixel_constants();
         resolves_bounded_tangent_space_nm_variant();
+        resolves_bounded_base_multimap_families();
         resolves_bounded_nmdetail_stack();
         resolves_bounded_at_nmdetail_stack();
         std::cout << "material binding tests passed\n";

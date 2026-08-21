@@ -2639,6 +2639,175 @@ bool contract_backend(apex::render::Backend backend) {
                 stock_draw_result.rgba8[3] == std::byte{255},
             "bounded stock-scene facade retains the clear color outside geometry");
 
+    // Execute the bounded base ksPerPixelMultiMap family through the same
+    // stock-scene facade. This path implements only the source-evidenced
+    // three-texture direct-light maps equation. Detail and Fresnel reflection
+    // are rejected during material preflight.
+    apex::formats::Kn5File multimap_model;
+    multimap_model.source = "stock-scene-multimap-runtime.kn5";
+    multimap_model.root.type = 1U;
+    multimap_model.root.kind = "node";
+    multimap_model.root.name = "ROOT";
+    apex::formats::Kn5Node multimap_mesh = indexed_mesh;
+    multimap_mesh.name = "MESH";
+    multimap_mesh.materialId = 0U;
+    multimap_model.root.children.push_back(std::move(multimap_mesh));
+    apex::formats::Kn5Material multimap_material;
+    multimap_material.name = "multimap-material";
+    multimap_material.shader = "ksPerPixelMultiMap";
+    multimap_material.depthMode = 2U;
+    multimap_material.properties = {
+        {"ksAmbient", 0.2F, {}, {}, {}},
+        {"ksDiffuse", 0.4F, {}, {}, {}},
+        {"ksSpecular", 0.5F, {}, {}, {}},
+        {"ksSpecularEXP", 1.0F, {}, {}, {}},
+        {"ksEmissive", 0.0F, {}, {0.0F, 0.0F, 0.0F}, {}},
+        {"fresnelMaxLevel", 0.0F, {}, {}, {}},
+        {"nmObjectSpace", 0.0F, {}, {}, {}},
+        {"useDetail", 0.0F, {}, {}, {}},
+    };
+    multimap_material.resources = {
+        {"txDiffuse", 21U, "multimap-body.dds"},
+        {"txNormal", 22U, "multimap-normal.dds"},
+        {"txMaps", 23U, "multimap-maps.dds"},
+    };
+    multimap_model.materials.push_back(std::move(multimap_material));
+    const std::array<std::array<std::uint8_t, 4>, 3> multimap_pixels = {
+        std::array<std::uint8_t, 4>{17U, 201U, 83U, 255U},
+        std::array<std::uint8_t, 4>{128U, 128U, 255U, 255U},
+        std::array<std::uint8_t, 4>{255U, 255U, 255U, 255U},
+    };
+    const std::array<const char*, 3> multimap_texture_names = {
+        "multimap-body.dds", "multimap-normal.dds", "multimap-maps.dds"};
+    for (std::size_t index = 0U; index < multimap_pixels.size(); ++index) {
+        std::vector<std::uint8_t> dds = rgba8_dds_fixture(multimap_pixels[index]);
+        multimap_model.textures.push_back(
+            {true, multimap_texture_names[index],
+             static_cast<std::uint32_t>(dds.size()), std::move(dds), {}});
+    }
+
+    apex::scene::SceneSnapshot multimap_scene;
+    (void)multimap_scene.add_material(
+        {"multimap-material", "ksPerPixelMultiMap",
+         apex::scene::BlendMode::opaque});
+    apex::scene::SceneNode multimap_root;
+    multimap_root.name = "ROOT";
+    const apex::scene::NodeId multimap_root_id =
+        multimap_scene.add_node(std::move(multimap_root));
+    apex::scene::SceneNode multimap_mesh_node;
+    multimap_mesh_node.name = "MESH";
+    multimap_mesh_node.kind = apex::scene::NodeKind::mesh;
+    multimap_mesh_node.material = 0U;
+    (void)multimap_scene.add_node(std::move(multimap_mesh_node),
+                                  multimap_root_id);
+
+    const std::array<StockMaterialShaderModules, 1> multimap_shader_modules = {
+        StockMaterialShaderModules{
+            StockMaterialShaderKeyKind::shader_family,
+            "ksPerPixelMultiMap",
+            std::span<const PipelineShaderModule>(nm_maps_pipeline.shaders),
+        }};
+    StockSceneExecutionRequest multimap_request;
+    multimap_request.model = &multimap_model;
+    multimap_request.scene = &multimap_scene;
+    multimap_request.shader_modules = multimap_shader_modules;
+    multimap_request.targets = nm_maps_pipeline.targets;
+    multimap_request.texture_authority =
+        StaticSceneTextureAuthority::embedded_kn5;
+    StockSceneExecutionResult multimap_result =
+        prepare_stock_scene_execution(*device.device, multimap_request);
+    require(multimap_result.ok() &&
+                multimap_result.render_plan.items.size() == 1U &&
+                multimap_result.resources->draw_count() == 1U &&
+                multimap_result.resources->owned_texture_count() == 3U &&
+                multimap_result.resources->owned_material_constant_count() == 1U &&
+                multimap_result.resources->owns_frame_constants(),
+            "bounded MultiMap stock facade owns its three textures and constants");
+    StaticSceneFrameDescription multimap_frame;
+    multimap_frame.camera = *indexed_camera.frame;
+    multimap_frame.frame_constants = nm_frame;
+    const IndexedStaticMeshBatchResult multimap_draw_result =
+        multimap_result.resources->draw_and_readback(
+            *device.device, *triangle_texture.texture, multimap_frame);
+    require(multimap_draw_result.ok(),
+            "bounded MultiMap stock facade executes on the real backend");
+    require_nm_pixel(multimap_draw_result.rgba8, 74U, 155U, 103U,
+                     "bounded MultiMap stock facade executes maps.r and maps.g");
+
+    apex::formats::Kn5File multimap_at_model = multimap_model;
+    multimap_at_model.source = "stock-scene-multimap-at-runtime.kn5";
+    multimap_at_model.materials.front().shader = "ksPerPixelMultiMap_AT";
+    multimap_at_model.materials.front().blendMode = 2U;
+    multimap_at_model.materials.front().serializedBlendMode = 2U;
+    multimap_at_model.textures.front().data =
+        rgba8_dds_fixture({17U, 201U, 83U, 128U});
+    multimap_at_model.textures.front().size = static_cast<std::uint32_t>(
+        multimap_at_model.textures.front().data.size());
+
+    apex::scene::SceneSnapshot multimap_at_scene;
+    (void)multimap_at_scene.add_material(
+        {"multimap-material", "ksPerPixelMultiMap_AT",
+         apex::scene::BlendMode::alpha_to_coverage});
+    apex::scene::SceneNode multimap_at_root;
+    multimap_at_root.name = "ROOT";
+    const apex::scene::NodeId multimap_at_root_id =
+        multimap_at_scene.add_node(std::move(multimap_at_root));
+    apex::scene::SceneNode multimap_at_mesh_node;
+    multimap_at_mesh_node.name = "MESH";
+    multimap_at_mesh_node.kind = apex::scene::NodeKind::mesh;
+    multimap_at_mesh_node.material = 0U;
+    (void)multimap_at_scene.add_node(std::move(multimap_at_mesh_node),
+                                     multimap_at_root_id);
+
+    const std::array<StockMaterialShaderModules, 1> multimap_at_shader_modules = {
+        StockMaterialShaderModules{
+            StockMaterialShaderKeyKind::shader_family,
+            "ksPerPixelMultiMap_AT",
+            std::span<const PipelineShaderModule>(nm_maps_pipeline.shaders),
+        }};
+    PipelineRenderTargets multimap_at_targets = nm_maps_pipeline.targets;
+    multimap_at_targets.colors.front().samples = 4U;
+    multimap_at_targets.depth.samples = 4U;
+    StockSceneExecutionRequest multimap_at_request;
+    multimap_at_request.model = &multimap_at_model;
+    multimap_at_request.scene = &multimap_at_scene;
+    multimap_at_request.shader_modules = multimap_at_shader_modules;
+    multimap_at_request.targets = multimap_at_targets;
+    multimap_at_request.texture_authority =
+        StaticSceneTextureAuthority::embedded_kn5;
+    StockSceneExecutionResult multimap_at_result =
+        prepare_stock_scene_execution(*device.device, multimap_at_request);
+    if (!multimap_at_result.ok())
+        throw std::runtime_error(
+            "bounded AT MultiMap facade failed: " +
+            multimap_at_result.diagnostic.code + " " +
+            multimap_at_result.diagnostic.message);
+    require(multimap_at_result.ok() &&
+                multimap_at_result.resources->draw_count() == 1U &&
+                multimap_at_result.resources->owned_texture_count() == 3U,
+            "bounded AT MultiMap stock facade prepares a four-sample draw");
+    TextureDescription multimap_at_target_description = triangle_description;
+    multimap_at_target_description.samples = 4U;
+    TextureResult multimap_at_target =
+        device.device->create_texture(multimap_at_target_description);
+    require(multimap_at_target.ok(),
+            "bounded AT MultiMap stock facade creates a four-sample target");
+    const IndexedStaticMeshBatchResult multimap_at_draw_result =
+        multimap_at_result.resources->draw_and_readback(
+            *device.device, *multimap_at_target.texture, multimap_frame);
+    require(multimap_at_draw_result.ok(),
+            "bounded AT MultiMap stock facade executes on the real backend");
+    const std::uint8_t multimap_at_red =
+        std::to_integer<std::uint8_t>(multimap_at_draw_result.rgba8[center]);
+    const std::uint8_t multimap_at_green =
+        std::to_integer<std::uint8_t>(multimap_at_draw_result.rgba8[center + 1U]);
+    const std::uint8_t multimap_at_blue =
+        std::to_integer<std::uint8_t>(multimap_at_draw_result.rgba8[center + 2U]);
+    require(multimap_at_red > 0U && multimap_at_red < 74U &&
+                multimap_at_green > 0U && multimap_at_green < 155U &&
+                multimap_at_blue > 0U && multimap_at_blue < 103U,
+            "bounded AT MultiMap facade generates partial resolved coverage");
+
     // An sRGB source and target form a decode/encode round trip. A wrong
     // source format produces visibly different midtone bytes.
     put_u32(embedded_model.textures.front().data, 128U, 29U);
