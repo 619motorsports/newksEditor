@@ -125,12 +125,13 @@ remains unchanged and feature-complete.
   camera position. Static scenes derive the camera position from the active
   `CameraFrame`. They own one bounded mutable record and update it before an
   ordered batch.
-  Both backends execute the source-evidenced ambient, directional diffuse, and
-  emissive equation. Known-pixel tests cover light reversal, frame updates,
-  and per-draw frame selection. This fixture does not include specular,
-  Fresnel, reflections, fog, shadows, alpha tests, normal maps, detail maps,
-  CSP lights, or overlays. This remains a bounded test ABI, not a complete
-  stock KN5 or CSP shader. A bounded resolver reads parsed KN5 values and typed CSP
+  Both backends execute the source-evidenced ambient, directional diffuse,
+  direct Blinn specular, and emissive equation. Known-pixel tests cover
+  specular enable and removal, light reversal, frame updates, and per-draw
+  frame selection. This fixture does not include Fresnel, reflections, fog,
+  shadows, alpha tests, normal maps, detail maps, CSP lights, or overlays.
+  This remains a bounded test ABI, not a complete stock KN5 or CSP shader.
+  A bounded resolver reads parsed KN5 values and typed CSP
   overrides. It preserves override precedence and WebGL emissive conversion.
   A second bounded ABI executes tangent-space `ksPerPixelNM`. It adds a normal
   image at binding 4 and a normal sampler at binding 5. D3D12 maps these
@@ -171,6 +172,15 @@ remains unchanged and feature-complete.
   translate stock shader containers. Production packets remain marked as
   staged. This work proves an explicit production-material boundary. It does
   not prove complete scene-rendering parity.
+  A bounded stock-scene facade composes the render plan, draw packets, material
+  handoff, and static-scene preparation. Its preflight uses linear topology
+  traversal. It rejects malformed edges, cycles, and over-budget plans before
+  backend allocation. A real SwiftShader pixel test executes the complete
+  facade with an embedded DDS texture and owned material and frame records.
+  The same test runs on the D3D12/WARP CI path. The caller must first resolve
+  workspace LOD/FOV, preview modes, per-node CSP overrides, and surface
+  overlays. Shadows, reflections, sky, CSP lights, and post-processing remain
+  staged with explicit evidence.
 - P1 is partial. Bounded readers support KN5 v4/v5/v6, DDS, ACD, INI/CSP,
   KSANIM v1/v2, and KNH. The port also supports byte-stable KN5 writing, VAO
   ZIP decoding, and track surfaces, cameras, and splines. KN5 object creation
@@ -191,7 +201,10 @@ remains unchanged and feature-complete.
   records and split-AO application remain staged with explicit diagnostics.
   KN5 baking is available. The remaining image formats are not ported.
 - P2 is partial. KN5 conversion feeds the neutral scene snapshot. Material
-  binding is explicit. Track/car workspace manifests assemble
+  binding is explicit. KN5 scene conversion has aggregate limits for native
+  records, copied strings, child links, geometry metadata, and path state.
+  It validates the complete source tree before it allocates the destination
+  snapshot. Track/car workspace manifests assemble
   deterministically. Driver rigs assemble. Bounded project transactions,
   undo/redo/recovery, geometry authoring, KN5 baking, and render/frame-plan
   selection are implemented. Bounded `.apex.json` persistence is implemented.
@@ -230,7 +243,8 @@ remains unchanged and feature-complete.
   frame-light record. Vulkan uses descriptor bindings 2 and 3 for these
   records. D3D12 uses `b2` and `b3`.
   The frame record drives the exact bounded WebGL equation for ambient,
-  directional diffuse, and emissive output. The record table uses final material order. Preparation copies
+  directional diffuse, direct Blinn specular, and emissive output. The record
+  table uses final material order. Preparation copies
   only used records and rejects non-finite values before backend allocation.
   One authority resolves the textures through caller-owned tables in the final KN5
   texture order. A second authority owns the used embedded KN5 textures. This
@@ -264,8 +278,10 @@ remains unchanged and feature-complete.
   The static-scene path requires explicit backend shader bytecode. The bounded
   material handoff selects modules by material or shader family. It derives
   the 12-binding layout, material constants, A2C state, culling, and depth
-  state. It does not execute stock KN5 shader containers. The port does not
-  create windows or swapchains. It does not provide full golden-image parity.
+  state. The stock-scene facade composes this handoff with visibility, LOD,
+  stable draw ordering, and packet validation for a pre-resolved snapshot.
+  It does not execute stock KN5 shader containers. The port does not create
+  windows or swapchains. It does not provide full golden-image parity.
 
 The production WebGL material gate uses the synthetic `BC7_PLANE` scene. The
 baseline screenshot SHA-256 is
@@ -320,6 +336,18 @@ were ready. WebGL reported no errors. The capture hash was
 `c64caf51986b652c5cd71e6093e7311a281bdf10924cf7eb05afbe591692497f`.
 This gate proves the production fixture and WebGL path. Native pixel tests
 separately prove direct BC1 and BC3 upload and sampling.
+
+The production LOD gate uses `data/lods.ini` from the repository car. LOD0
+selected index 0 and produced state hash `6029214d5cdb79d0`. Its screenshot
+SHA-256 was
+`2080d4b7a777ddaeb7d968ae24f91c5f90f50b9d395f8f129448fa663a6571ae`.
+LOD1 selected index 1 and produced state hash `fac54063a7647c2d`. Its
+screenshot SHA-256 was
+`5ccf52cd2e49cddd524d96f09c7c35a2e3f437c755101fca4f78d33617a00af2`.
+Both captures loaded all 63 textures and all 158 stock profiles. WebGL
+reported no errors. The selected wheel changed from 1,164 to 212 triangles.
+This gate proves production LOD selection. Native workspace LOD/FOV selection
+remains outside the bounded stock-scene facade.
 
 DDS BC7 has a bounded CPU decoder with differential fixtures for all eight
 modes. BC6H remains explicit and requires a GPU path. The checked upload

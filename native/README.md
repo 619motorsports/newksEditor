@@ -22,11 +22,13 @@ staged and produce diagnostics.
 
 The port supports surfaces, cameras, splines, workspaces, asset folders, skin
 indexes, and skin metadata. It includes staged CSP evaluation and KN5 scene
-conversion. The render model includes material profiles, bindings, and
-validated draw packets. Driver rigs include CPU reference skinning. The
-authoring model includes transactions, bounded project/CSP serialization,
-geometry edits, KN5 baking, car damage data, bottom colliders, and initial car
-validation.
+conversion. Scene conversion validates the complete source tree before
+snapshot allocation. Aggregate limits cover records, copied strings, child
+links, geometry metadata, and path state. The render model includes material
+profiles, bindings, and validated draw packets. Driver rigs include CPU
+reference skinning. The authoring model includes transactions, bounded
+project/CSP serialization, geometry edits, KN5 baking, car damage data, bottom
+colliders, and initial car validation.
 
 The render library includes DDS upload, recovered lighting math, shadow math,
 reflection math, camera matrices, and frame-pass plans. The camera code uses
@@ -98,10 +100,12 @@ at set 0, binding 2 carries one aligned material record. D3D12 maps it to
 `b2`. Its first 64 bytes use source-evidenced `ksPerPixel` defaults in this
 port's std140/HLSL-compatible packing. A bounded resolver reads parsed KN5
 values and typed CSP overrides. It preserves CSP precedence and the WebGL
-emissive conversion. Pixel tests prove per-draw record selection. The complete
-lighting and reflection equations remain staged. A bounded batch preflights
-all requests. It clears or loads attachments once and returns one final
-readback. Draw-packet texture resources resolve by canonical name.
+emissive conversion. The plain `ksPerPixel` fixture executes ambient,
+directional diffuse, direct Blinn specular, and emissive output. Pixel tests
+prove specular enable and removal and per-draw record selection. Fresnel,
+reflections, fog, shadows, and CSP lights remain staged. A bounded batch
+preflights all requests. It clears or loads attachments once and returns one
+final readback. Draw-packet texture resources resolve by canonical name.
 An exact tangent-space extension adds `txNormal` at bindings 4 and 5. A second
 extension adds linear `txMaps` at bindings 6 and 7. D3D12 uses `t4`, `s5`,
 `t6`, and `s7`. The maps shader uses `maps.r` for specular strength. It uses
@@ -128,6 +132,14 @@ layouts, constants, and profile state from KN5 materials. The caller must
 supply explicit SPIR-V or DXIL modules. Production packets remain marked as
 staged. The handoff does not translate stock shader containers. Window
 surfaces, swapchains, and complete stock execution remain roadmap work.
+A bounded stock-scene facade composes the render plan, draw packets, material
+handoff, and static-scene preparation. It uses linear topology preflight and
+rejects malformed edges, cycles, and over-budget plans before backend
+allocation. A real SwiftShader test executes the complete facade through
+pixel readback. The same test runs through D3D12/WARP in CI. The input snapshot
+must contain resolved workspace and CSP state. Workspace LOD/FOV, preview
+modes, surface overlays, shadows, reflections, and post-processing remain
+staged.
 The static-scene adapter has two texture-authority modes. The first mode
 uses caller-owned tables in the final KN5 texture order. The second mode owns
 the used embedded KN5 textures and one linear-repeat sampler. It validates all

@@ -6,10 +6,12 @@
 #include <exception>
 #include <iostream>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -184,6 +186,71 @@ void test_conversion_limits_before_snapshot_allocation() {
                  "depth conversion limit");
 }
 
+void test_conversion_aggregate_budget_and_string_limits() {
+    auto valid = fixture();
+    apex::scene::Kn5SceneLimits bounded;
+    bounded.max_native_object_bytes = 1U << 20U;
+    bounded.max_string_bytes = 64U;
+    const auto converted = apex::scene::convertKn5Scene(valid, bounded);
+    require(converted.snapshot.nodes.size() == 4U, "bounded valid scene remains supported");
+
+    auto zero_budget = fixture();
+    apex::scene::Kn5SceneLimits zero;
+    zero.max_native_object_bytes = 0U;
+    requireError([&] { (void)apex::scene::convertKn5Scene(zero_budget, zero); },
+                 "zero scene conversion budget");
+
+    auto oversized = fixture();
+    oversized.materials[0].name.assign(65U, 'm');
+    requireError([&] { (void)apex::scene::convertKn5Scene(oversized, bounded); },
+                 "oversized scene string");
+
+    auto many = Kn5File{};
+    many.materials.push_back(fixture().materials.front());
+    many.root = node("root");
+    for (std::size_t index = 0U; index < 32U; ++index)
+        many.root.children.push_back(node("n"));
+    apex::scene::Kn5SceneLimits low_budget;
+    low_budget.max_native_object_bytes = 4096U;
+    low_budget.max_string_bytes = 64U;
+    requireError([&] { (void)apex::scene::convertKn5Scene(many, low_budget); },
+                 "many-small-node aggregate budget");
+
+    apex::scene::Kn5SceneLimits record_budget;
+    record_budget.max_native_object_bytes = sizeof(apex::scene::SceneNode) - 1U;
+    requireError([&] { (void)apex::scene::convertKn5Scene(fixture(), record_budget); },
+                 "checked record budget boundary");
+}
+
+void test_malformed_input_is_rejected_during_preflight() {
+    auto malformed = fixture();
+    malformed.root.children[0].children[0].vertexStride = 10U;
+    requireError([&] { (void)apex::scene::convertKn5Scene(malformed); },
+                 "malformed geometry preflight");
+
+    auto invalid_child = fixture();
+    Kn5Node bad_child;
+    bad_child.type = 99U;
+    invalid_child.root.children[0].children[0].children.push_back(std::move(bad_child));
+    requireError([&] { (void)apex::scene::convertKn5Scene(invalid_child); },
+                 "malformed mesh child preflight");
+}
+
+void test_truncated_kn5_is_rejected_before_scene_conversion() {
+    const std::vector<std::uint8_t> truncated = {'s', 'c', '6', '9', '6', '9'};
+    try {
+        const auto parsed = apex::formats::parseKn5(
+            std::span<const std::uint8_t>(truncated.data(), truncated.size()),
+            "truncated-scene.kn5");
+        (void)apex::scene::convertKn5Scene(parsed);
+    } catch (const apex::formats::Kn5Error&) {
+        return;
+    } catch (const std::exception& error) {
+        throw std::runtime_error(std::string("truncated KN5: wrong exception: ") + error.what());
+    }
+    throw std::runtime_error("truncated KN5 was accepted");
+}
+
 }  // namespace
 
 int main() {
@@ -192,6 +259,9 @@ int main() {
         test_ids_are_repeatable();
         test_invalid_references_and_boundaries();
         test_conversion_limits_before_snapshot_allocation();
+        test_conversion_aggregate_budget_and_string_limits();
+        test_malformed_input_is_rejected_during_preflight();
+        test_truncated_kn5_is_rejected_before_scene_conversion();
         std::cout << "KN5 scene tests passed\n";
         return 0;
     } catch (const std::exception& error) {

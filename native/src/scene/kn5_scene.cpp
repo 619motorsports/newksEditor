@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <new>
 #include <sstream>
 #include <string_view>
 #include <utility>
@@ -114,6 +115,124 @@ NodeKind nodeKind(std::uint32_t type, std::string_view path) {
     }
 }
 
+class ConversionBudget final {
+public:
+    explicit ConversionBudget(const Kn5SceneLimits& limits)
+        : limit_(limits.max_native_object_bytes), string_limit_(limits.max_string_bytes) {}
+
+    void charge(std::size_t bytes, std::string_view path, std::string_view what) {
+        if (bytes > limit_ - used_)
+            invalid(path, "scene conversion aggregate allocation budget exceeded while reserving " +
+                                std::string(what));
+        used_ += bytes;
+    }
+
+    void chargeCount(std::size_t count, std::size_t element_bytes,
+                     std::string_view path, std::string_view what) {
+        if (count != 0U && element_bytes > std::numeric_limits<std::size_t>::max() / count)
+            invalid(path, "scene conversion allocation size overflows while reserving " +
+                                std::string(what));
+        charge(count * element_bytes, path, what);
+    }
+
+    void chargeString(std::size_t bytes, std::string_view path, std::string_view what) {
+        if (bytes > string_limit_)
+            invalid(path, std::string(what) + " exceeds the configured string limit");
+        if (bytes == std::numeric_limits<std::size_t>::max())
+            invalid(path, "scene conversion string allocation size overflows");
+        charge(bytes + 1U, path, what);
+    }
+
+    void chargePath(std::size_t bytes, std::string_view path) {
+        chargeString(bytes, path, "traversal path scratch");
+    }
+
+private:
+    std::size_t limit_ = 0U;
+    std::size_t string_limit_ = 0U;
+    std::size_t used_ = 0U;
+};
+
+struct ConversionCounts {
+    std::size_t nodes = 0U;
+    std::size_t geometry = 0U;
+};
+
+std::size_t decimalDigits(std::size_t value) noexcept {
+    std::size_t digits = 1U;
+    while (value >= 10U) {
+        value /= 10U;
+        ++digits;
+    }
+    return digits;
+}
+
+std::string makeChildPath(const std::string& path, std::size_t index,
+                          ConversionBudget& budget) {
+    if (path.size() > std::numeric_limits<std::size_t>::max() - 2U - decimalDigits(index))
+        invalid(path, "scene traversal path size overflows");
+    const std::size_t child_size = path.size() + 1U + decimalDigits(index);
+    if (child_size == std::numeric_limits<std::size_t>::max())
+        invalid(path, "scene traversal path allocation size overflows");
+    budget.chargePath(child_size, path);
+    budget.charge(child_size + 1U, path, "traversal path temporary");
+    return path + "/" + std::to_string(index);
+}
+
+void preflightNode(const formats::Kn5Node& source, std::size_t depth,
+                   std::string path, const Kn5SceneLimits& limits,
+                   std::size_t material_count, ConversionBudget& budget,
+                   ConversionCounts& counts, bool path_charged) {
+    if (!path_charged) budget.chargePath(path.size(), path);
+    if (depth > limits.max_depth) invalid(path, "hierarchy is too deep");
+    if (counts.nodes >= limits.max_nodes ||
+        counts.nodes >= static_cast<std::size_t>(invalid_node_id))
+        invalid(path, "node count exceeds conversion limit");
+
+    const NodeKind kind = nodeKind(source.type, path);
+    budget.chargeCount(1U, sizeof(SceneNode), path, "scene nodes");
+    budget.chargeString(source.name.size(), path, "node name");
+    budget.chargeCount(source.children.size(), sizeof(NodeId), path, "node child links");
+    ++counts.nodes;
+
+    if (kind == NodeKind::node) {
+        requireFinite(source.transform, path, "node transform");
+    } else {
+        if (source.vertexStride != (kind == NodeKind::mesh ? 11U : 19U))
+            invalid(path, "unexpected vertex stride");
+        if (source.vertices.size() % source.vertexStride != 0)
+            invalid(path, "vertex data is not stride-aligned");
+        if (source.indices.size() > std::numeric_limits<std::uint32_t>::max() ||
+            source.vertices.size() / source.vertexStride > std::numeric_limits<std::uint32_t>::max())
+            invalid(path, "geometry count exceeds 32-bit scene metadata");
+        const auto vertex_count = source.vertices.size() / source.vertexStride;
+        for (const auto value : source.vertices) requireFinite(value, path, "vertex data");
+        for (const auto index : source.indices)
+            if (static_cast<std::size_t>(index) >= vertex_count)
+                invalid(path, "index references a missing vertex");
+        if (source.bones.size() > std::numeric_limits<std::uint32_t>::max())
+            invalid(path, "bone count exceeds 32-bit scene metadata");
+        for (const auto& bone : source.bones)
+            requireFinite(bone.transform, path, "bone transform");
+        if (source.materialId >= material_count)
+            invalid(path, "material reference is outside the material table");
+        requireFinite(source.lodIn, path, "LOD in");
+        requireFinite(source.lodOut, path, "LOD out");
+        (void)geometryBounds(source, path);
+        budget.chargeCount(1U, sizeof(Kn5GeometryMetadata), path,
+                           "geometry metadata");
+        ++counts.geometry;
+    }
+
+    for (std::size_t index = 0; index < source.children.size(); ++index) {
+        if (depth == std::numeric_limits<std::size_t>::max())
+            invalid(path, "hierarchy depth overflows");
+        std::string child_path = makeChildPath(path, index, budget);
+        preflightNode(source.children[index], depth + 1U, std::move(child_path), limits,
+                      material_count, budget, counts, true);
+    }
+}
+
 void appendNode(const formats::Kn5Node& source, NodeId parent, const Matrix4& parentWorld,
                 std::size_t depth, std::string path, const Kn5SceneLimits& limits,
                 Kn5SceneConversion& result) {
@@ -132,6 +251,7 @@ void appendNode(const formats::Kn5Node& source, NodeId parent, const Matrix4& pa
 
     SceneNode node;
     node.name = source.name;
+    node.children.reserve(source.children.size());
     node.kind = kind;
     node.active = source.active;
     node.transform = world;
@@ -206,33 +326,57 @@ Kn5SceneError::Kn5SceneError(std::string message)
 
 Kn5SceneConversion convertKn5Scene(const formats::Kn5File& model,
                                     const Kn5SceneLimits& limits) {
-    Kn5SceneConversion result;
-    if (limits.max_materials == 0 || model.materials.size() > limits.max_materials)
-        invalid("materials", "material count exceeds conversion limit");
-    if (model.materials.size() >= static_cast<std::size_t>(invalid_material_id))
-        invalid("materials", "material count exceeds scene ID range");
-    result.snapshot.materials.reserve(model.materials.size());
-    for (const auto& source : model.materials) {
-        if (source.blendMode > 2) invalid("materials", "unsupported material blend mode");
-        result.snapshot.materials.push_back({
-            source.name,
-            source.shader,
-            static_cast<BlendMode>(source.blendMode)});
-    }
-    result.snapshot.nodes.reserve(1);
-    if (limits.max_nodes == 0) invalid("nodes", "node count exceeds conversion limit");
-    appendNode(model.root, invalid_node_id, identity_matrix, 0, "root", limits, result);
+    try {
+        if (limits.max_materials == 0 || model.materials.size() > limits.max_materials)
+            invalid("materials", "material count exceeds conversion limit");
+        if (model.materials.size() >= static_cast<std::size_t>(invalid_material_id))
+            invalid("materials", "material count exceeds scene ID range");
+        if (limits.max_nodes == 0)
+            invalid("nodes", "node count exceeds conversion limit");
+        if (limits.max_native_object_bytes == 0U)
+            invalid("scene", "scene conversion aggregate allocation budget is zero");
 
-    for (const auto& node : result.snapshot.nodes) {
-        const float distance = std::sqrt(node.bounds_center[0] * node.bounds_center[0] +
-                                         node.bounds_center[1] * node.bounds_center[1] +
-                                         node.bounds_center[2] * node.bounds_center[2]);
-        requireFinite(distance, "scene", "bounds distance");
-        const float extent = distance + node.bounds_radius;
-        requireFinite(extent, "scene", "bounds extent");
-        result.snapshot.bounds_radius = std::max(result.snapshot.bounds_radius, extent);
+        ConversionBudget budget(limits);
+        budget.chargeCount(model.materials.size(), sizeof(SceneMaterial), "materials",
+                           "scene materials");
+        for (const auto& source : model.materials) {
+            if (source.blendMode > 2)
+                invalid("materials", "unsupported material blend mode");
+            budget.chargeString(source.name.size(), "materials", "material name");
+            budget.chargeString(source.shader.size(), "materials", "shader name");
+        }
+        ConversionCounts counts;
+        preflightNode(model.root, 0U, "root", limits, model.materials.size(), budget,
+                      counts, false);
+
+        Kn5SceneConversion result;
+        result.snapshot.materials.reserve(model.materials.size());
+        for (const auto& source : model.materials) {
+            result.snapshot.materials.push_back({
+                source.name,
+                source.shader,
+                static_cast<BlendMode>(source.blendMode)});
+        }
+        result.snapshot.nodes.reserve(counts.nodes);
+        result.geometry.reserve(counts.geometry);
+        appendNode(model.root, invalid_node_id, identity_matrix, 0, "root", limits, result);
+
+        for (const auto& node : result.snapshot.nodes) {
+            const float distance = std::sqrt(node.bounds_center[0] * node.bounds_center[0] +
+                                             node.bounds_center[1] * node.bounds_center[1] +
+                                             node.bounds_center[2] * node.bounds_center[2]);
+            requireFinite(distance, "scene", "bounds distance");
+            const float extent = distance + node.bounds_radius;
+            requireFinite(extent, "scene", "bounds extent");
+            result.snapshot.bounds_radius = std::max(result.snapshot.bounds_radius, extent);
+        }
+        return result;
+    } catch (const Kn5SceneError&) {
+        throw;
+    } catch (const std::bad_alloc&) {
+        throw Kn5SceneError(
+            "KN5 scene conversion allocation failed within the configured aggregate budget");
     }
-    return result;
 }
 
 SceneSnapshot convertKn5ToScene(const formats::Kn5File& model,

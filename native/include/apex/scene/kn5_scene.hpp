@@ -11,6 +11,10 @@
 
 namespace apex::scene {
 
+inline constexpr std::size_t default_kn5_scene_native_object_bytes =
+    512U * 1024U * 1024U;
+inline constexpr std::size_t default_kn5_scene_string_bytes = 1U * 1024U * 1024U;
+
 /** A renderer-independent description of one KN5 mesh payload.
  *
  * Geometry remains owned by the parsed KN5 file. This sidecar deliberately
@@ -39,6 +43,11 @@ struct Kn5SceneLimits {
     std::size_t max_materials = 1'000'000;
     std::size_t max_nodes = 1'000'000;
     std::size_t max_depth = 1024;
+    // Bound the second ownership copy from a parsed/direct Kn5File into the
+    // renderer-independent snapshot. This includes native records, copied
+    // strings, child links, geometry metadata, and traversal scratch.
+    std::size_t max_native_object_bytes = default_kn5_scene_native_object_bytes;
+    std::size_t max_string_bytes = default_kn5_scene_string_bytes;
 };
 
 class Kn5SceneError final : public std::runtime_error {

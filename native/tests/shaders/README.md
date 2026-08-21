@@ -92,26 +92,30 @@ vertex ABI and the exact resource ABI requested by the native material path:
 sampled image `set=0,binding=0`, sampler `set=0,binding=1`, material UBO
 `set=0,binding=2`, and frame UBO `set=0,binding=3` (D3D12 `t0`, `s1`, `b2`,
 and `b3`). The fragment equation is intentionally limited to ambient plus
-directional diffuse and emissive:
+directional diffuse, Blinn specular, and emissive:
 
 ```text
 texel.rgb * (ambientColor * ksAmbient
   + sunColor * ksDiffuse * max(dot(normalize(worldNormal), normalize(sunDirection)), 0)
   + emissive)
+  + sunColor * pow(max(dot(normalize(worldNormal), normalize(
+      normalize(sunDirection) + normalize(cameraPosition - worldPosition))), 0),
+      max(1, ksSpecularEXP + 1)) * ksSpecular
 ```
 
-No specular, Fresnel, reflection, fog, shadows, alpha test, normal map, detail
-map, CSP light, or overlay behavior is implied by this fixture. It is a
-source-evidenced execution fixture for the explicitly bounded P3 slice, not a
-complete stock `ksPerPixel` implementation.
+This is the exact no-map direct-light subset from `public/app.js:2080-2083`.
+Fresnel, reflection, fog, shadows, alpha test, normal map, detail map, CSP
+light, and overlay behavior remain excluded. It is a source-evidenced
+execution fixture for the explicitly bounded P3 slice, not a complete stock
+`ksPerPixel` implementation.
 
 Fixture identities:
 
-- Vertex source SHA-256: `71d50209737d8caa1b88261125bd59e2e417214772684f96b98fe98f9212d408`
-- Vertex SPIR-V SHA-256: `98b395551eaa3f269962a338645fad99c1e80df6bd2352d9bfab41d6c6a0765b`
-- Fragment source SHA-256: `defffb89e94d8149d3662c469621f3d7aed6f1bc82693a54dac1163e7bcd676f`
-- Fragment SPIR-V SHA-256: `c44686b795e26512d7a623c37a60ed646ddf1914e946959aebf8c8798a3c55eb`
-- Compiler: glslang `16.4.0`
+- Vertex source SHA-256: `1df262a410660234a6918333e3ef0ef10773b2e9d47b277d4ed03a4b13101def`
+- Vertex SPIR-V SHA-256: `4ef3c3282d34fb12dbb3945d61a1554edef91c419f4b787071ccc9b50bbb7837`
+- Fragment source SHA-256: `673366c450eac9129f68ca72e091247887fdda0f162e8f6efc850ffce99db8e9`
+- Fragment SPIR-V SHA-256: `d90bfd7910b622e3c5bc4cc32c547f38f9b2d7c2be8233384c69b139834dc690`
+- Compiler: glslc `2026.3`
 - Validator: SPIRV-Tools `2026.3` (`vulkan-sdk-1.4.357.0-0-g9a49b0883`)
 - Target: SPIR-V 1.0 for Vulkan 1.0
 
