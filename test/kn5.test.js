@@ -108,6 +108,13 @@ test("rejects invalid and truncated files with offsets", () => {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
   ]);
   assert.throws(() => parseKn5(truncatedV4), /material name.*0x16/);
+  const malformedV4Count = new Uint8Array([
+    115, 99, 54, 57, 54, 57,
+    4, 0, 0, 0,
+    0, 0, 0, 0,
+    255, 255, 255, 255
+  ]);
+  assert.throws(() => parseKn5(malformedV4Count), /Invalid material count 4294967295.*0xe/);
 });
 
 test("computes game visibility from active branches and mesh flags", () => {

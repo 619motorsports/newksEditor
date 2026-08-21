@@ -90,7 +90,14 @@ greater than 5. The material loader reads depth mode only when the version is
 greater than 4. The node loader reads layer and LOD fields after version 2, and it
 reads the static-mesh bounding sphere and renderable flag after version 3. Thus,
 version 4 uses the current scene layout without the material depth word. The parser
-consumes all 26,660 bytes of each of the three installed copies of this axis asset.
+consumes all 26,660 bytes of both installed copies of this v4 axis asset. The
+supporting decompiler excerpts and fixture hashes are checked in at
+[`docs/evidence/ksnet-kn5-v4-loader.md`](evidence/ksnet-kn5-v4-loader.md).
+
+A production Chrome check loaded the installed SDK copy through the normal WebGL
+pipeline. It rendered one visible mesh with 478 vertices and 578 triangles, loaded
+its BC1 texture, and produced capture hash `fb0c7abe76272bfc`. WebGL returned error
+zero and the browser log contained no errors.
 
 ### Scene visibility semantics
 
