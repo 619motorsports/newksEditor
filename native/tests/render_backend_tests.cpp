@@ -2238,24 +2238,23 @@ bool contract_backend(apex::render::Backend backend) {
         require(invalid_texture.diagnostic.code == "d3d12_render_target_texture_exclusive",
                 "D3D12 combined texture usage diagnostic");
 
-        // Run this terminal capacity test after all sampler-dependent runtime
-        // cases. The D3D12 sampler heap uses monotonic descriptor slots.
-        // One direct sampler and three prepared embedded scenes have already
-        // consumed four of the 2,048 monotonic slots.
-        constexpr std::size_t remaining_sampler_slots = 2044U;
-        std::vector<std::unique_ptr<Sampler>> d3d_sampler_handles;
-        d3d_sampler_handles.reserve(remaining_sampler_slots);
-        for (std::size_t index = 0; index < remaining_sampler_slots; ++index) {
+        // Use a fresh device so this capacity check does not depend on the
+        // sampler count of earlier rendering cases. The D3D12 sampler heap
+        // uses the SDK-defined maximum of 2,048 monotonic descriptor slots.
+        DeviceResult capacity_device = create_device(backend, options);
+        require(capacity_device.ok(), "D3D12 sampler capacity fixture device");
+        constexpr std::size_t sampler_capacity = 2048U;
+        for (std::size_t index = 0; index < sampler_capacity; ++index) {
             SamplerResult extra =
-                device.device->create_sampler(SamplerDescription{});
+                capacity_device.device->create_sampler(SamplerDescription{});
             require(extra.ok(), "D3D12 sampler capacity fixture allocation");
-            d3d_sampler_handles.push_back(std::move(extra.sampler));
         }
         const SamplerResult exhausted =
-            device.device->create_sampler(SamplerDescription{});
+            capacity_device.device->create_sampler(SamplerDescription{});
         require(exhausted.status == SamplerStatus::allocation_failed &&
                     exhausted.diagnostic.code == "d3d12_sampler_limit",
                 "D3D12 sampler capacity limit");
+        capacity_device.device->wait_idle();
     }
     device.device->wait_idle();
     std::cout << "PASS " << backend_name(backend) << ": " << device.device->info().name << '\n';
