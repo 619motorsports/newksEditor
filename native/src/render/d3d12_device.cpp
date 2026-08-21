@@ -935,6 +935,20 @@ const char* d3d12_pipeline_semantic(PipelineVertexSemantic semantic) noexcept {
     return D3D12_COMPARISON_FUNC_ALWAYS;
 }
 
+[[nodiscard]] D3D12_PRIMITIVE_TOPOLOGY_TYPE d3d12_pipeline_topology_type(
+    PipelineFillMode fill) noexcept {
+    return fill == PipelineFillMode::wireframe
+               ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE
+               : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+}
+
+[[nodiscard]] D3D12_PRIMITIVE_TOPOLOGY d3d12_pipeline_topology(
+    PipelineFillMode fill) noexcept {
+    return fill == PipelineFillMode::wireframe
+               ? D3D_PRIMITIVE_TOPOLOGY_LINELIST
+               : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+}
+
 [[nodiscard]] D3D12_BLEND d3d12_pipeline_blend_factor(PipelineBlendFactor factor) noexcept {
     switch (factor) {
     case PipelineBlendFactor::zero: return D3D12_BLEND_ZERO;
@@ -1190,7 +1204,8 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     pipeline_description.VS = {vertex_shader->bytes.data(), vertex_shader->bytes.size()};
     pipeline_description.PS = {fragment_shader->bytes.data(), fragment_shader->bytes.size()};
     pipeline_description.InputLayout = {input_elements.data(), static_cast<UINT>(input_elements.size())};
-    pipeline_description.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pipeline_description.PrimitiveTopologyType =
+        d3d12_pipeline_topology_type(request.pipeline->raster.fill);
     pipeline_description.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     pipeline_description.RasterizerState.CullMode = request.pipeline->raster.cull == PipelineCullMode::none ? D3D12_CULL_MODE_NONE
                                              : request.pipeline->raster.cull == PipelineCullMode::front ? D3D12_CULL_MODE_FRONT
@@ -1360,7 +1375,7 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
             draw_matrices, 0U);
     }
     list->SetPipelineState(pipeline.Get());
-    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    list->IASetPrimitiveTopology(d3d12_pipeline_topology(request.pipeline->raster.fill));
     D3D12_VERTEX_BUFFER_VIEW vertex_view{};
     vertex_view.BufferLocation = geometry.vertex_resource->GetGPUVirtualAddress() + geometry.vertex_offset;
     vertex_view.SizeInBytes = geometry.vertex_size;
@@ -1655,7 +1670,8 @@ bool draw_indexed_static_mesh_batch_and_readback(
         pipeline_description.VS = {vertex_shader->bytes.data(), vertex_shader->bytes.size()};
         pipeline_description.PS = {fragment_shader->bytes.data(), fragment_shader->bytes.size()};
         pipeline_description.InputLayout = {input_elements.data(), static_cast<UINT>(input_elements.size())};
-        pipeline_description.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        pipeline_description.PrimitiveTopologyType =
+            d3d12_pipeline_topology_type(program.raster.fill);
         pipeline_description.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
         pipeline_description.RasterizerState.CullMode = program.raster.cull == PipelineCullMode::none
                                                              ? D3D12_CULL_MODE_NONE
@@ -1821,7 +1837,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
                 list->SetGraphicsRootDescriptorTable(3U, material_bindings[index].cbv_gpu);
         }
         list->SetPipelineState(pipelines[index].Get());
-        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        list->IASetPrimitiveTopology(d3d12_pipeline_topology(draw.pipeline->raster.fill));
         D3D12_VERTEX_BUFFER_VIEW vertex_view{};
         vertex_view.BufferLocation = draw.geometry.vertex_resource->GetGPUVirtualAddress() + draw.geometry.vertex_offset;
         vertex_view.SizeInBytes = draw.geometry.vertex_size;

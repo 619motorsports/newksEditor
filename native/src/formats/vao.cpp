@@ -16,6 +16,7 @@
 #include <span>
 #include <stdexcept>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 
 namespace apex::formats {
@@ -826,6 +827,334 @@ bool vaoNormalOverrideNameEligible(std::string_view name) noexcept {
     if (name == "AC_SEMAPHORE") return true;
     if (name.rfind("AC_", 0u) == 0u) return false;
     return std::none_of(name.begin(), name.end(), [](char value) { return value >= '0' && value <= '9'; });
+}
+
+namespace {
+
+struct VaoBindingMatch {
+    std::size_t record_index = 0U;
+    std::size_t mesh_index = 0U;
+};
+
+bool checkedAddBindingBytes(std::size_t left, std::size_t right,
+                            std::size_t& output) noexcept {
+    if (right > std::numeric_limits<std::size_t>::max() - left) return false;
+    output = left + right;
+    return true;
+}
+
+bool addBindingDiagnostic(VaoBindingResult& result, const VaoBindingLimits& limits,
+                          VaoBindingSeverity severity, std::string_view code,
+                          std::string_view message, std::size_t record_index = 0U,
+                          std::size_t mesh_index = 0U) {
+    if (result.diagnostics.size() >= limits.max_diagnostics) {
+        result.valid = false;
+        return false;
+    }
+    if (code.size() > std::numeric_limits<std::size_t>::max() - message.size()) {
+        result.valid = false;
+        return false;
+    }
+    const std::size_t bytes = code.size() + message.size();
+    if (bytes > limits.max_diagnostic_bytes) {
+        result.valid = false;
+        return false;
+    }
+    std::size_t used = 0U;
+    for (const auto& diagnostic : result.diagnostics) {
+        if (!checkedAddBindingBytes(used, diagnostic.code.size(), used) ||
+            !checkedAddBindingBytes(used, diagnostic.message.size(), used)) {
+            result.valid = false;
+            return false;
+        }
+    }
+    if (bytes > limits.max_diagnostic_bytes - std::min(used, limits.max_diagnostic_bytes)) {
+        result.valid = false;
+        return false;
+    }
+    result.diagnostics.push_back({severity, std::string(code), std::string(message),
+                                  record_index, mesh_index});
+    if (severity == VaoBindingSeverity::error) result.valid = false;
+    return true;
+}
+
+bool validBindingRecord(const VaoRecord& record, std::size_t record_index,
+                        const VaoBindingLimits& limits, VaoBindingResult& result,
+                        std::size_t& value_bytes) {
+    if (record.name.empty() || record.name.size() > limits.max_string_bytes) {
+        addBindingDiagnostic(result, limits, VaoBindingSeverity::error,
+                             "vao_binding_record_name_invalid",
+                             "VAO binding record name is empty or exceeds its limit",
+                             record_index);
+        return false;
+    }
+    if (!std::all_of(record.firstVertex.begin(), record.firstVertex.end(),
+                     [](float value) { return std::isfinite(value); })) {
+        addBindingDiagnostic(result, limits, VaoBindingSeverity::error,
+                             "vao_binding_record_non_finite",
+                             "VAO binding record position is not finite", record_index);
+        return false;
+    }
+    const auto expected_channel = record.type == 2U
+                                      ? VaoChannel::normal
+                                      : record.type == 3U ? VaoChannel::secondary
+                                                          : VaoChannel::primary;
+    if ((record.type != 0U && record.type != 1U && record.type != 2U && record.type != 3U) ||
+        record.channel != expected_channel) {
+        addBindingDiagnostic(result, limits, VaoBindingSeverity::error,
+                             "vao_binding_record_type_invalid",
+                             "VAO binding record type and channel are inconsistent",
+                             record_index);
+        return false;
+    }
+    const std::size_t count = static_cast<std::size_t>(record.vertexCount);
+    if (count == 0U || count > limits.max_vertices_per_mesh) {
+        addBindingDiagnostic(result, limits, VaoBindingSeverity::error,
+                             "vao_binding_record_vertex_limit",
+                             "VAO binding record vertex count is outside its configured limit",
+                             record_index);
+        return false;
+    }
+    if (record.type == 2U) {
+        if (count > std::numeric_limits<std::size_t>::max() / 3U ||
+            record.normals.size() != count * 3U) {
+            addBindingDiagnostic(result, limits, VaoBindingSeverity::error,
+                                 "vao_binding_normal_count_invalid",
+                                 "VAO normal record count does not match its values",
+                                 record_index);
+            return false;
+        }
+        if (!std::all_of(record.normals.begin(), record.normals.end(),
+                         [](float value) { return std::isfinite(value); })) {
+            addBindingDiagnostic(result, limits, VaoBindingSeverity::error,
+                                 "vao_binding_normal_non_finite",
+                                 "VAO normal record contains a non-finite value",
+                                 record_index);
+            return false;
+        }
+        if (record.normals.size() > std::numeric_limits<std::size_t>::max() / sizeof(float) ||
+            !checkedAddBindingBytes(value_bytes,
+                                    record.normals.size() * sizeof(float), value_bytes)) {
+            addBindingDiagnostic(result, limits, VaoBindingSeverity::error,
+                                 "vao_binding_value_size_overflow",
+                                 "VAO normal values exceed the size range", record_index);
+            return false;
+        }
+    } else if (record.values.size() != count) {
+        addBindingDiagnostic(result, limits, VaoBindingSeverity::error,
+                             "vao_binding_value_count_invalid",
+                             "VAO value record count does not match its values", record_index);
+        return false;
+    } else if (!checkedAddBindingBytes(value_bytes, record.values.size(), value_bytes)) {
+        addBindingDiagnostic(result, limits, VaoBindingSeverity::error,
+                             "vao_binding_value_size_overflow",
+                             "VAO values exceed the size range", record_index);
+        return false;
+    }
+    if (value_bytes > limits.max_value_bytes) {
+        addBindingDiagnostic(result, limits, VaoBindingSeverity::error,
+                             "vao_binding_value_limit",
+                             "VAO binding values exceed their configured limit", record_index);
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+VaoBindingResult bindVaoPatch(const VaoPatch& patch,
+                              std::span<const VaoMeshTarget> meshes,
+                              VaoBindingLimits limits) {
+    VaoBindingResult result;
+    result.mean = 0.0;
+    result.patch_record_count = patch.data.records.size();
+    if (limits.max_meshes == 0U || limits.max_vertices_per_mesh == 0U ||
+        limits.max_records == 0U || limits.max_string_bytes == 0U ||
+        limits.max_value_bytes == 0U || limits.max_diagnostics == 0U ||
+        limits.max_diagnostic_bytes == 0U) {
+        result.valid = false;
+        return result;
+    }
+    if (meshes.size() > limits.max_meshes) {
+        addBindingDiagnostic(result, limits, VaoBindingSeverity::error,
+                             "vao_binding_mesh_limit",
+                             "VAO binding mesh count exceeds its configured limit");
+        return result;
+    }
+    if (patch.data.records.size() > limits.max_records) {
+        addBindingDiagnostic(result, limits, VaoBindingSeverity::error,
+                             "vao_binding_record_limit",
+                             "VAO binding record count exceeds its configured limit");
+        return result;
+    }
+    for (std::size_t mesh_index = 0U; mesh_index < meshes.size(); ++mesh_index) {
+        const auto& mesh = meshes[mesh_index];
+        if (mesh.name.empty() || mesh.name.size() > limits.max_string_bytes ||
+            mesh.vertex_stride_floats < 3U || mesh.vertices.empty() ||
+            mesh.vertices.size() % mesh.vertex_stride_floats != 0U ||
+            mesh.vertices.size() / mesh.vertex_stride_floats > limits.max_vertices_per_mesh) {
+            addBindingDiagnostic(result, limits, VaoBindingSeverity::error,
+                                 "vao_binding_mesh_invalid",
+                                 "VAO binding mesh name, stride, or vertex count is invalid",
+                                 0U, mesh_index);
+            return result;
+        }
+        for (std::size_t vertex = 0U;
+             vertex < mesh.vertices.size(); vertex += mesh.vertex_stride_floats) {
+            if (!std::isfinite(mesh.vertices[vertex]) ||
+                !std::isfinite(mesh.vertices[vertex + 1U]) ||
+                !std::isfinite(mesh.vertices[vertex + 2U])) {
+                addBindingDiagnostic(result, limits, VaoBindingSeverity::error,
+                                     "vao_binding_mesh_non_finite",
+                                     "VAO binding mesh position is not finite", 0U,
+                                     mesh_index);
+                return result;
+            }
+        }
+    }
+
+    std::size_t source_value_bytes = 0U;
+    for (std::size_t record_index = 0U; record_index < patch.data.records.size(); ++record_index) {
+        if (!validBindingRecord(patch.data.records[record_index], record_index, limits,
+                                result, source_value_bytes))
+            return result;
+    }
+    if (patch.splitAo.present) {
+        result.split_ao_staged = true;
+        addBindingDiagnostic(result, limits, VaoBindingSeverity::warning,
+                             "vao_split_ao_staged",
+                             "VAO split-AO animation application remains staged");
+    }
+
+    std::unordered_map<std::string_view, std::vector<std::size_t>> meshes_by_name;
+    meshes_by_name.reserve(meshes.size());
+    for (std::size_t mesh_index = 0U; mesh_index < meshes.size(); ++mesh_index)
+        meshes_by_name[meshes[mesh_index].name].push_back(mesh_index);
+
+    std::vector<VaoBindingMatch> matches;
+    matches.reserve(patch.data.records.size());
+    for (std::size_t record_index = 0U; record_index < patch.data.records.size(); ++record_index) {
+        const auto& record = patch.data.records[record_index];
+        const bool normal = record.channel == VaoChannel::normal;
+        if (normal) ++result.normal_records;
+        if (normal && !vaoNormalOverrideNameEligible(record.name)) {
+            addBindingDiagnostic(result, limits, VaoBindingSeverity::warning,
+                                 "vao_normal_override_ineligible",
+                                 "VAO normal override name is not eligible", record_index);
+            continue;
+        }
+        if (record.alternate) {
+            if (!normal) {
+                ++result.alternate_records;
+                if (result.alternate.size() < 32U) result.alternate.emplace_back(record.name);
+                addBindingDiagnostic(result, limits, VaoBindingSeverity::warning,
+                                     "vao_alternate_record_staged",
+                                     "VAO alternate record is excluded from normal binding",
+                                     record_index);
+            }
+            continue;
+        }
+        std::size_t matched_mesh = std::numeric_limits<std::size_t>::max();
+        const auto candidates = meshes_by_name.find(record.name);
+        if (candidates != meshes_by_name.end()) {
+            for (const std::size_t mesh_index : candidates->second) {
+                const auto& mesh = meshes[mesh_index];
+                if (mesh.vertices.size() / mesh.vertex_stride_floats !=
+                    record.vertexCount)
+                    continue;
+                const auto& first = mesh.vertices;
+                const double dx =
+                    static_cast<double>(first[0]) - record.firstVertex[0];
+                const double dy =
+                    static_cast<double>(first[1]) - record.firstVertex[1];
+                const double dz =
+                    static_cast<double>(first[2]) - record.firstVertex[2];
+                if (dx * dx + dy * dy + dz * dz < 0.01) {
+                    matched_mesh = mesh_index;
+                    break;
+                }
+            }
+        }
+        if (matched_mesh == std::numeric_limits<std::size_t>::max()) {
+            if (normal) {
+                ++result.unmatched_normal_records;
+                addBindingDiagnostic(result, limits, VaoBindingSeverity::warning,
+                                     "vao_normal_record_unmatched",
+                                     "VAO normal record has no matching mesh", record_index);
+            } else {
+                ++result.unmatched_records;
+                if (result.unmatched.size() < 32U) result.unmatched.emplace_back(record.name);
+                addBindingDiagnostic(result, limits, VaoBindingSeverity::warning,
+                                     "vao_record_unmatched",
+                                     "VAO record has no matching mesh", record_index);
+            }
+            continue;
+        }
+        matches.push_back({record_index, matched_mesh});
+    }
+
+    std::size_t matched_value_bytes = 0U;
+    for (const auto& match : matches) {
+        const auto& record = patch.data.records[match.record_index];
+        const std::size_t bytes = record.channel == VaoChannel::normal
+                                      ? record.normals.size() * sizeof(float)
+                                      : record.values.size();
+        if (!checkedAddBindingBytes(matched_value_bytes, bytes, matched_value_bytes) ||
+            matched_value_bytes > limits.max_value_bytes) {
+            addBindingDiagnostic(result, limits, VaoBindingSeverity::error,
+                                 "vao_binding_value_limit",
+                                 "Matched VAO values exceed their configured limit",
+                                 match.record_index, match.mesh_index);
+            return result;
+        }
+    }
+
+    const std::size_t invalid_binding = std::numeric_limits<std::size_t>::max();
+    std::vector<std::size_t> binding_index(meshes.size(), invalid_binding);
+    result.bindings.reserve(matches.size());
+    for (const auto& match : matches) {
+        const auto& record = patch.data.records[match.record_index];
+        auto& index = binding_index[match.mesh_index];
+        if (index == invalid_binding) {
+            index = result.bindings.size();
+            result.bindings.push_back({match.mesh_index, std::nullopt, std::nullopt,
+                                       std::nullopt});
+        }
+        auto& binding = result.bindings[index];
+        if (record.channel == VaoChannel::primary)
+            binding.primary = record.values;
+        else if (record.channel == VaoChannel::secondary)
+            binding.secondary = record.values;
+        else
+            binding.normal = record.normals;
+        if (record.channel == VaoChannel::normal)
+            ++result.matched_normal_records;
+        else
+            ++result.matched_records;
+    }
+    result.matched_meshes = result.bindings.size();
+    result.unmatched_normal_records = result.normal_records - result.matched_normal_records;
+    for (const auto& binding : result.bindings) {
+        if (binding.primary.has_value()) {
+            ++result.primary_meshes;
+            for (const auto value : *binding.primary) {
+                result.value_count += 1U;
+                result.minimum = std::min(result.minimum, value);
+                result.maximum = std::max(result.maximum, value);
+                result.mean += static_cast<double>(value);
+            }
+        }
+        if (binding.secondary.has_value()) ++result.secondary_meshes;
+        if (binding.normal.has_value()) {
+            ++result.normal_meshes;
+            result.normal_vertex_count += binding.normal->size() / 3U;
+        }
+    }
+    if (result.value_count != 0U)
+        result.mean /= static_cast<double>(result.value_count);
+    else
+        result.mean = 255.0;
+    return result;
 }
 
 VaoPatch parseVaoPatch(std::span<const std::uint8_t> bytes, std::string source,

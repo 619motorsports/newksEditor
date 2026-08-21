@@ -123,7 +123,9 @@ public:
         nodes.clear();
         pipeline_names.clear();
         blend_states.clear();
+        fill_modes.clear();
         transparent_flags.clear();
+        wireframe_flags.clear();
         vertex_buffers.clear();
         index_buffers.clear();
         authorities.clear();
@@ -137,7 +139,9 @@ public:
             nodes.push_back(draw.packet->node);
             pipeline_names.push_back(draw.pipeline->name);
             blend_states.push_back(draw.pipeline->blend);
+            fill_modes.push_back(draw.pipeline->raster.fill);
             transparent_flags.push_back(draw.packet->flags.transparent);
+            wireframe_flags.push_back(draw.packet->flags.wireframe);
             vertex_buffers.push_back(draw.vertex_buffer);
             index_buffers.push_back(draw.index_buffer);
             authorities.push_back(draw.shader_authority);
@@ -177,7 +181,9 @@ public:
     std::vector<apex::scene::NodeId> nodes;
     std::vector<std::string> pipeline_names;
     std::vector<PipelineBlendState> blend_states;
+    std::vector<PipelineFillMode> fill_modes;
     std::vector<bool> transparent_flags;
+    std::vector<bool> wireframe_flags;
     std::vector<const Buffer*> vertex_buffers;
     std::vector<const Buffer*> index_buffers;
     std::vector<IndexedShaderAuthority> authorities;
@@ -387,6 +393,40 @@ void prepares_deduplicated_resources_and_executes_one_ordered_batch() {
     require(device.authorities == std::vector<IndexedShaderAuthority>(
                                       3U, IndexedShaderAuthority::explicit_pipeline),
             "each local request carries explicit executable-pipeline authority");
+}
+
+void prepares_source_evidenced_wireframe_batch_state() {
+    Fixture value = fixture();
+    value.first_pipeline.raster.fill = PipelineFillMode::wireframe;
+    value.packets[0].flags.wireframe = true;
+    value.packets[2].flags.wireframe = true;
+    RecordingDevice device;
+    auto prepared = prepare_static_scene_resources(device, request_for(value));
+    require(prepared.ok() && device.buffer_calls == 4U,
+            "matching wireframe scene state prepares all geometry");
+
+    FakeTexture target;
+    StaticSceneFrameDescription frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    const auto drawn = prepared.resources->draw_and_readback(device, target, frame);
+    require(drawn.ok() &&
+                device.fill_modes == std::vector<PipelineFillMode>(
+                                         {PipelineFillMode::wireframe,
+                                          PipelineFillMode::solid,
+                                          PipelineFillMode::wireframe}) &&
+                device.wireframe_flags == std::vector<bool>({true, false, true}),
+            "wireframe fill and packet state reach the ordered batch");
+
+    value = fixture();
+    value.first_pipeline.raster.fill = PipelineFillMode::wireframe;
+    const auto mismatch =
+        prepare_static_scene_resources(device, request_for(value));
+    require(!mismatch.ok() &&
+                mismatch.status == StaticSceneResourceStatus::invalid_request &&
+                mismatch.diagnostic.code ==
+                    "static_scene_material_pipeline_invalid" &&
+                device.buffer_calls == 4U,
+            "wireframe mismatch fails before another backend allocation");
 }
 
 void rejects_invalid_late_inputs_before_backend_allocation() {
@@ -1127,6 +1167,7 @@ void propagates_upload_and_batch_failures() {
 int main() {
     try {
         prepares_deduplicated_resources_and_executes_one_ordered_batch();
+        prepares_source_evidenced_wireframe_batch_state();
         rejects_invalid_late_inputs_before_backend_allocation();
         resolves_portable_diffuse_tables_without_owning_handles();
         owns_embedded_diffuse_resources_after_source_lifetime();

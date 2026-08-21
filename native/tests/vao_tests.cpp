@@ -174,6 +174,159 @@ void decodesNormalsAndMetadata() {
                 split.splitAo.doorNodes.size() == 1u, "split AO metadata");
 }
 
+void bindsRecordsWithReferenceMatchingAndStagedDiagnostics() {
+    const auto primary = record("mesh", 1u, {0, 0, 0}, 2u, {0, 255});
+    const auto secondary = record("mesh", 3u, {0, 0, 0}, 2u, {32, 64});
+    const auto alternate = record("@@__ALT@:mesh", 1u, {0, 0, 0}, 2u, {1, 2});
+    const auto normal = record("ROAD_MAIN", 2u, {0, 0, 0}, 1u, {255, 0, 0});
+    const auto ineligibleNormal = record("AC_PIT", 2u, {0, 0, 0}, 1u, {255, 0, 0});
+    const auto unmatched = record("missing", 1u, {0, 0, 0}, 2u, {1, 2});
+    const auto wrongCount = record("wrong_count", 1u, {0, 0, 0}, 2u, {1, 2});
+    std::vector<std::uint8_t> payload = primary;
+    payload.insert(payload.end(), secondary.begin(), secondary.end());
+    payload.insert(payload.end(), alternate.begin(), alternate.end());
+    payload.insert(payload.end(), normal.begin(), normal.end());
+    payload.insert(payload.end(), ineligibleNormal.begin(), ineligibleNormal.end());
+    payload.insert(payload.end(), unmatched.begin(), unmatched.end());
+    payload.insert(payload.end(), wrongCount.begin(), wrongCount.end());
+    VaoPatch patch;
+    patch.data = parseVaoData(payload, 5u);
+    patch.splitAo.present = true;
+
+    const std::vector<float> wrongMesh = {1, 0, 0, 0, 0, 0};
+    const std::vector<float> mesh = {0, 0, 0, 0, 0, 0};
+    const std::vector<float> road = {0, 0, 0};
+    const std::vector<float> wrongCountMesh = {0, 0, 0};
+    const std::array<VaoMeshTarget, 4> targets = {
+        VaoMeshTarget{"mesh", wrongMesh, 3u},
+        VaoMeshTarget{"mesh", mesh, 3u},
+        VaoMeshTarget{"ROAD_MAIN", road, 3u},
+        VaoMeshTarget{"wrong_count", wrongCountMesh, 3u},
+    };
+    const auto result = bindVaoPatch(patch, targets);
+    require(result.valid && result.split_ao_staged && result.matched_records == 2u &&
+                result.unmatched_records == 2u && result.alternate_records == 1u &&
+                result.normal_records == 2u && result.matched_normal_records == 1u &&
+                result.unmatched_normal_records == 1u && result.matched_meshes == 2u,
+            "VAO binding matches valid records and reports staged/unmatched records");
+    require(result.bindings.size() == 2u && result.bindings[0].mesh_index == 1u &&
+                result.bindings[0].primary.has_value() &&
+                *result.bindings[0].primary == std::vector<std::uint8_t>({0, 255}) &&
+                result.bindings[0].secondary.has_value() &&
+                *result.bindings[0].secondary == std::vector<std::uint8_t>({32, 64}) &&
+                result.bindings[1].mesh_index == 2u && result.bindings[1].normal.has_value() &&
+                result.bindings[1].normal->size() == 3u,
+            "VAO binding uses the first valid duplicate and stores each channel");
+    require(result.value_count == 2u && result.minimum == 0u && result.maximum == 255u &&
+                std::abs(result.mean - 127.5) < 1e-12 && result.normal_vertex_count == 1u,
+            "VAO binding statistics follow primary and normal records");
+    require(!result.unmatched.empty() && result.unmatched[0] == "missing" &&
+                !result.alternate.empty() && result.alternate[0] == "mesh",
+            "VAO binding retains bounded unmatched and alternate names");
+    bool staged = false;
+    bool ineligible = false;
+    for (const auto& diagnostic : result.diagnostics) {
+        staged = staged || diagnostic.code == "vao_split_ao_staged";
+        ineligible = ineligible || diagnostic.code == "vao_normal_override_ineligible";
+    }
+    require(staged && ineligible, "VAO binding emits explicit staged diagnostics");
+}
+
+void rejectsMalformedBindingInputsBeforeCopying() {
+    const std::vector<float> meshVertices = {0, 0, 0};
+    const std::array<VaoMeshTarget, 1> targets = {
+        VaoMeshTarget{"mesh", meshVertices, 3u},
+    };
+    VaoPatch nonFinite;
+    VaoRecord nonFiniteRecord;
+    nonFiniteRecord.name = "mesh";
+    nonFiniteRecord.type = 1u;
+    nonFiniteRecord.channel = VaoChannel::primary;
+    nonFiniteRecord.vertexCount = 1u;
+    nonFiniteRecord.firstVertex[0] = std::numeric_limits<float>::quiet_NaN();
+    nonFiniteRecord.values = {7u};
+    nonFinite.data.records.push_back(nonFiniteRecord);
+    const auto nonFiniteResult = bindVaoPatch(nonFinite, targets);
+    require(!nonFiniteResult.valid && nonFiniteResult.bindings.empty(),
+            "non-finite VAO binding positions are rejected before copying");
+
+    VaoPatch mismatched;
+    VaoRecord mismatchedRecord = nonFiniteRecord;
+    mismatchedRecord.firstVertex = {0, 0, 0};
+    mismatchedRecord.values.clear();
+    mismatched.data.records.push_back(mismatchedRecord);
+    const auto mismatchedResult = bindVaoPatch(mismatched, targets);
+    require(!mismatchedResult.valid && mismatchedResult.bindings.empty(),
+            "malformed VAO binding value counts are rejected before copying");
+
+    VaoPatch nonFiniteNormal;
+    VaoRecord normal;
+    normal.name = "ROAD_MAIN";
+    normal.type = 2u;
+    normal.channel = VaoChannel::normal;
+    normal.vertexCount = 1u;
+    normal.firstVertex = {0, 0, 0};
+    normal.normals = {0, std::numeric_limits<float>::infinity(), 0};
+    nonFiniteNormal.data.records.push_back(normal);
+    const auto normalResult = bindVaoPatch(nonFiniteNormal, targets);
+    require(!normalResult.valid && normalResult.bindings.empty(),
+            "non-finite VAO binding normals are rejected before copying");
+
+    const std::array<VaoMeshTarget, 1> emptyTargets = {
+        VaoMeshTarget{"mesh", std::span<const float>{}, 3u},
+    };
+    const auto emptyMeshResult = bindVaoPatch(mismatched, emptyTargets);
+    require(!emptyMeshResult.valid && emptyMeshResult.bindings.empty() &&
+                emptyMeshResult.diagnostics.front().code ==
+                    "vao_binding_mesh_invalid",
+            "empty VAO target geometry is rejected before first-position matching");
+
+    VaoPatch emptyRecord;
+    VaoRecord zero = mismatchedRecord;
+    zero.vertexCount = 0u;
+    zero.values.clear();
+    emptyRecord.data.records.push_back(zero);
+    const auto emptyRecordResult = bindVaoPatch(emptyRecord, targets);
+    require(!emptyRecordResult.valid && emptyRecordResult.bindings.empty() &&
+                emptyRecordResult.diagnostics.front().code ==
+                    "vao_binding_record_vertex_limit",
+            "zero-length VAO records are rejected before matching");
+}
+
+void enforcesBindingLimitsBeforeAllocation() {
+    const auto first = record("mesh", 1u, {0, 0, 0}, 2u, {1, 2});
+    const auto second = record("mesh2", 1u, {0, 0, 0}, 2u, {3, 4});
+    std::vector<std::uint8_t> payload = first;
+    payload.insert(payload.end(), second.begin(), second.end());
+    VaoPatch patch;
+    patch.data = parseVaoData(payload, 5u);
+    const std::vector<float> vertices = {0, 0, 0, 0, 0, 0};
+    const std::array<VaoMeshTarget, 2> targets = {
+        VaoMeshTarget{"mesh", vertices, 3u}, VaoMeshTarget{"mesh2", vertices, 3u},
+    };
+
+    auto recordLimit = VaoBindingLimits{};
+    recordLimit.max_records = 1u;
+    const auto records = bindVaoPatch(patch, targets, recordLimit);
+    require(!records.valid && records.bindings.empty() &&
+                records.diagnostics.front().code == "vao_binding_record_limit",
+            "VAO binding record limits precede output allocation");
+
+    auto valueLimit = VaoBindingLimits{};
+    valueLimit.max_value_bytes = 1u;
+    const auto values = bindVaoPatch(patch, targets, valueLimit);
+    require(!values.valid && values.bindings.empty() &&
+                values.diagnostics.front().code == "vao_binding_value_limit",
+            "VAO binding value limits precede output allocation");
+
+    auto stringLimit = VaoBindingLimits{};
+    stringLimit.max_string_bytes = 3u;
+    const auto strings = bindVaoPatch(patch, targets, stringLimit);
+    require(!strings.valid && strings.bindings.empty() &&
+                strings.diagnostics.front().code == "vao_binding_mesh_invalid",
+            "VAO binding string limits precede output allocation");
+}
+
 void supportsRawDeflateAndRejectsCrc() {
     const std::vector<std::uint8_t> plain{'h', 'e', 'l', 'l', 'o'};
     const std::vector<std::uint8_t> compressed{0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00};
@@ -285,6 +438,9 @@ int main() {
     try {
         decodesAoVersions();
         decodesNormalsAndMetadata();
+        bindsRecordsWithReferenceMatchingAndStagedDiagnostics();
+        rejectsMalformedBindingInputsBeforeCopying();
+        enforcesBindingLimitsBeforeAllocation();
         supportsRawDeflateAndRejectsCrc();
         validatesZipStructureAndDeflateTrees();
         validatesDecodedOutputBudget();

@@ -736,9 +736,9 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             return IndexedStaticMeshDrawStatus::invalid_request;
         }
     }
-    if (packet.flags.alpha_to_coverage || packet.flags.wireframe) {
+    if (packet.flags.alpha_to_coverage) {
         diagnostic = {"indexed_static_mesh_state_unsupported",
-                      "Indexed static-mesh execution does not support alpha-to-coverage or wireframe"};
+                      "Indexed static-mesh execution does not support alpha-to-coverage"};
         return IndexedStaticMeshDrawStatus::unsupported;
     }
     if (packet.flags.depth_write && !packet.flags.depth_test) {
@@ -772,11 +772,16 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     }
     if (pipeline.targets.colors.size() != 1U ||
         pipeline.targets.colors[0].samples != 1U || pipeline.targets.colors[0].format != expected_format ||
-        pipeline.raster.fill != PipelineFillMode::solid ||
         pipeline.blend.alpha_to_coverage) {
         diagnostic = {"indexed_pipeline_state_unsupported",
-                      "Indexed static-mesh execution requires one single-sample solid color target without alpha-to-coverage"};
+                      "Indexed static-mesh execution requires one single-sample color target without alpha-to-coverage"};
         return IndexedStaticMeshDrawStatus::unsupported;
+    }
+    const bool pipeline_wireframe = pipeline.raster.fill == PipelineFillMode::wireframe;
+    if (pipeline_wireframe != packet.flags.wireframe) {
+        diagnostic = {"indexed_fill_state_mismatch",
+                      "Pipeline fill state must match the draw packet"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
     }
     if (pipeline.blend.enabled != packet.flags.blend_enabled ||
         pipeline.blend.alpha_to_coverage != packet.flags.alpha_to_coverage) {

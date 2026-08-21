@@ -1009,6 +1009,61 @@ bool contract_backend(apex::render::Backend backend) {
     StaticMeshUploadResult sampled_upload =
         upload_static_mesh(*device.device, indexed_mesh, sampled_packet);
     require(sampled_upload.ok(), "portable diffuse static-mesh upload");
+
+    // The production WebGL renderer switches the existing triangle index
+    // stream to GL_LINES. The native backends must use line-list topology,
+    // not polygon-line rasterization. With three indices, only the first pair
+    // forms a line and the final index does not form a primitive.
+    PipelineProgram wireframe_pipeline = indexed_pipeline;
+    wireframe_pipeline.name = "source-index-line-list";
+    wireframe_pipeline.raster.fill = PipelineFillMode::wireframe;
+    DrawPacket wireframe_packet = sampled_packet;
+    wireframe_packet.flags.wireframe = true;
+    Diagnostic wireframe_diagnostic;
+    const auto wireframe_request = sampled_upload.upload->make_request(
+        wireframe_packet, wireframe_pipeline, *indexed_camera.frame, 0U, 0U,
+        {0.0F, 0.0F, 0.0F, 1.0F}, wireframe_diagnostic);
+    require(wireframe_request.has_value(),
+            "wireframe packet matches the uploaded static geometry");
+    const IndexedStaticMeshDrawResult wireframe_result =
+        device.device->draw_indexed_static_mesh_and_readback(
+            *triangle_texture.texture, *wireframe_request);
+    require(wireframe_result.ok(), "source-style line-list draw/readback");
+    require(wireframe_result.rgba8[center] == std::byte{0} &&
+                wireframe_result.rgba8[center + 1U] == std::byte{0} &&
+                wireframe_result.rgba8[center + 2U] == std::byte{0} &&
+                wireframe_result.rgba8[center + 3U] == std::byte{255},
+            "line-list wireframe does not fill the triangle center");
+    std::size_t wireframe_red_pixels = 0U;
+    for (std::size_t offset = 0U; offset < wireframe_result.rgba8.size();
+         offset += 4U) {
+        if (wireframe_result.rgba8[offset] == std::byte{255} &&
+            wireframe_result.rgba8[offset + 1U] == std::byte{0} &&
+            wireframe_result.rgba8[offset + 2U] == std::byte{0})
+            ++wireframe_red_pixels;
+    }
+    require(wireframe_red_pixels > 0U,
+            "line-list wireframe rasterizes the first source index pair");
+    const std::array<IndexedStaticMeshDrawRequest, 1> wireframe_draws = {
+        *wireframe_request};
+    IndexedStaticMeshBatchDescription wireframe_batch;
+    wireframe_batch.draws = wireframe_draws;
+    const IndexedStaticMeshBatchResult wireframe_batch_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *triangle_texture.texture, wireframe_batch);
+    std::size_t wireframe_batch_red_pixels = 0U;
+    for (std::size_t offset = 0U;
+         offset < wireframe_batch_result.rgba8.size(); offset += 4U) {
+        if (wireframe_batch_result.rgba8[offset] == std::byte{255} &&
+            wireframe_batch_result.rgba8[offset + 1U] == std::byte{0} &&
+            wireframe_batch_result.rgba8[offset + 2U] == std::byte{0})
+            ++wireframe_batch_red_pixels;
+    }
+    require(wireframe_batch_result.ok() && wireframe_batch_red_pixels > 0U &&
+                wireframe_batch_result.rgba8[center] == std::byte{0} &&
+                wireframe_batch_result.rgba8[center + 3U] == std::byte{255},
+            "line-list wireframe executes through the ordered batch path");
+
     PipelineProgram sampled_pipeline = indexed_pipeline;
     sampled_pipeline.name = "portable-diffuse-resource-baseline";
     sampled_pipeline.vertex_layout.attributes.push_back(

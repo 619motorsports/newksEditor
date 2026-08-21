@@ -1213,6 +1213,12 @@ VkShaderStageFlagBits vk_pipeline_stage(PipelineShaderStage stage) {
     return stage == PipelineShaderStage::vertex ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
 }
 
+VkPrimitiveTopology vk_pipeline_topology(PipelineFillMode fill) noexcept {
+    return fill == PipelineFillMode::wireframe
+               ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST
+               : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+}
+
 struct VulkanDrawGeometry {
     const RawVulkanBuffer& vertices;
     VkDeviceSize vertex_offset = 0U;
@@ -1410,7 +1416,7 @@ bool create_batch_pipeline(const std::shared_ptr<VulkanContext>& context,
     vertex_input.pVertexAttributeDescriptions = vertex_attributes.data();
     VkPipelineInputAssemblyStateCreateInfo assembly{};
     assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    assembly.topology = vk_pipeline_topology(program.raster.fill);
     VkViewport viewport{0.0F, 0.0F, static_cast<float>(description.width),
                         static_cast<float>(description.height), 0.0F, 1.0F};
     VkRect2D scissor{{0, 0}, {description.width, description.height}};
@@ -1802,7 +1808,7 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
         vertex_input.pVertexAttributeDescriptions = vertex_attributes.data();
         VkPipelineInputAssemblyStateCreateInfo assembly{};
         assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-        assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        assembly.topology = vk_pipeline_topology(program.raster.fill);
         VkViewport viewport{0.0F, 0.0F, static_cast<float>(description.width),
                             static_cast<float>(description.height), 0.0F, 1.0F};
         VkRect2D scissor{{0, 0}, {description.width, description.height}};

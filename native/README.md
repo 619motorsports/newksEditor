@@ -14,6 +14,12 @@ BC7 CPU decode. Its upload planner supports DX10 2D arrays, cubemaps, and exact
 RGB24 to RGBA8 conversion. FBX support includes a bounded binary/ASCII DOM and
 a static-geometry conversion subset.
 
+The VAO core binds decoded records to non-owning mesh views. It uses the exact
+name, vertex count, and first-position gate from `src/vao-patch.js`. It binds
+primary, secondary, and eligible normal channels. Explicit limits protect all
+validation and value copies. Alternate records and split-AO application remain
+staged and produce diagnostics.
+
 The port supports surfaces, cameras, splines, workspaces, asset folders, skin
 indexes, and skin metadata. It includes staged CSP evaluation and KN5 scene
 conversion. The render model includes material profiles, bindings, and
@@ -74,7 +80,11 @@ opaque and explicitly blended packets. The packet and pipeline blend flags must
 match. Ordinary alpha, multiply, and transparent-as-black factors match
 `applyItemRenderState` in the production WebGL renderer. Vulkan and D3D12 apply
 these factors in single draws and ordered batches. Alpha-to-coverage remains
-unsupported because the current targets are single-sample. A request-local
+unsupported because the current targets are single-sample. Indexed wireframe
+uses line-list topology over the source index stream. This behavior matches the
+production `GL_LINES` selection in `public/app.js`. It does not use polygon-line
+rasterization. Vulkan and D3D12 apply this topology in single draws and ordered
+batches. A request-local
 authority can enable one portable diffuse resource pair: a sampled image at set
 0, binding 0, and a sampler at set 0, binding 1. Vulkan and D3D12 execute this
 pair for single draws and ordered batches. The pair is a portable test ABI. It

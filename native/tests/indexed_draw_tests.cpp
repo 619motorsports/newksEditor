@@ -234,6 +234,37 @@ void accepts_source_evidenced_blend_state() {
             "alpha-to-coverage remains explicit until multisample targets exist");
 }
 
+void accepts_source_evidenced_wireframe_topology() {
+    PipelineProgram pipeline = pipeline_fixture();
+    pipeline.raster.fill = PipelineFillMode::wireframe;
+    DrawPacket packet = packet_fixture();
+    packet.flags.wireframe = true;
+    FakeTexture target(Backend::Vulkan, target_description());
+    FakeBuffer vertices(Backend::Vulkan, {36U, BufferUsage::vertex,
+                                          BufferMemory::device_local,
+                                          BufferMutability::immutable});
+    FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index,
+                                         BufferMemory::device_local,
+                                         BufferMutability::immutable});
+    auto request = request_fixture(packet, pipeline, vertices, indices);
+    Diagnostic diagnostic;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            "source-evidenced indexed wireframe contract accepted");
+
+    packet.flags.wireframe = false;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_fill_state_mismatch",
+            "wireframe pipeline rejects a solid packet");
+    packet.flags.wireframe = true;
+    pipeline.raster.fill = PipelineFillMode::solid;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_fill_state_mismatch",
+            "solid pipeline rejects a wireframe packet");
+}
+
 void validates_portable_diffuse_resource_contract() {
     PipelineProgram pipeline = pipeline_fixture();
     pipeline.resources = {
@@ -711,6 +742,7 @@ int main() {
         accepts_bounded_static_indexed_contract();
         accepts_explicit_d32_depth_contract();
         accepts_source_evidenced_blend_state();
+        accepts_source_evidenced_wireframe_topology();
         validates_portable_diffuse_resource_contract();
         validates_portable_material_buffer_contract();
         rejects_invalid_depth_attachment_descriptions();

@@ -104,7 +104,11 @@ remains unchanged and feature-complete.
   `LESS` depth comparison. It also executes explicitly blended packets. The
   ordinary alpha, multiply, and transparent-as-black factors match
   `applyItemRenderState` in `public/app.js`. Alpha-to-coverage remains staged
-  until the target contract supports multisampling. A bounded batch preflights
+  until the target contract supports multisampling. Indexed wireframe uses
+  line-list topology over the source index stream. This matches the production
+  `GL_LINES` selection in `public/app.js`. It does not use polygon-line
+  rasterization. Both native backends execute this topology in single draws and
+  ordered batches. A bounded batch preflights
   every request, preserves packet order, and records all draws in one pass with
   one final readback. The backend also executes one explicitly authorized
   portable diffuse pair. The pair uses a sampled image at set 0, binding 0,
@@ -135,6 +139,10 @@ remains unchanged and feature-complete.
   supports static positions, polygon triangulation, hierarchy, local/world
   transforms, and first material assignment. It rejects or diagnoses skinning,
   animation, embedded images, layer mappings, and advanced transform semantics.
+  A bounded VAO binder matches decoded records to mesh views. It uses exact
+  names, vertex counts, and first positions. It binds primary, secondary, and
+  eligible normal channels. Alternate records and split-AO application remain
+  staged with explicit diagnostics.
   KN5 baking is available. The remaining image formats are not ported.
 - P2 is partial. KN5 conversion feeds the neutral scene snapshot. Material
   binding is explicit. Track/car workspace manifests assemble
@@ -172,7 +180,9 @@ remains unchanged and feature-complete.
   restricted draw-packet subset. It supports one portable sampled-image and
   sampler descriptor pair plus a request-local material record. It executes
   the three source-evidenced WebGL blend
-  modes, but not complete scene resources or alpha-to-coverage. It executes
+  modes, but not complete scene resources or alpha-to-coverage. It also maps
+  the production `GL_LINES` wireframe behavior to native line-list topology.
+  An odd final source index does not form a line primitive. It executes
   finite non-identity world and camera
   transforms through an explicit shader contract. It preserves D32
   depth across synchronous draws and supports explicit test/write state. The
