@@ -3,6 +3,7 @@
 #include "apex/scene/scene.hpp"
 
 #include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -24,6 +25,10 @@ struct RenderPlanOptions {
     bool include_reflections = true;
     bool isolated = false;
     apex::scene::NodeId isolated_node = apex::scene::invalid_node_id;
+    // A pre-resolution layer can exclude whole subtrees without changing the
+    // immutable scene. Isolation bypasses these exclusions, as it does in the
+    // production WebGL preview.
+    std::span<const apex::scene::NodeId> excluded_subtree_roots{};
     apex::scene::NodeId explicit_reflection_root = apex::scene::invalid_node_id;
     std::string workspace_kind;
     float bounds_radius = 0.0F;

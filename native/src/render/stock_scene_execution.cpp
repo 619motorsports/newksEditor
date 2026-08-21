@@ -186,7 +186,7 @@ bool preplan_within_limit(const apex::scene::SceneSnapshot& scene,
     // build_render_plan allocates visited and a LIFO WalkState stack. The
     // stack capacity can approach the node count on a wide tree; ancestor
     // vectors are charged separately using the authored maximum depth.
-    if (!add_count(node_count, sizeof(bool), bytes, limit) ||
+    if (!add_count(node_count, 2U * sizeof(bool), bytes, limit) ||
         !add_count(node_count, sizeof(std::uint32_t) + sizeof(bool) +
                                2U * sizeof(std::string) + sizeof(std::vector<std::uint32_t>),
                    bytes, limit) ||

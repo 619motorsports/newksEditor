@@ -3,56 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
-#include <limits>
-#include <stdexcept>
 #include <utility>
-
-namespace apex::scene {
-
-const SceneNode* SceneSnapshot::find_node(NodeId id) const noexcept {
-    if (id == invalid_node_id || static_cast<std::size_t>(id) >= nodes.size()) return nullptr;
-    const SceneNode& node = nodes[static_cast<std::size_t>(id)];
-    return node.id == id ? &node : nullptr;
-}
-
-const SceneMaterial* SceneSnapshot::find_material(MaterialId id) const noexcept {
-    if (id == invalid_material_id || static_cast<std::size_t>(id) >= materials.size()) return nullptr;
-    return &materials[static_cast<std::size_t>(id)];
-}
-
-NodeId SceneSnapshot::add_node(SceneNode node, NodeId parent) {
-    const NodeId id = static_cast<NodeId>(nodes.size());
-    if (static_cast<std::size_t>(id) != nodes.size()) {
-        throw std::overflow_error("scene node count exceeds NodeId range");
-    }
-    if (parent != invalid_node_id && find_node(parent) == nullptr) {
-        throw std::invalid_argument("scene node parent does not exist");
-    }
-    if (parent == invalid_node_id && root != invalid_node_id) {
-        throw std::invalid_argument("scene snapshot already has a root");
-    }
-    node.id = id;
-    node.parent = parent;
-    nodes.push_back(std::move(node));
-    if (parent == invalid_node_id) {
-        root = id;
-    } else {
-        // find_node is valid after the push and the parent is known to exist.
-        nodes[static_cast<std::size_t>(parent)].children.push_back(id);
-    }
-    return id;
-}
-
-MaterialId SceneSnapshot::add_material(SceneMaterial material) {
-    const MaterialId id = static_cast<MaterialId>(materials.size());
-    if (static_cast<std::size_t>(id) != materials.size()) {
-        throw std::overflow_error("scene material count exceeds MaterialId range");
-    }
-    materials.push_back(std::move(material));
-    return id;
-}
-
-}  // namespace apex::scene
 
 namespace apex::render {
 namespace {
@@ -60,6 +11,7 @@ namespace {
 struct WalkState {
     apex::scene::NodeId node = apex::scene::invalid_node_id;
     bool parent_active = true;
+    bool excluded = false;
     std::string workspace_auxiliary;
     std::string workspace_file;
     std::vector<apex::scene::NodeId> ancestors;
@@ -151,7 +103,14 @@ RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
 
     const bool isolated = scene.isolated || options.isolated;
     std::vector<WalkState> stack;
-    stack.push_back({scene.root, true, {}, {}, {}});
+    std::vector<bool> excluded_roots(scene.nodes.size(), false);
+    for (const apex::scene::NodeId id : options.excluded_subtree_roots) {
+        if (id != apex::scene::invalid_node_id &&
+            static_cast<std::size_t>(id) < excluded_roots.size()) {
+            excluded_roots[static_cast<std::size_t>(id)] = true;
+        }
+    }
+    stack.push_back({scene.root, true, false, {}, {}, {}});
     std::vector<bool> visited(scene.nodes.size(), false);
     while (!stack.empty()) {
         WalkState state = std::move(stack.back());
@@ -163,6 +122,7 @@ RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
         visited[node_index] = true;
 
         const bool branch_active = state.parent_active && node->active;
+        const bool excluded = state.excluded || excluded_roots[node_index];
         const std::string workspace_auxiliary = node->workspace_auxiliary.empty()
                                                     ? state.workspace_auxiliary
                                                     : node->workspace_auxiliary;
@@ -170,15 +130,17 @@ RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
         std::vector<apex::scene::NodeId> ancestors = state.ancestors;
         ancestors.push_back(node->id);
 
-        if ((node->kind == apex::scene::NodeKind::mesh ||
-             node->kind == apex::scene::NodeKind::skinned_mesh) &&
-            branch_active && node->visible && node->renderable &&
-            (!isolated || node->id == options.isolated_node) &&
-            lod_visible(*node, safe_distance(node->bounds_center, options.camera_position))) {
+        const bool geometry = node->kind == apex::scene::NodeKind::mesh ||
+                              node->kind == apex::scene::NodeKind::skinned_mesh;
+        const bool isolated_item = isolated && node->id == options.isolated_node;
+        const float distance = safe_distance(node->bounds_center, options.camera_position);
+        const bool normally_visible = !isolated && !excluded && branch_active &&
+                                      node->visible && node->renderable &&
+                                      lod_visible(*node, distance);
+        if (geometry && (isolated_item || normally_visible)) {
             const apex::scene::SceneMaterial* material = scene.find_material(node->material);
             const bool material_alpha_blend = material != nullptr &&
                                               material->blend_mode == apex::scene::BlendMode::alpha_blend;
-            const float distance = safe_distance(node->bounds_center, options.camera_position);
             RenderItem item{
                 node->id,
                 node->material,
@@ -198,7 +160,8 @@ RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
         // avoids recursive stack growth for deeply nested untrusted scenes.
         for (auto child = node->children.rbegin(); child != node->children.rend(); ++child) {
             if (scene.find_node(*child) == nullptr) continue;
-            stack.push_back({*child, branch_active, workspace_auxiliary, workspace_file, ancestors});
+            stack.push_back({*child, branch_active, excluded, workspace_auxiliary,
+                             workspace_file, ancestors});
         }
     }
 

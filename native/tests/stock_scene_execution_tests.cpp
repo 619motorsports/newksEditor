@@ -184,6 +184,34 @@ void test_success_and_plan_evidence() {
     require(device.buffer_calls != 0U, "successful scene preparation must allocate resources");
 }
 
+void test_resolved_subtree_filter_and_isolation_reach_facade() {
+    Fixture fixture_value = fixture();
+    FakeDevice device;
+    auto request = request_for(fixture_value);
+    const std::array<apex::scene::NodeId, 1U> excluded = {
+        fixture_value.scene.nodes[1U].id};
+    request.render.excluded_subtree_roots = excluded;
+    auto result = prepare_stock_scene_execution(device, request);
+    require(result.ok(), "resolved subtree filter should reach stock-scene execution");
+    require(result.render_plan.items.size() == 4U &&
+                std::none_of(result.render_plan.items.begin(), result.render_plan.items.end(),
+                             [&](const RenderItem& item) {
+                                 return item.node == excluded.front();
+                             }),
+            "resolved subtree root must be absent from facade packets");
+
+    request = request_for(fixture_value);
+    const std::array<apex::scene::NodeId, 1U> isolated_excluded = {
+        fixture_value.scene.nodes[3U].id};
+    request.render.excluded_subtree_roots = isolated_excluded;
+    request.render.isolated = true;
+    request.render.isolated_node = fixture_value.scene.nodes[3U].id;
+    result = prepare_stock_scene_execution(device, request);
+    require(result.ok() && result.render_plan.items.size() == 1U &&
+                result.render_plan.items[0].node == fixture_value.scene.nodes[3U].id,
+            "facade isolation must bypass authored visibility and subtree filters");
+}
+
 void test_preflight_and_missing_modules() {
     Fixture fixture_value = fixture();
     FakeDevice device;
@@ -258,6 +286,7 @@ void test_preflight_and_missing_modules() {
 int main() {
     try {
         test_success_and_plan_evidence();
+        test_resolved_subtree_filter_and_isolation_reach_facade();
         test_preflight_and_missing_modules();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

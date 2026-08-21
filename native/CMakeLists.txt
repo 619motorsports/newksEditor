@@ -110,6 +110,7 @@ add_library(ApexEditor::Domain ALIAS apex_domain)
 target_link_libraries(apex_domain PUBLIC ApexEditor::Formats)
 
 add_library(apex_scene STATIC
+  src/scene/scene.cpp
   src/scene/kn5_scene.cpp
 )
 add_library(ApexEditor::Scene ALIAS apex_scene)
@@ -117,9 +118,10 @@ target_link_libraries(apex_scene PUBLIC ApexEditor::Formats)
 
 add_library(apex_workspace STATIC
   src/workspace/workspace.cpp
+  src/workspace/workspace_scene.cpp
 )
 add_library(ApexEditor::Workspace ALIAS apex_workspace)
-target_link_libraries(apex_workspace PUBLIC ApexEditor::Formats)
+target_link_libraries(apex_workspace PUBLIC ApexEditor::Scene)
 
 add_library(apex_platform STATIC
   src/platform/security.cpp
@@ -149,7 +151,7 @@ add_library(apex_render STATIC
   src/render/d3d12_device.cpp
 )
 add_library(ApexEditor::Render ALIAS apex_render)
-target_link_libraries(apex_render PUBLIC ApexEditor::Formats)
+target_link_libraries(apex_render PUBLIC ApexEditor::Scene)
 
 add_executable(apex_native_app src/app/main.cpp)
 set_target_properties(apex_native_app PROPERTIES OUTPUT_NAME apex-native)
@@ -211,6 +213,10 @@ apex_add_native_test(skin_metadata_tests.cpp skin_metadata_tests ApexEditor::Dom
 apex_add_native_test(track_data_tests.cpp track_data_tests ApexEditor::Domain)
 apex_add_native_test(kn5_scene_tests.cpp kn5_scene_tests ApexEditor::Scene)
 apex_add_native_test(workspace_tests.cpp workspace_tests ApexEditor::Workspace)
+apex_add_native_test(workspace_scene_tests.cpp workspace_scene_tests ApexEditor::Workspace)
+if(TARGET workspace_scene_tests)
+  target_link_libraries(workspace_scene_tests PRIVATE ApexEditor::Render)
+endif()
 apex_add_native_test(camera_tests.cpp camera_tests ApexEditor::Render)
 apex_add_native_test(render_backend_tests.cpp render_backend_tests ApexEditor::Render)
 apex_add_native_test(draw_packet_tests.cpp draw_packet_tests ApexEditor::Render)
@@ -251,7 +257,7 @@ foreach(boundary_test IN ITEMS authoring_project_tests geometry_bake_tests proje
                                asset_index_tests asset_source_tests csp_config_model_tests
                                csp_material_evaluator_tests car_damage_tests car_validation_tests
                                driver_tests skin_metadata_tests
-                               track_data_tests kn5_scene_tests workspace_tests)
+                               track_data_tests kn5_scene_tests workspace_tests workspace_scene_tests)
   if(TEST ${boundary_test})
     set_tests_properties(${boundary_test} PROPERTIES LABELS "unit;malformed")
   endif()

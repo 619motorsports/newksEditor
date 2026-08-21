@@ -178,9 +178,14 @@ remains unchanged and feature-complete.
   backend allocation. A real SwiftShader pixel test executes the complete
   facade with an embedded DDS texture and owned material and frame records.
   The same test runs on the D3D12/WARP CI path. The caller must first resolve
-  workspace LOD/FOV, preview modes, per-node CSP overrides, and surface
-  overlays. Shadows, reflections, sky, CSP lights, and post-processing remain
-  staged with explicit evidence.
+  preview modes, per-node CSP overrides, and surface overlays. A bounded
+  workspace adapter maps metadata to merged scene roots. It attaches file and
+  auxiliary labels without partial mutation. A bounded resolver implements
+  half-open workspace LOD ranges and the production FOV formula. The caller
+  supplies the exact preview AABB center and camera position. The resolver
+  passes excluded roots to the stock-scene facade. Isolation bypasses these
+  roots, authored visibility, and mesh LOD ranges. Shadows, reflections, sky,
+  CSP lights, and post-processing remain staged with explicit evidence.
 - P1 is partial. Bounded readers support KN5 v4/v5/v6, DDS, ACD, INI/CSP,
   KSANIM v1/v2, and KNH. The port also supports byte-stable KN5 writing, VAO
   ZIP decoding, and track surfaces, cameras, and splines. KN5 object creation
@@ -347,7 +352,11 @@ screenshot SHA-256 was
 Both captures loaded all 63 textures and all 158 stock profiles. WebGL
 reported no errors. The selected wheel changed from 1,164 to 212 triangles.
 This gate proves production LOD selection. Native workspace LOD/FOV selection
-remains outside the bounded stock-scene facade.
+uses the same half-open ranges and FOV formula. Native tests cover automatic,
+forced, overlapping, gapped, auxiliary, and track-camera cases. The
+stock-scene facade consumes the resolved root exclusions. The caller still
+supplies the production preview AABB center because the scene snapshot does
+not contain that exact value.
 
 DDS BC7 has a bounded CPU decoder with differential fixtures for all eight
 modes. BC6H remains explicit and requires a GPU path. The checked upload

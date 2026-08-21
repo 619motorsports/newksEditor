@@ -137,9 +137,14 @@ handoff, and static-scene preparation. It uses linear topology preflight and
 rejects malformed edges, cycles, and over-budget plans before backend
 allocation. A real SwiftShader test executes the complete facade through
 pixel readback. The same test runs through D3D12/WARP in CI. The input snapshot
-must contain resolved workspace and CSP state. Workspace LOD/FOV, preview
-modes, surface overlays, shadows, reflections, and post-processing remain
-staged.
+must contain resolved workspace and CSP state. A bounded workspace adapter
+maps files to merged scene roots in source order. It attaches file and
+auxiliary labels without partial mutation. A bounded LOD resolver uses the
+production half-open ranges and FOV formula. The caller must supply the exact
+preview AABB center and camera position. The resolver gives excluded roots to
+the stock-scene facade. Isolation bypasses these exclusions and authored
+visibility. Preview modes, surface overlays, shadows, reflections, and
+post-processing remain staged.
 The static-scene adapter has two texture-authority modes. The first mode
 uses caller-owned tables in the final KN5 texture order. The second mode owns
 the used embedded KN5 textures and one linear-repeat sampler. It validates all
