@@ -43,6 +43,11 @@ struct DdsDescriptor {
     std::uint32_t bitsPerPixel = 0;
     std::array<std::uint32_t, 4> masks{};
     std::uint32_t dxgi = 0;
+    // DX10 extension metadata. A zero resource dimension means legacy DDS;
+    // nonzero values are D3D10_RESOURCE_DIMENSION enum values.
+    std::uint32_t resourceDimension = 0;
+    std::uint32_t miscFlags = 0;
+    std::uint32_t arraySize = 1;
     std::uint32_t blockBytes = 0;
     bool compressed = false;
     bool luminance = false;
@@ -69,10 +74,11 @@ struct DdsLevel {
 // are multiples of four. This is a WebGL constraint, not a DDS validity rule.
 [[nodiscard]] bool webglCompressedMipChainSafe(const DdsDescriptor& descriptor) noexcept;
 
-// Decode supported uncompressed and BC1-BC5 textures into RGBA8. BC6H/BC7
-// descriptors are recognized for GPU upload, but deliberately do not receive
-// a guessed CPU fallback: this function throws a ParseError with code
-// GPU_REQUIRED for those formats.
+// Decode supported uncompressed and BC1-BC5 textures into RGBA8. 24-bit RGB,
+// legacy floating-point FOURCC layouts, and BC6H/BC7 are deliberately not
+// approximated by a guessed CPU fallback: recognized GPU-only formats throw a
+// ParseError with code GPU_REQUIRED, while unsupported layouts remain explicit
+// unknown/unsupported diagnostics.
 [[nodiscard]] std::vector<DdsLevel> decodeDdsRgba(
     std::span<const std::uint8_t> bytes, const DdsDescriptor& descriptor,
     std::string source = "texture.dds", apex::core::ParseLimits limits = {});

@@ -88,21 +88,27 @@ remains unchanged and feature-complete.
 
 - P0 is partial: CMake, strict warnings, sanitizers, cross-platform CI,
   portable security checks, a native inspection CLI, a backend-neutral device
-  API, and headless Vulkan/D3D12 device creation are implemented.
+  API, and headless Vulkan/D3D12 device and buffer creation are implemented.
 - P1 is partial: bounded KN5 v4/v5/v6, DDS, ACD, INI/CSP, KSANIM v1/v2, and
-  KNH readers are implemented. KN5 writing/baking, FBX, VAO, surfaces,
-  cameras, asset indexing, and the remaining image formats are not ported.
-- P2 has only its initial neutral scene snapshot and deterministic render-plan
-  selection. Authoring, undo/recovery, workspaces, validation, and export are
-  not ported.
-- P3–P7 are not complete. The native graphics backends create real devices,
-  but do not yet create windows/swapchains, upload scene resources, execute
-  shaders, draw pixels, or provide golden-image parity evidence.
+  KNH readers are implemented, together with bounded directory/ACD asset
+  resolution and a staged CSP configuration model. KN5 writing/baking, FBX,
+  VAO, surfaces, cameras, full asset indexing, and the remaining image formats
+  are not ported.
+- P2 is partial: KN5 conversion feeds the neutral scene snapshot, material
+  binding is explicit, and deterministic render-plan selection is implemented.
+  Authoring, undo/recovery, workspaces, validation, and export are not ported.
+- P3–P7 are not complete. The native graphics backends create real devices and
+  buffers, and DDS data has a checked backend upload plan, but the port does not
+  yet create windows/swapchains or textures, execute shaders, draw pixels, or
+  provide golden-image parity evidence.
 
 DDS BC6H and BC7 are recognized and routed as GPU-required formats. The
 current native slice deliberately does not substitute an approximate CPU
 decoder. A software fallback remains parity work because the WebGL editor has
-one. These limitations must stay visible until their roadmap gates are met.
+one. DX10 arrays, cubemaps, and 3D textures are explicitly rejected by the
+current upload planner; raw 24-bit and legacy D3D9 float uploads are also still
+WebGL-only. These limitations must stay visible until their roadmap gates are
+met.
 
 ## Source-module mapping
 

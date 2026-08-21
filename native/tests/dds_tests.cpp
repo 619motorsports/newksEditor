@@ -59,6 +59,9 @@ std::vector<std::uint8_t> dx10Dds(std::uint32_t width, std::uint32_t height,
     put32(bytes, 0, 0x20534444u); put32(bytes, 4, 124u); put32(bytes, 12, height);
     put32(bytes, 16, width); put32(bytes, 28, 1u); put32(bytes, 76, 32u); put32(bytes, 80, 4u);
     bytes[84] = 'D'; bytes[85] = 'X'; bytes[86] = '1'; bytes[87] = '0'; put32(bytes, 128, dxgi);
+    put32(bytes, 132, 3u);  // D3D10_RESOURCE_DIMENSION_TEXTURE2D
+    put32(bytes, 136, 0u);  // miscFlags
+    put32(bytes, 140, 1u);  // arraySize
     std::copy(payload.begin(), payload.end(), bytes.begin() + 148);
     return bytes;
 }
@@ -94,9 +97,22 @@ void decodesMaskedRawFormats() {
     const auto rgba = dx10Dds(1, 1, 28, {10, 20, 30, 40});
     const auto rgbaDescriptor = inspectDds(rgba);
     require(rgbaDescriptor.has_value() && rgbaDescriptor->format == DdsFormat::Raw32 &&
-                !rgbaDescriptor->compressed, "DX10 RGBA8 descriptor");
+                !rgbaDescriptor->compressed && rgbaDescriptor->resourceDimension == 3u &&
+                rgbaDescriptor->miscFlags == 0u && rgbaDescriptor->arraySize == 1u,
+            "DX10 RGBA8 descriptor and extension metadata");
     require(decodeDdsRgba(rgba, *rgbaDescriptor)[0].pixels == std::vector<std::uint8_t>{10, 20, 30, 40},
             "DX10 RGBA8 decode");
+
+    std::vector<std::uint8_t> paddedPixels(64u, 0);
+    paddedPixels[0] = 30u; paddedPixels[1] = 20u; paddedPixels[2] = 10u; paddedPixels[3] = 255u;
+    paddedPixels[32] = 60u; paddedPixels[33] = 50u; paddedPixels[34] = 40u; paddedPixels[35] = 255u;
+    const auto padded = rawDds(4, 2, 32, {0xff0000u, 0xff00u, 0xffu, 0xff000000u},
+                               paddedPixels, 0x40u, 32u);
+    const auto paddedDescriptor = inspectDds(padded);
+    require(paddedDescriptor.has_value(), "large-pitch raw descriptor");
+    const auto paddedLevels = decodeDdsRgba(padded, *paddedDescriptor);
+    require(paddedLevels[0].pixels[0] == 10u && paddedLevels[0].pixels[16u] == 40u,
+            "large raw pitch decode uses authoritative row stride");
 }
 
 void decodesBcColorFormats() {
@@ -153,12 +169,25 @@ void rejectsMalformedAndTruncatedInputs() {
             expectsParseError([&] { (void)decodeDdsRgba(prefix); }, "TRUNCATED");
         }
     }
+    const auto validDx10 = dx10Dds(1, 1, 28, {1, 2, 3, 4});
+    for (std::size_t length = 0; length < validDx10.size(); ++length) {
+        const std::vector<std::uint8_t> prefix(validDx10.begin(),
+                                                validDx10.begin() + static_cast<std::ptrdiff_t>(length));
+        if (length < 148u) {
+            require(!inspectDds(prefix).has_value(), "truncated DX10 header accepted");
+        } else {
+            expectsParseError([&] { (void)decodeDdsRgba(prefix); }, "TRUNCATED");
+        }
+    }
     auto badMipCount = valid;
     put32(badMipCount, 28, 99u);
     require(!inspectDds(badMipCount).has_value(), "excessive mip count accepted");
     auto badDimension = valid;
     put32(badDimension, 16, 0xffffffffu);
     require(!inspectDds(badDimension).has_value(), "excessive dimension accepted");
+    auto badDx10Dimension = validDx10;
+    put32(badDx10Dimension, 132, 1u); // D3D10_RESOURCE_DIMENSION_BUFFER
+    require(!inspectDds(badDx10Dimension).has_value(), "invalid DX10 resource dimension accepted");
     auto rawShort = rawDds(4, 4, 32, {0xffu, 0xff00u, 0xff0000u, 0xff000000u}, {});
     expectsParseError([&] { (void)decodeDdsRgba(rawShort); }, "TRUNCATED");
     auto hugeDescriptor = *inspectDds(valid);

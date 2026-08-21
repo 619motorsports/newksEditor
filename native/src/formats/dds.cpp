@@ -241,8 +241,11 @@ void validateDescriptor(const DdsDescriptor& descriptor, std::span<const std::ui
             const auto minimumPitch = apex::core::checkedMultiply(static_cast<std::size_t>(width),
                                                                   bytesPerPixel, "DDS", source, offset,
                                                                   "raw row");
-            const auto rowPitch = (level == 0u && descriptor.pitch >= minimumPitch &&
-                                   descriptor.pitch <= minimumPitch + 16u)
+            // The top-level DDS pitch is authoritative whenever it is large
+            // enough for one packed row. Do not cap legal driver alignment to
+            // a guessed padding amount; that would shift every later row and
+            // mip for textures with larger alignment.
+            const auto rowPitch = (level == 0u && descriptor.pitch >= minimumPitch)
                                       ? static_cast<std::size_t>(descriptor.pitch)
                                       : minimumPitch;
             payload = apex::core::checkedMultiply(rowPitch, static_cast<std::size_t>(height), "DDS",
@@ -266,8 +269,7 @@ void validateDescriptor(const DdsDescriptor& descriptor, std::span<const std::ui
     const auto bytesPerPixel = static_cast<std::size_t>(descriptor.bitsPerPixel / 8u);
     for (std::uint32_t level = 0; level < descriptor.mipCount; ++level) {
         const auto minimumPitch = static_cast<std::size_t>(width) * bytesPerPixel;
-        const auto rowPitch = (level == 0u && descriptor.pitch >= minimumPitch &&
-                               descriptor.pitch <= minimumPitch + 16u)
+        const auto rowPitch = (level == 0u && descriptor.pitch >= minimumPitch)
                                   ? static_cast<std::size_t>(descriptor.pitch)
                                   : minimumPitch;
         DdsLevel output{width, height, std::vector<std::uint8_t>(static_cast<std::size_t>(width) * height * 4u)};
@@ -446,6 +448,15 @@ std::optional<DdsDescriptor> inspectDds(std::span<const std::uint8_t> bytes, std
             if (bytes.size() < 148u) return std::nullopt;
             descriptor.dataOffset = 148u;
             descriptor.dxgi = u32(bytes, 128);
+            descriptor.resourceDimension = u32(bytes, 132);
+            descriptor.miscFlags = u32(bytes, 136);
+            descriptor.arraySize = u32(bytes, 140);
+            // D3D10_RESOURCE_DIMENSION_TEXTURE1D/2D/3D are 2/3/4.
+            // UNKNOWN (0), BUFFER (1), and future values are not valid for a
+            // texture upload descriptor. An array size of zero is malformed.
+            if (descriptor.resourceDimension < 2u || descriptor.resourceDimension > 4u ||
+                descriptor.arraySize == 0u)
+                return std::nullopt;
             switch (descriptor.dxgi) {
             case 28: case 29:
                 descriptor.format = DdsFormat::Raw32; descriptor.compressed = false;

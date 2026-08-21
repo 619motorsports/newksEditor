@@ -6,11 +6,13 @@ native implementation works through the parity gates in
 [`docs/CPP_PORT.md`](../docs/CPP_PORT.md).
 
 The current slices provide shared bounded input utilities; KN5 v4/v5/v6,
-DDS, ACD, ordered INI/CSP, KSANIM v1/v2, and KNH readers; stock material-state
-classification; a backend-neutral render planner and device contract;
-headless Vulkan and Windows D3D12 implementations; and portable desktop-boundary
-validation. Backend API types stay inside `src/render`; format and authoring
-libraries do not depend on a graphics API.
+DDS, ACD, ordered INI/CSP, KSANIM v1/v2, and KNH readers; bounded directory and
+ACD asset resolution; staged CSP evaluation; KN5 scene conversion; material
+classification and binding; DDS upload planning; a backend-neutral render
+planner and GPU resource contract; headless Vulkan and Windows D3D12 device and
+buffer implementations; and portable desktop-boundary validation. Backend API
+types stay inside `src/render`; format and authoring libraries do not depend on
+a graphics API.
 
 ## Build and test
 
@@ -36,10 +38,13 @@ out/native/dev/native/apex-native --inspect-ksanim animation.ksanim
 
 An unavailable SDK, driver, validation layer, or adapter is reported
 explicitly. It is never presented as a successful backend initialization.
-The current backends initialize devices only: window surfaces, swapchains,
-resource upload, shader execution, and production pixel comparisons remain
-roadmap work. BC6H/BC7 DDS files currently require a capable GPU path; the
-existing WebGL CPU fallback has not yet been ported.
+The current backends initialize devices and create/upload buffers. Window
+surfaces, swapchains, texture resources, shader execution, drawing, and
+production pixel comparisons remain roadmap work. BC6H/BC7 DDS files currently
+require a capable GPU path; the existing WebGL CPU fallback has not yet been
+ported. The native upload planner also rejects DX10 arrays, cubemaps, and 3D
+textures, and it does not upload raw 24-bit or legacy D3D9 float textures yet;
+those paths remain available in the unchanged WebGL reference.
 
 ## Contribution rules
 
