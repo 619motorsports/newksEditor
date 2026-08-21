@@ -59,14 +59,14 @@
       "name": "ci-windows",
       "displayName": "Native CI (Windows)",
       "inherits": "native-base",
-      "generator": "Visual Studio 17 2022",
-      "architecture": "x64",
+      "generator": "Ninja",
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
         "rhs": "Windows"
       },
       "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "APEX_ENABLE_VULKAN": "ON",
         "APEX_ENABLE_D3D12": "ON"
       }

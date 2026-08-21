@@ -79,9 +79,12 @@ void expectsError(Function&& function, std::string_view code) {
 void resolvesDirectoryAndPackedSourcesWithPrecedence(const std::filesystem::path& root) {
     std::filesystem::create_directories(root / "data");
     std::filesystem::create_directories(root / "textures");
+    std::filesystem::create_directories(root / "alternate");
     writeFile(root / "data/lods.ini", "directory");
     writeFile(root / "textures/body.dds", "external");
-    writeFile(root / "textures/BODY.DDS", "case collision");
+    // Keep the collision portable to case-insensitive filesystems: the
+    // basename differs only by case, while the containing paths are distinct.
+    writeFile(root / "alternate/BODY.DDS", "case collision");
 
     AssetSource source;
     source.addDirectory(root, "example_car");
