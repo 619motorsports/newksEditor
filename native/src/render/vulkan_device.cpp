@@ -4,6 +4,7 @@
 #include <cstring>
 #include <memory>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -35,6 +36,8 @@ const char* result_name(VkResult result) noexcept {
         return "VK_ERROR_EXTENSION_NOT_PRESENT";
     case VK_ERROR_INCOMPATIBLE_DRIVER:
         return "VK_ERROR_INCOMPATIBLE_DRIVER";
+    case VK_ERROR_DEVICE_LOST:
+        return "VK_ERROR_DEVICE_LOST";
     default:
         return "VkResult error";
     }
@@ -178,6 +181,7 @@ struct VulkanContext {
     VkQueue queue = VK_NULL_HANDLE;
     std::uint32_t queue_family = UINT32_MAX;
     VkCommandPool command_pool = VK_NULL_HANDLE;
+    std::mutex command_mutex;
     bool sampler_anisotropy = false;
     float max_sampler_anisotropy = 1.0F;
     DeviceInfo info;
@@ -196,10 +200,15 @@ struct VulkanContext {
 
     ~VulkanContext() {
         if (device != VK_NULL_HANDLE) {
-            (void)vkDeviceWaitIdle(device);
+            (void)wait_idle();
             if (command_pool != VK_NULL_HANDLE) vkDestroyCommandPool(device, command_pool, nullptr);
             vkDestroyDevice(device, nullptr);
         }
+    }
+
+    bool wait_idle() noexcept {
+        std::lock_guard lock(command_mutex);
+        return device == VK_NULL_HANDLE || vkDeviceWaitIdle(device) == VK_SUCCESS;
     }
 
     VulkanContext(const VulkanContext&) = delete;
@@ -377,6 +386,7 @@ bool copy_buffer(const std::shared_ptr<VulkanContext>& context,
                  VkDeviceSize size,
                  BufferUsage destination_usage,
                  Diagnostic& diagnostic) {
+    std::lock_guard command_guard(context->command_mutex);
     VkCommandBufferAllocateInfo allocation{};
     allocation.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocation.commandPool = context->command_pool;
@@ -384,6 +394,8 @@ bool copy_buffer(const std::shared_ptr<VulkanContext>& context,
     allocation.commandBufferCount = 1;
     VkCommandBuffer command = VK_NULL_HANDLE;
     VkResult result = vkAllocateCommandBuffers(context->device, &allocation, &command);
+    bool submitted = false;
+    bool completed = false;
     if (result != VK_SUCCESS) {
         diagnostic = vk_error("vkAllocateCommandBuffers", result);
         diagnostic.code = "buffer_upload_failed";
@@ -455,14 +467,22 @@ bool copy_buffer(const std::shared_ptr<VulkanContext>& context,
         result = vkCreateFence(context->device, &fence_info, nullptr, &fence);
         if (result == VK_SUCCESS) {
             result = vkQueueSubmit(context->queue, 1, &submit, fence);
-            if (result == VK_SUCCESS) result = vkWaitForFences(context->device, 1, &fence, VK_TRUE, UINT64_MAX);
+            submitted = result == VK_SUCCESS;
+            if (result == VK_SUCCESS) {
+                result = vkWaitForFences(context->device, 1, &fence, VK_TRUE, UINT64_MAX);
+                completed = result == VK_SUCCESS;
+            }
             vkDestroyFence(context->device, fence, nullptr);
         }
+    }
+    if (submitted && !completed) {
+        const VkResult drain = vkDeviceWaitIdle(context->device);
+        if (drain != VK_SUCCESS) result = drain;
     }
     vkFreeCommandBuffers(context->device, context->command_pool, 1, &command);
     if (result != VK_SUCCESS) {
         diagnostic = vk_error("Vulkan buffer copy", result);
-        diagnostic.code = "buffer_upload_failed";
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "buffer_upload_failed";
         return false;
     }
     return true;
@@ -689,6 +709,7 @@ bool copy_texture_uploads(const std::shared_ptr<VulkanContext>& context,
         diagnostic = {"texture_format_unknown", "Texture upload format has no byte layout"};
         return false;
     }
+    std::lock_guard command_guard(context->command_mutex);
     RawVulkanBuffer staging;
     std::vector<VkBufferImageCopy> copies;
     std::size_t staging_size = 0U;
@@ -738,6 +759,7 @@ bool copy_texture_uploads(const std::shared_ptr<VulkanContext>& context,
     VkCommandBuffer command = VK_NULL_HANDLE;
     VkResult result = vkAllocateCommandBuffers(context->device, &allocation, &command);
     bool submitted = false;
+    bool completed = false;
     if (result == VK_SUCCESS) {
         VkCommandBufferBeginInfo begin{};
         begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -787,19 +809,196 @@ bool copy_texture_uploads(const std::shared_ptr<VulkanContext>& context,
         if (result == VK_SUCCESS) {
             result = vkQueueSubmit(context->queue, 1, &submit, fence);
             submitted = result == VK_SUCCESS;
-            if (result == VK_SUCCESS) result = vkWaitForFences(context->device, 1, &fence, VK_TRUE, UINT64_MAX);
+            if (result == VK_SUCCESS) {
+                result = vkWaitForFences(context->device, 1, &fence, VK_TRUE, UINT64_MAX);
+                completed = result == VK_SUCCESS;
+                if (completed) current_layout = texture_final_layout(description.usage);
+            }
             vkDestroyFence(context->device, fence, nullptr);
         }
     }
-    if (result != VK_SUCCESS && submitted) (void)vkDeviceWaitIdle(context->device);
+    if (submitted && !completed) {
+        const VkResult drain = vkDeviceWaitIdle(context->device);
+        if (drain != VK_SUCCESS) {
+            current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+            result = drain;
+        } else {
+            current_layout = texture_final_layout(description.usage);
+        }
+    }
     if (command != VK_NULL_HANDLE) vkFreeCommandBuffers(context->device, context->command_pool, 1, &command);
     staging.reset();
     if (result != VK_SUCCESS) {
         diagnostic = vk_error("Vulkan texture upload", result);
-        diagnostic.code = "texture_upload_failed";
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "texture_upload_failed";
         return false;
     }
-    current_layout = texture_final_layout(description.usage);
+    if (!completed) current_layout = texture_final_layout(description.usage);
+    return true;
+}
+
+bool clear_texture_and_readback(const std::shared_ptr<VulkanContext>& context,
+                                RawVulkanImage& image,
+                                const TextureDescription& description,
+                                const TextureClearReadbackRequest& request,
+                                VkImageLayout& current_layout,
+                                std::vector<std::byte>& output,
+                                Diagnostic& diagnostic) {
+    const std::size_t output_size = static_cast<std::size_t>(request.output_width) *
+                                    static_cast<std::size_t>(request.output_height) * 4U;
+    BufferDescription staging_description;
+    staging_description.size_bytes = output_size;
+    staging_description.usage = BufferUsage::transfer_destination;
+    staging_description.memory = BufferMemory::host_visible;
+    RawVulkanBuffer staging;
+    if (!create_raw_buffer(context, staging_description, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                           BufferMemory::host_visible, staging, diagnostic)) {
+        diagnostic.code = "texture_readback_failed";
+        return false;
+    }
+    std::lock_guard command_guard(context->command_mutex);
+
+    VkCommandBufferAllocateInfo allocation{};
+    allocation.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocation.commandPool = context->command_pool;
+    allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocation.commandBufferCount = 1;
+    VkCommandBuffer command = VK_NULL_HANDLE;
+    VkResult result = vkAllocateCommandBuffers(context->device, &allocation, &command);
+    bool submitted = false;
+    bool completed = false;
+    if (result == VK_SUCCESS) {
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        result = vkBeginCommandBuffer(command, &begin);
+        if (result == VK_SUCCESS) {
+            VkImageMemoryBarrier barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.oldLayout = current_layout;
+            barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = image.image;
+            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            barrier.subresourceRange.levelCount = description.mip_levels;
+            barrier.subresourceRange.layerCount = description.array_layers;
+            barrier.srcAccessMask = current_layout == VK_IMAGE_LAYOUT_UNDEFINED
+                                        ? 0U
+                                        : VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(command,
+                                 current_layout == VK_IMAGE_LAYOUT_UNDEFINED ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                                                                              : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+            VkClearColorValue clear{};
+            for (std::size_t index = 0; index < 4U; ++index)
+                clear.float32[index] = request.clear_color[index];
+            VkImageSubresourceRange target_range{};
+            target_range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            target_range.baseMipLevel = request.mip_level;
+            target_range.levelCount = 1;
+            target_range.baseArrayLayer = request.array_layer;
+            target_range.layerCount = 1;
+            vkCmdClearColorImage(command, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1,
+                                 &target_range);
+
+            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                                 nullptr, 0, nullptr, 1, &barrier);
+            VkBufferImageCopy copy{};
+            copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            copy.imageSubresource.mipLevel = request.mip_level;
+            copy.imageSubresource.baseArrayLayer = request.array_layer;
+            copy.imageSubresource.layerCount = 1;
+            copy.imageExtent = {request.output_width, request.output_height, 1};
+            vkCmdCopyImageToBuffer(command, image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                   staging.buffer, 1, &copy);
+
+            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barrier.newLayout = texture_final_layout(description.usage);
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
+                                 0, nullptr, 0, nullptr, 1, &barrier);
+            result = vkEndCommandBuffer(command);
+        }
+    }
+    if (result == VK_SUCCESS) {
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &command;
+        VkFenceCreateInfo fence_info{};
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        VkFence fence = VK_NULL_HANDLE;
+        result = vkCreateFence(context->device, &fence_info, nullptr, &fence);
+        if (result == VK_SUCCESS) {
+            result = vkQueueSubmit(context->queue, 1, &submit, fence);
+            submitted = result == VK_SUCCESS;
+            if (result == VK_SUCCESS) {
+                result = vkWaitForFences(context->device, 1, &fence, VK_TRUE, UINT64_MAX);
+                completed = result == VK_SUCCESS;
+            }
+            vkDestroyFence(context->device, fence, nullptr);
+        }
+    }
+    if (submitted && !completed) {
+        const VkResult drain = vkDeviceWaitIdle(context->device);
+        if (drain == VK_SUCCESS) {
+            current_layout = texture_final_layout(description.usage);
+        } else {
+            current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+            result = drain;
+        }
+    } else if (completed) {
+        current_layout = texture_final_layout(description.usage);
+    }
+    if (command != VK_NULL_HANDLE) vkFreeCommandBuffers(context->device, context->command_pool, 1, &command);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("Vulkan texture clear/readback", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "texture_readback_failed";
+        return false;
+    }
+
+    void* mapped = nullptr;
+    result = vkMapMemory(context->device, staging.memory, 0, VK_WHOLE_SIZE, 0, &mapped);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkMapMemory(texture readback)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "texture_readback_failed";
+        return false;
+    }
+    if ((staging.properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0U) {
+        VkMappedMemoryRange range{};
+        range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+        range.memory = staging.memory;
+        range.offset = 0;
+        range.size = VK_WHOLE_SIZE;
+        result = vkInvalidateMappedMemoryRanges(context->device, 1, &range);
+    }
+    if (result == VK_SUCCESS) {
+        try {
+            output.resize(output_size);
+            std::memcpy(output.data(), mapped, output_size);
+        } catch (const std::bad_alloc&) {
+            result = VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
+    }
+    vkUnmapMemory(context->device, staging.memory);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("Vulkan texture readback map", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "texture_readback_failed";
+        output.clear();
+        return false;
+    }
+    if (description.format == TextureFormat::bgra8_unorm || description.format == TextureFormat::bgra8_srgb) {
+        for (std::size_t index = 0; index < output.size(); index += 4U)
+            std::swap(output[index], output[index + 2U]);
+    }
     return true;
 }
 
@@ -817,6 +1016,12 @@ public:
 
     bool upload(const TextureUploadPlan& uploads, Diagnostic& diagnostic) {
         return copy_texture_uploads(context_, raw_, info_.description, uploads, layout_, diagnostic);
+    }
+
+    bool clear_readback(const TextureClearReadbackRequest& request,
+                        std::vector<std::byte>& output,
+                        Diagnostic& diagnostic) {
+        return clear_texture_and_readback(context_, raw_, info_.description, request, layout_, output, diagnostic);
     }
 
 private:
@@ -1025,6 +1230,25 @@ public:
                    : TextureUpdateResult{TextureStatus::upload_failed, std::move(diagnostic)};
     }
 
+    TextureClearReadbackResult clear_texture_and_readback(
+        Texture& texture, const TextureClearReadbackRequest& request) override {
+        Diagnostic diagnostic;
+        const TextureReadbackStatus validation = validate_texture_clear_readback(texture, request, diagnostic);
+        if (validation != TextureReadbackStatus::ready)
+            return {validation, std::move(diagnostic), {}};
+        if (texture.backend() != Backend::Vulkan)
+            return {TextureReadbackStatus::unsupported,
+                    {"texture_backend_mismatch", "The texture belongs to another graphics backend"}, {}};
+        auto* vulkan_texture = dynamic_cast<VulkanTexture*>(&texture);
+        if (vulkan_texture == nullptr)
+            return {TextureReadbackStatus::unsupported,
+                    {"texture_type_unsupported", "The Vulkan device received an unknown texture handle"}, {}};
+        std::vector<std::byte> output;
+        if (!vulkan_texture->clear_readback(request, output, diagnostic))
+            return {TextureReadbackStatus::execution_failed, std::move(diagnostic), {}};
+        return {TextureReadbackStatus::ready, {}, std::move(output)};
+    }
+
     SamplerResult create_sampler(const SamplerDescription& description) override {
         Diagnostic diagnostic;
         if (!valid_sampler_description(description, diagnostic))
@@ -1097,9 +1321,7 @@ public:
     }
 
     void wait_idle() noexcept override {
-        if (context_ && context_->device != VK_NULL_HANDLE) {
-            (void)vkDeviceWaitIdle(context_->device);
-        }
+        if (context_) (void)context_->wait_idle();
     }
 
 private:

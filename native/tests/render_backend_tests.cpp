@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -17,6 +18,20 @@ void require(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
 }
 
+std::string environment_value(const char* name) {
+#if defined(_MSC_VER)
+    char* value = nullptr;
+    std::size_t length = 0U;
+    if (_dupenv_s(&value, &length, name) != 0 || value == nullptr) return {};
+    std::string result(value, length == 0U ? 0U : length - 1U);
+    std::free(value);
+    return result;
+#else
+    const char* value = std::getenv(name);
+    return value == nullptr ? std::string{} : std::string(value);
+#endif
+}
+
 void put_word(std::vector<std::byte>& bytes, std::size_t offset, std::uint32_t value) {
     require(offset + sizeof(std::uint32_t) <= bytes.size(), "shader fixture write out of bounds");
     bytes[offset] = std::byte{static_cast<unsigned char>(value & 0xffU)};
@@ -26,13 +41,20 @@ void put_word(std::vector<std::byte>& bytes, std::size_t offset, std::uint32_t v
 }
 
 std::vector<std::byte> minimal_spirv_fixture() {
-    std::vector<std::byte> bytes(24U);
-    put_word(bytes, 0U, 0x07230203U);
-    put_word(bytes, 4U, 0x00010000U);
-    put_word(bytes, 8U, 0U);
-    put_word(bytes, 12U, 1U);
-    put_word(bytes, 16U, 0U);
-    put_word(bytes, 20U, 0x00010000U); // OpNop: one-word instruction.
+    // Minimal vertex module assembled with spirv-as --target-env vulkan1.0.
+    // It is intentionally embedded so runtime backend tests do not depend on
+    // shader compiler tools being installed on the test host.
+    constexpr std::array<std::uint32_t, 29> words = {
+        0x07230203U, 0x00010000U, 0x00070000U, 0x00000005U, 0x00000000U,
+        0x00020011U, 0x00000001U, 0x0003000eU, 0x00000000U, 0x00000001U,
+        0x0005000fU, 0x00000000U, 0x00000001U, 0x6e69616dU, 0x00000000U,
+        0x00020013U, 0x00000002U, 0x00030021U, 0x00000003U, 0x00000002U,
+        0x00050036U, 0x00000002U, 0x00000001U, 0x00000000U, 0x00000003U,
+        0x000200f8U, 0x00000004U, 0x000100fdU, 0x00010038U,
+    };
+    std::vector<std::byte> bytes(words.size() * sizeof(std::uint32_t));
+    for (std::size_t index = 0U; index < words.size(); ++index)
+        put_word(bytes, index * sizeof(std::uint32_t), words[index]);
     return bytes;
 }
 
@@ -64,6 +86,9 @@ void contract_names() {
             "texture ready status name");
     require(std::string(apex::render::texture_status_name(apex::render::TextureStatus::upload_failed)) == "upload_failed",
             "texture upload status name");
+    require(std::string(apex::render::texture_readback_status_name(
+                apex::render::TextureReadbackStatus::execution_failed)) == "execution_failed",
+            "texture readback status name");
     require(std::string(apex::render::sampler_status_name(apex::render::SamplerStatus::ready)) == "ready",
             "sampler ready status name");
     require(std::string(apex::render::shader_module_status_name(apex::render::ShaderModuleStatus::unsupported)) ==
@@ -105,6 +130,17 @@ public:
     explicit ContractTexture(apex::render::TextureDescription description) : info_({description}) {}
 
     apex::render::Backend backend() const noexcept override { return apex::render::Backend::Vulkan; }
+    const apex::render::TextureInfo& info() const noexcept override { return info_; }
+
+private:
+    apex::render::TextureInfo info_;
+};
+
+class ContractD3D12Texture final : public apex::render::Texture {
+public:
+    explicit ContractD3D12Texture(apex::render::TextureDescription description) : info_({description}) {}
+
+    apex::render::Backend backend() const noexcept override { return apex::render::Backend::D3D12; }
     const apex::render::TextureInfo& info() const noexcept override { return info_; }
 
 private:
@@ -246,6 +282,75 @@ void contract_texture_limits() {
             "duplicate array-mip subresource rejected");
 }
 
+void contract_texture_readback_limits() {
+    using namespace apex::render;
+    Diagnostic diagnostic;
+    const TextureDescription description{4U, 2U, 2U, 1U, TextureFormat::rgba8_unorm,
+                                         TextureUsage::color_attachment | TextureUsage::transfer_source,
+                                         TextureMemory::device_local, TextureMutability::mutable_data};
+    ContractTexture texture(description);
+    TextureClearReadbackRequest request{{0, 1, 0, 1}, 0U, 0U, 4U, 2U};
+    require(validate_texture_clear_readback(texture, request, diagnostic) == TextureReadbackStatus::ready,
+            "valid texture clear/readback request accepted");
+    request.clear_color[0] = std::numeric_limits<float>::quiet_NaN();
+    require(validate_texture_clear_readback(texture, request, diagnostic) == TextureReadbackStatus::invalid_request &&
+                diagnostic.code == "texture_clear_color_non_finite", "non-finite clear color rejected");
+    request.clear_color[0] = 0.0F;
+    request.output_width = 2U;
+    require(validate_texture_clear_readback(texture, request, diagnostic) == TextureReadbackStatus::invalid_request &&
+                diagnostic.code == "texture_readback_dimensions", "readback output dimensions rejected");
+    request.output_width = 4U;
+    request.mip_level = 2U;
+    require(validate_texture_clear_readback(texture, request, diagnostic) == TextureReadbackStatus::invalid_request &&
+                diagnostic.code == "texture_readback_subresource_out_of_range", "readback mip range rejected");
+    request.mip_level = 0U;
+    TextureDescription array_mips{4U, 2U, 2U, 2U, TextureFormat::rgba8_unorm,
+                                  TextureUsage::color_attachment | TextureUsage::transfer_source,
+                                  TextureMemory::device_local, TextureMutability::mutable_data};
+    ContractTexture array_mips_texture(array_mips);
+    request.mip_level = 1U;
+    request.array_layer = 1U;
+    request.output_width = 2U;
+    request.output_height = 1U;
+    require(validate_texture_clear_readback(array_mips_texture, request, diagnostic) ==
+                TextureReadbackStatus::ready,
+            "array/mip readback subresource accepted");
+    request.array_layer = 2U;
+    require(validate_texture_clear_readback(array_mips_texture, request, diagnostic) ==
+                TextureReadbackStatus::invalid_request &&
+                diagnostic.code == "texture_readback_subresource_out_of_range",
+            "array readback layer range enforced");
+    request.array_layer = 1U;
+    request.mip_level = 0U;
+    request.array_layer = 0U;
+    request.output_width = 4U;
+    request.output_height = 2U;
+    TextureDescription missing_usage = description;
+    missing_usage.usage = TextureUsage::color_attachment;
+    ContractTexture missing_usage_texture(missing_usage);
+    require(validate_texture_clear_readback(missing_usage_texture, request, diagnostic) ==
+                TextureReadbackStatus::invalid_request && diagnostic.code == "texture_readback_usage_invalid",
+            "readback transfer usage required");
+    TextureDescription unsupported_format = description;
+    unsupported_format.format = TextureFormat::r8_unorm;
+    ContractTexture unsupported_texture(unsupported_format);
+    require(validate_texture_clear_readback(unsupported_texture, request, diagnostic) ==
+                TextureReadbackStatus::unsupported && diagnostic.code == "texture_readback_format_unsupported",
+            "unsupported readback format rejected");
+    TextureDescription oversized = description;
+    oversized.width = max_texture_dimension;
+    oversized.height = max_texture_dimension;
+    ContractTexture oversized_texture(oversized);
+    TextureClearReadbackRequest oversized_request{{0, 1, 0, 1}, 0U, 0U,
+                                                  max_texture_dimension, max_texture_dimension};
+    require(validate_texture_clear_readback(oversized_texture, oversized_request, diagnostic) ==
+                TextureReadbackStatus::invalid_request && diagnostic.code == "texture_readback_size_limit",
+            "readback output byte budget enforced");
+    ContractD3D12Texture foreign_texture(description);
+    require(foreign_texture.backend() == Backend::D3D12 && texture.backend() == Backend::Vulkan,
+            "backend ownership fixture");
+}
+
 void contract_sampler_shader_limits() {
     using namespace apex::render;
     Diagnostic diagnostic;
@@ -278,9 +383,12 @@ void contract_sampler_shader_limits() {
     require(validate_shader_module_description(shader, diagnostic) == ShaderModuleStatus::ready,
             "structurally valid SPIR-V accepted");
     for (std::size_t prefix = 0; prefix < spirv.size(); ++prefix) {
+        // A word-aligned prefix at an instruction boundary can be
+        // structurally valid even when it is not a complete shader module.
+        if (prefix >= 5U * sizeof(std::uint32_t) && prefix % sizeof(std::uint32_t) == 0U) continue;
         shader.bytecode = std::span<const std::byte>(spirv).first(prefix);
         require(validate_shader_module_description(shader, diagnostic) != ShaderModuleStatus::ready,
-                "truncated SPIR-V prefix rejected");
+                "misaligned or header-truncated SPIR-V prefix rejected");
     }
     std::vector<std::byte> bad_spirv = spirv;
     put_word(bad_spirv, 12U, 0U);
@@ -293,7 +401,7 @@ void contract_sampler_shader_limits() {
     require(validate_shader_module_description(shader, diagnostic) == ShaderModuleStatus::invalid_description &&
                 diagnostic.code == "shader_spirv_schema_invalid", "nonzero SPIR-V schema rejected");
     bad_spirv = spirv;
-    put_word(bad_spirv, 20U, 0x00020000U);
+    put_word(bad_spirv, bad_spirv.size() - sizeof(std::uint32_t), 0x00020038U);
     shader.bytecode = bad_spirv;
     require(validate_shader_module_description(shader, diagnostic) == ShaderModuleStatus::invalid_description &&
                 diagnostic.code == "shader_spirv_instruction_truncated", "truncated SPIR-V instruction rejected");
@@ -350,9 +458,9 @@ void contract_sampler_shader_limits() {
 bool contract_backend(apex::render::Backend backend) {
     using namespace apex::render;
     DeviceOptions options{};
-    options.enable_validation = std::getenv("APEX_RENDER_VALIDATION") != nullptr;
-    const char* requested_adapter = std::getenv("APEX_D3D12_ADAPTER");
-    if (backend == Backend::D3D12 && requested_adapter && std::string_view(requested_adapter) == "warp")
+    options.enable_validation = !environment_value("APEX_RENDER_VALIDATION").empty();
+    const std::string requested_adapter = environment_value("APEX_D3D12_ADAPTER");
+    if (backend == Backend::D3D12 && requested_adapter == "warp")
         options.prefer_software = true;
     const AdapterResult adapters = enumerate_adapters(backend, options);
     const DeviceResult device = create_device(backend, options);
@@ -446,6 +554,83 @@ bool contract_backend(apex::render::Backend backend) {
     host_texture_description.memory = TextureMemory::host_visible;
     TextureResult host_texture = device.device->create_texture(host_texture_description, texture_uploads);
     require(host_texture.status == TextureStatus::unsupported, "real backend rejects host-visible texture memory");
+    TextureDescription clear_texture_description{2U, 2U, 1U, 1U, TextureFormat::rgba8_unorm,
+                                                  TextureUsage::color_attachment | TextureUsage::transfer_source,
+                                                  TextureMemory::device_local, TextureMutability::mutable_data};
+    TextureResult clear_texture = device.device->create_texture(clear_texture_description);
+    require(clear_texture.ok(), "clear/readback texture creation");
+    const TextureClearReadbackRequest clear_request{{0.0F, 1.0F, 0.0F, 1.0F}, 0U, 0U, 2U, 2U};
+    ContractD3D12Texture foreign_texture(clear_texture_description);
+    const TextureClearReadbackResult foreign_result =
+        device.device->clear_texture_and_readback(foreign_texture, clear_request);
+    require(foreign_result.status == TextureReadbackStatus::unsupported &&
+                foreign_result.diagnostic.code == "texture_backend_mismatch",
+            "real backend rejects foreign texture ownership");
+    const TextureClearReadbackResult clear_result =
+        device.device->clear_texture_and_readback(*clear_texture.texture, clear_request);
+    require(clear_result.ok() && clear_result.rgba8.size() == 16U, "real clear/readback execution");
+    for (std::size_t pixel = 0; pixel < clear_result.rgba8.size(); pixel += 4U) {
+        require(clear_result.rgba8[pixel] == std::byte{0} && clear_result.rgba8[pixel + 1U] == std::byte{255} &&
+                    clear_result.rgba8[pixel + 2U] == std::byte{0} && clear_result.rgba8[pixel + 3U] == std::byte{255},
+                "deterministic canonical RGBA8 clear pixels");
+    }
+    TextureClearReadbackRequest invalid_clear = clear_request;
+    invalid_clear.clear_color[0] = std::numeric_limits<float>::infinity();
+    const TextureClearReadbackResult invalid_clear_result =
+        device.device->clear_texture_and_readback(*clear_texture.texture, invalid_clear);
+    require(invalid_clear_result.status == TextureReadbackStatus::invalid_request &&
+                invalid_clear_result.diagnostic.code == "texture_clear_color_non_finite",
+            "real clear/readback validates clear color");
+    const TextureClearReadbackRequest second_clear{{0.0F, 0.0F, 1.0F, 1.0F}, 0U, 0U, 2U, 2U};
+    const TextureClearReadbackResult repeated_clear =
+        device.device->clear_texture_and_readback(*clear_texture.texture, second_clear);
+    require(repeated_clear.ok(), "repeated clear/readback preserves tracked state");
+    require(repeated_clear.rgba8.size() == 16U && repeated_clear.rgba8[0] == std::byte{0} &&
+                repeated_clear.rgba8[1] == std::byte{0} && repeated_clear.rgba8[2] == std::byte{255} &&
+                repeated_clear.rgba8[3] == std::byte{255},
+            "repeated clear/readback pixels");
+
+    const TextureDescription bgra_description{3U, 2U, 1U, 1U, TextureFormat::bgra8_unorm,
+                                               TextureUsage::color_attachment | TextureUsage::transfer_source,
+                                               TextureMemory::device_local, TextureMutability::mutable_data};
+    TextureResult bgra_texture = device.device->create_texture(bgra_description);
+    require(bgra_texture.ok(), "BGRA clear/readback texture creation");
+    const TextureClearReadbackRequest bgra_request{{1.0F, 0.0F, 0.0F, 1.0F}, 0U, 0U, 3U, 2U};
+    const TextureClearReadbackResult bgra_result =
+        device.device->clear_texture_and_readback(*bgra_texture.texture, bgra_request);
+    require(bgra_result.ok() && bgra_result.rgba8.size() == 24U, "BGRA clear/readback execution");
+    for (std::size_t pixel = 0; pixel < bgra_result.rgba8.size(); pixel += 4U)
+        require(bgra_result.rgba8[pixel] == std::byte{255} && bgra_result.rgba8[pixel + 1U] == std::byte{0} &&
+                    bgra_result.rgba8[pixel + 2U] == std::byte{0} && bgra_result.rgba8[pixel + 3U] == std::byte{255},
+                "BGRA canonical red readback");
+
+    const TextureDescription srgb_description{2U, 2U, 1U, 1U, TextureFormat::rgba8_srgb,
+                                               TextureUsage::color_attachment | TextureUsage::transfer_source,
+                                               TextureMemory::device_local, TextureMutability::mutable_data};
+    TextureResult srgb_texture = device.device->create_texture(srgb_description);
+    require(srgb_texture.ok(), "sRGB clear/readback texture creation");
+    const TextureClearReadbackRequest srgb_request{{0.0F, 1.0F, 0.0F, 1.0F}, 0U, 0U, 2U, 2U};
+    const TextureClearReadbackResult srgb_result =
+        device.device->clear_texture_and_readback(*srgb_texture.texture, srgb_request);
+    require(srgb_result.ok() && srgb_result.rgba8.size() == 16U, "sRGB clear/readback execution");
+    for (std::size_t pixel = 0; pixel < srgb_result.rgba8.size(); pixel += 4U)
+        require(srgb_result.rgba8[pixel] == std::byte{0} && srgb_result.rgba8[pixel + 1U] == std::byte{255} &&
+                    srgb_result.rgba8[pixel + 2U] == std::byte{0} && srgb_result.rgba8[pixel + 3U] == std::byte{255},
+                "sRGB canonical green readback");
+
+    const TextureDescription array_description{4U, 4U, 2U, 2U, TextureFormat::rgba8_unorm,
+                                                TextureUsage::color_attachment | TextureUsage::transfer_source,
+                                                TextureMemory::device_local, TextureMutability::mutable_data};
+    TextureResult array_texture = device.device->create_texture(array_description);
+    require(array_texture.ok(), "array/mip clear/readback texture creation");
+    const TextureClearReadbackRequest array_request{{1.0F, 0.0F, 1.0F, 1.0F}, 1U, 1U, 2U, 2U};
+    const TextureClearReadbackResult array_result =
+        device.device->clear_texture_and_readback(*array_texture.texture, array_request);
+    require(array_result.ok() && array_result.rgba8.size() == 16U, "array/mip clear/readback execution");
+    for (std::size_t pixel = 0; pixel < array_result.rgba8.size(); pixel += 4U)
+        require(array_result.rgba8[pixel] == std::byte{255} && array_result.rgba8[pixel + 1U] == std::byte{0} &&
+                    array_result.rgba8[pixel + 2U] == std::byte{255} && array_result.rgba8[pixel + 3U] == std::byte{255},
+                "array/mip clear/readback pixels");
     if (backend == Backend::D3D12) {
         const BufferDescription incompatible{16U,
                                              BufferUsage::transfer_destination | BufferUsage::vertex,
@@ -477,16 +662,17 @@ int main() {
         contract_options();
         contract_buffer_limits();
         contract_texture_limits();
+        contract_texture_readback_limits();
         contract_sampler_shader_limits();
-        const char* requested = std::getenv("APEX_RENDER_BACKEND");
-        if (requested && std::string(requested) == "vulkan") {
+        const std::string requested = environment_value("APEX_RENDER_BACKEND");
+        if (requested == "vulkan") {
             return contract_backend(apex::render::Backend::Vulkan) ? 0 : 77;
         }
-        if (requested && std::string(requested) != "d3d12") {
+        if (!requested.empty() && requested != "d3d12") {
             std::cerr << "Unknown APEX_RENDER_BACKEND value: " << requested << '\n';
             return 2;
         }
-        if (requested) {
+        if (!requested.empty()) {
             return contract_backend(apex::render::Backend::D3D12) ? 0 : 77;
         }
         (void)contract_backend(apex::render::Backend::Vulkan);

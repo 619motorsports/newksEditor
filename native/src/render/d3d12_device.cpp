@@ -120,24 +120,24 @@ struct D3D12Context {
     std::mutex sampler_mutex;
     DeviceInfo info;
 
-    ~D3D12Context() { wait_idle(); }
+    ~D3D12Context() { (void)wait_idle(); }
 
-    void wait_idle() noexcept {
-        if (!queue || !device) return;
+    bool wait_idle() noexcept {
+        if (!queue || !device) return true;
         ComPtr<ID3D12Fence> fence;
-        if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)))) return;
+        if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)))) return false;
         HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (!event) return;
+        if (!event) return false;
         constexpr UINT64 value = 1;
-        if (SUCCEEDED(queue->Signal(fence.Get(), value)) && fence->GetCompletedValue() < value &&
-            SUCCEEDED(fence->SetEventOnCompletion(value, event))) {
+        bool success = SUCCEEDED(queue->Signal(fence.Get(), value));
+        if (success && fence->GetCompletedValue() < value)
+            success = SUCCEEDED(fence->SetEventOnCompletion(value, event));
+        if (success && fence->GetCompletedValue() < value) {
             const DWORD wait_result = WaitForSingleObject(event, INFINITE);
-            if (wait_result != WAIT_OBJECT_0) {
-                CloseHandle(event);
-                return;
-            }
+            success = wait_result == WAIT_OBJECT_0;
         }
         CloseHandle(event);
+        return success;
     }
 };
 
@@ -362,6 +362,8 @@ private:
 
 [[nodiscard]] D3D12_RESOURCE_STATES texture_state(TextureUsage usage) noexcept {
     const auto raw = static_cast<std::uint32_t>(usage);
+    if ((raw & static_cast<std::uint32_t>(TextureUsage::color_attachment)) != 0U)
+        return D3D12_RESOURCE_STATE_RENDER_TARGET;
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
     const auto add = [&state](D3D12_RESOURCE_STATES bit) {
         state = static_cast<D3D12_RESOURCE_STATES>(static_cast<UINT>(state) | static_cast<UINT>(bit));
@@ -407,7 +409,8 @@ private:
                       "D3D12 unordered-access texture state cannot be combined with another texture usage"};
         return false;
     }
-    if ((raw & color_attachment) != 0U && raw != color_attachment) {
+    const auto allowed_with_color = color_attachment | static_cast<std::uint32_t>(TextureUsage::transfer_source);
+    if ((raw & color_attachment) != 0U && (raw & ~allowed_with_color) != 0U) {
         diagnostic = {"d3d12_render_target_texture_exclusive",
                       "D3D12 render-target texture state cannot be combined with another texture usage"};
         return false;
@@ -595,6 +598,223 @@ bool execute_texture_upload(const std::shared_ptr<D3D12Context>& context,
     return true;
 }
 
+bool clear_texture_readback(const std::shared_ptr<D3D12Context>& context,
+                            ID3D12Resource* destination,
+                            const TextureDescription& description,
+                            const TextureClearReadbackRequest& request,
+                            D3D12_RESOURCE_STATES& destination_state,
+                            std::vector<std::byte>& output,
+                            Diagnostic& diagnostic) {
+    const UINT subresource = request.array_layer * description.mip_levels + request.mip_level;
+    const UINT64 row_bytes = static_cast<UINT64>(request.output_width) * 4U;
+    D3D12_RESOURCE_DESC resource_description = destination->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT row_count = 0;
+    UINT64 row_size = 0;
+    UINT64 readback_size = 0;
+    context->device->GetCopyableFootprints(&resource_description, subresource, 1, 0, &footprint,
+                                           &row_count, &row_size, &readback_size);
+    constexpr UINT64 max_size_t = static_cast<UINT64>(std::numeric_limits<std::size_t>::max());
+    const UINT64 row_pitch = footprint.Footprint.RowPitch;
+    bool footprint_valid = row_count >= request.output_height && row_size >= row_bytes &&
+                           row_pitch >= row_bytes && footprint.Offset <= max_size_t &&
+                           row_pitch <= max_size_t && readback_size <= max_texture_readback_bytes;
+    if (footprint_valid) {
+        const UINT64 rows_before_last = static_cast<UINT64>(request.output_height - 1U);
+        if (rows_before_last > (std::numeric_limits<UINT64>::max() - footprint.Offset) / row_pitch) {
+            footprint_valid = false;
+        } else {
+            const UINT64 last_row = footprint.Offset + rows_before_last * row_pitch;
+            footprint_valid = row_bytes <= std::numeric_limits<UINT64>::max() - last_row &&
+                              last_row + row_bytes <= readback_size;
+        }
+    }
+    if (!footprint_valid) {
+        diagnostic = {"texture_readback_footprint_invalid", "D3D12 readback footprint exceeds the bounded output"};
+        return false;
+    }
+
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC buffer_description{};
+    buffer_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer_description.Width = readback_size;
+    buffer_description.Height = 1;
+    buffer_description.DepthOrArraySize = 1;
+    buffer_description.MipLevels = 1;
+    buffer_description.SampleDesc.Count = 1;
+    buffer_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> readback;
+    HRESULT result = context->device->CreateCommittedResource(
+        &heap, D3D12_HEAP_FLAG_NONE, &buffer_description, D3D12_RESOURCE_STATE_COPY_DEST,
+        nullptr, IID_PPV_ARGS(&readback));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("ID3D12Device::CreateCommittedResource(readback)", result);
+        diagnostic.code = "texture_readback_failed";
+        return false;
+    }
+
+    D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_description{};
+    rtv_heap_description.NumDescriptors = 1;
+    rtv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    rtv_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    ComPtr<ID3D12DescriptorHeap> rtv_heap;
+    result = context->device->CreateDescriptorHeap(&rtv_heap_description, IID_PPV_ARGS(&rtv_heap));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("ID3D12Device::CreateDescriptorHeap(readback RTV)", result);
+        diagnostic.code = "texture_readback_failed";
+        return false;
+    }
+    D3D12_RENDER_TARGET_VIEW_DESC rtv_description{};
+    rtv_description.Format = dxgi_texture_format(description.format);
+    if (description.array_layers == 1U) {
+        rtv_description.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+        rtv_description.Texture2D.MipSlice = request.mip_level;
+        rtv_description.Texture2D.PlaneSlice = 0;
+    } else {
+        rtv_description.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+        rtv_description.Texture2DArray.MipSlice = request.mip_level;
+        rtv_description.Texture2DArray.FirstArraySlice = request.array_layer;
+        rtv_description.Texture2DArray.ArraySize = 1;
+        rtv_description.Texture2DArray.PlaneSlice = 0;
+    }
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
+    context->device->CreateRenderTargetView(destination, &rtv_description, rtv);
+
+    ComPtr<ID3D12CommandAllocator> allocator;
+    result = context->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                       IID_PPV_ARGS(&allocator));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("ID3D12Device::CreateCommandAllocator(readback)", result);
+        diagnostic.code = "texture_readback_failed";
+        return false;
+    }
+    ComPtr<ID3D12GraphicsCommandList> list;
+    result = context->device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
+                                                 IID_PPV_ARGS(&list));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("ID3D12Device::CreateCommandList(readback)", result);
+        diagnostic.code = "texture_readback_failed";
+        return false;
+    }
+    if (destination_state != D3D12_RESOURCE_STATE_RENDER_TARGET) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = destination;
+        barrier.Transition.StateBefore = destination_state;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1, &barrier);
+    }
+    list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    const float clear_color[4] = {request.clear_color[0], request.clear_color[1],
+                                  request.clear_color[2], request.clear_color[3]};
+    list->ClearRenderTargetView(rtv, clear_color, 0, nullptr);
+    {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = destination;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1, &barrier);
+    }
+    D3D12_TEXTURE_COPY_LOCATION source{};
+    source.pResource = destination;
+    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    source.SubresourceIndex = subresource;
+    D3D12_TEXTURE_COPY_LOCATION target{};
+    target.pResource = readback.Get();
+    target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    target.PlacedFootprint = footprint;
+    list->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
+    if (texture_state(description.usage) != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = destination;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barrier.Transition.StateAfter = texture_state(description.usage);
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1, &barrier);
+    }
+    result = list->Close();
+    if (FAILED(result)) {
+        diagnostic = hresult_error("ID3D12GraphicsCommandList::Close(readback)", result);
+        diagnostic.code = "texture_readback_failed";
+        return false;
+    }
+    ComPtr<ID3D12Fence> fence;
+    result = context->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("ID3D12Device::CreateFence(readback)", result);
+        diagnostic.code = "texture_readback_failed";
+        return false;
+    }
+    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!event) {
+        diagnostic = {"texture_readback_failed", "CreateEventW failed while waiting for a D3D12 readback"};
+        return false;
+    }
+    ID3D12CommandList* command_lists[] = {list.Get()};
+    context->queue->ExecuteCommandLists(1, command_lists);
+    const D3D12_RESOURCE_STATES final_state = texture_state(description.usage);
+    bool submitted = true;
+    constexpr UINT64 fence_value = 1;
+    result = context->queue->Signal(fence.Get(), fence_value);
+    if (SUCCEEDED(result) && fence->GetCompletedValue() < fence_value)
+        result = fence->SetEventOnCompletion(fence_value, event);
+    if (SUCCEEDED(result) && fence->GetCompletedValue() < fence_value) {
+        const DWORD wait_result = WaitForSingleObject(event, INFINITE);
+        if (wait_result != WAIT_OBJECT_0) result = E_FAIL;
+    }
+    CloseHandle(event);
+    if (FAILED(result)) {
+        const bool drained = context->wait_idle();
+        destination_state = drained && submitted ? final_state : D3D12_RESOURCE_STATE_COMMON;
+        diagnostic = hresult_error("D3D12 texture readback fence", result);
+        diagnostic.code = (result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET)
+                              ? "d3d12_device_removed"
+                              : "texture_readback_failed";
+        return false;
+    }
+    // The GPU has completed the transition before any host-visible work below.
+    // Keep the tracked state correct even if Map or output allocation fails.
+    destination_state = final_state;
+
+    void* mapped = nullptr;
+    D3D12_RANGE read_range{0, static_cast<SIZE_T>(readback_size)};
+    result = readback->Map(0, &read_range, &mapped);
+    if (FAILED(result)) {
+        diagnostic = hresult_error("ID3D12Resource::Map(readback)", result);
+        diagnostic.code = (result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET)
+                              ? "d3d12_device_removed"
+                              : "texture_readback_failed";
+        return false;
+    }
+    try {
+        output.resize(static_cast<std::size_t>(request.output_width) * request.output_height * 4U);
+        const auto* source_bytes = static_cast<const std::byte*>(mapped) + footprint.Offset;
+        for (std::uint32_t row = 0; row < request.output_height; ++row)
+            std::memcpy(output.data() + static_cast<std::size_t>(row) * request.output_width * 4U,
+                        source_bytes + static_cast<std::size_t>(row) * footprint.Footprint.RowPitch,
+                        static_cast<std::size_t>(row_bytes));
+    } catch (const std::bad_alloc&) {
+        result = E_OUTOFMEMORY;
+    }
+    readback->Unmap(0, nullptr);
+    if (FAILED(result)) {
+        output.clear();
+        diagnostic = hresult_error("D3D12 texture readback allocation", result);
+        diagnostic.code = "texture_readback_failed";
+        return false;
+    }
+    if (description.format == TextureFormat::bgra8_unorm || description.format == TextureFormat::bgra8_srgb) {
+        for (std::size_t index = 0; index < output.size(); index += 4U)
+            std::swap(output[index], output[index + 2U]);
+    }
+    return true;
+}
+
 class D3D12Texture final : public Texture {
 public:
     D3D12Texture(std::shared_ptr<D3D12Context> context,
@@ -612,6 +832,13 @@ public:
     bool upload(const TextureUploadPlan& uploads, Diagnostic& diagnostic) {
         return execute_texture_upload(context_, resource_.Get(), info_.description, uploads,
                                       state_, texture_state(info_.description.usage), diagnostic);
+    }
+
+    bool clear_readback(const TextureClearReadbackRequest& request,
+                        std::vector<std::byte>& output,
+                        Diagnostic& diagnostic) {
+        return clear_texture_readback(context_, resource_.Get(), info_.description, request, state_, output,
+                                      diagnostic);
     }
 
 private:
@@ -838,6 +1065,25 @@ public:
         return d3d_texture->upload(uploads, diagnostic)
                    ? TextureUpdateResult{TextureStatus::ready, {}}
                    : TextureUpdateResult{TextureStatus::upload_failed, std::move(diagnostic)};
+    }
+
+    TextureClearReadbackResult clear_texture_and_readback(
+        Texture& texture, const TextureClearReadbackRequest& request) override {
+        Diagnostic diagnostic;
+        const TextureReadbackStatus validation = validate_texture_clear_readback(texture, request, diagnostic);
+        if (validation != TextureReadbackStatus::ready)
+            return {validation, std::move(diagnostic), {}};
+        if (texture.backend() != Backend::D3D12)
+            return {TextureReadbackStatus::unsupported,
+                    {"texture_backend_mismatch", "The texture belongs to another graphics backend"}, {}};
+        auto* d3d_texture = dynamic_cast<D3D12Texture*>(&texture);
+        if (d3d_texture == nullptr)
+            return {TextureReadbackStatus::unsupported,
+                    {"texture_type_unsupported", "The D3D12 device received an unknown texture handle"}, {}};
+        std::vector<std::byte> output;
+        if (!d3d_texture->clear_readback(request, output, diagnostic))
+            return {TextureReadbackStatus::execution_failed, std::move(diagnostic), {}};
+        return {TextureReadbackStatus::ready, {}, std::move(output)};
     }
 
     SamplerResult create_sampler(const SamplerDescription& description) override {

@@ -54,14 +54,17 @@ std::vector<std::uint8_t> legacyBcDds(std::string_view tag, std::vector<std::uin
 }
 
 std::vector<std::uint8_t> dx10Dds(std::uint32_t width, std::uint32_t height,
-                                  std::uint32_t dxgi, std::vector<std::uint8_t> payload) {
+                                  std::uint32_t dxgi, std::vector<std::uint8_t> payload,
+                                  std::uint32_t resourceDimension = 3u,
+                                  std::uint32_t miscFlags = 0u,
+                                  std::uint32_t arraySize = 1u) {
     std::vector<std::uint8_t> bytes(148u + payload.size(), 0);
     put32(bytes, 0, 0x20534444u); put32(bytes, 4, 124u); put32(bytes, 12, height);
     put32(bytes, 16, width); put32(bytes, 28, 1u); put32(bytes, 76, 32u); put32(bytes, 80, 4u);
     bytes[84] = 'D'; bytes[85] = 'X'; bytes[86] = '1'; bytes[87] = '0'; put32(bytes, 128, dxgi);
-    put32(bytes, 132, 3u);  // D3D10_RESOURCE_DIMENSION_TEXTURE2D
-    put32(bytes, 136, 0u);  // miscFlags
-    put32(bytes, 140, 1u);  // arraySize
+    put32(bytes, 132, resourceDimension);
+    put32(bytes, 136, miscFlags);
+    put32(bytes, 140, arraySize);
     std::copy(payload.begin(), payload.end(), bytes.begin() + 148);
     return bytes;
 }
@@ -74,7 +77,9 @@ void expectsParseError(Function&& function, std::string_view code) {
     } catch (const ParseError& error) {
         caught = true;
         require(error.format() == "DDS", "unexpected parser format");
-        require(error.code() == code, "unexpected DDS parse error code");
+        if (error.code() != code)
+            throw std::runtime_error("unexpected DDS parse error code: " + error.code() + " expected " +
+                                     std::string(code));
     }
     require(caught, "expected DDS ParseError");
 }
@@ -113,6 +118,17 @@ void decodesMaskedRawFormats() {
     const auto paddedLevels = decodeDdsRgba(padded, *paddedDescriptor);
     require(paddedLevels[0].pixels[0] == 10u && paddedLevels[0].pixels[16u] == 40u,
             "large raw pitch decode uses authoritative row stride");
+
+    // Match src/dds.js: a pitch more than 16 bytes above the packed row is
+    // ignored for CPU decode instead of shifting subsequent rows.
+    std::vector<std::uint8_t> excessivePitch(64u, 0xeeu);
+    excessivePitch[0] = 10u; excessivePitch[1] = 20u; excessivePitch[2] = 30u; excessivePitch[3] = 255u;
+    excessivePitch[8] = 40u; excessivePitch[9] = 50u; excessivePitch[10] = 60u; excessivePitch[11] = 255u;
+    const auto ignoredPitch = rawDds(2, 2, 32, {0xffu, 0xff00u, 0xff0000u, 0xff000000u},
+                                      excessivePitch, 0x40u, 32u);
+    const auto ignoredPitchPixels = decodeDdsRgba(ignoredPitch)[0].pixels;
+    require(ignoredPitchPixels[0] == 10u && ignoredPitchPixels[8u] == 40u,
+            "excessive raw pitch follows JavaScript packed-row rule");
 }
 
 void decodesBcColorFormats() {
@@ -144,6 +160,10 @@ void decodesBcAlphaAndNormals() {
     const auto normal = decodeDdsRgba(bc5)[0].pixels;
     require(normal[0] == 128 && normal[1] == 128 && normal[2] == 255 && normal[3] == 255,
             "BC5 normal reconstruction");
+
+    const auto signedEndpoints = legacyBcDds("BC4S", {0x80u, 0x7fu, 0u, 0u, 0u, 0u, 0u, 0u});
+    const auto signedPixels = decodeDdsRgba(signedEndpoints)[0].pixels;
+    require(signedPixels[0] == 0u, "BC4 SNORM clamps -128 endpoint to -127 like JavaScript");
 }
 
 void recognizesGpuOnlyFormatsWithoutCpuApproximation() {
@@ -152,11 +172,47 @@ void recognizesGpuOnlyFormatsWithoutCpuApproximation() {
     require(bc6Descriptor.has_value() && bc6Descriptor->format == DdsFormat::BC6HUf16 &&
                 bc6Descriptor->gpuRequired, "BC6H GPU capability");
     expectsParseError([&] { (void)decodeDdsRgba(bc6, *bc6Descriptor); }, "GPU_REQUIRED");
-    const auto bc7 = dx10Dds(4, 4, 98, std::vector<std::uint8_t>(16));
+    const auto bc7 = dx10Dds(4, 4, 98, std::vector<std::uint8_t>{1u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
+                                                                    0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u});
     const auto bc7Descriptor = inspectDds(bc7);
     require(bc7Descriptor.has_value() && bc7Descriptor->format == DdsFormat::BC7 &&
-                bc7Descriptor->gpuRequired, "BC7 GPU capability");
-    expectsParseError([&] { (void)decodeDdsRgba(bc7, *bc7Descriptor); }, "GPU_REQUIRED");
+                !bc7Descriptor->gpuRequired, "BC7 CPU capability");
+    const auto bc7Pixels = decodeDdsRgba(bc7, *bc7Descriptor)[0].pixels;
+    require(bc7Pixels.size() == 64u && bc7Pixels[0] == 0u && bc7Pixels[3] == 255u,
+            "BC7 CPU decode");
+    const auto bc7Srgb = dx10Dds(5, 3, 99, std::vector<std::uint8_t>(32u, 1u));
+    const auto bc7SrgbDescriptor = inspectDds(bc7Srgb);
+    require(bc7SrgbDescriptor.has_value() && bc7SrgbDescriptor->format == DdsFormat::BC7Srgb &&
+                !bc7SrgbDescriptor->gpuRequired, "BC7 sRGB CPU capability");
+    const auto bc7SrgbPixels = decodeDdsRgba(bc7Srgb, *bc7SrgbDescriptor)[0].pixels;
+    require(bc7SrgbPixels.size() == 5u * 3u * 4u && bc7SrgbPixels[3] == 255u,
+            "BC7 clipped edge decode");
+
+    const auto rgbaSrgb = dx10Dds(1, 1, 29, {10, 20, 30, 40});
+    const auto rgbaSrgbDescriptor = inspectDds(rgbaSrgb);
+    require(rgbaSrgbDescriptor.has_value() && rgbaSrgbDescriptor->format == DdsFormat::Raw32 &&
+                rgbaSrgbDescriptor->srgb && rgbaSrgbDescriptor->dxgi == 29u,
+            "DX10 RGBA8 sRGB metadata preserved");
+    for (const auto dxgi : {72u, 75u, 78u}) {
+        const auto srgb = dx10Dds(4, 4, dxgi, std::vector<std::uint8_t>(16u, 1u));
+        const auto descriptor = inspectDds(srgb);
+        require(descriptor.has_value() && descriptor->srgb && descriptor->dxgi == dxgi,
+                "DX10 BC sRGB metadata preserved");
+    }
+    const auto bgraSrgb = dx10Dds(1, 1, 91, {10, 20, 30, 40});
+    const auto bgraDescriptor = inspectDds(bgraSrgb);
+    require(bgraDescriptor.has_value() && bgraDescriptor->srgb && bgraDescriptor->dxgi == 91u,
+            "DX10 BGRA8 sRGB metadata preserved");
+
+    auto legacyFloat = std::vector<std::uint8_t>(144u, 0u);
+    put32(legacyFloat, 0, 0x20534444u); put32(legacyFloat, 4, 124u); put32(legacyFloat, 12, 1u);
+    put32(legacyFloat, 16, 1u); put32(legacyFloat, 28, 1u); put32(legacyFloat, 76, 32u);
+    put32(legacyFloat, 80, 4u); put32(legacyFloat, 84, 116u);
+    const auto legacyFloatDescriptor = inspectDds(legacyFloat);
+    require(legacyFloatDescriptor.has_value() && legacyFloatDescriptor->format == DdsFormat::LegacyFloat &&
+                !legacyFloatDescriptor->compressed && legacyFloatDescriptor->gpuRequired,
+            "legacy float DDS remains explicit GPU_REQUIRED metadata");
+    expectsParseError([&] { (void)decodeDdsRgba(legacyFloat, *legacyFloatDescriptor); }, "GPU_REQUIRED");
 }
 
 void rejectsMalformedAndTruncatedInputs() {
@@ -188,11 +244,42 @@ void rejectsMalformedAndTruncatedInputs() {
     auto badDx10Dimension = validDx10;
     put32(badDx10Dimension, 132, 1u); // D3D10_RESOURCE_DIMENSION_BUFFER
     require(!inspectDds(badDx10Dimension).has_value(), "invalid DX10 resource dimension accepted");
+    for (const auto [dimension, misc, arraySize] : {
+             std::array<std::uint32_t, 3>{2u, 0u, 1u}, // 1D
+             std::array<std::uint32_t, 3>{3u, 0u, 2u}, // array
+             std::array<std::uint32_t, 3>{3u, 0x4u, 1u}, // cube
+             std::array<std::uint32_t, 3>{4u, 0u, 1u}, // 3D
+         }) {
+        const auto unsupportedLayout = dx10Dds(4, 4, 28, {1, 2, 3, 4}, dimension, misc, arraySize);
+        const auto layoutDescriptor = inspectDds(unsupportedLayout);
+        require(layoutDescriptor.has_value(), "unsupported DX10 layout remains inspectable");
+        expectsParseError([&] { (void)decodeDdsRgba(unsupportedLayout, *layoutDescriptor); }, "UNSUPPORTED_LAYOUT");
+    }
     auto rawShort = rawDds(4, 4, 32, {0xffu, 0xff00u, 0xff0000u, 0xff000000u}, {});
     expectsParseError([&] { (void)decodeDdsRgba(rawShort); }, "TRUNCATED");
+    const auto validBc7 = dx10Dds(4, 4, 98, std::vector<std::uint8_t>{1u, 0u, 0u, 0u,
+                                                                         0u, 0u, 0u, 0u,
+                                                                         0u, 0u, 0u, 0u,
+                                                                         0u, 0u, 0u, 0u});
+    for (std::size_t length = 148u; length < validBc7.size(); ++length) {
+        const std::vector<std::uint8_t> prefix(validBc7.begin(),
+                                                validBc7.begin() + static_cast<std::ptrdiff_t>(length));
+        expectsParseError([&] { (void)decodeDdsRgba(prefix); }, "TRUNCATED");
+    }
+    auto invalidBc7 = validBc7;
+    invalidBc7[148u] = 0u;
+    expectsParseError([&] { (void)decodeDdsRgba(invalidBc7); }, "INVALID_MODE");
     auto hugeDescriptor = *inspectDds(valid);
     hugeDescriptor.width = 32768; hugeDescriptor.height = 32768; hugeDescriptor.mipCount = 1;
     expectsParseError([&] { (void)decodeDdsRgba(valid, hugeDescriptor); }, "OUTPUT_TOO_LARGE");
+    auto badRawDescriptor = *inspectDds(rawDds(1, 1, 32, {0xffu, 0xff00u, 0xff0000u, 0xff000000u}, {1, 2, 3, 4}));
+    badRawDescriptor.bitsPerPixel = 16u;
+    badRawDescriptor.dataOffset = 0u;
+    expectsParseError([&] { (void)decodeDdsRgba(std::vector<std::uint8_t>{1, 2, 3, 4}, badRawDescriptor); },
+                      "UNSUPPORTED_FORMAT");
+    auto badBlockDescriptor = *inspectDds(validBc7);
+    badBlockDescriptor.blockBytes = 8u;
+    expectsParseError([&] { (void)decodeDdsRgba(validBc7, badBlockDescriptor); }, "UNSUPPORTED_FORMAT");
 }
 
 void checksWebglMipRule() {

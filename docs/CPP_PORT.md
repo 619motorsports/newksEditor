@@ -86,33 +86,43 @@ state.
 As of 2026-08-20, the native port is additive and the JavaScript/WebGL editor
 remains unchanged and feature-complete.
 
-- P0 is partial: CMake, strict warnings, sanitizers, cross-platform CI,
-  portable security checks, a native inspection CLI, a backend-neutral device
-  API, and headless Vulkan/D3D12 device, buffer, 2D texture, sampler, and
-  shader-module creation are implemented.
-- P1 is partial: bounded KN5 v4/v5/v6, DDS, ACD, INI/CSP, KSANIM v1/v2, and
-  KNH readers are implemented, together with byte-stable KN5 writing, VAO ZIP
-  decoding, track surfaces/cameras/splines, bounded directory/ACD asset
-  resolution, and a staged CSP configuration model. KN5 baking, FBX, full
-  asset indexing, and the remaining image formats are not ported.
-- P2 is partial: KN5 conversion feeds the neutral scene snapshot, material
-  binding is explicit, track/car workspace manifests assemble deterministically,
-  driver rigs assemble, and bounded project transactions, undo/redo/recovery,
-  geometry authoring, KN5 baking, and render/frame-plan selection are
-  implemented. Serialized project recovery, full validation, and CSP export
-  are not ported.
-- P3–P7 are not complete. The native graphics backends create real devices and
-  buffers plus bounded 2D textures, samplers, and shader modules, and DDS data
-  has a checked backend upload plan. CSP selectors and recovered
-  lighting/shadow/reflection math feed deterministic plans, but the port does
-  not yet create windows/swapchains, bind descriptors or pipelines, execute
-  shaders, draw pixels, or provide golden-image parity evidence.
+- P0 is partial. CMake, strict warnings, sanitizers, cross-platform CI,
+  portable security checks, and a native inspection CLI are implemented. The
+  port has a backend-neutral device API. Vulkan and D3D12 implement headless
+  devices, buffers, 2D textures, samplers, and shader modules. Both backends
+  also implement a bounded synchronous RGBA8/BGRA8 texture clear/readback
+  contract. This contract proves command submission and resource-state
+  handling. It does not prove scene-rendering parity.
+- P1 is partial. Bounded readers support KN5 v4/v5/v6, DDS, ACD, INI/CSP,
+  KSANIM v1/v2, and KNH. The port also supports byte-stable KN5 writing, VAO
+  ZIP decoding, and track surfaces, cameras, and splines. Bounded asset support
+  includes directory/ACD resolution, asset-folder/skin indexing, and skin
+  metadata JSON. A staged CSP configuration model is implemented. A bounded
+  binary/ASCII FBX DOM parser is implemented. FBX scene conversion is
+  explicitly not supported. KN5 baking is available. The remaining image
+  formats are not ported.
+- P2 is partial. KN5 conversion feeds the neutral scene snapshot. Material
+  binding is explicit. Track/car workspace manifests assemble
+  deterministically. Driver rigs assemble. Bounded project transactions,
+  undo/redo/recovery, geometry authoring, KN5 baking, and render/frame-plan
+  selection are implemented. Bounded `.apex.json` persistence is implemented.
+  The port deterministically exports modeled material edits to CSP. It reports
+  unsupported project categories instead of approximating them. Full
+  validation and the remaining project/export categories are not ported.
+- P3–P7 are not complete. The native backends create real resources. DDS data
+  has a checked backend upload plan. Validated draw packets include resource
+  references, render state, and bone palettes. A stricter CPU reference
+  skinning path bridges KN5 scenes to the render contract. CSP selectors and
+  recovered lighting, shadow, and reflection math feed deterministic plans.
+  The port does not create windows or swapchains. It does not bind descriptors
+  or pipelines, execute shaders, draw scene pixels, or provide golden-image
+  parity evidence.
 
-DDS BC6H and BC7 are recognized and routed as GPU-required formats. The
-current native slice deliberately does not substitute an approximate CPU
-decoder. A software fallback remains parity work because the WebGL editor has
-one. DX10 arrays, cubemaps, and 3D textures are explicitly rejected by the
-current upload planner; raw 24-bit and legacy D3D9 float uploads are also still
+DDS BC7 now has a bounded CPU decoder covered by differential fixtures for all
+eight modes. BC6H remains recognized and explicitly GPU-required. The port
+does not substitute an approximate CPU decoder. DX10 arrays, cubemaps, 1D/3D textures,
+and legacy D3D9 float data remain inspectable but are explicitly rejected by
+the current CPU decode/upload paths. Raw 24-bit upload is also still
 WebGL-only. These limitations must stay visible until their roadmap gates are
 met.
 

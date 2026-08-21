@@ -291,6 +291,59 @@ TextureStatus validate_texture_update(const Texture& texture,
     return validate_texture_upload_plan(texture.info().description, uploads, diagnostic);
 }
 
+TextureReadbackStatus validate_texture_clear_readback(
+    const Texture& texture, const TextureClearReadbackRequest& request, Diagnostic& diagnostic) {
+    const TextureDescription& description = texture.info().description;
+    for (const float component : request.clear_color) {
+        if (!std::isfinite(component)) {
+            diagnostic = {"texture_clear_color_non_finite", "Texture clear color components must be finite"};
+            return TextureReadbackStatus::invalid_request;
+        }
+    }
+    if (description.width == 0U || description.height == 0U || description.mip_levels == 0U ||
+        description.array_layers == 0U || request.mip_level >= description.mip_levels || request.mip_level >= 32U ||
+        request.array_layer >= description.array_layers) {
+        diagnostic = {"texture_readback_subresource_out_of_range", "Texture readback mip or array layer is out of range"};
+        return TextureReadbackStatus::invalid_request;
+    }
+    const std::uint32_t expected_width = std::max(1U, description.width >> request.mip_level);
+    const std::uint32_t expected_height = std::max(1U, description.height >> request.mip_level);
+    if (request.output_width != expected_width || request.output_height != expected_height) {
+        diagnostic = {"texture_readback_dimensions", "Texture readback output dimensions do not match the mip level"};
+        return TextureReadbackStatus::invalid_request;
+    }
+    const auto usage = static_cast<std::uint32_t>(description.usage);
+    const auto color_attachment = static_cast<std::uint32_t>(TextureUsage::color_attachment);
+    const auto transfer_source = static_cast<std::uint32_t>(TextureUsage::transfer_source);
+    if ((usage & color_attachment) == 0U || (usage & transfer_source) == 0U) {
+        diagnostic = {"texture_readback_usage_invalid",
+                      "Texture clear/readback requires color-attachment and transfer-source usage"};
+        return TextureReadbackStatus::invalid_request;
+    }
+    if (description.format != TextureFormat::rgba8_unorm &&
+        description.format != TextureFormat::rgba8_srgb &&
+        description.format != TextureFormat::bgra8_unorm &&
+        description.format != TextureFormat::bgra8_srgb) {
+        diagnostic = {"texture_readback_format_unsupported",
+                      "Texture clear/readback currently supports only RGBA8 and BGRA8 formats"};
+        return TextureReadbackStatus::unsupported;
+    }
+    constexpr std::uint64_t max_size_t = static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max());
+    const std::uint64_t width = request.output_width;
+    const std::uint64_t height = request.output_height;
+    if (width == 0U || height == 0U || width > std::numeric_limits<std::uint64_t>::max() / 4U ||
+        height > (std::numeric_limits<std::uint64_t>::max() / 4U) / width) {
+        diagnostic = {"texture_readback_size_limit", "Texture readback output size overflows the byte budget"};
+        return TextureReadbackStatus::invalid_request;
+    }
+    const std::uint64_t byte_count = width * height * 4U;
+    if (byte_count > max_size_t || byte_count > max_texture_readback_bytes) {
+        diagnostic = {"texture_readback_size_limit", "Texture readback output exceeds the backend-neutral byte limit"};
+        return TextureReadbackStatus::invalid_request;
+    }
+    return TextureReadbackStatus::ready;
+}
+
 SamplerStatus validate_sampler_description(const SamplerDescription& description,
                                            Diagnostic& diagnostic) {
     const auto valid_filter = [](SamplerFilter filter) {
@@ -541,6 +594,12 @@ bool valid_texture_update(const Texture& texture,
     return validate_texture_update(texture, uploads, diagnostic) == TextureStatus::ready;
 }
 
+bool valid_texture_clear_readback(const Texture& texture,
+                                  const TextureClearReadbackRequest& request,
+                                  Diagnostic& diagnostic) {
+    return validate_texture_clear_readback(texture, request, diagnostic) == TextureReadbackStatus::ready;
+}
+
 const char* backend_name(Backend backend) noexcept {
     switch (backend) {
     case Backend::Vulkan:
@@ -593,6 +652,20 @@ const char* texture_status_name(TextureStatus status) noexcept {
         return "allocation_failed";
     case TextureStatus::upload_failed:
         return "upload_failed";
+    }
+    return "unknown";
+}
+
+const char* texture_readback_status_name(TextureReadbackStatus status) noexcept {
+    switch (status) {
+    case TextureReadbackStatus::ready:
+        return "ready";
+    case TextureReadbackStatus::invalid_request:
+        return "invalid_request";
+    case TextureReadbackStatus::unsupported:
+        return "unsupported";
+    case TextureReadbackStatus::execution_failed:
+        return "execution_failed";
     }
     return "unknown";
 }

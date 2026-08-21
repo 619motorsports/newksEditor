@@ -1,0 +1,156 @@
+#pragma once
+
+#include "apex/formats/kn5.hpp"
+#include "apex/render/material_profile.hpp"
+#include "apex/render/render_plan.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <map>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace apex::render {
+
+enum class DrawPrimitiveKind : std::uint8_t { static_mesh, skinned_mesh };
+
+inline constexpr std::uint32_t invalid_draw_texture_id = std::numeric_limits<std::uint32_t>::max();
+
+struct DrawPacketFlags {
+    bool transparent = false;
+    bool blend_enabled = false;
+    bool alpha_to_coverage = false;
+    bool depth_test = true;
+    bool depth_write = true;
+    bool wireframe = false;
+    bool selected = false;
+    bool cast_shadows = false;
+};
+
+struct DrawResourceSlot {
+    std::string slot;
+    // KN5 textureId is an index into Kn5File::textures. It is not a shader
+    // register/bind point; backend binding allocation is intentionally staged.
+    std::uint32_t texture_id = invalid_draw_texture_id;
+    std::string texture;
+};
+
+struct DrawPacket {
+    apex::scene::NodeId node = apex::scene::invalid_node_id;
+    apex::scene::MaterialId material = apex::scene::invalid_material_id;
+    DrawPrimitiveKind primitive = DrawPrimitiveKind::static_mesh;
+    std::uint32_t vertex_offset = 0;
+    std::uint32_t vertex_count = 0;
+    std::uint32_t index_offset = 0;
+    std::uint32_t index_count = 0;
+    std::uint32_t vertex_stride = 0;
+    std::size_t order = 0;
+    float distance = 0.0F;
+    std::uint32_t layer = 0;
+    apex::scene::Matrix4 world_matrix = apex::scene::identity_matrix;
+    std::vector<apex::scene::Matrix4> bone_palette;
+    MaterialRenderProfile material_profile;
+    std::vector<DrawResourceSlot> resources;
+    DrawPacketFlags flags;
+    // Shader execution and texture sampling are intentionally staged. This
+    // packet is a validated command description, not evidence of pixels.
+    bool shader_execution_supported = false;
+};
+
+struct DrawPacketDiagnostic {
+    enum class Severity : std::uint8_t { warning, error };
+    Severity severity = Severity::warning;
+    std::string code;
+    std::string message;
+    apex::scene::NodeId node = apex::scene::invalid_node_id;
+    apex::scene::MaterialId material = apex::scene::invalid_material_id;
+};
+
+struct DrawPacketUnsupportedEffect {
+    std::string code;
+    std::string description;
+    apex::scene::NodeId node = apex::scene::invalid_node_id;
+    apex::scene::MaterialId material = apex::scene::invalid_material_id;
+};
+
+struct DrawPacketLimits {
+    std::size_t max_packets = 1'000'000;
+    std::size_t max_scene_nodes = 1'000'000;
+    std::size_t max_scene_materials = 1'000'000;
+    std::size_t max_vertices = 10'000'000;
+    std::size_t max_indices = 20'000'000;
+    std::size_t max_bones = 1'000'000;
+    std::size_t max_resources_per_packet = 4'096;
+    std::size_t max_string_bytes = 1U << 20;
+    std::size_t max_diagnostics = 100'000;
+    std::size_t max_unsupported_effects = 4'096;
+    std::size_t max_packet_bytes = 256U * 1024U * 1024U;
+    std::size_t max_total_bytes = 512U * 1024U * 1024U;
+    std::size_t max_cpu_skin_bytes = 256U * 1024U * 1024U;
+    std::size_t max_material_properties = 4'096;
+    std::size_t max_diagnostic_bytes = 16U * 1024U * 1024U;
+    std::size_t max_unsupported_effect_bytes = 16U * 1024U * 1024U;
+    std::size_t max_scene_textures = 1'000'000;
+};
+
+struct DrawPacketOptions {
+    bool wireframe = false;
+    apex::scene::NodeId selected_node = apex::scene::invalid_node_id;
+    bool include_shadow_casters = true;
+};
+
+struct DrawPacketBuildResult {
+    std::vector<DrawPacket> packets;
+    std::vector<DrawPacketDiagnostic> diagnostics;
+    std::vector<DrawPacketUnsupportedEffect> unsupported_effects;
+    // supported describes acceptance of the backend-neutral packet contract;
+    // unsupported_effects separately records staged shader/texture behavior.
+    bool supported = true;
+    bool limit_exceeded = false;
+    std::size_t total_bytes = 0;
+    std::size_t diagnostic_bytes = 0;
+    std::size_t unsupported_effect_bytes = 0;
+};
+
+class DrawPacketError final : public std::runtime_error {
+public:
+    DrawPacketError(std::string code, std::string message);
+
+    [[nodiscard]] const std::string& code() const noexcept { return code_; }
+
+private:
+    std::string code_;
+};
+
+[[nodiscard]] DrawPacketBuildResult build_draw_packets(
+    const apex::formats::Kn5File& model, const apex::scene::SceneSnapshot& scene,
+    const RenderPlan& plan, const DrawPacketOptions& options = {},
+    const DrawPacketLimits& limits = {});
+
+[[nodiscard]] inline DrawPacketBuildResult build_draw_packets(
+    const apex::formats::Kn5File& model, const apex::scene::SceneSnapshot& scene,
+    const DrawPacketOptions& options, const DrawPacketLimits& limits = {}) {
+    return build_draw_packets(model, scene, build_render_plan(scene), options, limits);
+}
+
+// CPU reference skinning follows src/skinning.js. It is a validation/reference
+// helper only; backends remain responsible for choosing a GPU skinning path.
+// It intentionally applies stricter validation than src/skinning.js: missing
+// palettes and malformed inactive influences are rejected instead of ignored.
+[[nodiscard]] std::vector<float> skin_vertices_reference(
+    const apex::formats::Kn5Node& mesh,
+    const std::map<std::string, apex::scene::Matrix4>& bone_world_by_name,
+    const apex::scene::Matrix4& mesh_world,
+    const DrawPacketLimits& limits = {});
+
+[[nodiscard]] inline std::vector<float> cpu_skin_vertices(
+    const apex::formats::Kn5Node& mesh,
+    const std::map<std::string, apex::scene::Matrix4>& bone_world_by_name,
+    const apex::scene::Matrix4& mesh_world,
+    const DrawPacketLimits& limits = {}) {
+    return skin_vertices_reference(mesh, bone_world_by_name, mesh_world, limits);
+}
+
+}  // namespace apex::render

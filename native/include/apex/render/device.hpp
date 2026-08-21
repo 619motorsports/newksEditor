@@ -2,6 +2,7 @@
 
 #include "apex/render/texture_format.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -234,6 +235,35 @@ struct TextureUpdateResult {
     [[nodiscard]] bool ok() const noexcept { return status == TextureStatus::ready; }
 };
 
+// A bounded, synchronous clear/readback operation for 2D RGBA8 textures.
+// The returned bytes are tightly packed canonical RGBA8, independent of the
+// backend's native channel order. This is an execution contract only; it is
+// not a pixel-fidelity claim for a complete renderer.
+struct TextureClearReadbackRequest {
+    std::array<float, 4> clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
+    std::uint32_t mip_level = 0;
+    std::uint32_t array_layer = 0;
+    std::uint32_t output_width = 0;
+    std::uint32_t output_height = 0;
+};
+
+enum class TextureReadbackStatus {
+    ready,
+    invalid_request,
+    unsupported,
+    execution_failed,
+};
+
+struct TextureClearReadbackResult {
+    TextureReadbackStatus status = TextureReadbackStatus::unsupported;
+    Diagnostic diagnostic;
+    std::vector<std::byte> rgba8;
+
+    [[nodiscard]] bool ok() const noexcept { return status == TextureReadbackStatus::ready; }
+};
+
+inline constexpr std::uint64_t max_texture_readback_bytes = 256ULL * 1024ULL * 1024ULL;
+
 enum class SamplerFilter : std::uint8_t {
     nearest,
     linear,
@@ -380,6 +410,11 @@ inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
     const TextureUploadPlan& uploads,
     Diagnostic& diagnostic);
 
+[[nodiscard]] TextureReadbackStatus validate_texture_clear_readback(
+    const Texture& texture,
+    const TextureClearReadbackRequest& request,
+    Diagnostic& diagnostic);
+
 [[nodiscard]] SamplerStatus validate_sampler_description(
     const SamplerDescription& description,
     Diagnostic& diagnostic);
@@ -422,6 +457,10 @@ public:
         Texture& texture,
         const TextureUploadPlan& uploads) = 0;
 
+    [[nodiscard]] virtual TextureClearReadbackResult clear_texture_and_readback(
+        Texture& texture,
+        const TextureClearReadbackRequest& request) = 0;
+
     [[nodiscard]] virtual SamplerResult create_sampler(
         const SamplerDescription& description) = 0;
 
@@ -445,6 +484,7 @@ struct DeviceResult {
 [[nodiscard]] const char* device_status_name(DeviceStatus status) noexcept;
 [[nodiscard]] const char* buffer_status_name(BufferStatus status) noexcept;
 [[nodiscard]] const char* texture_status_name(TextureStatus status) noexcept;
+[[nodiscard]] const char* texture_readback_status_name(TextureReadbackStatus status) noexcept;
 [[nodiscard]] const char* sampler_status_name(SamplerStatus status) noexcept;
 [[nodiscard]] const char* shader_module_status_name(ShaderModuleStatus status) noexcept;
 

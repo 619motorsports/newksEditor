@@ -31,6 +31,9 @@ enum class DdsFormat {
     BC6HSf16,
     BC7,
     BC7Srgb,
+    // Legacy D3D9 floating-point FOURCC payloads are intentionally retained
+    // as recognized GPU-only metadata. They are not approximated by RGBA8.
+    LegacyFloat,
 };
 
 struct DdsDescriptor {
@@ -49,6 +52,9 @@ struct DdsDescriptor {
     std::uint32_t miscFlags = 0;
     std::uint32_t arraySize = 1;
     std::uint32_t blockBytes = 0;
+    // Explicit DX10 color-space metadata. CPU byte decoding is unchanged, but
+    // upload callers must preserve this distinction for the native format.
+    bool srgb = false;
     bool compressed = false;
     bool luminance = false;
     bool signedChannels = false;
@@ -74,8 +80,8 @@ struct DdsLevel {
 // are multiples of four. This is a WebGL constraint, not a DDS validity rule.
 [[nodiscard]] bool webglCompressedMipChainSafe(const DdsDescriptor& descriptor) noexcept;
 
-// Decode supported uncompressed and BC1-BC5 textures into RGBA8. 24-bit RGB,
-// legacy floating-point FOURCC layouts, and BC6H/BC7 are deliberately not
+// Decode supported uncompressed and BC1-BC7 textures into RGBA8. 24-bit RGB,
+// legacy floating-point FOURCC layouts, and BC6H are deliberately not
 // approximated by a guessed CPU fallback: recognized GPU-only formats throw a
 // ParseError with code GPU_REQUIRED, while unsupported layouts remain explicit
 // unknown/unsupported diagnostics.

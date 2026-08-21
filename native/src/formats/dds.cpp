@@ -1,4 +1,5 @@
 #include "apex/formats/dds.hpp"
+#include "apex/formats/bc7.hpp"
 
 #include "apex/core/byte_reader.hpp"
 #include "apex/core/parse_error.hpp"
@@ -61,6 +62,10 @@ constexpr std::size_t MAX_CPU_DECODED_BYTES = 512u * 1024u * 1024u;
            format == DdsFormat::Raw24 || format == DdsFormat::Raw32;
 }
 
+[[nodiscard]] bool isLegacyFloat(DdsFormat format) noexcept {
+    return format == DdsFormat::LegacyFloat;
+}
+
 [[nodiscard]] bool isKnownCompressed(DdsFormat format) noexcept {
     return format == DdsFormat::BC1 || format == DdsFormat::BC2 ||
            format == DdsFormat::BC3 || format == DdsFormat::BC4Unorm ||
@@ -78,6 +83,14 @@ constexpr std::size_t MAX_CPU_DECODED_BYTES = 512u * 1024u * 1024u;
     case DdsFormat::Raw32: return 32;
     default: return 0;
     }
+}
+
+[[nodiscard]] bool isSupportedDx10CpuLayout(const DdsDescriptor& descriptor) noexcept {
+    if (descriptor.resourceDimension == 0u) return true;
+    // The CPU decoder returns one 2D mip chain. DX10 arrays, cubes, 1D, and
+    // 3D resources require an explicit GPU/array-aware path.
+    return descriptor.resourceDimension == 3u && descriptor.arraySize == 1u &&
+           (descriptor.miscFlags & 0x4u) == 0u; // D3D11_RESOURCE_MISC_TEXTURECUBE
 }
 
 [[nodiscard]] std::uint32_t blockBytesFor(DdsFormat format) noexcept {
@@ -99,7 +112,7 @@ constexpr std::size_t MAX_CPU_DECODED_BYTES = 512u * 1024u * 1024u;
 
 [[nodiscard]] bool isGpuOnly(DdsFormat format) noexcept {
     return format == DdsFormat::BC6HUf16 || format == DdsFormat::BC6HSf16 ||
-           format == DdsFormat::BC7 || format == DdsFormat::BC7Srgb;
+           format == DdsFormat::LegacyFloat;
 }
 
 [[nodiscard]] std::uint8_t roundByte(double value) noexcept {
@@ -143,7 +156,10 @@ struct BcPalette {
                                   bool signedChannels) noexcept {
     const auto convert = [signedChannels](std::uint8_t value) -> int {
         if (!signedChannels) return static_cast<int>(value);
-        return value > 127u ? static_cast<int>(value) - 256 : static_cast<int>(value);
+        // BC4/BC5 SNORM endpoints use the JS decoder's [-127, 127]
+        // representation; the raw 0x80 value is clamped from -128 to -127.
+        return std::clamp(value > 127u ? static_cast<int>(value) - 256 : static_cast<int>(value),
+                          -127, 127);
     };
     const int first = convert(bytes[offset]);
     const int second = convert(bytes[offset + 1]);
@@ -205,11 +221,19 @@ void validateDescriptor(const DdsDescriptor& descriptor, std::span<const std::ui
     }
     if (descriptor.dataOffset > bytes.size())
         throw ddsError(source, descriptor.dataOffset, "TRUNCATED", "DDS data offset exceeds input");
-    if (!descriptor.compressed && (!isRaw(descriptor.format) || descriptor.bitsPerPixel == 0 ||
-                                   descriptor.bitsPerPixel % 8u != 0u)) {
+    if (!isSupportedDx10CpuLayout(descriptor))
+        throw ddsError(source, 0, "UNSUPPORTED_LAYOUT", "CPU DDS decode supports only one DX10 2D texture");
+    if (!descriptor.compressed && !isLegacyFloat(descriptor.format) &&
+        (!isRaw(descriptor.format) || descriptor.bitsPerPixel == 0 ||
+         descriptor.bitsPerPixel != bitsForRaw(descriptor.format))) {
         throw ddsError(source, descriptor.dataOffset, "UNSUPPORTED_FORMAT", "DDS raw format is unsupported");
     }
-    if (descriptor.compressed && (!isKnownCompressed(descriptor.format) || descriptor.blockBytes == 0)) {
+    if (!descriptor.compressed && isLegacyFloat(descriptor.format) &&
+        (descriptor.bitsPerPixel == 0u || descriptor.bitsPerPixel % 8u != 0u))
+        throw ddsError(source, descriptor.dataOffset, "UNSUPPORTED_FORMAT", "legacy float DDS metadata has no byte size");
+    if (descriptor.compressed &&
+        (!isKnownCompressed(descriptor.format) || descriptor.blockBytes == 0 ||
+         descriptor.blockBytes != blockBytesFor(descriptor.format))) {
         throw ddsError(source, descriptor.dataOffset, "UNSUPPORTED_FORMAT", "DDS compressed format is unsupported");
     }
 
@@ -241,11 +265,11 @@ void validateDescriptor(const DdsDescriptor& descriptor, std::span<const std::ui
             const auto minimumPitch = apex::core::checkedMultiply(static_cast<std::size_t>(width),
                                                                   bytesPerPixel, "DDS", source, offset,
                                                                   "raw row");
-            // The top-level DDS pitch is authoritative whenever it is large
-            // enough for one packed row. Do not cap legal driver alignment to
-            // a guessed padding amount; that would shift every later row and
-            // mip for textures with larger alignment.
-            const auto rowPitch = (level == 0u && descriptor.pitch >= minimumPitch)
+            // Match src/dds.js: only the common <=16-byte top-level padding
+            // window is accepted. Larger values are treated as metadata from
+            // a producer whose pitch is not safe to apply to this decoder.
+            const auto rowPitch = (level == 0u && descriptor.pitch >= minimumPitch &&
+                                   static_cast<std::size_t>(descriptor.pitch) <= minimumPitch + 16u)
                                       ? static_cast<std::size_t>(descriptor.pitch)
                                       : minimumPitch;
             payload = apex::core::checkedMultiply(rowPitch, static_cast<std::size_t>(height), "DDS",
@@ -269,7 +293,8 @@ void validateDescriptor(const DdsDescriptor& descriptor, std::span<const std::ui
     const auto bytesPerPixel = static_cast<std::size_t>(descriptor.bitsPerPixel / 8u);
     for (std::uint32_t level = 0; level < descriptor.mipCount; ++level) {
         const auto minimumPitch = static_cast<std::size_t>(width) * bytesPerPixel;
-        const auto rowPitch = (level == 0u && descriptor.pitch >= minimumPitch)
+        const auto rowPitch = (level == 0u && descriptor.pitch >= minimumPitch &&
+                               static_cast<std::size_t>(descriptor.pitch) <= minimumPitch + 16u)
                                   ? static_cast<std::size_t>(descriptor.pitch)
                                   : minimumPitch;
         DdsLevel output{width, height, std::vector<std::uint8_t>(static_cast<std::size_t>(width) * height * 4u)};
@@ -303,7 +328,8 @@ void validateDescriptor(const DdsDescriptor& descriptor, std::span<const std::ui
 }
 
 [[nodiscard]] std::vector<DdsLevel> decodeBc(std::span<const std::uint8_t> bytes,
-                                             const DdsDescriptor& descriptor) {
+                                             const DdsDescriptor& descriptor,
+                                             std::string_view source) {
     std::vector<DdsLevel> levels;
     levels.reserve(descriptor.mipCount);
     std::size_t offset = descriptor.dataOffset;
@@ -312,6 +338,9 @@ void validateDescriptor(const DdsDescriptor& descriptor, std::span<const std::ui
     const bool bcColor = descriptor.format == DdsFormat::BC1 || descriptor.format == DdsFormat::BC2 ||
                          descriptor.format == DdsFormat::BC3;
     const bool bc5 = descriptor.format == DdsFormat::BC5Unorm || descriptor.format == DdsFormat::BC5Snorm;
+    const bool bc7 = descriptor.format == DdsFormat::BC7 || descriptor.format == DdsFormat::BC7Srgb;
+    Bc7Scratch bc7Scratch{};
+    std::array<std::uint8_t, 64> bc7Tile{};
     for (std::uint32_t level = 0; level < descriptor.mipCount; ++level) {
         const auto blocksWide = (static_cast<std::size_t>(width) + 3u) / 4u;
         const auto blocksHigh = (static_cast<std::size_t>(height) + 3u) / 4u;
@@ -320,6 +349,26 @@ void validateDescriptor(const DdsDescriptor& descriptor, std::span<const std::ui
         for (std::size_t blockY = 0; blockY < blocksHigh; ++blockY) {
             for (std::size_t blockX = 0; blockX < blocksWide; ++blockX) {
                 const auto block = offset + (blockY * blocksWide + blockX) * descriptor.blockBytes;
+                if (bc7) {
+                    try {
+                        decodeBc7Block(bytes, block, bc7Tile, 0u, 16u, bc7Scratch, source);
+                    } catch (const ParseError& error) {
+                        throw ddsError(source, block, error.code(), "BC7 block decode failed");
+                    }
+                    for (std::size_t tileY = 0; tileY < 4u; ++tileY) {
+                        const auto py = blockY * 4u + tileY;
+                        if (py >= height) continue;
+                        for (std::size_t tileX = 0; tileX < 4u; ++tileX) {
+                            const auto px = blockX * 4u + tileX;
+                            if (px >= width) continue;
+                            const auto target = (py * static_cast<std::size_t>(width) + px) * 4u;
+                            const auto tile = (tileY * 4u + tileX) * 4u;
+                            std::copy_n(bc7Tile.begin() + static_cast<std::ptrdiff_t>(tile), 4u,
+                                        output.pixels.begin() + static_cast<std::ptrdiff_t>(target));
+                        }
+                    }
+                    continue;
+                }
                 std::array<std::uint8_t, 3> colorPalette[4]{};
                 BcPalette redPalette{}, greenPalette{};
                 if (bcColor) {
@@ -419,6 +468,7 @@ const char* ddsFormatName(DdsFormat format) noexcept {
     case DdsFormat::BC6HSf16: return "BC6H_SF16";
     case DdsFormat::BC7: return "BC7";
     case DdsFormat::BC7Srgb: return "BC7_SRGB";
+    case DdsFormat::LegacyFloat: return "LEGACY_FLOAT";
     default: return "UNKNOWN";
     }
 }
@@ -460,28 +510,47 @@ std::optional<DdsDescriptor> inspectDds(std::span<const std::uint8_t> bytes, std
             switch (descriptor.dxgi) {
             case 28: case 29:
                 descriptor.format = DdsFormat::Raw32; descriptor.compressed = false;
+                descriptor.srgb = descriptor.dxgi == 29u;
                 descriptor.masks = {0xffu, 0xff00u, 0xff0000u, 0xff000000u}; break;
             case 61:
                 descriptor.format = DdsFormat::Raw8; descriptor.compressed = false;
                 descriptor.luminance = true; descriptor.masks = {0xffu, 0, 0, 0}; break;
             case 87: case 91:
                 descriptor.format = DdsFormat::Raw32; descriptor.compressed = false;
+                descriptor.srgb = descriptor.dxgi == 91u;
                 descriptor.masks = {0xff0000u, 0xff00u, 0xffu, 0xff000000u}; break;
-            case 71: case 72: descriptor.format = DdsFormat::BC1; descriptor.blockBytes = 8; break;
-            case 74: case 75: descriptor.format = DdsFormat::BC2; descriptor.blockBytes = 16; break;
-            case 77: case 78: descriptor.format = DdsFormat::BC3; descriptor.blockBytes = 16; break;
+            case 71: case 72:
+                descriptor.format = DdsFormat::BC1; descriptor.blockBytes = 8;
+                descriptor.srgb = descriptor.dxgi == 72u; break;
+            case 74: case 75:
+                descriptor.format = DdsFormat::BC2; descriptor.blockBytes = 16;
+                descriptor.srgb = descriptor.dxgi == 75u; break;
+            case 77: case 78:
+                descriptor.format = DdsFormat::BC3; descriptor.blockBytes = 16;
+                descriptor.srgb = descriptor.dxgi == 78u; break;
             case 80: descriptor.format = DdsFormat::BC4Unorm; descriptor.blockBytes = 8; break;
             case 81: descriptor.format = DdsFormat::BC4Snorm; descriptor.blockBytes = 8; descriptor.signedChannels = true; break;
             case 83: descriptor.format = DdsFormat::BC5Unorm; descriptor.blockBytes = 16; break;
             case 84: descriptor.format = DdsFormat::BC5Snorm; descriptor.blockBytes = 16; descriptor.signedChannels = true; break;
             case 95: descriptor.format = DdsFormat::BC6HUf16; descriptor.blockBytes = 16; descriptor.gpuRequired = true; break;
             case 96: descriptor.format = DdsFormat::BC6HSf16; descriptor.blockBytes = 16; descriptor.gpuRequired = true; break;
-            case 98: descriptor.format = DdsFormat::BC7; descriptor.blockBytes = 16; descriptor.gpuRequired = true; break;
-            case 99: descriptor.format = DdsFormat::BC7Srgb; descriptor.blockBytes = 16; descriptor.gpuRequired = true; break;
+            case 98: descriptor.format = DdsFormat::BC7; descriptor.blockBytes = 16; break;
+            case 99:
+                descriptor.format = DdsFormat::BC7Srgb; descriptor.blockBytes = 16; descriptor.srgb = true; break;
             default: descriptor.format = DdsFormat::Unknown; descriptor.blockBytes = 0; descriptor.gpuRequired = true; break;
             }
         } else {
-            if (descriptor.fourCC == "DXT1") { descriptor.format = DdsFormat::BC1; descriptor.blockBytes = 8; }
+            const auto legacyFourCcValue = u32(bytes, 84u);
+            if (legacyFourCcValue >= 111u && legacyFourCcValue <= 116u) {
+                descriptor.format = DdsFormat::LegacyFloat;
+                descriptor.compressed = false;
+                descriptor.gpuRequired = true;
+                descriptor.bitsPerPixel = legacyFourCcValue == 111u ? 16u
+                                         : legacyFourCcValue == 112u ? 32u
+                                         : legacyFourCcValue == 113u ? 64u
+                                         : legacyFourCcValue == 114u ? 32u
+                                         : legacyFourCcValue == 115u ? 64u : 128u;
+            } else if (descriptor.fourCC == "DXT1") { descriptor.format = DdsFormat::BC1; descriptor.blockBytes = 8; }
             else if (descriptor.fourCC == "DXT2") { descriptor.format = DdsFormat::BC2; descriptor.blockBytes = 16; descriptor.premultiplied = true; }
             else if (descriptor.fourCC == "DXT3") { descriptor.format = DdsFormat::BC2; descriptor.blockBytes = 16; }
             else if (descriptor.fourCC == "DXT4") { descriptor.format = DdsFormat::BC3; descriptor.blockBytes = 16; descriptor.premultiplied = true; }
@@ -505,7 +574,8 @@ std::optional<DdsDescriptor> inspectDds(std::span<const std::uint8_t> bytes, std
         for (std::size_t index = 0; index < descriptor.masks.size(); ++index)
             descriptor.masks[index] = u32(bytes, 92u + index * 4u);
     }
-    if (!descriptor.compressed) descriptor.bitsPerPixel = bitsForRaw(descriptor.format);
+    if (!descriptor.compressed && !isLegacyFloat(descriptor.format))
+        descriptor.bitsPerPixel = bitsForRaw(descriptor.format);
     if (descriptor.compressed && descriptor.blockBytes == 0u && descriptor.format != DdsFormat::Unknown)
         descriptor.blockBytes = blockBytesFor(descriptor.format);
     return descriptor;
@@ -533,7 +603,7 @@ std::vector<DdsLevel> decodeDdsRgba(std::span<const std::uint8_t> bytes,
         throw ddsError(source, descriptor.dataOffset, "GPU_REQUIRED",
                        std::string("DDS ") + ddsFormatName(descriptor.format) + " requires a GPU compressed-texture path");
     if (!descriptor.compressed) return decodeRaw(bytes, descriptor);
-    return decodeBc(bytes, descriptor);
+    return decodeBc(bytes, descriptor, source);
 }
 
 std::vector<DdsLevel> decodeDdsRgba(std::span<const std::uint8_t> bytes, std::string source,
