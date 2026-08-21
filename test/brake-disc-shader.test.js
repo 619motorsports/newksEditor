@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { parseKn5, walkNodes } from "../src/kn5.js";
-import { auditStockBrakeDiscMaterials, brakeDiscGlowStep, brakeDiscGlowTarget, isStockBrakeDiscShader, normalizeBrakeDiscBlur, parseBrakeDiscConfig, resolveBrakeDiscWheel, stockBrakeDiscGlow, stockBrakeDiscNormal, stockBrakeDiscTexel } from "../src/brake-disc-shader.js";
+import { auditStockBrakeDiscMaterials, brakeDiscGlowForAxle, brakeDiscGlowStep, brakeDiscGlowTarget, brakeDiscGlowTargets, isStockBrakeDiscShader, normalizeBrakeDiscBlur, parseBrakeDiscConfig, resolveBrakeDiscWheel, stockBrakeDiscGlow, stockBrakeDiscNormal, stockBrakeDiscTexel } from "../src/brake-disc-shader.js";
 import { parseAcd, findAcdEntry } from "../src/acd.js";
 import { assettoPath } from "./fixture-paths.js";
 
@@ -29,6 +29,10 @@ test("matches the recovered runtime target and hot-cool lag", () => {
   assert.equal(brakeDiscGlowStep(10, 20, 0.1, 2, 0.5), 12);
   assert.equal(brakeDiscGlowStep(20, 10, 0.1, 2, 0.5), 19.5);
   assert.equal(brakeDiscGlowStep(1, 4, 1, 2, 0.5), 4);
+  assert.deepEqual(brakeDiscGlowTargets(85, 64, 24), { frontGlowLevel: 32, rearGlowLevel: 12 });
+  assert.equal(brakeDiscGlowForAxle(160, "front", 64, 24), 64);
+  assert.equal(brakeDiscGlowForAxle(160, "rear", 64, 24), 24);
+  assert.equal(brakeDiscGlowForAxle(160, null, 64, 24), 0);
 });
 
 test("matches the stock blur, normal, and base-multiplied glow operations", () => {

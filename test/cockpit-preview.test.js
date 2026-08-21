@@ -27,12 +27,22 @@ test("uses the high-resolution root for each native F3 edge", () => {
 
 test("overrides only cockpit roots and keeps other inactive ancestors", () => {
   const root = node("ROOT"), high = node("COCKPIT_HR", true), low = node("COCKPIT_LR", false), mesh = node("MESH");
-  assert.equal(cockpitPreviewBranchActive([root, high, mesh], true), true);
-  assert.equal(cockpitPreviewBranchActive([root, high, mesh], false), false);
-  assert.equal(cockpitPreviewBranchActive([root, low, mesh], true), false);
-  assert.equal(cockpitPreviewBranchActive([root, low, mesh], false), true);
-  assert.equal(cockpitPreviewBranchActive([node("INACTIVE", false), low, mesh], false), false);
+  const audit = auditStockCockpitNodes(node("SCENE", true, [high, low]));
+  assert.equal(cockpitPreviewBranchActive([root, high, mesh], true, audit), true);
+  assert.equal(cockpitPreviewBranchActive([root, high, mesh], false, audit), false);
+  assert.equal(cockpitPreviewBranchActive([root, low, mesh], true, audit), false);
+  assert.equal(cockpitPreviewBranchActive([root, low, mesh], false, audit), true);
+  assert.equal(cockpitPreviewBranchActive([node("INACTIVE", false), low, mesh], false, audit), false);
   assert.equal(stockCockpitRoleForPath([root, low, mesh]), "low");
+});
+
+test("leaves duplicate cockpit names in their authored state", () => {
+  const firstHigh = node("COCKPIT_HR", true), duplicateHigh = node("COCKPIT_HR", false), low = node("COCKPIT_LR", false), root = node("ROOT");
+  const audit = auditStockCockpitNodes(node("SCENE", true, [firstHigh, duplicateHigh, low]));
+  assert.equal(audit.high, firstHigh);
+  assert.equal(cockpitPreviewBranchActive([root, firstHigh], false, audit), false);
+  assert.equal(cockpitPreviewBranchActive([root, duplicateHigh], true, audit), false);
+  assert.equal(cockpitPreviewBranchActive([root, duplicateHigh], false, audit), false);
 });
 
 test("diagnoses missing, duplicate, and nonexclusive cockpit roots", () => {
