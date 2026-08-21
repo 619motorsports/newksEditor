@@ -323,7 +323,8 @@ private:
                         const auto repeat = static_cast<std::size_t>(bits.bits(symbol == 17u ? 3u : 7u)) +
                                             (symbol == 17u ? 3u : 11u);
                         if (repeat > lengths.size() - index) throw std::runtime_error("deflate zero repeat exceeds tree");
-                        std::fill_n(lengths.begin() + static_cast<std::ptrdiff_t>(index), repeat, 0);
+                        std::fill_n(lengths.begin() + static_cast<std::ptrdiff_t>(index), repeat,
+                                    std::uint8_t{0});
                         index += repeat;
                     } else {
                         throw std::runtime_error("invalid deflate code length symbol");
