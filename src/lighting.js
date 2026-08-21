@@ -199,13 +199,13 @@ export function cspSecondarySpotAttenuation(distance, range, skip) {
 }
 
 const RAW_STOCK_WEATHER = Object.freeze([
-  ["1_heavy_fog","Heavy Fog",2,[164,164,164,3.5],[164,164,164,4],[164,164,164,3],[164,164,164,3.5],[229.5,168.3,86.7,0],[170,170,160,0],[160,150,140,10],[140,150,155,10.8],[4.25,4.25,4.25],1,2000,0,.69,.3],
-  ["2_light_fog","Light Fog",1.8,[150,150,150,5.25],[150,150,150,5],[100,130,150,3.5],[100,130,150,5.5],[200.5,110.3,46.7,9],[170,165,160,8],[130,120,105,10],[130,135,140,10],[4.15,4.15,4.15],.85,2700,0,.69,.3],
-  ["3_clear","Clear",3.4,[255,138,34,1.9],[150,170,220,3.5],[30,73,167,2.8],[30,73,167,3],[229.5,140,70,40],[170,160,140,20],[124,124,124,18],[105,105,105,11],[1.8,2.37,3.42],.85,9000,.9,.5,.7],
-  ["4_mid_clear","Mid Clear",3.4,[255,138,34,1.9],[150,170,220,3.5],[30,73,167,2.8],[30,73,167,3],[229.5,140,70,40],[170,160,140,20],[124,124,124,18],[105,105,105,11],[1.8,2.37,3.42],.85,9000,.9,.5,.7],
-  ["5_light_clouds","Light Clouds",1.8,[255,138,34,5.5],[140,170,200,5.5],[100,133,187,6],[80,133,200,6.5],[229.5,168.3,86.7,6],[170,170,160,6],[135,120,118,11],[124,134,145,15],[1.5,2.25,3.5],.8,12000,1,.7,3.05],
-  ["6_mid_clouds","Mid Clouds",2.8,[150,150,150,1.5],[150,150,150,1.5],[145,140,140,3.5],[120,150,180,3.5],[0,0,0,0],[0,0,0,0],[140,140,140,9],[140,140,140,11],[1.45,1.55,1.65],.8,12000,.4,.85,1.5],
-  ["7_heavy_clouds","Heavy Clouds",2,[140,140,140,2],[140,140,140,2],[145,140,142,4],[140,140,140,4],[0,0,0,0],[0,0,0,0],[140,130,120,6],[140,140,140,8],[1.1,1.1,1.1],.8,12000,.95,.55,.2]
+  ["1_heavy_fog","Heavy Fog",2,[164,164,164,3.5],[164,164,164,4],[164,164,164,3],[164,164,164,3.5],[229.5,168.3,86.7,0],[170,170,160,0],[160,150,140,10],[140,150,155,10.8],[4.25,4.25,4.25],1,2000,0,.69,.3,16,7,10,0,.0015],
+  ["2_light_fog","Light Fog",1.8,[150,150,150,5.25],[150,150,150,5],[100,130,150,3.5],[100,130,150,5.5],[200.5,110.3,46.7,9],[170,165,160,8],[130,120,105,10],[130,135,140,10],[4.15,4.15,4.15],.85,2700,0,.69,.3,16,7,10,0,.0015],
+  ["3_clear","Clear",3.4,[255,138,34,1.9],[150,170,220,3.5],[30,73,167,2.8],[30,73,167,3],[229.5,140,70,40],[170,160,140,20],[124,124,124,18],[105,105,105,11],[1.8,2.37,3.42],.85,9000,.9,.5,.7,6,2.5,6,0,.0015],
+  ["4_mid_clear","Mid Clear",3.4,[255,138,34,1.9],[150,170,220,3.5],[30,73,167,2.8],[30,73,167,3],[229.5,140,70,40],[170,160,140,20],[124,124,124,18],[105,105,105,11],[1.8,2.37,3.42],.85,9000,.9,.5,.7,9,4,6,40,.0015],
+  ["5_light_clouds","Light Clouds",1.8,[255,138,34,5.5],[140,170,200,5.5],[100,133,187,6],[80,133,200,6.5],[229.5,168.3,86.7,6],[170,170,160,6],[135,120,118,11],[124,134,145,15],[1.5,2.25,3.5],.8,12000,1,.7,3.05,18,9,10,50,.004],
+  ["6_mid_clouds","Mid Clouds",2.8,[150,150,150,1.5],[150,150,150,1.5],[145,140,140,3.5],[120,150,180,3.5],[0,0,0,0],[0,0,0,0],[140,140,140,9],[140,140,140,11],[1.45,1.55,1.65],.8,12000,.4,.85,1.5,25,12,10,45,.004],
+  ["7_heavy_clouds","Heavy Clouds",2,[140,140,140,2],[140,140,140,2],[145,140,142,4],[140,140,140,4],[0,0,0,0],[0,0,0,0],[140,130,120,6],[140,140,140,8],[1.1,1.1,1.1],.8,12000,.95,.55,.2,13,7,10,50,.004]
 ]);
 
 export const STOCK_WEATHER_PRESETS = Object.freeze(RAW_STOCK_WEATHER.map((entry) => Object.freeze(createPreset(...entry))));
@@ -232,7 +232,12 @@ export function parseKsWeatherLighting(colorCurvesText, weatherText, source = "w
     fogDistance: Math.max(1, scalar(weather, "FOG", "DISTANCE", 1)),
     cloudCover: scalar(weather, "CLOUDS", "COVER", 0),
     cloudCutoff: scalar(weather, "CLOUDS", "CUTOFF", 0),
-    cloudColor: scalar(weather, "CLOUDS", "COLOR", 0)
+    cloudColor: scalar(weather, "CLOUDS", "COLOR", 0),
+    cloudWidth: boundedScalar(weather, "CLOUDS", "WIDTH", 4, 0, 1000),
+    cloudHeight: boundedScalar(weather, "CLOUDS", "HEIGHT", 2, 0, 1000),
+    cloudRadius: boundedScalar(weather, "CLOUDS", "RADIUS", 4, 0, 1000),
+    cloudNumber: Math.floor(boundedScalar(weather, "CLOUDS", "NUMBER", 100, 0, 512)),
+    cloudBaseSpeed: boundedScalar(weather, "CLOUDS", "BASE_SPEED_MULT", .01, 0, 1)
   });
 }
 
@@ -258,8 +263,8 @@ export function sunDirectionFromAngles(headingDegrees, heightDegrees) {
   return normalize([Math.sin(heading) * horizontal, Math.sin(height), Math.cos(heading) * horizontal]);
 }
 
-function createPreset(id,name,angleGamma,horizonLow,horizonHigh,skyLow,skyHigh,sunLow,sunHigh,ambientLow,ambientHigh,fogColor,fogBlend,fogDistance,cloudCover,cloudCutoff,cloudColor) {
-  return {id,name,source:`Assetto Corsa SDK · ${id}`,version:3,angleGamma,hdrOffMult:1,horizonLow:colorCurve(horizonLow),horizonHigh:colorCurve(horizonHigh),skyLow:colorCurve(skyLow),skyHigh:colorCurve(skyHigh),sunLow:colorCurve(sunLow),sunHigh:colorCurve(sunHigh),ambientLow:colorCurve(ambientLow),ambientHigh:colorCurve(ambientHigh),fogColor:[...fogColor],fogBlend,fogDistance,cloudCover,cloudCutoff,cloudColor};
+function createPreset(id,name,angleGamma,horizonLow,horizonHigh,skyLow,skyHigh,sunLow,sunHigh,ambientLow,ambientHigh,fogColor,fogBlend,fogDistance,cloudCover,cloudCutoff,cloudColor,cloudWidth,cloudHeight,cloudRadius,cloudNumber,cloudBaseSpeed) {
+  return {id,name,source:`Assetto Corsa SDK · ${id}`,version:3,angleGamma,hdrOffMult:1,horizonLow:colorCurve(horizonLow),horizonHigh:colorCurve(horizonHigh),skyLow:colorCurve(skyLow),skyHigh:colorCurve(skyHigh),sunLow:colorCurve(sunLow),sunHigh:colorCurve(sunHigh),ambientLow:colorCurve(ambientLow),ambientHigh:colorCurve(ambientHigh),fogColor:[...fogColor],fogBlend,fogDistance,cloudCover,cloudCutoff,cloudColor,cloudWidth,cloudHeight,cloudRadius,cloudNumber,cloudBaseSpeed};
 }
 
 function colorCurve(value) { return value.slice(0, 3).map((component) => component * value[3] / 255); }
@@ -279,5 +284,6 @@ function parseIni(source) {
 }
 function raw(ini, section, key) { return ini.get(section)?.get(key); }
 function scalar(ini, section, key, fallback) { const value = Number.parseFloat(raw(ini, section, key)); return Number.isFinite(value) ? value : fallback; }
+function boundedScalar(ini, section, key, fallback, minimum, maximum) { return Math.max(minimum, Math.min(maximum, scalar(ini, section, key, fallback))); }
 function vector(ini, section, key, size) { const values = String(raw(ini, section, key) || "").split(",").map(Number); if (values.length < size || values.slice(0, size).some((value) => !Number.isFinite(value))) throw new Error(`Missing or invalid [${section}] ${key}`); return values.slice(0, size); }
 function text(ini, section, key, fallback) { return String(raw(ini, section, key) || fallback).trim(); }
