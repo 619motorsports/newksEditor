@@ -46,6 +46,9 @@ test("serves the desktop application and its explicitly allowed modules", async 
     const fileIdentity = await fetch(`${url}/src/file-identity.js`);
     assert.equal(fileIdentity.status, 200);
     assert.match(await fileIdentity.text(), /createFileIdentity/);
+    const tyreShader = await fetch(`${url}/src/tyre-shader.js`);
+    assert.equal(tyreShader.status, 200);
+    assert.match(await tyreShader.text(), /stockTyreTexel/);
     const analogInstruments = await fetch(`${url}/src/analog-instruments.js`);
     assert.equal(analogInstruments.status, 200);
     assert.match(await analogInstruments.text(), /parseAnalogInstrumentsIni/);

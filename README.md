@@ -86,7 +86,8 @@ npm test
   8/16/24/32-bit masked DDS, bounded legacy D3D9 R/RG/RGBA 16/32-bit float DDS,
   PNG/JPEG/WebP,
   tangent-space normal maps, packed maps channels, diffuse/normal detail maps, and
-  world-space four-layer track materials
+  world-space four-layer track materials. The preview also reproduces the recovered
+  five-texture blur and dirt path for `ksTyres` and `newStefano_ksTyres`.
 - Car- and track-scale orbit preview, hierarchy filtering, selected-mesh framing,
   isolation, and wireframe. Normal preview follows recursive KN5 game visibility:
   an inactive ancestor or a mesh with `visible`/`renderable` disabled stays hidden.

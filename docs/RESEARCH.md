@@ -149,6 +149,48 @@ described below. Runtime scene-cubemap capture now follows the recovered editor
 budget and orientation. Its mesh pass uses the same stock/CSP material binder as the
 viewport; unsupported shader families remain approximations.
 
+### Stock tyre shader evidence
+
+The installed `ksTyres.shader` and `newStefano_ksTyres.shader` containers are
+byte-identical. Their SHA-256 value is
+`8f380de9334c968e47d40bcdac948f9e42739929c9d93c7dd13afdee08105d01`.
+Their shared pixel DXBC SHA-256 value is
+`218e9a3638b919c44af94e2efb7f41753990a3056b186b0600a4af93beba0940`.
+
+DXBC reflection defines five tyre resources: `txDiffuse` at t0, `txNormal` at t1,
+`txDirty` at t2, `txBlur` at t3, and `txNormalBlur` at t4. The 32-byte `cbTyre`
+buffer stores `blurLevel`, `dirtyLevel`, `fresnelC`, and `fresnelEXP` at offsets
+0, 4, 8, and 12. It stores `isAdditive` and `fresnelMaxLevel` at offsets 16 and 20.
+
+The disassembly gives the following tyre-specific operations. The shader blends the
+diffuse and blur RGBA samples with `blurLevel`. It then blends RGB toward `txDirty.rgb`
+with `txDirty.a * dirtyLevel`. Diffuse alpha does not receive the dirt blend.
+Direct specular uses `diffuseAlpha * (1 - dirtyLevel) * ksSpecular`. The hard
+Fresnel cap uses `saturate(1 - dirtyLevel) * fresnelMaxLevel`.
+
+The shader decodes and normalizes each tangent-frame normal separately. It then blends
+those two world normals with `blurLevel`. It does not normalize that final blend.
+The additive branch adds the cubemap result. The other branch blends the lit result
+toward the cubemap result. Both branches write output alpha one.
+
+The installed Porsche 917/30 binds all five resources to one `ksTyres` material.
+Four tyre meshes use that material, and its `isAdditive` value is zero. The installed
+Nissan 370Z also binds all five resources. Its tyre material sets `isAdditive` to one.
+These cars exercise both recovered reflection branches.
+
+The old editor's Tyres wizard calls `setMaterialWizard(1, 1, 0.1, 5, false)`.
+Its Blurred button sends F1, and the native graphics layer exposes
+`areBlurredRimsVisible`. No recovered WinForms dirt slider was found. Apex therefore
+labels blur and dirt as live shader-state controls, not as a copy of the old interface.
+
+A production WebGL check isolated the Porsche `TYRE_MESH_LF` mesh. Pristine and
+fully blurred, dirty states produced `d56bf77a685cf332` and `6fbd5531bb4b4f5e`.
+The Nissan additive branch produced `9c280c9ad7598078` and `4dd5a2465dd6f50c`.
+All four captures returned WebGL error zero without a browser exception. A packaged
+Electron check loaded the Porsche model with all 76 textures. It also kept Node.js
+APIs unavailable, rejected external popups, served the content policy, and returned
+WebGL error zero.
+
 ### Reflection environment evidence
 
 An audit of official Kunos car, track, and showroom KN5 textures found no DDS with
