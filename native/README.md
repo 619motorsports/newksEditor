@@ -97,6 +97,13 @@ emissive conversion. Pixel tests prove per-draw record selection. The complete
 lighting and reflection equations remain staged. A bounded batch preflights
 all requests. It clears or loads attachments once and returns one final
 readback. Draw-packet texture resources resolve by canonical name.
+An exact tangent-space extension adds `txNormal` at bindings 4 and 5. A second
+extension adds linear `txMaps` at bindings 6 and 7. D3D12 uses `t4`, `s5`,
+`t6`, and `s7`. The maps shader uses `maps.r` for specular strength. It uses
+`maps.g` for the source exponent equation. The maps ABI requires zero Fresnel,
+so `maps.b` remains staged. Detail normals, reflections, and shadows also
+remain staged. Runtime tests cover known pixels, independent samplers, and
+mixed six-binding and eight-binding batches.
 The serialized KN5 resource ID remains a shader bind point, not a
 texture-table index. A bounded static-scene adapter maps the final KN5 tree to
 dense scene IDs. It validates all packets and pipelines before buffer creation.
@@ -116,6 +123,8 @@ native block-compressed upload path. BC7 has an exact, bounded CPU fallback.
 BC6H still requires a capable GPU path. The upload planner supports DX10 2D
 arrays, cubemaps, and RGB24 conversion. The embedded static-scene mode rejects
 arrays, cubemaps, 1D/3D textures, BC6H, and legacy D3D9 float textures.
+The maps path rejects sRGB payloads before backend allocation. Source, decoded,
+and host-preparation budgets include the maps resource and its retained tables.
 The FBX converter handles
 static positions, triangulation, hierarchy, a bounded transform subset, and
 first material assignment. It explicitly diagnoses unsupported images,

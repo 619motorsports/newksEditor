@@ -431,6 +431,9 @@ enum class IndexedPortableResourceLayout : std::uint8_t {
     // Exact bounded ksPerPixelNM ABI: diffuse at bindings 0/1, material and
     // frame uniforms at 2/3, and tangent-space normal texture at bindings 4/5.
     diffuse_normal_with_constants_and_frame,
+    // Exact bounded txMaps extension: the ksPerPixelNM bindings above plus
+    // the linear maps texture and sampler at bindings 6/7.
+    diffuse_normal_maps_with_constants_and_frame,
     unsupported,
 };
 
@@ -480,6 +483,8 @@ struct IndexedStaticMeshDrawRequest {
     IndexedSampledTextureBinding sampled_binding{};
     // Optional normal sampled image and sampler at set 0/bindings 4 and 5.
     IndexedSampledTextureBinding normal_binding{};
+    // Optional txMaps sampled image and sampler at set 0/bindings 6 and 7.
+    IndexedSampledTextureBinding maps_binding{};
     IndexedMaterialBufferBinding material_binding{};
     IndexedFrameBufferBinding frame_binding{};
 };

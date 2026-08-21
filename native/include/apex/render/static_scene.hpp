@@ -41,6 +41,9 @@ struct StaticSceneResourceLimits {
     // Counts full source payloads once per packet. This limit bounds repeated
     // validation work when many packets reference one large mesh.
     std::uint64_t max_validation_bytes = 1024ULL * 1024ULL * 1024ULL;
+    // Bounds host-side tables and deep copies that preparation retains or
+    // creates. Texture source bytes and decoded pixels have separate limits.
+    std::uint64_t max_preparation_bytes = 512ULL * 1024ULL * 1024ULL;
 };
 
 enum class StaticSceneTextureAuthority : std::uint8_t {
@@ -97,10 +100,11 @@ struct StaticSceneFrameDescription {
     // position from camera.position.
     std::optional<KsPerPixelFrameConstants> frame_constants;
     // For caller_tables authority, these non-owning tables use the final
-    // Kn5File::textures ordering. When a prepared packet uses txDiffuse, both
-    // lengths must equal the final texture count. Used entries must remain
-    // alive through the synchronous draw; unused entries can be null. The
-    // embedded_kn5 authority ignores these tables and uses owned resources.
+    // Kn5File::textures ordering. When a prepared packet uses txDiffuse,
+    // txNormal, or txMaps, both lengths must equal the final texture count.
+    // Used entries must remain alive through the synchronous draw; unused
+    // entries can be null. The embedded_kn5 authority ignores these tables
+    // and uses owned resources.
     std::span<const Texture* const> textures_by_global_index{};
     std::span<const Sampler* const> samplers_by_global_index{};
 };
@@ -136,6 +140,7 @@ private:
     struct PacketTextureIndices {
         std::uint32_t diffuse = invalid_draw_texture_index;
         std::uint32_t normal = invalid_draw_texture_index;
+        std::uint32_t maps = invalid_draw_texture_index;
     };
 
     Backend backend_ = Backend::Vulkan;

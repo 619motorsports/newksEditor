@@ -1245,6 +1245,10 @@ struct VulkanIndexedBatchDraw {
     VkImage normal_image = VK_NULL_HANDLE;
     VkImageView normal_view = VK_NULL_HANDLE;
     VkSampler normal_sampler = VK_NULL_HANDLE;
+    bool has_maps_binding = false;
+    VkImage maps_image = VK_NULL_HANDLE;
+    VkImageView maps_view = VK_NULL_HANDLE;
+    VkSampler maps_sampler = VK_NULL_HANDLE;
     bool has_material_binding = false;
     VkBuffer material_buffer = VK_NULL_HANDLE;
     VkDeviceSize material_offset = 0U;
@@ -1266,6 +1270,7 @@ struct VulkanTransientSampledDescriptors {
     bool includes_material_buffer = false;
     bool includes_frame_buffer = false;
     bool includes_normal_binding = false;
+    bool includes_maps_binding = false;
 
     VulkanTransientSampledDescriptors() = default;
     VulkanTransientSampledDescriptors(const VulkanTransientSampledDescriptors&) = delete;
@@ -1275,7 +1280,8 @@ struct VulkanTransientSampledDescriptors {
           pool(std::exchange(other.pool, VK_NULL_HANDLE)),
           includes_material_buffer(std::exchange(other.includes_material_buffer, false)),
           includes_frame_buffer(std::exchange(other.includes_frame_buffer, false)),
-          includes_normal_binding(std::exchange(other.includes_normal_binding, false)) {}
+          includes_normal_binding(std::exchange(other.includes_normal_binding, false)),
+          includes_maps_binding(std::exchange(other.includes_maps_binding, false)) {}
     VulkanTransientSampledDescriptors& operator=(VulkanTransientSampledDescriptors&& other) noexcept {
         if (this == &other) return *this;
         reset();
@@ -1285,6 +1291,7 @@ struct VulkanTransientSampledDescriptors {
         includes_material_buffer = std::exchange(other.includes_material_buffer, false);
         includes_frame_buffer = std::exchange(other.includes_frame_buffer, false);
         includes_normal_binding = std::exchange(other.includes_normal_binding, false);
+        includes_maps_binding = std::exchange(other.includes_maps_binding, false);
         return *this;
     }
     ~VulkanTransientSampledDescriptors() { reset(); }
@@ -1299,6 +1306,7 @@ struct VulkanTransientSampledDescriptors {
         includes_material_buffer = false;
         includes_frame_buffer = false;
         includes_normal_binding = false;
+        includes_maps_binding = false;
         context.reset();
     }
 };
@@ -1503,17 +1511,19 @@ bool create_sampled_descriptor_layout(const std::shared_ptr<VulkanContext>& cont
                                       bool includes_material_buffer,
                                       bool includes_frame_buffer,
                                       bool includes_normal_binding,
+                                      bool includes_maps_binding,
                                       Diagnostic& diagnostic) {
     descriptors.reset();
     descriptors.context = context;
-    // The normal-map ABI is intentionally exact: bindings 4/5 are only
-    // meaningful when the material and frame records at 2/3 are present.
-    // Keep descriptor accounting safe even if a malformed caller reaches this
-    // backend before neutral validation.
-    descriptors.includes_material_buffer = includes_material_buffer || includes_normal_binding;
-    descriptors.includes_frame_buffer = includes_frame_buffer || includes_normal_binding;
-    descriptors.includes_normal_binding = includes_normal_binding;
-    std::array<VkDescriptorSetLayoutBinding, 6> bindings{};
+    // The normal/maps ABIs are intentionally exact: bindings 4/5 and 6/7
+    // are only meaningful when the material and frame records at 2/3 are
+    // present. Keep descriptor accounting safe even if malformed input
+    // reaches this backend before neutral validation.
+    descriptors.includes_material_buffer = includes_material_buffer || includes_normal_binding || includes_maps_binding;
+    descriptors.includes_frame_buffer = includes_frame_buffer || includes_normal_binding || includes_maps_binding;
+    descriptors.includes_normal_binding = includes_normal_binding || includes_maps_binding;
+    descriptors.includes_maps_binding = includes_maps_binding;
+    std::array<VkDescriptorSetLayoutBinding, 8> bindings{};
     bindings[0].binding = 0U;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     bindings[0].descriptorCount = 1U;
@@ -1538,10 +1548,20 @@ bool create_sampled_descriptor_layout(const std::shared_ptr<VulkanContext>& cont
     bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
     bindings[5].descriptorCount = 1U;
     bindings[5].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[6].binding = 6U;
+    bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    bindings[6].descriptorCount = 1U;
+    bindings[6].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[7].binding = 7U;
+    bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    bindings[7].descriptorCount = 1U;
+    bindings[7].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     VkDescriptorSetLayoutCreateInfo layout_info{};
     layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layout_info.bindingCount = includes_normal_binding
+    layout_info.bindingCount = includes_maps_binding
                                    ? static_cast<std::uint32_t>(bindings.size())
+                                   : includes_normal_binding
+                                   ? 6U
                                    : includes_frame_buffer ? 4U : includes_material_buffer ? 3U : 2U;
     layout_info.pBindings = bindings.data();
     const VkResult result = vkCreateDescriptorSetLayout(context->device, &layout_info, nullptr,
@@ -1563,8 +1583,8 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
                                       Diagnostic& diagnostic) {
     std::size_t descriptor_count = 0U;
     for (const VulkanIndexedBatchDraw& draw : draws) {
-        if (draw.has_sampled_binding || draw.has_normal_binding || draw.has_material_binding ||
-            draw.has_frame_binding)
+        if (draw.has_sampled_binding || draw.has_normal_binding || draw.has_maps_binding ||
+            draw.has_material_binding || draw.has_frame_binding)
             ++descriptor_count;
     }
     if (descriptor_count == 0U) return true;
@@ -1578,8 +1598,15 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
     // reserve every descriptor in every allocated set, even when a particular
     // shader does not read one of the optional bindings.
     VkDescriptorPoolSize pool_sizes[3]{};
-    const std::size_t sampled_descriptor_count = descriptor_count *
-                                                 (descriptors.includes_normal_binding ? 2U : 1U);
+    const std::size_t sampled_descriptors_per_set = descriptors.includes_maps_binding
+                                                        ? 3U
+                                                        : descriptors.includes_normal_binding ? 2U : 1U;
+    if (descriptor_count > std::numeric_limits<std::size_t>::max() / sampled_descriptors_per_set) {
+        diagnostic = {"vulkan_descriptor_count_limit",
+                      "The indexed sampled-image descriptor count overflows host arithmetic"};
+        return false;
+    }
+    const std::size_t sampled_descriptor_count = descriptor_count * sampled_descriptors_per_set;
     if (sampled_descriptor_count > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
         diagnostic = {"vulkan_descriptor_count_limit",
                       "The indexed sampled-image descriptor count exceeds Vulkan's bounded descriptor limit"};
@@ -1596,6 +1623,12 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
     const std::size_t uniform_bindings_per_set = descriptors.includes_frame_buffer
                                                       ? 2U
                                                       : descriptors.includes_material_buffer ? 1U : 0U;
+    if (uniform_bindings_per_set != 0U &&
+        descriptor_count > std::numeric_limits<std::size_t>::max() / uniform_bindings_per_set) {
+        diagnostic = {"vulkan_descriptor_count_limit",
+                      "The indexed uniform descriptor count overflows host arithmetic"};
+        return false;
+    }
     const std::size_t uniform_descriptor_count = descriptor_count * uniform_bindings_per_set;
     if (uniform_descriptor_count > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
         diagnostic = {"vulkan_descriptor_count_limit",
@@ -1633,8 +1666,8 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
     std::size_t next = 0U;
     for (std::size_t index = 0U; index < draws.size(); ++index) {
         const VulkanIndexedBatchDraw& draw = draws[index];
-        if (!draw.has_sampled_binding && !draw.has_normal_binding && !draw.has_material_binding &&
-            !draw.has_frame_binding)
+        if (!draw.has_sampled_binding && !draw.has_normal_binding && !draw.has_maps_binding &&
+            !draw.has_material_binding && !draw.has_frame_binding)
             continue;
         const VkDescriptorSet set = allocated[next++];
         VkDescriptorImageInfo image_info{};
@@ -1647,6 +1680,11 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
         normal_image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         VkDescriptorImageInfo normal_sampler_info{};
         normal_sampler_info.sampler = draw.normal_sampler;
+        VkDescriptorImageInfo maps_image_info{};
+        maps_image_info.imageView = draw.maps_view;
+        maps_image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkDescriptorImageInfo maps_sampler_info{};
+        maps_sampler_info.sampler = draw.maps_sampler;
         VkDescriptorBufferInfo material_info{};
         material_info.buffer = draw.material_buffer;
         material_info.offset = draw.material_offset;
@@ -1655,7 +1693,7 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
         frame_info.buffer = draw.frame_buffer;
         frame_info.offset = draw.frame_offset;
         frame_info.range = draw.frame_range;
-        std::array<VkWriteDescriptorSet, 6> writes{};
+        std::array<VkWriteDescriptorSet, 8> writes{};
         std::uint32_t write_count = 0U;
         if (draw.has_sampled_binding) {
             writes[write_count].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -1687,6 +1725,22 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
             writes[write_count].descriptorCount = 1U;
             writes[write_count].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
             writes[write_count].pImageInfo = &normal_sampler_info;
+            ++write_count;
+        }
+        if (draw.has_maps_binding) {
+            writes[write_count].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[write_count].dstSet = set;
+            writes[write_count].dstBinding = 6U;
+            writes[write_count].descriptorCount = 1U;
+            writes[write_count].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+            writes[write_count].pImageInfo = &maps_image_info;
+            ++write_count;
+            writes[write_count].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[write_count].dstSet = set;
+            writes[write_count].dstBinding = 7U;
+            writes[write_count].descriptorCount = 1U;
+            writes[write_count].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+            writes[write_count].pImageInfo = &maps_sampler_info;
             ++write_count;
         }
         if (draw.has_material_binding) {
@@ -2243,16 +2297,18 @@ bool draw_indexed_batch_and_readback(
     bool has_material_binding = false;
     bool has_frame_binding = false;
     bool has_normal_binding = false;
+    bool has_maps_binding = false;
     for (const VulkanIndexedBatchDraw& draw : draws) {
         has_sampled_binding = has_sampled_binding || draw.has_sampled_binding;
         has_material_binding = has_material_binding || draw.has_material_binding;
         has_frame_binding = has_frame_binding || draw.has_frame_binding;
         has_normal_binding = has_normal_binding || draw.has_normal_binding;
+        has_maps_binding = has_maps_binding || draw.has_maps_binding;
     }
     VulkanTransientSampledDescriptors descriptors;
-    if ((has_sampled_binding || has_normal_binding || has_material_binding || has_frame_binding) &&
+    if ((has_sampled_binding || has_normal_binding || has_maps_binding || has_material_binding || has_frame_binding) &&
         !create_sampled_descriptor_layout(context, descriptors, has_material_binding, has_frame_binding,
-                                          has_normal_binding, diagnostic))
+                                          has_normal_binding, has_maps_binding, diagnostic))
         return false;
 
     VkAttachmentDescription color_attachment{};
@@ -2337,7 +2393,7 @@ bool draw_indexed_batch_and_readback(
     }
 
     std::vector<VkDescriptorSet> descriptor_sets;
-    if ((has_sampled_binding || has_normal_binding || has_material_binding || has_frame_binding) &&
+    if ((has_sampled_binding || has_normal_binding || has_maps_binding || has_material_binding || has_frame_binding) &&
         !allocate_sampled_descriptor_sets(
                                   context, descriptors, draws, descriptor_sets, diagnostic)) {
         pipelines.clear();
@@ -2781,6 +2837,8 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
     bool frame_declaration = false;
     bool normal_texture_declaration = false;
     bool normal_sampler_declaration = false;
+    bool maps_texture_declaration = false;
+    bool maps_sampler_declaration = false;
     for (const PipelineResourceBinding& resource : request.pipeline->resources) {
         if (resource.set != 0U) continue;
         if (resource.binding == 0U && resource.kind == PipelineResourceKind::sampled_texture)
@@ -2795,6 +2853,10 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
             normal_texture_declaration = true;
         else if (resource.binding == 5U && resource.kind == PipelineResourceKind::sampler)
             normal_sampler_declaration = true;
+        else if (resource.binding == 6U && resource.kind == PipelineResourceKind::sampled_texture)
+            maps_texture_declaration = true;
+        else if (resource.binding == 7U && resource.kind == PipelineResourceKind::sampler)
+            maps_sampler_declaration = true;
     }
     if (!sampled_declaration || !sampler_declaration) {
         diagnostic = {"vulkan_indexed_resource_layout_unsupported",
@@ -2810,6 +2872,23 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
     if (normal_declaration && (!material_declaration || !frame_declaration)) {
         diagnostic = {"vulkan_indexed_normal_layout_unsupported",
                       "Vulkan indexed normal resources require material and frame bindings at 2 and 3"};
+        return false;
+    }
+    if (maps_texture_declaration != maps_sampler_declaration) {
+        diagnostic = {"vulkan_indexed_maps_layout_unsupported",
+                      "Vulkan indexed maps resources require both set 0 texture and sampler bindings"};
+        return false;
+    }
+    const bool maps_declaration = maps_texture_declaration;
+    if (maps_declaration && (!normal_declaration || !material_declaration || !frame_declaration)) {
+        diagnostic = {"vulkan_indexed_maps_layout_unsupported",
+                      "Vulkan indexed maps resources require normal, material, and frame bindings"};
+        return false;
+    }
+    if (!maps_declaration &&
+        (request.maps_binding.texture != nullptr || request.maps_binding.sampler != nullptr)) {
+        diagnostic = {"vulkan_indexed_maps_binding_unexpected",
+                      "A Vulkan indexed pipeline without maps declarations cannot receive maps resources"};
         return false;
     }
     auto* sampled_texture = dynamic_cast<const VulkanTexture*>(request.sampled_binding.texture);
@@ -2900,6 +2979,71 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
         draw.normal_image = normal_texture->image();
         draw.normal_view = normal_texture->view();
         draw.normal_sampler = normal_sampler->sampler();
+    }
+
+    if (maps_declaration) {
+        const auto* maps_texture = dynamic_cast<const VulkanTexture*>(request.maps_binding.texture);
+        const auto* maps_sampler = dynamic_cast<const VulkanSampler*>(request.maps_binding.sampler);
+        if (maps_texture == nullptr || maps_sampler == nullptr) {
+            diagnostic = {"vulkan_indexed_maps_resource_type_unsupported",
+                          "Vulkan indexed maps resources must be Vulkan texture and sampler handles"};
+            return false;
+        }
+        if (maps_texture->context() != context || maps_sampler->context() != context) {
+            diagnostic = {"vulkan_indexed_maps_resource_context_mismatch",
+                          "Vulkan indexed maps resources must belong to the draw device"};
+            return false;
+        }
+        const TextureDescription& maps_description = maps_texture->info().description;
+        const std::uint32_t maps_usage = static_cast<std::uint32_t>(maps_description.usage);
+        const std::uint32_t forbidden_usage =
+            static_cast<std::uint32_t>(TextureUsage::color_attachment) |
+            static_cast<std::uint32_t>(TextureUsage::storage) |
+            static_cast<std::uint32_t>(TextureUsage::transfer_destination);
+        if ((maps_usage & static_cast<std::uint32_t>(TextureUsage::sampled)) == 0U ||
+            (maps_usage & forbidden_usage) != 0U) {
+            diagnostic = {"vulkan_indexed_maps_resource_usage_invalid",
+                          "Vulkan indexed maps textures require sampled-only image usage"};
+            return false;
+        }
+        if (maps_description.width == 0U || maps_description.height == 0U ||
+            maps_description.mip_levels == 0U || maps_description.array_layers != 1U ||
+            (maps_description.format != TextureFormat::rgba8_unorm &&
+             maps_description.format != TextureFormat::bgra8_unorm)) {
+            diagnostic = {"vulkan_indexed_maps_resource_format_unsupported",
+                          "Vulkan indexed maps textures require one-layer linear RGBA8 or BGRA8 UNORM image data"};
+            return false;
+        }
+        if (!maps_texture->initialized()) {
+            diagnostic = {"vulkan_indexed_maps_resource_uninitialized",
+                          "Vulkan indexed maps texture must contain an uploaded image before sampling"};
+            return false;
+        }
+        if (maps_texture->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            diagnostic = {"vulkan_indexed_maps_resource_layout_invalid",
+                          "Vulkan indexed maps texture is not in shader-read-only layout"};
+            return false;
+        }
+        if (maps_texture->image() == VK_NULL_HANDLE || maps_texture->view() == VK_NULL_HANDLE ||
+            maps_sampler->sampler() == VK_NULL_HANDLE) {
+            diagnostic = {"vulkan_indexed_maps_resource_handle_invalid",
+                          "Vulkan indexed maps resources contain a null native handle"};
+            return false;
+        }
+        Diagnostic maps_sampler_diagnostic;
+        const SamplerStatus maps_sampler_status = validate_sampler_description(
+            maps_sampler->info().description, maps_sampler_diagnostic);
+        if (maps_sampler_status != SamplerStatus::ready) {
+            diagnostic = {maps_sampler_diagnostic.code.empty()
+                              ? "vulkan_indexed_maps_sampler_invalid"
+                              : "vulkan_indexed_maps_" + maps_sampler_diagnostic.code,
+                          maps_sampler_diagnostic.message};
+            return false;
+        }
+        draw.has_maps_binding = true;
+        draw.maps_image = maps_texture->image();
+        draw.maps_view = maps_texture->view();
+        draw.maps_sampler = maps_sampler->sampler();
     }
 
     if (material_declaration) {

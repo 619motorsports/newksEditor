@@ -136,9 +136,15 @@ remains unchanged and feature-complete.
   resources to `t4` and `s5`. Both backends reconstruct the tangent-space
   normal and calculate the direct sun specular term. This behavior follows the
   production no-maps fallback. The resolver rejects object-space normals and
-  nonzero Fresnel levels. Maps, detail normals, reflections, and shadows remain
-  staged. Tests cover missing pairs, invalid handles, per-draw selection, and
-  known pixels.
+  nonzero Fresnel levels. A third bounded ABI adds a linear `txMaps` image at
+  binding 6 and its sampler at binding 7. D3D12 maps these resources to `t6`
+  and `s7`. The shader multiplies specular strength by `maps.r`. It calculates
+  the exponent as `max(1, ksSpecularEXP * maps.g + 1)`. Known-pixel tests cover
+  zero strength, low exponent, and full exponent. They also cover independent
+  samplers and mixed six-binding and eight-binding batches. This ABI requires
+  zero Fresnel, so it does not consume `maps.b`. Detail normals, Fresnel,
+  reflections, and shadows remain staged. Tests cover missing pairs, invalid
+  handles, per-draw selection, and known pixels.
   The resolver rejects oversized CSP shader, blend, depth, and cull strings
   before profile selection.
   A bounded static-scene adapter validates the complete packet set before
@@ -199,9 +205,13 @@ remains unchanged and feature-complete.
   shader contract uses these camera matrices. The static-scene adapter can
   dispatch bounded resource-free packets and the portable `txDiffuse` pair.
   It can dispatch the bounded `txDiffuse` and `txNormal` pair for
-  `ksPerPixelNM`. Caller tables or embedded KN5 ownership can supply both
+  `ksPerPixelNM`. It can also dispatch the bounded `txDiffuse`, `txNormal`, and
+  `txMaps` set. Caller tables or embedded KN5 ownership can supply these
   textures. Preparation rejects incomplete or duplicated packet resources
-  before backend allocation.
+  before backend allocation. It also rejects sRGB maps and malformed maps
+  before allocation. The texture budgets include all three source payloads and
+  their decoded pixels. A separate aggregate limit bounds host-side preparation
+  tables and retained copies.
   It can also bind a source-valued material record for explicitly authorized
   pipelines. An explicitly authorized pipeline can also bind one source-valued
   frame-light record. Vulkan uses descriptor bindings 2 and 3 for these
@@ -209,7 +219,7 @@ remains unchanged and feature-complete.
   The frame record drives the exact bounded WebGL equation for ambient,
   directional diffuse, and emissive output. The record table uses final material order. Preparation copies
   only used records and rejects non-finite values before backend allocation.
-  One authority resolves the pair through caller-owned tables in the final KN5
+  One authority resolves the textures through caller-owned tables in the final KN5
   texture order. A second authority owns the used embedded KN5 textures. This
   authority validates every DDS payload before backend allocation. It decodes
   supported 2D mip chains to RGBA8 and retains explicit sRGB metadata. Stock
@@ -220,8 +230,9 @@ remains unchanged and feature-complete.
   D3D12/WARP CI path. A production WebGL gate uses the same one-bone behavior.
   It reports distinct captures, a `1.0` displacement, and no WebGL errors. The
   indexed path executes only a deliberately
-  restricted draw-packet subset. It supports one portable sampled-image and
-  sampler descriptor pair plus a request-local material record. It executes
+  restricted draw-packet subset. It supports as many as three portable sampled
+  images and three samplers. A request-local material record and frame record
+  supply the bounded lighting constants. It executes
   the three source-evidenced WebGL blend
   modes, but not complete scene resources or alpha-to-coverage. It also maps
   the production `GL_LINES` wireframe behavior to native line-list topology.
@@ -251,6 +262,16 @@ at a sun height of 55 degrees had hash `9eb6de45a8e0c07f`. The capture at 10
 degrees had hash `cb993d752a7af5db`. This difference proves that the production
 lighting path responds to the sun direction. It does not prove native pixel
 parity for the complete `ksPerPixelMultiMap_NMDetail` shader.
+
+The production WebGL maps gate uses `GEO_STEER.002` and material `Swheel` from
+the repository car. This material uses `ksPerPixelMultiMap`. The active
+resources are `txDiffuse`, `txNormal`, and `txMaps`. Its detail and Fresnel
+controls are zero. The capture at a sun height of 55 degrees had hash
+`f0c4a1d3753fa220`. The capture at 10 degrees had hash `cea4a0300ce8c9d4`.
+WebGL reported no errors, and all 63 textures were ready. This gate identifies
+an exact source fixture for the bounded maps equation. Production packets and
+stock shader translation remain staged. The gate does not prove native pixel
+parity for `ksPerPixelMultiMap` or `ksPerPixelMultiMap_NMDetail`.
 
 DDS BC7 has a bounded CPU decoder with differential fixtures for all eight
 modes. BC6H remains explicit and requires a GPU path. The checked upload

@@ -25,11 +25,19 @@ void require(bool condition, std::string_view message) {
 
 class FakeBuffer final : public Buffer {
 public:
-    explicit FakeBuffer(BufferDescription description) : info_({description}) {}
+    explicit FakeBuffer(BufferDescription description,
+                        std::size_t* live_count = nullptr)
+        : info_({description}), live_count_(live_count) {
+        if (live_count_ != nullptr) ++*live_count_;
+    }
+    ~FakeBuffer() override {
+        if (live_count_ != nullptr) --*live_count_;
+    }
     Backend backend() const noexcept override { return Backend::Vulkan; }
     const BufferInfo& info() const noexcept override { return info_; }
 private:
     BufferInfo info_;
+    std::size_t* live_count_ = nullptr;
 };
 
 class FakeTexture final : public Texture {
@@ -39,25 +47,39 @@ public:
                              TextureUsage::color_attachment | TextureUsage::transfer_source,
                              TextureMemory::device_local, TextureMutability::mutable_data};
     }
-    FakeTexture(TextureDescription description, Backend backend = Backend::Vulkan)
-        : backend_(backend), info_({description}) {}
+    FakeTexture(TextureDescription description, Backend backend = Backend::Vulkan,
+                std::size_t* live_count = nullptr)
+        : backend_(backend), info_({description}), live_count_(live_count) {
+        if (live_count_ != nullptr) ++*live_count_;
+    }
+    ~FakeTexture() override {
+        if (live_count_ != nullptr) --*live_count_;
+    }
     Backend backend() const noexcept override { return backend_; }
     const TextureInfo& info() const noexcept override { return info_; }
 private:
     Backend backend_;
     TextureInfo info_{};
+    std::size_t* live_count_ = nullptr;
 };
 
 class FakeSampler final : public Sampler {
 public:
     explicit FakeSampler(Backend backend = Backend::Vulkan) : backend_(backend) {}
-    FakeSampler(SamplerDescription description, Backend backend = Backend::Vulkan)
-        : backend_(backend), info_({description}) {}
+    FakeSampler(SamplerDescription description, Backend backend = Backend::Vulkan,
+                std::size_t* live_count = nullptr)
+        : backend_(backend), info_({description}), live_count_(live_count) {
+        if (live_count_ != nullptr) ++*live_count_;
+    }
+    ~FakeSampler() override {
+        if (live_count_ != nullptr) --*live_count_;
+    }
     Backend backend() const noexcept override { return backend_; }
     const SamplerInfo& info() const noexcept override { return info_; }
 private:
     Backend backend_;
     SamplerInfo info_{};
+    std::size_t* live_count_ = nullptr;
 };
 
 class RecordingDevice final : public Device {
@@ -76,7 +98,8 @@ public:
         if (fail_buffer_call != 0U && buffer_calls == fail_buffer_call)
             return {BufferStatus::allocation_failed,
                     {"recording_buffer_failure", "injected buffer allocation failure"}, nullptr};
-        return {BufferStatus::ready, {}, std::make_unique<FakeBuffer>(stored_description)};
+        return {BufferStatus::ready, {},
+                std::make_unique<FakeBuffer>(stored_description, &live_buffers)};
     }
     BufferUpdateResult update_buffer(Buffer&, std::uint64_t offset,
                                      std::span<const std::byte> data) override {
@@ -101,7 +124,8 @@ public:
                     {"recording_texture_failure", "injected texture upload failure"},
                     nullptr};
         return {TextureStatus::ready, {},
-                std::make_unique<FakeTexture>(description)};
+                std::make_unique<FakeTexture>(description, Backend::Vulkan,
+                                              &live_textures)};
     }
     TextureUpdateResult update_texture(Texture&, const TextureUploadPlan&) override {
         return {TextureStatus::unsupported, {"unused", "unused"}};
@@ -121,7 +145,8 @@ public:
                     {"recording_sampler_failure", "injected sampler allocation failure"},
                     nullptr};
         return {SamplerStatus::ready, {},
-                std::make_unique<FakeSampler>(description)};
+                std::make_unique<FakeSampler>(description, Backend::Vulkan,
+                                              &live_samplers)};
     }
     ShaderModuleResult create_shader_module(const ShaderModuleDescription&) override {
         return {ShaderModuleStatus::unsupported, {"unused", "unused"}, nullptr};
@@ -145,6 +170,8 @@ public:
         sampled_samplers.clear();
         normal_textures.clear();
         normal_samplers.clear();
+        maps_textures.clear();
+        maps_samplers.clear();
         material_buffers.clear();
         material_offsets.clear();
         material_ranges.clear();
@@ -166,6 +193,8 @@ public:
             sampled_samplers.push_back(draw.sampled_binding.sampler);
             normal_textures.push_back(draw.normal_binding.texture);
             normal_samplers.push_back(draw.normal_binding.sampler);
+            maps_textures.push_back(draw.maps_binding.texture);
+            maps_samplers.push_back(draw.maps_binding.sampler);
             material_buffers.push_back(draw.material_binding.buffer);
             material_offsets.push_back(draw.material_binding.offset_bytes);
             material_ranges.push_back(draw.material_binding.range_bytes);
@@ -185,14 +214,17 @@ public:
     void wait_idle() noexcept override {}
 
     std::size_t buffer_calls = 0U;
+    std::size_t live_buffers = 0U;
     std::size_t fail_buffer_call = 0U;
     std::size_t update_calls = 0U;
     std::size_t fail_update_call = 0U;
     bool truncate_frame_buffer = false;
     std::size_t batch_calls = 0U;
     std::size_t texture_calls = 0U;
+    std::size_t live_textures = 0U;
     std::size_t fail_texture_call = 0U;
     std::size_t sampler_calls = 0U;
+    std::size_t live_samplers = 0U;
     bool fail_sampler = false;
     bool fail_batch = false;
     bool captured_load_color = false;
@@ -218,6 +250,8 @@ public:
     std::vector<const Sampler*> sampled_samplers;
     std::vector<const Texture*> normal_textures;
     std::vector<const Sampler*> normal_samplers;
+    std::vector<const Texture*> maps_textures;
+    std::vector<const Sampler*> maps_samplers;
     std::vector<const Buffer*> material_buffers;
     std::vector<std::uint64_t> material_offsets;
     std::vector<std::uint32_t> material_ranges;
@@ -1433,6 +1467,301 @@ void resolves_bounded_normal_map_resources_and_rejects_malformed_packets() {
             "normal execution rejects production Fresnel until its behavior is implemented");
 }
 
+void resolves_txmaps_resources_with_bounded_ownership_and_preflight() {
+    const auto configure = [](Fixture& value, bool embed_textures) {
+        const std::array<std::uint8_t, 4> diffuse_pixel = {17U, 34U, 51U, 255U};
+        const std::array<std::uint8_t, 4> normal_pixel = {128U, 255U, 128U, 255U};
+        const std::array<std::uint8_t, 4> maps_pixel = {9U, 19U, 29U, 255U};
+        value.model.textures.push_back(
+            {true, "body.dds", embed_textures ? 152U : 0U,
+             embed_textures ? rgba8_dds(true, diffuse_pixel)
+                            : std::vector<std::uint8_t>{}, {}});
+        value.model.textures.push_back(
+            {true, "body_nm.dds", embed_textures ? 152U : 0U,
+             embed_textures ? rgba8_dds(false, normal_pixel)
+                            : std::vector<std::uint8_t>{}, {}});
+        value.model.textures.push_back(
+            {true, "body_maps.dds", embed_textures ? 152U : 0U,
+             embed_textures ? rgba8_dds(false, maps_pixel)
+                            : std::vector<std::uint8_t>{}, {}});
+        value.first_pipeline.vertex_layout.attributes = {
+            {PipelineVertexSemantic::position,
+             PipelineVertexAttributeFormat::float32x3, 0U, 0U},
+            {PipelineVertexSemantic::normal,
+             PipelineVertexAttributeFormat::float32x3, 1U, 12U},
+            {PipelineVertexSemantic::texcoord0,
+             PipelineVertexAttributeFormat::float32x2, 2U, 24U},
+            {PipelineVertexSemantic::tangent,
+             PipelineVertexAttributeFormat::float32x3, 3U, 32U},
+        };
+        value.first_pipeline.resources = {
+            {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+            {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+            {PipelineResourceKind::uniform_buffer, 0U, 2U, "ksPerPixelMaterial"},
+            {PipelineResourceKind::uniform_buffer, 0U, 3U, "ksPerPixelFrame"},
+            {PipelineResourceKind::sampled_texture, 0U, 4U, "normalTexture"},
+            {PipelineResourceKind::sampler, 0U, 5U, "normalSampler"},
+            {PipelineResourceKind::sampled_texture, 0U, 6U, "mapsTexture"},
+            {PipelineResourceKind::sampler, 0U, 7U, "mapsSampler"},
+        };
+        const std::vector<DrawResourceSlot> slots = {
+            {"txDiffuse", 21U, 0U, "body.dds"},
+            {"txNormal", 22U, 1U, "body_nm.dds"},
+            {"txMaps", 23U, 2U, "body_maps.dds"},
+        };
+        value.packets[0].resources = slots;
+        value.packets[2].resources = slots;
+    };
+
+    std::array<KsPerPixelMaterialConstants, 2> constants{};
+    constants[0].fresnel[2] = 0.0F;
+    Fixture caller = fixture();
+    configure(caller, false);
+    auto caller_request = request_for(caller);
+    caller_request.material_constants_by_material = constants;
+    RecordingDevice caller_device;
+    const auto prepared = prepare_static_scene_resources(caller_device, caller_request);
+    require(prepared.ok(), "txMaps caller-table scene prepares");
+
+    const TextureDescription sampled_description{
+        1U, 1U, 1U, 1U, TextureFormat::rgba8_unorm, TextureUsage::sampled,
+        TextureMemory::device_local, TextureMutability::immutable};
+    FakeTexture diffuse(sampled_description);
+    FakeTexture normal(sampled_description);
+    FakeTexture maps(sampled_description);
+    FakeSampler diffuse_sampler;
+    FakeSampler normal_sampler;
+    FakeSampler maps_sampler;
+    const std::array<const Texture*, 3> textures = {&diffuse, &normal, &maps};
+    const std::array<const Sampler*, 3> samplers = {
+        &diffuse_sampler, &normal_sampler, &maps_sampler};
+    StaticSceneFrameDescription frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.camera.position = {2.0F, 3.0F, 4.0F};
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    frame.textures_by_global_index = textures;
+    frame.samplers_by_global_index = samplers;
+    FakeTexture target;
+    const auto drawn = prepared.resources->draw_and_readback(
+        caller_device, target, frame);
+    require(drawn.ok() &&
+                caller_device.maps_textures ==
+                    std::vector<const Texture*>{&maps, nullptr, &maps} &&
+                caller_device.maps_samplers ==
+                    std::vector<const Sampler*>{&maps_sampler, nullptr, &maps_sampler},
+            "caller tables preserve txMaps bindings in packet order");
+
+    Fixture embedded = fixture();
+    configure(embedded, true);
+    auto embedded_request = request_for(embedded);
+    embedded_request.material_constants_by_material = constants;
+    embedded_request.texture_authority = StaticSceneTextureAuthority::embedded_kn5;
+    RecordingDevice embedded_device;
+    const auto embedded_prepared =
+        prepare_static_scene_resources(embedded_device, embedded_request);
+    require(embedded_prepared.ok() &&
+                embedded_prepared.resources->owned_texture_count() == 3U &&
+                embedded_device.texture_calls == 3U && embedded_device.sampler_calls == 1U,
+            "embedded txMaps resources decode with one sampler");
+
+    Fixture malformed = fixture();
+    configure(malformed, false);
+    malformed.packets[2].resources[2] = malformed.packets[2].resources[0];
+    RecordingDevice malformed_device;
+    auto malformed_request = request_for(malformed);
+    malformed_request.material_constants_by_material = constants;
+    const auto duplicate =
+        prepare_static_scene_resources(malformed_device, malformed_request);
+    require(!duplicate.ok() &&
+                duplicate.diagnostic.code == "static_scene_resource_slot_duplicate" &&
+                malformed_device.buffer_calls == 0U && malformed_device.texture_calls == 0U,
+            "duplicate txMaps slot fails before backend allocation");
+
+    malformed = fixture();
+    configure(malformed, false);
+    malformed.packets[2].resources.pop_back();
+    malformed_request = request_for(malformed);
+    malformed_request.material_constants_by_material = constants;
+    const auto missing =
+        prepare_static_scene_resources(malformed_device, malformed_request);
+    require(!missing.ok() &&
+                missing.diagnostic.code == "static_scene_material_packet_unsupported" &&
+                malformed_device.buffer_calls == 0U,
+            "missing txMaps slot fails before backend allocation");
+
+    malformed = fixture();
+    configure(malformed, false);
+    malformed.packets[2].resources[2].texture = "wrong.dds";
+    malformed_request = request_for(malformed);
+    malformed_request.material_constants_by_material = constants;
+    const auto wrong_identity =
+        prepare_static_scene_resources(malformed_device, malformed_request);
+    require(!wrong_identity.ok() &&
+                wrong_identity.diagnostic.code == "static_scene_maps_texture_identity_invalid" &&
+                malformed_device.buffer_calls == 0U,
+            "wrong txMaps identity fails before backend allocation");
+
+    malformed = fixture();
+    configure(malformed, false);
+    malformed.model.textures.push_back(malformed.model.textures.front());
+    malformed.model.textures.back().name = "BODY.DDS";
+    malformed_request = request_for(malformed);
+    malformed_request.material_constants_by_material = constants;
+    const auto ambiguous =
+        prepare_static_scene_resources(malformed_device, malformed_request);
+    require(!ambiguous.ok() &&
+                ambiguous.diagnostic.code == "static_scene_diffuse_texture_identity_invalid" &&
+                malformed_device.buffer_calls == 0U,
+            "same-scope canonical duplicate texture names fail before allocation");
+
+    Fixture truncated = fixture();
+    configure(truncated, true);
+    truncated.model.textures[2].data.pop_back();
+    truncated.model.textures[2].size =
+        static_cast<std::uint32_t>(truncated.model.textures[2].data.size());
+    auto truncated_request = request_for(truncated);
+    truncated_request.material_constants_by_material = constants;
+    truncated_request.texture_authority = StaticSceneTextureAuthority::embedded_kn5;
+    RecordingDevice truncated_device;
+    const auto truncated_maps =
+        prepare_static_scene_resources(truncated_device, truncated_request);
+    require(!truncated_maps.ok() &&
+                truncated_maps.diagnostic.code ==
+                    "static_scene_embedded_texture_truncated" &&
+                truncated_device.buffer_calls == 0U && truncated_device.texture_calls == 0U,
+            "a consistent-size truncated txMaps mip fails in DDS preflight");
+
+    Fixture malformed_dx10_maps = fixture();
+    configure(malformed_dx10_maps, true);
+    put32(malformed_dx10_maps.model.textures[2].data, 132U, 0U);
+    auto malformed_dx10_request = request_for(malformed_dx10_maps);
+    malformed_dx10_request.material_constants_by_material = constants;
+    malformed_dx10_request.texture_authority =
+        StaticSceneTextureAuthority::embedded_kn5;
+    RecordingDevice malformed_dx10_device;
+    const auto malformed_dx10 =
+        prepare_static_scene_resources(malformed_dx10_device, malformed_dx10_request);
+    require(!malformed_dx10.ok() &&
+                malformed_dx10.diagnostic.code ==
+                    "static_scene_embedded_texture_invalid_header" &&
+                malformed_dx10_device.buffer_calls == 0U &&
+                malformed_dx10_device.texture_calls == 0U &&
+                malformed_dx10_device.sampler_calls == 0U,
+            "a malformed txMaps DX10 dimension fails before backend allocation");
+
+    Fixture invalid_size_maps = fixture();
+    configure(invalid_size_maps, true);
+    put32(invalid_size_maps.model.textures[2].data, 16U, 0U);
+    auto invalid_size_request = request_for(invalid_size_maps);
+    invalid_size_request.material_constants_by_material = constants;
+    invalid_size_request.texture_authority = StaticSceneTextureAuthority::embedded_kn5;
+    RecordingDevice invalid_size_device;
+    const auto invalid_size =
+        prepare_static_scene_resources(invalid_size_device, invalid_size_request);
+    require(!invalid_size.ok() &&
+                invalid_size.diagnostic.code ==
+                    "static_scene_embedded_texture_invalid_header" &&
+                invalid_size_device.buffer_calls == 0U &&
+                invalid_size_device.texture_calls == 0U &&
+                invalid_size_device.sampler_calls == 0U,
+            "a zero-width txMaps DDS fails before backend allocation");
+
+    Fixture srgb_maps = fixture();
+    configure(srgb_maps, true);
+    put32(srgb_maps.model.textures[2].data, 128U, 29U);
+    auto srgb_maps_request = request_for(srgb_maps);
+    srgb_maps_request.material_constants_by_material = constants;
+    srgb_maps_request.texture_authority = StaticSceneTextureAuthority::embedded_kn5;
+    RecordingDevice srgb_maps_device;
+    const auto unsupported_maps =
+        prepare_static_scene_resources(srgb_maps_device, srgb_maps_request);
+    require(!unsupported_maps.ok() &&
+                unsupported_maps.status == StaticSceneResourceStatus::unsupported &&
+                unsupported_maps.diagnostic.code ==
+                    "static_scene_maps_texture_format_unsupported" &&
+                srgb_maps_device.buffer_calls == 0U &&
+                srgb_maps_device.texture_calls == 0U &&
+                srgb_maps_device.sampler_calls == 0U,
+            "sRGB txMaps fails before backend allocation");
+
+    Fixture limited = fixture();
+    configure(limited, true);
+    auto limited_request = request_for(limited);
+    limited_request.material_constants_by_material = constants;
+    limited_request.texture_authority = StaticSceneTextureAuthority::embedded_kn5;
+    limited_request.limits.max_total_texture_source_bytes = 2U * 152U;
+    RecordingDevice limited_device;
+    const auto source_limited =
+        prepare_static_scene_resources(limited_device, limited_request);
+    require(!source_limited.ok() &&
+                source_limited.diagnostic.code ==
+                    "static_scene_texture_source_aggregate_limit" &&
+                limited_device.buffer_calls == 0U && limited_device.texture_calls == 0U,
+            "txMaps source aggregate limit fails before backend allocation");
+
+    limited_request.limits.max_total_texture_source_bytes =
+        std::numeric_limits<std::uint64_t>::max();
+    limited_request.limits.max_total_decoded_texture_bytes = 8U;
+    const auto decoded_limited =
+        prepare_static_scene_resources(limited_device, limited_request);
+    require(!decoded_limited.ok() &&
+                decoded_limited.diagnostic.code ==
+                    "static_scene_texture_decode_aggregate_limit" &&
+                limited_device.buffer_calls == 0U && limited_device.texture_calls == 0U,
+            "txMaps decoded aggregate limit fails before backend allocation");
+
+    Fixture preparation_limited = fixture();
+    configure(preparation_limited, false);
+    auto preparation_limited_request = request_for(preparation_limited);
+    preparation_limited_request.material_constants_by_material = constants;
+    preparation_limited_request.limits.max_preparation_bytes = 1U;
+    RecordingDevice preparation_limited_device;
+    const auto preparation_limited_result = prepare_static_scene_resources(
+        preparation_limited_device, preparation_limited_request);
+    require(!preparation_limited_result.ok() &&
+                preparation_limited_result.diagnostic.code ==
+                    "static_scene_preparation_aggregate_limit" &&
+                preparation_limited_device.buffer_calls == 0U &&
+                preparation_limited_device.texture_calls == 0U &&
+                preparation_limited_device.sampler_calls == 0U,
+            "the host preparation budget fails before backend allocation");
+
+    Fixture failed_maps = fixture();
+    configure(failed_maps, true);
+    auto failed_maps_request = request_for(failed_maps);
+    failed_maps_request.material_constants_by_material = constants;
+    failed_maps_request.texture_authority = StaticSceneTextureAuthority::embedded_kn5;
+    RecordingDevice failed_maps_device;
+    failed_maps_device.fail_texture_call = 3U;
+    const auto third_texture_failure =
+        prepare_static_scene_resources(failed_maps_device, failed_maps_request);
+    require(!third_texture_failure.ok() &&
+                third_texture_failure.status == StaticSceneResourceStatus::upload_failed &&
+                third_texture_failure.diagnostic.code == "recording_texture_failure" &&
+                failed_maps_device.texture_calls == 3U &&
+                failed_maps_device.sampler_calls == 0U &&
+                failed_maps_device.batch_calls == 0U &&
+                failed_maps_device.live_buffers == 0U &&
+                failed_maps_device.live_textures == 0U &&
+                failed_maps_device.live_samplers == 0U,
+            "a third-texture failure cleans earlier txMaps resources and stops preparation");
+
+    RecordingDevice failed_maps_sampler_device;
+    failed_maps_sampler_device.fail_sampler = true;
+    const auto maps_sampler_failure =
+        prepare_static_scene_resources(failed_maps_sampler_device, failed_maps_request);
+    require(!maps_sampler_failure.ok() &&
+                maps_sampler_failure.status == StaticSceneResourceStatus::allocation_failed &&
+                maps_sampler_failure.diagnostic.code == "recording_sampler_failure" &&
+                failed_maps_sampler_device.texture_calls == 3U &&
+                failed_maps_sampler_device.sampler_calls == 1U &&
+                failed_maps_sampler_device.batch_calls == 0U &&
+                failed_maps_sampler_device.live_buffers == 0U &&
+                failed_maps_sampler_device.live_textures == 0U &&
+                failed_maps_sampler_device.live_samplers == 0U,
+            "a txMaps sampler failure cleans all prepared resources and stops submission");
+}
+
 void orders_skin_updates_before_the_shared_frame_record() {
     Fixture value = fixture();
     make_second_mesh_skinned(value);
@@ -1675,6 +2004,7 @@ int main() {
         owns_and_reuses_material_constant_records();
         owns_and_updates_frame_constant_record_for_mixed_packets();
         resolves_bounded_normal_map_resources_and_rejects_malformed_packets();
+        resolves_txmaps_resources_with_bounded_ownership_and_preflight();
         orders_skin_updates_before_the_shared_frame_record();
         rejects_frame_constant_budget_before_allocation();
         rejects_invalid_material_constant_inputs_before_allocation();

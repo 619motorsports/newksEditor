@@ -706,6 +706,137 @@ void validates_portable_normal_map_contract() {
             "normal bindings are rejected from the diffuse-only constants layout");
 }
 
+void validates_portable_maps_contract() {
+    PipelineProgram pipeline = pipeline_fixture();
+    pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 2U, "ksPerPixelMaterial"},
+        {PipelineResourceKind::uniform_buffer, 0U, 3U, "ksPerPixelFrame"},
+        {PipelineResourceKind::sampled_texture, 0U, 4U, "normalTexture"},
+        {PipelineResourceKind::sampler, 0U, 5U, "normalSampler"},
+        {PipelineResourceKind::sampled_texture, 0U, 6U, "mapsTexture"},
+        {PipelineResourceKind::sampler, 0U, 7U, "mapsSampler"},
+    };
+    require(classify_indexed_portable_resource_layout(pipeline) ==
+                IndexedPortableResourceLayout::diffuse_normal_maps_with_constants_and_frame,
+            "portable maps resource layout classified");
+    DrawPacket packet = packet_fixture();
+    FakeTexture target(Backend::Vulkan, target_description());
+    FakeTexture diffuse(Backend::Vulkan, sampled_description());
+    FakeTexture normal(Backend::Vulkan, sampled_description());
+    FakeTexture maps(Backend::Vulkan, sampled_description());
+    FakeSampler diffuse_sampler(Backend::Vulkan);
+    FakeSampler normal_sampler(Backend::Vulkan);
+    FakeSampler maps_sampler(Backend::Vulkan);
+    FakeBuffer vertices(Backend::Vulkan,
+                        {132U, BufferUsage::vertex, BufferMemory::device_local,
+                         BufferMutability::immutable});
+    FakeBuffer indices(Backend::Vulkan,
+                       {6U, BufferUsage::index, BufferMemory::device_local,
+                        BufferMutability::immutable});
+    FakeBuffer material(Backend::Vulkan,
+                        {256U, BufferUsage::uniform, BufferMemory::host_visible,
+                         BufferMutability::immutable});
+    FakeBuffer frame(Backend::Vulkan,
+                     {256U, BufferUsage::uniform, BufferMemory::host_visible,
+                      BufferMutability::mutable_data});
+    auto request = request_fixture(packet, pipeline, vertices, indices);
+    request.resource_authority = IndexedResourceAuthority::explicit_bindings;
+    request.sampled_binding = {&diffuse, &diffuse_sampler};
+    request.normal_binding = {&normal, &normal_sampler};
+    request.maps_binding = {&maps, &maps_sampler};
+    request.material_binding = {&material, 0U, portable_material_buffer_view_bytes};
+    request.frame_binding = {&frame, 0U, portable_frame_buffer_view_bytes};
+    Diagnostic diagnostic;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            "portable linear maps contract accepted");
+
+    request.maps_binding = {};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_maps_binding_missing",
+            "missing maps texture and sampler rejected");
+    request.maps_binding = {&maps, nullptr};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_maps_binding_missing",
+            "partial maps binding rejected");
+
+    request.maps_binding = {&maps, &maps_sampler};
+    pipeline.resources.resize(6U);
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_maps_binding_unexpected",
+            "maps binding is rejected from the normal-only layout");
+
+    pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 2U, "ksPerPixelMaterial"},
+        {PipelineResourceKind::uniform_buffer, 0U, 3U, "ksPerPixelFrame"},
+        {PipelineResourceKind::sampled_texture, 0U, 4U, "normalTexture"},
+        {PipelineResourceKind::sampler, 0U, 5U, "normalSampler"},
+        {PipelineResourceKind::sampler, 0U, 6U, "mapsTextureWrongKind"},
+        {PipelineResourceKind::sampler, 0U, 7U, "mapsSampler"},
+    };
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_resource_layout_unsupported",
+            "wrong-kind maps declaration rejected");
+
+    pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 2U, "ksPerPixelMaterial"},
+        {PipelineResourceKind::uniform_buffer, 0U, 3U, "ksPerPixelFrame"},
+        {PipelineResourceKind::sampled_texture, 0U, 4U, "normalTexture"},
+        {PipelineResourceKind::sampler, 0U, 5U, "normalSampler"},
+        {PipelineResourceKind::sampled_texture, 0U, 6U, "mapsTexture"},
+        {PipelineResourceKind::sampler, 0U, 7U, "mapsSampler"},
+    };
+    FakeSampler foreign_sampler(Backend::D3D12);
+    request.maps_binding = {&maps, &foreign_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_maps_backend_mismatch",
+            "foreign maps sampler rejected");
+
+    request.maps_binding = {&maps, &maps_sampler};
+    FakeTexture missing_usage(
+        Backend::Vulkan,
+        {2U, 2U, 1U, 1U, TextureFormat::rgba8_unorm, TextureUsage::transfer_source,
+         TextureMemory::device_local, TextureMutability::immutable});
+    request.maps_binding = {&missing_usage, &maps_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_maps_texture_usage_invalid",
+            "maps texture without sampled usage rejected");
+
+    FakeTexture srgb_maps(
+        Backend::Vulkan,
+        {2U, 2U, 1U, 1U, TextureFormat::rgba8_srgb, TextureUsage::sampled,
+         TextureMemory::device_local, TextureMutability::immutable});
+    request.maps_binding = {&srgb_maps, &maps_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_maps_texture_description_unsupported",
+            "sRGB maps texture rejected in favor of linear UNORM");
+
+    request.maps_binding = {&target, &maps_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_maps_feedback_loop",
+            "maps render-target alias rejected");
+
+    pipeline.resources[7] =
+        {PipelineResourceKind::sampled_texture, 0U, 6U, "mapsTextureAlias"};
+    require(classify_indexed_portable_resource_layout(pipeline) ==
+                IndexedPortableResourceLayout::unsupported,
+            "duplicate maps sampled binding alias rejected");
+}
+
 void rejects_invalid_depth_attachment_descriptions() {
     Diagnostic diagnostic;
     DepthAttachmentDescription description;
@@ -1020,6 +1151,7 @@ int main() {
         validates_portable_material_buffer_contract();
         validates_portable_frame_buffer_contract();
         validates_portable_normal_map_contract();
+        validates_portable_maps_contract();
         rejects_invalid_depth_attachment_descriptions();
         rejects_invalid_depth_contract();
         validates_ordered_indexed_batch_contract();

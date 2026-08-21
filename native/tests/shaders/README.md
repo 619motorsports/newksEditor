@@ -138,3 +138,51 @@ and validating with SPIRV-Tools 2026.3:
 - Vertex SPIR-V SHA-256: `1d8fa2d0a866c374d42f55e9e92f4a39bbbf8abd6c9beceb8bb9f3de5945d34c`
 - Fragment source SHA-256: `59ec129cf2199a6363866bf57faa41be65fd37bff429885fdc4395074aef6bad`
 - Fragment SPIR-V SHA-256: `43a0c4b229eebc5153852d97c74f6acee67b4c252f627cd25ea349e68b9500d5`
+
+`indexed_ks_per_pixel_nm_maps.vert` and
+`indexed_ks_per_pixel_nm_maps.frag` extend the bounded tangent-space normal
+fixture with the exact `txMaps` channels used by `public/app.js:2080`.
+The maps image and sampler are set 0 bindings 6 and 7 (D3D12 `t6` and `s7`),
+after diffuse 0/1, material/frame UBOs 2/3, and normal 4/5. The fragment
+equation is:
+
+```text
+maps = texture(txMaps, vUv).rgb       // absent-source fallback is vec3(1)
+mappedSpecular = ksSpecular * maps.r
+mappedPower = max(1, ksSpecularEXP * maps.g + 1)
+```
+
+The resulting lighting remains the bounded tangent-space direct-light path:
+ambient plus directional diffuse, sun Blinn specular, and emissive. The
+fixture excludes `txDetail`/`txNormalDetail`, multilayer world-XZ resources,
+Fresnel/reflection (`maps.b` is sampled but has no consumer in this bounded
+fixture), shadows, AO/VAO, rain, seasons, local/CSP lights, damage, alpha
+testing, transparency, and overlays. This is an execution fixture for the
+maps channel semantics, not a complete `ksPerPixelMultiMap_NMDetail` shader.
+
+Maps fixture identities, compiled with glslang `16.4.0` and validated with
+SPIRV-Tools `2026.3` (`vulkan-sdk-1.4.357.0-0-g9a49b0883`), target SPIR-V 1.0
+for Vulkan 1.0:
+
+```sh
+glslangValidator -V --target-env vulkan1.0 -Os -g0 -S vert \
+  -o /tmp/apex_indexed_ks_per_pixel_nm_maps_vert.spv \
+  native/tests/shaders/indexed_ks_per_pixel_nm_maps.vert
+glslangValidator -V --target-env vulkan1.0 -Os -g0 -S frag \
+  -o /tmp/apex_indexed_ks_per_pixel_nm_maps_frag.spv \
+  native/tests/shaders/indexed_ks_per_pixel_nm_maps.frag
+spirv-val --target-env vulkan1.0 /tmp/apex_indexed_ks_per_pixel_nm_maps_vert.spv
+spirv-val --target-env vulkan1.0 /tmp/apex_indexed_ks_per_pixel_nm_maps_frag.spv
+```
+
+- Vertex source SHA-256: `54e299f32bf8ec6b73f5feaefd84c1c8e67c07438635a27e6f2d5715cd68d20f`
+- Vertex SPIR-V SHA-256: `1d8fa2d0a866c374d42f55e9e92f4a39bbbf8abd6c9beceb8bb9f3de5945d34c`
+- Fragment source SHA-256: `a05f26528f06354637c11117b84488a493a17be95d7b36f72f4d29bfa6c42370`
+- Fragment SPIR-V SHA-256: `bcb6cc36ab5e296b8887b31c5dd81ce3ba583eaadcd096140fa1474454ea3659`
+
+SwiftShader Vulkan pixel evidence (`VK_ICD_FILENAMES=/opt/google/chrome/vk_swiftshader_icd.json`,
+`APEX_RENDER_VALIDATION=1`) at the center of the fixed triangle is:
+
+- `maps=(0,0,1)`: `(7,88,37,255)`; specular scale is zero.
+- `maps=(1,0,1)`: `(99,180,128,255)`; exponent is independently reduced to one.
+- `maps=(1,1,1)`: `(74,155,103,255)`; full maps scale and exponent restore the NM fixture.

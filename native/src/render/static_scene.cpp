@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <new>
 #include <optional>
 #include <string>
@@ -43,6 +44,13 @@ bool checked_bytes(std::size_t count, std::size_t element_size,
     return true;
 }
 
+bool checked_charge(std::size_t count, std::size_t element_size,
+                    std::uint64_t& total, std::uint64_t limit) noexcept {
+    std::uint64_t bytes = 0U;
+    return checked_bytes(count, element_size, bytes) && checked_add(bytes, total) &&
+           total <= limit;
+}
+
 bool canonical_resource_equals(std::string_view value,
                                std::string_view expected) noexcept {
     std::size_t first = 0U;
@@ -60,6 +68,23 @@ bool canonical_resource_equals(std::string_view value,
             return false;
     }
     return true;
+}
+
+[[nodiscard]] std::string canonical_texture_name(std::string_view value) {
+    std::size_t first = 0U;
+    while (first < value.size() &&
+           std::isspace(static_cast<unsigned char>(value[first])) != 0)
+        ++first;
+    std::size_t last = value.size();
+    while (last > first &&
+           std::isspace(static_cast<unsigned char>(value[last - 1U])) != 0)
+        --last;
+    std::string result;
+    result.reserve(last - first);
+    for (std::size_t index = first; index < last; ++index)
+        result.push_back(static_cast<char>(std::tolower(
+            static_cast<unsigned char>(value[index]))));
+    return result;
 }
 
 bool finite_material_constants(const KsPerPixelMaterialConstants& constants) noexcept {
@@ -348,7 +373,8 @@ StaticSceneResourceResult prepare_static_scene_resources(
           limits.max_total_decoded_texture_bytes == 0U)) ||
         limits.max_total_vertex_bytes == 0U ||
         limits.max_total_index_bytes == 0U || limits.max_total_shader_bytes == 0U ||
-        limits.max_validation_bytes == 0U || limits.max_total_update_bytes == 0U)
+        limits.max_validation_bytes == 0U || limits.max_preparation_bytes == 0U ||
+        limits.max_total_update_bytes == 0U)
         return fail(StaticSceneResourceStatus::invalid_request, "static_scene_limits_invalid",
                     "Static-scene resource limits are invalid");
     if (request.packets.empty() || request.packets.size() > limits.max_draws)
@@ -359,10 +385,75 @@ StaticSceneResourceResult prepare_static_scene_resources(
         request.pipelines_by_material.size() != model.materials.size())
         return fail(StaticSceneResourceStatus::invalid_request, "static_scene_material_table_invalid",
                     "Model, scene, and pipeline material tables must have the same bounded size");
-    if (model.textures.size() > limits.max_textures)
+    if (model.textures.size() > limits.max_textures ||
+        model.textures.size() > static_cast<std::size_t>(
+            std::numeric_limits<std::uint32_t>::max()))
         return fail(StaticSceneResourceStatus::invalid_request,
                     "static_scene_texture_table_limit",
                     "The final KN5 texture table exceeds the static-scene limit");
+
+    using TextureScopeKey = std::pair<std::optional<std::size_t>, std::string>;
+    std::uint64_t preparation_bytes = 0U;
+    const auto charge = [&](std::size_t count, std::size_t element_size) noexcept {
+        return checked_charge(count, element_size, preparation_bytes,
+                              limits.max_preparation_bytes);
+    };
+    const auto preparation_limit = [] {
+        return fail(StaticSceneResourceStatus::invalid_request,
+                    "static_scene_preparation_aggregate_limit",
+                    "Static-scene host storage exceeds the aggregate preparation limit");
+    };
+    constexpr std::size_t map_node_links = 3U * sizeof(void*);
+    if (!charge(1U, sizeof(StaticSceneResources)) ||
+        !charge(model.textures.size(),
+                sizeof(TextureScopeKey) + sizeof(std::optional<std::uint32_t>) +
+                    map_node_links) ||
+        !charge(request.packets.size(),
+                sizeof(DrawPacket) + 4U * sizeof(std::size_t) +
+                    sizeof(StaticSceneResources::PacketTextureIndices)) ||
+        !charge(model.materials.size(), 2U * sizeof(std::size_t)) ||
+        !charge(request.packets.size(),
+                3U * sizeof(std::size_t) + 2U * sizeof(const formats::Kn5Node*)) ||
+        (embedded_textures &&
+         (!charge(model.textures.size(),
+                  sizeof(std::optional<DecodedDdsTexturePlan>) + sizeof(bool)) ||
+          !charge(model.textures.size(), sizeof(std::unique_ptr<Texture>)))))
+        return preparation_limit();
+    for (const formats::Kn5Texture& texture : model.textures) {
+        if (!charge(texture.name.size(), sizeof(char))) return preparation_limit();
+    }
+    for (const DrawPacket& packet : request.packets) {
+        if (!charge(packet.bone_palette.size(), sizeof(apex::scene::Matrix4)) ||
+            !charge(packet.resources.size(), sizeof(DrawResourceSlot)) ||
+            !charge(packet.material_profile.shader.size(), sizeof(char)) ||
+            !charge(packet.material_profile.blend_source.size(), sizeof(char)) ||
+            !charge(packet.material_profile.blend.size(), sizeof(char)) ||
+            !charge(packet.material_profile.blend_mode.size(), sizeof(char)) ||
+            !charge(packet.material_profile.depth_mode.size(), sizeof(char)) ||
+            !charge(packet.material_profile.cull_source.size(), sizeof(char)))
+            return preparation_limit();
+        for (const DrawResourceSlot& resource : packet.resources) {
+            if (!charge(resource.slot.size(), sizeof(char)) ||
+                !charge(resource.texture.size(), sizeof(char)))
+                return preparation_limit();
+        }
+    }
+
+    std::map<TextureScopeKey, std::optional<std::uint32_t>> unique_texture_indices;
+    for (std::size_t texture_index = 0U; texture_index < model.textures.size();
+         ++texture_index) {
+        const auto& texture = model.textures[texture_index];
+        if (texture.name.size() > limits.max_resource_string_bytes)
+            return fail(StaticSceneResourceStatus::invalid_request,
+                        "static_scene_resource_string_limit",
+                        "A KN5 texture name exceeds the static-scene resource string limit");
+        const std::string key = canonical_texture_name(texture.name);
+        if (key.empty()) continue;
+        const auto [found, inserted] = unique_texture_indices.emplace(
+            TextureScopeKey{texture.workspaceFileIndex, key},
+            static_cast<std::uint32_t>(texture_index));
+        if (!inserted) found->second.reset();
+    }
 
     const Kn5SceneNodeMapResult node_map =
         map_kn5_scene_nodes(model.root, scene, limits.node_map);
@@ -370,6 +461,14 @@ StaticSceneResourceResult prepare_static_scene_resources(
         return fail(StaticSceneResourceStatus::invalid_request,
                     "static_scene_" + node_map.diagnostic.code,
                     node_map.diagnostic.message);
+
+    if (!charge(node_map.source_nodes.size(), sizeof(std::size_t)) ||
+        !charge(request.packets.size(),
+                2U * sizeof(std::unique_ptr<StaticMeshUpload>)) ||
+        !charge(model.materials.size(),
+                sizeof(PipelineProgram) + sizeof(KsPerPixelMaterialConstants) +
+                    sizeof(std::unique_ptr<Buffer>)))
+        return preparation_limit();
 
     std::vector<std::size_t> upload_by_node(node_map.source_nodes.size(), invalid_resource_index);
     std::vector<std::size_t> pipeline_by_material(model.materials.size(), invalid_resource_index);
@@ -504,14 +603,19 @@ StaticSceneResourceResult prepare_static_scene_resources(
         const bool normal_layout =
             material_layout ==
             IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame;
+        const bool maps_layout =
+            material_layout ==
+            IndexedPortableResourceLayout::diffuse_normal_maps_with_constants_and_frame;
         if (!pipeline->resources.empty()) {
-            const std::size_t expected_resources = normal_layout ? 2U : 1U;
+            const std::size_t expected_resources = maps_layout ? 3U : normal_layout ? 2U : 1U;
             if (packet.resources.size() != expected_resources)
                 return fail(StaticSceneResourceStatus::unsupported,
                             "static_scene_material_packet_unsupported",
-                            normal_layout
-                                ? "The portable ksPerPixelNM path requires txDiffuse and txNormal packet resources"
-                                : "The portable diffuse path requires one txDiffuse packet resource");
+                            maps_layout
+                                ? "The portable txMaps path requires txDiffuse, txNormal, and txMaps packet resources"
+                                : normal_layout
+                                    ? "The portable ksPerPixelNM path requires txDiffuse and txNormal packet resources"
+                                    : "The portable diffuse path requires one txDiffuse packet resource");
             for (const DrawResourceSlot& resource : packet.resources) {
                 if (resource.slot.size() > limits.max_resource_string_bytes ||
                     resource.texture.size() > limits.max_resource_string_bytes)
@@ -519,17 +623,23 @@ StaticSceneResourceResult prepare_static_scene_resources(
                                 "static_scene_resource_string_limit",
                                 "A static-scene resource string exceeds its byte limit");
                 const bool diffuse = canonical_resource_equals(resource.slot, "txdiffuse");
-                const bool normal = normal_layout &&
+                const bool normal = (normal_layout || maps_layout) &&
                                     canonical_resource_equals(resource.slot, "txnormal");
-                if (!diffuse && !normal)
+                const bool maps = maps_layout &&
+                                  canonical_resource_equals(resource.slot, "txmaps");
+                if (!diffuse && !normal && !maps)
                     return fail(StaticSceneResourceStatus::unsupported,
                                 "static_scene_material_packet_unsupported",
-                                normal_layout
-                                    ? "The portable ksPerPixelNM path accepts only txDiffuse and txNormal"
-                                    : "The portable diffuse path accepts only txDiffuse");
+                                maps_layout
+                                    ? "The portable txMaps path accepts only txDiffuse, txNormal, and txMaps"
+                                    : normal_layout
+                                        ? "The portable ksPerPixelNM path accepts only txDiffuse and txNormal"
+                                        : "The portable diffuse path accepts only txDiffuse");
                 std::uint32_t& stored_index = diffuse
                                                   ? textures_for_packet[packet_index].diffuse
-                                                  : textures_for_packet[packet_index].normal;
+                                                  : normal
+                                                      ? textures_for_packet[packet_index].normal
+                                                      : textures_for_packet[packet_index].maps;
                 if (stored_index != invalid_draw_texture_index)
                     return fail(StaticSceneResourceStatus::invalid_request,
                                 "static_scene_resource_slot_duplicate",
@@ -538,9 +648,11 @@ StaticSceneResourceResult prepare_static_scene_resources(
                     static_cast<std::size_t>(resource.texture_index) >= model.textures.size())
                     return fail(StaticSceneResourceStatus::invalid_request,
                                 diffuse ? "static_scene_diffuse_texture_index_invalid"
-                                        : "static_scene_normal_texture_index_invalid",
+                                        : normal ? "static_scene_normal_texture_index_invalid"
+                                                 : "static_scene_maps_texture_index_invalid",
                                 diffuse ? "A txDiffuse resource has an invalid global texture index"
-                                        : "A txNormal resource has an invalid global texture index");
+                                        : normal ? "A txNormal resource has an invalid global texture index"
+                                                 : "A txMaps resource has an invalid global texture index");
                 const formats::Kn5Texture& source_texture =
                     model.textures[static_cast<std::size_t>(resource.texture_index)];
                 if (source_texture.name.size() > limits.max_resource_string_bytes ||
@@ -551,34 +663,47 @@ StaticSceneResourceResult prepare_static_scene_resources(
                     return fail(StaticSceneResourceStatus::invalid_request,
                                 "static_scene_validation_work_limit",
                                 "Static-scene resource validation exceeds its byte-work limit");
+                const auto unique_texture = unique_texture_indices.find(
+                    TextureScopeKey{source_texture.workspaceFileIndex,
+                                    canonical_texture_name(resource.texture)});
                 if (!source_texture.active || resource.texture.empty() ||
                     resource.texture != source_texture.name ||
                     source_texture.workspaceFileIndex !=
-                        model.materials[material_index].workspaceFileIndex)
+                        model.materials[material_index].workspaceFileIndex ||
+                    unique_texture == unique_texture_indices.end() ||
+                    !unique_texture->second.has_value() ||
+                    *unique_texture->second != resource.texture_index)
                     return fail(StaticSceneResourceStatus::invalid_request,
                                 diffuse ? "static_scene_diffuse_texture_identity_invalid"
-                                        : "static_scene_normal_texture_identity_invalid",
+                                        : normal ? "static_scene_normal_texture_identity_invalid"
+                                                 : "static_scene_maps_texture_identity_invalid",
                                 diffuse
-                                    ? "A txDiffuse resource does not match its active scoped KN5 texture"
-                                    : "A txNormal resource does not match its active scoped KN5 texture");
+                                    ? "A txDiffuse resource does not match its unique active scoped KN5 texture"
+                                    : normal
+                                        ? "A txNormal resource does not match its unique active scoped KN5 texture"
+                                        : "A txMaps resource does not match its unique active scoped KN5 texture");
                 stored_index = resource.texture_index;
             }
             if (textures_for_packet[packet_index].diffuse == invalid_draw_texture_index ||
-                (normal_layout && textures_for_packet[packet_index].normal ==
-                                      invalid_draw_texture_index))
+                ((normal_layout || maps_layout) &&
+                 textures_for_packet[packet_index].normal == invalid_draw_texture_index) ||
+                (maps_layout && textures_for_packet[packet_index].maps ==
+                                    invalid_draw_texture_index))
                 return fail(StaticSceneResourceStatus::invalid_request,
                             "static_scene_resource_slot_missing",
-                            normal_layout
-                                ? "The portable ksPerPixelNM resources are incomplete"
-                                : "The portable diffuse resource is missing");
+                            maps_layout
+                                ? "The portable txMaps resources are incomplete"
+                                : normal_layout
+                                    ? "The portable ksPerPixelNM resources are incomplete"
+                                    : "The portable diffuse resource is missing");
         }
         if (material_layout == IndexedPortableResourceLayout::diffuse_with_frame ||
             material_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame ||
-            normal_layout)
+            normal_layout || maps_layout)
             requires_frame_constants = true;
         if (material_layout == IndexedPortableResourceLayout::diffuse_with_constants ||
             material_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame ||
-            normal_layout) {
+            normal_layout || maps_layout) {
             if (limits.max_material_constant_buffers == 0U ||
                 limits.max_total_material_constant_bytes == 0U)
                 return fail(StaticSceneResourceStatus::invalid_request,
@@ -606,7 +731,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
                     return fail(StaticSceneResourceStatus::invalid_request,
                                 "static_scene_material_constant_non_finite",
                                 "A used material constant contains a non-finite value");
-                if (normal_layout && constants.fresnel[2] > 0.0F)
+                if ((normal_layout || maps_layout) && constants.fresnel[2] > 0.0F)
                     return fail(StaticSceneResourceStatus::unsupported,
                                 "static_scene_normal_fresnel_unsupported",
                                 "The bounded ksPerPixelNM path requires disabled Fresnel reflection");
@@ -633,6 +758,22 @@ StaticSceneResourceResult prepare_static_scene_resources(
                             "static_scene_mixed_depth_targets_unsupported",
                             "One ordered static-scene batch requires one depth-target contract");
             batch_has_depth = pipeline->targets.has_depth;
+            if (!charge(pipeline->name.size(), sizeof(char)) ||
+                !charge(pipeline->shaders.size(), sizeof(PipelineShaderModule)) ||
+                !charge(pipeline->vertex_layout.attributes.size(),
+                        sizeof(PipelineVertexAttribute)) ||
+                !charge(pipeline->targets.colors.size(),
+                        sizeof(PipelineRenderTarget)) ||
+                !charge(pipeline->resources.size(), sizeof(PipelineResourceBinding)))
+                return preparation_limit();
+            for (const PipelineShaderModule& shader : pipeline->shaders) {
+                if (!charge(shader.bytes.size(), sizeof(std::uint8_t)))
+                    return preparation_limit();
+            }
+            for (const PipelineResourceBinding& resource : pipeline->resources) {
+                if (!charge(resource.name.size(), sizeof(char)))
+                    return preparation_limit();
+            }
             pipeline_by_material[material_index] = pipelines.size();
             pipelines.push_back(*pipeline);
         }
@@ -648,12 +789,19 @@ StaticSceneResourceResult prepare_static_scene_resources(
     std::vector<std::optional<DecodedDdsTexturePlan>> decoded_textures;
     if (embedded_textures) {
         decoded_textures.resize(model.textures.size());
+        std::vector<bool> maps_texture_indices(model.textures.size(), false);
+        for (const StaticSceneResources::PacketTextureIndices& packet_textures :
+             textures_for_packet) {
+            if (packet_textures.maps != invalid_draw_texture_index)
+                maps_texture_indices[static_cast<std::size_t>(packet_textures.maps)] = true;
+        }
         std::uint64_t total_source_bytes = 0U;
         std::uint64_t total_decoded_bytes = 0U;
         for (const StaticSceneResources::PacketTextureIndices& packet_textures :
              textures_for_packet) {
             for (const std::uint32_t raw_index :
-                 {packet_textures.diffuse, packet_textures.normal}) {
+                 {packet_textures.diffuse, packet_textures.normal,
+                  packet_textures.maps}) {
                 if (raw_index == invalid_draw_texture_index) continue;
                 const std::size_t texture_index = static_cast<std::size_t>(raw_index);
                 if (decoded_textures[texture_index].has_value()) continue;
@@ -698,6 +846,14 @@ StaticSceneResourceResult prepare_static_scene_resources(
                                     std::to_string(decoded.diagnostic.offset) + ": " +
                                     decoded.diagnostic.message);
                 }
+                if (maps_texture_indices[texture_index] &&
+                    decoded.plan.description.format != TextureFormat::rgba8_unorm &&
+                    decoded.plan.description.format != TextureFormat::bgra8_unorm)
+                    return fail(StaticSceneResourceStatus::unsupported,
+                                "static_scene_maps_texture_format_unsupported",
+                                "An embedded txMaps texture must decode to linear RGBA8 or BGRA8");
+                if (!charge(decoded.plan.levels.size(), sizeof(formats::DdsLevel)))
+                    return preparation_limit();
                 for (const formats::DdsLevel& level : decoded.plan.levels) {
                     if (!checked_add(static_cast<std::uint64_t>(level.pixels.size()),
                                      total_decoded_bytes) ||
@@ -988,7 +1144,10 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         if (resource_failure.has_value()) return std::move(*resource_failure);
         draw->normal_binding = resolve_texture(texture_indices.normal, "normal");
         if (resource_failure.has_value()) return std::move(*resource_failure);
-        if (draw->sampled_binding.texture != nullptr || draw->normal_binding.texture != nullptr)
+        draw->maps_binding = resolve_texture(texture_indices.maps, "maps");
+        if (resource_failure.has_value()) return std::move(*resource_failure);
+        if (draw->sampled_binding.texture != nullptr || draw->normal_binding.texture != nullptr ||
+            draw->maps_binding.texture != nullptr)
             draw->resource_authority = IndexedResourceAuthority::explicit_bindings;
         const std::size_t material_index = material_constant_for_packet_[index];
         if (material_index != invalid_resource_index) {
@@ -1006,7 +1165,8 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
             classify_indexed_portable_resource_layout(*draw->pipeline);
         if (resource_layout == IndexedPortableResourceLayout::diffuse_with_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame ||
-            resource_layout == IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame) {
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame ||
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_with_constants_and_frame) {
             if (!owns_frame_constants())
                 return {IndexedStaticMeshBatchStatus::invalid_request,
                         {"static_scene_owned_frame_constant_missing",
