@@ -4,7 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { parseKn5 } from "../src/kn5.js";
 import { parseKsAnimation } from "../src/ksanim.js";
-import { bindVaoPatch, CSP_VAO_BIND_DISTANCE_SQUARED, parseSplitAoConfig, parseVaoData, parseVaoPatch, resolveSplitAoAnimation, splitAoAnimationNodeScope, splitAoBindingAmount } from "../src/vao-patch.js";
+import { bindVaoPatch, CSP_VAO_BIND_DISTANCE_SQUARED, parseSplitAoConfig, parseVaoData, parseVaoPatch, resolveSplitAoAnimation, splitAoAnimationNodeScope, splitAoBindingAmount, vaoNormalOverrideNameEligible } from "../src/vao-patch.js";
 import { assettoPath, carFixtureRoot, carMainKn5 } from "./fixture-paths.js";
 
 test("decodes native v4 square-root AO and v5 linear AO bytes", () => {
@@ -59,6 +59,27 @@ test("binds normal overrides with the native mesh identity key", () => {
   assert.equal(result.normalMeshes, 1);
   assert.equal(result.normalVertices, 2);
   assert.equal(result.bindings.get(node).normal, values);
+});
+
+test("honors CSP's normal-override application gate", () => {
+  const names = ["ROAD_MAIN", "AC_SEMAPHORE", "AC_PIT", "ROAD2"];
+  const nodes = names.map((name) => mesh(name, [[1, 2, 3], [4, 5, 6]]));
+  const values = Float32Array.of(0, 1, 0, 0, 1, 0);
+  const records = names.map((name) => ({ name, type: 2, channel: "normal", alternate: false, firstVertex: [1, 2, 3], vertexCount: 2, values }));
+  records.push({ name: "ROAD2", type: 1, channel: "primary", alternate: false, firstVertex: [1, 2, 3], vertexCount: 2, values: Uint8Array.of(100, 200) });
+  const result = bindVaoPatch({ root: { kind: "node", name: "root", active: true, children: nodes } }, { records, recordCount: records.length });
+  assert.equal(vaoNormalOverrideNameEligible("ROAD_MAIN"), true);
+  assert.equal(vaoNormalOverrideNameEligible("AC_SEMAPHORE"), true);
+  assert.equal(vaoNormalOverrideNameEligible("AC_PIT"), false);
+  assert.equal(vaoNormalOverrideNameEligible("ROAD2"), false);
+  assert.equal(result.normalRecords, 4);
+  assert.equal(result.matchedNormalRecords, 2);
+  assert.equal(result.unmatchedNormalRecords, 2);
+  assert.equal(result.bindings.get(nodes[0]).normal, values);
+  assert.equal(result.bindings.get(nodes[1]).normal, values);
+  assert.equal(result.bindings.has(nodes[2]), false);
+  assert.equal(result.bindings.get(nodes[3]).normal, null);
+  assert.deepEqual([...result.bindings.get(nodes[3]).primary], [100, 200]);
 });
 
 test("parses native split-AO groups and contiguous wing animations", () => {

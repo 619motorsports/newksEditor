@@ -102,6 +102,12 @@ export function parseVaoData(input, options = {}) {
   return { records: Object.freeze(records), recordCount: records.length, byteLength: bytes.length, bytesRead: embeddedExtraSamples ? bytes.length : offset, embeddedExtraSamples };
 }
 
+/** Match CSP's application gate for type-2 normal override record names. */
+export function vaoNormalOverrideNameEligible(name) {
+  const value = String(name || "");
+  return value === "AC_SEMAPHORE" || (!value.startsWith("AC_") && !/[0-9]/.test(value));
+}
+
 export function bindVaoPatch(model, patch) {
   const meshes = walkNodes(model.root).map(({ node }) => node).filter((node) => node.kind === "mesh" || node.kind === "skinnedMesh");
   const nodePaths = new WeakMap();
@@ -118,6 +124,7 @@ export function bindVaoPatch(model, patch) {
   for (const record of patch?.records || []) {
     const normal = record.channel === "normal";
     if (normal) normalRecords++;
+    if (normal && !vaoNormalOverrideNameEligible(record.name)) continue;
     if (record.alternate) { if (!normal) alternate.push(record); continue; }
     const candidates = byName.get(record.name) || [];
     const node = candidates.find((candidate) => {

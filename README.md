@@ -82,7 +82,7 @@ npm test
 - KN5 v5/v6 headers, embedded texture, material, hierarchy, static and skinned-mesh
   parsing, including recognition of appended CSP KN5ENC v1 protected payloads
 - Stock shader parameters, texture-resource inspection, embedded BC1/2/3,
-  CPU-decoded BC4/5, native BPTC BC6H/BC7 where available, generic
+  CPU-decoded BC4/5/7, native BPTC BC6H/BC7 where available, generic
   8/16/24/32-bit masked DDS, bounded legacy D3D9 R/RG/RGBA 16/32-bit float DDS,
   PNG/JPEG/WebP,
   tangent-space normal maps, packed maps channels, diffuse/normal detail maps, and
@@ -146,6 +146,11 @@ npm test
   normal rebuilding. Edits update the overlay and audit immediately. They also support
   undo, recovery, project JSON, reset, and standalone `collider.kn5` export. A SHA-256
   source identity prevents saved edits from changing a different or replaced collider.
+- Packed or unpacked `damage.ini` authoring for scratch thresholds, initial damage,
+  oscillation, and visual-object fields. The editor validates bounded input and node
+  names. Edits support undo, recovery, project JSON, reset, and standalone export.
+  A SHA-256 source identity prevents saved edits from changing a different file.
+  Runtime deformation and oscillation are not simulated in the viewport.
 - Per-LOD car hierarchy preflight for all 14 SDK-listed suspension, wheel, cockpit,
   steering, and brake-disc nodes; duplicate/null-kind diagnostics; left/right and
   +Z-forward wheel-axis checks; related-pivot and cross-LOD alignment
@@ -175,9 +180,12 @@ npm test
 - Safe built-in expansion of the common CSP car-paint, glass, interior PBR,
   license-plate, and distant-emissive material templates used by installed configs
 - Safe `CustomEmissive`/`CustomEmissiveMulti` atlas preview for rectangles, circles,
-  soft polygons, color matching, mirroring, vertex-anchor approximation, multi-item
-  dashboard channels, diffuse alpha/luminance, and live vehicle inputs such as
-  reverse, brake, turn signals, lights, doors, fog lights, hazards, and RPM
+  soft polygons, color matching, channel mirroring, exact `MirrorUV` half-plane
+  folding, vertex-anchor approximation, multi-item dashboard channels, diffuse
+  alpha/luminance, and live vehicle inputs such as reverse, brake, turn signals,
+  lights, doors, fog lights, hazards, and RPM. The preview also reproduces CSP's
+  view-dependent emissive bounce-back for the sun, reflection cube, and point or
+  spot lights
 - CSP point/spot lights, mirrored `SelfLight` expansion, finite line lights with
   closest-segment range/diffuse, endpoint-color interpolation, and segment gloss,
   geometry-derived track `LIGHT_SERIES` preview, native packed
@@ -258,8 +266,9 @@ npm test
   a cached 1024² static-editor radial exponential-shadow atlas for up to four authored
   spotlights, using four 512² cells, CSP's exponent/normal-bias/boost resolve,
   optional extra filtering, clip sphere, and 10 cm lowered grass receiver,
-  RainFX-driven wet-grass albedo darkening and near-field substrate-specular
-  direction gain, and a live visibility toggle
+  RainFX-driven wet-grass albedo darkening, near-field substrate-specular
+  direction gain, CSP's exact height-weighted negative-wetness snow whitening,
+  and a live visibility toggle
 - RainFX material/mesh classification for puddles, soaking, smooth, rough, line,
   and relief surfaces, with adjustable wet darkening/gloss, deterministic puddle
   breakup, configured stream-edge/point diagnostics, and per-mesh inspection
@@ -283,7 +292,9 @@ npm test
   clip sphere, and the public one-sample receiver equation match the recovered path
 - All seven stock SDK weather-lighting presets with the native version-3
   RGB × intensity / 255 conversion and sun-angle interpolation, authorable sun
-  heading/height, HDR sky and sun, distance fog, an RGBA16F composition target with
+  heading/height, HDR sky and sun, distance fog, camera-relative cloud billboards,
+  all seven native cloud DDS textures, the recovered `ksClouds` pixel formula,
+  an RGBA16F composition target with
   supported MSAA, full-frame automatic or manual exposure, and the recovered embedded
   Yebis default display curve, reciprocal gamma, pre-curve saturation, quality-3
   threshold bright pass, five-level bloom core, native 15-sample separable Gaussian
@@ -302,11 +313,11 @@ npm test
   aspect-, FOV-, strength-, and blur-dependent offsets
 - Defensive bounds checks and explicit errors for unsupported node layouts
 
-A portable BC6H/BC7 fallback for systems without BPTC, dynamic RainFX accumulation,
+A portable BC6H fallback for systems without BPTC, dynamic RainFX accumulation,
 drainage, spray and occlusion, GrassFX's full 868,352-thread density rather than the
 portable CPU sampling budget, CSP's full 32-slot local-shadow packing and dynamic/car
 atlas refresh scheduling,
-wet cubemap reflection and negative-wetness snow response,
+wet cubemap reflection and ground-snow response,
 transparent-layer feedback,
 general CSP template/include expansion,
 dynamic-object audio, subtractive procedural-emissive
@@ -314,8 +325,8 @@ composition, FBX bump-map conversion and packed material maps, arbitrary vertex 
 face editing, skinned bind-pose geometry editing,
 full local-light photometric fidelity,
 Yebis star, ghost, light-shaft, non-default max-61 Gaussian passes, controlled pixel matching,
-cloud billboards, and the remaining post-processing stack, VAO split-animation blending, dynamic
-extra samples, and tree samples remain on the implementation roadmap. Legacy VAO
+the remaining post-processing stack, VAO split-animation blending, dynamic extra
+samples, and tree samples remain on the implementation roadmap. Legacy VAO
 normal overrides now use the recovered decoder, identity key, and normalized WebGL
 vertex input. CSP's exact
 tree-season variation noise texture is represented by deterministic world-space preview
@@ -331,7 +342,9 @@ the game-visible scene with the all-mesh authoring view. Pass `--shadows` to cap
 and compare the native-shaped directional preview with shadows disabled. Pass `--lighting`, plus
 optional `--weather`, `--sun-heading`, `--sun-height`, `--compare-sun-height`, or
 `--manual-exposure`, to verify and compare the HDR weather-lighting path. Pass
-`--vao FILE.vao-patch` to bind a CSP VAO patch and capture its enabled and
+`--clouds --csp-assets PATH` to load the stock cloud DDS folder and compare cloud
+weather with the clear preset. Pass
+`--vao FILE.vao-patch` to bind a CSP vertex-AO patch and capture its enabled and
 disabled states. Pass `--seasons --year-progress 0.07 --compare-year-progress 0.5`
 to drive seasonal conditions through the track's calendar LUTs and compare captures.
 Pass `--reflection-compare` to capture and hash the live scene-cubemap and procedural
