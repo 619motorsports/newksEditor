@@ -36,11 +36,23 @@ public:
                              TextureUsage::color_attachment | TextureUsage::transfer_source,
                              TextureMemory::device_local, TextureMutability::mutable_data};
     }
+    FakeTexture(TextureDescription description, Backend backend = Backend::Vulkan)
+        : backend_(backend), info_({description}) {}
     Backend backend() const noexcept override { return backend_; }
     const TextureInfo& info() const noexcept override { return info_; }
 private:
     Backend backend_;
     TextureInfo info_{};
+};
+
+class FakeSampler final : public Sampler {
+public:
+    explicit FakeSampler(Backend backend = Backend::Vulkan) : backend_(backend) {}
+    Backend backend() const noexcept override { return backend_; }
+    const SamplerInfo& info() const noexcept override { return info_; }
+private:
+    Backend backend_;
+    SamplerInfo info_{};
 };
 
 class RecordingDevice final : public Device {
@@ -88,12 +100,18 @@ public:
         vertex_buffers.clear();
         index_buffers.clear();
         authorities.clear();
+        resource_authorities.clear();
+        sampled_textures.clear();
+        sampled_samplers.clear();
         for (const auto& draw : batch.draws) {
             nodes.push_back(draw.packet->node);
             pipeline_names.push_back(draw.pipeline->name);
             vertex_buffers.push_back(draw.vertex_buffer);
             index_buffers.push_back(draw.index_buffer);
             authorities.push_back(draw.shader_authority);
+            resource_authorities.push_back(draw.resource_authority);
+            sampled_textures.push_back(draw.sampled_binding.texture);
+            sampled_samplers.push_back(draw.sampled_binding.sampler);
         }
         Diagnostic diagnostic;
         const auto validation = validate_indexed_static_mesh_batch_description(texture, batch, diagnostic);
@@ -118,6 +136,9 @@ public:
     std::vector<const Buffer*> vertex_buffers;
     std::vector<const Buffer*> index_buffers;
     std::vector<IndexedShaderAuthority> authorities;
+    std::vector<IndexedResourceAuthority> resource_authorities;
+    std::vector<const Texture*> sampled_textures;
+    std::vector<const Sampler*> sampled_samplers;
 
 private:
     DeviceInfo info_{Backend::Vulkan, "recording", "test", 1U, 0U, 0U, 0U, 0U, true};
@@ -352,6 +373,150 @@ void rejects_invalid_late_inputs_before_backend_allocation() {
             "duplicate-packet source validation has an aggregate work limit");
 }
 
+void resolves_portable_diffuse_tables_without_owning_handles() {
+    Fixture value = fixture();
+    value.model.textures.push_back({true, "body.dds", 4U,
+                                    {1U, 2U, 3U, 4U}, {}});
+    value.first_pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+    };
+    value.packets[0].resources.push_back({" txDiffuse ", 21U, 0U, "body.dds"});
+    value.packets[2].resources.push_back({"TXDIFFUSE", 21U, 0U, "body.dds"});
+
+    RecordingDevice device;
+    auto prepared = prepare_static_scene_resources(device, request_for(value));
+    require(prepared.ok() && device.buffer_calls == 4U,
+            "portable diffuse packet mappings prepare before geometry upload");
+    require(!value.packets[0].shader_execution_supported &&
+                value.packets[0].resources.front().bind_point == 21U,
+            "preparation preserves staged packets and shader bind-point metadata");
+
+    const TextureDescription sampled_description{
+        1U, 1U, 1U, 1U, TextureFormat::rgba8_unorm, TextureUsage::sampled,
+        TextureMemory::device_local, TextureMutability::immutable};
+    FakeTexture diffuse(sampled_description);
+    FakeSampler sampler;
+    const std::array<const Texture*, 1> textures = {&diffuse};
+    const std::array<const Sampler*, 1> samplers = {&sampler};
+    FakeTexture target;
+    StaticSceneFrameDescription frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.textures_by_global_index = textures;
+    frame.samplers_by_global_index = samplers;
+    const auto drawn = prepared.resources->draw_and_readback(device, target, frame);
+    require(drawn.ok() && device.batch_calls == 1U,
+            "portable diffuse tables execute in one ordered static-scene batch");
+    require(device.resource_authorities ==
+                std::vector<IndexedResourceAuthority>{
+                    IndexedResourceAuthority::explicit_bindings,
+                    IndexedResourceAuthority::packet_contract,
+                    IndexedResourceAuthority::explicit_bindings} &&
+                device.sampled_textures ==
+                    std::vector<const Texture*>{&diffuse, nullptr, &diffuse} &&
+                device.sampled_samplers ==
+                    std::vector<const Sampler*>{&sampler, nullptr, &sampler},
+            "global texture-table indices map to non-owning request-local bindings");
+
+    StaticSceneFrameDescription missing_tables;
+    missing_tables.camera.clip_space = CameraClipSpace::vulkan;
+    const auto missing =
+        prepared.resources->draw_and_readback(device, target, missing_tables);
+    require(missing.status == IndexedStaticMeshBatchStatus::invalid_request &&
+                missing.diagnostic.code == "static_scene_resource_table_size_invalid" &&
+                device.batch_calls == 1U,
+            "short resource tables are rejected before the backend batch call");
+
+    const std::array<const Texture*, 1> null_textures = {nullptr};
+    missing_tables.textures_by_global_index = null_textures;
+    missing_tables.samplers_by_global_index = samplers;
+    const auto null_entry =
+        prepared.resources->draw_and_readback(device, target, missing_tables);
+    require(null_entry.status == IndexedStaticMeshBatchStatus::invalid_request &&
+                null_entry.diagnostic.code == "static_scene_resource_table_entry_missing" &&
+                device.batch_calls == 1U,
+            "null used resource entries are rejected before the backend batch call");
+}
+
+void rejects_malformed_diffuse_packets_before_allocation() {
+    Fixture value = fixture();
+    value.model.textures.push_back({true, "body.dds", 4U,
+                                    {1U, 2U, 3U, 4U}, {}});
+    value.first_pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+    };
+    value.packets[0].resources.push_back({"txDiffuse", 999U, 0U, "body.dds"});
+    value.packets[2].resources.push_back({"txDiffuse", 999U, 0U, "body.dds"});
+    RecordingDevice device;
+
+    value.packets[2].resources.front().texture_index = invalid_draw_texture_index;
+    const auto sentinel = prepare_static_scene_resources(device, request_for(value));
+    require(!sentinel.ok() &&
+                sentinel.diagnostic.code == "static_scene_diffuse_texture_index_invalid" &&
+                device.buffer_calls == 0U,
+            "invalid diffuse sentinel in a later packet is rejected before allocation");
+
+    value.packets[2].resources.front().texture_index = 1U;
+    const auto out_of_range = prepare_static_scene_resources(device, request_for(value));
+    require(!out_of_range.ok() &&
+                out_of_range.diagnostic.code == "static_scene_diffuse_texture_index_invalid" &&
+                device.buffer_calls == 0U,
+            "out-of-range diffuse index in a later packet is rejected before allocation");
+
+    value.packets[2].resources.front().texture_index = 0U;
+    value.packets[2].resources.front().texture = "other.dds";
+    const auto mismatch = prepare_static_scene_resources(device, request_for(value));
+    require(!mismatch.ok() &&
+                mismatch.diagnostic.code == "static_scene_diffuse_texture_identity_invalid" &&
+                device.buffer_calls == 0U,
+            "diffuse name and global-index mismatch is rejected before allocation");
+
+    value.packets[2].resources.front().texture = "body.dds";
+    value.model.textures.front().active = false;
+    const auto inactive = prepare_static_scene_resources(device, request_for(value));
+    require(!inactive.ok() &&
+                inactive.diagnostic.code == "static_scene_diffuse_texture_identity_invalid" &&
+                device.buffer_calls == 0U,
+            "inactive diffuse source is rejected before allocation");
+
+    value.model.textures.front().active = true;
+    auto string_limited_request = request_for(value);
+    string_limited_request.limits.max_resource_string_bytes = 4U;
+    const auto string_limited =
+        prepare_static_scene_resources(device, string_limited_request);
+    require(!string_limited.ok() &&
+                string_limited.diagnostic.code == "static_scene_resource_string_limit" &&
+                device.buffer_calls == 0U,
+            "oversized resource strings are rejected before allocation");
+
+    value.model.textures.push_back({true, "unused.dds", 0U, {}, {}});
+    auto table_limited_request = request_for(value);
+    table_limited_request.limits.max_textures = 1U;
+    const auto table_limited =
+        prepare_static_scene_resources(device, table_limited_request);
+    require(!table_limited.ok() &&
+                table_limited.diagnostic.code == "static_scene_texture_table_limit" &&
+                device.buffer_calls == 0U,
+            "oversized final texture tables are rejected before allocation");
+
+    value.model.textures.resize(1U);
+    value.model.textures.front().workspaceFileIndex = 0U;
+    value.model.materials.front().workspaceFileIndex = 0U;
+    apex::formats::Kn5Texture foreign_scope = value.model.textures.front();
+    foreign_scope.workspaceFileIndex = 1U;
+    value.model.textures.push_back(std::move(foreign_scope));
+    value.packets[0].resources.front().texture_index = 1U;
+    value.packets[2].resources.front().texture_index = 1U;
+    const auto scope_mismatch =
+        prepare_static_scene_resources(device, request_for(value));
+    require(!scope_mismatch.ok() &&
+                scope_mismatch.diagnostic.code ==
+                    "static_scene_diffuse_texture_identity_invalid" &&
+                device.buffer_calls == 0U,
+            "same-name texture from another workspace scope is rejected before allocation");
+}
+
 void propagates_upload_and_batch_failures() {
     Fixture value = fixture();
     RecordingDevice device;
@@ -398,6 +563,8 @@ int main() {
     try {
         prepares_deduplicated_resources_and_executes_one_ordered_batch();
         rejects_invalid_late_inputs_before_backend_allocation();
+        resolves_portable_diffuse_tables_without_owning_handles();
+        rejects_malformed_diffuse_packets_before_allocation();
         propagates_upload_and_batch_failures();
         require(std::string(static_scene_resource_status_name(StaticSceneResourceStatus::ready)) ==
                     "ready",

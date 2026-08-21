@@ -144,8 +144,10 @@ remains unchanged and feature-complete.
   `lookAt`, and `multiply` functions in `public/app.js`. Separate projections
   define the Vulkan and D3D12 clip-space conversions. The indexed backend
   shader contract uses these camera matrices. The static-scene adapter can
-  dispatch a bounded resource-free packet set. Stock shader translation and
-  complete material-resource resolution remain staged.
+  dispatch bounded resource-free packets and the portable `txDiffuse` pair.
+  The pair resolves through caller-owned tables in the final KN5 texture
+  order. Stock shader translation and complete material-resource resolution
+  remain staged.
   Vulkan and D3D12 create a basic graphics pipeline and execute fixed and
   indexed R16 static-mesh draws. The indexed path executes only a deliberately
   restricted draw-packet subset. It supports one portable sampled-image and

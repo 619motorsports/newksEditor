@@ -1,10 +1,12 @@
 #include "apex/render/static_scene.hpp"
 
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -32,6 +34,38 @@ bool checked_bytes(std::size_t count, std::size_t element_size,
         return false;
     bytes = count64 * element64;
     return true;
+}
+
+bool canonical_resource_equals(std::string_view value,
+                               std::string_view expected) noexcept {
+    std::size_t first = 0U;
+    while (first < value.size() &&
+           std::isspace(static_cast<unsigned char>(value[first])) != 0)
+        ++first;
+    std::size_t last = value.size();
+    while (last > first &&
+           std::isspace(static_cast<unsigned char>(value[last - 1U])) != 0)
+        --last;
+    if (last - first != expected.size()) return false;
+    for (std::size_t index = 0U; index < expected.size(); ++index) {
+        if (static_cast<char>(std::tolower(static_cast<unsigned char>(
+                value[first + index]))) != expected[index])
+            return false;
+    }
+    return true;
+}
+
+bool portable_diffuse_layout(const PipelineProgram& pipeline) noexcept {
+    if (pipeline.resources.size() != 2U) return false;
+    bool texture = false;
+    bool sampler = false;
+    for (const PipelineResourceBinding& resource : pipeline.resources) {
+        texture = texture || (resource.kind == PipelineResourceKind::sampled_texture &&
+                              resource.set == 0U && resource.binding == 0U);
+        sampler = sampler || (resource.kind == PipelineResourceKind::sampler &&
+                              resource.set == 0U && resource.binding == 1U);
+    }
+    return texture && sampler;
 }
 
 StaticSceneResourceStatus map_upload_status(StaticMeshUploadStatus status) noexcept {
@@ -68,10 +102,16 @@ ExecutorPipelineValidation validate_executor_pipeline(
     if (pipeline.transform_contract != PipelineTransformContract::draw_matrices)
         return {StaticSceneResourceStatus::unsupported,
                 "Static-scene execution requires the draw-matrices transform contract", 0U};
-    if (!pipeline.resources.empty() || pipeline.raster.fill != PipelineFillMode::solid ||
+    if (pipeline.raster.fill != PipelineFillMode::solid ||
         pipeline.blend.enabled || pipeline.blend.alpha_to_coverage)
         return {StaticSceneResourceStatus::unsupported,
-                "Static-scene execution supports resource-free opaque solid pipelines", 0U};
+                "Static-scene execution supports opaque solid pipelines", 0U};
+    if (!pipeline.resources.empty() && !portable_diffuse_layout(pipeline))
+        return {StaticSceneResourceStatus::unsupported,
+                "Static-scene material execution supports only the portable diffuse resource layout", 0U};
+    if (pipeline.resources.empty() != packet.resources.empty())
+        return {StaticSceneResourceStatus::invalid_request,
+                "Pipeline and draw-packet resource declarations do not match", 0U};
     if (pipeline.targets.colors.size() != 1U || pipeline.targets.colors.front().samples != 1U)
         return {StaticSceneResourceStatus::unsupported,
                 "Static-scene execution requires one single-sample color target", 0U};
@@ -146,7 +186,9 @@ StaticSceneResourceResult prepare_static_scene_resources(
     const auto& scene = *request.scene;
     const auto& limits = request.limits;
     if (limits.max_draws == 0U || limits.max_draws > max_indexed_static_mesh_batch_draws ||
-        limits.max_materials == 0U || limits.max_total_vertex_bytes == 0U ||
+        limits.max_materials == 0U || limits.max_textures == 0U ||
+        limits.max_resource_string_bytes == 0U ||
+        limits.max_total_vertex_bytes == 0U ||
         limits.max_total_index_bytes == 0U || limits.max_total_shader_bytes == 0U ||
         limits.max_validation_bytes == 0U)
         return fail(StaticSceneResourceStatus::invalid_request, "static_scene_limits_invalid",
@@ -159,6 +201,10 @@ StaticSceneResourceResult prepare_static_scene_resources(
         request.pipelines_by_material.size() != model.materials.size())
         return fail(StaticSceneResourceStatus::invalid_request, "static_scene_material_table_invalid",
                     "Model, scene, and pipeline material tables must have the same bounded size");
+    if (model.textures.size() > limits.max_textures)
+        return fail(StaticSceneResourceStatus::invalid_request,
+                    "static_scene_texture_table_limit",
+                    "The final KN5 texture table exceeds the static-scene limit");
 
     const Kn5SceneNodeMapResult node_map =
         map_kn5_scene_nodes(model.root, scene, limits.node_map);
@@ -171,6 +217,8 @@ StaticSceneResourceResult prepare_static_scene_resources(
     std::vector<std::size_t> pipeline_by_material(model.materials.size(), invalid_resource_index);
     std::vector<std::size_t> upload_for_packet(request.packets.size(), invalid_resource_index);
     std::vector<std::size_t> pipeline_for_packet(request.packets.size(), invalid_resource_index);
+    std::vector<std::uint32_t> texture_for_packet(request.packets.size(),
+                                                  invalid_draw_texture_index);
     std::vector<const formats::Kn5Node*> unique_meshes;
     std::vector<std::size_t> representative_packets;
     std::vector<PipelineProgram> pipelines;
@@ -189,11 +237,11 @@ StaticSceneResourceResult prepare_static_scene_resources(
         const auto node_index = static_cast<std::size_t>(packet.node);
         const auto material_index = static_cast<std::size_t>(packet.material);
         if (packet.primitive != DrawPrimitiveKind::static_mesh || !packet.bone_palette.empty() ||
-            !packet.resources.empty() || packet.flags.transparent || packet.flags.blend_enabled ||
+            packet.flags.transparent || packet.flags.blend_enabled ||
             packet.flags.alpha_to_coverage || packet.flags.wireframe)
             return fail(StaticSceneResourceStatus::unsupported,
                         "static_scene_packet_unsupported",
-                        "Static-scene execution supports resource-free opaque static meshes");
+                        "Static-scene execution supports opaque static meshes");
         if (node_index >= node_map.source_nodes.size() || material_index >= model.materials.size())
             return fail(StaticSceneResourceStatus::invalid_request,
                         "static_scene_packet_identity_invalid",
@@ -250,6 +298,45 @@ StaticSceneResourceResult prepare_static_scene_resources(
                             ? "static_scene_material_pipeline_invalid"
                             : "static_scene_material_pipeline_unsupported",
                         pipeline_validation.error);
+        if (!pipeline->resources.empty()) {
+            if (packet.resources.size() != 1U)
+                return fail(StaticSceneResourceStatus::unsupported,
+                            "static_scene_diffuse_packet_unsupported",
+                            "The portable static-scene material path requires one txDiffuse packet resource");
+            const DrawResourceSlot& diffuse = packet.resources.front();
+            if (diffuse.slot.size() > limits.max_resource_string_bytes ||
+                diffuse.texture.size() > limits.max_resource_string_bytes)
+                return fail(StaticSceneResourceStatus::invalid_request,
+                            "static_scene_resource_string_limit",
+                            "A static-scene resource string exceeds its byte limit");
+            if (!canonical_resource_equals(diffuse.slot, "txdiffuse"))
+                return fail(StaticSceneResourceStatus::unsupported,
+                            "static_scene_diffuse_packet_unsupported",
+                            "The portable static-scene material path requires one txDiffuse packet resource");
+            if (diffuse.texture_index == invalid_draw_texture_index ||
+                static_cast<std::size_t>(diffuse.texture_index) >= model.textures.size())
+                return fail(StaticSceneResourceStatus::invalid_request,
+                            "static_scene_diffuse_texture_index_invalid",
+                            "A txDiffuse packet resource has an invalid global texture index");
+            const formats::Kn5Texture& source_texture =
+                model.textures[static_cast<std::size_t>(diffuse.texture_index)];
+            if (source_texture.name.size() > limits.max_resource_string_bytes ||
+                !checked_add(static_cast<std::uint64_t>(diffuse.slot.size()), validation_bytes) ||
+                !checked_add(static_cast<std::uint64_t>(diffuse.texture.size()), validation_bytes) ||
+                !checked_add(static_cast<std::uint64_t>(source_texture.name.size()), validation_bytes) ||
+                validation_bytes > limits.max_validation_bytes)
+                return fail(StaticSceneResourceStatus::invalid_request,
+                            "static_scene_validation_work_limit",
+                            "Static-scene resource validation exceeds its byte-work limit");
+            if (!source_texture.active || diffuse.texture.empty() ||
+                diffuse.texture != source_texture.name ||
+                source_texture.workspaceFileIndex !=
+                    model.materials[material_index].workspaceFileIndex)
+                return fail(StaticSceneResourceStatus::invalid_request,
+                            "static_scene_diffuse_texture_identity_invalid",
+                            "A txDiffuse packet resource does not match its active scoped global KN5 texture");
+            texture_for_packet[packet_index] = diffuse.texture_index;
+        }
         const PipelineRenderTargetFormat color_format = pipeline->targets.colors.front().format;
         if (batch_color_format.has_value() && *batch_color_format != color_format)
             return fail(StaticSceneResourceStatus::unsupported,
@@ -280,6 +367,11 @@ StaticSceneResourceResult prepare_static_scene_resources(
     resources->pipelines_ = std::move(pipelines);
     resources->upload_for_packet_ = std::move(upload_for_packet);
     resources->pipeline_for_packet_ = std::move(pipeline_for_packet);
+    resources->texture_for_packet_ = std::move(texture_for_packet);
+    resources->texture_count_ = model.textures.size();
+    for (const std::uint32_t index : resources->texture_for_packet_)
+        resources->has_material_resources_ =
+            resources->has_material_resources_ || index != invalid_draw_texture_index;
     resources->uploads_.reserve(unique_meshes.size());
     for (std::size_t index = 0U; index < unique_meshes.size(); ++index) {
         StaticMeshUploadResult uploaded = upload_static_mesh(
@@ -299,9 +391,16 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
                 {"static_scene_device_mismatch",
                  "Static-scene resources require their preparing device and backend"}, {}};
     if (packets_.empty() || packets_.size() != upload_for_packet_.size() ||
-        packets_.size() != pipeline_for_packet_.size())
+        packets_.size() != pipeline_for_packet_.size() ||
+        packets_.size() != texture_for_packet_.size())
         return {IndexedStaticMeshBatchStatus::invalid_request,
                 {"static_scene_resources_invalid", "Static-scene resource mappings are incomplete"}, {}};
+    if (has_material_resources_ &&
+        (frame.textures_by_global_index.size() != texture_count_ ||
+         frame.samplers_by_global_index.size() != texture_count_))
+        return {IndexedStaticMeshBatchStatus::invalid_request,
+                {"static_scene_resource_table_size_invalid",
+                 "Static-scene texture and sampler tables must match the final KN5 texture count"}, {}};
 
     std::vector<IndexedStaticMeshDrawRequest> draws;
     draws.reserve(packets_.size());
@@ -317,6 +416,19 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         if (!draw.has_value())
             return {IndexedStaticMeshBatchStatus::invalid_request, std::move(diagnostic), {}};
         draw->shader_authority = IndexedShaderAuthority::explicit_pipeline;
+        const std::uint32_t texture_index = texture_for_packet_[index];
+        if (texture_index != invalid_draw_texture_index) {
+            const std::size_t resource_index = static_cast<std::size_t>(texture_index);
+            if (resource_index >= texture_count_ ||
+                frame.textures_by_global_index[resource_index] == nullptr ||
+                frame.samplers_by_global_index[resource_index] == nullptr)
+                return {IndexedStaticMeshBatchStatus::invalid_request,
+                        {"static_scene_resource_table_entry_missing",
+                         "A used static-scene texture-table entry has no texture or sampler handle"}, {}};
+            draw->resource_authority = IndexedResourceAuthority::explicit_bindings;
+            draw->sampled_binding = {frame.textures_by_global_index[resource_index],
+                                     frame.samplers_by_global_index[resource_index]};
+        }
         draws.push_back(std::move(*draw));
     }
     const IndexedStaticMeshBatchDescription batch{

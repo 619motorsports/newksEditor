@@ -83,8 +83,9 @@ ordered draw instances. It submits one batch with caller-supplied SPIR-V or
 DXIL pipelines. Production packets remain marked as staged. The adapter does
 not claim that stock KN5 shaders are executable. Window surfaces, swapchains,
 complete material binding, and production pixel comparisons remain roadmap
-work. The static-scene adapter still requires resource-free pipelines. BC7 has
-an exact, bounded CPU fallback.
+work. The static-scene adapter can resolve the portable `txDiffuse` pair from
+caller-owned texture and sampler tables. The tables use the final KN5 texture
+ordering. BC7 has an exact, bounded CPU fallback.
 BC6H still requires a capable GPU path. The upload planner supports DX10 2D
 arrays, cubemaps, and RGB24 conversion. It rejects 1D/3D textures and legacy
 D3D9 float textures.

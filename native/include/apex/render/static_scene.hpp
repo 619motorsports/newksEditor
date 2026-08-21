@@ -20,6 +20,8 @@ struct StaticSceneResourceLimits {
     PipelineLimits pipeline{};
     std::size_t max_draws = max_indexed_static_mesh_batch_draws;
     std::size_t max_materials = 4096U;
+    std::size_t max_textures = 65'536U;
+    std::size_t max_resource_string_bytes = 1U << 20;
     std::uint64_t max_total_vertex_bytes = 512ULL * 1024ULL * 1024ULL;
     std::uint64_t max_total_index_bytes = 256ULL * 1024ULL * 1024ULL;
     std::uint64_t max_total_shader_bytes = 64ULL * 1024ULL * 1024ULL;
@@ -53,6 +55,12 @@ struct StaticSceneFrameDescription {
     std::array<float, 4> clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
     bool clear_depth = false;
     float depth_clear_value = 1.0F;
+    // Non-owning tables use the final Kn5File::textures ordering. When a
+    // prepared packet uses txDiffuse, both table lengths must equal the final
+    // texture count. Used entries must remain alive through the synchronous
+    // draw; unused entries can be null.
+    std::span<const Texture* const> textures_by_global_index{};
+    std::span<const Sampler* const> samplers_by_global_index{};
 };
 
 struct StaticSceneResourceResult;
@@ -79,6 +87,9 @@ private:
     std::vector<std::unique_ptr<StaticMeshUpload>> uploads_;
     std::vector<std::size_t> upload_for_packet_;
     std::vector<std::size_t> pipeline_for_packet_;
+    std::vector<std::uint32_t> texture_for_packet_;
+    std::size_t texture_count_ = 0U;
+    bool has_material_resources_ = false;
 
     friend struct StaticSceneResourceResult;
     friend StaticSceneResourceResult prepare_static_scene_resources(
