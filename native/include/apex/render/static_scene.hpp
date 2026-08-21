@@ -3,6 +3,7 @@
 #include "apex/formats/kn5.hpp"
 #include "apex/core/parse_limits.hpp"
 #include "apex/render/kn5_scene_node_map.hpp"
+#include "apex/render/directional_shadow.hpp"
 #include "apex/render/skinned_mesh_upload.hpp"
 #include "apex/render/static_mesh_upload.hpp"
 #include "apex/scene/scene.hpp"
@@ -143,6 +144,15 @@ public:
     [[nodiscard]] IndexedStaticMeshBatchResult draw_and_readback(
         Device& device, Texture& target,
         const StaticSceneFrameDescription& frame);
+
+    // Execute the retained opaque static casters into the fixed three-map
+    // directional-shadow set. Alpha-tested and skinned casters are reported
+    // as staged. The portable pass is not a claim of recovered ksShadowGen
+    // shader or doubleFaceShadow parity.
+    [[nodiscard]] StaticSceneDirectionalShadowResult
+    draw_opaque_directional_shadows(
+        Device& device,
+        const StaticSceneDirectionalShadowFrameDescription& frame);
 
 private:
     struct PacketTextureIndices {

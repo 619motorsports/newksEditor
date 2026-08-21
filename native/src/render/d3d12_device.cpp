@@ -3140,11 +3140,6 @@ bool execute_d3d12_depth_only_indexed_static_mesh_batch(
     const DepthOnlyIndexedStaticMeshBatchDescription& batch,
     std::span<const D3D12IndexedBatchDraw> draws,
     Diagnostic& diagnostic) {
-    if (draws.empty()) {
-        diagnostic = {"depth_only_indexed_static_mesh_batch_empty",
-                      "D3D12 depth-only indexed batch has no executable draws"};
-        return false;
-    }
     const DepthAttachmentDescription& description = depth_attachment.info().description;
     if (description.width > static_cast<std::uint32_t>(std::numeric_limits<LONG>::max()) ||
         description.height > static_cast<std::uint32_t>(std::numeric_limits<LONG>::max())) {

@@ -1449,4 +1449,202 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
             {}};
 }
 
+StaticSceneDirectionalShadowResult
+StaticSceneResources::draw_opaque_directional_shadows(
+    Device& device,
+    const StaticSceneDirectionalShadowFrameDescription& frame) try {
+    const auto fail = [](StaticSceneDirectionalShadowStatus status,
+                         std::string code, std::string message) {
+        StaticSceneDirectionalShadowResult result;
+        result.status = status;
+        result.diagnostic = {std::move(code), std::move(message)};
+        return result;
+    };
+    if (frame.maps == nullptr || frame.opaque_pipeline == nullptr)
+        return fail(StaticSceneDirectionalShadowStatus::invalid_request,
+                    "directional_shadow_frame_handle_missing",
+                    "Directional shadow execution requires map and pipeline handles");
+    DirectionalShadowMapResources& maps = *frame.maps;
+    if (&device != device_ || &device != maps.device_ ||
+        device.info().backend != backend_ || maps.backend_ != backend_)
+        return fail(StaticSceneDirectionalShadowStatus::unsupported,
+                    "directional_shadow_device_mismatch",
+                    "Directional shadow resources require their preparing device and backend");
+    if (packets_.empty() || packets_.size() != upload_for_packet_.size() ||
+        packets_.size() != skinned_upload_for_packet_.size())
+        return fail(StaticSceneDirectionalShadowStatus::invalid_request,
+                    "directional_shadow_scene_resources_invalid",
+                    "Static-scene geometry mappings are incomplete");
+    if (!frame.refreshed_packets.empty() &&
+        frame.refreshed_packets.size() != packets_.size())
+        return fail(StaticSceneDirectionalShadowStatus::invalid_request,
+                    "directional_shadow_packet_count_invalid",
+                    "Refreshed shadow packets must match the prepared packet count");
+    if (maps.metadata_.cascades.size() != directional_shadow_cascade_count ||
+        maps.metadata_.splits.size() != directional_shadow_cascade_count)
+        return fail(StaticSceneDirectionalShadowStatus::invalid_request,
+                    "directional_shadow_map_contract_invalid",
+                    "Directional shadow resources must retain exactly three cascades");
+
+    const auto packet_for_frame = [&](std::size_t index) -> const DrawPacket& {
+        return frame.refreshed_packets.empty() ? packets_[index]
+                                               : frame.refreshed_packets[index];
+    };
+    for (std::size_t index = 0U; index < packets_.size(); ++index) {
+        const DrawPacket& packet = packet_for_frame(index);
+        if (!same_prepared_draw_contract(packets_[index], packet) ||
+            !finite_world_matrix(packet))
+            return fail(StaticSceneDirectionalShadowStatus::invalid_request,
+                        "directional_shadow_packet_contract_invalid",
+                        "A refreshed shadow packet changed its prepared contract or transform");
+    }
+
+    StaticSceneDirectionalShadowResult result;
+    std::vector<std::size_t> opaque_indices;
+    opaque_indices.reserve(packets_.size());
+    result.staged_casters.reserve(packets_.size());
+    for (std::size_t index = 0U; index < packets_.size(); ++index) {
+        const DrawPacket& packet = packet_for_frame(index);
+        if (!packet.flags.cast_shadows) continue;
+        ++result.selected_casters;
+        if (packet.primitive == DrawPrimitiveKind::skinned_mesh) {
+            ++result.staged_skinned;
+            result.staged_casters.push_back({
+                "directional_shadow_caster_skinning_staged", packet.node,
+                packet.material});
+            continue;
+        }
+        if (packet.material_profile.shadow_alpha_tested ||
+            packet.flags.transparent || packet.flags.blend_enabled ||
+            packet.flags.alpha_to_coverage) {
+            ++result.staged_alpha_tested;
+            result.staged_casters.push_back({
+                "directional_shadow_caster_alpha_test_staged", packet.node,
+                packet.material});
+            continue;
+        }
+        if (!packet.flags.depth_test || !packet.flags.depth_write) {
+            result.staged_casters.push_back({
+                "directional_shadow_caster_shader_staged", packet.node,
+                packet.material});
+            continue;
+        }
+        if (index >= upload_for_packet_.size() ||
+            upload_for_packet_[index] >= uploads_.size() ||
+            uploads_[upload_for_packet_[index]] == nullptr)
+            return fail(StaticSceneDirectionalShadowStatus::invalid_request,
+                        "directional_shadow_caster_geometry_invalid",
+                        "An opaque shadow caster has no retained static geometry");
+        opaque_indices.push_back(index);
+        ++result.opaque_casters;
+    }
+    if (result.selected_casters == 0U) {
+        for (std::size_t cascade = 0U;
+             cascade < directional_shadow_cascade_count; ++cascade) {
+            const DepthOnlyIndexedStaticMeshBatchDescription batch{
+                {}, maps.attachments_[cascade].get(), true, 1.0F};
+            const auto cleared =
+                device.draw_depth_only_indexed_static_mesh_batch(batch);
+            if (!cleared.ok())
+                return fail(
+                    cleared.status ==
+                            DepthOnlyIndexedStaticMeshBatchStatus::unsupported
+                        ? StaticSceneDirectionalShadowStatus::unsupported
+                        : cleared.status ==
+                                  DepthOnlyIndexedStaticMeshBatchStatus::invalid_request
+                              ? StaticSceneDirectionalShadowStatus::invalid_request
+                              : StaticSceneDirectionalShadowStatus::execution_failed,
+                    cleared.diagnostic.code, cleared.diagnostic.message);
+            ++result.cascades_completed;
+        }
+        result.status = StaticSceneDirectionalShadowStatus::ready;
+        result.diagnostic = {"directional_shadow_no_casters",
+                             "The scene selected no casters; all three maps contain clear depth"};
+        return result;
+    }
+    if (opaque_indices.empty()) {
+        result.status = StaticSceneDirectionalShadowStatus::unsupported;
+        result.diagnostic = {"directional_shadow_all_casters_staged",
+                             "All selected directional shadow casters require staged programs"};
+        return result;
+    }
+
+    // The recovered doubleFaceShadow field is not yet present in the native
+    // scene ABI. Record that bounded fidelity gap while executing the portable
+    // opaque pass; do not silently substitute main-pass culling as exact.
+    for (const std::size_t index : opaque_indices) {
+        const DrawPacket& packet = packet_for_frame(index);
+        result.staged_casters.push_back({
+            "directional_shadow_caster_shadow_cull_staged", packet.node,
+            packet.material});
+    }
+
+    std::array<std::vector<DepthOnlyIndexedStaticMeshDrawRequest>,
+               directional_shadow_cascade_count> cascade_draws;
+    for (std::size_t cascade = 0U; cascade < directional_shadow_cascade_count;
+         ++cascade) {
+        auto& draws = cascade_draws[cascade];
+        draws.reserve(opaque_indices.size());
+        for (const std::size_t index : opaque_indices) {
+            const DrawPacket& packet = packet_for_frame(index);
+            const StaticMeshUpload& upload = *uploads_[upload_for_packet_[index]];
+            DepthOnlyIndexedStaticMeshDrawRequest draw;
+            draw.packet = &packet;
+            draw.pipeline = frame.opaque_pipeline;
+            draw.vertex_buffer = upload.vertex_buffer.get();
+            draw.index_buffer = upload.index_buffer.get();
+            draw.camera_frame = maps.cameras_[cascade];
+            draws.push_back(std::move(draw));
+        }
+        const DepthOnlyIndexedStaticMeshBatchDescription batch{
+            draws, maps.attachments_[cascade].get(), true, 1.0F};
+        Diagnostic diagnostic;
+        const auto validation =
+            validate_depth_only_indexed_static_mesh_batch_description(batch,
+                                                                       diagnostic);
+        if (validation != DepthOnlyIndexedStaticMeshBatchStatus::ready)
+            return fail(validation == DepthOnlyIndexedStaticMeshBatchStatus::unsupported
+                            ? StaticSceneDirectionalShadowStatus::unsupported
+                            : StaticSceneDirectionalShadowStatus::invalid_request,
+                        diagnostic.code, diagnostic.message);
+    }
+
+    // All packets, all three matrices, and all backend resource ranges have
+    // passed before the first depth write. Runtime failure after a submission
+    // requires the caller to retry the complete set, which clears every map.
+    for (std::size_t cascade = 0U; cascade < directional_shadow_cascade_count;
+         ++cascade) {
+        const DepthOnlyIndexedStaticMeshBatchDescription batch{
+            cascade_draws[cascade], maps.attachments_[cascade].get(), true, 1.0F};
+        const auto drawn = device.draw_depth_only_indexed_static_mesh_batch(batch);
+        if (!drawn.ok()) {
+            result.status = drawn.status == DepthOnlyIndexedStaticMeshBatchStatus::unsupported
+                                ? StaticSceneDirectionalShadowStatus::unsupported
+                                : drawn.status ==
+                                          DepthOnlyIndexedStaticMeshBatchStatus::invalid_request
+                                      ? StaticSceneDirectionalShadowStatus::invalid_request
+                                      : StaticSceneDirectionalShadowStatus::execution_failed;
+            result.diagnostic = std::move(drawn.diagnostic);
+            return result;
+        }
+        ++result.cascades_completed;
+    }
+    result.status = result.staged_casters.empty()
+                        ? StaticSceneDirectionalShadowStatus::ready
+                        : StaticSceneDirectionalShadowStatus::partial;
+    result.diagnostic = result.status == StaticSceneDirectionalShadowStatus::partial
+                            ? Diagnostic{
+                                  "directional_shadow_portable_opaque_partial",
+                                  "Opaque static casters executed; recovered alpha, skinning, or shadow-cull behavior remains staged"}
+                            : Diagnostic{};
+    return result;
+} catch (const std::bad_alloc&) {
+    StaticSceneDirectionalShadowResult result;
+    result.status = StaticSceneDirectionalShadowStatus::execution_failed;
+    result.diagnostic = {
+        "directional_shadow_frame_allocation_failed",
+        "Directional shadow frame preparation has insufficient memory"};
+    return result;
+}
+
 }  // namespace apex::render

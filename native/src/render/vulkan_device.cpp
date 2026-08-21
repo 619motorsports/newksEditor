@@ -3377,11 +3377,6 @@ bool draw_depth_only_indexed_batch(
     float depth_clear_value,
     Diagnostic& diagnostic) {
     std::lock_guard command_guard(context->command_mutex);
-    if (draws.empty()) {
-        diagnostic = {"depth_only_indexed_static_mesh_batch_empty",
-                      "The Vulkan depth-only indexed batch contains no draws"};
-        return false;
-    }
     if (depth_attachment.context().get() != context.get()) {
         diagnostic = {"depth_only_indexed_depth_context_mismatch",
                       "The depth attachment belongs to another Vulkan device"};

@@ -1982,6 +1982,12 @@ validate_depth_only_indexed_static_mesh_draw_request(
                       "Depth-only indexed pipelines require draw matrices, depth LESS test/write, no blend, and no resources"};
         return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
     }
+    if (packet.flags.depth_test != pipeline.depth.test_enabled ||
+        packet.flags.depth_write != pipeline.depth.write_enabled) {
+        diagnostic = {"depth_only_indexed_packet_depth_state_mismatch",
+                      "Depth-only packet depth flags must match the executable pipeline"};
+        return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
+    }
     if (pipeline.shaders.size() != 1U ||
         pipeline.shaders.front().stage != PipelineShaderStage::vertex) {
         diagnostic = {"depth_only_indexed_shader_pair_invalid",
@@ -2076,9 +2082,9 @@ DepthOnlyIndexedStaticMeshBatchStatus
 validate_depth_only_indexed_static_mesh_batch_description(
     const DepthOnlyIndexedStaticMeshBatchDescription& description,
     Diagnostic& diagnostic) {
-    if (description.draws.empty()) {
+    if (description.draws.empty() && !description.clear_depth) {
         diagnostic = {"depth_only_indexed_static_mesh_batch_empty",
-                      "A depth-only indexed batch must contain at least one draw"};
+                      "An empty depth-only indexed batch must clear its attachment"};
         return DepthOnlyIndexedStaticMeshBatchStatus::invalid_request;
     }
     if (description.draws.size() > max_indexed_static_mesh_batch_draws) {

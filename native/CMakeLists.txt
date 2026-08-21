@@ -135,6 +135,7 @@ add_library(apex_render STATIC
   src/render/damage_preview.cpp
   src/render/decoded_dds_texture.cpp
   src/render/device.cpp
+  src/render/directional_shadow.cpp
   src/render/draw_packet.cpp
   src/render/frame_plan.cpp
   src/render/kn5_scene_node_map.cpp

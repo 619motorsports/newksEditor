@@ -120,9 +120,17 @@ remains unchanged and feature-complete.
   indexed geometry without a color target, and reads back changed depth inside
   the triangle and the clear value outside it. The D3D12 implementation uses a
   zero-render-target pipeline and is part of the Windows WARP test path. This
-  is the bounded opaque-caster execution seam. Static-scene caster selection,
-  three-map ownership, alpha-tested and skinned caster programs, depth
-  sampling, cascade selection, and receiver PCF remain staged. The executable main-pass subset uses the source-evidenced
+  is the bounded opaque-caster execution seam. A backend-neutral owner now
+  retains exactly three single-sample D32 maps. It also retains the three
+  cascade matrices and converts them from WebGL clip space for each backend.
+  The static-scene adapter selects `cast_shadows` packets from its retained
+  geometry. It executes only opaque static casters, in packet order, for all
+  three cascades. It reports alpha-tested and skinned casters as staged. It
+  also reports the missing recovered `doubleFaceShadow` cull state. The
+  portable cull state is not exact `ksShadowGen` behavior. A real SwiftShader
+  test reads all three maps and finds caster depth and clear depth in each map.
+  The same test is in the Windows D3D12/WARP path. Depth sampling, receiver
+  cascade selection, and receiver PCF remain staged. The executable main-pass subset uses the source-evidenced
   `LESS` depth comparison. It also executes explicitly blended packets. The
   ordinary alpha, multiply, and transparent-as-black factors match
   `applyItemRenderState` in `public/app.js`. The indexed path supports 4x
@@ -349,8 +357,10 @@ remains unchanged and feature-complete.
   pass. Each backend resolves a 4x color target once after the final draw. The
   same batch boundary can submit resource-free vertex-only draws to a
   persistent single-sample D32 target without a color allocation or readback.
-  This pass does not yet consume `RenderPlan::shadow_casters` or expose the D32
-  target as a sampled receiver resource. The
+  The retained static-scene path filters the equivalent
+  `DrawPacket::flags.cast_shadows` state. It submits the supported opaque
+  static subset to exactly three owned D32 maps. The maps are not sampled
+  receiver resources. The
   device API directly uploads immutable, one-layer BC1 and BC3 sampled
   textures. The upload path validates compressed block rows before allocation.
   Vulkan and D3D12 query format support before image creation. Direct BC5

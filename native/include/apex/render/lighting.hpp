@@ -1,6 +1,7 @@
 #pragma once
 
 #include "apex/core/parse_limits.hpp"
+#include "apex/render/camera.hpp"
 
 #include <array>
 #include <cstddef>
@@ -193,6 +194,31 @@ struct DirectionalShadowInput { LightingVec3 eye{}, target{}, up{0,1,0}, sun_dir
 struct ShadowCascade { std::uint32_t index=0; float near_plane=0, far_plane=0, radius=0, texel_world_size=0; LightingVec3 center{}; LightingMat4 matrix{}; };
 struct DirectionalShadowResult { std::vector<ShadowCascade> cascades; std::vector<float> splits; LightingVec3 forward{}, light_direction{}; std::uint32_t map_size=0; LightingSource source_kind=LightingSource::source_evidenced; };
 [[nodiscard]] DirectionalShadowResult computeDirectionalShadowCascades(const DirectionalShadowInput& input);
+
+enum class DirectionalShadowClipSpaceStatus : std::uint8_t {
+    ready,
+    invalid_input,
+    unsupported,
+};
+
+struct DirectionalShadowClipSpaceResult {
+    DirectionalShadowClipSpaceStatus status =
+        DirectionalShadowClipSpaceStatus::unsupported;
+    LightingMat4 matrix{};
+    std::string code;
+    std::string message;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == DirectionalShadowClipSpaceStatus::ready;
+    }
+};
+
+// Convert one existing WebGL-style, column-major cascade matrix to the
+// selected native clip convention. Native depth maps z from [-1, 1] to [0, 1];
+// Vulkan additionally flips clip-space y. Cascade computation is unchanged.
+[[nodiscard]] DirectionalShadowClipSpaceResult convertDirectionalShadowCascadeMatrix(
+    const LightingMat4& webgl_matrix, CameraClipSpace native_clip_space);
+
 struct ProbeShadowInput { LightingVec3 eye{}, sun_direction = ks_sun_direction; std::array<float,3> splits=ks_shadow_splits; float scene_radius=1; std::uint32_t map_size=ks_shadow_map_size; };
 [[nodiscard]] DirectionalShadowResult computeDirectionalProbeShadowCascades(const ProbeShadowInput& input);
 struct LocalShadowInput { LightingVec3 position{}, direction{0,-1,0}; float spot=90, range=10; ExponentialShadowInput esm{}; };

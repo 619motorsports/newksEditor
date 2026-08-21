@@ -1639,6 +1639,107 @@ bool contract_backend(apex::render::Backend backend) {
                 depth_only_batch_readback.depth[16U * depth_readback_description.width + 16U] <
                     0.99F,
             "depth-only caster batch writes persistent D32");
+    DepthAttachmentResult clear_only_attachment =
+        device.device->create_depth_attachment(depth_readback_description);
+    require(clear_only_attachment.ok(), "clear-only depth attachment creation");
+    const DepthOnlyIndexedStaticMeshBatchResult clear_only_batch =
+        device.device->draw_depth_only_indexed_static_mesh_batch(
+            {{}, clear_only_attachment.attachment.get(), true, 0.25F});
+    require(clear_only_batch.ok(), "clear-only empty caster batch execution");
+    const auto clear_only_readback = device.device->read_depth_attachment(
+        *clear_only_attachment.attachment,
+        {depth_readback_description.width, depth_readback_description.height});
+    require(clear_only_readback.ok() && !clear_only_readback.depth.empty() &&
+                std::all_of(clear_only_readback.depth.begin(),
+                            clear_only_readback.depth.end(), [](float value) {
+                                return std::abs(value - 0.25F) < 0.0001F;
+                            }),
+            "clear-only empty caster map contains the requested depth");
+
+    // Connect that backend path to the retained static-scene geometry and the
+    // fixed three-cascade owner. This is an opaque portable caster proof; it
+    // does not claim receiver sampling or recovered ksShadowGen parity.
+    apex::formats::Kn5File shadow_model;
+    shadow_model.materials.resize(1U);
+    shadow_model.root.type = 1U;
+    shadow_model.root.kind = "node";
+    shadow_model.root.name = "ROOT";
+    apex::formats::Kn5Node shadow_mesh = indexed_mesh;
+    shadow_mesh.name = "CASTER";
+    shadow_mesh.materialId = 0U;
+    shadow_model.root.children.push_back(std::move(shadow_mesh));
+    apex::scene::SceneSnapshot shadow_scene;
+    (void)shadow_scene.add_material(
+        {"caster", "fixture", apex::scene::BlendMode::opaque});
+    apex::scene::SceneNode shadow_root;
+    shadow_root.name = "ROOT";
+    const auto shadow_root_id = shadow_scene.add_node(std::move(shadow_root));
+    apex::scene::SceneNode shadow_scene_mesh;
+    shadow_scene_mesh.name = "CASTER";
+    shadow_scene_mesh.kind = apex::scene::NodeKind::mesh;
+    shadow_scene_mesh.material = 0U;
+    const auto shadow_mesh_id =
+        shadow_scene.add_node(std::move(shadow_scene_mesh), shadow_root_id);
+    DrawPacket retained_shadow_packet = depth_packet;
+    retained_shadow_packet.node = shadow_mesh_id;
+    retained_shadow_packet.material = 0U;
+    retained_shadow_packet.flags.cast_shadows = true;
+    const std::array<DrawPacket, 1U> retained_shadow_packets = {
+        retained_shadow_packet};
+    const std::array<const PipelineProgram*, 1U> retained_shadow_pipelines = {
+        &depth_readback_pipeline};
+    StaticScenePrepareRequest retained_shadow_request;
+    retained_shadow_request.model = &shadow_model;
+    retained_shadow_request.scene = &shadow_scene;
+    retained_shadow_request.packets = retained_shadow_packets;
+    retained_shadow_request.pipelines_by_material = retained_shadow_pipelines;
+    auto retained_shadow = prepare_static_scene_resources(
+        *device.device, retained_shadow_request);
+    require(retained_shadow.ok(), "retained directional caster scene preparation");
+    DirectionalShadowMapRequest three_map_request;
+    three_map_request.lighting.eye = {0.0F, 0.0F, 2.0F};
+    three_map_request.lighting.target = {0.0F, 0.0F, 0.0F};
+    three_map_request.lighting.fov_radians = 1.5707963267948966F;
+    three_map_request.lighting.aspect = 1.0F;
+    three_map_request.lighting.near_plane = 0.1F;
+    three_map_request.lighting.far_plane = 50.0F;
+    three_map_request.lighting.scene_radius = 2.0F;
+    three_map_request.lighting.map_size = 512U;
+    auto three_maps =
+        prepare_directional_shadow_maps(*device.device, three_map_request);
+    require(three_maps.ok() && three_maps.resources->metadata().cascades.size() ==
+                                   directional_shadow_cascade_count,
+            "real backend retains exactly three directional D32 maps");
+    StaticSceneDirectionalShadowFrameDescription retained_shadow_frame;
+    retained_shadow_frame.maps = three_maps.resources.get();
+    retained_shadow_frame.opaque_pipeline = &depth_only_pipeline;
+    const auto retained_shadow_draw =
+        retained_shadow.resources->draw_opaque_directional_shadows(
+            *device.device, retained_shadow_frame);
+    require(retained_shadow_draw.ok() &&
+                retained_shadow_draw.cascades_completed ==
+                    directional_shadow_cascade_count &&
+                retained_shadow_draw.opaque_casters == 1U,
+            "retained opaque caster executes all three directional cascades");
+    for (std::size_t cascade = 0U;
+         cascade < directional_shadow_cascade_count; ++cascade) {
+        const auto cascade_depth = device.device->read_depth_attachment(
+            three_maps.resources->attachment(cascade), {512U, 512U});
+        const float cascade_min = cascade_depth.ok()
+                                      ? *std::min_element(cascade_depth.depth.begin(),
+                                                          cascade_depth.depth.end())
+                                      : 1.0F;
+        const float cascade_max = cascade_depth.ok()
+                                      ? *std::max_element(cascade_depth.depth.begin(),
+                                                          cascade_depth.depth.end())
+                                      : 0.0F;
+        require(cascade_depth.ok() && cascade_depth.depth.size() == 512U * 512U &&
+                    cascade_min < 0.99F && cascade_max > 0.99F,
+                "retained directional cascade " + std::to_string(cascade) +
+                    " contains caster and clear depth (min=" +
+                    std::to_string(cascade_min) + ", max=" +
+                    std::to_string(cascade_max) + ")");
+    }
 
     // Exercise the bounded 4x color/depth-independent path. The backend must
     // render to the multisampled target, then resolve it to a single-sample

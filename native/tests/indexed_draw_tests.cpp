@@ -1374,6 +1374,8 @@ void rejects_invalid_depth_attachment_descriptions() {
 void validates_depth_only_indexed_contract() {
     PipelineProgram pipeline = depth_only_pipeline_fixture();
     DrawPacket packet = packet_fixture();
+    packet.flags.depth_test = true;
+    packet.flags.depth_write = true;
     FakeDepthAttachment depth(Backend::Vulkan,
                               {16U, 16U, 1U, DepthAttachmentFormat::d32_float});
     FakeBuffer vertices(Backend::Vulkan, {132U, BufferUsage::vertex,
@@ -1399,6 +1401,14 @@ void validates_depth_only_indexed_contract() {
             "non-finite depth-only clear rejected");
     request.clear_depth = false;
     request.depth_clear_value = 1.0F;
+
+    packet.flags.depth_write = false;
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code ==
+                    "depth_only_indexed_packet_depth_state_mismatch",
+            "depth-only packet and pipeline depth state must match");
+    packet.flags.depth_write = true;
 
     FakeDepthAttachment multisample_depth(Backend::Vulkan,
                                           {16U, 16U, 4U, DepthAttachmentFormat::d32_float});
@@ -1437,6 +1447,8 @@ void validates_depth_only_indexed_contract() {
             "non-finite depth-only world matrix rejected");
 
     packet = packet_fixture();
+    packet.flags.depth_test = true;
+    packet.flags.depth_write = true;
     request = depth_only_request_fixture(packet, pipeline, vertices, indices);
     pipeline.shaders.push_back({PipelineShaderStage::fragment, PipelineShaderFormat::spirv,
                                 shader_fixture()});
@@ -1469,6 +1481,11 @@ void validates_depth_only_indexed_contract() {
                 DepthOnlyIndexedStaticMeshBatchStatus::invalid_request &&
                 diagnostic.code == "depth_only_indexed_static_mesh_batch_empty",
             "empty depth-only batch rejected");
+    batch.depth_attachment = &depth;
+    batch.clear_depth = true;
+    require(validate_depth_only_indexed_static_mesh_batch_description(batch, diagnostic) ==
+                DepthOnlyIndexedStaticMeshBatchStatus::ready,
+            "clear-only depth batch initializes an empty caster map");
 }
 
 void rejects_invalid_depth_contract() {

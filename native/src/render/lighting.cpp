@@ -236,3 +236,42 @@ ReflectionBlur reflectionBlurFromExponent(float exponent) noexcept { const float
 ReflectionFallback portableReflectionEnvironment(Vec3 direction,float blur,Vec3 sky,Vec3 horizon,Vec3 fog,float fog_blend) noexcept { const Vec3 d=normalizeJs(direction);const float y=d[1],upper=saturate(y),horizon_weight=(1-upper)*(1-upper),fog_mix=saturate(fog_blend)*.35F,ground_edge=.025F+(.24F-.025F)*saturate(blur/6),edge_t=saturate((y+ground_edge)/(ground_edge*2)),smooth=edge_t*edge_t*(3-2*edge_t);Vec3 upper_color{};for(std::size_t i=0;i<3;++i)upper_color[i]=(finiteOr(sky[i],0)*(1-horizon_weight)+finiteOr(horizon[i],0)*horizon_weight)*saturate(.75F+y*2);for(std::size_t i=0;i<3;++i)upper_color[i]=upper_color[i]*(1-fog_mix)+finiteOr(fog[i],0)*fog_mix;const Vec3 ground{.05F,.11F,.08F};Vec3 out{};for(std::size_t i=0;i<3;++i)out[i]=(ground[i]*(1-smooth)+upper_color[i]*smooth)*.12F;return {out,LightingSource::procedural_fallback}; }
 
 } // namespace apex::render
+
+namespace apex::render {
+
+DirectionalShadowClipSpaceResult convertDirectionalShadowCascadeMatrix(
+    const LightingMat4& webgl_matrix, CameraClipSpace native_clip_space) {
+    if (native_clip_space != CameraClipSpace::vulkan &&
+        native_clip_space != CameraClipSpace::d3d12) {
+        return {DirectionalShadowClipSpaceStatus::unsupported, {},
+                "directional_shadow_clip_space_unsupported",
+                "Directional shadow conversion requires Vulkan or D3D12 clip space"};
+    }
+    if (!std::all_of(webgl_matrix.begin(), webgl_matrix.end(),
+                     [](float value) { return std::isfinite(value); })) {
+        return {DirectionalShadowClipSpaceStatus::invalid_input, {},
+                "directional_shadow_matrix_non_finite",
+                "Directional shadow cascade matrix must contain only finite values"};
+    }
+    LightingMat4 converted{};
+    for (std::size_t column = 0U; column < 4U; ++column) {
+        converted[column * 4U] = webgl_matrix[column * 4U];
+        converted[column * 4U + 1U] =
+            native_clip_space == CameraClipSpace::vulkan
+                ? -webgl_matrix[column * 4U + 1U]
+                : webgl_matrix[column * 4U + 1U];
+        converted[column * 4U + 2U] =
+            0.5F * webgl_matrix[column * 4U + 2U] +
+            0.5F * webgl_matrix[column * 4U + 3U];
+        converted[column * 4U + 3U] = webgl_matrix[column * 4U + 3U];
+    }
+    if (!std::all_of(converted.begin(), converted.end(),
+                     [](float value) { return std::isfinite(value); })) {
+        return {DirectionalShadowClipSpaceStatus::invalid_input, {},
+                "directional_shadow_matrix_conversion_non_finite",
+                "Directional shadow clip-space conversion exceeded finite float range"};
+    }
+    return {DirectionalShadowClipSpaceStatus::ready, converted, {}, {}};
+}
+
+} // namespace apex::render

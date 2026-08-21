@@ -211,6 +211,54 @@ void cspAndShadows() {
             "shadow caster override");
 }
 
+void convertsDirectionalCascadeClipSpace() {
+    const LightingMat4 identity = {1.0F, 0.0F, 0.0F, 0.0F,
+                                   0.0F, 1.0F, 0.0F, 0.0F,
+                                   0.0F, 0.0F, 1.0F, 0.0F,
+                                   0.0F, 0.0F, 0.0F, 1.0F};
+    const auto d3d = convertDirectionalShadowCascadeMatrix(identity,
+                                                             CameraClipSpace::d3d12);
+    require(d3d.ok() && d3d.matrix[5] == 1.0F && d3d.matrix[10] == 0.5F &&
+                d3d.matrix[14] == 0.5F && d3d.matrix[15] == 1.0F,
+            "D3D12 cascade conversion maps depth to zero-one");
+    const auto vulkan = convertDirectionalShadowCascadeMatrix(identity,
+                                                                CameraClipSpace::vulkan);
+    require(vulkan.ok() && vulkan.matrix[5] == -1.0F && vulkan.matrix[10] == 0.5F &&
+                vulkan.matrix[14] == 0.5F,
+            "Vulkan cascade conversion maps depth and flips y");
+
+    const LightingMat4 representative = {2.0F, 3.0F, 5.0F, 7.0F,
+                                          11.0F, 13.0F, 17.0F, 19.0F,
+                                          23.0F, 29.0F, 31.0F, 37.0F,
+                                          41.0F, 43.0F, 47.0F, 53.0F};
+    const auto converted = convertDirectionalShadowCascadeMatrix(
+        representative, CameraClipSpace::d3d12);
+    require(converted.ok() && converted.matrix[2] == 6.0F &&
+                converted.matrix[6] == 18.0F && converted.matrix[10] == 34.0F &&
+                converted.matrix[14] == 50.0F && finite(converted.matrix),
+            "representative cascade matrix conversion is numeric and finite");
+
+    const auto webgl = convertDirectionalShadowCascadeMatrix(identity,
+                                                               CameraClipSpace::webgl);
+    require(!webgl.ok() &&
+                webgl.status == DirectionalShadowClipSpaceStatus::unsupported &&
+                webgl.code == "directional_shadow_clip_space_unsupported",
+            "WebGL target is rejected as a native conversion target");
+    const auto unknown = convertDirectionalShadowCascadeMatrix(
+        identity, static_cast<CameraClipSpace>(255U));
+    require(!unknown.ok() && unknown.status == DirectionalShadowClipSpaceStatus::unsupported,
+            "unknown clip space is controlled");
+
+    LightingMat4 non_finite = identity;
+    non_finite[3] = std::numeric_limits<float>::quiet_NaN();
+    const auto malformed = convertDirectionalShadowCascadeMatrix(
+        non_finite, CameraClipSpace::vulkan);
+    require(!malformed.ok() &&
+                malformed.status == DirectionalShadowClipSpaceStatus::invalid_input &&
+                malformed.code == "directional_shadow_matrix_non_finite",
+            "non-finite cascade matrix is rejected");
+}
+
 void reflectionsAndBounds() {
     const auto faces = webglCubemapFaces();
     require(ksEditorCubemap().faces_per_frame == 1u && faces.size() == 6u &&
@@ -256,6 +304,7 @@ int main() {
     try {
         weatherAndExposure();
         cspAndShadows();
+        convertsDirectionalCascadeClipSpace();
         reflectionsAndBounds();
         std::cout << "lighting tests passed\n";
         return 0;

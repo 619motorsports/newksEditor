@@ -1,0 +1,122 @@
+#pragma once
+
+#include "apex/render/device.hpp"
+#include "apex/render/lighting.hpp"
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <span>
+#include <string>
+#include <vector>
+
+namespace apex::render {
+
+inline constexpr std::size_t directional_shadow_cascade_count = 3U;
+inline constexpr std::uint32_t max_directional_shadow_map_size = 4096U;
+inline constexpr std::uint64_t max_directional_shadow_map_bytes =
+    3ULL * 4096ULL * 4096ULL * sizeof(float);
+
+struct DirectionalShadowMapLimits {
+    std::uint32_t max_map_size = max_directional_shadow_map_size;
+    std::uint64_t max_total_bytes = max_directional_shadow_map_bytes;
+};
+
+struct DirectionalShadowMapRequest {
+    DirectionalShadowInput lighting{};
+    DirectionalShadowMapLimits limits{};
+};
+
+enum class DirectionalShadowMapStatus : std::uint8_t {
+    ready,
+    invalid_request,
+    unsupported,
+    allocation_failed,
+};
+
+struct DirectionalShadowMapResult;
+
+// Owns one fixed, backend-neutral D32 attachment for each recovered
+// directional cascade. It does not expose backend-native image handles.
+class DirectionalShadowMapResources final {
+public:
+    [[nodiscard]] Backend backend() const noexcept { return backend_; }
+    [[nodiscard]] std::uint32_t map_size() const noexcept { return metadata_.map_size; }
+    [[nodiscard]] const DirectionalShadowResult& metadata() const noexcept {
+        return metadata_;
+    }
+    [[nodiscard]] const CameraFrame& camera(std::size_t index) const;
+    [[nodiscard]] DepthAttachment& attachment(std::size_t index);
+    [[nodiscard]] const DepthAttachment& attachment(std::size_t index) const;
+
+private:
+    Backend backend_ = Backend::Vulkan;
+    const Device* device_ = nullptr;
+    DirectionalShadowResult metadata_;
+    std::array<CameraFrame, directional_shadow_cascade_count> cameras_{};
+    std::array<std::unique_ptr<DepthAttachment>, directional_shadow_cascade_count>
+        attachments_{};
+
+    friend struct DirectionalShadowMapResult;
+    friend DirectionalShadowMapResult prepare_directional_shadow_maps(
+        Device&, const DirectionalShadowMapRequest&);
+    friend class StaticSceneResources;
+};
+
+struct DirectionalShadowMapResult {
+    DirectionalShadowMapStatus status = DirectionalShadowMapStatus::unsupported;
+    Diagnostic diagnostic;
+    std::unique_ptr<DirectionalShadowMapResources> resources;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == DirectionalShadowMapStatus::ready && resources != nullptr;
+    }
+};
+
+[[nodiscard]] DirectionalShadowMapResult prepare_directional_shadow_maps(
+    Device& device, const DirectionalShadowMapRequest& request);
+[[nodiscard]] const char* directional_shadow_map_status_name(
+    DirectionalShadowMapStatus status) noexcept;
+
+struct DirectionalShadowCasterReport {
+    std::string code;
+    apex::scene::NodeId node = apex::scene::invalid_node_id;
+    apex::scene::MaterialId material = apex::scene::invalid_material_id;
+};
+
+struct StaticSceneDirectionalShadowFrameDescription {
+    DirectionalShadowMapResources* maps = nullptr;
+    const PipelineProgram* opaque_pipeline = nullptr;
+    std::span<const DrawPacket> refreshed_packets{};
+};
+
+enum class StaticSceneDirectionalShadowStatus : std::uint8_t {
+    ready,
+    partial,
+    invalid_request,
+    unsupported,
+    execution_failed,
+};
+
+struct StaticSceneDirectionalShadowResult {
+    StaticSceneDirectionalShadowStatus status =
+        StaticSceneDirectionalShadowStatus::unsupported;
+    Diagnostic diagnostic;
+    std::size_t selected_casters = 0U;
+    std::size_t opaque_casters = 0U;
+    std::size_t staged_alpha_tested = 0U;
+    std::size_t staged_skinned = 0U;
+    std::size_t cascades_completed = 0U;
+    std::vector<DirectionalShadowCasterReport> staged_casters;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == StaticSceneDirectionalShadowStatus::ready ||
+               status == StaticSceneDirectionalShadowStatus::partial;
+    }
+};
+
+[[nodiscard]] const char* static_scene_directional_shadow_status_name(
+    StaticSceneDirectionalShadowStatus status) noexcept;
+
+} // namespace apex::render

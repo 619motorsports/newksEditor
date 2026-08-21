@@ -82,6 +82,23 @@ private:
     std::size_t* live_count_ = nullptr;
 };
 
+class FakeDepthAttachment final : public DepthAttachment {
+public:
+    explicit FakeDepthAttachment(DepthAttachmentDescription description,
+                                 std::size_t* live_count = nullptr)
+        : info_({description}), live_count_(live_count) {
+        if (live_count_ != nullptr) ++*live_count_;
+    }
+    ~FakeDepthAttachment() override {
+        if (live_count_ != nullptr) --*live_count_;
+    }
+    Backend backend() const noexcept override { return Backend::Vulkan; }
+    const DepthAttachmentInfo& info() const noexcept override { return info_; }
+private:
+    DepthAttachmentInfo info_{};
+    std::size_t* live_count_ = nullptr;
+};
+
 class RecordingDevice final : public Device {
 public:
     const DeviceInfo& info() const noexcept override { return info_; }
@@ -136,6 +153,19 @@ public:
     }
     TriangleDrawResult draw_triangle_and_readback(Texture&, const TriangleDrawRequest&) override {
         return {TriangleDrawStatus::unsupported, {"unused", "unused"}, {}};
+    }
+    DepthAttachmentResult create_depth_attachment(
+        const DepthAttachmentDescription& description) override {
+        ++depth_attachment_calls;
+        depth_descriptions.push_back(description);
+        if (fail_depth_attachment_call != 0U &&
+            depth_attachment_calls == fail_depth_attachment_call)
+            return {DepthAttachmentStatus::allocation_failed,
+                    {"recording_depth_failure", "injected depth allocation failure"},
+                    nullptr};
+        return {DepthAttachmentStatus::ready, {},
+                std::make_unique<FakeDepthAttachment>(description,
+                                                       &live_depth_attachments)};
     }
     SamplerResult create_sampler(const SamplerDescription& description) override {
         ++sampler_calls;
@@ -219,6 +249,26 @@ public:
                     {"recording_batch_failure", "injected batch failure"}, {}};
         return {IndexedStaticMeshBatchStatus::ready, {}, {std::byte{0x11}}};
     }
+    DepthOnlyIndexedStaticMeshBatchResult draw_depth_only_indexed_static_mesh_batch(
+        const DepthOnlyIndexedStaticMeshBatchDescription& batch) override {
+        ++depth_batch_calls;
+        Diagnostic diagnostic;
+        const auto validation =
+            validate_depth_only_indexed_static_mesh_batch_description(batch, diagnostic);
+        if (validation != DepthOnlyIndexedStaticMeshBatchStatus::ready)
+            return {validation, std::move(diagnostic)};
+        std::vector<apex::scene::NodeId> captured;
+        for (const auto& draw : batch.draws) {
+            captured.push_back(draw.packet->node);
+            depth_camera_matrices.push_back(draw.camera_frame->view_projection);
+        }
+        depth_nodes.push_back(std::move(captured));
+        if (fail_depth_batch_call != 0U && depth_batch_calls == fail_depth_batch_call)
+            return {DepthOnlyIndexedStaticMeshBatchStatus::execution_failed,
+                    {"recording_depth_batch_failure",
+                     "injected depth batch failure"}};
+        return {DepthOnlyIndexedStaticMeshBatchStatus::ready, {}};
+    }
     void wait_idle() noexcept override {}
 
     std::size_t buffer_calls = 0U;
@@ -235,6 +285,11 @@ public:
     std::size_t live_samplers = 0U;
     bool fail_sampler = false;
     bool fail_batch = false;
+    std::size_t depth_attachment_calls = 0U;
+    std::size_t live_depth_attachments = 0U;
+    std::size_t fail_depth_attachment_call = 0U;
+    std::size_t depth_batch_calls = 0U;
+    std::size_t fail_depth_batch_call = 0U;
     bool captured_load_color = false;
     std::array<float, 4> captured_clear_color{};
     std::vector<std::vector<std::byte>> uploaded_bytes;
@@ -270,6 +325,9 @@ public:
     std::vector<const Buffer*> frame_buffers;
     std::vector<std::uint64_t> frame_offsets;
     std::vector<std::uint32_t> frame_ranges;
+    std::vector<DepthAttachmentDescription> depth_descriptions;
+    std::vector<std::vector<apex::scene::NodeId>> depth_nodes;
+    std::vector<apex::scene::Matrix4> depth_camera_matrices;
 
 private:
     DeviceInfo info_{Backend::Vulkan, "recording", "test", 1U, 0U, 0U, 0U, 0U, true};
@@ -2437,6 +2495,134 @@ void propagates_upload_and_batch_failures() {
             "same-backend cross-device execution is rejected before the device call");
 }
 
+void retains_three_directional_maps_and_executes_only_opaque_static_casters() {
+    Fixture value = fixture();
+    for (DrawPacket& packet : value.packets) {
+        packet.flags.cast_shadows = true;
+        packet.flags.depth_test = true;
+        packet.flags.depth_write = true;
+    }
+    value.packets[1].material_profile.shadow_alpha_tested = true;
+    for (PipelineProgram* pipeline :
+         std::array<PipelineProgram*, 2U>{&value.first_pipeline,
+                                          &value.second_pipeline}) {
+        pipeline->targets.has_depth = true;
+        pipeline->targets.depth = {PipelineRenderTargetFormat::depth32_float, 1U};
+        pipeline->depth.test_enabled = true;
+        pipeline->depth.write_enabled = true;
+        pipeline->depth.compare = PipelineCompareOperation::less;
+    }
+    RecordingDevice device;
+    auto prepared = prepare_static_scene_resources(device, request_for(value));
+    require(prepared.ok(), "directional shadow fixture retains its scene geometry");
+
+    DirectionalShadowMapRequest map_request;
+    map_request.lighting.map_size = 32U;
+    const auto maps = prepare_directional_shadow_maps(device, map_request);
+    require(maps.ok() && maps.resources->map_size() == 32U &&
+                maps.resources->metadata().cascades.size() ==
+                    directional_shadow_cascade_count &&
+                device.depth_attachment_calls == directional_shadow_cascade_count &&
+                device.live_depth_attachments == directional_shadow_cascade_count,
+            "directional shadow preparation owns exactly three bounded D32 maps");
+
+    PipelineProgram depth_pipeline = value.first_pipeline;
+    depth_pipeline.name = "portable-opaque-directional-caster";
+    depth_pipeline.targets.colors.clear();
+    depth_pipeline.shaders.resize(1U);
+    StaticSceneDirectionalShadowFrameDescription frame;
+    frame.maps = maps.resources.get();
+    frame.opaque_pipeline = &depth_pipeline;
+    const auto drawn =
+        prepared.resources->draw_opaque_directional_shadows(device, frame);
+    require(drawn.ok() &&
+                drawn.status == StaticSceneDirectionalShadowStatus::partial &&
+                drawn.selected_casters == 3U && drawn.opaque_casters == 2U &&
+                drawn.staged_alpha_tested == 1U &&
+                drawn.cascades_completed == directional_shadow_cascade_count &&
+                device.depth_batch_calls == directional_shadow_cascade_count &&
+                device.depth_nodes ==
+                    std::vector<std::vector<apex::scene::NodeId>>(
+                        directional_shadow_cascade_count, {1U, 1U}),
+            "three cascades preserve retained opaque order and stage alpha casters");
+    require(device.depth_camera_matrices.size() == 6U &&
+                device.depth_camera_matrices[0] == device.depth_camera_matrices[1] &&
+                device.depth_camera_matrices[2] == device.depth_camera_matrices[3] &&
+                device.depth_camera_matrices[4] == device.depth_camera_matrices[5] &&
+                device.depth_camera_matrices[0] != device.depth_camera_matrices[2],
+            "each pair of retained casters receives one converted cascade matrix");
+
+    Fixture mixed = fixture();
+    make_second_mesh_skinned(mixed);
+    for (DrawPacket& packet : mixed.packets) {
+        packet.flags.cast_shadows = true;
+        packet.flags.depth_test = true;
+        packet.flags.depth_write = true;
+    }
+    for (PipelineProgram* pipeline :
+         std::array<PipelineProgram*, 2U>{&mixed.first_pipeline,
+                                          &mixed.second_pipeline}) {
+        pipeline->targets.has_depth = true;
+        pipeline->targets.depth = {PipelineRenderTargetFormat::depth32_float, 1U};
+        pipeline->depth.test_enabled = true;
+        pipeline->depth.write_enabled = true;
+        pipeline->depth.compare = PipelineCompareOperation::less;
+    }
+    RecordingDevice mixed_device;
+    auto mixed_prepared =
+        prepare_static_scene_resources(mixed_device, request_for(mixed));
+    auto mixed_maps = prepare_directional_shadow_maps(mixed_device, map_request);
+    require(mixed_prepared.ok() && mixed_maps.ok(),
+            "mixed shadow fixture retains scene geometry and maps");
+    PipelineProgram mixed_depth_pipeline = mixed.first_pipeline;
+    mixed_depth_pipeline.targets.colors.clear();
+    mixed_depth_pipeline.shaders.resize(1U);
+    StaticSceneDirectionalShadowFrameDescription mixed_frame{
+        mixed_maps.resources.get(), &mixed_depth_pipeline, {}};
+    const auto mixed_drawn = mixed_prepared.resources->draw_opaque_directional_shadows(
+        mixed_device, mixed_frame);
+    require(mixed_drawn.ok() &&
+                mixed_drawn.opaque_casters == 2U &&
+                mixed_drawn.staged_skinned == 1U &&
+                mixed_drawn.cascades_completed == directional_shadow_cascade_count,
+            "skinned casters remain staged while opaque static casters execute");
+
+    std::vector<DrawPacket> malformed = value.packets;
+    malformed.back().world_matrix[0] = std::numeric_limits<float>::quiet_NaN();
+    frame.refreshed_packets = malformed;
+    const std::size_t calls_before_invalid = device.depth_batch_calls;
+    const auto invalid =
+        prepared.resources->draw_opaque_directional_shadows(device, frame);
+    require(invalid.status == StaticSceneDirectionalShadowStatus::invalid_request &&
+                invalid.diagnostic.code ==
+                    "directional_shadow_packet_contract_invalid" &&
+                device.depth_batch_calls == calls_before_invalid,
+            "malformed refreshed shadow input fails before any cascade write");
+
+    DirectionalShadowMapRequest oversized = map_request;
+    oversized.lighting.map_size = max_directional_shadow_map_size + 1U;
+    const auto rejected = prepare_directional_shadow_maps(device, oversized);
+    require(!rejected.ok() &&
+                rejected.status == DirectionalShadowMapStatus::invalid_request &&
+                device.depth_attachment_calls == directional_shadow_cascade_count,
+            "oversized three-map input fails before backend allocation");
+
+    RecordingDevice failing_device;
+    failing_device.fail_depth_attachment_call = 2U;
+    const auto failed_maps =
+        prepare_directional_shadow_maps(failing_device, map_request);
+    require(!failed_maps.ok() &&
+                failed_maps.status == DirectionalShadowMapStatus::allocation_failed &&
+                failing_device.depth_attachment_calls == 2U &&
+                failing_device.live_depth_attachments == 0U,
+            "a later map allocation failure releases the earlier map");
+    require(std::string(directional_shadow_map_status_name(
+                       DirectionalShadowMapStatus::ready)) == "ready" &&
+                std::string(static_scene_directional_shadow_status_name(
+                    StaticSceneDirectionalShadowStatus::partial)) == "partial",
+            "directional shadow status names are stable");
+}
+
 }  // namespace
 
 int main() {
@@ -2461,6 +2647,7 @@ int main() {
         rejects_invalid_material_constant_inputs_before_allocation();
         propagates_embedded_resource_failures();
         propagates_upload_and_batch_failures();
+        retains_three_directional_maps_and_executes_only_opaque_static_casters();
         require(std::string(static_scene_resource_status_name(StaticSceneResourceStatus::ready)) ==
                     "ready",
                 "static scene status name");
