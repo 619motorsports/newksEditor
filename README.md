@@ -168,6 +168,9 @@ npm test
   tracks. Cockpit mode resolves configured hidden nodes case-insensitively and hides
   only their driver subtrees. A uniquely named configured driver is selected
   automatically when it is already inside the browser-granted file set
+- Packed or unpacked `analog_instruments.ini` inspection and live linear RPM preview.
+  The preview uses ksEditor’s recovered node lookup, local +Z axis, and angle formula.
+  LUT-based RPM mappings stay disabled and labeled until their native behavior is recovered
 - Editable material shader/blend/depth/cull state, scalar/vector shader properties,
   embedded or solid-color texture resources, and mesh transparency/layer/LOD/shadow
   state, with granular reset controls
@@ -347,6 +350,7 @@ weather with the clear preset. Pass
 `--vao FILE.vao-patch` to bind a CSP vertex-AO patch and capture its enabled and
 disabled states. Pass `--seasons --year-progress 0.07 --compare-year-progress 0.5`
 to drive seasonal conditions through the track's calendar LUTs and compare captures.
+Pass `--rpm 1000 --compare-rpm 6000` to compare a linear analog RPM needle.
 Pass `--reflection-compare` to capture and hash the live scene-cubemap and procedural
 fallback states independently. Use `--reflection-environment SHOWROOM.kn5` and,
 optionally, `--reflection-root NODE` to verify showroom assembly and subtree selection.

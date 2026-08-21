@@ -241,7 +241,7 @@ vertical slice is only the foundation.
   wheel axes, related pivots, and cross-LOD placement. Packed-data editing/repacking,
   skin texture creation and preview-image authoring, animation authoring, cross-folder shared-driver access without
   a browser file grant, lights,
-  damage-material and dirt preview, instruments, steering/driver alignment, and remaining
+  damage-material and dirt preview, non-RPM instruments, steering/driver alignment, and remaining
   car-workflow expansion remain. LOD file names, ranges, and cockpit/driver distance switches now
   support live editing, project persistence, validation, and `lods.ini` export.
   Packed or unpacked `damage.ini` files now support validated authoring and standalone export.
@@ -250,6 +250,8 @@ vertical slice is only the foundation.
   update the orange overlay and the collider audit. Project JSON stores the edits, but
   CSP export excludes them. A standalone export writes the edited `collider.kn5`.
   Persisted SHA-256 identity now stops those edits from crossing collider files.
+  Linear RPM indicators now load from packed or unpacked `analog_instruments.ini`.
+  The live slider applies ksEditor’s recovered local +Z needle transform.
   Bottom-contact boxes from packed or unpacked `colliders.ini` now support live
   centre, size, and ground-flag editing. The orange overlay, undo, recovery, project
   JSON, validation, identity checks, and standalone export use the edited values.
