@@ -256,6 +256,66 @@ void rejects_invalid_depth_contract() {
             "depth write without test rejected");
 }
 
+void validates_ordered_indexed_batch_contract() {
+    PipelineProgram pipeline = pipeline_fixture();
+    DrawPacket first_packet = packet_fixture();
+    DrawPacket second_packet = packet_fixture();
+    first_packet.world_matrix[12] = -0.25F;
+    second_packet.world_matrix[12] = 0.25F;
+    FakeTexture target(Backend::Vulkan, target_description());
+    FakeBuffer vertices(Backend::Vulkan, {36U, BufferUsage::vertex, BufferMemory::device_local,
+                                          BufferMutability::immutable});
+    FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index, BufferMemory::device_local,
+                                         BufferMutability::immutable});
+    std::array<IndexedStaticMeshDrawRequest, 2> requests = {
+        request_fixture(first_packet, pipeline, vertices, indices),
+        request_fixture(second_packet, pipeline, vertices, indices),
+    };
+    IndexedStaticMeshBatchDescription description;
+    description.draws = requests;
+    description.load_color = false;
+    description.clear_color = {0.1F, 0.2F, 0.3F, 1.0F};
+    Diagnostic diagnostic;
+    require(validate_indexed_static_mesh_batch_description(target, description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::ready,
+            "ordered indexed batch preflight accepted");
+    require(std::string(indexed_static_mesh_batch_status_name(IndexedStaticMeshBatchStatus::ready)) == "ready",
+            "indexed batch status name");
+    require(requests[0].packet == &first_packet && requests[1].packet == &second_packet &&
+                requests[0].clear_color == std::array<float, 4>{0.0F, 0.0F, 0.0F, 1.0F} &&
+                requests[1].clear_color == std::array<float, 4>{0.0F, 0.0F, 0.0F, 1.0F} &&
+                !requests[0].load_color && !requests[1].load_color &&
+                !requests[0].clear_depth && !requests[1].clear_depth &&
+                requests[0].depth_attachment == nullptr && requests[1].depth_attachment == nullptr,
+            "batch preflight preserves ordered requests and caller state");
+
+    requests[1].packet = nullptr;
+    require(validate_indexed_static_mesh_batch_description(target, description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "indexed_static_mesh_handle_missing",
+            "invalid later draw rejects the complete batch before execution");
+    requests[1] = request_fixture(second_packet, pipeline, vertices, indices);
+    requests[1].load_color = true;
+    require(validate_indexed_static_mesh_batch_description(target, description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "indexed_static_mesh_batch_draw_override",
+            "per-draw load override rejected");
+
+    description = {};
+    require(validate_indexed_static_mesh_batch_description(target, description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "indexed_static_mesh_batch_empty",
+            "empty indexed batch rejected");
+    description.draws = requests;
+    std::vector<IndexedStaticMeshDrawRequest> oversized(max_indexed_static_mesh_batch_draws + 1U,
+                                                        requests[0]);
+    description.draws = oversized;
+    require(validate_indexed_static_mesh_batch_description(target, description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "indexed_static_mesh_batch_limit",
+            "over-limit indexed batch rejected");
+}
+
 void rejects_static_indexed_limits_and_ownership() {
     PipelineProgram pipeline = pipeline_fixture();
     DrawPacket packet = packet_fixture();
@@ -409,6 +469,7 @@ int main() {
         accepts_explicit_d32_depth_contract();
         rejects_invalid_depth_attachment_descriptions();
         rejects_invalid_depth_contract();
+        validates_ordered_indexed_batch_contract();
         rejects_static_indexed_limits_and_ownership();
         rejects_staged_draw_packet();
         std::cout << "indexed draw tests passed\n";

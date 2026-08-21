@@ -915,6 +915,12 @@ struct D3D12GeometryDescriptor {
     bool indexed = false;
 };
 
+struct D3D12IndexedBatchDraw {
+    D3D12GeometryDescriptor geometry{};
+    const PipelineProgram* pipeline = nullptr;
+    DrawMatrices matrices{};
+};
+
 bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
                                 ID3D12Resource* destination,
                                 const TextureDescription& description,
@@ -1313,6 +1319,373 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     return true;
 }
 
+bool draw_indexed_static_mesh_batch_and_readback(
+    const std::shared_ptr<D3D12Context>& context,
+    ID3D12Resource* destination,
+    const TextureDescription& description,
+    const IndexedStaticMeshBatchDescription& batch,
+    std::span<const D3D12IndexedBatchDraw> draws,
+    D3D12DepthAttachment* depth_attachment,
+    bool color_initialized,
+    D3D12_RESOURCE_STATES& destination_state,
+    std::vector<std::byte>& output,
+    Diagnostic& diagnostic) {
+    if (draws.empty() || destination == nullptr) {
+        diagnostic = {"indexed_static_mesh_batch_empty", "D3D12 indexed static-mesh batch has no executable draws"};
+        return false;
+    }
+    if (batch.load_color && !color_initialized) {
+        diagnostic = {"indexed_color_load_before_clear",
+                      "A color load was requested before the D3D12 color attachment was cleared"};
+        return false;
+    }
+    const bool use_depth = depth_attachment != nullptr;
+    if (use_depth && !batch.clear_depth && !depth_attachment->cleared()) {
+        diagnostic = {"indexed_depth_load_before_clear",
+                      "A depth load was requested before the D3D12 depth attachment was cleared"};
+        return false;
+    }
+    if (description.width > static_cast<std::uint32_t>(std::numeric_limits<LONG>::max()) ||
+        description.height > static_cast<std::uint32_t>(std::numeric_limits<LONG>::max())) {
+        diagnostic = {"indexed_static_mesh_batch_uint_limit",
+                      "D3D12 indexed static-mesh batch dimensions exceed LONG limits"};
+        return false;
+    }
+
+    std::vector<ComPtr<ID3D12RootSignature>> root_signatures;
+    std::vector<ComPtr<ID3D12PipelineState>> pipelines;
+    root_signatures.resize(draws.size());
+    pipelines.resize(draws.size());
+    HRESULT result = S_OK;
+    for (std::size_t index = 0; index < draws.size(); ++index) {
+        const PipelineProgram& program = *draws[index].pipeline;
+        const PipelineShaderModule* vertex_shader = nullptr;
+        const PipelineShaderModule* fragment_shader = nullptr;
+        for (const PipelineShaderModule& shader : program.shaders) {
+            if (shader.format != PipelineShaderFormat::dxil) {
+                diagnostic = {"indexed_static_mesh_batch_shader_format_unsupported",
+                              "D3D12 indexed static-mesh batch requires DXIL/DXBC shaders"};
+                return false;
+            }
+            if (shader.stage == PipelineShaderStage::vertex) vertex_shader = &shader;
+            if (shader.stage == PipelineShaderStage::fragment) fragment_shader = &shader;
+        }
+        if (vertex_shader == nullptr || fragment_shader == nullptr) {
+            diagnostic = {"indexed_static_mesh_batch_shader_pair_invalid",
+                          "D3D12 indexed static-mesh batch requires vertex and fragment shaders"};
+            return false;
+        }
+        D3D12_ROOT_PARAMETER transform_parameter{};
+        transform_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        transform_parameter.Constants.ShaderRegister = 0U;
+        transform_parameter.Constants.RegisterSpace = 0U;
+        transform_parameter.Constants.Num32BitValues = static_cast<UINT>(sizeof(DrawMatrices) / sizeof(std::uint32_t));
+        transform_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+        D3D12_ROOT_SIGNATURE_DESC root_description{};
+        root_description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+        root_description.NumParameters = 1U;
+        root_description.pParameters = &transform_parameter;
+        ComPtr<ID3DBlob> root_blob;
+        ComPtr<ID3DBlob> root_error;
+        result = D3D12SerializeRootSignature(&root_description, D3D_ROOT_SIGNATURE_VERSION_1,
+                                             &root_blob, &root_error);
+        if (FAILED(result)) {
+            diagnostic = hresult_error("D3D12SerializeRootSignature(indexed batch)", result);
+            diagnostic.code = "indexed_static_mesh_batch_pipeline_failed";
+            return false;
+        }
+        result = context->device->CreateRootSignature(0U, root_blob->GetBufferPointer(), root_blob->GetBufferSize(),
+                                                       IID_PPV_ARGS(&root_signatures[index]));
+        if (FAILED(result)) {
+            diagnostic = hresult_error("CreateRootSignature(indexed batch)", result);
+            diagnostic.code = "indexed_static_mesh_batch_pipeline_failed";
+            return false;
+        }
+        std::vector<D3D12_INPUT_ELEMENT_DESC> input_elements;
+        input_elements.reserve(program.vertex_layout.attributes.size());
+        for (const PipelineVertexAttribute& attribute : program.vertex_layout.attributes) {
+            D3D12_INPUT_ELEMENT_DESC element{};
+            element.SemanticName = d3d12_pipeline_semantic(attribute.semantic);
+            element.SemanticIndex = attribute.semantic == PipelineVertexSemantic::texcoord1 ? 1U : 0U;
+            element.Format = d3d12_pipeline_vertex_format(attribute.format);
+            element.InputSlot = 0U;
+            element.AlignedByteOffset = attribute.offset;
+            element.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+            input_elements.push_back(element);
+        }
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_description{};
+        pipeline_description.pRootSignature = root_signatures[index].Get();
+        pipeline_description.VS = {vertex_shader->bytes.data(), vertex_shader->bytes.size()};
+        pipeline_description.PS = {fragment_shader->bytes.data(), fragment_shader->bytes.size()};
+        pipeline_description.InputLayout = {input_elements.data(), static_cast<UINT>(input_elements.size())};
+        pipeline_description.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        pipeline_description.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+        pipeline_description.RasterizerState.CullMode = program.raster.cull == PipelineCullMode::none
+                                                             ? D3D12_CULL_MODE_NONE
+                                                             : program.raster.cull == PipelineCullMode::front
+                                                                   ? D3D12_CULL_MODE_FRONT
+                                                                   : D3D12_CULL_MODE_BACK;
+        pipeline_description.RasterizerState.FrontCounterClockwise =
+            program.raster.front_face == PipelineFrontFace::counter_clockwise;
+        pipeline_description.RasterizerState.DepthClipEnable = TRUE;
+        pipeline_description.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        pipeline_description.DepthStencilState.DepthEnable = use_depth && program.depth.test_enabled ? TRUE : FALSE;
+        pipeline_description.DepthStencilState.DepthWriteMask =
+            use_depth && program.depth.write_enabled ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
+        pipeline_description.DepthStencilState.DepthFunc =
+            use_depth ? d3d12_pipeline_compare(program.depth.compare) : D3D12_COMPARISON_FUNC_ALWAYS;
+        pipeline_description.DepthStencilState.StencilEnable = FALSE;
+        pipeline_description.NumRenderTargets = 1U;
+        pipeline_description.RTVFormats[0] = dxgi_texture_format(description.format);
+        pipeline_description.DSVFormat = use_depth ? DXGI_FORMAT_D32_FLOAT : DXGI_FORMAT_UNKNOWN;
+        pipeline_description.SampleMask = std::numeric_limits<UINT>::max();
+        pipeline_description.SampleDesc.Count = 1U;
+        result = context->device->CreateGraphicsPipelineState(&pipeline_description, IID_PPV_ARGS(&pipelines[index]));
+        if (FAILED(result)) {
+            diagnostic = hresult_error("CreateGraphicsPipelineState(indexed batch)", result);
+            diagnostic.code = "indexed_static_mesh_batch_pipeline_failed";
+            return false;
+        }
+    }
+
+    D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_description{};
+    rtv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    rtv_heap_description.NumDescriptors = 1U;
+    rtv_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    ComPtr<ID3D12DescriptorHeap> rtv_heap;
+    result = context->device->CreateDescriptorHeap(&rtv_heap_description, IID_PPV_ARGS(&rtv_heap));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("CreateDescriptorHeap(indexed batch RTV)", result);
+        diagnostic.code = "indexed_static_mesh_batch_pipeline_failed";
+        return false;
+    }
+    D3D12_RENDER_TARGET_VIEW_DESC rtv_description{};
+    rtv_description.Format = dxgi_texture_format(description.format);
+    rtv_description.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+    rtv_description.Texture2D.MipSlice = 0U;
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
+    context->device->CreateRenderTargetView(destination, &rtv_description, rtv);
+
+    D3D12_RESOURCE_DESC resource_description = destination->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT row_count = 0U;
+    UINT64 row_size = 0U;
+    UINT64 readback_size = 0U;
+    context->device->GetCopyableFootprints(&resource_description, 0U, 1U, 0U, &footprint,
+                                           &row_count, &row_size, &readback_size);
+    constexpr UINT64 max_size_t = static_cast<UINT64>(std::numeric_limits<std::size_t>::max());
+    const UINT64 row_bytes = static_cast<UINT64>(description.width) * 4U;
+    if (description.height == 0U || row_bytes > max_size_t / description.height) {
+        diagnostic = {"indexed_static_mesh_batch_readback_size_invalid",
+                      "D3D12 indexed static-mesh batch output exceeds platform limits"};
+        return false;
+    }
+    const std::size_t output_size = static_cast<std::size_t>(row_bytes * static_cast<UINT64>(description.height));
+    if (row_count < description.height || row_size < row_bytes || footprint.Footprint.RowPitch < row_bytes ||
+        footprint.Offset > max_size_t || readback_size > max_texture_readback_bytes || readback_size > max_size_t) {
+        diagnostic = {"indexed_static_mesh_batch_readback_footprint_invalid",
+                      "D3D12 indexed static-mesh batch readback footprint is out of bounds"};
+        return false;
+    }
+    const UINT64 last_row = footprint.Offset + static_cast<UINT64>(description.height - 1U) * footprint.Footprint.RowPitch;
+    if (last_row < footprint.Offset || last_row > readback_size || row_bytes > readback_size - last_row) {
+        diagnostic = {"indexed_static_mesh_batch_readback_footprint_invalid",
+                      "D3D12 indexed static-mesh batch rows exceed the bounded footprint"};
+        return false;
+    }
+    D3D12_RESOURCE_DESC readback_description{};
+    readback_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    readback_description.Width = readback_size;
+    readback_description.Height = 1U;
+    readback_description.DepthOrArraySize = 1U;
+    readback_description.MipLevels = 1U;
+    readback_description.SampleDesc.Count = 1U;
+    readback_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    D3D12_HEAP_PROPERTIES readback_heap{};
+    readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
+    ComPtr<ID3D12Resource> readback;
+    result = context->device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE,
+                                                       &readback_description, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                       nullptr, IID_PPV_ARGS(&readback));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("CreateCommittedResource(indexed batch readback)", result);
+        diagnostic.code = "indexed_static_mesh_batch_execution_failed";
+        return false;
+    }
+    ComPtr<ID3D12CommandAllocator> allocator;
+    result = context->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("CreateCommandAllocator(indexed batch)", result);
+        diagnostic.code = "indexed_static_mesh_batch_execution_failed";
+        return false;
+    }
+    ComPtr<ID3D12GraphicsCommandList> list;
+    result = context->device->CreateCommandList(0U, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
+                                                IID_PPV_ARGS(&list));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("CreateCommandList(indexed batch)", result);
+        diagnostic.code = "indexed_static_mesh_batch_execution_failed";
+        return false;
+    }
+    if (destination_state != D3D12_RESOURCE_STATE_RENDER_TARGET) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = destination;
+        barrier.Transition.StateBefore = destination_state;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
+    }
+    D3D12_RESOURCE_STATES depth_state = use_depth ? depth_attachment->state() : D3D12_RESOURCE_STATE_COMMON;
+    if (use_depth && batch.clear_depth && depth_state != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = depth_attachment->resource();
+        barrier.Transition.StateBefore = depth_state;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
+        depth_state = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    }
+    if (use_depth && batch.clear_depth)
+        list->ClearDepthStencilView(depth_attachment->dsv(true), D3D12_CLEAR_FLAG_DEPTH,
+                                    batch.depth_clear_value, 0U, 0U, nullptr);
+    if (!batch.load_color) list->ClearRenderTargetView(rtv, batch.clear_color.data(), 0U, nullptr);
+
+    for (std::size_t index = 0; index < draws.size(); ++index) {
+        const auto& draw = draws[index];
+        const bool depth_write = use_depth && draw.pipeline->depth.write_enabled;
+        const D3D12_RESOURCE_STATES desired_depth_state = depth_write ? D3D12_RESOURCE_STATE_DEPTH_WRITE
+                                                                       : D3D12_RESOURCE_STATE_DEPTH_READ;
+        if (use_depth && depth_state != desired_depth_state) {
+            D3D12_RESOURCE_BARRIER barrier{};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition.pResource = depth_attachment->resource();
+            barrier.Transition.StateBefore = depth_state;
+            barrier.Transition.StateAfter = desired_depth_state;
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            list->ResourceBarrier(1U, &barrier);
+            depth_state = desired_depth_state;
+        }
+        D3D12_CPU_DESCRIPTOR_HANDLE dsv{};
+        if (use_depth) dsv = depth_attachment->dsv(depth_write);
+        list->OMSetRenderTargets(1U, &rtv, FALSE, use_depth ? &dsv : nullptr);
+        list->SetGraphicsRootSignature(root_signatures[index].Get());
+        list->SetGraphicsRoot32BitConstants(0U, static_cast<UINT>(sizeof(DrawMatrices) / sizeof(std::uint32_t)),
+                                             &draw.matrices, 0U);
+        list->SetPipelineState(pipelines[index].Get());
+        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        D3D12_VERTEX_BUFFER_VIEW vertex_view{};
+        vertex_view.BufferLocation = draw.geometry.vertex_resource->GetGPUVirtualAddress() + draw.geometry.vertex_offset;
+        vertex_view.SizeInBytes = draw.geometry.vertex_size;
+        vertex_view.StrideInBytes = draw.geometry.vertex_stride;
+        list->IASetVertexBuffers(0U, 1U, &vertex_view);
+        D3D12_INDEX_BUFFER_VIEW index_view{};
+        index_view.BufferLocation = draw.geometry.index_resource->GetGPUVirtualAddress() + draw.geometry.index_offset;
+        index_view.SizeInBytes = draw.geometry.index_size;
+        index_view.Format = DXGI_FORMAT_R16_UINT;
+        list->IASetIndexBuffer(&index_view);
+        D3D12_VIEWPORT viewport{0.0F, 0.0F, static_cast<float>(description.width),
+                                static_cast<float>(description.height), 0.0F, 1.0F};
+        D3D12_RECT scissor{0, 0, static_cast<LONG>(description.width), static_cast<LONG>(description.height)};
+        list->RSSetViewports(1U, &viewport);
+        list->RSSetScissorRects(1U, &scissor);
+        list->DrawIndexedInstanced(draw.geometry.index_count, 1U, 0U, 0, 0U);
+    }
+    D3D12_RESOURCE_BARRIER to_copy{};
+    to_copy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    to_copy.Transition.pResource = destination;
+    to_copy.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    to_copy.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    to_copy.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    list->ResourceBarrier(1U, &to_copy);
+    D3D12_TEXTURE_COPY_LOCATION source{};
+    source.pResource = destination;
+    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    source.SubresourceIndex = 0U;
+    D3D12_TEXTURE_COPY_LOCATION target{};
+    target.pResource = readback.Get();
+    target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    target.PlacedFootprint = footprint;
+    list->CopyTextureRegion(&target, 0U, 0U, 0U, &source, nullptr);
+    const D3D12_RESOURCE_STATES final_state = texture_state(description.usage);
+    if (final_state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = destination;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barrier.Transition.StateAfter = final_state;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
+    }
+    result = list->Close();
+    if (FAILED(result)) {
+        diagnostic = hresult_error("Close(indexed batch)", result);
+        diagnostic.code = "indexed_static_mesh_batch_execution_failed";
+        return false;
+    }
+    ComPtr<ID3D12Fence> fence;
+    result = context->device->CreateFence(0U, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("CreateFence(indexed batch)", result);
+        diagnostic.code = "indexed_static_mesh_batch_execution_failed";
+        return false;
+    }
+    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!event) {
+        diagnostic = {"indexed_static_mesh_batch_execution_failed", "CreateEventW failed for indexed batch"};
+        return false;
+    }
+    ID3D12CommandList* command_lists[] = {list.Get()};
+    context->queue->ExecuteCommandLists(1U, command_lists);
+    result = context->queue->Signal(fence.Get(), 1U);
+    if (SUCCEEDED(result)) result = fence->SetEventOnCompletion(1U, event);
+    if (SUCCEEDED(result) && WaitForSingleObject(event, INFINITE) != WAIT_OBJECT_0) result = E_FAIL;
+    CloseHandle(event);
+    if (FAILED(result)) {
+        const bool drained = context->wait_idle();
+        destination_state = drained ? final_state : D3D12_RESOURCE_STATE_COMMON;
+        if (use_depth)
+            depth_attachment->set_state(drained ? depth_state : D3D12_RESOURCE_STATE_COMMON);
+        diagnostic = hresult_error("D3D12 indexed batch fence", result);
+        diagnostic.code = result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET
+                              ? "d3d12_device_removed" : "indexed_static_mesh_batch_execution_failed";
+        return false;
+    }
+    destination_state = final_state;
+    if (use_depth) {
+        depth_attachment->set_state(depth_state);
+        if (batch.clear_depth) depth_attachment->set_cleared();
+    }
+    void* mapped = nullptr;
+    D3D12_RANGE read_range{0U, static_cast<SIZE_T>(readback_size)};
+    result = readback->Map(0U, &read_range, &mapped);
+    if (SUCCEEDED(result)) {
+        try {
+            output.resize(output_size);
+            const auto* source_bytes = static_cast<const std::byte*>(mapped) + footprint.Offset;
+            for (std::uint32_t row = 0U; row < description.height; ++row)
+                std::memcpy(output.data() + static_cast<std::size_t>(row) * description.width * 4U,
+                            source_bytes + static_cast<std::size_t>(row) * footprint.Footprint.RowPitch,
+                            static_cast<std::size_t>(row_bytes));
+        } catch (const std::bad_alloc&) {
+            result = E_OUTOFMEMORY;
+        }
+        readback->Unmap(0U, nullptr);
+    }
+    if (FAILED(result)) {
+        diagnostic = hresult_error("Map(indexed batch readback)", result);
+        diagnostic.code = result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET
+                              ? "d3d12_device_removed" : "indexed_static_mesh_batch_execution_failed";
+        output.clear();
+        return false;
+    }
+    if (description.format == TextureFormat::bgra8_unorm || description.format == TextureFormat::bgra8_srgb)
+        for (std::size_t index = 0; index < output.size(); index += 4U)
+            std::swap(output[index], output[index + 2U]);
+    return true;
+}
+
 bool draw_indexed_static_mesh_and_readback(
     const std::shared_ptr<D3D12Context>& context,
     ID3D12Resource* destination,
@@ -1464,6 +1837,23 @@ public:
             context_, resource_.Get(), info_.description, request, vertex_buffer.resource(),
             index_buffer.resource(), state_, vertex_buffer.state(), index_buffer.state(), depth_attachment,
             output, diagnostic);
+        initialized_ = initialized_ || drawn;
+        return drawn;
+    }
+
+    bool draw_indexed_static_mesh_batch(const IndexedStaticMeshBatchDescription& batch,
+                                        std::span<const D3D12IndexedBatchDraw> draws,
+                                        D3D12DepthAttachment* depth_attachment,
+                                        std::vector<std::byte>& output,
+                                        Diagnostic& diagnostic) {
+        if (batch.load_color && !initialized_) {
+            diagnostic = {"indexed_color_load_before_clear",
+                          "A color load was requested before the color attachment was initialized"};
+            return false;
+        }
+        const bool drawn = draw_indexed_static_mesh_batch_and_readback(
+            context_, resource_.Get(), info_.description, batch, draws, depth_attachment,
+            initialized_, state_, output, diagnostic);
         initialized_ = initialized_ || drawn;
         return drawn;
     }
@@ -1848,6 +2238,110 @@ public:
         if (!d3d_texture->draw_indexed_static_mesh(request, *d3d_vertex, *d3d_index, d3d_depth, output, diagnostic))
             return {IndexedStaticMeshDrawStatus::execution_failed, std::move(diagnostic), {}};
         return {IndexedStaticMeshDrawStatus::ready, {}, std::move(output)};
+    }
+
+    IndexedStaticMeshBatchResult draw_indexed_static_mesh_batch_and_readback(
+        Texture& texture, const IndexedStaticMeshBatchDescription& batch) override {
+        Diagnostic diagnostic;
+        const IndexedStaticMeshBatchStatus validation =
+            validate_indexed_static_mesh_batch_description(texture, batch, diagnostic);
+        if (validation != IndexedStaticMeshBatchStatus::ready)
+            return {validation, std::move(diagnostic), {}};
+        if (texture.backend() != Backend::D3D12)
+            return {IndexedStaticMeshBatchStatus::unsupported,
+                    {"texture_backend_mismatch", "The texture belongs to another graphics backend"}, {}};
+        auto* d3d_texture = dynamic_cast<D3D12Texture*>(&texture);
+        if (d3d_texture == nullptr)
+            return {IndexedStaticMeshBatchStatus::unsupported,
+                    {"texture_type_unsupported", "The D3D12 device received an unknown batch texture handle"}, {}};
+        D3D12DepthAttachment* d3d_depth = nullptr;
+        if (batch.depth_attachment != nullptr) {
+            if (batch.depth_attachment->backend() != Backend::D3D12)
+                return {IndexedStaticMeshBatchStatus::unsupported,
+                        {"indexed_static_mesh_batch_depth_backend_mismatch",
+                         "The batch depth attachment belongs to another graphics backend"}, {}};
+            d3d_depth = dynamic_cast<D3D12DepthAttachment*>(batch.depth_attachment);
+            if (d3d_depth == nullptr)
+                return {IndexedStaticMeshBatchStatus::unsupported,
+                        {"indexed_static_mesh_batch_depth_type_unsupported",
+                         "The D3D12 device received an unknown batch depth attachment handle"}, {}};
+        }
+        const D3D12Context* context = context_.get();
+        if (d3d_texture->context() != context ||
+            (d3d_depth != nullptr && d3d_depth->context() != context)) {
+            return {IndexedStaticMeshBatchStatus::unsupported,
+                    {"indexed_static_mesh_batch_context_mismatch",
+                     "Batch resources belong to another D3D12 device"}, {}};
+        }
+        std::vector<D3D12IndexedBatchDraw> draws;
+        draws.reserve(batch.draws.size());
+        for (const IndexedStaticMeshDrawRequest& request : batch.draws) {
+            const auto* vertex = dynamic_cast<const D3D12Buffer*>(request.vertex_buffer);
+            const auto* index = dynamic_cast<const D3D12Buffer*>(request.index_buffer);
+            if (vertex == nullptr || index == nullptr || vertex->context() != context || index->context() != context) {
+                return {IndexedStaticMeshBatchStatus::unsupported,
+                        {"indexed_static_mesh_batch_context_mismatch",
+                         "Batch geometry buffers belong to another D3D12 device"}, {}};
+            }
+            const UINT required_vertex_state =
+                static_cast<UINT>(D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+            const UINT required_index_state = static_cast<UINT>(D3D12_RESOURCE_STATE_INDEX_BUFFER);
+            if ((static_cast<UINT>(vertex->state()) & required_vertex_state) == 0U ||
+                (static_cast<UINT>(index->state()) & required_index_state) == 0U) {
+                return {IndexedStaticMeshBatchStatus::invalid_request,
+                        {"indexed_static_mesh_batch_resource_state_invalid",
+                         "Batch geometry buffers are not in D3D12 vertex/index state"}, {}};
+            }
+            const std::uint64_t stride = request.pipeline->vertex_layout.stride;
+            const std::uint64_t vertex_offset = static_cast<std::uint64_t>(request.packet->vertex_offset);
+            const std::uint64_t index_offset = static_cast<std::uint64_t>(request.packet->index_offset);
+            if (stride == 0U || vertex_offset > std::numeric_limits<std::uint64_t>::max() / stride ||
+                index_offset > std::numeric_limits<std::uint64_t>::max() / sizeof(std::uint16_t)) {
+                return {IndexedStaticMeshBatchStatus::invalid_request,
+                        {"indexed_static_mesh_batch_offset_overflow",
+                         "Batch geometry offsets overflow D3D12 byte arithmetic"}, {}};
+            }
+            const std::uint64_t vertex_byte_offset = vertex_offset * stride;
+            const std::uint64_t index_byte_offset = index_offset * sizeof(std::uint16_t);
+            const std::uint64_t vertex_bytes = static_cast<std::uint64_t>(request.packet->vertex_count) * stride;
+            const std::uint64_t index_bytes =
+                static_cast<std::uint64_t>(request.packet->index_count) * sizeof(std::uint16_t);
+            constexpr std::uint64_t max_uint = static_cast<std::uint64_t>(std::numeric_limits<UINT>::max());
+            const D3D12_RESOURCE_DESC vertex_description = vertex->resource()->GetDesc();
+            const D3D12_RESOURCE_DESC index_description = index->resource()->GetDesc();
+            const D3D12_GPU_VIRTUAL_ADDRESS vertex_address =
+                vertex->resource()->GetGPUVirtualAddress();
+            const D3D12_GPU_VIRTUAL_ADDRESS index_address =
+                index->resource()->GetGPUVirtualAddress();
+            if (vertex_bytes > max_uint || index_bytes > max_uint ||
+                vertex_byte_offset > vertex_description.Width ||
+                vertex_bytes > vertex_description.Width - vertex_byte_offset ||
+                index_byte_offset > index_description.Width ||
+                index_bytes > index_description.Width - index_byte_offset ||
+                vertex_address > std::numeric_limits<D3D12_GPU_VIRTUAL_ADDRESS>::max() - vertex_byte_offset ||
+                index_address > std::numeric_limits<D3D12_GPU_VIRTUAL_ADDRESS>::max() - index_byte_offset) {
+                return {IndexedStaticMeshBatchStatus::invalid_request,
+                        {"indexed_static_mesh_batch_buffer_range_invalid",
+                         "Batch geometry range exceeds D3D12 buffer limits"}, {}};
+            }
+            D3D12IndexedBatchDraw draw;
+            draw.pipeline = request.pipeline;
+            draw.matrices = {request.packet->world_matrix, request.camera_frame->view_projection};
+            draw.geometry.vertex_resource = vertex->resource();
+            draw.geometry.vertex_offset = vertex_byte_offset;
+            draw.geometry.vertex_size = static_cast<UINT>(vertex_bytes);
+            draw.geometry.vertex_stride = static_cast<UINT>(stride);
+            draw.geometry.index_resource = index->resource();
+            draw.geometry.index_offset = index_byte_offset;
+            draw.geometry.index_size = static_cast<UINT>(index_bytes);
+            draw.geometry.index_count = request.packet->index_count;
+            draw.geometry.indexed = true;
+            draws.push_back(draw);
+        }
+        std::vector<std::byte> output;
+        if (!d3d_texture->draw_indexed_static_mesh_batch(batch, draws, d3d_depth, output, diagnostic))
+            return {IndexedStaticMeshBatchStatus::execution_failed, std::move(diagnostic), {}};
+        return {IndexedStaticMeshBatchStatus::ready, {}, std::move(output)};
     }
 
     SamplerResult create_sampler(const SamplerDescription& description) override {

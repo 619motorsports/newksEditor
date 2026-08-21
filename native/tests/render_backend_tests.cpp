@@ -1021,6 +1021,11 @@ bool contract_backend(apex::render::Backend backend) {
         request.depth_clear_value = depth_clear_value;
         return request;
     };
+    auto make_batch_request = [&](const StaticMeshUploadResult& upload, const PipelineProgram& pipeline) {
+        // Batch attachment/load/clear state belongs to the description. Keep
+        // every request at the neutral defaults required by the contract.
+        return upload.upload->make_request(pipeline, *indexed_camera.frame);
+    };
     auto require_pixel = [&](const std::vector<std::byte>& rgba8, std::size_t x, std::size_t y,
                              std::byte red_value, std::byte green_value, std::byte blue_value,
                              std::string_view message) {
@@ -1142,6 +1147,112 @@ bool contract_backend(apex::render::Backend backend) {
     require(no_write_far_result.ok(), "depth-write-disabled far draw");
     require_pixel(no_write_far_result.rgba8, 16U, 16U, std::byte{0}, std::byte{0}, std::byte{255},
                   "disabled depth writes allow the later far draw");
+
+    // Ordered batches execute both translated draws in one render pass. The
+    // triangles overlap at the center: red is submitted first and blue
+    // second, so the center must show the later request while side samples
+    // prove that both draws survived the batch readback.
+    PipelineProgram batch_order_red_pipeline = depth_red_pipeline;
+    PipelineProgram batch_order_blue_pipeline = depth_blue_pipeline;
+    batch_order_red_pipeline.name = "indexed-batch-order-red";
+    batch_order_blue_pipeline.name = "indexed-batch-order-blue";
+    batch_order_red_pipeline.targets.has_depth = false;
+    batch_order_blue_pipeline.targets.has_depth = false;
+    batch_order_red_pipeline.depth.test_enabled = false;
+    batch_order_red_pipeline.depth.write_enabled = false;
+    batch_order_blue_pipeline.depth.test_enabled = false;
+    batch_order_blue_pipeline.depth.write_enabled = false;
+    DrawPacket batch_left_packet = make_depth_packet(-1.1F, 0.0F, false);
+    DrawPacket batch_right_packet = make_depth_packet(1.1F, 0.0F, false);
+    batch_left_packet.flags.depth_test = false;
+    batch_right_packet.flags.depth_test = false;
+    StaticMeshUploadResult batch_left_upload = make_depth_upload(batch_left_packet);
+    StaticMeshUploadResult batch_right_upload = make_depth_upload(batch_right_packet);
+    std::array<IndexedStaticMeshDrawRequest, 2> ordered_batch_draws = {
+        make_batch_request(batch_left_upload, batch_order_red_pipeline),
+        make_batch_request(batch_right_upload, batch_order_blue_pipeline),
+    };
+    IndexedStaticMeshBatchDescription ordered_batch_description;
+    ordered_batch_description.draws = std::span<const IndexedStaticMeshDrawRequest>(ordered_batch_draws);
+    ordered_batch_description.load_color = false;
+    ordered_batch_description.clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
+    ordered_batch_description.clear_depth = false;
+    IndexedStaticMeshBatchDescription invalid_batch_color_load = ordered_batch_description;
+    invalid_batch_color_load.load_color = true;
+    const IndexedStaticMeshBatchResult invalid_batch_color_load_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(*uninitialized_color.texture,
+                                                                    invalid_batch_color_load);
+    require(invalid_batch_color_load_result.status == IndexedStaticMeshBatchStatus::execution_failed &&
+                invalid_batch_color_load_result.diagnostic.code == "indexed_color_load_before_clear",
+            "batch color load before initialization rejected");
+    const IndexedStaticMeshBatchResult ordered_batch_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(*triangle_texture.texture,
+                                                                    ordered_batch_description);
+    require(ordered_batch_result.ok() && ordered_batch_result.rgba8.size() == 32U * 32U * 4U,
+            "ordered indexed batch draw/readback");
+    require_pixel(ordered_batch_result.rgba8, 8U, 16U, std::byte{255}, std::byte{0}, std::byte{0},
+                  "ordered batch preserves the first translated red draw");
+    require_pixel(ordered_batch_result.rgba8, 24U, 16U, std::byte{0}, std::byte{0}, std::byte{255},
+                  "ordered batch preserves the second translated blue draw");
+    require(ordered_batch_draws[0].depth_attachment == nullptr && !ordered_batch_draws[0].load_color &&
+                !ordered_batch_draws[0].clear_depth && ordered_batch_draws[1].depth_attachment == nullptr &&
+                !ordered_batch_draws[1].load_color && !ordered_batch_draws[1].clear_depth &&
+                ordered_batch_draws[0].clear_color == std::array<float, 4>{0.0F, 0.0F, 0.0F, 1.0F} &&
+                ordered_batch_draws[1].clear_color == std::array<float, 4>{0.0F, 0.0F, 0.0F, 1.0F},
+            "ordered batch leaves caller requests attachment-neutral");
+
+    // Reuse one immutable upload for two requests at the same position. The
+    // later blue pipeline must replace red, making request order observable.
+    DrawPacket batch_overlap_packet = make_depth_packet(0.0F, 0.0F, false);
+    batch_overlap_packet.flags.depth_test = false;
+    StaticMeshUploadResult batch_overlap_upload = make_depth_upload(batch_overlap_packet);
+    std::array<IndexedStaticMeshDrawRequest, 2> overlap_batch_draws = {
+        make_batch_request(batch_overlap_upload, batch_order_red_pipeline),
+        make_batch_request(batch_overlap_upload, batch_order_blue_pipeline),
+    };
+    IndexedStaticMeshBatchDescription overlap_batch_description = ordered_batch_description;
+    overlap_batch_description.draws = std::span<const IndexedStaticMeshDrawRequest>(overlap_batch_draws);
+    const IndexedStaticMeshBatchResult overlap_batch_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(*triangle_texture.texture,
+                                                                    overlap_batch_description);
+    require(overlap_batch_result.ok(), "overlapping ordered indexed batch draw/readback");
+    require_pixel(overlap_batch_result.rgba8, 16U, 16U, std::byte{0}, std::byte{0}, std::byte{255},
+                  "ordered batch preserves request order at overlap");
+
+    // A single batch clear must apply to the first draw only. Near red is
+    // submitted before far blue; if the implementation cleared depth again
+    // for the second request, blue would incorrectly replace red under LESS.
+    std::array<IndexedStaticMeshDrawRequest, 2> depth_batch_draws = {
+        make_batch_request(near_upload, depth_red_pipeline),
+        make_batch_request(far_upload, depth_blue_pipeline),
+    };
+    IndexedStaticMeshBatchDescription depth_batch_description;
+    depth_batch_description.draws = std::span<const IndexedStaticMeshDrawRequest>(depth_batch_draws);
+    depth_batch_description.depth_attachment = depth_result.attachment.get();
+    depth_batch_description.load_color = false;
+    depth_batch_description.clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
+    depth_batch_description.clear_depth = true;
+    depth_batch_description.depth_clear_value = 1.0F;
+    IndexedStaticMeshBatchDescription invalid_batch_depth_load = depth_batch_description;
+    invalid_batch_depth_load.depth_attachment = uninitialized_depth.attachment.get();
+    invalid_batch_depth_load.clear_depth = false;
+    const IndexedStaticMeshBatchResult invalid_batch_depth_load_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(*triangle_texture.texture,
+                                                                    invalid_batch_depth_load);
+    require(invalid_batch_depth_load_result.status == IndexedStaticMeshBatchStatus::execution_failed &&
+                invalid_batch_depth_load_result.diagnostic.code == "indexed_depth_load_before_clear",
+            "batch depth load before initialization rejected");
+    const IndexedStaticMeshBatchResult depth_batch_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(*triangle_texture.texture,
+                                                                    depth_batch_description);
+    require(depth_batch_result.ok() && depth_batch_result.rgba8.size() == 32U * 32U * 4U,
+            "depth indexed batch draw/readback");
+    require_pixel(depth_batch_result.rgba8, 16U, 16U, std::byte{255}, std::byte{0}, std::byte{0},
+                  "depth batch loads depth between ordered requests");
+    require(depth_batch_draws[0].depth_attachment == nullptr && !depth_batch_draws[0].load_color &&
+                !depth_batch_draws[0].clear_depth && depth_batch_draws[1].depth_attachment == nullptr &&
+                !depth_batch_draws[1].load_color && !depth_batch_draws[1].clear_depth,
+            "depth batch applies attachment and clear state without mutating requests");
 
     const TextureDescription bgra_description{3U, 2U, 1U, 1U, TextureFormat::bgra8_unorm,
                                                TextureUsage::color_attachment | TextureUsage::transfer_source,

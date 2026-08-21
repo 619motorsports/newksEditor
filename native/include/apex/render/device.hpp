@@ -12,6 +12,7 @@
 #include <span>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace apex::render {
@@ -399,6 +400,40 @@ struct IndexedStaticMeshDrawResult {
     [[nodiscard]] bool ok() const noexcept { return status == IndexedStaticMeshDrawStatus::ready; }
 };
 
+// A bounded ordered group of indexed draws. The batch owns the initial color
+// load/clear and optional depth clear; individual draw requests must leave
+// their attachment and load/clear fields at their defaults. The first draw
+// uses load_color/clear_depth, and later draws load both persistent targets.
+inline constexpr std::size_t max_indexed_static_mesh_batch_draws = 4096U;
+
+struct IndexedStaticMeshBatchDescription {
+    std::span<const IndexedStaticMeshDrawRequest> draws{};
+    DepthAttachment* depth_attachment = nullptr;
+    bool load_color = false;
+    std::array<float, 4> clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
+    bool clear_depth = false;
+    float depth_clear_value = 1.0F;
+};
+
+enum class IndexedStaticMeshBatchStatus {
+    ready,
+    invalid_request,
+    unsupported,
+    execution_failed,
+};
+
+struct IndexedStaticMeshBatchResult {
+    IndexedStaticMeshBatchStatus status = IndexedStaticMeshBatchStatus::unsupported;
+    Diagnostic diagnostic;
+    // One pass produces one final color readback. Draw order is observable in
+    // this image, rather than represented by synthetic per-draw results.
+    std::vector<std::byte> rgba8;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == IndexedStaticMeshBatchStatus::ready;
+    }
+};
+
 inline constexpr std::uint64_t max_texture_readback_bytes = 256ULL * 1024ULL * 1024ULL;
 
 enum class SamplerFilter : std::uint8_t {
@@ -562,6 +597,13 @@ inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
 [[nodiscard]] IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     const Texture& texture, const IndexedStaticMeshDrawRequest& request, Diagnostic& diagnostic);
 
+// Preflight an ordered batch without changing any caller-owned request. The
+// function applies the batch attachment/load/clear state to local copies and
+// validates every draw before a backend is allowed to execute any of them.
+[[nodiscard]] IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
+    const Texture& texture, const IndexedStaticMeshBatchDescription& description,
+    Diagnostic& diagnostic);
+
 [[nodiscard]] SamplerStatus validate_sampler_description(
     const SamplerDescription& description,
     Diagnostic& diagnostic);
@@ -632,6 +674,23 @@ public:
                 {}};
     }
 
+    // Backends may execute the validated ordered batch as one pass. The
+    // default validates first, so an invalid later draw cannot partially
+    // execute on a discovery-only or neutral device.
+    [[nodiscard]] virtual IndexedStaticMeshBatchResult
+    draw_indexed_static_mesh_batch_and_readback(
+        Texture& texture, const IndexedStaticMeshBatchDescription& description) {
+        Diagnostic diagnostic;
+        const IndexedStaticMeshBatchStatus validation =
+            validate_indexed_static_mesh_batch_description(texture, description, diagnostic);
+        if (validation != IndexedStaticMeshBatchStatus::ready)
+            return {validation, std::move(diagnostic), {}};
+        return {IndexedStaticMeshBatchStatus::unsupported,
+                {"indexed_static_mesh_batch_execution_unsupported",
+                 "This backend has not enabled ordered indexed static-mesh batch execution"},
+                {}};
+    }
+
     [[nodiscard]] virtual SamplerResult create_sampler(
         const SamplerDescription& description) = 0;
 
@@ -660,6 +719,8 @@ struct DeviceResult {
 [[nodiscard]] const char* triangle_draw_status_name(TriangleDrawStatus status) noexcept;
 [[nodiscard]] const char* indexed_static_mesh_draw_status_name(
     IndexedStaticMeshDrawStatus status) noexcept;
+[[nodiscard]] const char* indexed_static_mesh_batch_status_name(
+    IndexedStaticMeshBatchStatus status) noexcept;
 [[nodiscard]] const char* sampler_status_name(SamplerStatus status) noexcept;
 [[nodiscard]] const char* shader_module_status_name(ShaderModuleStatus status) noexcept;
 

@@ -68,8 +68,10 @@ root-constant block. Each camera must use the clip-space convention for its
 backend. Both backends create persistent single-sample D32 attachments.
 Indexed requests use explicit color-load and depth-clear controls. The
 source-evidenced main path uses `LESS` depth testing. The execution path still
-accepts only resource-free opaque packets. Draw-packet texture resources
-resolve by canonical name.
+accepts only resource-free opaque packets. A bounded ordered batch preflights
+all requests, clears or loads attachments once, submits one render pass, and
+returns one final readback. Draw-packet texture resources resolve by canonical
+name.
 The serialized KN5 resource ID remains a shader bind point, not a
 texture-table index. This work does not show complete scene pixels. Window
 surfaces, swapchains, descriptor binding, complete scene draws, and production

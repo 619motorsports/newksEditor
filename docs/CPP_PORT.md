@@ -101,10 +101,12 @@ remains unchanged and feature-complete.
   conversion explicit. Both backends also create persistent single-sample D32
   attachments. Explicit load and clear controls retain color and depth across
   indexed draws. The executable main-pass subset uses the source-evidenced
-  `LESS` depth comparison. The backend still accepts only resource-free opaque
-  packets. This proves basic pipeline creation, persistent attachment and
-  geometry binding, command submission, rasterization, and resource-state
-  handling. It does not prove scene-rendering parity.
+  `LESS` depth comparison. A bounded batch preflights every request, preserves
+  packet order, and records all draws in one pass with one final readback. The
+  backend still accepts only resource-free opaque packets. This proves basic
+  pipeline creation, persistent attachment and geometry binding, ordered
+  command submission, rasterization, and resource-state handling. It does not
+  prove scene-rendering parity.
 - P1 is partial. Bounded readers support KN5 v4/v5/v6, DDS, ACD, INI/CSP,
   KSANIM v1/v2, and KNH. The port also supports byte-stable KN5 writing, VAO
   ZIP decoding, and track surfaces, cameras, and splines. Bounded asset support
@@ -143,10 +145,11 @@ remains unchanged and feature-complete.
   restricted draw-packet subset. It has no descriptors, scene resources,
   blending, or alpha-to-coverage. It executes finite non-identity world and
   camera transforms through an explicit shader contract. It preserves D32
-  depth across synchronous draws and supports explicit test/write state. A
-  bounded multi-draw pass and complete scene dispatch remain staged. The port
-  does not create windows or swapchains, draw complete KN5 scenes, or provide
-  golden-image parity evidence.
+  depth across synchronous draws and supports explicit test/write state. The
+  ordered multi-draw path clears or loads attachments once and submits one
+  pass. Complete scene dispatch remains staged. The port does not create
+  windows or swapchains, draw complete KN5 scenes, or provide golden-image
+  parity evidence.
 
 DDS BC7 now has a bounded CPU decoder covered by differential fixtures for all
 eight modes. BC6H remains recognized and explicitly GPU-required. The port

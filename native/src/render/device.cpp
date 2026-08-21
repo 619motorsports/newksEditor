@@ -865,6 +865,98 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     return IndexedStaticMeshDrawStatus::ready;
 }
 
+IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
+    const Texture& texture, const IndexedStaticMeshBatchDescription& description,
+    Diagnostic& diagnostic) {
+    if (description.draws.empty()) {
+        diagnostic = {"indexed_static_mesh_batch_empty",
+                      "An indexed static-mesh batch must contain at least one draw"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (description.draws.size() > max_indexed_static_mesh_batch_draws) {
+        diagnostic = {"indexed_static_mesh_batch_limit",
+                      "Indexed static-mesh batch exceeds the bounded draw limit"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    for (const float component : description.clear_color) {
+        if (!std::isfinite(component)) {
+            diagnostic = {"indexed_static_mesh_batch_clear_color_non_finite",
+                          "Indexed static-mesh batch clear color components must be finite"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+    }
+    if (!std::isfinite(description.depth_clear_value) || description.depth_clear_value < 0.0F ||
+        description.depth_clear_value > 1.0F) {
+        diagnostic = {"indexed_static_mesh_batch_depth_clear_invalid",
+                      "Indexed static-mesh batch depth clear value must be finite and within [0, 1]"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (description.clear_depth && description.depth_attachment == nullptr) {
+        diagnostic = {"indexed_static_mesh_batch_depth_attachment_missing",
+                      "A batch depth clear requires a persistent depth attachment"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (description.depth_attachment != nullptr) {
+        const DepthAttachment& depth = *description.depth_attachment;
+        if (depth.backend() != texture.backend()) {
+            diagnostic = {"indexed_static_mesh_batch_depth_backend_mismatch",
+                          "Batch color target and depth attachment must belong to the same backend"};
+            return IndexedStaticMeshBatchStatus::unsupported;
+        }
+        Diagnostic depth_diagnostic;
+        const DepthAttachmentStatus depth_status =
+            validate_depth_attachment_description(depth.info().description, depth_diagnostic);
+        if (depth_status != DepthAttachmentStatus::ready) {
+            diagnostic = {depth_diagnostic.code.empty() ? "indexed_static_mesh_batch_depth_invalid"
+                                                         : depth_diagnostic.code,
+                          depth_diagnostic.message};
+            return depth_status == DepthAttachmentStatus::unsupported
+                       ? IndexedStaticMeshBatchStatus::unsupported
+                       : IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        const TextureDescription& target = texture.info().description;
+        const DepthAttachmentDescription& depth_description = depth.info().description;
+        if (depth_description.width != target.width || depth_description.height != target.height ||
+            depth_description.samples != 1U) {
+            diagnostic = {"indexed_static_mesh_batch_depth_dimensions_mismatch",
+                          "Batch depth attachment dimensions and samples must match the color target"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+    }
+
+    constexpr std::array<float, 4> default_clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
+    for (std::size_t index = 0U; index < description.draws.size(); ++index) {
+        const IndexedStaticMeshDrawRequest& source = description.draws[index];
+        if (source.depth_attachment != nullptr || source.load_color || source.clear_depth ||
+            source.depth_clear_value != 1.0F || source.clear_color != default_clear_color) {
+            diagnostic = {"indexed_static_mesh_batch_draw_override",
+                          "Batch attachment, load, and clear state must be specified only once on the batch"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+
+        // Preflight a local request. The caller's ordered span and its request
+        // objects remain unchanged; execution backends receive the batch state
+        // through this same effective single-draw contract.
+        IndexedStaticMeshDrawRequest effective = source;
+        effective.depth_attachment = description.depth_attachment;
+        effective.load_color = description.load_color || index != 0U;
+        effective.clear_color = description.clear_color;
+        effective.clear_depth = description.clear_depth && index == 0U;
+        effective.depth_clear_value = description.depth_clear_value;
+        Diagnostic draw_diagnostic;
+        const IndexedStaticMeshDrawStatus draw_status =
+            validate_indexed_static_mesh_draw_request(texture, effective, draw_diagnostic);
+        if (draw_status != IndexedStaticMeshDrawStatus::ready) {
+            diagnostic = std::move(draw_diagnostic);
+            return draw_status == IndexedStaticMeshDrawStatus::unsupported
+                       ? IndexedStaticMeshBatchStatus::unsupported
+                       : IndexedStaticMeshBatchStatus::invalid_request;
+        }
+    }
+    diagnostic = {};
+    return IndexedStaticMeshBatchStatus::ready;
+}
+
 SamplerStatus validate_sampler_description(const SamplerDescription& description,
                                            Diagnostic& diagnostic) {
     const auto valid_filter = [](SamplerFilter filter) {
@@ -1221,6 +1313,16 @@ const char* indexed_static_mesh_draw_status_name(IndexedStaticMeshDrawStatus sta
     case IndexedStaticMeshDrawStatus::invalid_request: return "invalid_request";
     case IndexedStaticMeshDrawStatus::unsupported: return "unsupported";
     case IndexedStaticMeshDrawStatus::execution_failed: return "execution_failed";
+    }
+    return "unknown";
+}
+
+const char* indexed_static_mesh_batch_status_name(IndexedStaticMeshBatchStatus status) noexcept {
+    switch (status) {
+    case IndexedStaticMeshBatchStatus::ready: return "ready";
+    case IndexedStaticMeshBatchStatus::invalid_request: return "invalid_request";
+    case IndexedStaticMeshBatchStatus::unsupported: return "unsupported";
+    case IndexedStaticMeshBatchStatus::execution_failed: return "execution_failed";
     }
     return "unknown";
 }
