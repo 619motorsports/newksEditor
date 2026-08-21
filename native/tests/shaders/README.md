@@ -246,13 +246,17 @@ The same run passes descriptor-switch batches and a mixed 6/8/12-binding batch.
 `indexed_ks_per_pixel_damage.frag` implements the recovered dirt-zero branch of
 `ksPerPixelMultiMap_damage_dirt`. The installed shader container has SHA-256
 `76d6a625c34e386641667a44a0433c6d1dc2af5be9e4a8ebbd6a886181f97dc8`.
+Its pixel FXO has SHA-256
+`ef7835b917eddf0b6e233d05ef8d66126e20bf4ca828b429b742dca3552d7743`.
 The DXBC disassembly proves that the final alpha source is `txNormal.a`.
 
 The portable ABI uses `txDamage` at bindings 12/13. It uses `txDamageMask` at
 bindings 14/15. The 80-byte material record stores `damageZones` at byte 64.
-The fixture does not bind `txDust` because the exact zero-dirt factor is one.
+The fixture does not bind `txDust` because the recovered zero-dirt factor is one.
+The fixture does not execute stock detail, sun-specular, Fresnel, or reflection
+branches. It is a bounded damage stage, not a complete stock-material shader.
 The source SHA-256 is
-`2ef09b44dd48c7043e8e1d9595acf5ca85ec1a3fc93ebbfc5cf12a3ba4012031`.
+`aa2b93e043ffaef5639302eb32d8faa03572950bf96f61d3333d5a33c566c04c`.
 The SPIR-V SHA-256 is
 `327868c20cd79ea8c7a0cb36bcaf5fb5f12212faca2e227239dcaad8c058aa82`.
 

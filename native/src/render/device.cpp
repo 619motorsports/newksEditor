@@ -213,6 +213,38 @@ bool valid_buffer_update(const Buffer& buffer,
     return validate_buffer_update(buffer, offset, data_size, diagnostic) == BufferStatus::ready;
 }
 
+PresentationTargetStatus validate_presentation_target_description(
+    const PresentationTargetDescription& description,
+    Diagnostic& diagnostic) {
+    if (description.width == 0U || description.height == 0U) {
+        diagnostic = {"presentation_dimensions_invalid",
+                      "Presentation target dimensions must be non-zero"};
+        return PresentationTargetStatus::invalid_description;
+    }
+    if (description.width > max_texture_dimension ||
+        description.height > max_texture_dimension) {
+        diagnostic = {"presentation_dimension_limit",
+                      "Presentation target dimensions exceed the backend-neutral safety limit"};
+        return PresentationTargetStatus::invalid_description;
+    }
+    if (description.image_count < 2U ||
+        description.image_count > max_presentation_image_count) {
+        diagnostic = {"presentation_image_count_invalid",
+                      "Presentation image count must be between 2 and 8"};
+        return PresentationTargetStatus::invalid_description;
+    }
+    if (description.format != TextureFormat::rgba8_unorm &&
+        description.format != TextureFormat::rgba8_srgb &&
+        description.format != TextureFormat::bgra8_unorm &&
+        description.format != TextureFormat::bgra8_srgb) {
+        diagnostic = {"presentation_format_unsupported",
+                      "Presentation targets require RGBA8 or BGRA8 UNORM or sRGB data"};
+        return PresentationTargetStatus::unsupported;
+    }
+    diagnostic = {};
+    return PresentationTargetStatus::ready;
+}
+
 TextureStatus validate_texture_upload_plan(const TextureDescription& description,
                                            const TextureUploadPlan& uploads,
                                            Diagnostic& diagnostic) {
@@ -2075,6 +2107,19 @@ const char* texture_status_name(TextureStatus status) noexcept {
         return "allocation_failed";
     case TextureStatus::upload_failed:
         return "upload_failed";
+    }
+    return "unknown";
+}
+
+const char* presentation_target_status_name(
+    PresentationTargetStatus status) noexcept {
+    switch (status) {
+    case PresentationTargetStatus::ready:
+        return "ready";
+    case PresentationTargetStatus::invalid_description:
+        return "invalid_description";
+    case PresentationTargetStatus::unsupported:
+        return "unsupported";
     }
     return "unknown";
 }

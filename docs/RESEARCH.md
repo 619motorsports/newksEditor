@@ -289,6 +289,12 @@ by `(1 + factor * (txNormal.a - 1))`. DXBC proves that the alpha source is
 `txNormal`. The portable Vulkan and D3D12 path requires an effective `dirt` value
 of zero. Nonzero dirt uses the labeled base-material preview.
 
+This equation is exact for the recovered dirt-zero damage stage. It is not the
+complete stock material. The installed material enables detail and uses
+sun-specular and Fresnel values. The portable stage rejects these branches.
+Its normal reconstruction and output alpha also differ from the complete stock
+shader. These limits prevent a false full-parity claim.
+
 The installed Abarth 500 has nine selected damage-glass roots: two front, one rear,
 two left, two right, and two center. All nine roots are authored inactive. Five
 materials define `damageZones`; one uses the exact stock shader and provides both

@@ -41,8 +41,9 @@ struct Diagnostic {
 
 /** Options shared by all backend implementations. */
 struct DeviceOptions {
-    // A native renderer device is intentionally headless. No window-system
-    // extensions or swapchain are requested by either backend.
+    // Devices are still created for headless execution. Backends can report
+    // presentation API prerequisites, but they do not create a surface or
+    // swapchain through this option.
     bool headless = true;
     bool enable_validation = false;
     bool allow_software = true;
@@ -104,6 +105,30 @@ enum class BufferUsage : std::uint32_t {
 inline constexpr std::uint64_t max_buffer_bytes = 1ULL << 34U;
 inline constexpr std::uint64_t max_texture_bytes = 1ULL << 34U;
 inline constexpr std::uint32_t max_texture_dimension = 16384U;
+inline constexpr std::uint32_t max_presentation_image_count = 8U;
+
+// These flags report API prerequisites only. They do not prove that a native
+// window, presentation surface, present-capable queue, or swapchain exists.
+struct PresentationCapabilities {
+    bool offscreen = true;
+    bool swapchain_api_available = false;
+    bool native_surface_api_available = false;
+    bool headless_surface_api_available = false;
+};
+
+struct PresentationTargetDescription {
+    std::uint32_t width = 0U;
+    std::uint32_t height = 0U;
+    std::uint32_t image_count = 2U;
+    TextureFormat format = TextureFormat::bgra8_srgb;
+    bool vsync = true;
+};
+
+enum class PresentationTargetStatus : std::uint8_t {
+    ready,
+    invalid_description,
+    unsupported,
+};
 
 struct BufferDescription {
     std::uint64_t size_bytes = 0;
@@ -385,8 +410,8 @@ struct KsPerPixelMaterialConstants {
     // useDetail, detailUVMultiplier, detailNormalBlend, reserved. These
     // values preserve the public/app.js generic detail-stack controls.
     std::array<float, 4> detail = {0.0F, 1.0F, 1.0F, 0.0F};
-    // CSP damageZones.x/y/z/w. The exact dirt-zero damage branch evaluates
-    // saturate(txDamage.a * dot(txDamageMask, damage_zones)).
+    // CSP damageZones.x/y/z/w. The source-evidenced bounded damage stage
+    // evaluates saturate(txDamage.a * dot(txDamageMask, damage_zones)).
     std::array<float, 4> damage_zones = {0.0F, 0.0F, 0.0F, 0.0F};
 };
 
@@ -738,6 +763,10 @@ inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
     const ShaderModuleDescription& description,
     Diagnostic& diagnostic);
 
+[[nodiscard]] PresentationTargetStatus validate_presentation_target_description(
+    const PresentationTargetDescription& description,
+    Diagnostic& diagnostic);
+
 struct AdapterResult {
     DeviceStatus status = DeviceStatus::unavailable;
     Diagnostic diagnostic;
@@ -751,6 +780,13 @@ public:
     virtual ~Device() = default;
 
     [[nodiscard]] virtual const DeviceInfo& info() const noexcept = 0;
+
+    // The default preserves discovery-only and fake devices. Backends may
+    // report prerequisites without exposing or creating native handles.
+    [[nodiscard]] virtual PresentationCapabilities presentation_capabilities()
+        const noexcept {
+        return {};
+    }
 
     // Buffer lifetimes may extend beyond this Device object: backend handles
     // retain their private shared context. Public callers only see this
@@ -849,6 +885,8 @@ struct DeviceResult {
     IndexedStaticMeshBatchStatus status) noexcept;
 [[nodiscard]] const char* sampler_status_name(SamplerStatus status) noexcept;
 [[nodiscard]] const char* shader_module_status_name(ShaderModuleStatus status) noexcept;
+[[nodiscard]] const char* presentation_target_status_name(
+    PresentationTargetStatus status) noexcept;
 
 [[nodiscard]] AdapterResult enumerate_adapters(Backend backend,
                                                 const DeviceOptions& options = {});

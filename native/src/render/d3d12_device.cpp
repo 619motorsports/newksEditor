@@ -4002,6 +4002,17 @@ public:
 
     const DeviceInfo& info() const noexcept override { return context_->info; }
 
+    PresentationCapabilities presentation_capabilities() const noexcept override {
+        const bool context_ready = context_ != nullptr && context_->factory.Get() != nullptr &&
+                                   context_->device.Get() != nullptr && context_->queue.Get() != nullptr;
+        PresentationCapabilities result;
+        result.offscreen = true;
+        result.swapchain_api_available = context_ready;
+        result.native_surface_api_available = context_ready;
+        result.headless_surface_api_available = false;
+        return result;
+    }
+
     BufferResult create_buffer(const BufferDescription& description,
                                std::span<const std::byte> initial_data) override {
         Diagnostic diagnostic;

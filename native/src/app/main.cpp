@@ -123,7 +123,18 @@ int probe_backend(apex::render::Backend backend, bool validation) {
                   << ": " << result.diagnostic.message << '\n';
         return result.status == apex::render::DeviceStatus::unavailable ? 77 : 1;
     }
-    std::cout << apex::render::backend_name(backend) << ": " << result.device->info().name << '\n';
+    const apex::render::PresentationCapabilities presentation =
+        result.device->presentation_capabilities();
+    std::cout << apex::render::backend_name(backend) << ": "
+              << result.device->info().name
+              << ", offscreen=" << (presentation.offscreen ? "yes" : "no")
+              << ", swapchain-api="
+              << (presentation.swapchain_api_available ? "yes" : "no")
+              << ", native-surface-api="
+              << (presentation.native_surface_api_available ? "yes" : "no")
+              << ", headless-surface-api="
+              << (presentation.headless_surface_api_available ? "yes" : "no")
+              << '\n';
     result.device->wait_idle();
     return 0;
 }

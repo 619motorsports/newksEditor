@@ -40,6 +40,10 @@ and clear/readback operations. Portable validation protects the desktop
 boundary. Backend API types stay inside `src/render`. Format and authoring
 libraries do not depend on a graphics API.
 
+The device API reports presentation prerequisites without creating a window.
+Vulkan reports surface and swapchain extensions. D3D12 reports DXGI factory,
+device, and queue support. The port does not create surfaces or swapchains.
+
 ## Build and test
 
 CMake 3.25 or newer and a C++20 compiler are required. Vulkan is enabled when
@@ -128,7 +132,8 @@ It adds `txDamage` at bindings 12 and 13. It adds `txDamageMask` at bindings
 `dirt`. It validates optional `txDust` but does not bind it. The recovered
 zero-dirt equation makes the dust factor one. Vulkan and D3D12 execute the
 damage mix and the two recovered specular factors. Pixel tests cover disabled
-damage, enabled damage, and normal-alpha attenuation.
+damage, enabled damage, and normal-alpha attenuation. This bounded stage does
+not execute stock detail, sun-specular, Fresnel, or reflection branches.
 The serialized KN5 resource ID remains a shader bind point, not a
 texture-table index. A bounded static-scene adapter maps the final KN5 tree to
 dense scene IDs. It validates all packets and pipelines before buffer creation.
@@ -141,12 +146,15 @@ Static scenes accept 1x and 4x pipelines. A2C requires 4x color and matching
 depth samples. A bounded material handoff derives the supported resource
 layouts, constants, and profile state from KN5 materials. The caller must
 supply explicit SPIR-V or DXIL modules. Production packets remain marked as
-staged. The handoff does not translate stock shader containers. Window
-surfaces, swapchains, and complete stock execution remain roadmap work.
+staged. The handoff does not translate stock shader containers. The device API
+reports presentation prerequisites. Window surfaces, swapchains, and complete
+stock execution remain roadmap work.
 A bounded stock-scene facade composes the render plan, draw packets, material
 handoff, and static-scene preparation. It uses linear topology preflight and
 rejects malformed edges, cycles, and over-budget plans before backend
-allocation. A real SwiftShader test executes the complete facade through
+allocation. The facade can resolve F4 damage before it creates the plan. It
+merges the activity writes and complete material table before allocation. A
+real SwiftShader test executes the complete facade through
 pixel readback. A second test executes the three-texture MultiMap facade and
 checks the `maps.r` and `maps.g` result. It also executes the AT family on a
 4x target and checks partial resolved coverage. The same tests run through
@@ -172,7 +180,8 @@ without changing the parsed model. It applies `damageZones` after CSP values.
 It also retains the native one-way `glassDamage` write for shared materials.
 The adapter identifies the recovered dirt-zero branch. The bounded material
 handoff executes this branch with caller-supplied SPIR-V or DXIL modules.
-Nonzero dirt remains staged.
+Nonzero dirt remains staged. Active detail, sun-specular, Fresnel, and
+reflection branches also remain staged.
 The static-scene adapter has two texture-authority modes. The first mode
 uses caller-owned tables in the final KN5 texture order. The second mode owns
 the used embedded KN5 textures and one linear-repeat sampler. It validates all
@@ -191,9 +200,10 @@ includes temporary containers, copied strings, and output containers. It
 explicitly diagnoses unsupported images, skinning, animation, layer mappings,
 and advanced transform semantics.
 
-The strict Linux builds detect the Vulkan SDK. Local runtime checks use the
-SwiftShader ICD. CI runs the same checks with a software Vulkan device. The
-production WebGL visual check remains mandatory for each rendering change.
+The strict Linux build detects the Vulkan SDK. The runtime test uses a software
+Vulkan device when an ICD is available. CI defines the same Vulkan test. The
+current GitHub account billing error prevents fresh CI evidence. The production
+WebGL visual check remains mandatory for each rendering change.
 
 ## Contribution rules
 

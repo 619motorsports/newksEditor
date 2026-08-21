@@ -9,6 +9,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #if defined(APEX_HAS_VULKAN) && APEX_HAS_VULKAN
@@ -65,6 +66,71 @@ bool has_validation_layer() {
         }
     }
     return false;
+}
+
+// WSI is intentionally not enabled by the headless device contract. Keep
+// this inventory separate from instance creation so callers can inspect
+// prerequisites without constructing a VkSurfaceKHR. In particular, the
+// presence of VK_KHR_swapchain and a platform surface extension does not
+// prove that a surface or a present-capable queue is available.
+inline constexpr std::uint32_t max_extension_properties = 4096U;
+
+template <typename EnumerateFunction>
+std::vector<VkExtensionProperties> enumerate_extension_properties(
+    EnumerateFunction&& enumerate) {
+    std::uint32_t count = 0U;
+    VkResult result = enumerate(&count, nullptr);
+    if (result != VK_SUCCESS && result != VK_INCOMPLETE) return {};
+    if (count == 0U || count > max_extension_properties) return {};
+
+    std::vector<VkExtensionProperties> properties(count);
+    result = enumerate(&count, properties.data());
+    if (result != VK_SUCCESS && result != VK_INCOMPLETE) return {};
+    if (count < properties.size()) properties.resize(count);
+    return properties;
+}
+
+bool has_extension(std::span<const VkExtensionProperties> properties,
+                   std::string_view name) noexcept {
+    for (const VkExtensionProperties& property : properties) {
+        if (name == std::string_view(property.extensionName)) return true;
+    }
+    return false;
+}
+
+bool has_native_surface_extension(std::span<const VkExtensionProperties> properties) noexcept {
+#if defined(_WIN32)
+    return has_extension(properties, "VK_KHR_win32_surface");
+#elif defined(__linux__)
+    return has_extension(properties, "VK_KHR_xcb_surface") ||
+           has_extension(properties, "VK_KHR_wayland_surface");
+#elif defined(__APPLE__)
+    return has_extension(properties, "VK_EXT_metal_surface");
+#else
+    return false;
+#endif
+}
+
+PresentationCapabilities query_vulkan_presentation_capabilities(
+    VkPhysicalDevice physical_device) {
+    PresentationCapabilities capabilities;
+    const auto instance_properties = enumerate_extension_properties(
+        [](std::uint32_t* count, VkExtensionProperties* properties) {
+            return vkEnumerateInstanceExtensionProperties(nullptr, count, properties);
+        });
+    const auto device_properties = enumerate_extension_properties(
+        [physical_device](std::uint32_t* count, VkExtensionProperties* properties) {
+            return vkEnumerateDeviceExtensionProperties(physical_device, nullptr, count, properties);
+        });
+
+    const bool surface_api = has_extension(instance_properties, "VK_KHR_surface");
+    capabilities.swapchain_api_available =
+        surface_api && has_extension(device_properties, "VK_KHR_swapchain");
+    capabilities.native_surface_api_available =
+        surface_api && has_native_surface_extension(instance_properties);
+    capabilities.headless_surface_api_available =
+        surface_api && has_extension(instance_properties, "VK_EXT_headless_surface");
+    return capabilities;
 }
 
 struct Instance {
@@ -187,6 +253,7 @@ struct VulkanContext {
     float max_sampler_anisotropy = 1.0F;
     VkDeviceSize max_uniform_buffer_range = 0U;
     VkDeviceSize min_uniform_buffer_offset_alignment = 1U;
+    PresentationCapabilities presentation_capabilities{};
     DeviceInfo info;
 
     VulkanContext(Instance instance_value,
@@ -3938,6 +4005,10 @@ public:
 
     const DeviceInfo& info() const noexcept override { return context_->info; }
 
+    PresentationCapabilities presentation_capabilities() const noexcept override {
+        return context_->presentation_capabilities;
+    }
+
     BufferResult create_buffer(const BufferDescription& description,
                                std::span<const std::byte> initial_data) override {
         Diagnostic diagnostic;
@@ -4362,6 +4433,8 @@ DeviceResult create_vulkan_device(const DeviceOptions& options) {
                                                    selected.properties.limits.maxSamplerAnisotropy,
                                                    selected.properties.limits.maxUniformBufferRange,
                                                    selected.properties.limits.minUniformBufferOffsetAlignment);
+    context->presentation_capabilities =
+        query_vulkan_presentation_capabilities(selected.handle);
     const VkResult pool_result = vkCreateCommandPool(device, &command_pool_info, nullptr, &context->command_pool);
     if (pool_result != VK_SUCCESS) {
         DeviceResult failure;

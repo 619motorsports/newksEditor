@@ -1,11 +1,13 @@
 #pragma once
 
+#include "apex/render/damage_preview.hpp"
 #include "apex/render/draw_packet.hpp"
 #include "apex/render/stock_material_execution.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace apex::render {
@@ -23,6 +25,7 @@ struct StockSceneExecutionLimits {
     std::uint64_t max_plan_bytes = 256ULL * 1024ULL * 1024ULL;
     DrawPacketLimits packets{};
     StockMaterialExecutionLimits material{};
+    DamagePreviewLimits damage{};
 };
 
 struct StockSceneExecutionRequest {
@@ -32,6 +35,11 @@ struct StockSceneExecutionRequest {
     DrawPacketOptions packets{};
     std::span<const StockMaterialShaderModules> shader_modules{};
     std::span<const MaterialBindingOverrides> overrides_by_material{};
+    // When enabled, resolve the source-evidenced F4 state at this facade
+    // boundary. The resolver's complete material table is merged after any
+    // caller-provided material overrides.
+    bool evaluate_damage_preview = false;
+    std::optional<bool> damage_broken_visible;
     PipelineRenderTargets targets{};
     bool wireframe = false;
     StaticSceneTextureAuthority texture_authority =
@@ -48,6 +56,8 @@ struct StockSceneExecutionResult {
     RenderPlan render_plan;
     std::vector<DrawPacketDiagnostic> packet_diagnostics;
     std::vector<DrawPacketUnsupportedEffect> packet_unsupported_effects;
+    // Retain the bounded F4 audit, including diagnostics, when requested.
+    std::optional<DamagePreviewResult> damage_preview;
     std::unique_ptr<StaticSceneResources> resources;
 
     [[nodiscard]] bool ok() const noexcept {

@@ -49,7 +49,7 @@ void clear_output(DamagePreviewResult& result) {
     result.selected_roots.clear();
     result.affected_glass_materials.clear();
     result.damage_zone_materials.clear();
-    result.exact_zero_dirt_materials.clear();
+    result.executable_zero_dirt_materials.clear();
     result.activity_overrides.clear();
     result.material_overrides.clear();
     result.diagnostics.clear();
@@ -393,20 +393,30 @@ DamagePreviewResult resolve_damage_preview(
             const MaterialBinding& binding = effective_materials[index];
             const bool exact_shader = binding.shader == "ksPerPixelMultiMap_damage_dirt";
             const float dirt = material_scalar(binding, "dirt", 0.0F);
+            const bool diffuse_texture = executable_texture(binding, "txDiffuse");
+            const bool normal_texture = executable_texture(binding, "txNormal");
+            const bool maps_texture = executable_texture(binding, "txMaps");
             const bool damage_texture = executable_texture(binding, "txDamage");
             const bool damage_mask = executable_texture(binding, "txDamageMask");
-            if (exact_shader && dirt == 0.0F && damage_texture && damage_mask) {
-                result.exact_zero_dirt_materials.push_back(material_id);
+            const bool exact_resources = diffuse_texture && normal_texture && maps_texture &&
+                                         damage_texture && damage_mask;
+            const KsPerPixelMaterialResolveResult executable =
+                resolve_ks_per_pixel_material_constants(binding);
+            if (exact_shader && binding.status == MaterialBindingStatus::complete &&
+                dirt == 0.0F && exact_resources && executable.ok()) {
+                result.executable_zero_dirt_materials.push_back(material_id);
             } else if (exact_shader && dirt != 0.0F) {
                 if (!add_diagnostic(result, limits, output_bytes,
                                     "DAMAGE_PREVIEW_DIRT_UNSUPPORTED",
-                                    "The recovered exact damage preview supports only dirt zero",
+                                    "The recovered bounded damage stage supports only dirt zero",
                                     apex::scene::invalid_node_id, material_id))
                     return result;
-            } else if (exact_shader && (!damage_texture || !damage_mask)) {
+            } else if (exact_shader &&
+                       (binding.status != MaterialBindingStatus::complete ||
+                        !exact_resources || !executable.ok())) {
                 if (!add_diagnostic(result, limits, output_bytes,
-                                    "DAMAGE_PREVIEW_TEXTURE_MISSING",
-                                    "The exact damage material is missing an executable damage texture",
+                                    "DAMAGE_PREVIEW_STAGE_UNSUPPORTED",
+                                    "The bounded damage stage cannot execute this material resource or property set",
                                     apex::scene::invalid_node_id, material_id))
                     return result;
             }
@@ -466,7 +476,7 @@ DamagePreviewResult resolve_damage_preview(
     const std::uint64_t vector_bytes =
         result.activity_overrides.size() * sizeof(apex::scene::NodeActivityOverride) +
         (result.affected_glass_materials.size() + result.damage_zone_materials.size() +
-         result.exact_zero_dirt_materials.size()) * sizeof(apex::scene::MaterialId);
+         result.executable_zero_dirt_materials.size()) * sizeof(apex::scene::MaterialId);
     if (!charge(vector_bytes, output_bytes, limits.max_output_bytes)) {
         fail(result, "DAMAGE_PREVIEW_OUTPUT_LIMIT",
              "Damage-preview state output exceeds its byte limit", true);

@@ -222,6 +222,13 @@ StockMaterialExecutionRequest request_for(Fixture& fixture) {
 
 void test_success_and_a2c() {
     FakeDevice device;
+    const PresentationCapabilities default_presentation =
+        device.presentation_capabilities();
+    require(default_presentation.offscreen &&
+                !default_presentation.swapchain_api_available &&
+                !default_presentation.native_surface_api_available &&
+                !default_presentation.headless_surface_api_available,
+            "neutral fake devices report only offscreen capability by default");
     Fixture base_fixture = fixture("ksPerPixelMultiMap");
     const auto base_result =
         prepare_stock_material_execution(device, request_for(base_fixture));

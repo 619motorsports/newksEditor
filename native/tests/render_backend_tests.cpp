@@ -375,6 +375,10 @@ void contract_names() {
     require(std::string(apex::render::shader_module_status_name(apex::render::ShaderModuleStatus::unsupported)) ==
                 "unsupported",
             "shader unsupported status name");
+    require(std::string(apex::render::presentation_target_status_name(
+                apex::render::PresentationTargetStatus::invalid_description)) ==
+                "invalid_description",
+            "presentation invalid-description status name");
 }
 
 void contract_options() {
@@ -393,6 +397,51 @@ void contract_options() {
     options.prefer_software = true;
     require(enumerate_adapters(Backend::Vulkan, options).status == DeviceStatus::invalid_options,
             "contradictory software adapter options");
+}
+
+void contract_presentation_target() {
+    using namespace apex::render;
+    Diagnostic diagnostic;
+    PresentationTargetDescription description;
+    require(validate_presentation_target_description(description, diagnostic) ==
+                PresentationTargetStatus::invalid_description &&
+                diagnostic.code == "presentation_dimensions_invalid",
+            "zero-sized presentation target rejected");
+
+    description.width = 640U;
+    description.height = 480U;
+    for (const TextureFormat format : {TextureFormat::rgba8_unorm,
+                                       TextureFormat::rgba8_srgb,
+                                       TextureFormat::bgra8_unorm,
+                                       TextureFormat::bgra8_srgb}) {
+        description.format = format;
+        require(validate_presentation_target_description(description, diagnostic) ==
+                    PresentationTargetStatus::ready && diagnostic.code.empty(),
+                "portable presentation format accepted");
+    }
+
+    description.width = max_texture_dimension + 1U;
+    require(validate_presentation_target_description(description, diagnostic) ==
+                PresentationTargetStatus::invalid_description &&
+                diagnostic.code == "presentation_dimension_limit",
+            "oversized presentation target rejected");
+    description.width = 640U;
+    description.image_count = 1U;
+    require(validate_presentation_target_description(description, diagnostic) ==
+                PresentationTargetStatus::invalid_description &&
+                diagnostic.code == "presentation_image_count_invalid",
+            "single-buffered presentation target rejected");
+    description.image_count = max_presentation_image_count + 1U;
+    require(validate_presentation_target_description(description, diagnostic) ==
+                PresentationTargetStatus::invalid_description &&
+                diagnostic.code == "presentation_image_count_invalid",
+            "over-budget presentation image count rejected");
+    description.image_count = 2U;
+    description.format = TextureFormat::bc1_srgb;
+    require(validate_presentation_target_description(description, diagnostic) ==
+                PresentationTargetStatus::unsupported &&
+                diagnostic.code == "presentation_format_unsupported",
+            "block-compressed presentation target rejected");
 }
 
 class ContractBuffer final : public apex::render::Buffer {
@@ -918,6 +967,16 @@ bool contract_backend(apex::render::Backend backend) {
     require(device.device != nullptr, "created device");
     require(device.device->info().backend == backend, "created backend");
     require(!device.device->info().name.empty(), "device name");
+    const PresentationCapabilities presentation =
+        device.device->presentation_capabilities();
+    require(presentation.offscreen,
+            "created backends retain offscreen rendering capability");
+    if (backend == Backend::D3D12) {
+        require(presentation.swapchain_api_available &&
+                    presentation.native_surface_api_available &&
+                    !presentation.headless_surface_api_available,
+                "D3D12 reports only its initialized native presentation prerequisites");
+    }
     const SamplerResult sampler = device.device->create_sampler(SamplerDescription{});
     require(sampler.ok(), "real backend sampler creation");
     const auto minimal_spirv = minimal_spirv_fixture();
@@ -3464,6 +3523,7 @@ int main() {
     try {
         contract_names();
         contract_options();
+        contract_presentation_target();
         contract_buffer_limits();
         contract_texture_limits();
         contract_texture_readback_limits();

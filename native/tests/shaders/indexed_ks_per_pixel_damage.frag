@@ -1,8 +1,9 @@
 #version 450
 
-// Source authority: installed ksPerPixelMultiMap_damage_dirt_ps.fxo,
+// Source authority: installed ksPerPixelMultiMap_damage_dirt.shader container,
 // SHA-256 76d6a625c34e386641667a44a0433c6d1dc2af5be9e4a8ebbd6a886181f97dc8.
-// This fixture implements only the recovered exact dirt == 0 branch.
+// Its pixel FXO has SHA-256 ef7835b917eddf0b6e233d05ef8d66126e20bf4ca828b429b742dca3552d7743.
+// This fixture implements only the recovered bounded dirt == 0 damage stage.
 layout(location = 0) in vec3 fragmentNormal;
 layout(location = 1) in vec3 fragmentTangent;
 layout(location = 2) in vec3 fragmentBitangent;

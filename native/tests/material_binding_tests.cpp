@@ -129,7 +129,7 @@ void unknown_and_bind_point_references() {
             "KN5 shader bind point is not texture-table indexed");
 }
 
-void resolves_exact_dirt_zero_damage_variant() {
+void resolves_bounded_dirt_zero_damage_variant() {
     Kn5Material material;
     material.shader = "ksPerPixelMultiMap_damage_dirt";
     material.properties = {
@@ -150,7 +150,37 @@ void resolves_exact_dirt_zero_damage_variant() {
     require(binding.status == MaterialBindingStatus::complete && resolved.ok() &&
                 resolved.constants.damage_zones ==
                     std::array<float, 4>{1.0F, 0.5F, 0.25F, 0.0F},
-            "damage_dirt resolves the exact authored dirt-zero constants");
+            "damage_dirt resolves the authored dirt-zero stage constants");
+
+    material.properties.push_back({"useDetail", 1.0F, {}, {}, {}});
+    const auto detail = resolve_ks_per_pixel_material_constants(
+        build_material_binding(material, 6U));
+    require(!detail.ok() &&
+                detail.status == KsPerPixelMaterialResolveStatus::unsupported &&
+                detail.diagnostic.code == "ks_per_pixel_damage_detail_unsupported",
+            "damage_dirt does not silently ignore the stock detail branch");
+    material.properties.pop_back();
+
+    material.properties.push_back({"sunSpecular", 12.0F, {}, {}, {}});
+    const auto sun_specular = resolve_ks_per_pixel_material_constants(
+        build_material_binding(material, 6U));
+    require(!sun_specular.ok() &&
+                sun_specular.status == KsPerPixelMaterialResolveStatus::unsupported &&
+                sun_specular.diagnostic.code ==
+                    "ks_per_pixel_damage_sun_specular_unsupported",
+            "damage_dirt does not silently ignore the stock sun-specular branch");
+
+    MaterialBinding malformed_sun_specular = build_material_binding(material, 6U);
+    malformed_sun_specular.properties.at("sunspecular").scalar =
+        std::numeric_limits<float>::quiet_NaN();
+    const auto non_finite_sun_specular = resolve_ks_per_pixel_material_constants(
+        malformed_sun_specular);
+    require(!non_finite_sun_specular.ok() &&
+                non_finite_sun_specular.status ==
+                    KsPerPixelMaterialResolveStatus::invalid_input &&
+                non_finite_sun_specular.diagnostic.code == "non_finite_constants",
+            "damage_dirt rejects a non-finite sun-specular value");
+    material.properties.pop_back();
 
     material.properties[1].value = 0.25F;
     const auto dirty = resolve_ks_per_pixel_material_constants(
@@ -702,7 +732,7 @@ int main() {
         resolves_bounded_base_multimap_families();
         resolves_bounded_nmdetail_stack();
         resolves_bounded_at_nmdetail_stack();
-        resolves_exact_dirt_zero_damage_variant();
+        resolves_bounded_dirt_zero_damage_variant();
         std::cout << "material binding tests passed\n";
         return 0;
     } catch (const std::exception& error) {

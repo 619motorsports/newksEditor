@@ -62,7 +62,9 @@ struct DamagePreviewResult {
     std::vector<apex::scene::NodeId> selected_roots;
     std::vector<apex::scene::MaterialId> affected_glass_materials;
     std::vector<apex::scene::MaterialId> damage_zone_materials;
-    std::vector<apex::scene::MaterialId> exact_zero_dirt_materials;
+    // Materials executable by the bounded dirt-zero stage. This does not
+    // claim full stock-shader parity for lighting, detail, or reflections.
+    std::vector<apex::scene::MaterialId> executable_zero_dirt_materials;
     std::vector<apex::scene::NodeActivityOverride> activity_overrides;
     // Complete material-indexed table, including the supplied base overrides.
     std::vector<MaterialBindingOverrides> material_overrides;

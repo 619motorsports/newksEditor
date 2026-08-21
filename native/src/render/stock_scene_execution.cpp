@@ -47,6 +47,59 @@ bool add_product(std::initializer_list<std::size_t> factors, std::size_t element
     return add_bytes(product, total, limit);
 }
 
+bool merge_damage_activity_overrides(
+    const apex::scene::SceneSnapshot& scene,
+    std::span<const apex::scene::NodeActivityOverride> caller,
+    std::span<const apex::scene::NodeActivityOverride> damage,
+    std::vector<apex::scene::NodeActivityOverride>& merged,
+    Diagnostic& diagnostic) {
+    const std::size_t node_count = scene.nodes.size();
+    if (caller.size() > node_count || damage.size() > node_count ||
+        caller.size() > node_count - std::min(damage.size(), node_count)) {
+        diagnostic = {"stock_scene_damage_activity_limit",
+                      "Merged damage activity overrides exceed the scene node limit"};
+        return false;
+    }
+
+    // Keep one bounded origin byte per scene node. This makes conflicts
+    // deterministic and avoids an unbounded associative container for input
+    // that originated in a parsed model or caller-provided preview state.
+    std::vector<std::uint8_t> origins(node_count, 0U);
+    merged.reserve(caller.size() + damage.size());
+    const auto append = [&](std::span<const apex::scene::NodeActivityOverride> values,
+                            bool from_damage) {
+        for (const apex::scene::NodeActivityOverride& value : values) {
+            if (value.node == apex::scene::invalid_node_id ||
+                static_cast<std::size_t>(value.node) >= node_count) {
+                diagnostic = {from_damage ? "stock_scene_damage_activity_invalid"
+                                          : "stock_scene_activity_override_invalid",
+                              from_damage
+                                  ? "Damage preview activity references an unknown scene node"
+                                  : "An activity override references an unknown scene node"};
+                return false;
+            }
+            const std::size_t index = static_cast<std::size_t>(value.node);
+            if (origins[index] != 0U) {
+                if (from_damage && origins[index] == 1U) {
+                    diagnostic = {"stock_scene_damage_activity_conflict",
+                                  "Caller activity state conflicts with native damage activity"};
+                } else if (from_damage) {
+                    diagnostic = {"stock_scene_damage_activity_duplicate",
+                                  "Damage preview produced duplicate activity overrides"};
+                } else {
+                    diagnostic = {"stock_scene_activity_override_duplicate",
+                                  "Activity overrides contain a duplicate scene node"};
+                }
+                return false;
+            }
+            origins[index] = from_damage ? 2U : 1U;
+            merged.push_back(value);
+        }
+        return true;
+    };
+    return append(caller, false) && append(damage, true);
+}
+
 bool preplan_within_limit(const apex::scene::SceneSnapshot& scene,
                           std::uint64_t limit, Diagnostic& diagnostic) {
     if (limit == 0U) {
@@ -393,6 +446,56 @@ StockSceneExecutionResult prepare_stock_scene_execution(
                         "Draw-packet and pipeline wireframe options must agree");
 
         StockSceneExecutionResult result;
+        std::vector<apex::scene::NodeActivityOverride> merged_damage_activity;
+        RenderPlanOptions render_options = request.render;
+        std::span<const MaterialBindingOverrides> material_overrides =
+            request.overrides_by_material;
+        if (request.evaluate_damage_preview) {
+            DamagePreviewRequest damage_request;
+            damage_request.model = request.model;
+            damage_request.scene = request.scene;
+            damage_request.broken_visible = request.damage_broken_visible;
+            damage_request.base_material_overrides = request.overrides_by_material;
+            DamagePreviewResult damage_result =
+                resolve_damage_preview(damage_request, request.limits.damage);
+            result.damage_preview = std::move(damage_result);
+            if (!result.damage_preview->ok()) {
+                const DamagePreviewDiagnostic* error = nullptr;
+                for (const DamagePreviewDiagnostic& diagnostic :
+                     result.damage_preview->diagnostics) {
+                    if (diagnostic.severity == DamagePreviewDiagnosticSeverity::error) {
+                        error = &diagnostic;
+                        break;
+                    }
+                }
+                result.status = result.damage_preview->limit_exceeded
+                                    ? StaticSceneResourceStatus::invalid_request
+                                    : StaticSceneResourceStatus::unsupported;
+                result.diagnostic = error != nullptr
+                                        ? Diagnostic{error->code, error->message}
+                                        : Diagnostic{
+                                              result.damage_preview->limit_exceeded
+                                                  ? "stock_scene_damage_preview_limit"
+                                                  : "stock_scene_damage_preview_unsupported",
+                                              result.damage_preview->limit_exceeded
+                                                  ? "Damage-preview preparation exceeded its configured limit"
+                                                  : "Damage-preview resolution is unsupported"};
+                return result;
+            }
+
+            Diagnostic activity_diagnostic;
+            if (!merge_damage_activity_overrides(
+                    *request.scene, request.render.activity_overrides,
+                    result.damage_preview->activity_overrides, merged_damage_activity,
+                    activity_diagnostic)) {
+                result.status = StaticSceneResourceStatus::invalid_request;
+                result.diagnostic = std::move(activity_diagnostic);
+                return result;
+            }
+            render_options.activity_overrides = merged_damage_activity;
+            material_overrides = result.damage_preview->material_overrides;
+        }
+
         Diagnostic preflight_diagnostic;
         if (!preplan_within_limit(*request.scene, request.limits.max_plan_bytes,
                                   preflight_diagnostic)) {
@@ -400,15 +503,15 @@ StockSceneExecutionResult prepare_stock_scene_execution(
             result.diagnostic = std::move(preflight_diagnostic);
             return result;
         }
-        if (!validate_render_options(*request.scene, request.render, preflight_diagnostic)) {
+        if (!validate_render_options(*request.scene, render_options, preflight_diagnostic)) {
             result.status = StaticSceneResourceStatus::invalid_request;
             result.diagnostic = std::move(preflight_diagnostic);
             return result;
         }
-        result.render_plan = build_render_plan(*request.scene, request.render);
+        result.render_plan = build_render_plan(*request.scene, render_options);
         result.render_plan.unsupported_effects.push_back({
             "stock_scene_snapshot_staged",
-            "Workspace LOD/FOV, CSP shader and resource changes, damage shader execution, and surface overlays remain outside this main-color handoff.",
+            "Workspace LOD/FOV, CSP shader and resource changes, and surface overlays remain outside this main-color handoff.",
         });
         if (result.render_plan.items.size() > request.limits.max_plan_items ||
             !plan_within_limit(result.render_plan, request.limits.max_plan_bytes)) {
@@ -440,7 +543,7 @@ StockSceneExecutionResult prepare_stock_scene_execution(
         material_request.scene = request.scene;
         material_request.packets = packet_result.packets;
         material_request.shader_modules = request.shader_modules;
-        material_request.overrides_by_material = request.overrides_by_material;
+        material_request.overrides_by_material = material_overrides;
         material_request.targets = request.targets;
         material_request.wireframe = request.wireframe;
         material_request.texture_authority = request.texture_authority;

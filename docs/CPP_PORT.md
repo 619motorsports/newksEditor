@@ -90,7 +90,11 @@ remains unchanged and feature-complete.
   portable security checks, and a native inspection CLI are implemented. The
   port has a backend-neutral device API. Vulkan and D3D12 implement headless
   devices, buffers, 2D textures, samplers, and shader modules. Both backends
-  also implement bounded synchronous RGBA8/BGRA8 texture clear/readback. Each
+  report presentation prerequisites through the neutral API. Vulkan reports
+  surface and swapchain extensions. D3D12 reports the DXGI factory, device,
+  and queue prerequisite. Neither backend creates a surface or swapchain.
+  Both backends implement bounded synchronous RGBA8/BGRA8 texture
+  clear/readback. Each
   backend validates a pipeline and executes fixed and indexed R16 mesh draws
   with readback. Static draws use immutable vertex and index buffers. Skinned
   draws use mutable vertex buffers and immutable index buffers. A bounded
@@ -203,7 +207,10 @@ remains unchanged and feature-complete.
   It identifies the recovered dirt-zero material branch. The material handoff
   executes this branch with explicit SPIR-V or DXIL modules. It binds
   `txDamage` at 12/13 and `txDamageMask` at 14/15. The handoff rejects nonzero
-  dirt. The caller must still resolve surface overlays. A
+  dirt. It also rejects active detail, sun-specular, Fresnel, and reflection
+  branches. The stock-scene facade can resolve this F4 state before allocation.
+  It merges node activity and the complete material table into the handoff.
+  The caller must still resolve surface overlays. A
   bounded workspace adapter maps metadata to merged scene roots. It attaches
   file and auxiliary labels without partial mutation. A bounded resolver implements
   half-open workspace LOD ranges and the production FOV formula. The caller

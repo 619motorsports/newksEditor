@@ -522,7 +522,7 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
         if (damage_zones == nullptr || dirt == nullptr) {
             result.status = KsPerPixelMaterialResolveStatus::unsupported;
             result.diagnostic = {"ks_per_pixel_damage_properties_missing", "damageZones",
-                                 "The exact damage branch requires authored damageZones and dirt properties"};
+                                 "The bounded damage stage requires authored damageZones and dirt properties"};
             return result;
         }
         if (!std::isfinite(dirt->scalar)) {
@@ -534,7 +534,7 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
         if (dirt->scalar != 0.0F) {
             result.status = KsPerPixelMaterialResolveStatus::unsupported;
             result.diagnostic = {"ks_per_pixel_damage_dirt_unsupported", "dirt",
-                                 "The recovered exact damage branch supports dirt zero only"};
+                                 "The recovered bounded damage stage supports dirt zero only"};
             return result;
         }
         result.constants.damage_zones = damage_zones->vector4;
@@ -615,6 +615,28 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
                              "The bounded eight-binding ksPerPixelMultiMap path does not execute the generic detail stack"};
         return result;
     }
+    if (damage_dirt_variant && result.constants.detail[0] > 0.5F) {
+        result.status = KsPerPixelMaterialResolveStatus::unsupported;
+        result.diagnostic = {"ks_per_pixel_damage_detail_unsupported", "useDetail",
+                             "The bounded damage stage does not execute the stock detail branch"};
+        return result;
+    }
+    if (damage_dirt_variant) {
+        const float sun_specular = material_scalar(binding, "sunSpecular", 0.0F);
+        if (!std::isfinite(sun_specular)) {
+            result.status = KsPerPixelMaterialResolveStatus::invalid_input;
+            result.diagnostic = {"non_finite_constants", "sunSpecular",
+                                 "The resolved sun-specular value must be finite"};
+            return result;
+        }
+        if (sun_specular != 0.0F) {
+            result.status = KsPerPixelMaterialResolveStatus::unsupported;
+            result.diagnostic = {"ks_per_pixel_damage_sun_specular_unsupported",
+                                 "sunSpecular",
+                                 "The bounded damage stage does not execute the stock sun-specular branch"};
+            return result;
+        }
+    }
 
     if (detail_stack_variant && binding.status != MaterialBindingStatus::complete) {
         result.status = KsPerPixelMaterialResolveStatus::unsupported;
@@ -631,7 +653,7 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
     if (damage_dirt_variant && binding.status != MaterialBindingStatus::complete) {
         result.status = KsPerPixelMaterialResolveStatus::unsupported;
         result.diagnostic = {"ks_per_pixel_damage_resources_incomplete", "resources",
-                             "The exact damage branch requires txDiffuse, txNormal, txMaps, txDamage, and txDamageMask"};
+                             "The bounded damage stage requires txDiffuse, txNormal, txMaps, txDamage, and txDamageMask"};
         return result;
     }
 

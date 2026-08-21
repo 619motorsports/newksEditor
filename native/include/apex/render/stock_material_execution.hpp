@@ -68,9 +68,10 @@ struct StockMaterialExecutionResult {
 // static scene. Supported shader families are
 // ksPerPixel, ksPerPixelNM, ksPerPixelMultiMap,
 // ksPerPixelMultiMap_AT, ksPerPixelMultiMap_NMDetail, and
-// ksPerPixelMultiMap_AT_NMDetail. The dirt-zero
-// ksPerPixelMultiMap_damage_dirt branch is also supported. Both AT profiles
-// retain their A2C state.
+// ksPerPixelMultiMap_AT_NMDetail. A bounded dirt-zero stage from
+// ksPerPixelMultiMap_damage_dirt is also supported. This stage does not claim
+// parity for stock detail, sun-specular, Fresnel, or reflection branches. Both
+// AT profiles retain their A2C state.
 [[nodiscard]] StockMaterialExecutionResult prepare_stock_material_execution(
     Device& device, const StockMaterialExecutionRequest& request);
 

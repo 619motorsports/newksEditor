@@ -67,7 +67,11 @@ apex::formats::Kn5Material damage_material(std::string name, bool glass) {
     material.shader = "ksPerPixelMultiMap_damage_dirt";
     material.properties.push_back(scalar("damageZones", 0.0F));
     material.properties.push_back(scalar("dirt", 0.0F));
+    material.properties.push_back(scalar("fresnelMaxLevel", 0.0F));
     if (glass) material.properties.push_back(scalar("glassDamage", 0.25F));
+    material.resources.push_back({"txDiffuse", 0U, "diffuse.dds"});
+    material.resources.push_back({"txNormal", 1U, "normal.dds"});
+    material.resources.push_back({"txMaps", 2U, "maps.dds"});
     material.resources.push_back({"txDamage", 4U, "damage.dds"});
     material.resources.push_back({"txDamageMask", 21U, "damage_mask.dds"});
     return material;
@@ -156,8 +160,8 @@ void resolves_exact_numbered_groups() {
     require(result.activity_overrides.empty(),
             "authored audit should not replace node activity");
     require(result.damage_zone_materials.size() == 3U &&
-                result.exact_zero_dirt_materials.size() == 3U,
-            "exact dirt-zero material classification should require source properties and textures");
+                result.executable_zero_dirt_materials.size() == 3U,
+            "bounded dirt-zero material classification should require supported properties and textures");
 }
 
 void resolves_transient_writes_without_mutation() {
@@ -220,41 +224,84 @@ void resolves_transient_writes_without_mutation() {
             "an inactive non-selected ancestor should remain inactive");
 }
 
-void classifies_effective_material_state() {
+void rejects_unsupported_damage_stage_inputs() {
     Fixture value = fixture();
     value.model.materials[2U].shader = "ksPerPixel";
     value.scene.materials[2U].shader = "ksPerPixel";
     value.model.materials[2U].resources.clear();
-    std::vector<apex::render::MaterialBindingOverrides> base(value.model.materials.size());
-    base[2U].shader = "ksPerPixelMultiMap_damage_dirt";
-    base[2U].properties.emplace(
+    std::vector<apex::render::MaterialBindingOverrides> complete(
+        value.model.materials.size());
+    complete[2U].shader = "ksPerPixelMultiMap_damage_dirt";
+    complete[2U].properties.emplace(
         "dirt", apex::render::MaterialPropertyOverride::scalar_value(-0.0F));
-    base[2U].resources.emplace(
-        "txDamage", apex::render::MaterialTextureOverride{4U, "override_damage.dds", {}, {}});
-    base[2U].resources.emplace(
-        "txDamageMask", apex::render::MaterialTextureOverride{21U, "override_mask.dds", {}, {}});
-    auto exact = apex::render::resolve_damage_preview(
-        {&value.model, &value.scene, true, base});
-    require(exact.ok() &&
-                std::find(exact.exact_zero_dirt_materials.begin(),
-                          exact.exact_zero_dirt_materials.end(), 2U) !=
-                    exact.exact_zero_dirt_materials.end(),
-            "effective CSP shader, zero dirt, and resources should classify the exact branch");
+    complete[2U].resources = {
+        {"txDiffuse", {0U, "override_diffuse.dds", {}, {}}},
+        {"txNormal", {1U, "override_normal.dds", {}, {}}},
+        {"txMaps", {2U, "override_maps.dds", {}, {}}},
+        {"txDamage", {4U, "override_damage.dds", {}, {}}},
+        {"txDamageMask", {21U, "override_mask.dds", {}, {}}},
+    };
 
-    base[2U].properties["dirt"] =
-        apex::render::MaterialPropertyOverride::scalar_value(0.5F);
-    const auto staged = apex::render::resolve_damage_preview(
-        {&value.model, &value.scene, true, base});
-    require(staged.ok() &&
-                std::find(staged.exact_zero_dirt_materials.begin(),
-                          staged.exact_zero_dirt_materials.end(), 2U) ==
-                    staged.exact_zero_dirt_materials.end() &&
-                std::any_of(staged.diagnostics.begin(), staged.diagnostics.end(),
-                            [](const auto& item) {
-                                return item.code == "DAMAGE_PREVIEW_DIRT_UNSUPPORTED" &&
-                                       item.material == 2U;
-                            }),
-            "nonzero dirt should remain explicitly unsupported");
+    const auto executable = apex::render::resolve_damage_preview(
+        {&value.model, &value.scene, true, complete});
+    require(executable.ok() &&
+                std::find(executable.executable_zero_dirt_materials.begin(),
+                          executable.executable_zero_dirt_materials.end(), 2U) !=
+                    executable.executable_zero_dirt_materials.end(),
+            "complete effective CSP damage resources should classify the bounded stage");
+
+    for (const std::string_view missing_slot : {"txDiffuse", "txNormal", "txMaps"}) {
+        auto missing = complete;
+        auto& resources = missing[2U].resources;
+        const auto resource = resources.find(std::string(missing_slot));
+        require(resource != resources.end(), "test fixture must contain each required base resource");
+        resources.erase(resource);
+        const auto rejected = apex::render::resolve_damage_preview(
+            {&value.model, &value.scene, true, missing});
+        require(rejected.ok() &&
+                    std::find(rejected.executable_zero_dirt_materials.begin(),
+                              rejected.executable_zero_dirt_materials.end(), 2U) ==
+                        rejected.executable_zero_dirt_materials.end() &&
+                    std::any_of(rejected.diagnostics.begin(), rejected.diagnostics.end(),
+                                [](const auto& item) {
+                                    return item.code == "DAMAGE_PREVIEW_STAGE_UNSUPPORTED" &&
+                                           item.material == 2U;
+                                }),
+                "each missing base damage resource must reject bounded execution");
+    }
+
+    auto with_dust = complete;
+    with_dust[2U].resources.emplace(
+        "txDust", apex::render::MaterialTextureOverride{5U, "override_dust.dds", {}, {}});
+    const auto dust = apex::render::resolve_damage_preview(
+        {&value.model, &value.scene, true, with_dust});
+    require(dust.ok() &&
+                std::find(dust.executable_zero_dirt_materials.begin(),
+                          dust.executable_zero_dirt_materials.end(), 2U) !=
+                    dust.executable_zero_dirt_materials.end(),
+            "optional txDust must not be required for the bounded dirt-zero stage");
+
+    for (const std::pair<std::string, float>& unsupported : {
+             std::pair<std::string, float>{"useDetail", 1.0F},
+             std::pair<std::string, float>{"sunSpecular", 12.0F}}) {
+        auto properties = complete;
+        properties[2U].properties.emplace(
+            unsupported.first,
+            apex::render::MaterialPropertyOverride::scalar_value(unsupported.second));
+        const auto rejected = apex::render::resolve_damage_preview(
+            {&value.model, &value.scene, true, properties});
+        require(rejected.ok() &&
+                    std::find(rejected.executable_zero_dirt_materials.begin(),
+                              rejected.executable_zero_dirt_materials.end(), 2U) ==
+                        rejected.executable_zero_dirt_materials.end() &&
+                    std::any_of(rejected.diagnostics.begin(),
+                                rejected.diagnostics.end(), [](const auto& item) {
+                                    return item.code ==
+                                               "DAMAGE_PREVIEW_STAGE_UNSUPPORTED" &&
+                                           item.material == 2U;
+                                }),
+                "unsupported stock branches must not be classified as executable");
+    }
 }
 
 void rejects_malformed_and_bounded_inputs() {
@@ -348,7 +395,7 @@ int main() {
     try {
         resolves_exact_numbered_groups();
         resolves_transient_writes_without_mutation();
-        classifies_effective_material_state();
+        rejects_unsupported_damage_stage_inputs();
         rejects_malformed_and_bounded_inputs();
         std::cout << "Damage-preview tests passed\n";
         return 0;

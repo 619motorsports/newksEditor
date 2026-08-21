@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -33,8 +34,9 @@ class FakeDevice final : public Device {
 public:
     const DeviceInfo& info() const noexcept override { return info_; }
     BufferResult create_buffer(const BufferDescription& description,
-                               std::span<const std::byte>) override {
+                               std::span<const std::byte> initial_data) override {
         ++buffer_calls;
+        initial_buffers.emplace_back(initial_data.begin(), initial_data.end());
         return {BufferStatus::ready, {}, std::make_unique<FakeBuffer>(description)};
     }
     BufferUpdateResult update_buffer(Buffer&, std::uint64_t,
@@ -63,6 +65,7 @@ public:
     void wait_idle() noexcept override {}
 
     std::size_t buffer_calls = 0U;
+    std::vector<std::vector<std::byte>> initial_buffers;
 private:
     DeviceInfo info_{Backend::Vulkan, "fake", "unit", 1U, 0U, 0U, 0U, 0U, true};
 };
@@ -144,6 +147,36 @@ Fixture fixture() {
     result.modules = {{PipelineShaderStage::vertex, PipelineShaderFormat::spirv, bytes},
                       {PipelineShaderStage::fragment, PipelineShaderFormat::spirv, bytes}};
     result.module_set = {StockMaterialShaderKeyKind::shader_family, "ksPerPixel", result.modules};
+    return result;
+}
+
+Fixture damage_fixture() {
+    Fixture result = fixture();
+    auto& material = result.model.materials.front();
+    material.shader = "ksPerPixelMultiMap_damage_dirt";
+    material.properties = {
+        {"damageZones", 0.0F, {}, {}, {0.0F, 0.0F, 0.0F, 0.0F}},
+        {"dirt", 0.0F, {}, {}, {}},
+        {"glassDamage", 0.25F, {}, {}, {}},
+        {"fresnelMaxLevel", 0.0F, {}, {}, {}},
+    };
+    material.resources = {
+        {"txDiffuse", 0U, "diffuse"},
+        {"txNormal", 1U, "normal"},
+        {"txMaps", 2U, "maps"},
+        {"txDamage", 4U, "damage"},
+        {"txDamageMask", 21U, "damage_mask"},
+    };
+    result.model.textures.clear();
+    for (const std::string name : {"diffuse", "normal", "maps", "damage",
+                                   "damage_mask"})
+        result.model.textures.push_back({true, name, 4U, {}, std::nullopt});
+    result.model.root.children.front().name = "DAMAGE_GLASS_FRONT_1";
+    result.model.root.children.front().active = false;
+    result.scene.nodes[1U].name = "DAMAGE_GLASS_FRONT_1";
+    result.scene.nodes[1U].active = false;
+    result.scene.materials.front().shader = material.shader;
+    result.module_set.key = material.shader;
     return result;
 }
 
@@ -259,6 +292,84 @@ void test_csp_node_state_reaches_per_packet_pipelines() {
             "CSP cast-shadow state should reach facade shadow evidence");
     require(result.resources->unique_pipeline_count() == 2U,
             "shared materials should retain distinct per-node transparency pipelines");
+}
+
+void test_damage_preview_reaches_scene_and_material_handoff() {
+    Fixture broken_fixture = damage_fixture();
+    FakeDevice broken_device;
+    auto broken_request = request_for(broken_fixture);
+    broken_request.evaluate_damage_preview = true;
+    broken_request.damage_broken_visible = true;
+    const auto broken =
+        prepare_stock_scene_execution(broken_device, broken_request);
+    require(broken.ok() && broken.damage_preview.has_value() &&
+                broken.damage_preview->executable_zero_dirt_materials ==
+                    std::vector<apex::scene::MaterialId>{0U},
+            "facade must retain the executable dirt-zero damage audit");
+    require(broken.render_plan.items.size() == 5U,
+            "broken F4 state must activate the selected damage root");
+    bool found_broken_zones = false;
+    for (const auto& bytes : broken_device.initial_buffers) {
+        if (bytes.size() < sizeof(KsPerPixelMaterialConstants)) continue;
+        KsPerPixelMaterialConstants constants{};
+        std::memcpy(&constants, bytes.data(), sizeof(constants));
+        found_broken_zones = found_broken_zones ||
+                             constants.damage_zones ==
+                                 std::array<float, 4>{1.0F, 1.0F, 1.0F, 1.0F};
+    }
+    require(found_broken_zones,
+            "broken F4 damage zones must reach the owned material record");
+
+    Fixture intact_fixture = damage_fixture();
+    FakeDevice intact_device;
+    auto intact_request = request_for(intact_fixture);
+    intact_request.evaluate_damage_preview = true;
+    intact_request.damage_broken_visible = false;
+    const auto intact =
+        prepare_stock_scene_execution(intact_device, intact_request);
+    require(intact.ok() && intact.render_plan.items.size() == 4U,
+            "intact F4 state must keep the selected damage root inactive");
+    bool found_intact_zones = false;
+    for (const auto& bytes : intact_device.initial_buffers) {
+        if (bytes.size() < sizeof(KsPerPixelMaterialConstants)) continue;
+        KsPerPixelMaterialConstants constants{};
+        std::memcpy(&constants, bytes.data(), sizeof(constants));
+        found_intact_zones = found_intact_zones ||
+                             constants.damage_zones ==
+                                 std::array<float, 4>{0.0F, 0.0F, 0.0F, 0.0F};
+    }
+    require(found_intact_zones,
+            "intact F4 damage zones must reach the owned material record");
+
+    Fixture conflict_fixture = damage_fixture();
+    FakeDevice conflict_device;
+    auto conflict_request = request_for(conflict_fixture);
+    conflict_request.evaluate_damage_preview = true;
+    conflict_request.damage_broken_visible = true;
+    const std::array<apex::scene::NodeActivityOverride, 1U> caller_activity = {{
+        {conflict_fixture.scene.nodes[1U].id, false},
+    }};
+    conflict_request.render.activity_overrides = caller_activity;
+    const auto conflict =
+        prepare_stock_scene_execution(conflict_device, conflict_request);
+    require(conflict.status == StaticSceneResourceStatus::invalid_request &&
+                conflict.diagnostic.code == "stock_scene_damage_activity_conflict" &&
+                conflict_device.buffer_calls == 0U,
+            "caller and F4 activity conflicts must fail before backend allocation");
+
+    Fixture limited_fixture = damage_fixture();
+    FakeDevice limited_device;
+    auto limited_request = request_for(limited_fixture);
+    limited_request.evaluate_damage_preview = true;
+    limited_request.damage_broken_visible = true;
+    limited_request.limits.damage.max_output_bytes = 1U;
+    const auto limited =
+        prepare_stock_scene_execution(limited_device, limited_request);
+    require(limited.status == StaticSceneResourceStatus::invalid_request &&
+                limited.damage_preview.has_value() &&
+                limited.damage_preview->limit_exceeded &&
+                limited_device.buffer_calls == 0U,
+            "bounded damage resolution must fail before backend allocation");
 }
 
 void test_preflight_and_missing_modules() {
@@ -422,6 +533,7 @@ int main() {
         test_success_and_plan_evidence();
         test_resolved_subtree_filter_and_isolation_reach_facade();
         test_csp_node_state_reaches_per_packet_pipelines();
+        test_damage_preview_reaches_scene_and_material_handoff();
         test_preflight_and_missing_modules();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
