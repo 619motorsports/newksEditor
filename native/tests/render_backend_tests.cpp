@@ -1,5 +1,8 @@
+#include "apex/assets/asset_source.hpp"
+#include "apex/formats/acd.hpp"
 #include "apex/render/device.hpp"
 #include "apex/render/draw_packet.hpp"
+#include "apex/render/external_texture_authority.hpp"
 #include "apex/render/skinned_mesh_upload.hpp"
 #include "apex/render/static_scene.hpp"
 #include "apex/render/static_mesh_upload.hpp"
@@ -269,6 +272,89 @@ std::vector<std::uint8_t> executable_ks_per_pixel_nm_detail_stack_fragment_shade
     for (std::size_t index = 0U; index < result.size(); ++index)
         result[index] = static_cast<std::uint8_t>((hex_digit(hex[index * 2U]) << 4U) |
                                                    hex_digit(hex[index * 2U + 1U]));
+    return result;
+}
+
+std::vector<std::uint8_t> executable_ks_per_pixel_damage_dust_fragment_shader() {
+    // Generated from tests/shaders/indexed_ks_per_pixel_damage_dust.frag with glslangValidator.
+    constexpr std::string_view hex =
+        "03022307000001000b000800f60000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000"
+        "010000000f000b0004000000040000006d61696e00000000160000002d000000360000003e000000a9000000db000000100003000400000007000000"
+        "470004000c0000002100000000000000470004000c000000220000000000000047000400100000002100000001000000470004001000000022000000"
+        "0000000047000400160000001e00000004000000470004001a0000002100000004000000470004001a0000002200000000000000470004001c000000"
+        "2100000005000000470004001c0000002200000000000000470004002d0000001e0000000100000047000400360000001e0000000200000047000400"
+        "3e0000001e000000000000004700040048000000210000000600000047000400480000002200000000000000470004004a0000002100000007000000"
+        "470004004a00000022000000000000004700040051000000210000000c00000047000400510000002200000000000000470004005300000021000000"
+        "0d000000470004005300000022000000000000004700040059000000210000000e00000047000400590000002200000000000000470004005b000000"
+        "210000000f000000470004005b0000002200000000000000470003006500000002000000480005006500000000000000230000000000000048000500"
+        "650000000100000023000000100000004800050065000000020000002300000020000000480005006500000003000000230000003000000048000500"
+        "650000000400000023000000400000004700040067000000210000000200000047000400670000002200000000000000470004009400000021000000"
+        "08000000470004009400000022000000000000004700040096000000210000000900000047000400960000002200000000000000470003009d000000"
+        "02000000480005009d000000000000002300000000000000480005009d000000010000002300000010000000480005009d0000000200000023000000"
+        "20000000480005009d000000030000002300000030000000470004009f0000002100000003000000470004009f000000220000000000000047000400"
+        "a90000001e0000000300000047000400db0000001e000000000000001300020002000000210003000300000002000000160003000600000020000000"
+        "17000400070000000600000004000000190009000a00000006000000010000000000000000000000000000000100000000000000200004000b000000"
+        "000000000a0000003b0004000b0000000c000000000000001a0002000e000000200004000f000000000000000e0000003b0004000f00000010000000"
+        "000000001b000300120000000a00000017000400140000000600000002000000200004001500000001000000140000003b0004001500000016000000"
+        "010000003b0004000b0000001a000000000000003b0004000f0000001c00000000000000170004002100000006000000030000002b00040006000000"
+        "26000000000000402b00040006000000280000000000803f200004002c00000001000000210000003b0004002c0000002d0000000100000015000400"
+        "3000000020000000000000002b0004003000000031000000000000003b0004002c00000036000000010000002b000400300000003900000001000000"
+        "3b0004002c0000003e000000010000002b0004003000000041000000020000003b0004000b00000048000000000000003b0004000f0000004a000000"
+        "000000003b0004000b00000051000000000000003b0004000f00000053000000000000003b0004000b00000059000000000000003b0004000f000000"
+        "5b000000000000002b0004003000000061000000030000001e0007006500000007000000070000000700000007000000070000002000040066000000"
+        "02000000650000003b000400660000006700000002000000150004006800000020000000010000002b00040068000000690000000400000020000400"
+        "6a00000002000000070000002b000400060000006f000000000000002b000400680000007a00000000000000200004007b0000000200000006000000"
+        "3b0004000b00000094000000000000003b0004000f00000096000000000000001e0006009d0000000700000007000000070000000700000020000400"
+        "9e000000020000009d0000003b0004009e0000009f000000020000002b00040068000000a5000000030000003b0004002c000000a900000001000000"
+        "2b00040068000000b4000000020000002b00040068000000bb0000000100000020000400da00000003000000070000003b000400da000000db000000"
+        "030000002c00060021000000e50000006f0000006f0000006f0000002c00060021000000f50000002800000028000000280000003600050002000000"
+        "040000000000000003000000f8000200050000003d0004000a0000000d0000000c0000003d0004000e00000011000000100000005600050012000000"
+        "130000000d000000110000003d00040014000000170000001600000057000500070000001800000013000000170000003d0004000a0000001b000000"
+        "1a0000003d0004000e0000001d0000001c00000056000500120000001e0000001b0000001d0000005700050007000000200000001e00000017000000"
+        "4f000800210000002500000020000000200000000000000001000000020000008e000500210000002700000025000000260000008300050021000000"
+        "2a00000027000000f50000003d000400210000002e0000002d0000000c000600210000002f00000001000000450000002e0000005100050006000000"
+        "340000002a000000000000008e00050021000000350000002f000000340000003d0004002100000037000000360000000c0006002100000038000000"
+        "01000000450000003700000051000500060000003b0000002a000000010000008e000500210000003c000000380000003b0000008100050021000000"
+        "3d000000350000003c0000003d000400210000003f0000003e0000000c000600210000004000000001000000450000003f0000005100050006000000"
+        "430000002a000000020000008e000500210000004400000040000000430000008100050021000000450000003d000000440000000c00060021000000"
+        "460000000100000045000000450000003d0004000a00000049000000480000003d0004000e0000004b0000004a00000056000500120000004c000000"
+        "490000004b00000057000500070000004e0000004c000000170000003d0004000a00000052000000510000003d0004000e0000005400000053000000"
+        "560005001200000055000000520000005400000057000500070000005700000055000000170000003d0004000a0000005a000000590000003d000400"
+        "0e0000005c0000005b00000056000500120000005d0000005a0000005c00000057000500070000005f0000005d000000170000005100050006000000"
+        "630000005700000003000000410005006a0000006b00000067000000690000003d000400070000006c0000006b00000094000500060000006d000000"
+        "5f0000006c00000085000500060000006e000000630000006d0000000c0008000600000070000000010000002b0000006e0000006f00000028000000"
+        "4f000800210000007300000018000000180000000000000001000000020000004f000800210000007500000057000000570000000000000001000000"
+        "020000005000060021000000770000007000000070000000700000000c0008002100000078000000010000002e000000730000007500000077000000"
+        "410006007b0000007c000000670000007a000000410000003d000400060000007d0000007c00000051000500060000007f0000004e00000000000000"
+        "8500050006000000800000007d0000007f00000083000500060000008200000028000000700000008500050006000000830000008000000082000000"
+        "510005000600000086000000200000000300000083000500060000008700000086000000280000008500050006000000880000007000000087000000"
+        "810005000600000089000000280000008800000085000500060000008a0000008300000089000000410006007b0000008c000000670000007a000000"
+        "610000003d000400060000008d0000008c00000051000500060000008f0000004e000000010000008500050006000000900000008d0000008f000000"
+        "81000500060000009100000090000000280000000c0007000600000092000000010000002800000028000000910000003d0004000a00000095000000"
+        "940000003d0004000e0000009700000096000000560005001200000098000000950000009700000057000500070000009a0000009800000017000000"
+        "51000500060000009b0000009a00000003000000410005006a000000a00000009f0000007a0000003d00040007000000a1000000a00000004f000800"
+        "21000000a2000000a1000000a10000000000000001000000020000000c00060021000000a30000000100000045000000a2000000410005006a000000"
+        "a60000009f000000a50000003d00040007000000a7000000a60000004f00080021000000a8000000a7000000a7000000000000000100000002000000"
+        "3d00040021000000aa000000a90000008300050021000000ab000000a8000000aa0000000c00060021000000ac0000000100000045000000ab000000"
+        "9400050006000000b000000046000000a30000000c00070006000000b10000000100000028000000b00000006f000000410005006a000000b5000000"
+        "9f000000b40000003d00040007000000b6000000b50000004f00080021000000b7000000b6000000b600000000000000010000000200000041000600"
+        "7b000000b8000000670000007a000000310000003d00040006000000b9000000b80000008e00050021000000ba000000b7000000b900000041000500"
+        "6a000000bc0000009f000000bb0000003d00040007000000bd000000bc0000004f00080021000000be000000bd000000bd0000000000000001000000"
+        "02000000410006007b000000bf000000670000007a000000390000003d00040006000000c0000000bf0000008e00050021000000c1000000be000000"
+        "c00000008e00050021000000c3000000c1000000b10000008e00050021000000c5000000c30000009b0000008100050021000000c6000000ba000000"
+        "c50000008500050021000000c700000078000000c60000008100050021000000cf000000a3000000ac0000000c00060021000000d000000001000000"
+        "45000000cf0000009400050006000000d100000046000000d00000000c00070006000000d20000000100000028000000d10000006f0000000c000700"
+        "06000000d4000000010000001a000000d2000000920000008500050006000000d6000000d40000008a0000008500050006000000d8000000d6000000"
+        "9b0000008e00050021000000d9000000be000000d80000008100050021000000de000000c7000000d9000000410005006a000000e000000067000000"
+        "b40000003d00040007000000e1000000e00000004f00080021000000e2000000e1000000e10000000000000001000000020000008500050021000000"
+        "e300000078000000e20000008100050021000000e4000000de000000e30000000c00070021000000e60000000100000028000000e4000000e5000000"
+        "5100050006000000e800000018000000030000005100050006000000e9000000e6000000000000005100050006000000ea000000e600000001000000"
+        "5100050006000000eb000000e6000000020000005000070007000000ec000000e9000000ea000000eb000000e80000003e000300db000000ec000000"
+        "fd00010038000100";
+    require(hex.size() % 2U == 0U, "embedded ksPerPixel damage-dust fragment shader hex alignment");
+    std::vector<std::uint8_t> result(hex.size() / 2U);
+    for (std::size_t index = 0U; index < result.size(); ++index)
+        result[index] = static_cast<std::uint8_t>((hex_digit(hex[index * 2U]) << 4U) | hex_digit(hex[index * 2U + 1U]));
     return result;
 }
 
@@ -976,6 +1062,43 @@ bool contract_backend(apex::render::Backend backend) {
                     presentation.native_surface_api_available &&
                     !presentation.headless_surface_api_available,
                 "D3D12 reports only its initialized native presentation prerequisites");
+    }
+    if (backend == Backend::Vulkan && presentation.swapchain_api_available &&
+        presentation.headless_surface_api_available) {
+        DeviceOptions presentation_options = options;
+        presentation_options.enable_headless_presentation = true;
+        DeviceResult presentation_device = create_device(backend, presentation_options);
+        require(presentation_device.ok() && presentation_device.device != nullptr,
+                "Vulkan headless presentation device creation");
+        PresentationTargetDescription presentation_description;
+        presentation_description.width = 64U;
+        presentation_description.height = 64U;
+        PresentationTargetResult target =
+            presentation_device.device->create_presentation_target(presentation_description);
+        require(target.ok(), "Vulkan headless presentation target creation");
+        PresentationTargetResult duplicate_target =
+            presentation_device.device->create_presentation_target(presentation_description);
+        require(duplicate_target.status == PresentationTargetStatus::unsupported &&
+                    duplicate_target.diagnostic.code ==
+                        "vulkan_presentation_target_active",
+                "Vulkan rejects a second active presentation target");
+        const PresentationFrameResult invalid_frame =
+            presentation_device.device->clear_and_present(
+                *target.target,
+                {std::numeric_limits<float>::quiet_NaN(), 0.2F, 0.3F, 1.0F});
+        require(invalid_frame.status == PresentationFrameStatus::invalid_request &&
+                    invalid_frame.diagnostic.code ==
+                        "presentation_clear_color_non_finite",
+                "Vulkan rejects a non-finite presentation clear color");
+        const PresentationFrameResult frame = presentation_device.device->clear_and_present(
+            *target.target, {0.1F, 0.2F, 0.3F, 1.0F});
+        require(frame.ok(), "Vulkan headless clear and present");
+        target.target.reset();
+        PresentationTargetResult recreated_target =
+            presentation_device.device->create_presentation_target(presentation_description);
+        require(recreated_target.ok(),
+                "Vulkan presentation target can be recreated after destruction");
+        presentation_device.device->wait_idle();
     }
     const SamplerResult sampler = device.device->create_sampler(SamplerDescription{});
     require(sampler.ok(), "real backend sampler creation");
@@ -2255,6 +2378,94 @@ bool contract_backend(apex::render::Backend backend) {
     require_nm_pixel(damage_batch_result.rgba8, 64U, 65U, 43U,
                      "ordered damage batch selects the later normal-alpha record");
 
+    // The stock shader samples txDust even when dirt is zero. The damage-dust
+    // ABI reuses bindings 8/9 for this input; it is distinct from the generic
+    // detail stack because it has no bindings 10/11.
+    const std::array<std::byte, 4> dust_alpha_zero_pixel = {
+        std::byte{255}, std::byte{255}, std::byte{255}, std::byte{0}};
+    TextureResult dust_texture = device.device->create_texture(
+        diffuse_description,
+        TextureUploadPlan{{TextureUpload{0U, 0U, 1U, 1U, 4U, damage_mask_pixel}}});
+    TextureResult dust_alpha_zero_texture = device.device->create_texture(
+        diffuse_description,
+        TextureUploadPlan{{TextureUpload{0U, 0U, 1U, 1U, 4U, dust_alpha_zero_pixel}}});
+    require(dust_texture.ok() && dust_alpha_zero_texture.ok(),
+            "dirt-zero damage dust texture uploads");
+    PipelineProgram damage_dust_pipeline = damage_pipeline;
+    damage_dust_pipeline.name = "source-evidenced-dirt-zero-damage-dust-alpha";
+    damage_dust_pipeline.resources.insert(
+        damage_dust_pipeline.resources.begin() + 8,
+        {PipelineResourceKind::sampled_texture, 0U, 8U, "dustTexture"});
+    damage_dust_pipeline.resources.insert(
+        damage_dust_pipeline.resources.begin() + 9,
+        {PipelineResourceKind::sampler, 0U, 9U, "dustSampler"});
+    if (backend == Backend::Vulkan) {
+        damage_dust_pipeline.shaders[1].bytes =
+            executable_ks_per_pixel_damage_dust_fragment_shader();
+    } else {
+#if defined(_WIN32)
+        damage_dust_pipeline.shaders[1].bytes = executable_d3d_shader(
+            "Texture2D diffuseTexture : register(t0); SamplerState diffuseSampler : register(s1);"
+            "cbuffer KsPerPixelMaterial : register(b2) { float4 lighting; float4 fresnel; float4 emissive; float4 detail; float4 damageZones; };"
+            "cbuffer KsPerPixelFrame : register(b3) { float4 sun_direction; float4 sun_color; float4 ambient_color; float4 camera_position; };"
+            "Texture2D normalTexture : register(t4); SamplerState normalSampler : register(s5);"
+            "Texture2D mapsTexture : register(t6); SamplerState mapsSampler : register(s7);"
+            "Texture2D dustTexture : register(t8); SamplerState dustSampler : register(s9);"
+            "Texture2D damageTexture : register(t12); SamplerState damageSampler : register(s13);"
+            "Texture2D damageMaskTexture : register(t14); SamplerState damageMaskSampler : register(s15);"
+            "float4 main(float4 position : SV_Position, float3 normal : TEXCOORD1, float3 tangent : TEXCOORD2,"
+            "float3 bitangent : TEXCOORD3, float3 world : TEXCOORD4, float2 texcoord : TEXCOORD0) : SV_Target {"
+            "float4 diffuseTexel = diffuseTexture.Sample(diffuseSampler, texcoord);"
+            "float4 normalTexel = normalTexture.Sample(normalSampler, texcoord);"
+            "float3 sampledNormal = normalTexel.rgb * 2.0 - 1.0;"
+            "float3 n = normalize(normalize(tangent) * sampledNormal.x + normalize(bitangent) * sampledNormal.y + normalize(normal) * sampledNormal.z);"
+            "float3 maps = mapsTexture.Sample(mapsSampler, texcoord).rgb;"
+            "float4 damageTexel = damageTexture.Sample(damageSampler, texcoord);"
+            "float amount = saturate(damageTexel.a * dot(damageMaskTexture.Sample(damageMaskSampler, texcoord), damageZones));"
+            "float3 surface = lerp(diffuseTexel.rgb, damageTexel.rgb, amount);"
+            "float mappedSpecular = lighting.z * maps.r * (1.0 - amount) * (1.0 + amount * (normalTexel.a - 1.0));"
+            "float mappedPower = max(1.0, lighting.w * maps.g + 1.0);"
+            "float dustAlpha = dustTexture.Sample(dustSampler, texcoord).a;"
+            "float3 l = normalize(sun_direction.xyz); float3 v = normalize(camera_position.xyz - world);"
+            "float ndl = max(dot(n, l), 0.0);"
+            "float3 diffuse = surface * (ambient_color.rgb * lighting.x + sun_color.rgb * lighting.y * ndl * dustAlpha);"
+            "float3 spec = sun_color.rgb * (pow(max(dot(n, normalize(l + v)), 0.0), mappedPower) * mappedSpecular * dustAlpha);"
+            "return float4(max(diffuse + spec + surface * emissive.rgb, 0.0), diffuseTexel.a); }",
+            "ps_5_0");
+#else
+        require(false, "D3D12 damage-dust shader test requires Windows D3DCompile");
+#endif
+    }
+    auto make_damage_dust_request = [&](const Texture* dust_texture_value) {
+        IndexedStaticMeshDrawRequest request = sampled_upload.upload->make_request(
+            damage_dust_pipeline, *indexed_camera.frame);
+        request.resource_authority = IndexedResourceAuthority::explicit_bindings;
+        request.sampled_binding = {diffuse_texture.texture.get(), sampler.sampler.get()};
+        request.normal_binding = {flat_normal_texture.texture.get(), normal_sampler.sampler.get()};
+        request.maps_binding = {maps_full_texture.texture.get(), maps_sampler.sampler.get()};
+        request.detail_binding = {dust_texture_value, damage_sampler.sampler.get()};
+        request.damage_binding = {damage_texture.texture.get(), damage_sampler.sampler.get()};
+        request.damage_mask_binding = {damage_mask_texture.texture.get(), damage_mask_sampler.sampler.get()};
+        request.material_binding = {nm_material_buffer.buffer.get(), 0U,
+                                    portable_material_buffer_view_bytes};
+        request.frame_binding = {nm_frame_buffer.buffer.get(), 0U,
+                                 portable_frame_buffer_view_bytes};
+        return request;
+    };
+    const IndexedStaticMeshDrawResult damage_dust_result =
+        device.device->draw_indexed_static_mesh_and_readback(
+            *triangle_texture.texture, make_damage_dust_request(dust_texture.texture.get()));
+    const IndexedStaticMeshDrawResult damage_dust_alpha_zero_result =
+        device.device->draw_indexed_static_mesh_and_readback(
+            *triangle_texture.texture,
+            make_damage_dust_request(dust_alpha_zero_texture.texture.get()));
+    require(damage_dust_result.ok() && damage_dust_alpha_zero_result.ok(),
+            "dirt-zero damage dust draw/readback");
+    require(damage_dust_result.rgba8 == damage_enabled_result.rgba8,
+            "txDust alpha one preserves the recovered damage fixture");
+    require_nm_pixel(damage_dust_alpha_zero_result.rgba8, 4U, 4U, 2U,
+                     "txDust alpha zero removes direct diffuse and specular light");
+
     // Extend the same eight-binding NM maps fixture with the generic detail
     // stack at bindings 8/9 and 10/11. The detail records mirror the
     // production useDetail, detailUVMultiplier, and detailNormalBlend values.
@@ -2867,6 +3078,71 @@ bool contract_backend(apex::render::Backend backend) {
                 stock_draw_result.rgba8[2] == std::byte{0} &&
                 stock_draw_result.rgba8[3] == std::byte{255},
             "bounded stock-scene facade retains the clear color outside geometry");
+
+    // Prove the complete external texture authority path on the same real
+    // backend. The renderer receives only the effective owned model and no
+    // AssetSource pointer or external filesystem path.
+    constexpr std::array<std::uint8_t, 4> external_pixel = {201U, 17U, 83U, 255U};
+    apex::formats::AcdArchive external_archive;
+    external_archive.source = "fixture/data.acd";
+    external_archive.assetName = "fixture";
+    apex::formats::AcdEntry external_entry;
+    external_entry.name = "textures/external.dds";
+    external_entry.path = external_entry.name;
+    external_entry.safe = true;
+    external_entry.data = rgba8_dds_fixture(external_pixel);
+    external_entry.size = external_entry.data.size();
+    external_archive.entries.push_back(std::move(external_entry));
+    apex::assets::AssetSource external_source;
+    external_source.addAcdArchive(external_archive);
+
+    std::vector<MaterialBindingOverrides> external_overrides(1U);
+    MaterialTextureOverride external_override;
+    external_override.file = "textures/external.dds";
+    external_overrides[0].resources.emplace("txDiffuse", std::move(external_override));
+    const std::array<ExternalTextureGrant, 1> external_grants = {
+        ExternalTextureGrant{"car-grant", &external_source}};
+    ExternalTextureRequest external_texture_request;
+    external_texture_request.grant_id = "car-grant";
+    external_texture_request.binding.slot = "txDiffuse";
+    external_texture_request.binding.kind = MaterialTextureKind::external_file;
+    external_texture_request.binding.file = "textures/external.dds";
+    external_texture_request.material_index = 0U;
+    const std::array<ExternalTextureRequest, 1> external_requests = {
+        std::move(external_texture_request)};
+    ExternalTextureEffectiveStockSceneResult effective_external =
+        prepare_effective_stock_scene_input(stock_model, external_overrides,
+                                            external_grants, external_requests);
+    require(effective_external.ok() &&
+                effective_external.input->external_bindings.size() == 1U &&
+                effective_external.input->model.textures.size() == 2U,
+            "external authority prepares one owned effective DDS");
+    require(stock_model.materials[0].resources[0].texture == "body.dds" &&
+                effective_external.input->model.materials[0].resources[0].texture ==
+                    effective_external.input->external_bindings[0].synthetic_texture_name &&
+                effective_external.input->model.materials[0].resources[0].textureId == 21U &&
+                effective_external.input->overrides_by_material[0].resources.empty(),
+            "external authority rewrites only the effective slot and preserves its bind point");
+
+    StockSceneExecutionRequest external_stock_request = stock_request;
+    external_stock_request.model = &effective_external.input->model;
+    external_stock_request.overrides_by_material =
+        effective_external.input->overrides_by_material;
+    StockSceneExecutionResult external_stock_result =
+        prepare_stock_scene_execution(*device.device, external_stock_request);
+    require(external_stock_result.ok() &&
+                external_stock_result.resources->owned_texture_count() == 1U,
+            "external authority effective model reaches the real backend");
+    const IndexedStaticMeshBatchResult external_stock_draw =
+        external_stock_result.resources->draw_and_readback(
+            *device.device, *triangle_texture.texture, stock_frame);
+    require(external_stock_draw.ok(),
+            "external authority effective model executes on the real backend");
+    require(near_material_channel(external_stock_draw.rgba8[center], 191U) &&
+                near_material_channel(external_stock_draw.rgba8[center + 1U], 10U) &&
+                near_material_channel(external_stock_draw.rgba8[center + 2U], 34U) &&
+                near_material_channel(external_stock_draw.rgba8[center + 3U], 255U),
+            "external authority effective DDS controls the rendered center pixel");
 
     // Execute the bounded base ksPerPixelMultiMap family through the same
     // stock-scene facade. This path implements only the source-evidenced

@@ -2,6 +2,7 @@
 #include "apex/render/draw_packet.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <limits>
@@ -148,6 +149,57 @@ struct Instance {
     Instance(Instance&& other) noexcept : value(std::exchange(other.value, VK_NULL_HANDLE)) {}
 };
 
+struct RawVulkanSurface {
+    VkInstance instance = VK_NULL_HANDLE;
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+
+    RawVulkanSurface() = default;
+    RawVulkanSurface(const RawVulkanSurface&) = delete;
+    RawVulkanSurface& operator=(const RawVulkanSurface&) = delete;
+    RawVulkanSurface(RawVulkanSurface&& other) noexcept
+        : instance(std::exchange(other.instance, VK_NULL_HANDLE)),
+          surface(std::exchange(other.surface, VK_NULL_HANDLE)) {}
+    RawVulkanSurface& operator=(RawVulkanSurface&& other) noexcept {
+        if (this == &other) return *this;
+        reset();
+        instance = std::exchange(other.instance, VK_NULL_HANDLE);
+        surface = std::exchange(other.surface, VK_NULL_HANDLE);
+        return *this;
+    }
+    ~RawVulkanSurface() { reset(); }
+
+    void reset() noexcept {
+        if (instance != VK_NULL_HANDLE && surface != VK_NULL_HANDLE)
+            vkDestroySurfaceKHR(instance, surface, nullptr);
+        instance = VK_NULL_HANDLE;
+        surface = VK_NULL_HANDLE;
+    }
+};
+
+bool create_headless_surface(VkInstance instance, RawVulkanSurface& output,
+                             Diagnostic& diagnostic) {
+    output.reset();
+    auto create_function = reinterpret_cast<PFN_vkCreateHeadlessSurfaceEXT>(
+        vkGetInstanceProcAddr(instance, "vkCreateHeadlessSurfaceEXT"));
+    if (create_function == nullptr) {
+        diagnostic = {"vulkan_headless_surface_function_unavailable",
+                      "VK_EXT_headless_surface is advertised but vkCreateHeadlessSurfaceEXT is unavailable"};
+        return false;
+    }
+    output.instance = instance;
+    VkHeadlessSurfaceCreateInfoEXT create_info{};
+    create_info.sType = VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT;
+    create_info.flags = 0U;
+    const VkResult result = create_function(instance, &create_info, nullptr, &output.surface);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkCreateHeadlessSurfaceEXT", result);
+        diagnostic.code = "vulkan_headless_surface_creation_failed";
+        output.reset();
+        return false;
+    }
+    return true;
+}
+
 struct PhysicalDevice {
     VkPhysicalDevice handle = VK_NULL_HANDLE;
     VkPhysicalDeviceProperties properties{};
@@ -156,6 +208,7 @@ struct PhysicalDevice {
 
 AdapterResult make_instance(const DeviceOptions& options, Instance& instance) {
     std::vector<const char*> layers;
+    std::vector<const char*> extensions;
     if (options.enable_validation) {
         if (!has_validation_layer()) {
             AdapterResult result;
@@ -165,6 +218,23 @@ AdapterResult make_instance(const DeviceOptions& options, Instance& instance) {
             return result;
         }
         layers.push_back("VK_LAYER_KHRONOS_validation");
+    }
+
+    if (options.enable_headless_presentation) {
+        const auto available_extensions = enumerate_extension_properties(
+            [](std::uint32_t* count, VkExtensionProperties* properties) {
+                return vkEnumerateInstanceExtensionProperties(nullptr, count, properties);
+            });
+        if (!has_extension(available_extensions, "VK_KHR_surface") ||
+            !has_extension(available_extensions, "VK_EXT_headless_surface")) {
+            AdapterResult result;
+            result.status = DeviceStatus::unavailable;
+            result.diagnostic = {"vulkan_headless_surface_unavailable",
+                                 "VK_KHR_surface and VK_EXT_headless_surface are required for headless presentation"};
+            return result;
+        }
+        extensions.push_back("VK_KHR_surface");
+        extensions.push_back("VK_EXT_headless_surface");
     }
 
     VkApplicationInfo application{};
@@ -180,6 +250,8 @@ AdapterResult make_instance(const DeviceOptions& options, Instance& instance) {
     create_info.pApplicationInfo = &application;
     create_info.enabledLayerCount = static_cast<std::uint32_t>(layers.size());
     create_info.ppEnabledLayerNames = layers.empty() ? nullptr : layers.data();
+    create_info.enabledExtensionCount = static_cast<std::uint32_t>(extensions.size());
+    create_info.ppEnabledExtensionNames = extensions.empty() ? nullptr : extensions.data();
 
     const VkResult result = vkCreateInstance(&create_info, nullptr, &instance.value);
     if (result != VK_SUCCESS) {
@@ -193,7 +265,8 @@ AdapterResult make_instance(const DeviceOptions& options, Instance& instance) {
     return success;
 }
 
-std::vector<PhysicalDevice> physical_devices(VkInstance instance) {
+std::vector<PhysicalDevice> physical_devices(VkInstance instance,
+                                             VkSurfaceKHR surface = VK_NULL_HANDLE) {
     std::uint32_t count = 0;
     if (vkEnumeratePhysicalDevices(instance, &count, nullptr) != VK_SUCCESS || count == 0) {
         return {};
@@ -212,11 +285,18 @@ std::vector<PhysicalDevice> physical_devices(VkInstance instance) {
         vkGetPhysicalDeviceQueueFamilyProperties(handle, &family_count, families.data());
         std::uint32_t graphics_family = UINT32_MAX;
         for (std::uint32_t index = 0; index < family_count; ++index) {
-            if ((families[index].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0 &&
-                families[index].queueCount != 0) {
-                graphics_family = index;
-                break;
+            if ((families[index].queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0 ||
+                families[index].queueCount == 0)
+                continue;
+            if (surface != VK_NULL_HANDLE) {
+                VkBool32 present_supported = VK_FALSE;
+                if (vkGetPhysicalDeviceSurfaceSupportKHR(handle, index, surface,
+                                                         &present_supported) != VK_SUCCESS ||
+                    present_supported == VK_FALSE)
+                    continue;
             }
+            graphics_family = index;
+            break;
         }
         if (graphics_family != UINT32_MAX) {
             devices.push_back({handle, properties, graphics_family});
@@ -247,6 +327,7 @@ struct VulkanContext {
     VkDevice device = VK_NULL_HANDLE;
     VkQueue queue = VK_NULL_HANDLE;
     std::uint32_t queue_family = UINT32_MAX;
+    VkSurfaceKHR headless_surface = VK_NULL_HANDLE;
     VkCommandPool command_pool = VK_NULL_HANDLE;
     std::mutex command_mutex;
     bool sampler_anisotropy = false;
@@ -254,6 +335,7 @@ struct VulkanContext {
     VkDeviceSize max_uniform_buffer_range = 0U;
     VkDeviceSize min_uniform_buffer_offset_alignment = 1U;
     PresentationCapabilities presentation_capabilities{};
+    bool presentation_target_active = false;
     DeviceInfo info;
 
     VulkanContext(Instance instance_value,
@@ -280,6 +362,8 @@ struct VulkanContext {
             if (command_pool != VK_NULL_HANDLE) vkDestroyCommandPool(device, command_pool, nullptr);
             vkDestroyDevice(device, nullptr);
         }
+        if (headless_surface != VK_NULL_HANDLE && instance.value != VK_NULL_HANDLE)
+            vkDestroySurfaceKHR(instance.value, headless_surface, nullptr);
     }
 
     bool wait_idle() noexcept {
@@ -3464,8 +3548,11 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
     }
     const bool detail_declaration = detail_texture_declaration;
     const bool normal_detail_declaration = normal_detail_texture_declaration;
-    if (detail_declaration != normal_detail_declaration ||
-        (detail_declaration &&
+    const bool damage_dust_layout =
+        classify_indexed_portable_resource_layout(*request.pipeline) ==
+        IndexedPortableResourceLayout::diffuse_normal_maps_damage_dust_with_constants_and_frame;
+    if ((!damage_dust_layout && detail_declaration != normal_detail_declaration) ||
+        (!damage_dust_layout && detail_declaration &&
          (!maps_declaration || !normal_declaration || !material_declaration || !frame_declaration))) {
         diagnostic = {"vulkan_indexed_detail_layout_unsupported",
                       "Vulkan indexed detail stack requires diffuse, normal, maps, material, and frame bindings"};
@@ -3488,7 +3575,7 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
     const bool damage_declaration = damage_texture_declaration;
     if (damage_declaration &&
         (!maps_declaration || !normal_declaration || !material_declaration ||
-         !frame_declaration || detail_declaration)) {
+         !frame_declaration || (detail_declaration && !damage_dust_layout))) {
         diagnostic = {"vulkan_indexed_damage_layout_unsupported",
                       "Vulkan indexed damage resources require diffuse, normal, maps, material, and frame bindings without the detail stack"};
         return false;
@@ -3999,6 +4086,427 @@ VkCompareOp vk_sampler_compare(SamplerCompare compare) noexcept {
     return VK_COMPARE_OP_ALWAYS;
 }
 
+class VulkanHeadlessPresentationTarget final : public PresentationTarget {
+public:
+    VulkanHeadlessPresentationTarget(std::shared_ptr<VulkanContext> context,
+                                     const PresentationTargetDescription& description,
+                                     Diagnostic& diagnostic)
+        : context_(std::move(context)), info_({description}) {
+        valid_ = create(diagnostic);
+        if (!valid_) reset();
+    }
+
+    ~VulkanHeadlessPresentationTarget() override { reset(); }
+
+    Backend backend() const noexcept override { return Backend::Vulkan; }
+    const PresentationTargetInfo& info() const noexcept override { return info_; }
+    bool valid() const noexcept { return valid_; }
+    const std::shared_ptr<VulkanContext>& context() const noexcept { return context_; }
+
+    PresentationFrameResult clear_and_present(const std::array<float, 4>& clear_color) {
+        for (const float value : clear_color) {
+            if (!std::isfinite(value)) {
+                return {PresentationFrameStatus::invalid_request,
+                        {"presentation_clear_color_non_finite",
+                         "Presentation clear colors must contain finite values"}};
+            }
+        }
+        if (context_ == nullptr || swapchain_ == VK_NULL_HANDLE || command_buffer_ == VK_NULL_HANDLE) {
+            return {PresentationFrameStatus::execution_failed,
+                    {"vulkan_presentation_target_invalid",
+                     "The Vulkan presentation target is not initialized"}};
+        }
+
+        std::lock_guard command_guard(context_->command_mutex);
+        VkResult result = vkWaitForFences(context_->device, 1U, &frame_fence_, VK_TRUE, UINT64_MAX);
+        if (result != VK_SUCCESS) return failure("vkWaitForFences(presentation)", result);
+        result = vkAcquireNextImageKHR(context_->device, swapchain_, UINT64_MAX,
+                                       image_available_, VK_NULL_HANDLE, &image_index_);
+        if (result == VK_ERROR_OUT_OF_DATE_KHR)
+            return {PresentationFrameStatus::execution_failed,
+                    {"vulkan_presentation_target_out_of_date",
+                     "The Vulkan presentation target requires swapchain recreation"}};
+        if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
+            return failure("vkAcquireNextImageKHR", result);
+        result = vkResetCommandBuffer(command_buffer_, 0U);
+        if (result != VK_SUCCESS) return failure("vkResetCommandBuffer(presentation)", result);
+
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        result = vkBeginCommandBuffer(command_buffer_, &begin);
+        if (result == VK_SUCCESS) {
+            VkClearValue clear{};
+            for (std::size_t index = 0U; index < clear_color.size(); ++index)
+                clear.color.float32[index] = clear_color[index];
+            VkRenderPassBeginInfo render_begin{};
+            render_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            render_begin.renderPass = render_pass_;
+            render_begin.framebuffer = framebuffers_[image_index_];
+            render_begin.renderArea.extent = extent_;
+            render_begin.clearValueCount = 1U;
+            render_begin.pClearValues = &clear;
+            vkCmdBeginRenderPass(command_buffer_, &render_begin, VK_SUBPASS_CONTENTS_INLINE);
+            vkCmdEndRenderPass(command_buffer_);
+            result = vkEndCommandBuffer(command_buffer_);
+        }
+        if (result != VK_SUCCESS) return failure("Vulkan presentation command recording", result);
+
+        result = vkResetFences(context_->device, 1U, &frame_fence_);
+        if (result != VK_SUCCESS) return failure("vkResetFences(presentation)", result);
+
+        const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.waitSemaphoreCount = 1U;
+        submit.pWaitSemaphores = &image_available_;
+        submit.pWaitDstStageMask = &wait_stage;
+        submit.commandBufferCount = 1U;
+        submit.pCommandBuffers = &command_buffer_;
+        submit.signalSemaphoreCount = 1U;
+        submit.pSignalSemaphores = &render_finished_;
+        result = vkQueueSubmit(context_->queue, 1U, &submit, frame_fence_);
+        if (result != VK_SUCCESS) return failure("vkQueueSubmit(presentation)", result);
+
+        VkPresentInfoKHR present{};
+        present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        present.waitSemaphoreCount = 1U;
+        present.pWaitSemaphores = &render_finished_;
+        present.swapchainCount = 1U;
+        present.pSwapchains = &swapchain_;
+        present.pImageIndices = &image_index_;
+        const VkResult present_result = vkQueuePresentKHR(context_->queue, &present);
+        const VkResult wait_result = vkWaitForFences(context_->device, 1U, &frame_fence_, VK_TRUE, UINT64_MAX);
+        if (wait_result != VK_SUCCESS) return failure("vkWaitForFences(presentation completion)", wait_result);
+        if (present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR)
+            return {PresentationFrameStatus::ready, {}};
+        if (present_result == VK_ERROR_OUT_OF_DATE_KHR)
+            return {PresentationFrameStatus::execution_failed,
+                    {"vulkan_presentation_target_out_of_date",
+                     "The Vulkan presentation target requires swapchain recreation"}};
+        return failure("vkQueuePresentKHR", present_result);
+    }
+
+private:
+    static PresentationFrameResult failure(const char* operation, VkResult result) {
+        Diagnostic diagnostic = vk_error(operation, result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost"
+                                                          : "vulkan_presentation_execution_failed";
+        return {PresentationFrameStatus::execution_failed, std::move(diagnostic)};
+    }
+
+    static bool has_composite_alpha(VkCompositeAlphaFlagsKHR supported,
+                                    VkCompositeAlphaFlagBitsKHR value) noexcept {
+        return (supported & static_cast<VkCompositeAlphaFlagsKHR>(value)) != 0U;
+    }
+
+    bool create(Diagnostic& diagnostic) {
+        if (context_ == nullptr || context_->headless_surface == VK_NULL_HANDLE) {
+            diagnostic = {"vulkan_headless_surface_unavailable",
+                          "The Vulkan device has no initialized headless surface"};
+            return false;
+        }
+        VkSurfaceCapabilitiesKHR capabilities{};
+        VkResult result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+            context_->physical_device, context_->headless_surface, &capabilities);
+        if (result != VK_SUCCESS) {
+            diagnostic = vk_error("vkGetPhysicalDeviceSurfaceCapabilitiesKHR", result);
+            diagnostic.code = "vulkan_presentation_capabilities_failed";
+            return false;
+        }
+        if ((capabilities.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) == 0U) {
+            diagnostic = {"vulkan_presentation_color_attachment_unsupported",
+                          "The headless surface does not support color-attachment swapchain images"};
+            return false;
+        }
+
+        VkSurfaceFormatKHR format{};
+        std::uint32_t format_count = 0U;
+        result = vkGetPhysicalDeviceSurfaceFormatsKHR(context_->physical_device,
+                                                      context_->headless_surface,
+                                                      &format_count, nullptr);
+        if (result != VK_SUCCESS || format_count == 0U || format_count > 4096U) {
+            diagnostic = {"vulkan_presentation_formats_unavailable",
+                          "The headless surface returned no bounded surface formats"};
+            return false;
+        }
+        std::vector<VkSurfaceFormatKHR> formats(format_count);
+        result = vkGetPhysicalDeviceSurfaceFormatsKHR(context_->physical_device,
+                                                      context_->headless_surface,
+                                                      &format_count, formats.data());
+        if (result != VK_SUCCESS) {
+            diagnostic = vk_error("vkGetPhysicalDeviceSurfaceFormatsKHR", result);
+            diagnostic.code = "vulkan_presentation_formats_unavailable";
+            return false;
+        }
+        formats.resize(format_count);
+        const VkFormat requested_format = vk_texture_format(info_.description.format);
+        for (const VkSurfaceFormatKHR& candidate : formats) {
+            if ((candidate.format == requested_format || candidate.format == VK_FORMAT_UNDEFINED) &&
+                candidate.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+                format = candidate;
+                if (candidate.format == VK_FORMAT_UNDEFINED) format.format = requested_format;
+                break;
+            }
+        }
+        if (format.format == VK_FORMAT_UNDEFINED) {
+            diagnostic = {"vulkan_presentation_format_unsupported",
+                          "The requested presentation format is not exposed by the headless surface"};
+            return false;
+        }
+
+        std::uint32_t present_mode_count = 0U;
+        result = vkGetPhysicalDeviceSurfacePresentModesKHR(context_->physical_device,
+                                                            context_->headless_surface,
+                                                            &present_mode_count, nullptr);
+        if (result != VK_SUCCESS || present_mode_count == 0U || present_mode_count > 4096U) {
+            diagnostic = {"vulkan_presentation_modes_unavailable",
+                          "The headless surface returned no bounded present modes"};
+            return false;
+        }
+        std::vector<VkPresentModeKHR> present_modes(present_mode_count);
+        result = vkGetPhysicalDeviceSurfacePresentModesKHR(context_->physical_device,
+                                                           context_->headless_surface,
+                                                           &present_mode_count, present_modes.data());
+        if (result != VK_SUCCESS) {
+            diagnostic = vk_error("vkGetPhysicalDeviceSurfacePresentModesKHR", result);
+            diagnostic.code = "vulkan_presentation_modes_unavailable";
+            return false;
+        }
+        present_modes.resize(present_mode_count);
+        VkPresentModeKHR present_mode = VK_PRESENT_MODE_FIFO_KHR;
+        if (info_.description.vsync) {
+            if (std::find(present_modes.begin(), present_modes.end(), present_mode) == present_modes.end()) {
+                diagnostic = {"vulkan_presentation_fifo_unsupported",
+                              "The headless surface does not expose the required FIFO present mode"};
+                return false;
+            }
+        } else {
+            present_mode = VK_PRESENT_MODE_FIFO_KHR;
+            for (const VkPresentModeKHR candidate : {VK_PRESENT_MODE_MAILBOX_KHR,
+                                                     VK_PRESENT_MODE_IMMEDIATE_KHR,
+                                                     VK_PRESENT_MODE_FIFO_KHR}) {
+                if (std::find(present_modes.begin(), present_modes.end(), candidate) != present_modes.end()) {
+                    present_mode = candidate;
+                    break;
+                }
+            }
+        }
+
+        VkExtent2D extent{};
+        if (capabilities.currentExtent.width != UINT32_MAX) {
+            extent = capabilities.currentExtent;
+        } else {
+            extent.width = std::clamp(info_.description.width, capabilities.minImageExtent.width,
+                                      capabilities.maxImageExtent.width);
+            extent.height = std::clamp(info_.description.height, capabilities.minImageExtent.height,
+                                       capabilities.maxImageExtent.height);
+        }
+        if (extent.width == 0U || extent.height == 0U) {
+            diagnostic = {"vulkan_presentation_extent_invalid",
+                          "The headless surface returned a zero presentation extent"};
+            return false;
+        }
+        std::uint32_t image_count = std::max(info_.description.image_count, capabilities.minImageCount);
+        if ((capabilities.maxImageCount != 0U && image_count > capabilities.maxImageCount) ||
+            image_count > max_presentation_image_count) {
+            diagnostic = {"vulkan_presentation_image_count_unsupported",
+                          "The requested presentation image count exceeds the surface limits"};
+            return false;
+        }
+        VkCompositeAlphaFlagBitsKHR composite_alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        for (const VkCompositeAlphaFlagBitsKHR candidate : {
+                 VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+                 VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+                 VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
+                 VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR}) {
+            if (has_composite_alpha(capabilities.supportedCompositeAlpha, candidate)) {
+                composite_alpha = candidate;
+                break;
+            }
+        }
+        if (!has_composite_alpha(capabilities.supportedCompositeAlpha, composite_alpha)) {
+            diagnostic = {"vulkan_presentation_composite_alpha_unsupported",
+                          "The headless surface exposes no supported composite-alpha mode"};
+            return false;
+        }
+
+        VkSwapchainCreateInfoKHR swapchain_info{};
+        swapchain_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+        swapchain_info.surface = context_->headless_surface;
+        swapchain_info.minImageCount = image_count;
+        swapchain_info.imageFormat = format.format;
+        swapchain_info.imageColorSpace = format.colorSpace;
+        swapchain_info.imageExtent = extent;
+        swapchain_info.imageArrayLayers = 1U;
+        swapchain_info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        swapchain_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        swapchain_info.preTransform = capabilities.currentTransform;
+        swapchain_info.compositeAlpha = composite_alpha;
+        swapchain_info.presentMode = present_mode;
+        swapchain_info.clipped = VK_TRUE;
+        result = vkCreateSwapchainKHR(context_->device, &swapchain_info, nullptr, &swapchain_);
+        if (result != VK_SUCCESS) {
+            diagnostic = vk_error("vkCreateSwapchainKHR", result);
+            diagnostic.code = "vulkan_presentation_swapchain_creation_failed";
+            return false;
+        }
+        std::uint32_t image_count_result = 0U;
+        result = vkGetSwapchainImagesKHR(context_->device, swapchain_, &image_count_result, nullptr);
+        if (result != VK_SUCCESS || image_count_result == 0U || image_count_result > 4096U) {
+            diagnostic = {"vulkan_presentation_images_unavailable",
+                          "The Vulkan swapchain returned no bounded images"};
+            return false;
+        }
+        images_.resize(image_count_result);
+        result = vkGetSwapchainImagesKHR(context_->device, swapchain_, &image_count_result, images_.data());
+        if (result != VK_SUCCESS) {
+            diagnostic = vk_error("vkGetSwapchainImagesKHR", result);
+            diagnostic.code = "vulkan_presentation_images_unavailable";
+            return false;
+        }
+        images_.resize(image_count_result);
+        views_.resize(images_.size(), VK_NULL_HANDLE);
+        for (std::size_t index = 0U; index < images_.size(); ++index) {
+            VkImageViewCreateInfo view_info{};
+            view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            view_info.image = images_[index];
+            view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            view_info.format = format.format;
+            view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            view_info.subresourceRange.levelCount = 1U;
+            view_info.subresourceRange.layerCount = 1U;
+            result = vkCreateImageView(context_->device, &view_info, nullptr, &views_[index]);
+            if (result != VK_SUCCESS) {
+                diagnostic = vk_error("vkCreateImageView(presentation)", result);
+                diagnostic.code = "vulkan_presentation_target_allocation_failed";
+                return false;
+            }
+        }
+        VkAttachmentDescription attachment{};
+        attachment.format = format.format;
+        attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        attachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        VkAttachmentReference color_reference{0U, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1U;
+        subpass.pColorAttachments = &color_reference;
+        VkRenderPassCreateInfo render_pass_info{};
+        render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        render_pass_info.attachmentCount = 1U;
+        render_pass_info.pAttachments = &attachment;
+        render_pass_info.subpassCount = 1U;
+        render_pass_info.pSubpasses = &subpass;
+        result = vkCreateRenderPass(context_->device, &render_pass_info, nullptr, &render_pass_);
+        if (result != VK_SUCCESS) {
+            diagnostic = vk_error("vkCreateRenderPass(presentation)", result);
+            diagnostic.code = "vulkan_presentation_target_allocation_failed";
+            return false;
+        }
+        framebuffers_.resize(views_.size(), VK_NULL_HANDLE);
+        for (std::size_t index = 0U; index < views_.size(); ++index) {
+            VkFramebufferCreateInfo framebuffer_info{};
+            framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            framebuffer_info.renderPass = render_pass_;
+            framebuffer_info.attachmentCount = 1U;
+            framebuffer_info.pAttachments = &views_[index];
+            framebuffer_info.width = extent.width;
+            framebuffer_info.height = extent.height;
+            framebuffer_info.layers = 1U;
+            result = vkCreateFramebuffer(context_->device, &framebuffer_info, nullptr,
+                                         &framebuffers_[index]);
+            if (result != VK_SUCCESS) {
+                diagnostic = vk_error("vkCreateFramebuffer(presentation)", result);
+                diagnostic.code = "vulkan_presentation_target_allocation_failed";
+                return false;
+            }
+        }
+        VkCommandBufferAllocateInfo command_allocation{};
+        command_allocation.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        command_allocation.commandPool = context_->command_pool;
+        command_allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        command_allocation.commandBufferCount = 1U;
+        result = vkAllocateCommandBuffers(context_->device, &command_allocation, &command_buffer_);
+        if (result != VK_SUCCESS) {
+            diagnostic = vk_error("vkAllocateCommandBuffers(presentation)", result);
+            diagnostic.code = "vulkan_presentation_target_allocation_failed";
+            return false;
+        }
+        VkSemaphoreCreateInfo semaphore_info{};
+        semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        result = vkCreateSemaphore(context_->device, &semaphore_info, nullptr, &image_available_);
+        if (result == VK_SUCCESS)
+            result = vkCreateSemaphore(context_->device, &semaphore_info, nullptr, &render_finished_);
+        VkFenceCreateInfo fence_info{};
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        if (result == VK_SUCCESS)
+            result = vkCreateFence(context_->device, &fence_info, nullptr, &frame_fence_);
+        if (result != VK_SUCCESS) {
+            diagnostic = vk_error("Vulkan presentation synchronization", result);
+            diagnostic.code = "vulkan_presentation_target_allocation_failed";
+            return false;
+        }
+        format_ = format.format;
+        extent_ = extent;
+        info_.description.width = extent.width;
+        info_.description.height = extent.height;
+        return true;
+    }
+
+    void reset() noexcept {
+        if (context_ != nullptr && context_->device != VK_NULL_HANDLE) {
+            (void)context_->wait_idle();
+            if (command_buffer_ != VK_NULL_HANDLE)
+                vkFreeCommandBuffers(context_->device, context_->command_pool, 1U, &command_buffer_);
+            if (frame_fence_ != VK_NULL_HANDLE) vkDestroyFence(context_->device, frame_fence_, nullptr);
+            if (render_finished_ != VK_NULL_HANDLE)
+                vkDestroySemaphore(context_->device, render_finished_, nullptr);
+            if (image_available_ != VK_NULL_HANDLE)
+                vkDestroySemaphore(context_->device, image_available_, nullptr);
+            for (VkFramebuffer framebuffer : framebuffers_)
+                if (framebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(context_->device, framebuffer, nullptr);
+            if (render_pass_ != VK_NULL_HANDLE) vkDestroyRenderPass(context_->device, render_pass_, nullptr);
+            for (VkImageView view : views_)
+                if (view != VK_NULL_HANDLE) vkDestroyImageView(context_->device, view, nullptr);
+            if (swapchain_ != VK_NULL_HANDLE) vkDestroySwapchainKHR(context_->device, swapchain_, nullptr);
+        }
+        command_buffer_ = VK_NULL_HANDLE;
+        frame_fence_ = VK_NULL_HANDLE;
+        render_finished_ = VK_NULL_HANDLE;
+        image_available_ = VK_NULL_HANDLE;
+        framebuffers_.clear();
+        views_.clear();
+        images_.clear();
+        render_pass_ = VK_NULL_HANDLE;
+        swapchain_ = VK_NULL_HANDLE;
+        if (context_ != nullptr) context_->presentation_target_active = false;
+        context_.reset();
+    }
+
+    std::shared_ptr<VulkanContext> context_;
+    PresentationTargetInfo info_;
+    VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
+    std::vector<VkImage> images_;
+    std::vector<VkImageView> views_;
+    std::vector<VkFramebuffer> framebuffers_;
+    VkRenderPass render_pass_ = VK_NULL_HANDLE;
+    VkCommandBuffer command_buffer_ = VK_NULL_HANDLE;
+    VkSemaphore image_available_ = VK_NULL_HANDLE;
+    VkSemaphore render_finished_ = VK_NULL_HANDLE;
+    VkFence frame_fence_ = VK_NULL_HANDLE;
+    VkFormat format_ = VK_FORMAT_UNDEFINED;
+    VkExtent2D extent_{0U, 0U};
+    std::uint32_t image_index_ = 0U;
+    bool valid_ = false;
+};
+
 class VulkanDevice final : public Device {
 public:
     explicit VulkanDevice(std::shared_ptr<VulkanContext> context) : context_(std::move(context)) {}
@@ -4007,6 +4515,50 @@ public:
 
     PresentationCapabilities presentation_capabilities() const noexcept override {
         return context_->presentation_capabilities;
+    }
+
+    PresentationTargetResult create_presentation_target(
+        const PresentationTargetDescription& description) override {
+        Diagnostic diagnostic;
+        const PresentationTargetStatus validation =
+            validate_presentation_target_description(description, diagnostic);
+        if (validation != PresentationTargetStatus::ready)
+            return {validation, std::move(diagnostic), nullptr};
+        if (!context_->presentation_capabilities.swapchain_api_available ||
+            !context_->presentation_capabilities.headless_surface_api_available ||
+            context_->headless_surface == VK_NULL_HANDLE) {
+            return {PresentationTargetStatus::unsupported,
+                    {"vulkan_presentation_unsupported",
+                     "This Vulkan device was not created with headless presentation support"},
+                    nullptr};
+        }
+        if (context_->presentation_target_active) {
+            return {PresentationTargetStatus::unsupported,
+                    {"vulkan_presentation_target_active",
+                     "This Vulkan device already owns a presentation target"},
+                    nullptr};
+        }
+        context_->presentation_target_active = true;
+        auto target = std::make_unique<VulkanHeadlessPresentationTarget>(context_, description, diagnostic);
+        if (!target->valid())
+            return {PresentationTargetStatus::allocation_failed, std::move(diagnostic), nullptr};
+        return {PresentationTargetStatus::ready, {}, std::move(target)};
+    }
+
+    PresentationFrameResult clear_and_present(
+        PresentationTarget& target, const std::array<float, 4>& clear_color) override {
+        if (target.backend() != Backend::Vulkan) {
+            return {PresentationFrameStatus::unsupported,
+                    {"presentation_target_backend_mismatch",
+                     "The Vulkan device received a target from another backend"}};
+        }
+        auto* vulkan_target = dynamic_cast<VulkanHeadlessPresentationTarget*>(&target);
+        if (vulkan_target == nullptr || vulkan_target->context().get() != context_.get()) {
+            return {PresentationFrameStatus::unsupported,
+                    {"presentation_target_device_mismatch",
+                     "The Vulkan device received an unknown presentation target"}};
+        }
+        return vulkan_target->clear_and_present(clear_color);
     }
 
     BufferResult create_buffer(const BufferDescription& description,
@@ -4367,7 +4919,18 @@ DeviceResult create_vulkan_device(const DeviceOptions& options) {
         return result;
     }
 
-    const auto devices = physical_devices(instance.value);
+    RawVulkanSurface headless_surface;
+    if (options.enable_headless_presentation) {
+        Diagnostic diagnostic;
+        if (!create_headless_surface(instance.value, headless_surface, diagnostic)) {
+            DeviceResult result;
+            result.status = DeviceStatus::initialization_failed;
+            result.diagnostic = std::move(diagnostic);
+            return result;
+        }
+    }
+
+    const auto devices = physical_devices(instance.value, headless_surface.surface);
     std::vector<PhysicalDevice> usable;
     for (const auto& device : devices) {
         const bool software = device.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
@@ -4386,7 +4949,10 @@ DeviceResult create_vulkan_device(const DeviceOptions& options) {
     if (usable.empty()) {
         DeviceResult result;
         result.status = DeviceStatus::unavailable;
-        result.diagnostic = {"vulkan_no_usable_device", "Vulkan has no usable graphics device"};
+        result.diagnostic = {"vulkan_no_usable_device",
+                             options.enable_headless_presentation
+                                 ? "Vulkan has no usable graphics and present-capable device"
+                                 : "Vulkan has no usable graphics device"};
         return result;
     }
     if (options.adapter_index >= usable.size()) {
@@ -4397,6 +4963,20 @@ DeviceResult create_vulkan_device(const DeviceOptions& options) {
     }
 
     const PhysicalDevice& selected = usable[options.adapter_index];
+    const PresentationCapabilities presentation_capabilities =
+        query_vulkan_presentation_capabilities(selected.handle);
+    if (options.enable_headless_presentation &&
+        (!presentation_capabilities.swapchain_api_available ||
+         !presentation_capabilities.headless_surface_api_available)) {
+        DeviceResult result;
+        result.status = DeviceStatus::unavailable;
+        result.diagnostic = {"vulkan_presentation_unsupported",
+                             "The selected Vulkan device lacks the headless surface or swapchain extension"};
+        return result;
+    }
+    std::vector<const char*> device_extensions;
+    if (options.enable_headless_presentation)
+        device_extensions.push_back("VK_KHR_swapchain");
     const float priority = 1.0f;
     VkDeviceQueueCreateInfo queue_info{};
     queue_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
@@ -4411,6 +4991,9 @@ DeviceResult create_vulkan_device(const DeviceOptions& options) {
     create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     create_info.queueCreateInfoCount = 1;
     create_info.pQueueCreateInfos = &queue_info;
+    create_info.enabledExtensionCount = static_cast<std::uint32_t>(device_extensions.size());
+    create_info.ppEnabledExtensionNames =
+        device_extensions.empty() ? nullptr : device_extensions.data();
     create_info.pEnabledFeatures = &features;
 
     VkDevice device = VK_NULL_HANDLE;
@@ -4433,8 +5016,8 @@ DeviceResult create_vulkan_device(const DeviceOptions& options) {
                                                    selected.properties.limits.maxSamplerAnisotropy,
                                                    selected.properties.limits.maxUniformBufferRange,
                                                    selected.properties.limits.minUniformBufferOffsetAlignment);
-    context->presentation_capabilities =
-        query_vulkan_presentation_capabilities(selected.handle);
+    context->headless_surface = std::exchange(headless_surface.surface, VK_NULL_HANDLE);
+    context->presentation_capabilities = presentation_capabilities;
     const VkResult pool_result = vkCreateCommandPool(device, &command_pool_info, nullptr, &context->command_pool);
     if (pool_result != VK_SUCCESS) {
         DeviceResult failure;

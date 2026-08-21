@@ -252,7 +252,8 @@ The DXBC disassembly proves that the final alpha source is `txNormal.a`.
 
 The portable ABI uses `txDamage` at bindings 12/13. It uses `txDamageMask` at
 bindings 14/15. The 80-byte material record stores `damageZones` at byte 64.
-The fixture does not bind `txDust` because the recovered zero-dirt factor is one.
+The base fixture does not bind `txDust`. It isolates the recovered damage-mix
+equation, where the dust RGB factor is one for zero dirt.
 The fixture does not execute stock detail, sun-specular, Fresnel, or reflection
 branches. It is a bounded damage stage, not a complete stock-material shader.
 The source SHA-256 is
@@ -265,3 +266,21 @@ SwiftShader Vulkan pixel evidence is:
 - `damageZones=(0,0,0,0)`: `(74,155,103,255)`.
 - `damageZones=(1,0,0,0)`: `(81,81,60,255)`.
 - `damageZones=(1,0,0,0)` and `txNormal.a=0`: `(64,65,43,255)`.
+
+`indexed_ks_per_pixel_damage_dust.frag` extends the same damage fixture with
+the source-evidenced `txDust` alpha sample. It uses bindings 8 and 9, which are
+mutually exclusive with the generic detail stack. The damage resources remain
+at bindings 12 through 15. This low-level ABI does not prove that the stock
+material facade binds `txDust`.
+
+The fixture identities are:
+
+- Source SHA-256: `faaf6f8cbfb5bd7e30596eee6e3a4c88ee3fca3cf343cbcc1281c8f85adbb764`
+- SPIR-V SHA-256: `29d492e6e07da74958ccc913e1f8061fcd8171c6a83517ed978592bb8e3e8505`
+- Compiler: glslang `16.4.0`
+- Target: SPIR-V 1.0 for Vulkan 1.0
+
+SwiftShader Vulkan pixel evidence is:
+
+- `txDust.a=1`: `(81,81,60,255)`, equal to the base damage fixture.
+- `txDust.a=0`: `(4,4,2,255)`, with direct diffuse and specular light removed.

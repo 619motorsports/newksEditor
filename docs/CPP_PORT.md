@@ -90,9 +90,11 @@ remains unchanged and feature-complete.
   portable security checks, and a native inspection CLI are implemented. The
   port has a backend-neutral device API. Vulkan and D3D12 implement headless
   devices, buffers, 2D textures, samplers, and shader modules. Both backends
-  report presentation prerequisites through the neutral API. Vulkan reports
-  surface and swapchain extensions. D3D12 reports the DXGI factory, device,
-  and queue prerequisite. Neither backend creates a surface or swapchain.
+  report presentation prerequisites through the neutral API. An optional
+  Vulkan mode creates a headless surface and swapchain. It acquires, clears,
+  submits, and presents swapchain images. D3D12 reports the DXGI factory,
+  device, and queue prerequisite. D3D12 still requires a native-window seam
+  before it can create a swapchain.
   Both backends implement bounded synchronous RGBA8/BGRA8 texture
   clear/readback. Each
   backend validates a pipeline and executes fixed and indexed R16 mesh draws
@@ -207,8 +209,11 @@ remains unchanged and feature-complete.
   It identifies the recovered dirt-zero material branch. The material handoff
   executes this branch with explicit SPIR-V or DXIL modules. It binds
   `txDamage` at 12/13 and `txDamageMask` at 14/15. The handoff rejects nonzero
-  dirt. It also rejects active detail, sun-specular, Fresnel, and reflection
-  branches. The stock-scene facade can resolve this F4 state before allocation.
+  dirt. A low-level ABI binds `txDust` at the mutually exclusive bindings 8/9.
+  Pixel tests prove that its alpha changes direct diffuse and specular light.
+  The stock material handoff does not yet select this ABI. It also rejects
+  active detail, sun-specular, Fresnel, and reflection branches. The
+  stock-scene facade can resolve this F4 state before allocation.
   It merges node activity and the complete material table into the handoff.
   A real backend test executes broken and intact F4 states through this facade.
   The test also executes the recovered normal-alpha attenuation.
@@ -235,8 +240,11 @@ remains unchanged and feature-complete.
   indexing, and skin metadata JSON. A CPU bridge resolves external DDS files
   through explicit `AssetSource` grants. It rejects unsafe, missing, ambiguous,
   and over-budget input. It retains source identity and returns no partial
-  table after an error. The bridge has no backend access. Stock-scene
-  integration remains staged. A staged CSP configuration model is implemented. A bounded
+  table after an error. It creates an owned effective model with opaque DDS
+  names. It rewrites exact material slots and preserves serialized bind points.
+  A real backend test executes an ACD DDS through the stock-scene facade. The
+  renderer receives no `AssetSource`, grant, or external path. A staged CSP
+  configuration model is implemented. A bounded
   binary/ASCII FBX DOM parser is implemented. A bounded FBX conversion subset
   supports static positions, polygon triangulation, hierarchy, local/world
   transforms, and first material assignment. It rejects or diagnoses skinning,
@@ -301,7 +309,8 @@ remains unchanged and feature-complete.
   supported 2D mip chains to RGBA8 and retains explicit sRGB metadata. Stock
   shader translation and complete material-resource resolution remain staged.
   The external-texture bridge is a separate target above Assets and Render.
-  Thus, filesystem authority does not enter the renderer library.
+  It materializes owned DDS bytes before the stock-scene handoff. Thus,
+  filesystem authority does not enter the renderer library.
   Vulkan and D3D12 create a basic graphics pipeline and execute fixed and
   indexed R16 static and CPU-skinned mesh draws. A real Vulkan pixel test
   proves that a one-bone update moves the triangle. The same test runs on the
@@ -332,8 +341,9 @@ remains unchanged and feature-complete.
   culling, and depth state. The stock-scene facade composes this handoff with visibility, LOD,
   stable draw ordering, CSP mesh state, and packet validation for a
   pre-resolved snapshot.
-  It does not execute stock KN5 shader containers. The port does not create
-  windows or swapchains. It does not provide full golden-image parity.
+  It does not execute stock KN5 shader containers. Vulkan can create a
+  headless surface and swapchain. The port does not create native windows or
+  D3D12 swapchains. It does not provide full golden-image parity.
 
 The production WebGL material gate uses the synthetic `BC7_PLANE` scene. The
 baseline screenshot SHA-256 is

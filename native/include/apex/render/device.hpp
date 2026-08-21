@@ -47,6 +47,9 @@ struct DeviceOptions {
     bool headless = true;
     bool enable_validation = false;
     bool allow_software = true;
+    // Opt into the Vulkan headless-surface prerequisites. This does not
+    // create a target; callers must still request one from the device.
+    bool enable_headless_presentation = false;
     // Prefer a software adapter when one is available. D3D12 resolves WARP
     // explicitly; Vulkan prioritizes CPU physical devices.
     bool prefer_software = false;
@@ -128,6 +131,46 @@ enum class PresentationTargetStatus : std::uint8_t {
     ready,
     invalid_description,
     unsupported,
+    allocation_failed,
+    execution_failed,
+};
+
+struct PresentationTargetInfo {
+    PresentationTargetDescription description{};
+};
+
+class PresentationTarget {
+public:
+    virtual ~PresentationTarget() = default;
+
+    [[nodiscard]] virtual Backend backend() const noexcept = 0;
+    [[nodiscard]] virtual const PresentationTargetInfo& info() const noexcept = 0;
+};
+
+struct PresentationTargetResult {
+    PresentationTargetStatus status = PresentationTargetStatus::unsupported;
+    Diagnostic diagnostic;
+    std::unique_ptr<PresentationTarget> target;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == PresentationTargetStatus::ready && target != nullptr;
+    }
+};
+
+enum class PresentationFrameStatus : std::uint8_t {
+    ready,
+    invalid_request,
+    unsupported,
+    execution_failed,
+};
+
+struct PresentationFrameResult {
+    PresentationFrameStatus status = PresentationFrameStatus::unsupported;
+    Diagnostic diagnostic;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == PresentationFrameStatus::ready;
+    }
 };
 
 struct BufferDescription {
@@ -473,6 +516,9 @@ enum class IndexedPortableResourceLayout : std::uint8_t {
     // 12/13 and txDamageMask at 14/15. Bindings 8-11 stay reserved for the
     // mutually exclusive generic detail stack.
     diffuse_normal_maps_damage_with_constants_and_frame,
+    // Dirt-zero damage branch with the stock txDust alpha input at bindings
+    // 8/9. This is a damage-only layout; generic detail remains exclusive.
+    diffuse_normal_maps_damage_dust_with_constants_and_frame,
     unsupported,
 };
 
@@ -524,7 +570,8 @@ struct IndexedStaticMeshDrawRequest {
     IndexedSampledTextureBinding normal_binding{};
     // Optional txMaps sampled image and sampler at set 0/bindings 6 and 7.
     IndexedSampledTextureBinding maps_binding{};
-    // Optional txDetail sampled image and sampler at set 0/bindings 8 and 9.
+    // Optional txDetail or mutually exclusive txDust sampled image and sampler
+    // at set 0/bindings 8 and 9. The portable resource layout selects the ABI.
     IndexedSampledTextureBinding detail_binding{};
     // Optional txNormalDetail/txDetailNM sampled image and sampler at set 0/bindings 10 and 11.
     IndexedSampledTextureBinding normal_detail_binding{};
@@ -788,6 +835,29 @@ public:
         return {};
     }
 
+    // The target and its native synchronization objects remain private to
+    // each backend. The default preserves source compatibility for D3D12,
+    // fake devices, and discovery-only devices until they opt in.
+    [[nodiscard]] virtual PresentationTargetResult create_presentation_target(
+        const PresentationTargetDescription& description) {
+        Diagnostic diagnostic;
+        const PresentationTargetStatus validation =
+            validate_presentation_target_description(description, diagnostic);
+        if (validation != PresentationTargetStatus::ready)
+            return {validation, std::move(diagnostic), nullptr};
+        return {PresentationTargetStatus::unsupported,
+                {"presentation_target_unsupported",
+                 "This backend has not enabled presentation targets"},
+                nullptr};
+    }
+
+    [[nodiscard]] virtual PresentationFrameResult clear_and_present(
+        PresentationTarget&, const std::array<float, 4>&) {
+        return {PresentationFrameStatus::unsupported,
+                {"presentation_execution_unsupported",
+                 "This backend has not enabled presentation execution"}};
+    }
+
     // Buffer lifetimes may extend beyond this Device object: backend handles
     // retain their private shared context. Public callers only see this
     // backend-neutral RAII contract, never Vk* or ID3D12* types.
@@ -887,6 +957,8 @@ struct DeviceResult {
 [[nodiscard]] const char* shader_module_status_name(ShaderModuleStatus status) noexcept;
 [[nodiscard]] const char* presentation_target_status_name(
     PresentationTargetStatus status) noexcept;
+[[nodiscard]] const char* presentation_frame_status_name(
+    PresentationFrameStatus status) noexcept;
 
 [[nodiscard]] AdapterResult enumerate_adapters(Backend backend,
                                                 const DeviceOptions& options = {});

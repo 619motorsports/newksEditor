@@ -25,6 +25,9 @@ using apex::render::ExternalTextureGrant;
 using apex::render::ExternalTextureRequest;
 using apex::render::MaterialTextureBinding;
 using apex::render::MaterialTextureKind;
+using apex::render::MaterialBindingOverrides;
+using apex::render::MaterialTextureOverride;
+using apex::render::prepare_effective_stock_scene_input;
 using apex::render::resolve_external_texture_authority;
 
 void require(bool condition, std::string_view message) {
@@ -79,14 +82,16 @@ ExternalTextureRequest request(std::string grant, std::string file) {
     binding.slot = "txDiffuse";
     binding.kind = MaterialTextureKind::external_file;
     binding.file = std::move(file);
-    return {std::move(grant), std::move(binding)};
+    return {std::move(grant), std::move(binding),
+            apex::render::invalid_external_texture_resource, {}};
 }
 
 ExternalTextureRequest nonExternalRequest(std::string grant) {
     MaterialTextureBinding binding;
     binding.slot = "txDiffuse";
     binding.kind = MaterialTextureKind::embedded;
-    return {std::move(grant), std::move(binding)};
+    return {std::move(grant), std::move(binding),
+            apex::render::invalid_external_texture_resource, {}};
 }
 
 AcdArchive archiveWith(std::string path, std::vector<std::uint8_t> bytes) {
@@ -297,6 +302,132 @@ void enforcesSourceAndDecodedLimits(const std::filesystem::path& root) {
             "per-file limit fails before source read");
 }
 
+struct EffectiveFixture {
+    apex::formats::Kn5File model;
+    std::vector<MaterialBindingOverrides> overrides;
+    std::vector<ExternalTextureGrant> grants;
+    std::vector<ExternalTextureRequest> requests;
+};
+
+EffectiveFixture effectiveFixture(const std::filesystem::path& root,
+                                  std::string file = "textures/override.dds") {
+    const auto base = rgba8Dds({9U, 8U, 7U, 255U});
+    const auto replacement = rgba8Dds({1U, 2U, 3U, 255U});
+    std::filesystem::create_directories(root / "textures");
+    writeBytes(root / file, replacement);
+
+    EffectiveFixture fixture;
+    fixture.model.materials.push_back({});
+    fixture.model.materials.front().name = "body";
+    fixture.model.materials.front().shader = "ksPerPixel";
+    fixture.model.materials.front().workspaceFileIndex = 7U;
+    fixture.model.materials.front().resources.push_back({"txDiffuse", 17U, "base.dds"});
+    fixture.model.textures.push_back({true, "base.dds", static_cast<std::uint32_t>(base.size()),
+                                      base, 7U});
+    fixture.overrides.resize(1U);
+    MaterialTextureOverride override_value;
+    override_value.file = file;
+    fixture.overrides.front().resources.emplace("txDiffuse", std::move(override_value));
+
+    fixture.requests.push_back(request("car-grant", file));
+    auto& external = fixture.requests.back();
+    external.material_index = 0U;
+    external.workspace_file_index = 7U;
+    return fixture;
+}
+
+void materializesOwnedEffectiveScene(const std::filesystem::path& root) {
+    auto fixture = effectiveFixture(root);
+    AssetSource source;
+    source.addDirectory(root, "car");
+    fixture.grants = {{"car-grant", &source}};
+
+    const auto result = prepare_effective_stock_scene_input(
+        fixture.model, fixture.overrides, fixture.grants, fixture.requests);
+    require(result.ok() && result.input->model.textures.size() == 2U &&
+                result.input->overrides_by_material.size() == 1U &&
+                result.input->overrides_by_material.front().resources.empty(),
+            "external DDS becomes an owned effective-scene texture");
+    const auto& material = result.input->model.materials.front();
+    require(material.resources.size() == 1U && material.resources.front().textureId == 17U,
+            "effective replacement preserves the serialized bind point");
+    const auto& synthetic = result.input->model.textures.back();
+    require(synthetic.name.rfind("__apex_external_dds_", 0U) == 0U &&
+                synthetic.name.find("override.dds") == std::string::npos &&
+                synthetic.workspaceFileIndex == 7U && synthetic.data == rgba8Dds({1U, 2U, 3U, 255U}),
+            "effective texture has opaque name, source scope, and exact DDS bytes");
+    require(result.input->external_bindings.size() == 1U &&
+                result.input->external_bindings.front().grant_id == "car-grant" &&
+                result.input->external_bindings.front().requested_path == "textures/override.dds",
+            "effective binding retains source identity outside renderer input");
+}
+
+void rejectsEffectiveMalformedScopeAndCollisions(const std::filesystem::path& root) {
+    auto malformed = effectiveFixture(root / "malformed", "textures/bad.dds");
+    writeBytes(root / "malformed" / "textures/bad.dds", {1U, 2U, 3U});
+    AssetSource malformed_source;
+    malformed_source.addDirectory(root / "malformed", "malformed");
+    malformed.grants = {{"car-grant", &malformed_source}};
+    auto result = prepare_effective_stock_scene_input(
+        malformed.model, malformed.overrides, malformed.grants, malformed.requests);
+    require(result.status == ExternalTextureAuthorityStatus::invalid_request &&
+                result.input == nullptr,
+            "truncated effective DDS fails atomically");
+
+    auto scoped = effectiveFixture(root / "scope");
+    AssetSource scoped_source;
+    scoped_source.addDirectory(root / "scope", "scope");
+    scoped.grants = {{"car-grant", &scoped_source}};
+    scoped.requests.front().workspace_file_index = 8U;
+    result = prepare_effective_stock_scene_input(
+        scoped.model, scoped.overrides, scoped.grants, scoped.requests);
+    require(result.status == ExternalTextureAuthorityStatus::rejected &&
+                result.input == nullptr,
+            "workspace scope mismatch fails atomically");
+
+    auto collision = effectiveFixture(root / "collision");
+    AssetSource first_source;
+    AssetSource second_source;
+    first_source.addDirectory(root / "collision", "first");
+    second_source.addDirectory(root / "collision", "second");
+    collision.grants = {{"first", &first_source}, {"second", &second_source}};
+    collision.requests.front().grant_id = "first";
+    auto duplicate = collision.requests.front();
+    duplicate.grant_id = "second";
+    collision.requests.push_back(std::move(duplicate));
+    result = prepare_effective_stock_scene_input(
+        collision.model, collision.overrides, collision.grants, collision.requests);
+    require(result.status == ExternalTextureAuthorityStatus::ambiguous &&
+                result.input == nullptr,
+            "same material slot collision fails atomically");
+
+    auto name_collision = effectiveFixture(root / "name-collision");
+    name_collision.model.textures.push_back(
+        {true, "__apex_external_dds_0", 0U, {}, 7U});
+    AssetSource name_source;
+    name_source.addDirectory(root / "name-collision", "name");
+    name_collision.grants = {{"car-grant", &name_source}};
+    result = prepare_effective_stock_scene_input(
+        name_collision.model, name_collision.overrides,
+        name_collision.grants, name_collision.requests);
+    require(result.ok() && result.input->model.textures.back().name !=
+                "__apex_external_dds_0",
+            "synthetic texture names avoid scoped table collisions");
+
+    auto budget = effectiveFixture(root / "budget");
+    AssetSource budget_source;
+    budget_source.addDirectory(root / "budget", "budget");
+    budget.grants = {{"car-grant", &budget_source}};
+    ExternalTextureAuthorityLimits effective_limits;
+    effective_limits.max_total_effective_source_bytes = 1U;
+    result = prepare_effective_stock_scene_input(
+        budget.model, budget.overrides, budget.grants, budget.requests,
+        effective_limits);
+    require(result.status == ExternalTextureAuthorityStatus::resource_limit &&
+                result.input == nullptr,
+            "effective owned DDS aggregate limit fails atomically");
+}
+
 }  // namespace
 
 int main() {
@@ -307,6 +438,8 @@ int main() {
         preservesGrantIdentityAndDeduplicates(root / "identity");
         rejectsUnsafeAndInvalidRequests(root / "invalid");
         enforcesSourceAndDecodedLimits(root / "limits");
+        materializesOwnedEffectiveScene(root / "effective");
+        rejectsEffectiveMalformedScopeAndCollisions(root / "effective-cases");
         std::error_code cleanup;
         std::filesystem::remove_all(root, cleanup);
         std::cout << "external texture authority tests passed\n";

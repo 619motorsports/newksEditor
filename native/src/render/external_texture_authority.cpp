@@ -3,8 +3,10 @@
 #include "apex/core/parse_error.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <map>
 #include <new>
+#include <set>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -37,9 +39,13 @@ void add_diagnostic(ExternalTextureAuthorityResult& result, Status status,
     return limits.max_requests != 0U && limits.max_grants != 0U &&
            limits.max_grant_id_bytes != 0U && limits.max_path_bytes != 0U &&
            limits.max_file_bytes != 0U && limits.max_mip_levels != 0U &&
+           limits.max_materials != 0U && limits.max_effective_textures != 0U &&
+           limits.max_effective_texture_name_bytes != 0U &&
            limits.max_total_source_bytes != 0U &&
            limits.max_total_decoded_bytes != 0U &&
-           limits.max_total_plan_bytes != 0U && limits.decode.maxInputBytes != 0U &&
+           limits.max_total_plan_bytes != 0U &&
+           limits.max_total_effective_source_bytes != 0U &&
+           limits.decode.maxInputBytes != 0U &&
            limits.decode.maxOutputBytes != 0U;
 }
 
@@ -349,10 +355,14 @@ ExternalTextureAuthorityResult resolve_external_texture_authority(
             }
             std::uint64_t plan_bytes = sizeof(DecodedDdsTexturePlan);
             std::uint64_t level_metadata = 0U;
+            std::uint64_t source_payload_bytes = 0U;
             if (!checked_size_to_u64(planned.plan.levels.size(), level_metadata) ||
+                !checked_size_to_u64(bytes.size(), source_payload_bytes) ||
                 level_metadata > std::numeric_limits<std::uint64_t>::max() /
                                      sizeof(formats::DdsLevel) ||
                 !checked_add(level_metadata * sizeof(formats::DdsLevel), plan_bytes,
+                             std::numeric_limits<std::uint64_t>::max()) ||
+                !checked_add(source_payload_bytes, plan_bytes,
                              std::numeric_limits<std::uint64_t>::max()) ||
                 !checked_add(decoded_bytes, plan_bytes,
                              std::numeric_limits<std::uint64_t>::max())) {
@@ -369,7 +379,7 @@ ExternalTextureAuthorityResult resolve_external_texture_authority(
                 break;
             }
             result.resources.push_back({grant.id, {}, item.file->path, item.file->kind,
-                                        std::move(planned.plan)});
+                                        std::move(bytes), std::move(planned.plan)});
             for (std::size_t request_index = 0U; request_index < resolved.size();
                  ++request_index) {
                 if (resolved[request_index].resource_index == resource_index) {
@@ -401,6 +411,292 @@ ExternalTextureAuthorityResult resolve_external_texture_authority(
         return failure(Status::resource_limit, invalid_external_texture_resource, {}, {},
                        "external_texture_authority_allocation_failed",
                        "External texture authority exceeded bounded host storage");
+}
+
+namespace {
+
+[[nodiscard]] std::string canonical_effective_slot(std::string_view value) {
+    std::size_t first = 0U;
+    while (first < value.size() &&
+           std::isspace(static_cast<unsigned char>(value[first])) != 0)
+        ++first;
+    std::size_t last = value.size();
+    while (last > first &&
+           std::isspace(static_cast<unsigned char>(value[last - 1U])) != 0)
+        --last;
+    std::string result;
+    result.reserve(last - first);
+    for (std::size_t index = first; index < last; ++index)
+        result.push_back(static_cast<char>(std::tolower(
+            static_cast<unsigned char>(value[index]))));
+    return result;
+}
+
+[[nodiscard]] ExternalTextureEffectiveStockSceneResult effective_failure(
+    Status status, std::size_t request_index, std::string grant_id,
+    std::string path, std::string code, std::string message) {
+    ExternalTextureEffectiveStockSceneResult result;
+    result.status = status;
+    result.diagnostics.push_back({request_index, std::move(grant_id), std::move(path),
+                                  std::move(code), std::move(message)});
+    return result;
+}
+
+}  // namespace
+
+ExternalTextureEffectiveStockSceneResult prepare_effective_stock_scene_input(
+    const apex::formats::Kn5File& model,
+    std::span<const MaterialBindingOverrides> overrides_by_material,
+    std::span<const ExternalTextureGrant> grants,
+    std::span<const ExternalTextureRequest> requests,
+    ExternalTextureAuthorityLimits limits) try {
+    if (!valid_limits(limits))
+        return effective_failure(Status::invalid_request,
+                                 invalid_external_texture_resource, {}, {},
+                                 "external_texture_limits_invalid",
+                                 "External texture authority limits must be nonzero");
+    if (model.materials.size() > limits.max_materials)
+        return effective_failure(Status::resource_limit,
+                                 invalid_external_texture_resource, {}, {},
+                                 "external_texture_material_limit",
+                                 "Effective scene material count exceeds the configured limit");
+    if (model.textures.size() > limits.max_effective_textures)
+        return effective_failure(Status::resource_limit,
+                                 invalid_external_texture_resource, {}, {},
+                                 "external_texture_effective_texture_limit",
+                                 "Effective scene texture count exceeds the configured limit");
+    if (!overrides_by_material.empty() &&
+        overrides_by_material.size() != model.materials.size())
+        return effective_failure(Status::invalid_request,
+                                 invalid_external_texture_resource, {}, {},
+                                 "external_texture_override_table_invalid",
+                                 "Effective scene overrides must match the material table");
+
+    const ExternalTextureAuthorityResult authority =
+        resolve_external_texture_authority(grants, requests, limits);
+    if (!authority.ok()) {
+        ExternalTextureEffectiveStockSceneResult result;
+        result.status = authority.status;
+        result.diagnostics = authority.diagnostics;
+        return result;
+    }
+
+    // Validate every request and collect the exact map key to erase. A
+    // canonical-slot collision is rejected before any model is copied or
+    // modified, so two sources cannot silently compete for one material slot.
+    struct ConsumedOverride {
+        std::size_t material_index = 0U;
+        std::string raw_key;
+        std::size_t request_index = 0U;
+        std::string canonical_slot;
+    };
+    std::vector<ConsumedOverride> consumed;
+    consumed.reserve(requests.size());
+    std::map<std::pair<std::size_t, std::string>, std::size_t> request_slots;
+    for (std::size_t request_index = 0U; request_index < requests.size();
+         ++request_index) {
+        const auto& request = requests[request_index];
+        if (request.material_index == invalid_external_texture_resource ||
+            request.material_index >= model.materials.size())
+            return effective_failure(Status::invalid_request, request_index,
+                                     request.grant_id, request.binding.file,
+                                     "external_texture_material_index_invalid",
+                                     "External texture request names no material in the effective scene");
+        const auto& material = model.materials[request.material_index];
+        if (request.workspace_file_index != material.workspaceFileIndex)
+            return effective_failure(Status::rejected, request_index,
+                                     request.grant_id, request.binding.file,
+                                     "external_texture_workspace_scope_mismatch",
+                                     "External texture request workspace scope does not match its material");
+        if (request.binding.slot.empty() ||
+            request.binding.slot.size() > limits.max_path_bytes ||
+            request.binding.slot.find('\0') != std::string::npos ||
+            canonical_effective_slot(request.binding.slot).empty())
+            return effective_failure(Status::invalid_request, request_index,
+                                     request.grant_id, request.binding.file,
+                                     "external_texture_slot_invalid",
+                                     "External texture request slot is empty or exceeds the configured limit");
+        const std::string canonical_slot =
+            canonical_effective_slot(request.binding.slot);
+        if (!request_slots.emplace(
+                std::make_pair(request.material_index, canonical_slot), request_index)
+                 .second)
+            return effective_failure(Status::ambiguous, request_index,
+                                     request.grant_id, request.binding.file,
+                                     "external_texture_slot_collision",
+                                     "Multiple external texture requests address one material slot");
+
+        if (overrides_by_material.empty())
+            return effective_failure(Status::invalid_request, request_index,
+                                     request.grant_id, request.binding.file,
+                                     "external_texture_override_missing",
+                                     "External texture request has no material override table");
+        const auto& overrides = overrides_by_material[request.material_index];
+        const MaterialTextureOverride* matched = nullptr;
+        std::string matched_key;
+        std::set<std::string> override_slots;
+        for (const auto& [raw_key, value] : overrides.resources) {
+            const std::string key = canonical_effective_slot(raw_key);
+            if (!override_slots.insert(key).second)
+                return effective_failure(Status::ambiguous, request_index,
+                                         request.grant_id, request.binding.file,
+                                         "external_texture_override_collision",
+                                         "Material resource overrides contain colliding slot names");
+            if (key == canonical_slot) {
+                matched = &value;
+                matched_key = raw_key;
+            }
+        }
+        if (matched == nullptr || matched->file.empty() ||
+            matched->file != request.binding.file)
+            return effective_failure(Status::rejected, request_index,
+                                     request.grant_id, request.binding.file,
+                                     "external_texture_override_mismatch",
+                                     "External texture request does not match one material file override");
+        if (authority.request_resource_indices.size() != requests.size() ||
+            authority.request_resource_indices[request_index] ==
+                invalid_external_texture_resource)
+            return effective_failure(Status::invalid_request, request_index,
+                                     request.grant_id, request.binding.file,
+                                     "external_texture_authority_mapping_invalid",
+                                     "External texture authority returned no resource for a valid request");
+        consumed.push_back({request.material_index, std::move(matched_key),
+                            request_index, canonical_slot});
+    }
+
+    try {
+        auto input = std::make_unique<ExternalTextureEffectiveStockSceneInput>();
+        input->model = model;
+        input->overrides_by_material.assign(overrides_by_material.begin(),
+                                            overrides_by_material.end());
+        input->external_bindings.reserve(requests.size());
+
+        using ScopeKey = std::pair<std::size_t, std::optional<std::size_t>>;
+        std::map<std::pair<std::size_t, ScopeKey>, std::size_t> synthetic_indices;
+        std::set<std::pair<ScopeKey, std::string>> texture_names;
+        for (const auto& texture : input->model.textures) {
+            texture_names.emplace(ScopeKey{texture.workspaceFileIndex.has_value()
+                                               ? 1U
+                                               : 0U,
+                                           texture.workspaceFileIndex},
+                                  canonical_effective_slot(texture.name));
+        }
+        std::uint64_t effective_source_bytes = 0U;
+        std::size_t next_name = 0U;
+        for (const ConsumedOverride& item : consumed) {
+            const auto& request = requests[item.request_index];
+            const std::size_t authority_index =
+                authority.request_resource_indices[item.request_index];
+            const auto& resource = authority.resources[authority_index];
+            const auto& material = input->model.materials[item.material_index];
+            const ScopeKey scope{material.workspaceFileIndex.has_value() ? 1U : 0U,
+                                 material.workspaceFileIndex};
+            const std::pair<std::size_t, ScopeKey> resource_key{authority_index, scope};
+            auto found_synthetic = synthetic_indices.find(resource_key);
+            std::size_t texture_index = invalid_external_texture_resource;
+            if (found_synthetic != synthetic_indices.end()) {
+                texture_index = found_synthetic->second;
+            } else {
+                if (resource.source_bytes.empty() || resource.plan.levels.empty())
+                    return effective_failure(Status::read_failed, item.request_index,
+                                             request.grant_id, request.binding.file,
+                                             "external_texture_owned_payload_invalid",
+                                             "Authority returned an invalid owned DDS payload");
+                if (!checked_add(static_cast<std::uint64_t>(resource.source_bytes.size()),
+                                 effective_source_bytes,
+                                 limits.max_total_effective_source_bytes))
+                    return effective_failure(Status::resource_limit, item.request_index,
+                                             request.grant_id, request.binding.file,
+                                             "external_texture_effective_source_limit",
+                                             "Owned effective DDS bytes exceed the aggregate limit");
+                if (input->model.textures.size() >= limits.max_effective_textures ||
+                    resource.source_bytes.size() > std::numeric_limits<std::uint32_t>::max())
+                    return effective_failure(Status::resource_limit, item.request_index,
+                                             request.grant_id, request.binding.file,
+                                             "external_texture_effective_texture_limit",
+                                             "Synthetic effective texture exceeds the configured limit");
+                std::string name;
+                do {
+                    name = "__apex_external_dds_" + std::to_string(next_name++);
+                    if (name.size() > limits.max_effective_texture_name_bytes)
+                        return effective_failure(Status::resource_limit, item.request_index,
+                                                 request.grant_id, request.binding.file,
+                                                 "external_texture_effective_name_limit",
+                                                 "Synthetic effective texture name exceeds the configured limit");
+                } while (!texture_names.emplace(scope, canonical_effective_slot(name)).second);
+                apex::formats::Kn5Texture texture;
+                texture.active = true;
+                texture.name = name;
+                texture.size = static_cast<std::uint32_t>(resource.source_bytes.size());
+                texture.data = resource.source_bytes;
+                texture.workspaceFileIndex = material.workspaceFileIndex;
+                input->model.textures.push_back(std::move(texture));
+                texture_index = input->model.textures.size() - 1U;
+                synthetic_indices.emplace(resource_key, texture_index);
+            }
+
+            auto& effective_material = input->model.materials[item.material_index];
+            std::size_t matching_resource = invalid_external_texture_resource;
+            for (std::size_t resource_index = 0U;
+                 resource_index < effective_material.resources.size(); ++resource_index) {
+                if (canonical_effective_slot(effective_material.resources[resource_index].slot) ==
+                    item.canonical_slot) {
+                    if (matching_resource != invalid_external_texture_resource)
+                        return effective_failure(Status::ambiguous, item.request_index,
+                                                 request.grant_id, request.binding.file,
+                                                 "external_texture_material_resource_collision",
+                                                 "Material contains colliding resource slots");
+                    matching_resource = resource_index;
+                }
+            }
+            if (matching_resource == invalid_external_texture_resource) {
+                if (!request.binding.bind_point.has_value())
+                    return effective_failure(Status::invalid_request, item.request_index,
+                                             request.grant_id, request.binding.file,
+                                             "external_texture_bind_point_missing",
+                                             "A new material resource requires an explicit bind point");
+                effective_material.resources.push_back(
+                    {request.binding.slot, *request.binding.bind_point,
+                     input->model.textures[texture_index].name});
+            } else {
+                // The serialized KN5 bind point remains authoritative for an
+                // existing slot; only its owned texture payload is replaced.
+                effective_material.resources[matching_resource].texture =
+                    input->model.textures[texture_index].name;
+            }
+
+            auto& effective_overrides = input->overrides_by_material[item.material_index];
+            effective_overrides.resources.erase(item.raw_key);
+            input->external_bindings.push_back({
+                item.material_index, material.workspaceFileIndex,
+                request.binding.slot,
+                resource.grant_id, resource.requested_path, resource.resolved_path,
+                input->model.textures[texture_index].name, authority_index});
+        }
+
+        ExternalTextureEffectiveStockSceneResult result;
+        result.status = Status::ready;
+        result.input = std::move(input);
+        return result;
+    } catch (const std::bad_alloc&) {
+        return effective_failure(Status::resource_limit,
+                                 invalid_external_texture_resource, {}, {},
+                                 "external_texture_effective_allocation_failed",
+                                 "Effective stock-scene input exceeded bounded host storage");
+    } catch (const std::length_error&) {
+        return effective_failure(Status::resource_limit,
+                                 invalid_external_texture_resource, {}, {},
+                                 "external_texture_effective_allocation_failed",
+                                 "Effective stock-scene input exceeded bounded host storage");
+    }
+} catch (const std::bad_alloc&) {
+    return effective_failure(Status::resource_limit, invalid_external_texture_resource, {}, {},
+                             "external_texture_effective_allocation_failed",
+                             "Effective stock-scene input exceeded bounded host storage");
+} catch (const std::length_error&) {
+    return effective_failure(Status::resource_limit, invalid_external_texture_resource, {}, {},
+                             "external_texture_effective_allocation_failed",
+                             "Effective stock-scene input exceeded bounded host storage");
 }
 
 }  // namespace apex::render

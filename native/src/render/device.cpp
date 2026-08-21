@@ -735,7 +735,8 @@ IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
         return IndexedPortableResourceLayout::resource_free;
     if (pipeline.resources.size() != 2U && pipeline.resources.size() != 3U &&
         pipeline.resources.size() != 4U && pipeline.resources.size() != 6U &&
-        pipeline.resources.size() != 8U && pipeline.resources.size() != 12U)
+        pipeline.resources.size() != 8U && pipeline.resources.size() != 12U &&
+        pipeline.resources.size() != 14U)
         return IndexedPortableResourceLayout::unsupported;
     bool sampled_texture = false;
     bool sampler = false;
@@ -849,6 +850,11 @@ IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
         normal_texture && normal_sampler && maps_texture && maps_sampler &&
         damage_texture && damage_sampler && damage_mask_texture && damage_mask_sampler)
         return IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame;
+    if (pipeline.resources.size() == 14U && material_constants && frame_constants &&
+        normal_texture && normal_sampler && maps_texture && maps_sampler &&
+        detail_texture && detail_sampler && damage_texture && damage_sampler &&
+        damage_mask_texture && damage_mask_sampler)
+        return IndexedPortableResourceLayout::diffuse_normal_maps_damage_dust_with_constants_and_frame;
     return IndexedPortableResourceLayout::unsupported;
 }
 
@@ -1129,28 +1135,35 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame ||
-            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame;
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame ||
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_dust_with_constants_and_frame;
         const bool frame_declaration =
             resource_layout == IndexedPortableResourceLayout::diffuse_with_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame ||
-            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame;
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame ||
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_dust_with_constants_and_frame;
         const bool normal_declaration =
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame ||
-            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame;
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame ||
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_dust_with_constants_and_frame;
         const bool maps_declaration =
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame ||
-            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame;
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame ||
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_dust_with_constants_and_frame;
         const bool detail_declaration =
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame ||
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_dust_with_constants_and_frame;
+        const bool normal_detail_declaration =
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame;
-        const bool normal_detail_declaration = detail_declaration;
         const bool damage_declaration =
-            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame;
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame ||
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_dust_with_constants_and_frame;
         if (request.resource_authority != IndexedResourceAuthority::explicit_bindings) {
             diagnostic = {"indexed_resource_execution_staged",
                           "Material resources require explicit request-local binding authority"};
@@ -2120,6 +2133,25 @@ const char* presentation_target_status_name(
         return "invalid_description";
     case PresentationTargetStatus::unsupported:
         return "unsupported";
+    case PresentationTargetStatus::allocation_failed:
+        return "allocation_failed";
+    case PresentationTargetStatus::execution_failed:
+        return "execution_failed";
+    }
+    return "unknown";
+}
+
+const char* presentation_frame_status_name(
+    PresentationFrameStatus status) noexcept {
+    switch (status) {
+    case PresentationFrameStatus::ready:
+        return "ready";
+    case PresentationFrameStatus::invalid_request:
+        return "invalid_request";
+    case PresentationFrameStatus::unsupported:
+        return "unsupported";
+    case PresentationFrameStatus::execution_failed:
+        return "execution_failed";
     }
     return "unknown";
 }

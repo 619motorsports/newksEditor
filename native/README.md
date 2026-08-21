@@ -41,8 +41,11 @@ boundary. Backend API types stay inside `src/render`. Format and authoring
 libraries do not depend on a graphics API.
 
 The device API reports presentation prerequisites without creating a window.
-Vulkan reports surface and swapchain extensions. D3D12 reports DXGI factory,
-device, and queue support. The port does not create surfaces or swapchains.
+An optional Vulkan mode creates a `VK_EXT_headless_surface` surface and a
+swapchain. It can acquire, clear, submit, and present an image. The target owns
+its image views, framebuffers, commands, and synchronization objects. D3D12
+reports its DXGI factory, device, and queue prerequisites. D3D12 does not create
+a swapchain because the application does not yet supply a native window handle.
 
 ## Build and test
 
@@ -128,14 +131,12 @@ retains the production A2C state. Reflections and shadows remain staged.
 Runtime tests cover known pixels and mixed resource layouts.
 The dirt-zero damage ABI uses the same diffuse, normal, and maps resources.
 It adds `txDamage` at bindings 12 and 13. It adds `txDamageMask` at bindings
-14 and 15. The handoff requires an authored `damageZones` value and exact zero
-`dirt`. It validates optional `txDust` but does not bind it. The isolated
-damage-mix equation makes the dust RGB factor one when dirt is zero. Vulkan and
-D3D12 execute the damage mix and two recovered specular factors. Pixel tests
-cover disabled damage, enabled damage, and normal-alpha attenuation. The stock
-shader samples `txDust` in the complete direct-light path. Its alpha affects
-diffuse and specular light. Thus, the complete direct-light path remains
-staged. Stock detail, sun-specular, Fresnel, and reflection also remain staged.
+14 and 15. A low-level extension binds `txDust` at the mutually exclusive
+bindings 8 and 9. Vulkan and D3D12 use its alpha for direct diffuse and
+specular light. Pixel tests cover alpha values of zero and one. The stock
+material handoff still validates `txDust` without binding this extension.
+Thus, stock-facade `txDust` execution remains staged. Stock detail,
+sun-specular, Fresnel, and reflection also remain staged.
 The serialized KN5 resource ID remains a shader bind point, not a
 texture-table index. A bounded static-scene adapter maps the final KN5 tree to
 dense scene IDs. It validates all packets and pipelines before buffer creation.
@@ -148,9 +149,9 @@ Static scenes accept 1x and 4x pipelines. A2C requires 4x color and matching
 depth samples. A bounded material handoff derives the supported resource
 layouts, constants, and profile state from KN5 materials. The caller must
 supply explicit SPIR-V or DXIL modules. Production packets remain marked as
-staged. The handoff does not translate stock shader containers. The device API
-reports presentation prerequisites. Window surfaces, swapchains, and complete
-stock execution remain roadmap work.
+staged. The handoff does not translate stock shader containers. Vulkan can
+create a headless surface and swapchain. Native window surfaces, D3D12
+swapchains, and complete stock execution remain roadmap work.
 A bounded stock-scene facade composes the render plan, draw packets, material
 handoff, and static-scene preparation. It uses linear topology preflight and
 rejects malformed edges, cycles, and over-budget plans before backend
@@ -201,8 +202,11 @@ and host-preparation budgets include the maps resource and its retained tables.
 A separate CPU bridge resolves external DDS files through explicit
 `AssetSource` grants. It rejects unsafe, missing, ambiguous, and over-budget
 requests. It retains source identity and returns no partial table after an
-error. The bridge has no GPU access. It is not yet connected to the
-stock-scene facade.
+error. The bridge copies validated DDS bytes into opaque, synthetic KN5
+textures. It rewrites only the requested material slots and preserves their
+bind points. Then the stock-scene facade can own and execute the effective
+model. A real backend pixel test proves the ACD-to-GPU path. The renderer does
+not receive the `AssetSource`, the grant, or the external path.
 The FBX converter handles static positions, triangulation, hierarchy, a
 bounded transform subset, and first material assignment. Its aggregate budget
 includes temporary containers, copied strings, and output containers. It
