@@ -109,6 +109,10 @@ void rejectsInvalidReferencesIndicesAndNonFiniteValues() {
     badConnection.roots[1].children[0].properties[0].values[2] = std::int64_t(9999);
     expectsError([&] { (void)apex::formats::convertFbxScene(badConnection); }, "invalid_reference");
 
+    auto duplicateId = fixture();
+    duplicateId.roots[0].children[2].properties[0].values[0] = std::int64_t(200);
+    expectsError([&] { (void)apex::formats::convertFbxScene(duplicateId); }, "duplicate_id");
+
     auto zeroId = fixture();
     zeroId.roots[0].children[0].properties[0].values[0] = std::int64_t(0);
     expectsError([&] { (void)apex::formats::convertFbxScene(zeroId); }, "invalid_id");
@@ -189,6 +193,12 @@ void enforcesLimitsAndUnsupportedCapability() {
     auto nodeLimited = apex::formats::FbxConversionLimits{};
     nodeLimited.max_nodes = 1u;
     expectsError([&] { (void)apex::formats::convertFbxScene(fixture(), nodeLimited); }, "node_limit");
+    auto zeroConnections = apex::formats::FbxConversionLimits{};
+    zeroConnections.max_connections = 0u;
+    expectsError([&] { (void)apex::formats::convertFbxScene(fixture(), zeroConnections); }, "connection_limit");
+    auto zeroIndices = apex::formats::FbxConversionLimits{};
+    zeroIndices.max_indices = 0u;
+    expectsError([&] { (void)apex::formats::convertFbxScene(fixture(), zeroIndices); }, "index_limit");
     auto propertyLimited = apex::formats::FbxConversionLimits{};
     propertyLimited.max_property_values = 2u;
     expectsError([&] { (void)apex::formats::convertFbxScene(fixture(), propertyLimited); }, "property_limit");
@@ -208,6 +218,25 @@ void enforcesLimitsAndUnsupportedCapability() {
             "FBX conversion capability detail");
 }
 
+void boundsTemporaryContainersBeforeConversion() {
+    auto many = fixture();
+    auto& objects = many.roots[0];
+    auto& connections = many.roots[1];
+    constexpr std::size_t extraCount = 64u;
+    for (std::size_t index = 0u; index < extraCount; ++index) {
+        const auto id = static_cast<std::int64_t>(1000u + index);
+        objects.children.push_back(node("Material", {
+            id, std::string("Material::Extra") + std::to_string(index), std::string("Material")}, {
+            propertyNode("ShadingModel", {std::string("Phong")})}));
+        connections.children.push_back(node("C", {std::string("OO"), id, std::int64_t(200)}));
+    }
+    auto limits = apex::formats::FbxConversionLimits{};
+    limits.max_materials = extraCount + 1u;
+    limits.max_connections = extraCount + 2u;
+    limits.max_output_bytes = 16u * 1024u;
+    expectsError([&] { (void)apex::formats::convertFbxScene(many, limits); }, "output_limit");
+}
+
 }  // namespace
 
 int main() {
@@ -215,6 +244,7 @@ int main() {
         convertsStaticGeometryTransformsAndMaterials();
         rejectsInvalidReferencesIndicesAndNonFiniteValues();
         enforcesLimitsAndUnsupportedCapability();
+        boundsTemporaryContainersBeforeConversion();
         std::cout << "fbx conversion tests passed\n";
         return 0;
     } catch (const std::exception& error) {

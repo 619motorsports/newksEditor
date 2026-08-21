@@ -21,6 +21,28 @@ using scene::NodeId;
                               std::string(message), std::move(path)});
 }
 
+struct Budget {
+    std::size_t used = 0;
+    std::size_t maximum = 0;
+    void add(std::size_t amount, std::string_view path) {
+        if (amount > std::numeric_limits<std::size_t>::max() - used || used + amount > maximum)
+            fail("output_limit", "FBX converted scene exceeds its output budget", std::string(path));
+        used += amount;
+    }
+};
+
+std::size_t checkedMultiply(std::size_t left, std::size_t right, std::string_view path) {
+    if (left != 0u && right > std::numeric_limits<std::size_t>::max() / left)
+        fail("size_overflow", "FBX conversion size arithmetic overflow", std::string(path));
+    return left * right;
+}
+
+std::size_t checkedAdd(std::size_t left, std::size_t right, std::string_view path) {
+    if (right > std::numeric_limits<std::size_t>::max() - left)
+        fail("size_overflow", "FBX conversion size arithmetic overflow", std::string(path));
+    return left + right;
+}
+
 std::string cleanName(std::string value, std::string_view fallback) {
     const auto separator = value.find("::");
     if (separator != std::string::npos) value.erase(0, separator + 2u);
@@ -28,8 +50,14 @@ std::string cleanName(std::string value, std::string_view fallback) {
     return value;
 }
 
-std::vector<const FbxValue*> values(const FbxNode& node) {
+std::vector<const FbxValue*> values(const FbxNode& node, Budget* budget = nullptr,
+                                    std::string_view path = "FBX values") {
+    std::size_t count = 0u;
+    for (const auto& property : node.properties)
+        count = checkedAdd(count, property.values.size(), path);
+    if (budget != nullptr) budget->add(checkedMultiply(count, sizeof(const FbxValue*), path), path);
     std::vector<const FbxValue*> result;
+    result.reserve(count);
     for (const auto& property : node.properties)
         for (const auto& value : property.values) result.push_back(&value);
     return result;
@@ -68,38 +96,30 @@ bool integerValue(const FbxValue* value, std::int64_t& result) {
     return true;
 }
 
-std::size_t checkedMultiply(std::size_t left, std::size_t right, std::string_view path) {
-    if (left != 0u && right > std::numeric_limits<std::size_t>::max() / left)
-        fail("size_overflow", "FBX conversion size arithmetic overflow", std::string(path));
-    return left * right;
-}
-
-std::size_t checkedAdd(std::size_t left, std::size_t right, std::string_view path) {
-    if (right > std::numeric_limits<std::size_t>::max() - left)
-        fail("size_overflow", "FBX conversion size arithmetic overflow", std::string(path));
-    return left + right;
-}
-
-std::int64_t objectId(const FbxNode& node, std::string_view path) {
-    const auto flattened = values(node);
+std::int64_t objectId(const FbxNode& node, std::string_view path, Budget& budget) {
+    const auto flattened = values(node, &budget, path);
     std::int64_t id = 0;
     if (flattened.empty() || !integerValue(flattened[0], id) || id <= 0)
         fail("invalid_id", "FBX object ID is not a finite integer", std::string(path));
     return id;
 }
 
-std::string objectName(const FbxNode& node, std::string_view path) {
-    const auto flattened = values(node);
+std::string objectName(const FbxNode& node, std::string_view path, Budget& budget) {
+    const auto flattened = values(node, &budget, path);
     if (flattened.size() < 2u || stringValue(flattened[1]) == nullptr)
         fail("invalid_object", "FBX object has no string name", std::string(path));
-    return cleanName(*stringValue(flattened[1]), "Object");
+    const auto raw = *stringValue(flattened[1]);
+    const auto separator = raw.find("::");
+    const auto suffixBytes = separator == std::string::npos ? raw.size() : raw.size() - separator - 2u;
+    budget.add(suffixBytes == 0u ? 6u : suffixBytes, path);
+    return cleanName(raw, "Object");
 }
 
-std::string objectType(const FbxNode& node) {
-    const auto flattened = values(node);
-    return flattened.size() >= 3u && stringValue(flattened[2]) != nullptr
-               ? *stringValue(flattened[2])
-               : std::string();
+std::string objectType(const FbxNode& node, std::string_view path, Budget& budget) {
+    const auto flattened = values(node, &budget, path);
+    if (flattened.size() < 3u || stringValue(flattened[2]) == nullptr) return {};
+    budget.add(stringValue(flattened[2])->size(), path);
+    return *stringValue(flattened[2]);
 }
 
 const FbxNode* rootNamed(const FbxDocument& document, std::string_view name) {
@@ -122,15 +142,24 @@ struct Link {
     std::string property;
 };
 
-struct Budget {
-    std::size_t used = 0;
-    std::size_t maximum = 0;
-    void add(std::size_t amount, std::string_view path) {
-        if (amount > std::numeric_limits<std::size_t>::max() - used || used + amount > maximum)
-            fail("output_limit", "FBX converted scene exceeds its output budget", std::string(path));
-        used += amount;
-    }
-};
+constexpr std::size_t kAssociativeNodeOverhead = sizeof(void*) * 4u;
+
+void chargeAssociativeNode(Budget& budget, std::size_t valueBytes, std::string_view path) {
+    budget.add(checkedAdd(valueBytes, kAssociativeNodeOverhead, path), path);
+}
+
+template <typename T>
+void reserveForAppend(std::vector<T>& values, std::size_t required, Budget& budget,
+                      std::string_view path) {
+    if (required <= values.capacity()) return;
+    const auto current = values.capacity();
+    auto next = current == 0u ? 1u : current > std::numeric_limits<std::size_t>::max() / 2u
+                                     ? std::numeric_limits<std::size_t>::max()
+                                     : current * 2u;
+    if (next < required) next = required;
+    budget.add(checkedMultiply(next - current, sizeof(T), path), path);
+    values.reserve(next);
+}
 
 struct DiagnosticBudget {
     std::size_t count = 0;
@@ -156,6 +185,15 @@ void addDiagnostic(FbxSceneConversion& result, DiagnosticBudget& budget,
     if (budget.output != nullptr) budget.output->add(bytes, "diagnostics");
     budget.bytes += bytes;
     ++budget.count;
+    if (budget.output != nullptr && result.diagnostics.size() == result.diagnostics.capacity()) {
+        const auto current = result.diagnostics.capacity();
+        const auto next = current == 0u ? 1u : current > std::numeric_limits<std::size_t>::max() / 2u
+                                                ? std::numeric_limits<std::size_t>::max()
+                                                : current * 2u;
+        budget.output->add(checkedMultiply(next - current, sizeof(FbxConversionDiagnostic), "diagnostics"),
+                           "diagnostics");
+        result.diagnostics.reserve(next);
+    }
     result.diagnostics.push_back({severity, std::string(code), std::string(message), std::string(path)});
 }
 
@@ -204,7 +242,7 @@ Matrix4 localTransform(const FbxNode& model, std::string_view path,
     if (properties70 != nullptr) {
         for (std::size_t propertyIndex = 0; propertyIndex < properties70->children.size(); ++propertyIndex) {
             const auto& property = properties70->children[propertyIndex];
-            const auto flattened = values(property);
+            const auto flattened = values(property, diagnostics.output, path);
             if (flattened.empty() || stringValue(flattened[0]) == nullptr) continue;
             const auto& name = *stringValue(flattened[0]);
             const bool supported = name == "Lcl Translation" || name == "Lcl Rotation" ||
@@ -257,11 +295,11 @@ Matrix4 localTransform(const FbxNode& model, std::string_view path,
     return matrix;
 }
 
-bool modelVisible(const FbxNode& model) {
+bool modelVisible(const FbxNode& model, Budget* budget = nullptr) {
     for (const auto& child : model.children) {
         if (child.name != "Properties70" && child.name != "Properties60") continue;
         for (const auto& property : child.children) {
-            const auto flattened = values(property);
+            const auto flattened = values(property, budget, "model visibility");
             if (flattened.empty() || stringValue(flattened[0]) == nullptr || *stringValue(flattened[0]) != "Visibility") continue;
             for (std::size_t index = 1u; index < flattened.size(); ++index) {
                 double number = 0.0;
@@ -277,7 +315,7 @@ std::vector<float> geometryPositions(const FbxNode& geometry, std::string_view p
     const FbxNode* vertices = nullptr;
     for (const auto& child : geometry.children) if (child.name == "Vertices") vertices = &child;
     if (vertices == nullptr) fail("missing_geometry", "FBX geometry has no Vertices array", std::string(path));
-    const auto flattened = values(*vertices);
+    const auto flattened = values(*vertices, &budget, path);
     if (flattened.empty()) fail("missing_geometry", "FBX Vertices property is empty", std::string(path));
     const FbxArray* array = std::get_if<FbxArray>(flattened[0]);
     if (array == nullptr) fail("invalid_geometry", "FBX Vertices is not an array", std::string(path));
@@ -310,7 +348,7 @@ std::vector<std::uint32_t> geometryIndices(const FbxNode& geometry, std::string_
     const FbxNode* polygon = nullptr;
     for (const auto& child : geometry.children) if (child.name == "PolygonVertexIndex") polygon = &child;
     if (polygon == nullptr) fail("missing_geometry", "FBX geometry has no PolygonVertexIndex array", std::string(path));
-    const auto flattened = values(*polygon);
+    const auto flattened = values(*polygon, &budget, path);
     if (flattened.empty()) fail("missing_geometry", "FBX PolygonVertexIndex property is empty", std::string(path));
     const FbxArray* array = std::get_if<FbxArray>(flattened[0]);
     const auto encoded = array == nullptr ? nullptr : std::get_if<std::vector<std::int64_t>>(array);
@@ -319,7 +357,7 @@ std::vector<std::uint32_t> geometryIndices(const FbxNode& geometry, std::string_
         fail("id_limit", "FBX vertex indices exceed their uint32 range", std::string(path));
     std::vector<std::uint32_t> result;
     std::vector<std::uint32_t> polygonVertices;
-    const auto maxPolygonVertices = limits.max_indices / 3u + 2u;
+    const auto maxPolygonVertices = checkedAdd(limits.max_indices / 3u, 2u, path);
     for (std::size_t index = 0; index < encoded->size(); ++index) {
         const auto value = (*encoded)[index];
         const bool terminal = value < 0;
@@ -328,13 +366,14 @@ std::vector<std::uint32_t> geometryIndices(const FbxNode& geometry, std::string_
             fail("invalid_index", "FBX polygon index references a missing vertex", std::string(path));
         if (polygonVertices.size() >= maxPolygonVertices)
             fail("index_limit", "FBX polygon vertex count exceeds its limit", std::string(path));
+        reserveForAppend(polygonVertices, polygonVertices.size() + 1u, budget, path);
         polygonVertices.push_back(static_cast<std::uint32_t>(decoded));
         if (terminal) {
             if (polygonVertices.size() < 3u) fail("invalid_geometry", "FBX polygon has fewer than three vertices", std::string(path));
             const auto triangles = polygonVertices.size() - 2u;
             if (result.size() > limits.max_indices || triangles > (limits.max_indices - result.size()) / 3u)
                 fail("index_limit", "FBX triangle index count exceeds its limit", std::string(path));
-            budget.add(checkedMultiply(checkedMultiply(triangles, 3u, path), sizeof(std::uint32_t), path), path);
+            reserveForAppend(result, checkedAdd(result.size(), checkedMultiply(triangles, 3u, path), path), budget, path);
             for (std::size_t corner = 1u; corner + 1u < polygonVertices.size(); ++corner) {
                 result.push_back(polygonVertices[0]); result.push_back(polygonVertices[corner]); result.push_back(polygonVertices[corner + 1u]);
             }
@@ -349,11 +388,23 @@ void unsupportedFeatureScan(const FbxDocument& document, FbxSceneConversion& res
                             DiagnosticBudget& diagnostics) {
     struct Frame { const FbxNode* node = nullptr; std::string path; std::size_t child = 0; };
     std::vector<Frame> stack;
+    const auto pushFrame = [&](Frame frame) {
+        if (stack.size() == stack.capacity() && diagnostics.output != nullptr) {
+            const auto current = stack.capacity();
+            const auto next = current == 0u ? 1u : current > std::numeric_limits<std::size_t>::max() / 2u
+                                                    ? std::numeric_limits<std::size_t>::max()
+                                                    : current * 2u;
+            diagnostics.output->add(checkedMultiply(next - current, sizeof(Frame), "unsupported feature scan"),
+                                    "unsupported feature scan");
+            stack.reserve(next);
+        }
+        stack.push_back(std::move(frame));
+    };
     for (auto iterator = document.roots.rbegin(); iterator != document.roots.rend(); ++iterator) {
         if (iterator->name.size() > diagnostics.limits.max_diagnostic_path_bytes)
             fail("diagnostic_limit", "FBX conversion diagnostic path exceeds its limit", "diagnostics");
         if (diagnostics.output != nullptr) diagnostics.output->add(iterator->name.size(), "diagnostic paths");
-        stack.push_back({&*iterator, iterator->name, 0u});
+        pushFrame({&*iterator, iterator->name, 0u});
     }
     while (!stack.empty()) {
         auto& frame = stack.back();
@@ -370,7 +421,7 @@ void unsupportedFeatureScan(const FbxDocument& document, FbxSceneConversion& res
         if (frame.child == frame.node->children.size()) { stack.pop_back(); continue; }
         const auto childIndex = frame.child++;
         const auto* child = &frame.node->children[childIndex];
-        stack.push_back({child, childPath(frame.path, childIndex, diagnostics.limits, diagnostics.output), 0u});
+        pushFrame({child, childPath(frame.path, childIndex, diagnostics.limits, diagnostics.output), 0u});
     }
 }
 
@@ -453,17 +504,32 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
                                   : limits.max_nodes + limits.max_materials + limits.max_meshes;
     if (objects->children.size() > objectBudget)
         fail("node_limit", "FBX Objects count exceeds conversion limits", "Objects");
+    std::size_t modelCount = 0u;
+    std::size_t materialCount = 0u;
+    std::size_t geometryCount = 0u;
+    for (const auto& node : objects->children) {
+        if (node.name == "Model") ++modelCount;
+        else if (node.name == "Material") ++materialCount;
+        else if (node.name == "Geometry") ++geometryCount;
+    }
+    if (modelCount > limits.max_nodes || materialCount > limits.max_materials || geometryCount > limits.max_meshes)
+        fail("count_limit", "FBX scene object count exceeds conversion limits", "Objects");
     budget.add(checkedMultiply(objects->children.size(), sizeof(ObjectRecord), "records"), "records");
-    budget.add(checkedMultiply(checkedMultiply(objects->children.size(), sizeof(std::size_t), "object indexes"), 3u, "object indexes"), "object indexes");
+    budget.add(checkedMultiply(modelCount, sizeof(std::size_t), "model indexes"), "model indexes");
+    budget.add(checkedMultiply(materialCount, sizeof(std::size_t), "material indexes"), "material indexes");
+    budget.add(checkedMultiply(geometryCount, sizeof(std::size_t), "geometry indexes"), "geometry indexes");
     records.reserve(objects->children.size());
+    modelIndexes.reserve(modelCount);
+    materialIndexes.reserve(materialCount);
+    geometryIndexes.reserve(geometryCount);
     for (std::size_t index = 0; index < objects->children.size(); ++index) {
         const auto& node = objects->children[index];
         const auto path = "Objects/" + std::to_string(index);
-        ObjectRecord record{&node, objectId(node, path), objectName(node, path), objectType(node)};
+        ObjectRecord record{&node, objectId(node, path, budget), objectName(node, path, budget), objectType(node, path, budget)};
         if (record.id == 0) fail("invalid_id", "FBX object ID 0 is reserved for the synthetic root", path);
-        budget.add(record.name.size(), path);
-        budget.add(record.type.size(), path);
-        if (!byId.emplace(record.id, records.size()).second) fail("duplicate_id", "FBX object IDs must be unique", path);
+        if (byId.contains(record.id)) fail("duplicate_id", "FBX object IDs must be unique", path);
+        chargeAssociativeNode(budget, sizeof(std::pair<const std::int64_t, std::size_t>), path);
+        byId.emplace(record.id, records.size());
         records.push_back(std::move(record));
         const auto& type = records.back().type;
         if (node.name == "Model") modelIndexes.push_back(records.size() - 1u);
@@ -472,8 +538,6 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
         else if (node.name == "Deformer") result.complete = false;
         (void)type;
     }
-    if (modelIndexes.size() > limits.max_nodes || materialIndexes.size() > limits.max_materials || geometryIndexes.size() > limits.max_meshes)
-        fail("count_limit", "FBX scene object count exceeds conversion limits", "Objects");
     if (modelIndexes.size() >= static_cast<std::size_t>(scene::invalid_node_id) ||
         materialIndexes.size() >= static_cast<std::size_t>(scene::invalid_material_id) ||
         geometryIndexes.size() >= static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))
@@ -495,13 +559,15 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
     std::map<std::int64_t, std::uint32_t> materialIds;
     for (std::size_t index = 0; index < materialIndexes.size(); ++index) {
         const auto& record = records[materialIndexes[index]];
-        std::string shader = record.type;
+        std::string_view shaderView = record.type;
         for (const auto& child : record.node->children) if (child.name == "ShadingModel") {
-            const auto flattened = values(child);
-            if (!flattened.empty() && stringValue(flattened[0]) != nullptr) shader = *stringValue(flattened[0]);
+            const auto flattened = values(child, &budget, "scene/materials");
+            if (!flattened.empty() && stringValue(flattened[0]) != nullptr) shaderView = *stringValue(flattened[0]);
         }
-        budget.add(checkedAdd(record.name.size(), shader.size(), "scene/materials"), "scene/materials");
+        budget.add(checkedAdd(record.name.size(), shaderView.size(), "scene/materials"), "scene/materials");
+        std::string shader(shaderView);
         result.snapshot.materials.push_back({record.name, shader, scene::BlendMode::opaque});
+        chargeAssociativeNode(budget, sizeof(std::pair<const std::int64_t, std::uint32_t>), "material IDs");
         materialIds.emplace(record.id, static_cast<std::uint32_t>(index));
     }
     std::vector<Link> links;
@@ -511,17 +577,21 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
         links.reserve(connections->children.size());
         for (std::size_t index = 0; index < connections->children.size(); ++index) {
             const auto& node = connections->children[index];
-            const auto flattened = values(node);
             const auto path = "Connections/" + std::to_string(index);
+            const auto flattened = values(node, &budget, path);
             if (node.name != "C" || flattened.size() < 3u || stringValue(flattened[0]) == nullptr)
                 fail("invalid_connection", "FBX connection record is malformed", path);
             std::int64_t sourceId = 0, targetId = 0;
             if (!integerValue(flattened[1], sourceId) || !integerValue(flattened[2], targetId))
                 fail("invalid_reference", "FBX connection IDs are invalid", path);
-            Link link{*stringValue(flattened[0]), sourceId, targetId, flattened.size() > 3u && stringValue(flattened[3]) != nullptr ? *stringValue(flattened[3]) : std::string()};
+            const auto* kindValue = stringValue(flattened[0]);
+            const auto* propertyValue = flattened.size() > 3u ? stringValue(flattened[3]) : nullptr;
+            const auto kindBytes = kindValue->size();
+            const auto propertyBytes = propertyValue == nullptr ? std::size_t{0u} : propertyValue->size();
+            budget.add(checkedAdd(kindBytes, propertyBytes, path), path);
+            Link link{*kindValue, sourceId, targetId, propertyValue == nullptr ? std::string() : *propertyValue};
             if (byId.find(link.source) == byId.end() || (link.target != 0 && byId.find(link.target) == byId.end()))
                 fail("invalid_reference", "FBX connection references an unknown object", path);
-            budget.add(checkedAdd(link.kind.size(), link.property.size(), path), path);
             links.push_back(std::move(link));
         }
     }
@@ -537,25 +607,53 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
         if (link.kind == "OO" && sourceName == "Model") {
             const auto targetName = link.target == 0 ? std::string("Root") : records[byId.at(link.target)].node->name;
             if (targetName == "Model" || link.target == 0) {
-                if (!parent.emplace(link.source, link.target).second) fail("invalid_hierarchy", "FBX model has multiple parents", "Connections");
+                if (parent.contains(link.source)) fail("invalid_hierarchy", "FBX model has multiple parents", "Connections");
+                chargeAssociativeNode(budget, sizeof(std::pair<const std::int64_t, std::int64_t>), "scene/parents");
+                parent.emplace(link.source, link.target);
             } else fail("invalid_reference", "FBX Model parent connection targets a non-Model object", "Connections");
         } else if (link.kind == "OO" && sourceName == "Geometry") {
             if (link.target == 0 || records[byId.at(link.target)].node->name != "Model") fail("invalid_reference", "FBX geometry is not connected to a Model", "Connections");
-            referencedGeometry.insert(link.source);
-            if (!geometryForModel.emplace(link.target, link.source).second)
+            if (!referencedGeometry.contains(link.source)) {
+                chargeAssociativeNode(budget, sizeof(std::int64_t), "scene/referenced geometry");
+                referencedGeometry.insert(link.source);
+            }
+            if (geometryForModel.contains(link.target))
                 addDiagnostic(result, diagnostics, FbxConversionSeverity::warning, "multiple_geometry", "Multiple FBX geometries are connected to one Model; first is used", "Connections");
+            else {
+                chargeAssociativeNode(budget, sizeof(std::pair<const std::int64_t, std::int64_t>), "scene/geometry assignments");
+                geometryForModel.emplace(link.target, link.source);
+            }
         } else if ((link.kind == "OO" || link.kind == "OP") && sourceName == "Material") {
             if (link.target == 0 || records[byId.at(link.target)].node->name != "Model") continue;
-            if (!materialForModel.emplace(link.target, link.source).second)
+            if (materialForModel.contains(link.target))
                 addDiagnostic(result, diagnostics, FbxConversionSeverity::warning, "multiple_materials", "Multiple FBX materials are connected to one Model; first is used", "Connections");
+            else {
+                chargeAssociativeNode(budget, sizeof(std::pair<const std::int64_t, std::int64_t>), "scene/material assignments");
+                materialForModel.emplace(link.target, link.source);
+            }
         }
     }
     for (const auto modelIndex : modelIndexes) {
         const auto child = records[modelIndex].id;
         const auto parentIt = parent.find(child);
-        if (parentIt != parent.end()) childrenByParent[parentIt->second].push_back(child);
+        if (parentIt != parent.end()) {
+            auto childIt = childrenByParent.find(parentIt->second);
+            if (childIt == childrenByParent.end()) {
+                chargeAssociativeNode(budget, sizeof(std::pair<const std::int64_t, std::vector<std::int64_t>>), "scene/children map");
+                childIt = childrenByParent.emplace(parentIt->second, std::vector<std::int64_t>{}).first;
+            }
+            auto& children = childIt->second;
+            if (children.size() == children.capacity()) {
+                const auto current = children.capacity();
+                const auto next = current == 0u ? 1u : current > std::numeric_limits<std::size_t>::max() / 2u
+                                                        ? std::numeric_limits<std::size_t>::max()
+                                                        : current * 2u;
+                budget.add(checkedMultiply(next - current, sizeof(std::int64_t), "scene/children map"), "scene/children map");
+                children.reserve(next);
+            }
+            children.push_back(child);
+        }
     }
-    budget.add(checkedMultiply(parent.size(), sizeof(std::int64_t) * 2u, "scene/hierarchy"), "scene/hierarchy");
     std::map<std::int64_t, std::uint32_t> meshIds;
     for (const auto geometryIndex : geometryIndexes) {
         const auto& record = records[geometryIndex];
@@ -566,6 +664,7 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
         if (mesh.triangle_indices.empty()) fail("invalid_geometry", "FBX geometry has no triangles", path);
         if (result.meshes.size() >= static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))
             fail("id_limit", "FBX mesh IDs exceed their uint32 range", path);
+        chargeAssociativeNode(budget, sizeof(std::pair<const std::int64_t, std::uint32_t>), "mesh IDs");
         meshIds.emplace(record.id, static_cast<std::uint32_t>(result.meshes.size()));
         result.meshes.push_back(std::move(mesh));
     }
@@ -578,7 +677,9 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
     std::set<std::int64_t> emitted;
     const auto append = [&](auto&& self, std::int64_t modelId, NodeId parentId, Matrix4 parentWorld, std::size_t depth, std::string path) -> void {
         if (depth > limits.max_depth) fail("depth_limit", "FBX model hierarchy exceeds its limit", path);
-        if (!visiting.insert(modelId).second) fail("invalid_hierarchy", "FBX model hierarchy contains a cycle", path);
+        if (visiting.contains(modelId)) fail("invalid_hierarchy", "FBX model hierarchy contains a cycle", path);
+        chargeAssociativeNode(budget, sizeof(std::int64_t), "scene/visiting models");
+        visiting.insert(modelId);
         const auto recordIndex = byId.at(modelId);
         const auto& record = records[recordIndex];
         const auto local = localTransform(*record.node, path, limits, result, diagnostics);
@@ -602,7 +703,7 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
             }
         }
         budget.add(record.name.size(), path);
-        scene::SceneNode node{id, parentId, record.name, kind, modelVisible(*record.node), modelVisible(*record.node), kind == scene::NodeKind::mesh, false, true, 0u, 0.0F, 0.0F, material, {0.0F, 0.0F, 0.0F}, 0.0F, world, {}, {}, {}};
+        scene::SceneNode node{id, parentId, record.name, kind, modelVisible(*record.node, &budget), modelVisible(*record.node, &budget), kind == scene::NodeKind::mesh, false, true, 0u, 0.0F, 0.0F, material, {0.0F, 0.0F, 0.0F}, 0.0F, world, {}, {}, {}};
         if (kind == scene::NodeKind::mesh) {
             const auto& mesh = result.meshes[meshIndex];
             std::array<double, 3> minimum = {std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity()};
@@ -634,8 +735,19 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
         }
         result.snapshot.nodes.push_back(std::move(node));
         result.transforms.push_back({id, local, world});
-        result.snapshot.nodes[parentId].children.push_back(id);
-        if (!emitted.insert(modelId).second) fail("invalid_hierarchy", "FBX Model is emitted more than once", path);
+        auto& outputChildren = result.snapshot.nodes[parentId].children;
+        if (outputChildren.size() == outputChildren.capacity()) {
+            const auto current = outputChildren.capacity();
+            const auto next = current == 0u ? 1u : current > std::numeric_limits<std::size_t>::max() / 2u
+                                                    ? std::numeric_limits<std::size_t>::max()
+                                                    : current * 2u;
+            budget.add(checkedMultiply(next - current, sizeof(NodeId), "scene/children"), "scene/children");
+            outputChildren.reserve(next);
+        }
+        outputChildren.push_back(id);
+        if (emitted.contains(modelId)) fail("invalid_hierarchy", "FBX Model is emitted more than once", path);
+        chargeAssociativeNode(budget, sizeof(std::int64_t), "scene/emitted models");
+        emitted.insert(modelId);
         const auto children = childrenByParent.find(modelId);
         if (children != childrenByParent.end())
             for (const auto childId : children->second)
