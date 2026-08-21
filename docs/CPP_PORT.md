@@ -93,10 +93,12 @@ remains unchanged and feature-complete.
   also implement bounded synchronous RGBA8/BGRA8 texture clear/readback. Each
   backend validates a pipeline and executes fixed and indexed R16 static-mesh
   draws with readback. The indexed path uses immutable vertex and index
-  buffers. It currently accepts only identity transforms and resource-free,
-  no-depth packets. This proves basic pipeline creation, persistent geometry
-  binding, command submission, rasterization, and resource-state handling. It
-  does not prove scene-rendering parity.
+  buffers. A bounded adapter validates and uploads 11-float KN5 static
+  geometry. It rejects malformed geometry, unsafe indices, and invalid packet
+  ranges before allocation. The backend accepts only identity transforms and
+  resource-free, no-depth packets. This proves basic pipeline creation,
+  persistent geometry binding, command submission, rasterization, and
+  resource-state handling. It does not prove scene-rendering parity.
 - P1 is partial. Bounded readers support KN5 v4/v5/v6, DDS, ACD, INI/CSP,
   KSANIM v1/v2, and KNH. The port also supports byte-stable KN5 writing, VAO
   ZIP decoding, and track surfaces, cameras, and splines. Bounded asset support
@@ -125,7 +127,10 @@ remains unchanged and feature-complete.
   canonical resource name and rejects missing or ambiguous names. A stricter
   CPU reference skinning path bridges KN5 scenes to the render contract. CSP
   selectors and recovered lighting, shadow, and reflection math feed
-  deterministic plans.
+  deterministic plans. Source-based camera math matches the `perspective`,
+  `lookAt`, and `multiply` functions in `public/app.js`. Separate projections
+  define the Vulkan and D3D12 clip-space conversions. Backend shaders do not
+  use these camera matrices yet.
   Vulkan and D3D12 create a basic graphics pipeline and execute fixed and
   indexed R16 static-mesh draws. The indexed path executes only a deliberately
   restricted draw-packet subset. It has no descriptors, scene resources,

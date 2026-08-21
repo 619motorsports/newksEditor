@@ -1,5 +1,6 @@
 #include "apex/render/device.hpp"
 #include "apex/render/draw_packet.hpp"
+#include "apex/render/static_mesh_upload.hpp"
 
 #include <array>
 #include <cstddef>
@@ -806,33 +807,34 @@ bool contract_backend(apex::render::Backend backend) {
                 triangle_result.rgba8[2] == std::byte{0} && triangle_result.rgba8[3] == std::byte{255},
             "triangle outside pixel retains clear color");
 
-    const std::array<std::uint16_t, 3> indexed_indices = {0U, 1U, 2U};
-    const std::span<const std::byte> indexed_index_bytes(
-        reinterpret_cast<const std::byte*>(indexed_indices.data()), sizeof(indexed_indices));
-    const BufferDescription indexed_vertex_description{
-        triangle_vertex_bytes.size(), BufferUsage::vertex, BufferMemory::device_local,
-        BufferMutability::immutable};
-    const BufferDescription indexed_index_description{
-        indexed_index_bytes.size(), BufferUsage::index, BufferMemory::device_local,
-        BufferMutability::immutable};
-    BufferResult indexed_vertex_buffer =
-        device.device->create_buffer(indexed_vertex_description, triangle_vertex_bytes);
-    BufferResult indexed_index_buffer =
-        device.device->create_buffer(indexed_index_description, indexed_index_bytes);
-    require(indexed_vertex_buffer.ok() && indexed_index_buffer.ok(),
-            "indexed static-mesh immutable buffer creation");
+    apex::formats::Kn5Node indexed_mesh;
+    indexed_mesh.type = 2U;
+    indexed_mesh.kind = "mesh";
+    indexed_mesh.vertexStride = 11U;
+    indexed_mesh.vertices = {
+        -0.75F, -0.75F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+         0.75F, -0.75F, 0.0F, 0.0F, 1.0F, 0.0F, 1.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+         0.0F,   0.75F, 0.0F, 0.0F, 1.0F, 0.0F, 0.5F, 1.0F, 1.0F, 0.0F, 0.0F,
+    };
+    indexed_mesh.indices = {0U, 1U, 2U};
     DrawPacket indexed_packet;
     indexed_packet.primitive = DrawPrimitiveKind::static_mesh;
     indexed_packet.vertex_count = 3U;
     indexed_packet.index_count = 3U;
-    indexed_packet.vertex_stride_floats = 3U;
+    indexed_packet.vertex_stride_floats = 11U;
     indexed_packet.world_matrix = apex::scene::identity_matrix;
     indexed_packet.shader_execution_supported = true;
     indexed_packet.flags.depth_test = false;
     indexed_packet.flags.depth_write = false;
-    IndexedStaticMeshDrawRequest indexed_request{
-        &indexed_packet, &triangle_pipeline, indexed_vertex_buffer.buffer.get(), indexed_index_buffer.buffer.get(),
-        StaticMeshIndexType::uint16, 0U, 0U, {0.0F, 0.0F, 0.0F, 1.0F}};
+    StaticMeshUploadResult indexed_upload =
+        upload_static_mesh(*device.device, indexed_mesh, indexed_packet);
+    require(indexed_upload.ok(), "validated KN5 static-mesh upload");
+    PipelineProgram indexed_pipeline = triangle_pipeline;
+    indexed_pipeline.vertex_layout.stride = 11U * sizeof(float);
+    IndexedStaticMeshDrawRequest indexed_request =
+        indexed_upload.upload->make_request(indexed_pipeline);
+    const BufferDescription indexed_vertex_description =
+        indexed_upload.upload->vertex_buffer->info().description;
     ContractBuffer foreign_vulkan_buffer(indexed_vertex_description);
     ContractD3D12Buffer foreign_d3d12_buffer(indexed_vertex_description);
     if (backend == Backend::Vulkan)
@@ -844,7 +846,7 @@ bool contract_backend(apex::render::Backend backend) {
     require(foreign_indexed_result.status == IndexedStaticMeshDrawStatus::unsupported &&
                 foreign_indexed_result.diagnostic.code == "indexed_static_mesh_backend_mismatch",
             "indexed static-mesh rejects foreign buffer ownership");
-    indexed_request.vertex_buffer = indexed_vertex_buffer.buffer.get();
+    indexed_request.vertex_buffer = indexed_upload.upload->vertex_buffer.get();
     const IndexedStaticMeshDrawResult indexed_result =
         device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture, indexed_request);
     require(indexed_result.ok() && indexed_result.rgba8.size() == 32U * 32U * 4U,
