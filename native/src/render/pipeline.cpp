@@ -486,12 +486,25 @@ StockPipelineResult build_stock_pipeline(const StockPipelineRequest& request, co
     output.program.blend.enabled = output.profile.blend_enabled;
     output.program.blend.alpha_to_coverage = output.profile.alpha_to_coverage;
     if (output.program.blend.enabled) {
-        // The JS profile establishes that alpha blending is enabled. It does
-        // not specify factors, so these conventional factors are staged.
-        output.program.blend.source_color = PipelineBlendFactor::source_alpha;
-        output.program.blend.destination_color = PipelineBlendFactor::one_minus_source_alpha;
-        output.program.blend.source_alpha = PipelineBlendFactor::one;
-        output.program.blend.destination_alpha = PipelineBlendFactor::one_minus_source_alpha;
+        // public/app.js applyItemRenderState is the source authority. WebGL
+        // glBlendFunc applies the same named factors to color and alpha. The
+        // alpha factors below express the equivalent component behavior.
+        if (output.profile.blend == "multiply") {
+            output.program.blend.source_color = PipelineBlendFactor::destination_color;
+            output.program.blend.destination_color = PipelineBlendFactor::zero;
+            output.program.blend.source_alpha = PipelineBlendFactor::destination_alpha;
+            output.program.blend.destination_alpha = PipelineBlendFactor::zero;
+        } else if (output.profile.blend == "transparent-as-black") {
+            output.program.blend.source_color = PipelineBlendFactor::one;
+            output.program.blend.destination_color = PipelineBlendFactor::one_minus_source_alpha;
+            output.program.blend.source_alpha = PipelineBlendFactor::one;
+            output.program.blend.destination_alpha = PipelineBlendFactor::one_minus_source_alpha;
+        } else {
+            output.program.blend.source_color = PipelineBlendFactor::source_alpha;
+            output.program.blend.destination_color = PipelineBlendFactor::one_minus_source_alpha;
+            output.program.blend.source_alpha = PipelineBlendFactor::source_alpha;
+            output.program.blend.destination_alpha = PipelineBlendFactor::one_minus_source_alpha;
+        }
     }
     output.program.depth.test_enabled = output.profile.depth_test;
     output.program.depth.write_enabled = output.profile.depth_write;
@@ -519,8 +532,6 @@ StockPipelineResult build_stock_pipeline(const StockPipelineRequest& request, co
             }
         }
     }
-    if (output.profile.blend_enabled)
-        append_diagnostic(output.validation, limits, PipelineDiagnostic::Severity::warning, "blend_factors_staged", "stock profile proves alpha blending is enabled; blend factors are not specified by the source profile");
     append_diagnostic(output.validation, limits, PipelineDiagnostic::Severity::warning, "depth_compare_staged", "stock profile proves depth test/write flags; the depth comparison operation is backend policy");
     append_diagnostic(output.validation, limits, PipelineDiagnostic::Severity::warning, "shader_execution_staged", "shader linking, resource reflection, and execution are not implemented by this backend-neutral contract");
     output.validation.valid = output.validation.valid && !has_errors(output.validation);

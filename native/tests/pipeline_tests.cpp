@@ -245,10 +245,45 @@ void mapsStockProfileWithExplicitStaging() {
             "stock profile controls transparent blend state");
     require(result.program.raster.cull == PipelineCullMode::back && result.program.vertex_layout.stride == 44,
             "stock mesh layout and cull mapping");
+    require(result.program.blend.source_color == PipelineBlendFactor::source_alpha &&
+                result.program.blend.destination_color ==
+                    PipelineBlendFactor::one_minus_source_alpha &&
+                result.program.blend.source_alpha == PipelineBlendFactor::source_alpha &&
+                result.program.blend.destination_alpha ==
+                    PipelineBlendFactor::one_minus_source_alpha,
+            "stock alpha blend uses the production WebGL factors");
     require(!result.validation.shader_execution_supported && has_code(result.validation, "shader_execution_staged") &&
-                has_code(result.validation, "blend_factors_staged"),
-            "staged stock execution and unspecified blend factors are explicit");
+                !has_code(result.validation, "blend_factors_staged"),
+            "shader execution remains staged while source-evidenced blend factors are exact");
 
+    MaterialOverride multiply;
+    multiply.blend_mode = "MULTIPLY";
+    request.material.serialized_blend_mode = 0;
+    request.override_values = &multiply;
+    const StockPipelineResult multiplied = build_stock_pipeline(request);
+    require(multiplied.program.blend.enabled &&
+                multiplied.program.blend.source_color ==
+                    PipelineBlendFactor::destination_color &&
+                multiplied.program.blend.destination_color == PipelineBlendFactor::zero &&
+                multiplied.program.blend.source_alpha ==
+                    PipelineBlendFactor::destination_alpha &&
+                multiplied.program.blend.destination_alpha == PipelineBlendFactor::zero,
+            "stock multiply blend matches WebGL destination-color multiplication");
+
+    MaterialOverride transparent_black;
+    transparent_black.blend_mode = "TRANSPARENT_AS_BLACK";
+    request.override_values = &transparent_black;
+    const StockPipelineResult transparent = build_stock_pipeline(request);
+    require(transparent.program.blend.enabled &&
+                transparent.program.blend.source_color == PipelineBlendFactor::one &&
+                transparent.program.blend.destination_color ==
+                    PipelineBlendFactor::one_minus_source_alpha &&
+                transparent.program.blend.source_alpha == PipelineBlendFactor::one &&
+                transparent.program.blend.destination_alpha ==
+                    PipelineBlendFactor::one_minus_source_alpha,
+            "transparent-as-black blend matches the production WebGL factors");
+
+    request.override_values = nullptr;
     request.material.shader = "extensionShader";
     const StockPipelineResult unknown = build_stock_pipeline(request);
     require(!unknown.validation.valid && has_code(unknown.validation, "unknown_shader"), "unknown stock shader diagnosed");

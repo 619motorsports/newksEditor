@@ -1179,6 +1179,28 @@ VkFormat vk_pipeline_vertex_format(PipelineVertexAttributeFormat format) {
     return VK_FORMAT_UNDEFINED;
 }
 
+VkBlendFactor vk_pipeline_blend_factor(PipelineBlendFactor factor) noexcept {
+    switch (factor) {
+    case PipelineBlendFactor::zero: return VK_BLEND_FACTOR_ZERO;
+    case PipelineBlendFactor::one: return VK_BLEND_FACTOR_ONE;
+    case PipelineBlendFactor::source_alpha: return VK_BLEND_FACTOR_SRC_ALPHA;
+    case PipelineBlendFactor::one_minus_source_alpha: return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    case PipelineBlendFactor::destination_color: return VK_BLEND_FACTOR_DST_COLOR;
+    case PipelineBlendFactor::destination_alpha: return VK_BLEND_FACTOR_DST_ALPHA;
+    case PipelineBlendFactor::one_minus_destination_alpha: return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+    }
+    return VK_BLEND_FACTOR_ZERO;
+}
+
+VkBlendOp vk_pipeline_blend_operation(PipelineBlendOperation operation) noexcept {
+    switch (operation) {
+    case PipelineBlendOperation::add: return VK_BLEND_OP_ADD;
+    case PipelineBlendOperation::subtract: return VK_BLEND_OP_SUBTRACT;
+    case PipelineBlendOperation::reverse_subtract: return VK_BLEND_OP_REVERSE_SUBTRACT;
+    }
+    return VK_BLEND_OP_ADD;
+}
+
 VkShaderStageFlagBits vk_pipeline_stage(PipelineShaderStage stage) {
     return stage == PipelineShaderStage::vertex ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
 }
@@ -1394,7 +1416,13 @@ bool create_batch_pipeline(const std::shared_ptr<VulkanContext>& context,
     multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
     VkPipelineColorBlendAttachmentState blend{};
-    blend.blendEnable = VK_FALSE;
+    blend.blendEnable = program.blend.enabled ? VK_TRUE : VK_FALSE;
+    blend.srcColorBlendFactor = vk_pipeline_blend_factor(program.blend.source_color);
+    blend.dstColorBlendFactor = vk_pipeline_blend_factor(program.blend.destination_color);
+    blend.colorBlendOp = vk_pipeline_blend_operation(program.blend.color_operation);
+    blend.srcAlphaBlendFactor = vk_pipeline_blend_factor(program.blend.source_alpha);
+    blend.dstAlphaBlendFactor = vk_pipeline_blend_factor(program.blend.destination_alpha);
+    blend.alphaBlendOp = vk_pipeline_blend_operation(program.blend.alpha_operation);
     blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     VkPipelineColorBlendStateCreateInfo color_blend{};
@@ -1752,7 +1780,13 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
         multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
         multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
         VkPipelineColorBlendAttachmentState blend{};
-        blend.blendEnable = VK_FALSE;
+        blend.blendEnable = program.blend.enabled ? VK_TRUE : VK_FALSE;
+        blend.srcColorBlendFactor = vk_pipeline_blend_factor(program.blend.source_color);
+        blend.dstColorBlendFactor = vk_pipeline_blend_factor(program.blend.destination_color);
+        blend.colorBlendOp = vk_pipeline_blend_operation(program.blend.color_operation);
+        blend.srcAlphaBlendFactor = vk_pipeline_blend_factor(program.blend.source_alpha);
+        blend.dstAlphaBlendFactor = vk_pipeline_blend_factor(program.blend.destination_alpha);
+        blend.alphaBlendOp = vk_pipeline_blend_operation(program.blend.alpha_operation);
         blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
         VkPipelineColorBlendStateCreateInfo color_blend{};

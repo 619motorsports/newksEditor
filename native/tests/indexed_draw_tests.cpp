@@ -196,6 +196,44 @@ void accepts_explicit_d32_depth_contract() {
             "depth attachment status name");
 }
 
+void accepts_source_evidenced_blend_state() {
+    PipelineProgram pipeline = pipeline_fixture();
+    pipeline.blend.enabled = true;
+    pipeline.blend.source_color = PipelineBlendFactor::source_alpha;
+    pipeline.blend.destination_color = PipelineBlendFactor::one_minus_source_alpha;
+    pipeline.blend.source_alpha = PipelineBlendFactor::source_alpha;
+    pipeline.blend.destination_alpha = PipelineBlendFactor::one_minus_source_alpha;
+    DrawPacket packet = packet_fixture();
+    packet.flags.transparent = true;
+    packet.flags.blend_enabled = true;
+    FakeTexture target(Backend::Vulkan, target_description());
+    FakeBuffer vertices(Backend::Vulkan, {36U, BufferUsage::vertex,
+                                          BufferMemory::device_local,
+                                          BufferMutability::immutable});
+    FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index,
+                                         BufferMemory::device_local,
+                                         BufferMutability::immutable});
+    auto request = request_fixture(packet, pipeline, vertices, indices);
+    Diagnostic diagnostic;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            "source-evidenced alpha blend contract accepted");
+
+    packet.flags.blend_enabled = false;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_blend_state_mismatch",
+            "packet and pipeline blend mismatch rejected");
+    packet.flags.blend_enabled = true;
+    pipeline.blend.alpha_to_coverage = true;
+    packet.flags.alpha_to_coverage = true;
+    pipeline.targets.colors.front().samples = 4U;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_static_mesh_state_unsupported",
+            "alpha-to-coverage remains explicit until multisample targets exist");
+}
+
 void validates_portable_diffuse_resource_contract() {
     PipelineProgram pipeline = pipeline_fixture();
     pipeline.resources = {
@@ -601,6 +639,7 @@ int main() {
     try {
         accepts_bounded_static_indexed_contract();
         accepts_explicit_d32_depth_contract();
+        accepts_source_evidenced_blend_state();
         validates_portable_diffuse_resource_contract();
         rejects_invalid_depth_attachment_descriptions();
         rejects_invalid_depth_contract();

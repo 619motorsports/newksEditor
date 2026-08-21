@@ -101,9 +101,13 @@ remains unchanged and feature-complete.
   conversion explicit. Both backends also create persistent single-sample D32
   attachments. Explicit load and clear controls retain color and depth across
   indexed draws. The executable main-pass subset uses the source-evidenced
-  `LESS` depth comparison. A bounded batch preflights every request, preserves
-  packet order, and records all draws in one pass with one final readback. The
-  backend also executes one explicitly authorized portable diffuse pair. The
+  `LESS` depth comparison. It also executes explicitly blended packets. The
+  ordinary alpha, multiply, and transparent-as-black factors match
+  `applyItemRenderState` in `public/app.js`. Alpha-to-coverage remains staged
+  until the target contract supports multisampling. A bounded batch preflights
+  every request, preserves packet order, and records all draws in one pass with
+  one final readback. The backend also executes one explicitly authorized
+  portable diffuse pair. The
   pair uses a sampled image at set 0, binding 0, and a sampler at set 0,
   binding 1. It is a test ABI, not recovered stock KN5 or CSP behavior. A
   bounded static-scene adapter validates the complete packet set before allocation.
@@ -153,8 +157,9 @@ remains unchanged and feature-complete.
   Vulkan and D3D12 create a basic graphics pipeline and execute fixed and
   indexed R16 static-mesh draws. The indexed path executes only a deliberately
   restricted draw-packet subset. It supports one portable sampled-image and
-  sampler descriptor pair, but not complete scene resources, blending, or
-  alpha-to-coverage. It executes finite non-identity world and camera
+  sampler descriptor pair. It executes the three source-evidenced WebGL blend
+  modes, but not complete scene resources or alpha-to-coverage. It executes
+  finite non-identity world and camera
   transforms through an explicit shader contract. It preserves D32
   depth across synchronous draws and supports explicit test/write state. The
   ordered multi-draw path clears or loads attachments once and submits one

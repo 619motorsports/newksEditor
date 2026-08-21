@@ -68,13 +68,18 @@ root-constant block. Each camera must use the clip-space convention for its
 backend. Both backends create persistent single-sample D32 attachments.
 Indexed requests use explicit color-load and depth-clear controls. The
 source-evidenced main path uses `LESS` depth testing. The execution path accepts
-opaque packets. A request-local authority can enable one portable diffuse
-resource pair: a sampled image at set 0, binding 0, and a sampler at set 0,
-binding 1. Vulkan and D3D12 execute this pair for single draws and ordered
-batches. The pair is a portable test ABI. It is not a recovered stock KN5 or
-CSP shader contract. A bounded ordered batch preflights all requests, clears or
-loads attachments once, submits one render pass, and returns one final
-readback. Draw-packet texture resources resolve by canonical name.
+opaque and explicitly blended packets. The packet and pipeline blend flags must
+match. Ordinary alpha, multiply, and transparent-as-black factors match
+`applyItemRenderState` in the production WebGL renderer. Vulkan and D3D12 apply
+these factors in single draws and ordered batches. Alpha-to-coverage remains
+unsupported because the current targets are single-sample. A request-local
+authority can enable one portable diffuse resource pair: a sampled image at set
+0, binding 0, and a sampler at set 0, binding 1. Vulkan and D3D12 execute this
+pair for single draws and ordered batches. The pair is a portable test ABI. It
+is not a recovered stock KN5 or CSP shader contract. A bounded ordered batch
+preflights all requests, clears or loads attachments once, submits one render
+pass, and returns one final readback. Draw-packet texture resources resolve by
+canonical name.
 The serialized KN5 resource ID remains a shader bind point, not a
 texture-table index. A bounded static-scene adapter maps the final KN5 tree to
 dense scene IDs. It validates all packets and pipelines before buffer creation.

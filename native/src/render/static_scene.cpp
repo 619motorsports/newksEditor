@@ -127,9 +127,9 @@ ExecutorPipelineValidation validate_executor_pipeline(
         return {StaticSceneResourceStatus::unsupported,
                 "Static-scene execution requires the draw-matrices transform contract", 0U};
     if (pipeline.raster.fill != PipelineFillMode::solid ||
-        pipeline.blend.enabled || pipeline.blend.alpha_to_coverage)
+        pipeline.blend.alpha_to_coverage)
         return {StaticSceneResourceStatus::unsupported,
-                "Static-scene execution supports opaque solid pipelines", 0U};
+                "Static-scene execution supports solid pipelines without alpha-to-coverage", 0U};
     if (!pipeline.resources.empty() && !portable_diffuse_layout(pipeline))
         return {StaticSceneResourceStatus::unsupported,
                 "Static-scene material execution supports only the portable diffuse resource layout", 0U};
@@ -153,6 +153,10 @@ ExecutorPipelineValidation validate_executor_pipeline(
         pipeline.depth.write_enabled != packet.flags.depth_write)
         return {StaticSceneResourceStatus::invalid_request,
                 "Pipeline depth state does not match its draw packet", 0U};
+    if (pipeline.blend.enabled != packet.flags.blend_enabled ||
+        pipeline.blend.alpha_to_coverage != packet.flags.alpha_to_coverage)
+        return {StaticSceneResourceStatus::invalid_request,
+                "Pipeline blend state does not match its draw packet", 0U};
     if ((pipeline.depth.test_enabled || pipeline.depth.write_enabled) &&
         !pipeline.targets.has_depth)
         return {StaticSceneResourceStatus::invalid_request,
@@ -284,11 +288,10 @@ StaticSceneResourceResult prepare_static_scene_resources(
         const auto node_index = static_cast<std::size_t>(packet.node);
         const auto material_index = static_cast<std::size_t>(packet.material);
         if (packet.primitive != DrawPrimitiveKind::static_mesh || !packet.bone_palette.empty() ||
-            packet.flags.transparent || packet.flags.blend_enabled ||
             packet.flags.alpha_to_coverage || packet.flags.wireframe)
             return fail(StaticSceneResourceStatus::unsupported,
                         "static_scene_packet_unsupported",
-                        "Static-scene execution supports opaque static meshes");
+                        "Static-scene execution supports solid static meshes without alpha-to-coverage");
         if (node_index >= node_map.source_nodes.size() || material_index >= model.materials.size())
             return fail(StaticSceneResourceStatus::invalid_request,
                         "static_scene_packet_identity_invalid",

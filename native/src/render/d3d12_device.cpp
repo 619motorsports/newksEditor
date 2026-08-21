@@ -922,6 +922,46 @@ const char* d3d12_pipeline_semantic(PipelineVertexSemantic semantic) noexcept {
     return D3D12_COMPARISON_FUNC_ALWAYS;
 }
 
+[[nodiscard]] D3D12_BLEND d3d12_pipeline_blend_factor(PipelineBlendFactor factor) noexcept {
+    switch (factor) {
+    case PipelineBlendFactor::zero: return D3D12_BLEND_ZERO;
+    case PipelineBlendFactor::one: return D3D12_BLEND_ONE;
+    case PipelineBlendFactor::source_alpha: return D3D12_BLEND_SRC_ALPHA;
+    case PipelineBlendFactor::one_minus_source_alpha: return D3D12_BLEND_INV_SRC_ALPHA;
+    case PipelineBlendFactor::destination_color: return D3D12_BLEND_DEST_COLOR;
+    case PipelineBlendFactor::destination_alpha: return D3D12_BLEND_DEST_ALPHA;
+    case PipelineBlendFactor::one_minus_destination_alpha: return D3D12_BLEND_INV_DEST_ALPHA;
+    }
+    return D3D12_BLEND_ZERO;
+}
+
+[[nodiscard]] D3D12_BLEND_OP d3d12_pipeline_blend_operation(
+    PipelineBlendOperation operation) noexcept {
+    switch (operation) {
+    case PipelineBlendOperation::add: return D3D12_BLEND_OP_ADD;
+    case PipelineBlendOperation::subtract: return D3D12_BLEND_OP_SUBTRACT;
+    case PipelineBlendOperation::reverse_subtract: return D3D12_BLEND_OP_REV_SUBTRACT;
+    }
+    return D3D12_BLEND_OP_ADD;
+}
+
+void configure_d3d12_blend_state(const PipelineBlendState& source,
+                                 D3D12_BLEND_DESC& destination) noexcept {
+    destination.AlphaToCoverageEnable = FALSE;
+    destination.IndependentBlendEnable = FALSE;
+    D3D12_RENDER_TARGET_BLEND_DESC& target = destination.RenderTarget[0];
+    target.BlendEnable = source.enabled ? TRUE : FALSE;
+    target.LogicOpEnable = FALSE;
+    target.SrcBlend = d3d12_pipeline_blend_factor(source.source_color);
+    target.DestBlend = d3d12_pipeline_blend_factor(source.destination_color);
+    target.BlendOp = d3d12_pipeline_blend_operation(source.color_operation);
+    target.SrcBlendAlpha = d3d12_pipeline_blend_factor(source.source_alpha);
+    target.DestBlendAlpha = d3d12_pipeline_blend_factor(source.destination_alpha);
+    target.BlendOpAlpha = d3d12_pipeline_blend_operation(source.alpha_operation);
+    target.LogicOp = D3D12_LOGIC_OP_NOOP;
+    target.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+}
+
 struct D3D12GeometryDescriptor {
     ID3D12Resource* vertex_resource = nullptr;
     UINT64 vertex_offset = 0U;
@@ -1128,7 +1168,7 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
                                                                                                          : D3D12_CULL_MODE_BACK;
     pipeline_description.RasterizerState.FrontCounterClockwise = request.pipeline->raster.front_face == PipelineFrontFace::counter_clockwise;
     pipeline_description.RasterizerState.DepthClipEnable = TRUE;
-    pipeline_description.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    configure_d3d12_blend_state(request.pipeline->blend, pipeline_description.BlendState);
     pipeline_description.DepthStencilState.DepthEnable = depth_test ? TRUE : FALSE;
     pipeline_description.DepthStencilState.DepthWriteMask = depth_write ? D3D12_DEPTH_WRITE_MASK_ALL
                                                                          : D3D12_DEPTH_WRITE_MASK_ZERO;
@@ -1571,7 +1611,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
         pipeline_description.RasterizerState.FrontCounterClockwise =
             program.raster.front_face == PipelineFrontFace::counter_clockwise;
         pipeline_description.RasterizerState.DepthClipEnable = TRUE;
-        pipeline_description.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        configure_d3d12_blend_state(program.blend, pipeline_description.BlendState);
         pipeline_description.DepthStencilState.DepthEnable = use_depth && program.depth.test_enabled ? TRUE : FALSE;
         pipeline_description.DepthStencilState.DepthWriteMask =
             use_depth && program.depth.write_enabled ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;

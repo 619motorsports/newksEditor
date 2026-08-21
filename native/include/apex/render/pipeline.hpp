@@ -93,6 +93,7 @@ enum class PipelineBlendFactor : std::uint8_t {
     one,
     source_alpha,
     one_minus_source_alpha,
+    destination_color,
     destination_alpha,
     one_minus_destination_alpha,
 };

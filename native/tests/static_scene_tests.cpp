@@ -119,6 +119,8 @@ public:
         captured_clear_color = batch.clear_color;
         nodes.clear();
         pipeline_names.clear();
+        blend_states.clear();
+        transparent_flags.clear();
         vertex_buffers.clear();
         index_buffers.clear();
         authorities.clear();
@@ -128,6 +130,8 @@ public:
         for (const auto& draw : batch.draws) {
             nodes.push_back(draw.packet->node);
             pipeline_names.push_back(draw.pipeline->name);
+            blend_states.push_back(draw.pipeline->blend);
+            transparent_flags.push_back(draw.packet->flags.transparent);
             vertex_buffers.push_back(draw.vertex_buffer);
             index_buffers.push_back(draw.index_buffer);
             authorities.push_back(draw.shader_authority);
@@ -162,6 +166,8 @@ public:
     std::vector<SamplerDescription> sampler_descriptions;
     std::vector<apex::scene::NodeId> nodes;
     std::vector<std::string> pipeline_names;
+    std::vector<PipelineBlendState> blend_states;
+    std::vector<bool> transparent_flags;
     std::vector<const Buffer*> vertex_buffers;
     std::vector<const Buffer*> index_buffers;
     std::vector<IndexedShaderAuthority> authorities;
@@ -321,6 +327,15 @@ StaticScenePrepareRequest request_for(Fixture& value) {
 
 void prepares_deduplicated_resources_and_executes_one_ordered_batch() {
     Fixture value = fixture();
+    value.packets[1].flags.transparent = true;
+    value.packets[1].flags.blend_enabled = true;
+    value.second_pipeline.blend.enabled = true;
+    value.second_pipeline.blend.source_color = PipelineBlendFactor::source_alpha;
+    value.second_pipeline.blend.destination_color =
+        PipelineBlendFactor::one_minus_source_alpha;
+    value.second_pipeline.blend.source_alpha = PipelineBlendFactor::source_alpha;
+    value.second_pipeline.blend.destination_alpha =
+        PipelineBlendFactor::one_minus_source_alpha;
     RecordingDevice device;
     auto prepared = prepare_static_scene_resources(device, request_for(value));
     require(prepared.ok() && prepared.resources->draw_count() == 3U &&
@@ -343,6 +358,14 @@ void prepares_deduplicated_resources_and_executes_one_ordered_batch() {
                 device.pipeline_names == std::vector<std::string>({"material-zero", "material-one",
                                                                    "material-zero"}),
             "packet order and global material pipeline lookup are preserved");
+    require(device.transparent_flags == std::vector<bool>({false, true, false}) &&
+                !device.blend_states[0].enabled && device.blend_states[1].enabled &&
+                !device.blend_states[2].enabled &&
+                device.blend_states[1].source_color ==
+                    PipelineBlendFactor::source_alpha &&
+                device.blend_states[1].destination_color ==
+                    PipelineBlendFactor::one_minus_source_alpha,
+            "source-evidenced blend state and transparent order reach the batch");
     require(device.vertex_buffers[0] == device.vertex_buffers[2] &&
                 device.index_buffers[0] == device.index_buffers[2] &&
                 device.vertex_buffers[0] != device.vertex_buffers[1] &&
@@ -404,6 +427,17 @@ void rejects_invalid_late_inputs_before_backend_allocation() {
                 missing_pipeline.diagnostic.code == "static_scene_material_pipeline_missing" &&
                 device.buffer_calls == 0U,
             "missing used material pipeline is rejected before allocation");
+
+    value = fixture();
+    value.second_pipeline.blend.enabled = true;
+    const auto blend_mismatch =
+        prepare_static_scene_resources(device, request_for(value));
+    require(!blend_mismatch.ok() &&
+                blend_mismatch.status == StaticSceneResourceStatus::invalid_request &&
+                blend_mismatch.diagnostic.code ==
+                    "static_scene_material_pipeline_invalid" &&
+                device.buffer_calls == 0U,
+            "packet and pipeline blend mismatch is rejected before allocation");
 
     value = fixture();
     value.second_pipeline.shaders.front().bytes.resize(3U);

@@ -1048,6 +1048,69 @@ bool contract_backend(apex::render::Backend backend) {
                 sampled_result.rgba8[3] == std::byte{255},
             "portable diffuse outside pixel retains clear color");
 
+    // public/app.js applyItemRenderState is the source authority for this
+    // alpha blend. Prove the equivalent native factors in both draw paths.
+    const std::array<std::byte, 4> alpha_pixel = {
+        std::byte{255}, std::byte{0}, std::byte{0}, std::byte{128}};
+    const TextureUploadPlan alpha_uploads{{
+        TextureUpload{0U, 0U, 1U, 1U, 4U, alpha_pixel}}};
+    TextureResult alpha_texture =
+        device.device->create_texture(diffuse_description, alpha_uploads);
+    require(alpha_texture.ok(), "alpha blend source texture upload");
+
+    DrawPacket alpha_packet = sampled_packet;
+    alpha_packet.flags.transparent = true;
+    alpha_packet.flags.blend_enabled = true;
+    PipelineProgram alpha_pipeline = sampled_pipeline;
+    alpha_pipeline.name = "source-evidenced-alpha-blend";
+    alpha_pipeline.blend.enabled = true;
+    alpha_pipeline.blend.source_color = PipelineBlendFactor::source_alpha;
+    alpha_pipeline.blend.destination_color =
+        PipelineBlendFactor::one_minus_source_alpha;
+    alpha_pipeline.blend.source_alpha = PipelineBlendFactor::source_alpha;
+    alpha_pipeline.blend.destination_alpha =
+        PipelineBlendFactor::one_minus_source_alpha;
+    IndexedStaticMeshDrawRequest alpha_request =
+        sampled_upload.upload->make_request(alpha_pipeline, *indexed_camera.frame);
+    alpha_request.packet = &alpha_packet;
+    alpha_request.clear_color = {0.0F, 0.0F, 1.0F, 1.0F};
+    alpha_request.resource_authority = IndexedResourceAuthority::explicit_bindings;
+    alpha_request.sampled_binding = {alpha_texture.texture.get(), sampler.sampler.get()};
+    const auto near_channel = [](std::byte actual, std::uint8_t expected) {
+        const int value = static_cast<int>(std::to_integer<std::uint8_t>(actual));
+        return value >= static_cast<int>(expected) - 1 &&
+               value <= static_cast<int>(expected) + 1;
+    };
+    const auto require_alpha_center = [&](std::span<const std::byte> rgba8,
+                                          std::string_view message) {
+        require(near_channel(rgba8[center], 128U) &&
+                    rgba8[center + 1U] == std::byte{0} &&
+                    near_channel(rgba8[center + 2U], 127U) &&
+                    near_channel(rgba8[center + 3U], 191U),
+                message);
+    };
+    const IndexedStaticMeshDrawResult alpha_result =
+        device.device->draw_indexed_static_mesh_and_readback(
+            *triangle_texture.texture, alpha_request);
+    require(alpha_result.ok(), "source-evidenced alpha draw/readback");
+    require_alpha_center(alpha_result.rgba8,
+                         "single draw blends half-alpha red over blue");
+
+    IndexedStaticMeshDrawRequest alpha_batch_request = alpha_request;
+    alpha_batch_request.clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
+    const std::array<IndexedStaticMeshDrawRequest, 1> alpha_draws = {
+        alpha_batch_request};
+    IndexedStaticMeshBatchDescription alpha_batch;
+    alpha_batch.draws = alpha_draws;
+    alpha_batch.clear_color = {0.0F, 0.0F, 1.0F, 1.0F};
+    const IndexedStaticMeshBatchResult alpha_batch_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *triangle_texture.texture, alpha_batch);
+    require(alpha_batch_result.ok(),
+            "source-evidenced alpha batch draw/readback");
+    require_alpha_center(alpha_batch_result.rgba8,
+                         "batch draw blends half-alpha red over blue");
+
     const std::array<IndexedStaticMeshDrawRequest, 2> sampled_draws = {
         sampled_request, sampled_request};
     IndexedStaticMeshBatchDescription sampled_batch;
