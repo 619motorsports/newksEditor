@@ -153,6 +153,30 @@ IndexedStaticMeshDrawRequest request_fixture(const DrawPacket& packet, const Pip
             {0.0F, 0.0F, 0.0F, 1.0F}, camera};
 }
 
+PipelineProgram depth_only_pipeline_fixture() {
+    PipelineProgram pipeline = pipeline_fixture();
+    pipeline.targets.colors.clear();
+    pipeline.targets.has_depth = true;
+    pipeline.targets.depth = {PipelineRenderTargetFormat::depth32_float, 1U};
+    pipeline.resources.clear();
+    pipeline.depth.test_enabled = true;
+    pipeline.depth.write_enabled = true;
+    pipeline.depth.compare = PipelineCompareOperation::less;
+    pipeline.shaders.pop_back();
+    return pipeline;
+}
+
+DepthOnlyIndexedStaticMeshDrawRequest depth_only_request_fixture(
+    const DrawPacket& packet, const PipelineProgram& pipeline,
+    FakeBuffer& vertices, FakeBuffer& indices) {
+    CameraFrame camera;
+    camera.clip_space = vertices.backend() == Backend::Vulkan
+                            ? CameraClipSpace::vulkan
+                            : CameraClipSpace::d3d12;
+    return {&packet, &pipeline, &vertices, &indices, StaticMeshIndexType::uint16,
+            camera, false, 1.0F};
+}
+
 void accepts_bounded_static_indexed_contract() {
     PipelineProgram pipeline = pipeline_fixture();
     DrawPacket packet = packet_fixture();
@@ -1347,6 +1371,106 @@ void rejects_invalid_depth_attachment_descriptions() {
             "unknown depth attachment format rejected");
 }
 
+void validates_depth_only_indexed_contract() {
+    PipelineProgram pipeline = depth_only_pipeline_fixture();
+    DrawPacket packet = packet_fixture();
+    FakeDepthAttachment depth(Backend::Vulkan,
+                              {16U, 16U, 1U, DepthAttachmentFormat::d32_float});
+    FakeBuffer vertices(Backend::Vulkan, {132U, BufferUsage::vertex,
+                                          BufferMemory::device_local,
+                                          BufferMutability::immutable});
+    FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index,
+                                         BufferMemory::device_local,
+                                         BufferMutability::immutable});
+    auto request = depth_only_request_fixture(packet, pipeline, vertices, indices);
+    Diagnostic diagnostic;
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::ready,
+            "valid depth-only indexed contract accepted");
+    require(std::string(depth_only_indexed_static_mesh_draw_status_name(
+                DepthOnlyIndexedStaticMeshDrawStatus::ready)) == "ready",
+            "depth-only draw status name");
+
+    request.clear_depth = true;
+    request.depth_clear_value = std::numeric_limits<float>::infinity();
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "depth_only_indexed_static_mesh_depth_clear_invalid",
+            "non-finite depth-only clear rejected");
+    request.clear_depth = false;
+    request.depth_clear_value = 1.0F;
+
+    FakeDepthAttachment multisample_depth(Backend::Vulkan,
+                                          {16U, 16U, 4U, DepthAttachmentFormat::d32_float});
+    require(validate_depth_only_indexed_static_mesh_draw_request(
+                multisample_depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "depth_only_indexed_static_mesh_depth_target_unsupported",
+            "multisample depth-only target rejected");
+
+    FakeBuffer combined_vertices(Backend::Vulkan,
+                                 {132U, BufferUsage::vertex | BufferUsage::transfer_destination,
+                                  BufferMemory::device_local, BufferMutability::immutable});
+    request = depth_only_request_fixture(packet, pipeline, combined_vertices, indices);
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "depth_only_indexed_vertex_buffer_usage_invalid",
+            "non-exclusive vertex usage rejected");
+
+    vertices = FakeBuffer(Backend::Vulkan, {131U, BufferUsage::vertex,
+                                            BufferMemory::device_local,
+                                            BufferMutability::immutable});
+    request = depth_only_request_fixture(packet, pipeline, vertices, indices);
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "depth_only_indexed_static_mesh_buffer_range_invalid",
+            "depth-only vertex range exceeding ownership rejected");
+
+    vertices = FakeBuffer(Backend::Vulkan, {132U, BufferUsage::vertex,
+                                            BufferMemory::device_local,
+                                            BufferMutability::immutable});
+    request = depth_only_request_fixture(packet, pipeline, vertices, indices);
+    packet.world_matrix[0] = std::numeric_limits<float>::quiet_NaN();
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "depth_only_indexed_static_mesh_world_matrix_non_finite",
+            "non-finite depth-only world matrix rejected");
+
+    packet = packet_fixture();
+    request = depth_only_request_fixture(packet, pipeline, vertices, indices);
+    pipeline.shaders.push_back({PipelineShaderStage::fragment, PipelineShaderFormat::spirv,
+                                shader_fixture()});
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "depth_only_indexed_shader_pair_invalid",
+            "depth-only fragment shader rejected");
+
+    pipeline = depth_only_pipeline_fixture();
+    request = depth_only_request_fixture(packet, pipeline, vertices, indices);
+    std::array<DepthOnlyIndexedStaticMeshDrawRequest, 2U> draws = {request, request};
+    DepthOnlyIndexedStaticMeshBatchDescription batch;
+    batch.draws = draws;
+    batch.depth_attachment = &depth;
+    batch.clear_depth = true;
+    batch.depth_clear_value = 0.75F;
+    require(validate_depth_only_indexed_static_mesh_batch_description(batch, diagnostic) ==
+                DepthOnlyIndexedStaticMeshBatchStatus::ready,
+            "valid depth-only indexed batch accepted");
+    require(std::string(depth_only_indexed_static_mesh_batch_status_name(
+                DepthOnlyIndexedStaticMeshBatchStatus::ready)) == "ready",
+            "depth-only batch status name");
+    draws[1].clear_depth = true;
+    require(validate_depth_only_indexed_static_mesh_batch_description(batch, diagnostic) ==
+                DepthOnlyIndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "depth_only_indexed_static_mesh_batch_draw_override",
+            "per-draw depth clear override rejected");
+    batch = {};
+    require(validate_depth_only_indexed_static_mesh_batch_description(batch, diagnostic) ==
+                DepthOnlyIndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "depth_only_indexed_static_mesh_batch_empty",
+            "empty depth-only batch rejected");
+}
+
 void rejects_invalid_depth_contract() {
     PipelineProgram pipeline = pipeline_fixture();
     pipeline.targets.has_depth = true;
@@ -1682,6 +1806,7 @@ int main() {
         validates_portable_damage_stack_contract();
         validates_portable_damage_dust_alpha_contract();
         rejects_invalid_depth_attachment_descriptions();
+        validates_depth_only_indexed_contract();
         rejects_invalid_depth_contract();
         validates_ordered_indexed_batch_contract();
         rejects_static_indexed_limits_and_ownership();

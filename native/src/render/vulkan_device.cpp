@@ -1817,8 +1817,11 @@ struct VulkanBatchPipeline {
 
 bool create_batch_pipeline(const std::shared_ptr<VulkanContext>& context,
                            VkRenderPass render_pass,
-                           const TextureDescription& description,
+                           std::uint32_t width,
+                           std::uint32_t height,
+                           std::uint32_t samples,
                            const PipelineProgram& program,
+                           bool has_color,
                            bool has_depth,
                            VkDescriptorSetLayout sampled_descriptor_layout,
                            VulkanBatchPipeline& output,
@@ -1903,9 +1906,9 @@ bool create_batch_pipeline(const std::shared_ptr<VulkanContext>& context,
     VkPipelineInputAssemblyStateCreateInfo assembly{};
     assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
     assembly.topology = vk_pipeline_topology(program.raster.fill);
-    VkViewport viewport{0.0F, 0.0F, static_cast<float>(description.width),
-                        static_cast<float>(description.height), 0.0F, 1.0F};
-    VkRect2D scissor{{0, 0}, {description.width, description.height}};
+    VkViewport viewport{0.0F, 0.0F, static_cast<float>(width),
+                        static_cast<float>(height), 0.0F, 1.0F};
+    VkRect2D scissor{{0, 0}, {width, height}};
     VkPipelineViewportStateCreateInfo viewport_state{};
     viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
     viewport_state.viewportCount = 1U;
@@ -1923,7 +1926,7 @@ bool create_batch_pipeline(const std::shared_ptr<VulkanContext>& context,
     raster.lineWidth = 1.0F;
     VkPipelineMultisampleStateCreateInfo multisample{};
     multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    const VkSampleCountFlagBits sample_count = vk_sample_count(description.samples);
+    const VkSampleCountFlagBits sample_count = vk_sample_count(samples);
     if (sample_count == 0U) {
         diagnostic = {"vulkan_draw_samples_unsupported",
                       "Vulkan draws support only one or four samples in the bounded contract"};
@@ -1944,8 +1947,8 @@ bool create_batch_pipeline(const std::shared_ptr<VulkanContext>& context,
                            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     VkPipelineColorBlendStateCreateInfo color_blend{};
     color_blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    color_blend.attachmentCount = 1U;
-    color_blend.pAttachments = &blend;
+    color_blend.attachmentCount = has_color ? 1U : 0U;
+    color_blend.pAttachments = has_color ? &blend : nullptr;
     VkPipelineDepthStencilStateCreateInfo depth_stencil{};
     depth_stencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depth_stencil.depthTestEnable = has_depth && program.depth.test_enabled ? VK_TRUE : VK_FALSE;
@@ -3131,7 +3134,8 @@ bool draw_indexed_batch_and_readback(
             return false;
         }
         pipelines.emplace_back();
-        if (!create_batch_pipeline(context, render_pass, description, *draw.program,
+        if (!create_batch_pipeline(context, render_pass, description.width, description.height,
+                                   description.samples, *draw.program, true,
                                    depth_attachment != nullptr, descriptors.layout,
                                    pipelines.back(), diagnostic)) {
             pipelines.clear();
@@ -3359,6 +3363,226 @@ bool draw_indexed_batch_and_readback(
     }
     if (description.format == TextureFormat::bgra8_unorm || description.format == TextureFormat::bgra8_srgb)
         for (std::size_t index = 0; index < output.size(); index += 4U) std::swap(output[index], output[index + 2U]);
+    return true;
+}
+
+// Execute a resource-free depth pass without manufacturing a color target or
+// performing a color readback. The attachment stays in the persistent D32
+// layout so a later bounded readback or receiver pass can consume it.
+bool draw_depth_only_indexed_batch(
+    const std::shared_ptr<VulkanContext>& context,
+    VulkanDepthAttachment& depth_attachment,
+    std::span<const VulkanIndexedBatchDraw> draws,
+    bool clear_depth,
+    float depth_clear_value,
+    Diagnostic& diagnostic) {
+    std::lock_guard command_guard(context->command_mutex);
+    if (draws.empty()) {
+        diagnostic = {"depth_only_indexed_static_mesh_batch_empty",
+                      "The Vulkan depth-only indexed batch contains no draws"};
+        return false;
+    }
+    if (depth_attachment.context().get() != context.get()) {
+        diagnostic = {"depth_only_indexed_depth_context_mismatch",
+                      "The depth attachment belongs to another Vulkan device"};
+        return false;
+    }
+    if (!clear_depth && !depth_attachment.initialized()) {
+        diagnostic = {"depth_only_indexed_depth_load_before_clear",
+                      "A depth load was requested before the depth attachment was initialized"};
+        return false;
+    }
+    const DepthAttachmentDescription& description = depth_attachment.info().description;
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(context->physical_device, &properties);
+    if (properties.limits.maxPushConstantsSize < sizeof(DrawMatrices)) {
+        diagnostic = {"vulkan_draw_transform_limit_unsupported",
+                      "Vulkan device push-constant limit is smaller than the draw-matrices contract"};
+        return false;
+    }
+
+    VkAttachmentDescription attachment{};
+    attachment.format = VK_FORMAT_D32_SFLOAT;
+    attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    attachment.loadOp = clear_depth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachment.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    attachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    VkAttachmentReference depth_reference{0U, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 0U;
+    subpass.pColorAttachments = nullptr;
+    subpass.pDepthStencilAttachment = &depth_reference;
+    VkRenderPassCreateInfo render_pass_info{};
+    render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    render_pass_info.attachmentCount = 1U;
+    render_pass_info.pAttachments = &attachment;
+    render_pass_info.subpassCount = 1U;
+    render_pass_info.pSubpasses = &subpass;
+    VkRenderPass render_pass = VK_NULL_HANDLE;
+    VkResult result = vkCreateRenderPass(context->device, &render_pass_info, nullptr, &render_pass);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkCreateRenderPass(depth-only batch)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost"
+                                                          : "vulkan_depth_only_execution_failed";
+        return false;
+    }
+
+    const VkImageView framebuffer_attachment = depth_attachment.view();
+    VkFramebufferCreateInfo framebuffer_info{};
+    framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    framebuffer_info.renderPass = render_pass;
+    framebuffer_info.attachmentCount = 1U;
+    framebuffer_info.pAttachments = &framebuffer_attachment;
+    framebuffer_info.width = description.width;
+    framebuffer_info.height = description.height;
+    framebuffer_info.layers = 1U;
+    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    result = vkCreateFramebuffer(context->device, &framebuffer_info, nullptr, &framebuffer);
+    if (result != VK_SUCCESS) {
+        vkDestroyRenderPass(context->device, render_pass, nullptr);
+        diagnostic = vk_error("vkCreateFramebuffer(depth-only batch)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost"
+                                                          : "vulkan_depth_only_execution_failed";
+        return false;
+    }
+
+    std::vector<VulkanBatchPipeline> pipelines;
+    pipelines.reserve(draws.size());
+    for (const VulkanIndexedBatchDraw& draw : draws) {
+        if (draw.program == nullptr || draw.vertices == nullptr || draw.indices == nullptr) {
+            pipelines.clear();
+            vkDestroyFramebuffer(context->device, framebuffer, nullptr);
+            vkDestroyRenderPass(context->device, render_pass, nullptr);
+            diagnostic = {"depth_only_indexed_static_mesh_batch_resource_invalid",
+                          "The Vulkan depth-only batch contains an invalid draw resource"};
+            return false;
+        }
+        pipelines.emplace_back();
+        if (!create_batch_pipeline(context, render_pass, description.width, description.height,
+                                   description.samples, *draw.program, false, true,
+                                   VK_NULL_HANDLE, pipelines.back(), diagnostic)) {
+            pipelines.clear();
+            vkDestroyFramebuffer(context->device, framebuffer, nullptr);
+            vkDestroyRenderPass(context->device, render_pass, nullptr);
+            return false;
+        }
+    }
+
+    VkCommandBufferAllocateInfo allocation{};
+    allocation.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocation.commandPool = context->command_pool;
+    allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocation.commandBufferCount = 1U;
+    VkCommandBuffer command = VK_NULL_HANDLE;
+    result = vkAllocateCommandBuffers(context->device, &allocation, &command);
+    bool submitted = false;
+    bool completed = false;
+    if (result == VK_SUCCESS) {
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        result = vkBeginCommandBuffer(command, &begin);
+    }
+    if (result == VK_SUCCESS &&
+        depth_attachment.layout() != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = depth_attachment.layout();
+        barrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = depth_attachment.image();
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        barrier.subresourceRange.levelCount = 1U;
+        barrier.subresourceRange.layerCount = 1U;
+        barrier.srcAccessMask = depth_attachment.layout() == VK_IMAGE_LAYOUT_UNDEFINED
+                                    ? 0U
+                                    : VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                          VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        vkCmdPipelineBarrier(command,
+                             depth_attachment.layout() == VK_IMAGE_LAYOUT_UNDEFINED
+                                 ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                                 : VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                                       VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                             VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                                 VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                             0U, 0U, nullptr, 0U, nullptr, 1U, &barrier);
+    }
+    if (result == VK_SUCCESS) {
+        VkClearValue clear_value{};
+        clear_value.depthStencil.depth = depth_clear_value;
+        VkRenderPassBeginInfo render_begin{};
+        render_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        render_begin.renderPass = render_pass;
+        render_begin.framebuffer = framebuffer;
+        render_begin.renderArea.extent = {description.width, description.height};
+        render_begin.clearValueCount = 1U;
+        render_begin.pClearValues = &clear_value;
+        vkCmdBeginRenderPass(command, &render_begin, VK_SUBPASS_CONTENTS_INLINE);
+        for (std::size_t index = 0U; index < draws.size(); ++index) {
+            const VulkanIndexedBatchDraw& draw = draws[index];
+            const VulkanBatchPipeline& pipeline = pipelines[index];
+            const VkBuffer vertex_buffer = draw.vertices->raw().buffer;
+            const VkDeviceSize vertex_offset = draw.vertex_offset;
+            vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline);
+            vkCmdPushConstants(command, pipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0U,
+                               static_cast<std::uint32_t>(sizeof(DrawMatrices)), &draw.matrices);
+            vkCmdBindVertexBuffers(command, 0U, 1U, &vertex_buffer, &vertex_offset);
+            vkCmdBindIndexBuffer(command, draw.indices->raw().buffer, draw.index_offset,
+                                 VK_INDEX_TYPE_UINT16);
+            vkCmdDrawIndexed(command, draw.index_count, 1U, 0U, 0, 0U);
+        }
+        vkCmdEndRenderPass(command);
+        result = vkEndCommandBuffer(command);
+    }
+    VkFence fence = VK_NULL_HANDLE;
+    if (result == VK_SUCCESS) {
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1U;
+        submit.pCommandBuffers = &command;
+        VkFenceCreateInfo fence_info{};
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        result = vkCreateFence(context->device, &fence_info, nullptr, &fence);
+        if (result == VK_SUCCESS) {
+            result = vkQueueSubmit(context->queue, 1U, &submit, fence);
+            submitted = result == VK_SUCCESS;
+            if (submitted) {
+                result = vkWaitForFences(context->device, 1U, &fence, VK_TRUE, UINT64_MAX);
+                completed = result == VK_SUCCESS;
+            }
+        }
+    }
+    if (submitted && !completed) {
+        const VkResult drain = vkDeviceWaitIdle(context->device);
+        if (drain == VK_SUCCESS) {
+            depth_attachment.mark_rendered(clear_depth);
+        } else {
+            depth_attachment.mark_invalid();
+            result = drain;
+        }
+    } else if (completed) {
+        depth_attachment.mark_rendered(clear_depth);
+    }
+    if (fence != VK_NULL_HANDLE) vkDestroyFence(context->device, fence, nullptr);
+    if (command != VK_NULL_HANDLE)
+        vkFreeCommandBuffers(context->device, context->command_pool, 1U, &command);
+    pipelines.clear();
+    vkDestroyFramebuffer(context->device, framebuffer, nullptr);
+    vkDestroyRenderPass(context->device, render_pass, nullptr);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("Vulkan depth-only indexed batch execution", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost"
+                                                          : "vulkan_depth_only_execution_failed";
+        return false;
+    }
+    diagnostic = {};
     return true;
 }
 
@@ -5168,6 +5392,93 @@ public:
         result.status = IndexedStaticMeshBatchStatus::ready;
         result.rgba8 = std::move(output);
         return result;
+    }
+
+    DepthOnlyIndexedStaticMeshDrawResult draw_depth_only_indexed_static_mesh(
+        DepthAttachment& depth,
+        const DepthOnlyIndexedStaticMeshDrawRequest& request) override {
+        Diagnostic diagnostic;
+        const auto validation = validate_depth_only_indexed_static_mesh_draw_request(
+            depth, request, diagnostic);
+        if (validation != DepthOnlyIndexedStaticMeshDrawStatus::ready)
+            return {validation, std::move(diagnostic)};
+        DepthOnlyIndexedStaticMeshDrawRequest draw = request;
+        draw.clear_depth = false;
+        draw.depth_clear_value = 1.0F;
+        const std::array<DepthOnlyIndexedStaticMeshDrawRequest, 1U> draws = {draw};
+        const DepthOnlyIndexedStaticMeshBatchDescription batch{
+            draws, &depth, request.clear_depth, request.depth_clear_value};
+        const DepthOnlyIndexedStaticMeshBatchResult result =
+            draw_depth_only_indexed_static_mesh_batch(batch);
+        if (result.status == DepthOnlyIndexedStaticMeshBatchStatus::ready)
+            return {DepthOnlyIndexedStaticMeshDrawStatus::ready, {}};
+        const auto status = result.status == DepthOnlyIndexedStaticMeshBatchStatus::unsupported
+                                ? DepthOnlyIndexedStaticMeshDrawStatus::unsupported
+                            : result.status == DepthOnlyIndexedStaticMeshBatchStatus::invalid_request
+                                ? DepthOnlyIndexedStaticMeshDrawStatus::invalid_request
+                                : DepthOnlyIndexedStaticMeshDrawStatus::execution_failed;
+        return {status, result.diagnostic};
+    }
+
+    DepthOnlyIndexedStaticMeshBatchResult draw_depth_only_indexed_static_mesh_batch(
+        const DepthOnlyIndexedStaticMeshBatchDescription& description) override {
+        Diagnostic diagnostic;
+        const auto validation =
+            validate_depth_only_indexed_static_mesh_batch_description(description, diagnostic);
+        if (validation != DepthOnlyIndexedStaticMeshBatchStatus::ready)
+            return {validation, std::move(diagnostic)};
+        auto* depth_attachment =
+            dynamic_cast<VulkanDepthAttachment*>(description.depth_attachment);
+        if (depth_attachment == nullptr || depth_attachment->context() != context_) {
+            return {DepthOnlyIndexedStaticMeshBatchStatus::unsupported,
+                    {"depth_only_indexed_depth_context_mismatch",
+                     "The depth attachment does not belong to this Vulkan device"}};
+        }
+
+        std::vector<VulkanIndexedBatchDraw> draws;
+        draws.reserve(description.draws.size());
+        for (const DepthOnlyIndexedStaticMeshDrawRequest& request : description.draws) {
+            auto* vertices = dynamic_cast<const VulkanBuffer*>(request.vertex_buffer);
+            auto* indices = dynamic_cast<const VulkanBuffer*>(request.index_buffer);
+            if (vertices == nullptr || indices == nullptr || request.packet == nullptr ||
+                request.pipeline == nullptr || !request.camera_frame.has_value()) {
+                return {DepthOnlyIndexedStaticMeshBatchStatus::unsupported,
+                        {"depth_only_indexed_static_mesh_batch_resource_invalid",
+                         "The Vulkan depth-only batch contains an unknown or incomplete resource"}};
+            }
+            if (vertices->context() != context_ || indices->context() != context_) {
+                return {DepthOnlyIndexedStaticMeshBatchStatus::unsupported,
+                        {"depth_only_indexed_static_mesh_context_mismatch",
+                         "Depth-only indexed resources must belong to this Vulkan device"}};
+            }
+            const DrawPacket& packet = *request.packet;
+            const std::uint64_t vertex_offset = static_cast<std::uint64_t>(packet.vertex_offset) *
+                                                request.pipeline->vertex_layout.stride;
+            const std::uint64_t index_offset = static_cast<std::uint64_t>(packet.index_offset) *
+                                               sizeof(std::uint16_t);
+            if (vertex_offset > std::numeric_limits<VkDeviceSize>::max() ||
+                index_offset > std::numeric_limits<VkDeviceSize>::max()) {
+                return {DepthOnlyIndexedStaticMeshBatchStatus::invalid_request,
+                        {"depth_only_indexed_static_mesh_offset_overflow",
+                         "Depth-only indexed offsets exceed Vulkan addressability"}};
+            }
+            VulkanIndexedBatchDraw draw;
+            draw.program = request.pipeline;
+            draw.vertices = vertices;
+            draw.indices = indices;
+            draw.vertex_offset = static_cast<VkDeviceSize>(vertex_offset);
+            draw.index_offset = static_cast<VkDeviceSize>(index_offset);
+            draw.index_count = packet.index_count;
+            draw.matrices = {packet.world_matrix, request.camera_frame->view_projection};
+            draws.push_back(draw);
+        }
+        if (!draw_depth_only_indexed_batch(context_, *depth_attachment, draws,
+                                           description.clear_depth,
+                                           description.depth_clear_value, diagnostic)) {
+            return {DepthOnlyIndexedStaticMeshBatchStatus::execution_failed,
+                    std::move(diagnostic)};
+        }
+        return {DepthOnlyIndexedStaticMeshBatchStatus::ready, {}};
     }
 
     SamplerResult create_sampler(const SamplerDescription& description) override {

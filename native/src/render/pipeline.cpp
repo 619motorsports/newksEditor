@@ -317,7 +317,11 @@ PipelineValidationResult validate_pipeline(const PipelineProgram& program, const
     }
     if (!stages.contains(PipelineShaderStage::vertex) && !stock_package)
         diagnostics.error("missing_vertex_stage", "pipeline requires a vertex shader stage");
-    if (!stages.contains(PipelineShaderStage::fragment) && !stock_package)
+    const bool depth_only_stage_contract = program.targets.colors.empty() &&
+                                           program.targets.has_depth;
+    if (!stages.contains(PipelineShaderStage::fragment) && !stock_package &&
+        (!depth_only_stage_contract || !stages.contains(PipelineShaderStage::vertex) ||
+         stages.size() != 1U))
         diagnostics.error("missing_fragment_stage", "pipeline requires a fragment shader stage");
     if (stock_package && stock_geometry && !stages.contains(PipelineShaderStage::geometry))
         diagnostics.warning("stock_geometry_embedded", "stock container carries a geometry stage; backend extraction remains staged");

@@ -1866,6 +1866,279 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
     return IndexedStaticMeshBatchStatus::ready;
 }
 
+DepthOnlyIndexedStaticMeshDrawStatus
+validate_depth_only_indexed_static_mesh_draw_request(
+    const DepthAttachment& depth,
+    const DepthOnlyIndexedStaticMeshDrawRequest& request,
+    Diagnostic& diagnostic) {
+    if (request.packet == nullptr || request.pipeline == nullptr ||
+        request.vertex_buffer == nullptr || request.index_buffer == nullptr) {
+        diagnostic = {"depth_only_indexed_static_mesh_handle_missing",
+                      "Depth-only indexed drawing requires a packet, pipeline, vertex buffer, and index buffer"};
+        return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (!std::isfinite(request.depth_clear_value) || request.depth_clear_value < 0.0F ||
+        request.depth_clear_value > 1.0F) {
+        diagnostic = {"depth_only_indexed_static_mesh_depth_clear_invalid",
+                      "Depth-only indexed depth clear value must be finite and within [0, 1]"};
+        return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (request.index_type != StaticMeshIndexType::uint16) {
+        diagnostic = {"depth_only_indexed_static_mesh_index_type_unsupported",
+                      "Depth-only indexed drawing supports only uint16 indices"};
+        return DepthOnlyIndexedStaticMeshDrawStatus::unsupported;
+    }
+    Diagnostic depth_diagnostic;
+    const DepthAttachmentStatus depth_status =
+        validate_depth_attachment_description(depth.info().description, depth_diagnostic);
+    if (depth_status != DepthAttachmentStatus::ready) {
+        diagnostic = {depth_diagnostic.code.empty() ? "depth_only_indexed_static_mesh_depth_invalid"
+                                                     : depth_diagnostic.code,
+                      depth_diagnostic.message};
+        return depth_status == DepthAttachmentStatus::unsupported
+                   ? DepthOnlyIndexedStaticMeshDrawStatus::unsupported
+                   : DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
+    }
+    const auto& depth_description = depth.info().description;
+    if (depth_description.format != DepthAttachmentFormat::d32_float ||
+        depth_description.samples != 1U) {
+        diagnostic = {"depth_only_indexed_static_mesh_depth_target_unsupported",
+                      "Depth-only indexed drawing requires a single-sample D32 attachment"};
+        return DepthOnlyIndexedStaticMeshDrawStatus::unsupported;
+    }
+
+    const DrawPacket& packet = *request.packet;
+    if (packet.primitive != DrawPrimitiveKind::static_mesh) {
+        diagnostic = {"depth_only_indexed_static_mesh_primitive_unsupported",
+                      "Depth-only indexed drawing accepts static mesh packets only"};
+        return DepthOnlyIndexedStaticMeshDrawStatus::unsupported;
+    }
+    if (!packet.bone_palette.empty()) {
+        diagnostic = {"depth_only_indexed_static_mesh_skinning_unsupported",
+                      "Depth-only indexed static meshes must not carry a bone palette"};
+        return DepthOnlyIndexedStaticMeshDrawStatus::unsupported;
+    }
+    if (packet.vertex_count == 0U || packet.vertex_count > max_indexed_static_mesh_vertices ||
+        packet.index_count == 0U || packet.index_count > max_indexed_static_mesh_indices ||
+        packet.index_count % 3U != 0U) {
+        diagnostic = {"depth_only_indexed_static_mesh_range_invalid",
+                      "Depth-only indexed ranges must contain bounded non-empty triangles"};
+        return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
+    }
+    for (const float value : packet.world_matrix) {
+        if (!std::isfinite(value)) {
+            diagnostic = {"depth_only_indexed_static_mesh_world_matrix_non_finite",
+                          "Depth-only indexed world matrix must be finite"};
+            return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
+        }
+    }
+    if (!request.camera_frame.has_value()) {
+        diagnostic = {"depth_only_indexed_static_mesh_camera_missing",
+                      "Depth-only indexed transform execution requires a camera frame"};
+        return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
+    }
+    const CameraFrame& camera = *request.camera_frame;
+    const CameraClipSpace expected_clip = depth.backend() == Backend::Vulkan
+                                              ? CameraClipSpace::vulkan
+                                              : CameraClipSpace::d3d12;
+    if (camera.clip_space != expected_clip) {
+        diagnostic = {"depth_only_indexed_static_mesh_camera_clip_space_mismatch",
+                      "Depth-only indexed camera clip space does not match the backend"};
+        return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
+    }
+    for (const float value : camera.view_projection) {
+        if (!std::isfinite(value)) {
+            diagnostic = {"depth_only_indexed_static_mesh_view_projection_non_finite",
+                          "Depth-only indexed view-projection matrix must be finite"};
+            return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
+        }
+    }
+
+    const PipelineProgram& pipeline = *request.pipeline;
+    const PipelineValidationResult pipeline_validation = validate_pipeline(pipeline);
+    if (!pipeline_validation.valid) {
+        if (!pipeline_validation.diagnostics.empty()) {
+            const auto& failure = pipeline_validation.diagnostics.front();
+            diagnostic = {"depth_only_indexed_pipeline_" + failure.code, failure.message};
+        } else {
+            diagnostic = {"depth_only_indexed_pipeline_invalid",
+                          "Depth-only indexed pipeline validation failed without a diagnostic"};
+        }
+        return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (!pipeline.targets.colors.empty() || !pipeline.targets.has_depth ||
+        pipeline.targets.depth.format != PipelineRenderTargetFormat::depth32_float ||
+        pipeline.targets.depth.samples != 1U) {
+        diagnostic = {"depth_only_indexed_pipeline_target_invalid",
+                      "Depth-only indexed pipelines require exactly one single-sample D32 depth target and no color targets"};
+        return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (pipeline.resources.size() != 0U || pipeline.blend.enabled ||
+        pipeline.blend.alpha_to_coverage ||
+        pipeline.transform_contract != PipelineTransformContract::draw_matrices ||
+        !pipeline.depth.test_enabled || !pipeline.depth.write_enabled ||
+        pipeline.depth.compare != PipelineCompareOperation::less) {
+        diagnostic = {"depth_only_indexed_pipeline_state_invalid",
+                      "Depth-only indexed pipelines require draw matrices, depth LESS test/write, no blend, and no resources"};
+        return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (pipeline.shaders.size() != 1U ||
+        pipeline.shaders.front().stage != PipelineShaderStage::vertex) {
+        diagnostic = {"depth_only_indexed_shader_pair_invalid",
+                      "Depth-only indexed pipelines require exactly one vertex shader and no fragment shader"};
+        return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
+    }
+    const auto& shader = pipeline.shaders.front();
+    const PipelineShaderFormat expected_shader = depth.backend() == Backend::Vulkan
+                                                     ? PipelineShaderFormat::spirv
+                                                     : PipelineShaderFormat::dxil;
+    if (shader.format != expected_shader) {
+        diagnostic = {"depth_only_indexed_shader_format_mismatch",
+                      "Depth-only indexed vertex shader format does not match the backend"};
+        return DepthOnlyIndexedStaticMeshDrawStatus::unsupported;
+    }
+    const ShaderStage shader_stage = ShaderStage::vertex;
+    const std::span<const std::byte> bytecode(
+        reinterpret_cast<const std::byte*>(shader.bytes.data()), shader.bytes.size());
+    Diagnostic shader_diagnostic;
+    const ShaderModuleStatus shader_status =
+        validate_shader_module_description({shader_stage, bytecode}, shader_diagnostic);
+    if (shader_status != ShaderModuleStatus::ready) {
+        diagnostic = {shader_diagnostic.code.empty() ? "depth_only_indexed_shader_invalid"
+                                                      : "depth_only_indexed_shader_" + shader_diagnostic.code,
+                      shader_diagnostic.message};
+        return shader_status == ShaderModuleStatus::unsupported
+                   ? DepthOnlyIndexedStaticMeshDrawStatus::unsupported
+                   : DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (packet.vertex_stride_floats != 11U ||
+        static_cast<std::uint64_t>(packet.vertex_stride_floats) * sizeof(float) !=
+            pipeline.vertex_layout.stride) {
+        diagnostic = {"depth_only_indexed_static_mesh_stride_mismatch",
+                      "Depth-only indexed static mesh requires an 11-float stride matching the pipeline"};
+        return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
+    }
+
+    const Buffer& vertex_buffer = *request.vertex_buffer;
+    const Buffer& index_buffer = *request.index_buffer;
+    if (depth.backend() != vertex_buffer.backend() ||
+        depth.backend() != index_buffer.backend()) {
+        diagnostic = {"depth_only_indexed_static_mesh_backend_mismatch",
+                      "Depth attachment and indexed buffers must belong to the same backend"};
+        return DepthOnlyIndexedStaticMeshDrawStatus::unsupported;
+    }
+    const auto& vertex_description = vertex_buffer.info().description;
+    const auto& index_description = index_buffer.info().description;
+    if (vertex_description.usage != BufferUsage::vertex) {
+        diagnostic = {"depth_only_indexed_vertex_buffer_usage_invalid",
+                      "Depth-only indexed vertex buffers require exclusive vertex usage"};
+        return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (index_description.usage != BufferUsage::index) {
+        diagnostic = {"depth_only_indexed_index_buffer_usage_invalid",
+                      "Depth-only indexed index buffers require exclusive index usage"};
+        return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (vertex_description.memory != BufferMemory::device_local ||
+        index_description.memory != BufferMemory::device_local ||
+        vertex_description.mutability != BufferMutability::immutable ||
+        index_description.mutability != BufferMutability::immutable) {
+        diagnostic = {"depth_only_indexed_buffer_ownership_invalid",
+                      "Depth-only indexed buffers require immutable device-local ownership"};
+        return DepthOnlyIndexedStaticMeshDrawStatus::unsupported;
+    }
+    const std::uint64_t stride = pipeline.vertex_layout.stride;
+    const std::uint64_t vertex_offset = packet.vertex_offset;
+    const std::uint64_t index_offset = packet.index_offset;
+    if (vertex_offset > std::numeric_limits<std::uint64_t>::max() / stride ||
+        index_offset > std::numeric_limits<std::uint64_t>::max() / sizeof(std::uint16_t)) {
+        diagnostic = {"depth_only_indexed_static_mesh_offset_overflow",
+                      "Depth-only indexed buffer offsets overflow byte arithmetic"};
+        return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
+    }
+    const std::uint64_t vertex_bytes = vertex_offset * stride;
+    const std::uint64_t index_bytes = index_offset * sizeof(std::uint16_t);
+    const std::uint64_t vertex_span = static_cast<std::uint64_t>(packet.vertex_count) * stride;
+    const std::uint64_t index_span = static_cast<std::uint64_t>(packet.index_count) * sizeof(std::uint16_t);
+    if (vertex_bytes > vertex_description.size_bytes ||
+        vertex_span > vertex_description.size_bytes - vertex_bytes ||
+        index_bytes > index_description.size_bytes ||
+        index_span > index_description.size_bytes - index_bytes) {
+        diagnostic = {"depth_only_indexed_static_mesh_buffer_range_invalid",
+                      "Depth-only indexed draw ranges exceed their owned buffers"};
+        return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
+    }
+    diagnostic = {};
+    return DepthOnlyIndexedStaticMeshDrawStatus::ready;
+}
+
+DepthOnlyIndexedStaticMeshBatchStatus
+validate_depth_only_indexed_static_mesh_batch_description(
+    const DepthOnlyIndexedStaticMeshBatchDescription& description,
+    Diagnostic& diagnostic) {
+    if (description.draws.empty()) {
+        diagnostic = {"depth_only_indexed_static_mesh_batch_empty",
+                      "A depth-only indexed batch must contain at least one draw"};
+        return DepthOnlyIndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (description.draws.size() > max_indexed_static_mesh_batch_draws) {
+        diagnostic = {"depth_only_indexed_static_mesh_batch_limit",
+                      "Depth-only indexed batch exceeds the bounded draw limit"};
+        return DepthOnlyIndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (description.depth_attachment == nullptr) {
+        diagnostic = {"depth_only_indexed_static_mesh_batch_depth_missing",
+                      "A depth-only indexed batch requires a persistent depth attachment"};
+        return DepthOnlyIndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (!std::isfinite(description.depth_clear_value) ||
+        description.depth_clear_value < 0.0F || description.depth_clear_value > 1.0F) {
+        diagnostic = {"depth_only_indexed_static_mesh_batch_depth_clear_invalid",
+                      "Depth-only indexed batch depth clear value must be finite and within [0, 1]"};
+        return DepthOnlyIndexedStaticMeshBatchStatus::invalid_request;
+    }
+    Diagnostic depth_diagnostic;
+    const DepthAttachmentStatus depth_status = validate_depth_attachment_description(
+        description.depth_attachment->info().description, depth_diagnostic);
+    if (depth_status != DepthAttachmentStatus::ready) {
+        diagnostic = {depth_diagnostic.code.empty() ? "depth_only_indexed_static_mesh_batch_depth_invalid"
+                                                     : depth_diagnostic.code,
+                      depth_diagnostic.message};
+        return depth_status == DepthAttachmentStatus::unsupported
+                   ? DepthOnlyIndexedStaticMeshBatchStatus::unsupported
+                   : DepthOnlyIndexedStaticMeshBatchStatus::invalid_request;
+    }
+    const auto& depth_description = description.depth_attachment->info().description;
+    if (depth_description.format != DepthAttachmentFormat::d32_float ||
+        depth_description.samples != 1U) {
+        diagnostic = {"depth_only_indexed_static_mesh_batch_depth_target_unsupported",
+                      "Depth-only indexed batches require a single-sample D32 attachment"};
+        return DepthOnlyIndexedStaticMeshBatchStatus::unsupported;
+    }
+    for (std::size_t index = 0U; index < description.draws.size(); ++index) {
+        const auto& source = description.draws[index];
+        if (source.clear_depth || source.depth_clear_value != 1.0F) {
+            diagnostic = {"depth_only_indexed_static_mesh_batch_draw_override",
+                          "Depth clear state must be specified only on the batch"};
+            return DepthOnlyIndexedStaticMeshBatchStatus::invalid_request;
+        }
+        auto effective = source;
+        effective.clear_depth = description.clear_depth && index == 0U;
+        effective.depth_clear_value = description.depth_clear_value;
+        Diagnostic draw_diagnostic;
+        const auto draw_status = validate_depth_only_indexed_static_mesh_draw_request(
+            *description.depth_attachment, effective, draw_diagnostic);
+        if (draw_status != DepthOnlyIndexedStaticMeshDrawStatus::ready) {
+            diagnostic = std::move(draw_diagnostic);
+            return draw_status == DepthOnlyIndexedStaticMeshDrawStatus::unsupported
+                       ? DepthOnlyIndexedStaticMeshBatchStatus::unsupported
+                       : DepthOnlyIndexedStaticMeshBatchStatus::invalid_request;
+        }
+    }
+    diagnostic = {};
+    return DepthOnlyIndexedStaticMeshBatchStatus::ready;
+}
+
 SamplerStatus validate_sampler_description(const SamplerDescription& description,
                                            Diagnostic& diagnostic) {
     const auto valid_filter = [](SamplerFilter filter) {
@@ -2279,6 +2552,28 @@ const char* indexed_static_mesh_batch_status_name(IndexedStaticMeshBatchStatus s
     case IndexedStaticMeshBatchStatus::invalid_request: return "invalid_request";
     case IndexedStaticMeshBatchStatus::unsupported: return "unsupported";
     case IndexedStaticMeshBatchStatus::execution_failed: return "execution_failed";
+    }
+    return "unknown";
+}
+
+const char* depth_only_indexed_static_mesh_draw_status_name(
+    DepthOnlyIndexedStaticMeshDrawStatus status) noexcept {
+    switch (status) {
+    case DepthOnlyIndexedStaticMeshDrawStatus::ready: return "ready";
+    case DepthOnlyIndexedStaticMeshDrawStatus::invalid_request: return "invalid_request";
+    case DepthOnlyIndexedStaticMeshDrawStatus::unsupported: return "unsupported";
+    case DepthOnlyIndexedStaticMeshDrawStatus::execution_failed: return "execution_failed";
+    }
+    return "unknown";
+}
+
+const char* depth_only_indexed_static_mesh_batch_status_name(
+    DepthOnlyIndexedStaticMeshBatchStatus status) noexcept {
+    switch (status) {
+    case DepthOnlyIndexedStaticMeshBatchStatus::ready: return "ready";
+    case DepthOnlyIndexedStaticMeshBatchStatus::invalid_request: return "invalid_request";
+    case DepthOnlyIndexedStaticMeshBatchStatus::unsupported: return "unsupported";
+    case DepthOnlyIndexedStaticMeshBatchStatus::execution_failed: return "execution_failed";
     }
     return "unknown";
 }

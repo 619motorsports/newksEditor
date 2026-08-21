@@ -160,6 +160,34 @@ void rejectsInvalidLayoutAndState() {
     require(!a2c_result.valid && has_code(a2c_result, "a2c_sample_count"), "A2C requires multisample output");
 }
 
+void acceptsDepthOnlyVertexStageOnly() {
+    PipelineProgram depth_only = valid_program();
+    depth_only.targets.colors.clear();
+    depth_only.targets.has_depth = true;
+    depth_only.targets.depth = {PipelineRenderTargetFormat::depth32_float, 1U};
+    depth_only.resources.clear();
+    depth_only.depth.test_enabled = true;
+    depth_only.depth.write_enabled = true;
+    depth_only.depth.compare = PipelineCompareOperation::less;
+    depth_only.transform_contract = PipelineTransformContract::draw_matrices;
+    depth_only.shaders.pop_back();
+    const PipelineValidationResult accepted = validate_pipeline(depth_only);
+    require(accepted.valid, "vertex-only depth pipeline accepted");
+
+    PipelineProgram color_vertex_only = depth_only;
+    color_vertex_only.targets.colors.push_back({PipelineRenderTargetFormat::rgba8_unorm, 1U});
+    const PipelineValidationResult color_result = validate_pipeline(color_vertex_only);
+    require(!color_result.valid && has_code(color_result, "missing_fragment_stage"),
+            "color pipeline still requires a fragment stage");
+
+    PipelineProgram no_target = depth_only;
+    no_target.targets.has_depth = false;
+    const PipelineValidationResult no_target_result = validate_pipeline(no_target);
+    require(!no_target_result.valid && has_code(no_target_result, "missing_fragment_stage") &&
+                has_code(no_target_result, "render_target_missing"),
+            "vertex-only pipeline without depth target rejected");
+}
+
 void enforcesResourceAndByteLimits() {
     PipelineProgram limited = valid_program();
     limited.resources.push_back({PipelineResourceKind::sampler, 0, 0, "sampler"});
@@ -296,6 +324,7 @@ int main() {
         acceptsBoundedBackendNeutralContract();
         rejectsMalformedShaderBytes();
         rejectsInvalidLayoutAndState();
+        acceptsDepthOnlyVertexStageOnly();
         enforcesResourceAndByteLimits();
         preservesPreflightReasonWithOneDiagnostic();
         mapsStockProfileWithExplicitStaging();

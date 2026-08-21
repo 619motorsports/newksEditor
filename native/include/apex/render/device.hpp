@@ -658,6 +658,61 @@ struct IndexedStaticMeshBatchResult {
     }
 };
 
+// A depth-only indexed draw is the backend-neutral directional-shadow seam.
+// It writes only the supplied persistent D32 attachment. Vertex/index ranges
+// come from the validated packet and remain bounded before backend execution.
+struct DepthOnlyIndexedStaticMeshDrawRequest {
+    const DrawPacket* packet = nullptr;
+    const PipelineProgram* pipeline = nullptr;
+    const Buffer* vertex_buffer = nullptr;
+    const Buffer* index_buffer = nullptr;
+    StaticMeshIndexType index_type = StaticMeshIndexType::uint16;
+    std::optional<CameraFrame> camera_frame;
+    bool clear_depth = false;
+    float depth_clear_value = 1.0F;
+};
+
+enum class DepthOnlyIndexedStaticMeshDrawStatus : std::uint8_t {
+    ready,
+    invalid_request,
+    unsupported,
+    execution_failed,
+};
+
+struct DepthOnlyIndexedStaticMeshDrawResult {
+    DepthOnlyIndexedStaticMeshDrawStatus status =
+        DepthOnlyIndexedStaticMeshDrawStatus::unsupported;
+    Diagnostic diagnostic;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == DepthOnlyIndexedStaticMeshDrawStatus::ready;
+    }
+};
+
+struct DepthOnlyIndexedStaticMeshBatchDescription {
+    std::span<const DepthOnlyIndexedStaticMeshDrawRequest> draws{};
+    DepthAttachment* depth_attachment = nullptr;
+    bool clear_depth = false;
+    float depth_clear_value = 1.0F;
+};
+
+enum class DepthOnlyIndexedStaticMeshBatchStatus : std::uint8_t {
+    ready,
+    invalid_request,
+    unsupported,
+    execution_failed,
+};
+
+struct DepthOnlyIndexedStaticMeshBatchResult {
+    DepthOnlyIndexedStaticMeshBatchStatus status =
+        DepthOnlyIndexedStaticMeshBatchStatus::unsupported;
+    Diagnostic diagnostic;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == DepthOnlyIndexedStaticMeshBatchStatus::ready;
+    }
+};
+
 inline constexpr std::uint64_t max_texture_readback_bytes = 256ULL * 1024ULL * 1024ULL;
 
 enum class SamplerFilter : std::uint8_t {
@@ -833,6 +888,17 @@ inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
     const Texture& texture, const IndexedStaticMeshBatchDescription& description,
     Diagnostic& diagnostic);
 
+[[nodiscard]] DepthOnlyIndexedStaticMeshDrawStatus
+validate_depth_only_indexed_static_mesh_draw_request(
+    const DepthAttachment& depth,
+    const DepthOnlyIndexedStaticMeshDrawRequest& request,
+    Diagnostic& diagnostic);
+
+[[nodiscard]] DepthOnlyIndexedStaticMeshBatchStatus
+validate_depth_only_indexed_static_mesh_batch_description(
+    const DepthOnlyIndexedStaticMeshBatchDescription& description,
+    Diagnostic& diagnostic);
+
 [[nodiscard]] SamplerStatus validate_sampler_description(
     const SamplerDescription& description,
     Diagnostic& diagnostic);
@@ -978,6 +1044,34 @@ public:
                 {}};
     }
 
+    // Backends opt into depth-only indexed execution independently. The
+    // neutral default validates the complete request and performs no work.
+    [[nodiscard]] virtual DepthOnlyIndexedStaticMeshDrawResult
+    draw_depth_only_indexed_static_mesh(
+        DepthAttachment& depth, const DepthOnlyIndexedStaticMeshDrawRequest& request) {
+        Diagnostic diagnostic;
+        const DepthOnlyIndexedStaticMeshDrawStatus validation =
+            validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic);
+        if (validation != DepthOnlyIndexedStaticMeshDrawStatus::ready)
+            return {validation, std::move(diagnostic)};
+        return {DepthOnlyIndexedStaticMeshDrawStatus::unsupported,
+                {"depth_only_indexed_static_mesh_execution_unsupported",
+                 "This backend has not enabled depth-only indexed static-mesh execution"}};
+    }
+
+    [[nodiscard]] virtual DepthOnlyIndexedStaticMeshBatchResult
+    draw_depth_only_indexed_static_mesh_batch(
+        const DepthOnlyIndexedStaticMeshBatchDescription& description) {
+        Diagnostic diagnostic;
+        const DepthOnlyIndexedStaticMeshBatchStatus validation =
+            validate_depth_only_indexed_static_mesh_batch_description(description, diagnostic);
+        if (validation != DepthOnlyIndexedStaticMeshBatchStatus::ready)
+            return {validation, std::move(diagnostic)};
+        return {DepthOnlyIndexedStaticMeshBatchStatus::unsupported,
+                {"depth_only_indexed_static_mesh_batch_execution_unsupported",
+                 "This backend has not enabled depth-only indexed static-mesh batch execution"}};
+    }
+
     [[nodiscard]] virtual SamplerResult create_sampler(
         const SamplerDescription& description) = 0;
 
@@ -1010,6 +1104,10 @@ struct DeviceResult {
     IndexedStaticMeshDrawStatus status) noexcept;
 [[nodiscard]] const char* indexed_static_mesh_batch_status_name(
     IndexedStaticMeshBatchStatus status) noexcept;
+[[nodiscard]] const char* depth_only_indexed_static_mesh_draw_status_name(
+    DepthOnlyIndexedStaticMeshDrawStatus status) noexcept;
+[[nodiscard]] const char* depth_only_indexed_static_mesh_batch_status_name(
+    DepthOnlyIndexedStaticMeshBatchStatus status) noexcept;
 [[nodiscard]] const char* sampler_status_name(SamplerStatus status) noexcept;
 [[nodiscard]] const char* shader_module_status_name(ShaderModuleStatus status) noexcept;
 [[nodiscard]] const char* presentation_target_status_name(

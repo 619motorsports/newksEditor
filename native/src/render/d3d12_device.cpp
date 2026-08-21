@@ -3134,6 +3134,234 @@ bool draw_indexed_static_mesh_and_readback(
                                       request.clear_depth, request.depth_clear_value, request.load_color, &request);
 }
 
+bool execute_d3d12_depth_only_indexed_static_mesh_batch(
+    const std::shared_ptr<D3D12Context>& context,
+    D3D12DepthAttachment& depth_attachment,
+    const DepthOnlyIndexedStaticMeshBatchDescription& batch,
+    std::span<const D3D12IndexedBatchDraw> draws,
+    Diagnostic& diagnostic) {
+    if (draws.empty()) {
+        diagnostic = {"depth_only_indexed_static_mesh_batch_empty",
+                      "D3D12 depth-only indexed batch has no executable draws"};
+        return false;
+    }
+    const DepthAttachmentDescription& description = depth_attachment.info().description;
+    if (description.width > static_cast<std::uint32_t>(std::numeric_limits<LONG>::max()) ||
+        description.height > static_cast<std::uint32_t>(std::numeric_limits<LONG>::max())) {
+        diagnostic = {"depth_only_indexed_static_mesh_batch_uint_limit",
+                      "D3D12 depth-only dimensions exceed LONG limits"};
+        return false;
+    }
+    if (!batch.clear_depth && !depth_attachment.cleared()) {
+        diagnostic = {"depth_only_indexed_depth_load_before_clear",
+                      "A D3D12 depth attachment must be initialized before it is loaded"};
+        return false;
+    }
+    if (!validate_d3d12_sample_count(context, DXGI_FORMAT_D32_FLOAT,
+                                     description.samples, diagnostic))
+        return false;
+
+    HRESULT result = S_OK;
+    std::vector<ComPtr<ID3D12RootSignature>> root_signatures(draws.size());
+    std::vector<ComPtr<ID3D12PipelineState>> pipelines(draws.size());
+    for (std::size_t index = 0U; index < draws.size(); ++index) {
+        const PipelineProgram& program = *draws[index].pipeline;
+        const PipelineShaderModule* vertex_shader = nullptr;
+        for (const PipelineShaderModule& shader : program.shaders) {
+            if (shader.format != PipelineShaderFormat::dxil) {
+                diagnostic = {"depth_only_indexed_shader_format_unsupported",
+                              "D3D12 depth-only execution requires DXIL/DXBC bytecode"};
+                return false;
+            }
+            if (shader.stage == PipelineShaderStage::vertex) vertex_shader = &shader;
+        }
+        if (vertex_shader == nullptr || program.shaders.size() != 1U) {
+            diagnostic = {"depth_only_indexed_shader_pair_invalid",
+                          "D3D12 depth-only execution requires one vertex shader and no pixel shader"};
+            return false;
+        }
+
+        D3D12_ROOT_PARAMETER transform_parameter{};
+        transform_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        transform_parameter.Constants.ShaderRegister = 0U;
+        transform_parameter.Constants.RegisterSpace = 0U;
+        transform_parameter.Constants.Num32BitValues =
+            static_cast<UINT>(sizeof(DrawMatrices) / sizeof(std::uint32_t));
+        transform_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+        D3D12_ROOT_SIGNATURE_DESC root_description{};
+        root_description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+        root_description.NumParameters = 1U;
+        root_description.pParameters = &transform_parameter;
+        ComPtr<ID3DBlob> root_blob;
+        ComPtr<ID3DBlob> root_error;
+        result = D3D12SerializeRootSignature(&root_description, D3D_ROOT_SIGNATURE_VERSION_1,
+                                             &root_blob, &root_error);
+        if (FAILED(result)) {
+            diagnostic = hresult_error("D3D12SerializeRootSignature(depth-only batch)", result);
+            diagnostic.code = "depth_only_indexed_pipeline_failed";
+            return false;
+        }
+        result = context->device->CreateRootSignature(
+            0U, root_blob->GetBufferPointer(), root_blob->GetBufferSize(),
+            IID_PPV_ARGS(&root_signatures[index]));
+        if (FAILED(result)) {
+            diagnostic = hresult_error("CreateRootSignature(depth-only batch)", result);
+            diagnostic.code = "depth_only_indexed_pipeline_failed";
+            return false;
+        }
+
+        std::vector<D3D12_INPUT_ELEMENT_DESC> input_elements;
+        input_elements.reserve(program.vertex_layout.attributes.size());
+        for (const PipelineVertexAttribute& attribute : program.vertex_layout.attributes) {
+            D3D12_INPUT_ELEMENT_DESC element{};
+            element.SemanticName = d3d12_pipeline_semantic(attribute.semantic);
+            element.SemanticIndex =
+                attribute.semantic == PipelineVertexSemantic::texcoord1 ? 1U : 0U;
+            element.Format = d3d12_pipeline_vertex_format(attribute.format);
+            element.InputSlot = 0U;
+            element.AlignedByteOffset = attribute.offset;
+            element.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+            input_elements.push_back(element);
+        }
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_description{};
+        pipeline_description.pRootSignature = root_signatures[index].Get();
+        pipeline_description.VS = {vertex_shader->bytes.data(), vertex_shader->bytes.size()};
+        pipeline_description.PS = {nullptr, 0U};
+        pipeline_description.InputLayout = {input_elements.data(),
+                                            static_cast<UINT>(input_elements.size())};
+        pipeline_description.PrimitiveTopologyType =
+            d3d12_pipeline_topology_type(program.raster.fill);
+        pipeline_description.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+        pipeline_description.RasterizerState.CullMode =
+            program.raster.cull == PipelineCullMode::none
+                ? D3D12_CULL_MODE_NONE
+                : program.raster.cull == PipelineCullMode::front ? D3D12_CULL_MODE_FRONT
+                                                                  : D3D12_CULL_MODE_BACK;
+        pipeline_description.RasterizerState.FrontCounterClockwise =
+            program.raster.front_face == PipelineFrontFace::counter_clockwise;
+        pipeline_description.RasterizerState.DepthClipEnable = TRUE;
+        pipeline_description.DepthStencilState.DepthEnable = TRUE;
+        pipeline_description.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        pipeline_description.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+        pipeline_description.DepthStencilState.StencilEnable = FALSE;
+        pipeline_description.NumRenderTargets = 0U;
+        pipeline_description.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+        pipeline_description.SampleMask = std::numeric_limits<UINT>::max();
+        pipeline_description.SampleDesc.Count = description.samples;
+        pipeline_description.SampleDesc.Quality = 0U;
+        result = context->device->CreateGraphicsPipelineState(
+            &pipeline_description, IID_PPV_ARGS(&pipelines[index]));
+        if (FAILED(result)) {
+            diagnostic = hresult_error("CreateGraphicsPipelineState(depth-only batch)", result);
+            diagnostic.code = "depth_only_indexed_pipeline_failed";
+            return false;
+        }
+    }
+
+    ComPtr<ID3D12CommandAllocator> allocator;
+    result = context->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                      IID_PPV_ARGS(&allocator));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("CreateCommandAllocator(depth-only batch)", result);
+        diagnostic.code = "depth_only_indexed_execution_failed";
+        return false;
+    }
+    ComPtr<ID3D12GraphicsCommandList> list;
+    result = context->device->CreateCommandList(0U, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                allocator.Get(), nullptr, IID_PPV_ARGS(&list));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("CreateCommandList(depth-only batch)", result);
+        diagnostic.code = "depth_only_indexed_execution_failed";
+        return false;
+    }
+    D3D12_RESOURCE_STATES depth_state = depth_attachment.state();
+    if (depth_state != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = depth_attachment.resource();
+        barrier.Transition.StateBefore = depth_state;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
+        depth_state = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    }
+    const D3D12_CPU_DESCRIPTOR_HANDLE dsv = depth_attachment.dsv(true);
+    if (batch.clear_depth)
+        list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, batch.depth_clear_value,
+                                    0U, 0U, nullptr);
+    list->OMSetRenderTargets(0U, nullptr, FALSE, &dsv);
+    for (std::size_t index = 0U; index < draws.size(); ++index) {
+        const D3D12IndexedBatchDraw& draw = draws[index];
+        list->SetGraphicsRootSignature(root_signatures[index].Get());
+        list->SetGraphicsRoot32BitConstants(
+            0U, static_cast<UINT>(sizeof(DrawMatrices) / sizeof(std::uint32_t)),
+            &draw.matrices, 0U);
+        list->SetPipelineState(pipelines[index].Get());
+        list->IASetPrimitiveTopology(d3d12_pipeline_topology(draw.pipeline->raster.fill));
+        D3D12_VERTEX_BUFFER_VIEW vertex_view{};
+        vertex_view.BufferLocation = draw.geometry.vertex_resource->GetGPUVirtualAddress() +
+                                     draw.geometry.vertex_offset;
+        vertex_view.SizeInBytes = draw.geometry.vertex_size;
+        vertex_view.StrideInBytes = draw.geometry.vertex_stride;
+        list->IASetVertexBuffers(0U, 1U, &vertex_view);
+        D3D12_INDEX_BUFFER_VIEW index_view{};
+        index_view.BufferLocation = draw.geometry.index_resource->GetGPUVirtualAddress() +
+                                    draw.geometry.index_offset;
+        index_view.SizeInBytes = draw.geometry.index_size;
+        index_view.Format = DXGI_FORMAT_R16_UINT;
+        list->IASetIndexBuffer(&index_view);
+        D3D12_VIEWPORT viewport{0.0F, 0.0F, static_cast<float>(description.width),
+                                static_cast<float>(description.height), 0.0F, 1.0F};
+        D3D12_RECT scissor{0, 0, static_cast<LONG>(description.width),
+                           static_cast<LONG>(description.height)};
+        list->RSSetViewports(1U, &viewport);
+        list->RSSetScissorRects(1U, &scissor);
+        list->DrawIndexedInstanced(draw.geometry.index_count, 1U, 0U, 0, 0U);
+    }
+    result = list->Close();
+    if (FAILED(result)) {
+        diagnostic = hresult_error("Close(depth-only batch)", result);
+        diagnostic.code = "depth_only_indexed_execution_failed";
+        return false;
+    }
+    ComPtr<ID3D12Fence> fence;
+    result = context->device->CreateFence(0U, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("CreateFence(depth-only batch)", result);
+        diagnostic.code = "depth_only_indexed_execution_failed";
+        return false;
+    }
+    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!event) {
+        diagnostic = {"depth_only_indexed_execution_failed",
+                      "CreateEventW failed for the D3D12 depth-only batch"};
+        return false;
+    }
+    ID3D12CommandList* command_lists[] = {list.Get()};
+    context->queue->ExecuteCommandLists(1U, command_lists);
+    constexpr UINT64 fence_value = 1U;
+    result = context->queue->Signal(fence.Get(), fence_value);
+    if (SUCCEEDED(result) && fence->GetCompletedValue() < fence_value)
+        result = fence->SetEventOnCompletion(fence_value, event);
+    if (SUCCEEDED(result) && fence->GetCompletedValue() < fence_value &&
+        WaitForSingleObject(event, INFINITE) != WAIT_OBJECT_0)
+        result = E_FAIL;
+    CloseHandle(event);
+    if (FAILED(result)) {
+        const bool drained = context->wait_idle();
+        depth_attachment.set_state(drained ? depth_state : D3D12_RESOURCE_STATE_COMMON);
+        diagnostic = hresult_error("D3D12 depth-only batch fence", result);
+        diagnostic.code = result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET
+                              ? "d3d12_device_removed"
+                              : "depth_only_indexed_execution_failed";
+        return false;
+    }
+    depth_attachment.set_state(depth_state);
+    if (batch.clear_depth) depth_attachment.set_cleared();
+    diagnostic = {};
+    return true;
+}
+
 class D3D12Texture final : public Texture {
 public:
     D3D12Texture(std::shared_ptr<D3D12Context> context,
@@ -4659,6 +4887,120 @@ public:
         if (!d3d_texture->draw_indexed_static_mesh_batch(batch, draws, d3d_depth, output, diagnostic))
             return {IndexedStaticMeshBatchStatus::execution_failed, std::move(diagnostic), {}};
         return {IndexedStaticMeshBatchStatus::ready, {}, std::move(output)};
+    }
+
+    DepthOnlyIndexedStaticMeshDrawResult draw_depth_only_indexed_static_mesh(
+        DepthAttachment& depth,
+        const DepthOnlyIndexedStaticMeshDrawRequest& request) override {
+        Diagnostic diagnostic;
+        const auto validation = validate_depth_only_indexed_static_mesh_draw_request(
+            depth, request, diagnostic);
+        if (validation != DepthOnlyIndexedStaticMeshDrawStatus::ready)
+            return {validation, std::move(diagnostic)};
+        DepthOnlyIndexedStaticMeshDrawRequest draw = request;
+        draw.clear_depth = false;
+        draw.depth_clear_value = 1.0F;
+        const std::array<DepthOnlyIndexedStaticMeshDrawRequest, 1U> draws = {draw};
+        const DepthOnlyIndexedStaticMeshBatchDescription batch{
+            draws, &depth, request.clear_depth, request.depth_clear_value};
+        const auto result = draw_depth_only_indexed_static_mesh_batch(batch);
+        if (result.status == DepthOnlyIndexedStaticMeshBatchStatus::ready)
+            return {DepthOnlyIndexedStaticMeshDrawStatus::ready, {}};
+        const auto status = result.status == DepthOnlyIndexedStaticMeshBatchStatus::unsupported
+                                ? DepthOnlyIndexedStaticMeshDrawStatus::unsupported
+                            : result.status == DepthOnlyIndexedStaticMeshBatchStatus::invalid_request
+                                ? DepthOnlyIndexedStaticMeshDrawStatus::invalid_request
+                                : DepthOnlyIndexedStaticMeshDrawStatus::execution_failed;
+        return {status, result.diagnostic};
+    }
+
+    DepthOnlyIndexedStaticMeshBatchResult draw_depth_only_indexed_static_mesh_batch(
+        const DepthOnlyIndexedStaticMeshBatchDescription& batch) override {
+        Diagnostic diagnostic;
+        const auto validation =
+            validate_depth_only_indexed_static_mesh_batch_description(batch, diagnostic);
+        if (validation != DepthOnlyIndexedStaticMeshBatchStatus::ready)
+            return {validation, std::move(diagnostic)};
+        auto* depth = dynamic_cast<D3D12DepthAttachment*>(batch.depth_attachment);
+        if (depth == nullptr || depth->context() != context_.get()) {
+            return {DepthOnlyIndexedStaticMeshBatchStatus::unsupported,
+                    {"depth_only_indexed_depth_context_mismatch",
+                     "The depth attachment does not belong to this D3D12 device"}};
+        }
+        const D3D12Context* context = context_.get();
+        std::vector<D3D12IndexedBatchDraw> draws;
+        draws.reserve(batch.draws.size());
+        for (const DepthOnlyIndexedStaticMeshDrawRequest& request : batch.draws) {
+            const auto* vertex = dynamic_cast<const D3D12Buffer*>(request.vertex_buffer);
+            const auto* index = dynamic_cast<const D3D12Buffer*>(request.index_buffer);
+            if (vertex == nullptr || index == nullptr || vertex->context() != context ||
+                index->context() != context) {
+                return {DepthOnlyIndexedStaticMeshBatchStatus::unsupported,
+                        {"depth_only_indexed_static_mesh_context_mismatch",
+                         "Depth-only geometry buffers belong to another D3D12 device"}};
+            }
+            const UINT required_vertex_state =
+                static_cast<UINT>(D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+            const UINT required_index_state = static_cast<UINT>(D3D12_RESOURCE_STATE_INDEX_BUFFER);
+            if ((static_cast<UINT>(vertex->state()) & required_vertex_state) == 0U ||
+                (static_cast<UINT>(index->state()) & required_index_state) == 0U) {
+                return {DepthOnlyIndexedStaticMeshBatchStatus::invalid_request,
+                        {"depth_only_indexed_static_mesh_resource_state_invalid",
+                         "Depth-only geometry buffers are not in D3D12 vertex/index state"}};
+            }
+            const std::uint64_t stride = request.pipeline->vertex_layout.stride;
+            const std::uint64_t vertex_offset = request.packet->vertex_offset;
+            const std::uint64_t index_offset = request.packet->index_offset;
+            if (stride == 0U || vertex_offset > std::numeric_limits<std::uint64_t>::max() / stride ||
+                index_offset > std::numeric_limits<std::uint64_t>::max() / sizeof(std::uint16_t)) {
+                return {DepthOnlyIndexedStaticMeshBatchStatus::invalid_request,
+                        {"depth_only_indexed_static_mesh_offset_overflow",
+                         "Depth-only geometry offsets overflow D3D12 byte arithmetic"}};
+            }
+            const std::uint64_t vertex_byte_offset = vertex_offset * stride;
+            const std::uint64_t index_byte_offset = index_offset * sizeof(std::uint16_t);
+            const std::uint64_t vertex_bytes =
+                static_cast<std::uint64_t>(request.packet->vertex_count) * stride;
+            const std::uint64_t index_bytes =
+                static_cast<std::uint64_t>(request.packet->index_count) * sizeof(std::uint16_t);
+            constexpr std::uint64_t max_uint =
+                static_cast<std::uint64_t>(std::numeric_limits<UINT>::max());
+            const D3D12_RESOURCE_DESC vertex_description = vertex->resource()->GetDesc();
+            const D3D12_RESOURCE_DESC index_description = index->resource()->GetDesc();
+            const D3D12_GPU_VIRTUAL_ADDRESS vertex_address = vertex->resource()->GetGPUVirtualAddress();
+            const D3D12_GPU_VIRTUAL_ADDRESS index_address = index->resource()->GetGPUVirtualAddress();
+            if (vertex_bytes > max_uint || index_bytes > max_uint ||
+                vertex_byte_offset > vertex_description.Width ||
+                vertex_bytes > vertex_description.Width - vertex_byte_offset ||
+                index_byte_offset > index_description.Width ||
+                index_bytes > index_description.Width - index_byte_offset ||
+                vertex_address > std::numeric_limits<D3D12_GPU_VIRTUAL_ADDRESS>::max() - vertex_byte_offset ||
+                index_address > std::numeric_limits<D3D12_GPU_VIRTUAL_ADDRESS>::max() - index_byte_offset) {
+                return {DepthOnlyIndexedStaticMeshBatchStatus::invalid_request,
+                        {"depth_only_indexed_static_mesh_buffer_range_invalid",
+                         "Depth-only geometry range exceeds D3D12 buffer limits"}};
+            }
+            D3D12IndexedBatchDraw draw;
+            draw.pipeline = request.pipeline;
+            draw.matrices = {request.packet->world_matrix,
+                             request.camera_frame->view_projection};
+            draw.geometry.vertex_resource = vertex->resource();
+            draw.geometry.vertex_offset = vertex_byte_offset;
+            draw.geometry.vertex_size = static_cast<UINT>(vertex_bytes);
+            draw.geometry.vertex_stride = static_cast<UINT>(stride);
+            draw.geometry.index_resource = index->resource();
+            draw.geometry.index_offset = index_byte_offset;
+            draw.geometry.index_size = static_cast<UINT>(index_bytes);
+            draw.geometry.index_count = request.packet->index_count;
+            draw.geometry.indexed = true;
+            draws.push_back(draw);
+        }
+        if (!execute_d3d12_depth_only_indexed_static_mesh_batch(
+                context_, *depth, batch, draws, diagnostic)) {
+            return {DepthOnlyIndexedStaticMeshBatchStatus::execution_failed,
+                    std::move(diagnostic)};
+        }
+        return {DepthOnlyIndexedStaticMeshBatchStatus::ready, {}};
     }
 
     SamplerResult create_sampler(const SamplerDescription& description) override {

@@ -112,7 +112,17 @@ remains unchanged and feature-complete.
   attachments. Explicit load and clear controls retain color and depth across
   indexed draws. Both backends read initialized, single-sample D32 attachments
   through a bounded synchronous API. This readback is execution evidence. It
-  is not a sampled shadow-map or receiver path. The executable main-pass subset uses the source-evidenced
+  is not a sampled shadow-map or receiver path. Both backends also implement a
+  resource-free, depth-only indexed pass. The pass requires a vertex-only
+  backend shader, an 11-float static mesh, draw matrices, and one single-sample
+  D32 target. It rejects material resources, fragment shaders, blending,
+  skinning, and multisample depth. A Vulkan SwiftShader test clears D32, draws
+  indexed geometry without a color target, and reads back changed depth inside
+  the triangle and the clear value outside it. The D3D12 implementation uses a
+  zero-render-target pipeline and is part of the Windows WARP test path. This
+  is the bounded opaque-caster execution seam. Static-scene caster selection,
+  three-map ownership, alpha-tested and skinned caster programs, depth
+  sampling, cascade selection, and receiver PCF remain staged. The executable main-pass subset uses the source-evidenced
   `LESS` depth comparison. It also executes explicitly blended packets. The
   ordinary alpha, multiply, and transparent-as-black factors match
   `applyItemRenderState` in `public/app.js`. The indexed path supports 4x
@@ -337,6 +347,10 @@ remains unchanged and feature-complete.
   depth across synchronous draws and supports explicit test/write state. The
   ordered multi-draw path clears or loads attachments once and submits one
   pass. Each backend resolves a 4x color target once after the final draw. The
+  same batch boundary can submit resource-free vertex-only draws to a
+  persistent single-sample D32 target without a color allocation or readback.
+  This pass does not yet consume `RenderPlan::shadow_casters` or expose the D32
+  target as a sampled receiver resource. The
   device API directly uploads immutable, one-layer BC1 and BC3 sampled
   textures. The upload path validates compressed block rows before allocation.
   Vulkan and D3D12 query format support before image creation. Direct BC5

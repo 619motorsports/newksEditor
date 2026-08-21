@@ -1575,6 +1575,71 @@ bool contract_backend(apex::render::Backend backend) {
                     0.0001F,
             "repeated D32 depth readback preserves tracked state");
 
+    // A true caster pass has no color attachment and no fragment shader. It
+    // writes the persistent D32 target, which is verified through the
+    // backend-neutral readback contract instead of a color-depth surrogate.
+    PipelineProgram depth_only_pipeline = depth_readback_pipeline;
+    depth_only_pipeline.name = "opaque-directional-caster-depth";
+    depth_only_pipeline.targets.colors.clear();
+    depth_only_pipeline.shaders.resize(1U);
+    DepthAttachmentResult depth_only_attachment =
+        device.device->create_depth_attachment(depth_readback_description);
+    require(depth_only_attachment.ok(), "depth-only caster attachment creation");
+    DepthOnlyIndexedStaticMeshDrawRequest depth_only_request;
+    depth_only_request.packet = &depth_packet;
+    depth_only_request.pipeline = &depth_only_pipeline;
+    depth_only_request.vertex_buffer = depth_upload.upload->vertex_buffer.get();
+    depth_only_request.index_buffer = depth_upload.upload->index_buffer.get();
+    depth_only_request.camera_frame = *indexed_camera.frame;
+    const DepthOnlyIndexedStaticMeshDrawResult depth_only_uninitialized =
+        device.device->draw_depth_only_indexed_static_mesh(
+            *depth_only_attachment.attachment, depth_only_request);
+    require(depth_only_uninitialized.status ==
+                DepthOnlyIndexedStaticMeshDrawStatus::execution_failed &&
+                depth_only_uninitialized.diagnostic.code ==
+                    "depth_only_indexed_depth_load_before_clear",
+            "depth-only caster load before clear rejected");
+    depth_only_request.clear_depth = true;
+    const DepthOnlyIndexedStaticMeshDrawResult depth_only_draw =
+        device.device->draw_depth_only_indexed_static_mesh(
+            *depth_only_attachment.attachment, depth_only_request);
+    require(depth_only_draw.ok(), "real depth-only caster draw");
+    const DepthAttachmentReadbackResult depth_only_readback =
+        device.device->read_depth_attachment(
+            *depth_only_attachment.attachment,
+            {depth_readback_description.width, depth_readback_description.height});
+    require(depth_only_readback.ok() &&
+                depth_only_readback.depth.size() == depth_readback_result.depth.size(),
+            "depth-only caster D32 readback");
+    const float depth_only_center =
+        depth_only_readback.depth[16U * depth_readback_description.width + 16U];
+    const float depth_only_outside = depth_only_readback.depth.front();
+    require(std::isfinite(depth_only_center) && std::isfinite(depth_only_outside) &&
+                depth_only_center < depth_only_outside - 0.01F &&
+                depth_only_outside > 0.99F,
+            "depth-only caster changes center depth and preserves clear outside");
+
+    DepthAttachmentResult depth_only_batch_attachment =
+        device.device->create_depth_attachment(depth_readback_description);
+    require(depth_only_batch_attachment.ok(), "depth-only caster batch attachment creation");
+    DepthOnlyIndexedStaticMeshDrawRequest depth_only_batch_draw = depth_only_request;
+    depth_only_batch_draw.clear_depth = false;
+    const std::array<DepthOnlyIndexedStaticMeshDrawRequest, 1U> depth_only_draws = {
+        depth_only_batch_draw};
+    const DepthOnlyIndexedStaticMeshBatchResult depth_only_batch =
+        device.device->draw_depth_only_indexed_static_mesh_batch(
+            {depth_only_draws, depth_only_batch_attachment.attachment.get(), true, 1.0F});
+    require(depth_only_batch.ok(), "real depth-only caster batch draw");
+    const DepthAttachmentReadbackResult depth_only_batch_readback =
+        device.device->read_depth_attachment(
+            *depth_only_batch_attachment.attachment,
+            {depth_readback_description.width, depth_readback_description.height});
+    require(depth_only_batch_readback.ok() &&
+                depth_only_batch_readback.depth.size() == depth_only_readback.depth.size() &&
+                depth_only_batch_readback.depth[16U * depth_readback_description.width + 16U] <
+                    0.99F,
+            "depth-only caster batch writes persistent D32");
+
     // Exercise the bounded 4x color/depth-independent path. The backend must
     // render to the multisampled target, then resolve it to a single-sample
     // image before producing the canonical readback. Alpha-to-coverage is
