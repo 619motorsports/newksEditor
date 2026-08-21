@@ -85,7 +85,7 @@ state.
 
 | Current module | Port boundary and retained responsibility |
 | --- | --- |
-| `src/kn5.js`, `src/kn5-write.js`, `src/kn5-bake.js` | Checked KN5 v5/v6 read, write, visibility, CSP KN5ENC inspection, project baking |
+| `src/kn5.js`, `src/kn5-write.js`, `src/kn5-bake.js` | Checked KN5 v4/v5/v6 read, write, visibility, CSP KN5ENC inspection, project baking |
 | `src/dds.js` | DDS/DXGI/D3D9 headers, raw formats, BC1/2/3/4/5 decode, BC6H/BC7 capability/fallback |
 | `src/fbx-import.js` | Binary/ASCII FBX geometry, materials, UVs, skinning, images, clips, KN5 conversion |
 | `src/ksanim.js`, `src/knh.js` | KSANIM v1/v2 parse/sample/serialize and recursive driver-base hierarchy |
@@ -205,7 +205,7 @@ package launches all pass.
 
 | Area | Must retain | Minimum proof before declaring parity |
 | --- | --- | --- |
-| Asset I/O | KN5 v5/v6, DDS, FBX, KSANIM, KNH, ACD, VAO, CSP/INI and safe external assets | Fixture round trips; malformed/truncated tests; diagnostics compare |
+| Asset I/O | KN5 v4/v5/v6, DDS, FBX, KSANIM, KNH, ACD, VAO, CSP/INI and safe external assets | Fixture round trips; malformed/truncated tests; diagnostics compare |
 | Scene model | Hierarchy, active/visible/renderable rules, static/skinned meshes, materials, resources, bounds | Structural snapshots and visibility tests |
 | Track workflow | `models*.ini`, placement/dynamic objects, surfaces, cameras/splines, physics overlay | Manifest/surface export equivalence and assembled-layout audits |
 | Car workflow | ACD/LODs, skin overrides, collider checks, SDK node audit, driver pose/cockpit mode | LOD/skin/driver/collider fixtures and inspector diagnostics |

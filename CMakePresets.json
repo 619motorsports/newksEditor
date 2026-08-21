@@ -1,0 +1,129 @@
+{
+  "version": 4,
+  "configurePresets": [
+    {
+      "name": "native-base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/out/native/${presetName}",
+      "cacheVariables": {
+        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_CXX_EXTENSIONS": "OFF",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "APEX_BUILD_TESTS": "ON",
+        "APEX_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "dev",
+      "displayName": "Native development build",
+      "inherits": "native-base",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "ci-linux",
+      "displayName": "Native CI (Linux)",
+      "inherits": "native-base",
+      "generator": "Ninja",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "APEX_ENABLE_SANITIZERS": "ON",
+        "APEX_ENABLE_VULKAN": "ON",
+        "APEX_ENABLE_D3D12": "OFF"
+      }
+    },
+    {
+      "name": "ci-macos",
+      "displayName": "Native CI (macOS)",
+      "inherits": "native-base",
+      "generator": "Ninja",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "APEX_ENABLE_VULKAN": "OFF",
+        "APEX_ENABLE_D3D12": "OFF"
+      }
+    },
+    {
+      "name": "ci-windows",
+      "displayName": "Native CI (Windows)",
+      "inherits": "native-base",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "APEX_ENABLE_VULKAN": "ON",
+        "APEX_ENABLE_D3D12": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev"
+    },
+    {
+      "name": "ci-linux",
+      "configurePreset": "ci-linux"
+    },
+    {
+      "name": "ci-macos",
+      "configurePreset": "ci-macos"
+    },
+    {
+      "name": "ci-windows",
+      "configurePreset": "ci-windows",
+      "configuration": "RelWithDebInfo"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "dev",
+      "displayName": "Native development tests",
+      "configurePreset": "dev",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "ci-linux",
+      "displayName": "Native tests (Linux)",
+      "configurePreset": "ci-linux",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "ci-macos",
+      "displayName": "Native tests (macOS)",
+      "configurePreset": "ci-macos",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "ci-windows",
+      "displayName": "Native tests (Windows)",
+      "configurePreset": "ci-windows",
+      "configuration": "RelWithDebInfo",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

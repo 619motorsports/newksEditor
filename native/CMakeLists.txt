@@ -1,0 +1,155 @@
+find_package(Vulkan QUIET)
+
+add_library(apex_native INTERFACE)
+add_library(ApexEditor::Native ALIAS apex_native)
+
+target_compile_features(apex_native INTERFACE cxx_std_20)
+target_include_directories(apex_native INTERFACE
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+
+if(MSVC)
+  target_compile_options(apex_native INTERFACE /W4 /permissive- /EHsc)
+  if(APEX_WARNINGS_AS_ERRORS)
+    target_compile_options(apex_native INTERFACE /WX)
+  endif()
+else()
+  target_compile_options(apex_native INTERFACE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wconversion
+    -Wsign-conversion
+    -Wshadow
+    -Werror=return-type
+  )
+  if(APEX_WARNINGS_AS_ERRORS)
+    target_compile_options(apex_native INTERFACE -Werror)
+  endif()
+  if(APEX_ENABLE_SANITIZERS)
+    target_compile_options(apex_native INTERFACE -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(apex_native INTERFACE -fsanitize=address,undefined)
+  endif()
+endif()
+
+if(APEX_ENABLE_VULKAN AND Vulkan_FOUND)
+  target_compile_definitions(apex_native INTERFACE APEX_HAS_VULKAN=1)
+  target_link_libraries(apex_native INTERFACE Vulkan::Vulkan)
+  set(APEX_VULKAN_AVAILABLE TRUE)
+else()
+  set(APEX_VULKAN_AVAILABLE FALSE)
+  if(APEX_ENABLE_VULKAN)
+    message(STATUS "Vulkan SDK not found; Vulkan support is disabled")
+  endif()
+endif()
+
+if(APEX_ENABLE_D3D12)
+  if(NOT WIN32)
+    message(WARNING "APEX_ENABLE_D3D12 requested on a non-Windows host; disabling it")
+    set(APEX_ENABLE_D3D12 OFF CACHE BOOL "Build D3D12 support on Windows" FORCE)
+  else()
+    target_compile_definitions(apex_native INTERFACE APEX_HAS_D3D12=1)
+    target_link_libraries(apex_native INTERFACE d3d12 dxgi)
+  endif()
+endif()
+
+add_library(apex_core STATIC
+  src/core/byte_reader.cpp
+  src/core/parse_error.cpp
+)
+add_library(ApexEditor::Core ALIAS apex_core)
+target_link_libraries(apex_core PUBLIC ApexEditor::Native)
+
+add_library(apex_formats STATIC
+  src/formats/knh.cpp
+  src/formats/ksanim.cpp
+)
+add_library(ApexEditor::Formats ALIAS apex_formats)
+target_link_libraries(apex_formats PUBLIC ApexEditor::Core)
+
+add_library(apex_platform STATIC
+  src/platform/security.cpp
+)
+add_library(ApexEditor::Platform ALIAS apex_platform)
+target_link_libraries(apex_platform PUBLIC ApexEditor::Native)
+
+add_library(apex_render STATIC
+  src/render/device.cpp
+  src/render/vulkan_device.cpp
+  src/render/d3d12_device.cpp
+)
+add_library(ApexEditor::Render ALIAS apex_render)
+target_link_libraries(apex_render PUBLIC ApexEditor::Native)
+
+add_executable(apex_native_app src/app/main.cpp)
+set_target_properties(apex_native_app PROPERTIES OUTPUT_NAME apex-native)
+target_link_libraries(apex_native_app PRIVATE ApexEditor::Formats ApexEditor::Render)
+
+if(NOT BUILD_TESTING OR NOT APEX_BUILD_TESTS)
+  return()
+endif()
+
+# Tests are intentionally discovered by filename. This keeps the native build
+# usable while the port is staged and gives each format/backend a separate
+# executable once its implementation lands in native/tests.
+function(apex_add_native_test source stem library)
+  set(test_source "${CMAKE_CURRENT_SOURCE_DIR}/tests/${source}")
+  if(NOT EXISTS "${test_source}")
+    set(test_source "${CMAKE_CURRENT_SOURCE_DIR}/${source}")
+    if(NOT EXISTS "${test_source}")
+      message(STATUS "Skipping ${stem}: ${source} is not present")
+      return()
+    endif()
+  endif()
+
+  add_executable(${stem} "${test_source}")
+  target_link_libraries(${stem} PRIVATE ${library})
+  add_test(NAME ${stem} COMMAND ${stem})
+
+  # Native tests return 77 when a backend cannot be exercised on the current
+  # machine (for example, no Vulkan physical device or no D3D12 adapter).
+  # CTest treats that result as skipped instead of turning hardware absence
+  # into a CI failure. The regex covers older staged tests with diagnostics.
+  set_tests_properties(${stem} PROPERTIES
+    SKIP_RETURN_CODE 77
+    SKIP_REGULAR_EXPRESSION "[Uu]navailable|[Nn]ot available|[Nn]o physical device|[Nn]o D3D12 adapter"
+  )
+endfunction()
+
+apex_add_native_test(ksanim_tests.cpp ksanim_tests ApexEditor::Formats)
+apex_add_native_test(knh_tests.cpp knh_tests ApexEditor::Formats)
+apex_add_native_test(render_backend_tests.cpp render_backend_tests ApexEditor::Render)
+apex_add_native_test(platform_security_tests.cpp platform_security_tests ApexEditor::Platform)
+
+if(TEST ksanim_tests)
+  set_tests_properties(ksanim_tests PROPERTIES LABELS "unit;malformed")
+endif()
+if(TEST knh_tests)
+  set_tests_properties(knh_tests PROPERTIES LABELS "unit;malformed")
+endif()
+if(TEST render_backend_tests)
+  set_tests_properties(render_backend_tests PROPERTIES LABELS "unit;render")
+endif()
+if(TEST platform_security_tests)
+  set_tests_properties(platform_security_tests PROPERTIES LABELS "unit;security")
+endif()
+
+if(TARGET render_backend_tests)
+  if(APEX_VULKAN_AVAILABLE)
+    add_test(NAME render_backend_vulkan COMMAND render_backend_tests)
+    set_tests_properties(render_backend_vulkan PROPERTIES
+      ENVIRONMENT "APEX_RENDER_BACKEND=vulkan;APEX_RENDER_VALIDATION=1"
+      SKIP_RETURN_CODE 77
+      SKIP_REGULAR_EXPRESSION "[Uu]navailable|[Nn]ot available|[Nn]o physical device"
+    )
+  endif()
+
+  if(WIN32 AND APEX_ENABLE_D3D12)
+    add_test(NAME render_backend_d3d12_warp COMMAND render_backend_tests)
+    set_tests_properties(render_backend_d3d12_warp PROPERTIES
+      ENVIRONMENT "APEX_RENDER_BACKEND=d3d12;APEX_D3D12_ADAPTER=warp;APEX_RENDER_VALIDATION=1"
+      SKIP_RETURN_CODE 77
+      SKIP_REGULAR_EXPRESSION "[Uu]navailable|[Nn]ot available|[Nn]o D3D12 adapter"
+    )
+  endif()
+endif()

@@ -65,6 +65,14 @@ Run their package commands on their target operating systems before distribution
 npm test
 ```
 
+## Native C++ port
+
+The C++20 port is being developed alongside the feature-complete WebGL
+implementation. It uses a backend-neutral render device with Vulkan and
+Windows Direct3D 12 implementations. See [the native build guide](native/README.md)
+and [the feature-parity roadmap](docs/CPP_PORT.md). The WebGL path remains the
+reference until every documented parity and production-rendering gate passes.
+
 ## Current scope
 
 - Binary or ASCII FBX import through the portable Three.js loader. The importer
