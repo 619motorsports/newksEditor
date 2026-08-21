@@ -65,7 +65,8 @@ Kn5File model(std::string source, std::string materialName, std::string textureN
     Kn5Material materialValue;
     materialValue.name = std::move(materialName);
     materialValue.shader = "ksPerPixel";
-    materialValue.resources.push_back(Kn5MaterialResource{"txDiffuse", 0, output.textures[0].name});
+    // KN5's serialized integer is the shader bind point, not a texture-table index.
+    materialValue.resources.push_back(Kn5MaterialResource{"txDiffuse", 21, output.textures[0].name});
     output.materials.push_back(std::move(materialValue));
     output.root.type = 1;
     output.root.kind = "node";
@@ -162,15 +163,23 @@ void mergesScenesWithTransformsAndResourceRemapping() {
             "material ID remap");
     require(merged.model.root.children[1].transform[12] == 4.0F, "placement translation");
     require(merged.workspace.textureCollisions.size() == 1, "texture collision diagnostic");
-    require(merged.model.materials[1].resources[0].textureId == 0,
-            "deduplicated texture ID remap");
+    require(merged.model.materials[0].resources[0].textureId == 21 &&
+                merged.model.materials[1].resources[0].textureId == 21,
+            "track texture dedupe preserves shader bind points");
     require(merged.model.bytesRead == 200 && merged.model.byteLength == 200, "aggregate byte metadata");
 
     WorkspaceOptions carOptions;
     carOptions.kind = "carLods";
     const auto car = mergeKn5Models(entries, carOptions);
     require(car.model.textures.size() == 2 && car.workspace.scopeResources, "car texture scoping");
-    require(car.model.materials[1].resources[0].textureId == 1, "scoped texture ID remap");
+    require(car.model.textures[0].workspaceFileIndex == 0U &&
+                car.model.textures[1].workspaceFileIndex == 1U &&
+                car.model.materials[0].workspaceFileIndex == 0U &&
+                car.model.materials[1].workspaceFileIndex == 1U,
+            "car resources retain synthetic workspace scope");
+    require(car.model.materials[0].resources[0].textureId == 21 &&
+                car.model.materials[1].resources[0].textureId == 21,
+            "car texture scoping preserves shader bind points");
     require(car.workspace.materialRecords.size() == 2 && car.workspace.textureRecords.size() == 2,
             "scoped resource metadata");
 }

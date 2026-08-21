@@ -32,7 +32,7 @@ Kn5File synthetic(std::uint32_t version) {
     Kn5File file;
     file.version = version;
     file.sourceMarker = 0x12345678u;
-    file.textures.push_back({true, "body.dds", 4u, {1, 2, 3, 4}});
+    file.textures.push_back({true, "body.dds", 4u, {1, 2, 3, 4}, {}});
     Kn5Material material;
     material.name = "Body";
     material.shader = "ksPerPixel";

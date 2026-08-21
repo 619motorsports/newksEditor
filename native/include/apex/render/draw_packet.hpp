@@ -16,7 +16,7 @@ namespace apex::render {
 
 enum class DrawPrimitiveKind : std::uint8_t { static_mesh, skinned_mesh };
 
-inline constexpr std::uint32_t invalid_draw_texture_id = std::numeric_limits<std::uint32_t>::max();
+inline constexpr std::uint32_t invalid_draw_texture_index = std::numeric_limits<std::uint32_t>::max();
 
 struct DrawPacketFlags {
     bool transparent = false;
@@ -31,9 +31,13 @@ struct DrawPacketFlags {
 
 struct DrawResourceSlot {
     std::string slot;
-    // KN5 textureId is an index into Kn5File::textures. It is not a shader
-    // register/bind point; backend binding allocation is intentionally staged.
-    std::uint32_t texture_id = invalid_draw_texture_id;
+    // KN5 textureId is the shader bind point. The resolved table index is
+    // separate because the texture name, rather than the bind point, selects
+    // the embedded KN5 texture.
+    std::uint32_t bind_point = 0;
+    std::uint32_t texture_index = invalid_draw_texture_index;
+    // Original spelling from the resolved KN5 texture table. Empty means the
+    // material declared no texture name and remains a staged/missing binding.
     std::string texture;
 };
 
@@ -45,7 +49,8 @@ struct DrawPacket {
     std::uint32_t vertex_count = 0;
     std::uint32_t index_offset = 0;
     std::uint32_t index_count = 0;
-    std::uint32_t vertex_stride = 0;
+    // KN5 stores the stride as a count of float32 values, not bytes.
+    std::uint32_t vertex_stride_floats = 0;
     std::size_t order = 0;
     float distance = 0.0F;
     std::uint32_t layer = 0;

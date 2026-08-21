@@ -1,4 +1,5 @@
 #include "backend_internal.hpp"
+#include "apex/render/draw_packet.hpp"
 
 #include <cstring>
 #include <cstdio>
@@ -286,6 +287,9 @@ public:
 
     Backend backend() const noexcept override { return Backend::D3D12; }
     const BufferInfo& info() const noexcept override { return info_; }
+    [[nodiscard]] ID3D12Resource* resource() const noexcept { return resource_.Get(); }
+    [[nodiscard]] D3D12_RESOURCE_STATES state() const noexcept { return state_; }
+    [[nodiscard]] const D3D12Context* context() const noexcept { return context_.get(); }
 
     bool write_host(std::uint64_t offset, std::span<const std::byte> data, Diagnostic& diagnostic) {
         void* mapped = nullptr;
@@ -840,13 +844,26 @@ const char* d3d12_pipeline_semantic(PipelineVertexSemantic semantic) noexcept {
     return "POSITION";
 }
 
-bool draw_triangle_and_readback(const std::shared_ptr<D3D12Context>& context,
+struct D3D12GeometryDescriptor {
+    ID3D12Resource* vertex_resource = nullptr;
+    UINT64 vertex_offset = 0U;
+    UINT vertex_size = 0U;
+    UINT vertex_stride = 0U;
+    ID3D12Resource* index_resource = nullptr;
+    UINT64 index_offset = 0U;
+    UINT index_size = 0U;
+    UINT index_count = 0U;
+    bool indexed = false;
+};
+
+bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
                                 ID3D12Resource* destination,
                                 const TextureDescription& description,
                                 const TriangleDrawRequest& request,
                                 D3D12_RESOURCE_STATES& destination_state,
                                 std::vector<std::byte>& output,
-                                Diagnostic& diagnostic) {
+                                Diagnostic& diagnostic,
+                                const D3D12GeometryDescriptor* geometry_override = nullptr) {
     const auto& shaders = request.pipeline->shaders;
     const PipelineShaderModule* vertex_shader = nullptr;
     const PipelineShaderModule* fragment_shader = nullptr;
@@ -862,34 +879,43 @@ bool draw_triangle_and_readback(const std::shared_ptr<D3D12Context>& context,
         diagnostic = {"triangle_shader_pair_invalid", "D3D12 triangle execution requires vertex and fragment shaders"};
         return false;
     }
-    D3D12_HEAP_PROPERTIES upload_heap{};
-    upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
-    D3D12_RESOURCE_DESC vertex_description{};
-    vertex_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    vertex_description.Width = request.vertex_data.size();
-    vertex_description.Height = 1U;
-    vertex_description.DepthOrArraySize = 1U;
-    vertex_description.MipLevels = 1U;
-    vertex_description.SampleDesc.Count = 1U;
-    vertex_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    D3D12GeometryDescriptor geometry;
     ComPtr<ID3D12Resource> vertices;
-    HRESULT result = context->device->CreateCommittedResource(
-        &upload_heap, D3D12_HEAP_FLAG_NONE, &vertex_description, D3D12_RESOURCE_STATE_GENERIC_READ,
-        nullptr, IID_PPV_ARGS(&vertices));
-    if (FAILED(result)) {
-        diagnostic = hresult_error("CreateCommittedResource(triangle vertices)", result);
-        diagnostic.code = "triangle_execution_failed";
-        return false;
+    HRESULT result = S_OK;
+    if (geometry_override != nullptr) {
+        geometry = *geometry_override;
+    } else {
+        D3D12_HEAP_PROPERTIES upload_heap{};
+        upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC vertex_description{};
+        vertex_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        vertex_description.Width = request.vertex_data.size();
+        vertex_description.Height = 1U;
+        vertex_description.DepthOrArraySize = 1U;
+        vertex_description.MipLevels = 1U;
+        vertex_description.SampleDesc.Count = 1U;
+        vertex_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        result = context->device->CreateCommittedResource(
+            &upload_heap, D3D12_HEAP_FLAG_NONE, &vertex_description, D3D12_RESOURCE_STATE_GENERIC_READ,
+            nullptr, IID_PPV_ARGS(&vertices));
+        if (FAILED(result)) {
+            diagnostic = hresult_error("CreateCommittedResource(triangle vertices)", result);
+            diagnostic.code = "triangle_execution_failed";
+            return false;
+        }
+        void* mapped_vertices = nullptr;
+        result = vertices->Map(0U, nullptr, &mapped_vertices);
+        if (FAILED(result)) {
+            diagnostic = hresult_error("Map(triangle vertices)", result);
+            diagnostic.code = "triangle_execution_failed";
+            return false;
+        }
+        std::memcpy(mapped_vertices, request.vertex_data.data(), request.vertex_data.size());
+        vertices->Unmap(0U, nullptr);
+        geometry.vertex_resource = vertices.Get();
+        geometry.vertex_size = static_cast<UINT>(request.vertex_data.size());
+        geometry.vertex_stride = request.pipeline->vertex_layout.stride;
     }
-    void* mapped_vertices = nullptr;
-    result = vertices->Map(0U, nullptr, &mapped_vertices);
-    if (FAILED(result)) {
-        diagnostic = hresult_error("Map(triangle vertices)", result);
-        diagnostic.code = "triangle_execution_failed";
-        return false;
-    }
-    std::memcpy(mapped_vertices, request.vertex_data.data(), request.vertex_data.size());
-    vertices->Unmap(0U, nullptr);
 
     D3D12_ROOT_SIGNATURE_DESC root_description{};
     root_description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
@@ -1041,15 +1067,23 @@ bool draw_triangle_and_readback(const std::shared_ptr<D3D12Context>& context,
     list->SetPipelineState(pipeline.Get());
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     D3D12_VERTEX_BUFFER_VIEW vertex_view{};
-    vertex_view.BufferLocation = vertices->GetGPUVirtualAddress();
-    vertex_view.SizeInBytes = static_cast<UINT>(request.vertex_data.size());
-    vertex_view.StrideInBytes = request.pipeline->vertex_layout.stride;
+    vertex_view.BufferLocation = geometry.vertex_resource->GetGPUVirtualAddress() + geometry.vertex_offset;
+    vertex_view.SizeInBytes = geometry.vertex_size;
+    vertex_view.StrideInBytes = geometry.vertex_stride;
     list->IASetVertexBuffers(0U, 1U, &vertex_view);
+    D3D12_INDEX_BUFFER_VIEW index_view{};
+    if (geometry.indexed) {
+        index_view.BufferLocation = geometry.index_resource->GetGPUVirtualAddress() + geometry.index_offset;
+        index_view.SizeInBytes = geometry.index_size;
+        index_view.Format = DXGI_FORMAT_R16_UINT;
+        list->IASetIndexBuffer(&index_view);
+    }
     D3D12_VIEWPORT viewport{0.0F, 0.0F, static_cast<float>(description.width), static_cast<float>(description.height), 0.0F, 1.0F};
     D3D12_RECT scissor{0, 0, static_cast<LONG>(description.width), static_cast<LONG>(description.height)};
     list->RSSetViewports(1U, &viewport);
     list->RSSetScissorRects(1U, &scissor);
-    list->DrawInstanced(request.vertex_count, 1U, 0U, 0U);
+    if (geometry.indexed) list->DrawIndexedInstanced(geometry.index_count, 1U, 0U, 0, 0U);
+    else list->DrawInstanced(request.vertex_count, 1U, 0U, 0U);
     D3D12_RESOURCE_BARRIER to_copy{};
     to_copy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     to_copy.Transition.pResource = destination;
@@ -1135,6 +1169,97 @@ bool draw_triangle_and_readback(const std::shared_ptr<D3D12Context>& context,
     return true;
 }
 
+bool draw_indexed_static_mesh_and_readback(
+    const std::shared_ptr<D3D12Context>& context,
+    ID3D12Resource* destination,
+    const TextureDescription& description,
+    const IndexedStaticMeshDrawRequest& request,
+    ID3D12Resource* vertex_resource,
+    ID3D12Resource* index_resource,
+    D3D12_RESOURCE_STATES& destination_state,
+    D3D12_RESOURCE_STATES vertex_state,
+    D3D12_RESOURCE_STATES index_state,
+    std::vector<std::byte>& output,
+    Diagnostic& diagnostic) {
+    const auto& pipeline = *request.pipeline;
+    const auto& packet = *request.packet;
+    if (vertex_resource == nullptr || index_resource == nullptr) {
+        diagnostic = {"indexed_static_mesh_buffer_missing", "Indexed static-mesh buffers have no D3D12 resource"};
+        return false;
+    }
+    if (description.width > static_cast<std::uint32_t>(std::numeric_limits<LONG>::max()) ||
+        description.height > static_cast<std::uint32_t>(std::numeric_limits<LONG>::max()) ||
+        pipeline.vertex_layout.attributes.size() > static_cast<std::size_t>(std::numeric_limits<UINT>::max())) {
+        diagnostic = {"indexed_static_mesh_uint_limit",
+                      "Indexed static-mesh dimensions or input layout exceed D3D12 UINT/LONG limits"};
+        return false;
+    }
+    const UINT required_vertex_state = static_cast<UINT>(D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+    const UINT required_index_state = static_cast<UINT>(D3D12_RESOURCE_STATE_INDEX_BUFFER);
+    if ((static_cast<UINT>(vertex_state) & required_vertex_state) == 0U ||
+        (static_cast<UINT>(index_state) & required_index_state) == 0U) {
+        diagnostic = {"indexed_static_mesh_resource_state_invalid",
+                      "Indexed static-mesh buffers are not in vertex/index state"};
+        return false;
+    }
+
+    const UINT64 stride = static_cast<UINT64>(pipeline.vertex_layout.stride);
+    const UINT64 vertex_element_offset = static_cast<UINT64>(packet.vertex_offset);
+    const UINT64 index_element_offset = static_cast<UINT64>(packet.index_offset);
+    constexpr UINT64 max_uint = static_cast<UINT64>(std::numeric_limits<UINT>::max());
+    if (stride == 0U || vertex_element_offset > std::numeric_limits<UINT64>::max() / stride ||
+        index_element_offset > std::numeric_limits<UINT64>::max() / sizeof(std::uint16_t) ||
+        static_cast<UINT64>(packet.vertex_count) > std::numeric_limits<UINT64>::max() / stride ||
+        static_cast<UINT64>(packet.index_count) > std::numeric_limits<UINT64>::max() / sizeof(std::uint16_t)) {
+        diagnostic = {"indexed_static_mesh_offset_overflow",
+                      "Indexed static-mesh element offsets overflow byte arithmetic"};
+        return false;
+    }
+    const UINT64 vertex_byte_offset = vertex_element_offset * stride;
+    const UINT64 index_byte_offset = index_element_offset * sizeof(std::uint16_t);
+    const UINT64 vertex_bytes = static_cast<UINT64>(packet.vertex_count) * stride;
+    const UINT64 index_bytes = static_cast<UINT64>(packet.index_count) * sizeof(std::uint16_t);
+    const D3D12_RESOURCE_DESC vertex_description = vertex_resource->GetDesc();
+    const D3D12_RESOURCE_DESC index_description = index_resource->GetDesc();
+    if (vertex_bytes > max_uint || index_bytes > max_uint ||
+        vertex_byte_offset > vertex_description.Width ||
+        vertex_bytes > vertex_description.Width - vertex_byte_offset ||
+        index_byte_offset > index_description.Width ||
+        index_bytes > index_description.Width - index_byte_offset) {
+        diagnostic = {"indexed_static_mesh_buffer_range_invalid",
+                      "Indexed static-mesh draw range exceeds D3D12 buffer limits"};
+        return false;
+    }
+    const D3D12_GPU_VIRTUAL_ADDRESS vertex_address = vertex_resource->GetGPUVirtualAddress();
+    const D3D12_GPU_VIRTUAL_ADDRESS index_address = index_resource->GetGPUVirtualAddress();
+    if (vertex_address > std::numeric_limits<D3D12_GPU_VIRTUAL_ADDRESS>::max() - vertex_byte_offset ||
+        index_address > std::numeric_limits<D3D12_GPU_VIRTUAL_ADDRESS>::max() - index_byte_offset) {
+        diagnostic = {"indexed_static_mesh_gpu_address_overflow",
+                      "Indexed static-mesh GPU buffer address overflows"};
+        return false;
+    }
+
+    D3D12GeometryDescriptor geometry;
+    geometry.vertex_resource = vertex_resource;
+    geometry.vertex_offset = vertex_byte_offset;
+    geometry.vertex_size = static_cast<UINT>(vertex_bytes);
+    geometry.vertex_stride = static_cast<UINT>(stride);
+    geometry.index_resource = index_resource;
+    geometry.index_offset = index_byte_offset;
+    geometry.index_size = static_cast<UINT>(index_bytes);
+    geometry.index_count = packet.index_count;
+    geometry.indexed = true;
+
+    TriangleDrawRequest render_request;
+    render_request.pipeline = request.pipeline;
+    render_request.vertex_count = packet.vertex_count;
+    render_request.mip_level = request.mip_level;
+    render_request.array_layer = request.array_layer;
+    render_request.clear_color = request.clear_color;
+    return draw_graphics_and_readback(context, destination, description, render_request, destination_state, output,
+                                      diagnostic, &geometry);
+}
+
 class D3D12Texture final : public Texture {
 public:
     D3D12Texture(std::shared_ptr<D3D12Context> context,
@@ -1148,6 +1273,7 @@ public:
     }
     Backend backend() const noexcept override { return Backend::D3D12; }
     const TextureInfo& info() const noexcept override { return info_; }
+    [[nodiscard]] const D3D12Context* context() const noexcept { return context_.get(); }
 
     bool upload(const TextureUploadPlan& uploads, Diagnostic& diagnostic) {
         return execute_texture_upload(context_, resource_.Get(), info_.description, uploads,
@@ -1164,8 +1290,18 @@ public:
     bool draw_triangle(const TriangleDrawRequest& request,
                        std::vector<std::byte>& output,
                        Diagnostic& diagnostic) {
-        return draw_triangle_and_readback(context_, resource_.Get(), info_.description, request, state_, output,
+        return draw_graphics_and_readback(context_, resource_.Get(), info_.description, request, state_, output,
                                           diagnostic);
+    }
+
+    bool draw_indexed_static_mesh(const IndexedStaticMeshDrawRequest& request,
+                                  const D3D12Buffer& vertex_buffer,
+                                  const D3D12Buffer& index_buffer,
+                                  std::vector<std::byte>& output,
+                                  Diagnostic& diagnostic) {
+        return draw_indexed_static_mesh_and_readback(context_, resource_.Get(), info_.description, request,
+                                                     vertex_buffer.resource(), index_buffer.resource(), state_,
+                                                     vertex_buffer.state(), index_buffer.state(), output, diagnostic);
     }
 
 private:
@@ -1429,6 +1565,32 @@ public:
         if (!d3d_texture->draw_triangle(request, output, diagnostic))
             return {TriangleDrawStatus::execution_failed, std::move(diagnostic), {}};
         return {TriangleDrawStatus::ready, {}, std::move(output)};
+    }
+
+    IndexedStaticMeshDrawResult draw_indexed_static_mesh_and_readback(
+        Texture& texture, const IndexedStaticMeshDrawRequest& request) override {
+        Diagnostic diagnostic;
+        const IndexedStaticMeshDrawStatus validation =
+            validate_indexed_static_mesh_draw_request(texture, request, diagnostic);
+        if (validation != IndexedStaticMeshDrawStatus::ready)
+            return {validation, std::move(diagnostic), {}};
+        if (texture.backend() != Backend::D3D12)
+            return {IndexedStaticMeshDrawStatus::unsupported,
+                    {"texture_backend_mismatch", "The texture belongs to another graphics backend"}, {}};
+        auto* d3d_texture = dynamic_cast<D3D12Texture*>(&texture);
+        const auto* d3d_vertex = dynamic_cast<const D3D12Buffer*>(request.vertex_buffer);
+        const auto* d3d_index = dynamic_cast<const D3D12Buffer*>(request.index_buffer);
+        if (d3d_texture == nullptr || d3d_vertex == nullptr || d3d_index == nullptr)
+            return {IndexedStaticMeshDrawStatus::unsupported,
+                    {"indexed_static_mesh_type_unsupported", "The D3D12 device received an unknown indexed static-mesh handle"}, {}};
+        const D3D12Context* context = context_.get();
+        if (d3d_texture->context() != context || d3d_vertex->context() != context || d3d_index->context() != context)
+            return {IndexedStaticMeshDrawStatus::unsupported,
+                    {"indexed_static_mesh_context_mismatch", "Indexed static-mesh resources belong to another D3D12 device"}, {}};
+        std::vector<std::byte> output;
+        if (!d3d_texture->draw_indexed_static_mesh(request, *d3d_vertex, *d3d_index, output, diagnostic))
+            return {IndexedStaticMeshDrawStatus::execution_failed, std::move(diagnostic), {}};
+        return {IndexedStaticMeshDrawStatus::ready, {}, std::move(output)};
     }
 
     SamplerResult create_sampler(const SamplerDescription& description) override {

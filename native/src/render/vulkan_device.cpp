@@ -1,4 +1,5 @@
 #include "backend_internal.hpp"
+#include "apex/render/draw_packet.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -499,6 +500,8 @@ public:
 
     Backend backend() const noexcept override { return Backend::Vulkan; }
     const BufferInfo& info() const noexcept override { return info_; }
+    const std::shared_ptr<VulkanContext>& context() const noexcept { return context_; }
+    const RawVulkanBuffer& raw() const noexcept { return raw_; }
 
     bool write_host(std::uint64_t offset, std::span<const std::byte> data, Diagnostic& diagnostic) {
         if ((raw_.properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == 0U) {
@@ -1017,26 +1020,33 @@ VkShaderStageFlagBits vk_pipeline_stage(PipelineShaderStage stage) {
     return stage == PipelineShaderStage::vertex ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
 }
 
-bool draw_triangle_and_readback(const std::shared_ptr<VulkanContext>& context,
+struct VulkanDrawGeometry {
+    const RawVulkanBuffer& vertices;
+    VkDeviceSize vertex_offset = 0U;
+    const RawVulkanBuffer* indices = nullptr;
+    VkDeviceSize index_offset = 0U;
+    std::uint32_t vertex_count = 0U;
+    std::uint32_t index_count = 0U;
+    VkIndexType index_type = VK_INDEX_TYPE_UINT16;
+};
+
+bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
                                 RawVulkanImage& image,
                                 const TextureDescription& description,
-                                const TriangleDrawRequest& request,
+                                const PipelineProgram& program,
+                                const VulkanDrawGeometry& geometry,
+                                const std::array<float, 4>& clear_color,
                                 VkImageLayout& current_layout,
                                 std::vector<std::byte>& output,
                                 Diagnostic& diagnostic) {
     std::lock_guard command_guard(context->command_mutex);
-    const std::size_t output_size = static_cast<std::size_t>(description.width) * description.height * 4U;
-    BufferDescription vertex_description;
-    vertex_description.size_bytes = request.vertex_data.size();
-    vertex_description.usage = BufferUsage::vertex;
-    vertex_description.memory = BufferMemory::host_visible;
-    RawVulkanBuffer vertices;
-    if (!create_raw_buffer(context, vertex_description, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                           BufferMemory::host_visible, vertices, diagnostic) ||
-        !write_host_buffer(context, vertices, 0U, request.vertex_data, diagnostic)) {
-        diagnostic.code = "triangle_execution_failed";
+    const std::uint64_t output_size_u64 = static_cast<std::uint64_t>(description.width) *
+                                          static_cast<std::uint64_t>(description.height) * 4U;
+    if (output_size_u64 > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        diagnostic = {"vulkan_draw_output_size_limit", "Vulkan draw readback size exceeds host addressability"};
         return false;
     }
+    const std::size_t output_size = static_cast<std::size_t>(output_size_u64);
     BufferDescription readback_description;
     readback_description.size_bytes = output_size;
     readback_description.usage = BufferUsage::transfer_destination;
@@ -1044,24 +1054,24 @@ bool draw_triangle_and_readback(const std::shared_ptr<VulkanContext>& context,
     RawVulkanBuffer readback;
     if (!create_raw_buffer(context, readback_description, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                            BufferMemory::host_visible, readback, diagnostic)) {
-        diagnostic.code = "triangle_execution_failed";
+        diagnostic.code = "vulkan_draw_execution_failed";
         return false;
     }
 
     std::vector<VkShaderModule> shader_modules;
     std::vector<std::vector<std::uint32_t>> shader_words;
-    shader_modules.reserve(request.pipeline->shaders.size());
-    shader_words.reserve(request.pipeline->shaders.size());
+    shader_modules.reserve(program.shaders.size());
+    shader_words.reserve(program.shaders.size());
     VkResult result = VK_SUCCESS;
-    for (const PipelineShaderModule& shader : request.pipeline->shaders) {
+    for (const PipelineShaderModule& shader : program.shaders) {
         if (shader.format != PipelineShaderFormat::spirv || shader.bytes.size() % sizeof(std::uint32_t) != 0U) {
-            diagnostic = {"triangle_shader_format_unsupported", "Vulkan triangle execution requires aligned SPIR-V shaders"};
+            diagnostic = {"vulkan_draw_shader_format_unsupported", "Vulkan draw execution requires aligned SPIR-V shaders"};
             return false;
         }
         shader_words.emplace_back(shader.bytes.size() / sizeof(std::uint32_t));
         std::memcpy(shader_words.back().data(), shader.bytes.data(), shader.bytes.size());
         if (shader_words.back().empty() || shader_words.back()[0] != 0x07230203U) {
-            diagnostic = {"triangle_shader_invalid", "Vulkan triangle shader has an invalid SPIR-V signature"};
+            diagnostic = {"vulkan_draw_shader_invalid", "Vulkan draw shader has an invalid SPIR-V signature"};
             return false;
         }
         VkShaderModuleCreateInfo module_info{};
@@ -1079,8 +1089,8 @@ bool draw_triangle_and_readback(const std::shared_ptr<VulkanContext>& context,
     };
     if (result != VK_SUCCESS) {
         destroy_modules();
-        diagnostic = vk_error("vkCreateShaderModule(triangle)", result);
-        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "triangle_execution_failed";
+        diagnostic = vk_error("vkCreateShaderModule(draw)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "vulkan_draw_execution_failed";
         return false;
     }
 
@@ -1108,8 +1118,8 @@ bool draw_triangle_and_readback(const std::shared_ptr<VulkanContext>& context,
     result = vkCreateRenderPass(context->device, &render_pass_info, nullptr, &render_pass);
     if (result != VK_SUCCESS) {
         destroy_modules();
-        diagnostic = vk_error("vkCreateRenderPass(triangle)", result);
-        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "triangle_execution_failed";
+        diagnostic = vk_error("vkCreateRenderPass(draw)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "vulkan_draw_execution_failed";
         return false;
     }
     VkFramebufferCreateInfo framebuffer_info{};
@@ -1125,8 +1135,8 @@ bool draw_triangle_and_readback(const std::shared_ptr<VulkanContext>& context,
     if (result != VK_SUCCESS) {
         vkDestroyRenderPass(context->device, render_pass, nullptr);
         destroy_modules();
-        diagnostic = vk_error("vkCreateFramebuffer(triangle)", result);
-        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "triangle_execution_failed";
+        diagnostic = vk_error("vkCreateFramebuffer(draw)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "vulkan_draw_execution_failed";
         return false;
     }
     VkPipelineLayoutCreateInfo layout_info{};
@@ -1136,21 +1146,21 @@ bool draw_triangle_and_readback(const std::shared_ptr<VulkanContext>& context,
     VkPipeline pipeline = VK_NULL_HANDLE;
     if (result == VK_SUCCESS) {
         std::vector<VkPipelineShaderStageCreateInfo> stages;
-        stages.reserve(request.pipeline->shaders.size());
-        for (std::size_t index = 0; index < request.pipeline->shaders.size(); ++index) {
+        stages.reserve(program.shaders.size());
+        for (std::size_t index = 0; index < program.shaders.size(); ++index) {
             VkPipelineShaderStageCreateInfo stage{};
             stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-            stage.stage = vk_pipeline_stage(request.pipeline->shaders[index].stage);
+            stage.stage = vk_pipeline_stage(program.shaders[index].stage);
             stage.module = shader_modules[index];
             stage.pName = "main";
             stages.push_back(stage);
         }
-        const auto& attributes = request.pipeline->vertex_layout.attributes;
+        const auto& attributes = program.vertex_layout.attributes;
         std::vector<VkVertexInputAttributeDescription> vertex_attributes;
         vertex_attributes.reserve(attributes.size());
         for (const PipelineVertexAttribute& attribute : attributes)
             vertex_attributes.push_back({attribute.location, 0U, vk_pipeline_vertex_format(attribute.format), attribute.offset});
-        VkVertexInputBindingDescription vertex_binding{0U, request.pipeline->vertex_layout.stride,
+        VkVertexInputBindingDescription vertex_binding{0U, program.vertex_layout.stride,
                                                        VK_VERTEX_INPUT_RATE_VERTEX};
         VkPipelineVertexInputStateCreateInfo vertex_input{};
         vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -1173,10 +1183,10 @@ bool draw_triangle_and_readback(const std::shared_ptr<VulkanContext>& context,
         VkPipelineRasterizationStateCreateInfo raster{};
         raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
         raster.polygonMode = VK_POLYGON_MODE_FILL;
-        raster.cullMode = request.pipeline->raster.cull == PipelineCullMode::none ? VK_CULL_MODE_NONE
-                          : request.pipeline->raster.cull == PipelineCullMode::front ? VK_CULL_MODE_FRONT_BIT
+        raster.cullMode = program.raster.cull == PipelineCullMode::none ? VK_CULL_MODE_NONE
+                          : program.raster.cull == PipelineCullMode::front ? VK_CULL_MODE_FRONT_BIT
                                                                                       : VK_CULL_MODE_BACK_BIT;
-        raster.frontFace = request.pipeline->raster.front_face == PipelineFrontFace::clockwise
+        raster.frontFace = program.raster.front_face == PipelineFrontFace::clockwise
                                ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
         raster.lineWidth = 1.0F;
         VkPipelineMultisampleStateCreateInfo multisample{};
@@ -1210,8 +1220,8 @@ bool draw_triangle_and_readback(const std::shared_ptr<VulkanContext>& context,
         vkDestroyFramebuffer(context->device, framebuffer, nullptr);
         vkDestroyRenderPass(context->device, render_pass, nullptr);
         destroy_modules();
-        diagnostic = vk_error("vkCreateGraphicsPipelines(triangle)", result);
-        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "triangle_execution_failed";
+        diagnostic = vk_error("vkCreateGraphicsPipelines(draw)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "vulkan_draw_execution_failed";
         return false;
     }
 
@@ -1248,7 +1258,7 @@ bool draw_triangle_and_readback(const std::shared_ptr<VulkanContext>& context,
                                      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
             }
             VkClearValue clear{};
-            for (std::size_t index = 0; index < 4U; ++index) clear.color.float32[index] = request.clear_color[index];
+            for (std::size_t index = 0; index < 4U; ++index) clear.color.float32[index] = clear_color[index];
             VkRenderPassBeginInfo render_begin{};
             render_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
             render_begin.renderPass = render_pass;
@@ -1258,9 +1268,13 @@ bool draw_triangle_and_readback(const std::shared_ptr<VulkanContext>& context,
             render_begin.pClearValues = &clear;
             vkCmdBeginRenderPass(command, &render_begin, VK_SUBPASS_CONTENTS_INLINE);
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-            VkDeviceSize vertex_offset = 0U;
-            vkCmdBindVertexBuffers(command, 0U, 1U, &vertices.buffer, &vertex_offset);
-            vkCmdDraw(command, request.vertex_count, 1U, 0U, 0U);
+            vkCmdBindVertexBuffers(command, 0U, 1U, &geometry.vertices.buffer, &geometry.vertex_offset);
+            if (geometry.indices != nullptr) {
+                vkCmdBindIndexBuffer(command, geometry.indices->buffer, geometry.index_offset, geometry.index_type);
+                vkCmdDrawIndexed(command, geometry.index_count, 1U, 0U, 0, 0U);
+            } else {
+                vkCmdDraw(command, geometry.vertex_count, 1U, 0U, 0U);
+            }
             vkCmdEndRenderPass(command);
             VkImageMemoryBarrier barrier{};
             barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -1324,8 +1338,8 @@ bool draw_triangle_and_readback(const std::shared_ptr<VulkanContext>& context,
     vkDestroyRenderPass(context->device, render_pass, nullptr);
     destroy_modules();
     if (result != VK_SUCCESS) {
-        diagnostic = vk_error("Vulkan triangle execution", result);
-        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "triangle_execution_failed";
+        diagnostic = vk_error("Vulkan draw execution", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "vulkan_draw_execution_failed";
         return false;
     }
     void* mapped = nullptr;
@@ -1343,13 +1357,42 @@ bool draw_triangle_and_readback(const std::shared_ptr<VulkanContext>& context,
     }
     if (mapped != nullptr) vkUnmapMemory(context->device, readback.memory);
     if (result != VK_SUCCESS) {
-        diagnostic = vk_error("Vulkan triangle readback", result);
-        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "triangle_execution_failed";
+        diagnostic = vk_error("Vulkan draw readback", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "vulkan_draw_execution_failed";
         output.clear();
         return false;
     }
     if (description.format == TextureFormat::bgra8_unorm || description.format == TextureFormat::bgra8_srgb)
         for (std::size_t index = 0; index < output.size(); index += 4U) std::swap(output[index], output[index + 2U]);
+    return true;
+}
+
+bool draw_triangle_and_readback(const std::shared_ptr<VulkanContext>& context,
+                                RawVulkanImage& image,
+                                const TextureDescription& description,
+                                const TriangleDrawRequest& request,
+                                VkImageLayout& current_layout,
+                                std::vector<std::byte>& output,
+                                Diagnostic& diagnostic) {
+    BufferDescription vertex_description;
+    vertex_description.size_bytes = request.vertex_data.size();
+    vertex_description.usage = BufferUsage::vertex;
+    vertex_description.memory = BufferMemory::host_visible;
+    RawVulkanBuffer vertices;
+    if (!create_raw_buffer(context, vertex_description, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                           BufferMemory::host_visible, vertices, diagnostic) ||
+        !write_host_buffer(context, vertices, 0U, request.vertex_data, diagnostic)) {
+        diagnostic.code = "triangle_execution_failed";
+        return false;
+    }
+    const VulkanDrawGeometry geometry{vertices, 0U, nullptr, 0U, request.vertex_count, 0U,
+                                      VK_INDEX_TYPE_UINT16};
+    if (!draw_graphics_and_readback(context, image, description, *request.pipeline, geometry,
+                                    request.clear_color, current_layout, output, diagnostic)) {
+        if (diagnostic.code.rfind("vulkan_draw_", 0U) == 0U)
+            diagnostic.code = "triangle_execution_failed";
+        return false;
+    }
     return true;
 }
 
@@ -1364,6 +1407,7 @@ public:
     ~VulkanTexture() override = default;
     Backend backend() const noexcept override { return Backend::Vulkan; }
     const TextureInfo& info() const noexcept override { return info_; }
+    const std::shared_ptr<VulkanContext>& context() const noexcept { return context_; }
 
     bool upload(const TextureUploadPlan& uploads, Diagnostic& diagnostic) {
         return copy_texture_uploads(context_, raw_, info_.description, uploads, layout_, diagnostic);
@@ -1379,6 +1423,29 @@ public:
                        std::vector<std::byte>& output,
                        Diagnostic& diagnostic) {
         return draw_triangle_and_readback(context_, raw_, info_.description, request, layout_, output, diagnostic);
+    }
+
+    bool draw_indexed_static_mesh(const IndexedStaticMeshDrawRequest& request,
+                                  const VulkanBuffer& vertex_buffer,
+                                  const VulkanBuffer& index_buffer,
+                                  std::vector<std::byte>& output,
+                                  Diagnostic& diagnostic) {
+        const DrawPacket& packet = *request.packet;
+        const std::uint64_t vertex_offset = static_cast<std::uint64_t>(packet.vertex_offset) *
+                                            request.pipeline->vertex_layout.stride;
+        const std::uint64_t index_offset = static_cast<std::uint64_t>(packet.index_offset) * sizeof(std::uint16_t);
+        if (vertex_offset > std::numeric_limits<VkDeviceSize>::max() ||
+            index_offset > std::numeric_limits<VkDeviceSize>::max()) {
+            diagnostic = {"indexed_static_mesh_offset_overflow", "Indexed static-mesh offsets exceed Vulkan addressability"};
+            return false;
+        }
+        const VulkanDrawGeometry geometry{vertex_buffer.raw(),
+                                          static_cast<VkDeviceSize>(vertex_offset),
+                                          &index_buffer.raw(),
+                                          static_cast<VkDeviceSize>(index_offset), 0U,
+                                          packet.index_count, VK_INDEX_TYPE_UINT16};
+        return draw_graphics_and_readback(context_, raw_, info_.description, *request.pipeline, geometry,
+                                          request.clear_color, layout_, output, diagnostic);
     }
 
 private:
@@ -1622,6 +1689,40 @@ public:
         if (!vulkan_texture->draw_triangle(request, output, diagnostic))
             return {TriangleDrawStatus::execution_failed, std::move(diagnostic), {}};
         return {TriangleDrawStatus::ready, {}, std::move(output)};
+    }
+
+    IndexedStaticMeshDrawResult draw_indexed_static_mesh_and_readback(
+        Texture& texture, const IndexedStaticMeshDrawRequest& request) override {
+        Diagnostic diagnostic;
+        const IndexedStaticMeshDrawStatus validation =
+            validate_indexed_static_mesh_draw_request(texture, request, diagnostic);
+        if (validation != IndexedStaticMeshDrawStatus::ready)
+            return {validation, std::move(diagnostic), {}};
+        if (texture.backend() != Backend::Vulkan || request.vertex_buffer->backend() != Backend::Vulkan ||
+            request.index_buffer->backend() != Backend::Vulkan) {
+            return {IndexedStaticMeshDrawStatus::unsupported,
+                    {"indexed_static_mesh_backend_mismatch",
+                     "Indexed static-mesh resources must belong to the Vulkan backend"}, {}};
+        }
+        auto* vulkan_texture = dynamic_cast<VulkanTexture*>(&texture);
+        auto* vulkan_vertices = dynamic_cast<const VulkanBuffer*>(request.vertex_buffer);
+        auto* vulkan_indices = dynamic_cast<const VulkanBuffer*>(request.index_buffer);
+        if (vulkan_texture == nullptr || vulkan_vertices == nullptr || vulkan_indices == nullptr) {
+            return {IndexedStaticMeshDrawStatus::unsupported,
+                    {"indexed_static_mesh_type_unsupported",
+                     "The Vulkan device received an unknown indexed static-mesh resource handle"}, {}};
+        }
+        if (vulkan_texture->context() != vulkan_vertices->context() ||
+            vulkan_texture->context() != vulkan_indices->context()) {
+            return {IndexedStaticMeshDrawStatus::unsupported,
+                    {"indexed_static_mesh_context_mismatch",
+                     "Indexed static-mesh resources must be owned by the same Vulkan device"}, {}};
+        }
+        std::vector<std::byte> output;
+        if (!vulkan_texture->draw_indexed_static_mesh(request, *vulkan_vertices, *vulkan_indices,
+                                                      output, diagnostic))
+            return {IndexedStaticMeshDrawStatus::execution_failed, std::move(diagnostic), {}};
+        return {IndexedStaticMeshDrawStatus::ready, {}, std::move(output)};
     }
 
     SamplerResult create_sampler(const SamplerDescription& description) override {

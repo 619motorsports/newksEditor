@@ -13,6 +13,8 @@
 
 namespace apex::render {
 
+struct DrawPacket;
+
 /** Graphics APIs supported by the native renderer. */
 enum class Backend {
     Vulkan,
@@ -292,6 +294,42 @@ struct TriangleDrawResult {
     [[nodiscard]] bool ok() const noexcept { return status == TriangleDrawStatus::ready; }
 };
 
+// Indexed static-mesh execution consumes persistent backend-neutral buffers.
+// Offsets in DrawPacket are interpreted as element offsets: vertex_offset is
+// measured in pipeline-stride vertices and index_offset in uint16 indices.
+// This baseline deliberately has no material/resource binding or transform
+// uniform support; those effects remain explicit unsupported states.
+enum class StaticMeshIndexType : std::uint8_t { uint16 };
+
+inline constexpr std::uint32_t max_indexed_static_mesh_vertices = 10'000'000U;
+inline constexpr std::uint32_t max_indexed_static_mesh_indices = 20'000'000U;
+
+struct IndexedStaticMeshDrawRequest {
+    const DrawPacket* packet = nullptr;
+    const PipelineProgram* pipeline = nullptr;
+    const Buffer* vertex_buffer = nullptr;
+    const Buffer* index_buffer = nullptr;
+    StaticMeshIndexType index_type = StaticMeshIndexType::uint16;
+    std::uint32_t mip_level = 0U;
+    std::uint32_t array_layer = 0U;
+    std::array<float, 4> clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
+};
+
+enum class IndexedStaticMeshDrawStatus {
+    ready,
+    invalid_request,
+    unsupported,
+    execution_failed,
+};
+
+struct IndexedStaticMeshDrawResult {
+    IndexedStaticMeshDrawStatus status = IndexedStaticMeshDrawStatus::unsupported;
+    Diagnostic diagnostic;
+    std::vector<std::byte> rgba8;
+
+    [[nodiscard]] bool ok() const noexcept { return status == IndexedStaticMeshDrawStatus::ready; }
+};
+
 inline constexpr std::uint64_t max_texture_readback_bytes = 256ULL * 1024ULL * 1024ULL;
 
 enum class SamplerFilter : std::uint8_t {
@@ -448,6 +486,9 @@ inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
 [[nodiscard]] TriangleDrawStatus validate_triangle_draw_request(
     const Texture& texture, const TriangleDrawRequest& request, Diagnostic& diagnostic);
 
+[[nodiscard]] IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
+    const Texture& texture, const IndexedStaticMeshDrawRequest& request, Diagnostic& diagnostic);
+
 [[nodiscard]] SamplerStatus validate_sampler_description(
     const SamplerDescription& description,
     Diagnostic& diagnostic);
@@ -497,6 +538,17 @@ public:
     [[nodiscard]] virtual TriangleDrawResult draw_triangle_and_readback(
         Texture& texture, const TriangleDrawRequest& request) = 0;
 
+    // Backends opt into indexed execution independently. Keeping a default
+    // implementation preserves headless and discovery-only devices while the
+    // neutral contract is adopted by each backend.
+    [[nodiscard]] virtual IndexedStaticMeshDrawResult draw_indexed_static_mesh_and_readback(
+        Texture&, const IndexedStaticMeshDrawRequest&) {
+        return {IndexedStaticMeshDrawStatus::unsupported,
+                {"indexed_static_mesh_execution_unsupported",
+                 "This backend has not enabled indexed static-mesh execution"},
+                {}};
+    }
+
     [[nodiscard]] virtual SamplerResult create_sampler(
         const SamplerDescription& description) = 0;
 
@@ -522,6 +574,8 @@ struct DeviceResult {
 [[nodiscard]] const char* texture_status_name(TextureStatus status) noexcept;
 [[nodiscard]] const char* texture_readback_status_name(TextureReadbackStatus status) noexcept;
 [[nodiscard]] const char* triangle_draw_status_name(TriangleDrawStatus status) noexcept;
+[[nodiscard]] const char* indexed_static_mesh_draw_status_name(
+    IndexedStaticMeshDrawStatus status) noexcept;
 [[nodiscard]] const char* sampler_status_name(SamplerStatus status) noexcept;
 [[nodiscard]] const char* shader_module_status_name(ShaderModuleStatus status) noexcept;
 

@@ -84,7 +84,7 @@ Kn5Material readMaterial(ByteReader& reader, std::uint32_t version) {
     for (std::uint32_t index = 0; index < resourceCount; ++index) {
         Kn5MaterialResource resource;
         resource.slot = reader.string("resource slot");
-        resource.textureId = reader.u32("resource texture ID");
+        resource.textureId = reader.u32("resource bind point");
         resource.texture = reader.string("texture name");
         material.resources.push_back(std::move(resource));
     }

@@ -1,4 +1,5 @@
 #include "apex/render/device.hpp"
+#include "apex/render/draw_packet.hpp"
 
 #include <array>
 #include <cstddef>
@@ -184,6 +185,17 @@ public:
     explicit ContractBuffer(apex::render::BufferDescription description) : info_({description}) {}
 
     apex::render::Backend backend() const noexcept override { return apex::render::Backend::Vulkan; }
+    const apex::render::BufferInfo& info() const noexcept override { return info_; }
+
+private:
+    apex::render::BufferInfo info_;
+};
+
+class ContractD3D12Buffer final : public apex::render::Buffer {
+public:
+    explicit ContractD3D12Buffer(apex::render::BufferDescription description) : info_({description}) {}
+
+    apex::render::Backend backend() const noexcept override { return apex::render::Backend::D3D12; }
     const apex::render::BufferInfo& info() const noexcept override { return info_; }
 
 private:
@@ -793,6 +805,67 @@ bool contract_backend(apex::render::Backend backend) {
     require(triangle_result.rgba8[0] == std::byte{0} && triangle_result.rgba8[1] == std::byte{0} &&
                 triangle_result.rgba8[2] == std::byte{0} && triangle_result.rgba8[3] == std::byte{255},
             "triangle outside pixel retains clear color");
+
+    const std::array<std::uint16_t, 3> indexed_indices = {0U, 1U, 2U};
+    const std::span<const std::byte> indexed_index_bytes(
+        reinterpret_cast<const std::byte*>(indexed_indices.data()), sizeof(indexed_indices));
+    const BufferDescription indexed_vertex_description{
+        triangle_vertex_bytes.size(), BufferUsage::vertex, BufferMemory::device_local,
+        BufferMutability::immutable};
+    const BufferDescription indexed_index_description{
+        indexed_index_bytes.size(), BufferUsage::index, BufferMemory::device_local,
+        BufferMutability::immutable};
+    BufferResult indexed_vertex_buffer =
+        device.device->create_buffer(indexed_vertex_description, triangle_vertex_bytes);
+    BufferResult indexed_index_buffer =
+        device.device->create_buffer(indexed_index_description, indexed_index_bytes);
+    require(indexed_vertex_buffer.ok() && indexed_index_buffer.ok(),
+            "indexed static-mesh immutable buffer creation");
+    DrawPacket indexed_packet;
+    indexed_packet.primitive = DrawPrimitiveKind::static_mesh;
+    indexed_packet.vertex_count = 3U;
+    indexed_packet.index_count = 3U;
+    indexed_packet.vertex_stride_floats = 3U;
+    indexed_packet.world_matrix = apex::scene::identity_matrix;
+    indexed_packet.shader_execution_supported = true;
+    indexed_packet.flags.depth_test = false;
+    indexed_packet.flags.depth_write = false;
+    IndexedStaticMeshDrawRequest indexed_request{
+        &indexed_packet, &triangle_pipeline, indexed_vertex_buffer.buffer.get(), indexed_index_buffer.buffer.get(),
+        StaticMeshIndexType::uint16, 0U, 0U, {0.0F, 0.0F, 0.0F, 1.0F}};
+    ContractBuffer foreign_vulkan_buffer(indexed_vertex_description);
+    ContractD3D12Buffer foreign_d3d12_buffer(indexed_vertex_description);
+    if (backend == Backend::Vulkan)
+        indexed_request.vertex_buffer = &foreign_d3d12_buffer;
+    else
+        indexed_request.vertex_buffer = &foreign_vulkan_buffer;
+    const IndexedStaticMeshDrawResult foreign_indexed_result =
+        device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture, indexed_request);
+    require(foreign_indexed_result.status == IndexedStaticMeshDrawStatus::unsupported &&
+                foreign_indexed_result.diagnostic.code == "indexed_static_mesh_backend_mismatch",
+            "indexed static-mesh rejects foreign buffer ownership");
+    indexed_request.vertex_buffer = indexed_vertex_buffer.buffer.get();
+    const IndexedStaticMeshDrawResult indexed_result =
+        device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture, indexed_request);
+    require(indexed_result.ok() && indexed_result.rgba8.size() == 32U * 32U * 4U,
+            "indexed static-mesh draw/readback");
+    require(indexed_result.rgba8[center] == std::byte{255} &&
+                indexed_result.rgba8[center + 1U] == std::byte{0} &&
+                indexed_result.rgba8[center + 2U] == std::byte{0} &&
+                indexed_result.rgba8[center + 3U] == std::byte{255},
+            "indexed static-mesh center pixel is shader red");
+    require(indexed_result.rgba8[0] == std::byte{0} && indexed_result.rgba8[1] == std::byte{0} &&
+                indexed_result.rgba8[2] == std::byte{0} && indexed_result.rgba8[3] == std::byte{255},
+            "indexed static-mesh outside pixel retains clear color");
+    const IndexedStaticMeshDrawResult repeated_indexed_result =
+        device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture, indexed_request);
+    require(repeated_indexed_result.ok() && repeated_indexed_result.rgba8.size() == 32U * 32U * 4U,
+            "repeated indexed static-mesh draw/readback preserves tracked state");
+    require(repeated_indexed_result.rgba8[center] == std::byte{255} &&
+                repeated_indexed_result.rgba8[center + 1U] == std::byte{0} &&
+                repeated_indexed_result.rgba8[center + 2U] == std::byte{0} &&
+                repeated_indexed_result.rgba8[center + 3U] == std::byte{255},
+            "repeated indexed static-mesh center pixel is shader red");
 
     const TextureDescription bgra_description{3U, 2U, 1U, 1U, TextureFormat::bgra8_unorm,
                                                TextureUsage::color_attachment | TextureUsage::transfer_source,

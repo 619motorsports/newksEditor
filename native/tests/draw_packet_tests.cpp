@@ -69,9 +69,9 @@ apex::scene::SceneSnapshot static_scene() {
 
 apex::formats::Kn5File static_model(std::string shader = "ksPerPixel") {
     apex::formats::Kn5File model;
-    model.textures.resize(22);
-    model.textures[21].active = true;
-    model.textures[21].name = "body_d.dds";
+    model.textures.resize(1);
+    model.textures[0].active = true;
+    model.textures[0].name = "body_d.dds";
     model.materials.push_back(material(std::move(shader)));
     model.root.type = 1;
     model.root.kind = "node";
@@ -97,14 +97,15 @@ void builds_static_packet_with_stock_state_and_ranges() {
     require(result.packets.size() == 1 && result.supported, "static packet builds");
     const auto& packet = result.packets.front();
     require(packet.primitive == apex::render::DrawPrimitiveKind::static_mesh &&
-                packet.vertex_count == 3 && packet.index_count == 3 && packet.vertex_stride == 11 &&
+                packet.vertex_count == 3 && packet.index_count == 3 && packet.vertex_stride_floats == 11 &&
                 packet.vertex_offset == 0 && packet.index_offset == 0,
             "static packet ranges and layout");
     require(packet.world_matrix[12] == 3.0F && packet.flags.wireframe && packet.flags.selected &&
                 packet.flags.depth_test && packet.flags.depth_write && !packet.flags.transparent,
             "static packet matrices and state flags");
     require(packet.material_profile.stock != nullptr && packet.resources.size() == 1 &&
-                packet.resources[0].texture_id == 21 && packet.resources[0].texture == "body_d.dds" &&
+                packet.resources[0].bind_point == 21 && packet.resources[0].texture_index == 0 &&
+                packet.resources[0].texture == "body_d.dds" &&
                 packet.resources[0].slot == "txDiffuse",
             "stock material and resource slots");
     require(!result.unsupported_effects.empty() && !packet.shader_execution_supported,
@@ -227,15 +228,10 @@ void validates_layout_resource_identity_and_metadata_limits() {
     for (const auto& diagnostic : layout.diagnostics) layout_diagnostic = layout_diagnostic || diagnostic.code == "UNSUPPORTED_LAYOUT";
     require(layout_diagnostic, "unsupported stock layout has a diagnostic");
 
-    auto invalid_resource_model = static_model();
-    invalid_resource_model.materials[0].resources[0].textureId = 22;
-    const auto invalid_resource = apex::render::build_draw_packets(invalid_resource_model, static_scene(), one_item_plan());
-    require(invalid_resource.packets.empty() && !invalid_resource.supported, "out-of-range KN5 texture ID is rejected");
-
     auto mismatched_resource_model = static_model();
     mismatched_resource_model.materials[0].resources[0].texture = "other.dds";
     const auto mismatched_resource = apex::render::build_draw_packets(mismatched_resource_model, static_scene(), one_item_plan());
-    require(mismatched_resource.packets.empty() && !mismatched_resource.supported, "resource texture name mismatch is rejected");
+    require(mismatched_resource.packets.empty() && !mismatched_resource.supported, "unresolved resource texture name is rejected");
 
     auto identity_scene = static_scene();
     identity_scene.nodes[1].name = "RENAMED";
@@ -286,9 +282,35 @@ void rejects_nonfinite_scene_and_ambiguous_resource_inputs() {
     require(nonfinite.packets.empty() && !nonfinite.supported, "non-finite scene matrix is rejected");
 
     auto duplicate_model = static_model();
-    duplicate_model.materials[0].resources.push_back({"txDiffuse", 22, "other.dds"});
+    duplicate_model.materials[0].resources.push_back({"txDiffuse", 7, "other.dds"});
     const auto duplicate = apex::render::build_draw_packets(duplicate_model, static_scene(), one_item_plan());
     require(duplicate.packets.empty() && !duplicate.supported, "duplicate resource slots are rejected");
+
+    auto ambiguous_model = static_model();
+    ambiguous_model.textures.push_back(ambiguous_model.textures.front());
+    ambiguous_model.textures.back().name = " BODY_D.DDS ";
+    const auto ambiguous = apex::render::build_draw_packets(ambiguous_model, static_scene(), one_item_plan());
+    require(ambiguous.packets.empty() && !ambiguous.supported, "ambiguous texture names are rejected");
+
+    auto scoped_model = static_model();
+    scoped_model.textures[0].workspaceFileIndex = 0U;
+    scoped_model.textures.push_back(scoped_model.textures.front());
+    scoped_model.textures[1].workspaceFileIndex = 1U;
+    scoped_model.materials[0].workspaceFileIndex = 1U;
+    const auto scoped = apex::render::build_draw_packets(scoped_model, static_scene(), one_item_plan());
+    require(scoped.packets.size() == 1 && scoped.packets.front().resources.size() == 1 &&
+                scoped.packets.front().resources.front().texture_index == 1U,
+            "workspace scope disambiguates equal texture names");
+
+    auto empty_model = static_model();
+    empty_model.materials[0].resources[0].texture.clear();
+    const auto empty = apex::render::build_draw_packets(empty_model, static_scene(), one_item_plan());
+    bool missing_texture_warning = false;
+    for (const auto& diagnostic : empty.diagnostics)
+        missing_texture_warning = missing_texture_warning || diagnostic.code == "MISSING_TEXTURE";
+    require(empty.packets.size() == 1 && empty.packets.front().resources.size() == 1 &&
+                empty.packets.front().resources.front().texture_index == apex::render::invalid_draw_texture_index &&
+                missing_texture_warning, "empty texture names remain staged with a warning");
 
     auto invalid_plan = one_item_plan(true);
     invalid_plan.items[0].distance = std::numeric_limits<float>::quiet_NaN();

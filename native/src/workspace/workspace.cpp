@@ -590,13 +590,6 @@ WorkspaceAssembly mergeKn5Models(std::span<const WorkspaceModelInput> entries,
             options.limits.maxNodes - nodeCountValue - modelNodes < 1)
             throw error(name, 0, "NODE_LIMIT", "workspace node count exceeds configured limit");
         const auto materialOffset = output.model.materials.size();
-        for (const auto& material : model.materials)
-            for (const auto& resource : material.resources)
-                if (resource.textureId != std::numeric_limits<std::uint32_t>::max() &&
-                    static_cast<std::size_t>(resource.textureId) >= model.textures.size())
-                    throw error(name, 0, "INVALID_REFERENCE", "material resource texture ID exceeds texture count");
-        std::vector<std::uint32_t> textureRemap;
-        textureRemap.reserve(model.textures.size());
         for (const auto& texture : model.textures) {
             textureBytes = checkedAdd(textureBytes, texture.size, name, "workspace texture");
             if (textureBytes > options.limits.maxTextureBytes)
@@ -613,27 +606,20 @@ WorkspaceAssembly mergeKn5Models(std::span<const WorkspaceModelInput> entries,
                     throw error(name, 0, "TEXTURE_LIMIT", "workspace texture count exceeds configured limit");
                 if (output.model.textures.size() > std::numeric_limits<std::uint32_t>::max())
                     throw error(name, 0, "SIZE_OVERFLOW", "workspace texture ID overflows");
-                output.model.textures.push_back(texture);
-                output.workspace.textureRecords.push_back({texture, name, fileIndex});
+                auto workspaceTexture = texture;
+                if (output.workspace.scopeResources) workspaceTexture.workspaceFileIndex = fileIndex;
+                output.model.textures.push_back(std::move(workspaceTexture));
+                output.workspace.textureRecords.push_back({output.model.textures.back(), name, fileIndex});
                 textureMap[key] = output.model.textures.size() - 1;
             } else {
                 output.model.textures[previous->second] = texture;
                 output.workspace.textureRecords[previous->second] = {texture, name, fileIndex};
                 textureMap[key] = previous->second;
             }
-            const auto mapped = textureMap[key];
-            if (mapped > std::numeric_limits<std::uint32_t>::max())
-                throw error(name, 0, "SIZE_OVERFLOW", "workspace texture ID overflows");
-            textureRemap.push_back(static_cast<std::uint32_t>(mapped));
         }
         for (const auto& originalMaterial : model.materials) {
             auto material = originalMaterial;
-            for (auto& resource : material.resources) {
-                if (resource.textureId == std::numeric_limits<std::uint32_t>::max()) continue;
-                if (static_cast<std::size_t>(resource.textureId) >= textureRemap.size())
-                    throw error(name, 0, "INVALID_REFERENCE", "material resource texture ID exceeds texture count");
-                resource.textureId = textureRemap[resource.textureId];
-            }
+            if (output.workspace.scopeResources) material.workspaceFileIndex = fileIndex;
             output.model.materials.push_back(std::move(material));
             output.workspace.materialRecords.push_back({output.model.materials.back(), name, fileIndex});
         }

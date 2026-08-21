@@ -22,6 +22,8 @@ struct Kn5Texture {
     std::uint32_t size = 0;
     // Empty when metadataOnly was requested (or when the serialized texture is empty).
     std::vector<std::uint8_t> data;
+    // Synthetic workspace scope. This field is not part of serialized KN5 data.
+    std::optional<std::size_t> workspaceFileIndex;
 };
 
 struct Kn5MaterialProperty {
@@ -34,6 +36,9 @@ struct Kn5MaterialProperty {
 
 struct Kn5MaterialResource {
     std::string slot;
+    // Retained as textureId for serialized/JavaScript model compatibility.
+    // The KN5 integer is a shader resource bind point, not an index into
+    // Kn5File::textures. Resolve the texture payload by its name.
     std::uint32_t textureId = 0;
     std::string texture;
 };
@@ -48,6 +53,8 @@ struct Kn5Material {
     std::uint32_t depthMode = 0;
     std::vector<Kn5MaterialProperty> properties;
     std::vector<Kn5MaterialResource> resources;
+    // Synthetic workspace scope. This field is not part of serialized KN5 data.
+    std::optional<std::size_t> workspaceFileIndex;
 };
 
 struct Kn5Bone {

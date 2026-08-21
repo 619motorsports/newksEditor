@@ -91,10 +91,12 @@ remains unchanged and feature-complete.
   port has a backend-neutral device API. Vulkan and D3D12 implement headless
   devices, buffers, 2D textures, samplers, and shader modules. Both backends
   also implement bounded synchronous RGBA8/BGRA8 texture clear/readback. Each
-  backend now validates a pipeline and executes one fixed, resource-free
-  triangle draw with readback. This proves basic pipeline creation, command
-  submission, rasterization, and resource-state handling. It does not prove
-  scene-rendering parity.
+  backend validates a pipeline and executes fixed and indexed R16 static-mesh
+  draws with readback. The indexed path uses immutable vertex and index
+  buffers. It currently accepts only identity transforms and resource-free,
+  no-depth packets. This proves basic pipeline creation, persistent geometry
+  binding, command submission, rasterization, and resource-state handling. It
+  does not prove scene-rendering parity.
 - P1 is partial. Bounded readers support KN5 v4/v5/v6, DDS, ACD, INI/CSP,
   KSANIM v1/v2, and KNH. The port also supports byte-stable KN5 writing, VAO
   ZIP decoding, and track surfaces, cameras, and splines. Bounded asset support
@@ -117,14 +119,19 @@ remains unchanged and feature-complete.
   colliders, and visual-model bounds. Multi-LOD validation is still staged.
   Full validation and the remaining project/export categories are not ported.
 - P3–P7 are not complete. The native backends create real resources. DDS data
-  has a checked backend upload plan. Validated draw packets include resource
-  references, render state, and bone palettes. A stricter CPU reference
-  skinning path bridges KN5 scenes to the render contract. CSP selectors and
-  recovered lighting, shadow, and reflection math feed deterministic plans.
-  Vulkan and D3D12 now create a basic graphics pipeline and execute one fixed
-  triangle draw. That path has no descriptors, scene resources, depth,
-  blending, or alpha-to-coverage. The port does not create windows or
-  swapchains, draw scene packets, or provide golden-image parity evidence.
+  has a checked backend upload plan. Validated draw packets include resolved
+  resource references, render state, and bone palettes. KN5 material resource
+  IDs remain shader bind points. The draw-packet builder resolves textures by
+  canonical resource name and rejects missing or ambiguous names. A stricter
+  CPU reference skinning path bridges KN5 scenes to the render contract. CSP
+  selectors and recovered lighting, shadow, and reflection math feed
+  deterministic plans.
+  Vulkan and D3D12 create a basic graphics pipeline and execute fixed and
+  indexed R16 static-mesh draws. The indexed path executes only a deliberately
+  restricted draw-packet subset. It has no descriptors, scene resources,
+  non-identity transforms, depth, blending, or alpha-to-coverage. The port does
+  not create windows or swapchains, draw complete KN5 scenes, or provide
+  golden-image parity evidence.
 
 DDS BC7 now has a bounded CPU decoder covered by differential fixtures for all
 eight modes. BC6H remains recognized and explicitly GPU-required. The port

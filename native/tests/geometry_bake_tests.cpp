@@ -43,7 +43,7 @@ Kn5Node rootWithMesh() {
 
 Kn5File model() {
     Kn5File file; file.magic = "sc6969"; file.version = 6u;
-    file.textures.push_back({true, "body.dds", 3u, {1, 2, 3}});
+    file.textures.push_back({true, "body.dds", 3u, {1, 2, 3}, {}});
     Kn5Material material; material.name = "Body"; material.shader = "ksPerPixel";
     material.resources.push_back({"txDiffuse", 21u, "body.dds"});
     file.materials.push_back(material); file.root = rootWithMesh();

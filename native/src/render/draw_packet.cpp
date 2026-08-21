@@ -277,6 +277,7 @@ DrawPacketBuildResult build_draw_packets(
     add_unsupported(result, limits, "texture_sampling_staged", "Texture loading and sampling are represented by resource slots only.");
     if (scene.nodes.size() > limits.max_scene_nodes || scene.materials.size() > limits.max_scene_materials ||
         model.materials.size() > limits.max_scene_materials || model.textures.size() > limits.max_scene_textures ||
+        model.textures.size() > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
         plan.items.size() > limits.max_packets) {
         add_diagnostic(result, limits, DrawPacketDiagnostic::Severity::error, "INPUT_LIMIT",
                        "scene, material, or render-plan input exceeds draw-packet limits");
@@ -342,13 +343,21 @@ DrawPacketBuildResult build_draw_packets(
         }
     }
 
-    for (const auto& texture : model.textures) {
+    using TextureScopeKey = std::pair<std::optional<std::size_t>, std::string>;
+    std::map<TextureScopeKey, std::optional<std::uint32_t>> texture_indices;
+    for (std::size_t index = 0; index < model.textures.size(); ++index) {
+        const auto& texture = model.textures[index];
         if (texture.name.size() > limits.max_string_bytes) {
             add_diagnostic(result, limits, DrawPacketDiagnostic::Severity::error, "STRING_LIMIT",
                            "KN5 texture name exceeds draw-packet limits");
             result.limit_exceeded = true;
             return result;
         }
+        const std::string key = canonical_resource_slot(texture.name);
+        if (key.empty()) continue;
+        const auto [found, inserted] = texture_indices.emplace(
+            TextureScopeKey{texture.workspaceFileIndex, key}, static_cast<std::uint32_t>(index));
+        if (!inserted) found->second.reset();
     }
 
     std::map<std::string, Matrix> bone_world_by_name;
@@ -474,16 +483,15 @@ DrawPacketBuildResult build_draw_packets(
                 add_diagnostic(result, limits, DrawPacketDiagnostic::Severity::error, "STRING_LIMIT", "material resource string exceeds draw-packet limits", item.node, item.material);
                 goto next_item;
             }
-            if (resource.textureId >= model.textures.size()) {
-                add_diagnostic(result, limits, DrawPacketDiagnostic::Severity::error, "RESOURCE_REFERENCE",
-                               "material resource texture ID is outside the KN5 texture table", item.node, item.material);
-                goto next_item;
-            }
-            const auto& texture = model.textures[resource.textureId];
-            if (!resource.texture.empty() && canonical_resource_slot(resource.texture) != canonical_resource_slot(texture.name)) {
-                add_diagnostic(result, limits, DrawPacketDiagnostic::Severity::error, "RESOURCE_REFERENCE",
-                               "material resource texture name does not match its KN5 texture ID", item.node, item.material);
-                goto next_item;
+            if (!resource.texture.empty()) {
+                const std::string key = canonical_resource_slot(resource.texture);
+                const auto found = texture_indices.find({source_material.workspaceFileIndex, key});
+                if (key.empty() || found == texture_indices.end() || !found->second.has_value()) {
+                    add_diagnostic(result, limits, DrawPacketDiagnostic::Severity::error, "RESOURCE_REFERENCE",
+                                   "material resource texture name does not resolve to exactly one KN5 texture",
+                                   item.node, item.material);
+                    goto next_item;
+                }
             }
             if (canonical_resource_slot(resource.slot).empty() ||
                 !resource_slots.insert(canonical_resource_slot(resource.slot)).second) {
@@ -575,8 +583,15 @@ DrawPacketBuildResult build_draw_packets(
             goto next_item;
         }
         for (const auto& resource : source_material.resources) {
+            std::size_t resolved_texture_bytes = 0;
+            if (!resource.texture.empty()) {
+                const auto found = texture_indices.find(
+                    {source_material.workspaceFileIndex, canonical_resource_slot(resource.texture)});
+                // Every non-empty resource was resolved during validation.
+                resolved_texture_bytes = model.textures[*found->second].name.size();
+            }
             if (!checked_add(bytes, resource.slot.size(), limits.max_packet_bytes, bytes) ||
-                !checked_add(bytes, resource.texture.size(), limits.max_packet_bytes, bytes)) {
+                !checked_add(bytes, resolved_texture_bytes, limits.max_packet_bytes, bytes)) {
                 add_diagnostic(result, limits, DrawPacketDiagnostic::Severity::error, "PACKET_BYTE_LIMIT",
                                "draw packet resource strings exceed byte budget", item.node, item.material);
                 result.limit_exceeded = true;
@@ -602,7 +617,7 @@ DrawPacketBuildResult build_draw_packets(
             packet.primitive = raw->type == 3U ? DrawPrimitiveKind::skinned_mesh : DrawPrimitiveKind::static_mesh;
             packet.vertex_count = static_cast<std::uint32_t>(vertex_count);
             packet.index_count = static_cast<std::uint32_t>(raw->indices.size());
-            packet.vertex_stride = static_cast<std::uint32_t>(raw->vertexStride);
+            packet.vertex_stride_floats = static_cast<std::uint32_t>(raw->vertexStride);
             packet.order = result.packets.size();
             packet.distance = item.distance;
             packet.layer = item.layer;
@@ -619,8 +634,19 @@ DrawPacketBuildResult build_draw_packets(
                             item.node == options.selected_node,
                             item.casts_shadows && options.include_shadow_casters};
             packet.resources.reserve(source_material.resources.size());
-            for (const auto& resource : source_material.resources)
-                packet.resources.push_back({resource.slot, resource.textureId, model.textures[resource.textureId].name});
+            for (const auto& resource : source_material.resources) {
+                std::uint32_t texture_index = invalid_draw_texture_index;
+                std::string texture_name;
+                if (!resource.texture.empty()) {
+                    const auto found = texture_indices.find(
+                        {source_material.workspaceFileIndex, canonical_resource_slot(resource.texture)});
+                    // Every non-empty resource was resolved during validation.
+                    texture_index = *found->second;
+                    texture_name = model.textures[texture_index].name;
+                }
+                packet.resources.push_back({resource.slot, resource.textureId, texture_index,
+                                            std::move(texture_name)});
+            }
             if (packet.primitive == DrawPrimitiveKind::skinned_mesh) {
                 packet.bone_palette.reserve(raw->bones.size());
                 for (const auto& bone : raw->bones) {

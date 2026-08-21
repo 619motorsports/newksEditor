@@ -55,12 +55,16 @@ explicitly. It is never presented as a successful backend initialization.
 The current backends initialize devices and create/upload buffers and bounded
 2D textures, samplers, and immutable shader modules. They execute bounded
 RGBA8/BGRA8 texture clears and canonical RGBA8 readback. They also validate a
-pipeline and execute one fixed, resource-free triangle draw with readback.
-This is not evidence of complete scene pixels. Window surfaces, swapchains,
-descriptor binding, scene draws, and production pixel comparisons remain
-roadmap work. BC7 has an exact, bounded CPU fallback. BC6H still requires a
-capable GPU path. The upload planner supports DX10 2D arrays, cubemaps, and
-RGB24 conversion. It rejects 1D/3D textures and legacy D3D9 float textures.
+pipeline and execute fixed and indexed R16 static-mesh draws with readback.
+The indexed path uses immutable vertex and index buffers. It accepts only
+resource-free, no-depth packets with identity transforms. Draw-packet texture
+resources resolve by canonical name. The serialized KN5 resource ID remains a
+shader bind point, not a texture-table index. This is not evidence of complete
+scene pixels. Window surfaces, swapchains, descriptor binding, complete scene
+draws, and production pixel comparisons remain roadmap work. BC7 has an exact,
+bounded CPU fallback. BC6H still requires a capable GPU path. The upload
+planner supports DX10 2D arrays, cubemaps, and RGB24 conversion. It rejects
+1D/3D textures and legacy D3D9 float textures.
 The CPU decoder can still reject arrays and cubemaps. The FBX converter handles
 static positions, triangulation, hierarchy, a bounded transform subset, and
 first material assignment. It explicitly diagnoses unsupported images,
