@@ -1,5 +1,6 @@
 #include "apex/core/parse_error.hpp"
 #include "apex/formats/dds.hpp"
+#include "apex/render/decoded_dds_texture.hpp"
 #include "apex/render/texture_upload.hpp"
 
 #include <algorithm>
@@ -324,6 +325,60 @@ void rejectsUnsupportedWithoutApproximation() {
             "BC7 GPU plan without CPU approximation");
 }
 
+void plansPortableDecodedTextureResources() {
+    auto srgb = dx10(2u, 1u, 29u, 8u);
+    const std::array<std::uint8_t, 8> pixels = {
+        7u, 11u, 13u, 17u, 19u, 23u, 29u, 31u};
+    std::copy(pixels.begin(), pixels.end(), srgb.begin() + 148);
+    const auto decoded = plan_decoded_dds_texture(srgb, "srgb.dds");
+    require(decoded.ok() && decoded.plan.description.width == 2U &&
+                decoded.plan.description.height == 1U &&
+                decoded.plan.description.mip_levels == 1U &&
+                decoded.plan.description.format == TextureFormat::rgba8_srgb &&
+                decoded.plan.description.usage == TextureUsage::sampled &&
+                decoded.plan.levels.front().pixels ==
+                    std::vector<std::uint8_t>(pixels.begin(), pixels.end()),
+            "decoded DDS plan preserves sRGB metadata and texels");
+    const TextureUploadPlan uploads = decoded.plan.make_upload_plan();
+    require(uploads.subresources.size() == 1U &&
+                uploads.subresources.front().row_pitch == 8U &&
+                uploads.subresources.front().data.size() == 8U,
+            "decoded DDS plan exposes a borrowing texture upload");
+
+    auto bc1 = legacyBc("DXT1", 4U, 4U, 1U, 8U);
+    bc1[128] = 0x00U;
+    bc1[129] = 0xf8U;
+    const auto decoded_bc1 = plan_decoded_dds_texture(bc1, "bc1.dds");
+    require(decoded_bc1.ok() &&
+                decoded_bc1.plan.description.format == TextureFormat::rgba8_unorm &&
+                decoded_bc1.plan.levels.front().pixels.size() == 64U &&
+                decoded_bc1.plan.levels.front().pixels[0] == 255U,
+            "BC1 uses the exact bounded RGBA8 CPU fallback");
+
+    auto truncated = srgb;
+    truncated.pop_back();
+    const auto short_plan =
+        plan_decoded_dds_texture(truncated, "truncated.dds");
+    require(!short_plan.ok() &&
+                short_plan.status == TextureUploadStatus::invalid &&
+                short_plan.diagnostic.code == "truncated" &&
+                short_plan.diagnostic.source == "truncated.dds",
+            "decoded DDS plan rejects a truncated mip with source attribution");
+
+    auto array = dx10(1U, 1U, 29U, 8U, 1U, 3U, 0U, 2U);
+    const auto array_plan = plan_decoded_dds_texture(array, "array.dds");
+    require(!array_plan.ok() &&
+                array_plan.status == TextureUploadStatus::unsupported &&
+                array_plan.diagnostic.code == "unsupported_layout",
+            "decoded DDS plan rejects arrays without flattening them");
+
+    const auto bc6 = plan_decoded_dds_texture(
+        dx10(4U, 4U, 95U, 16U), "bc6h.dds");
+    require(!bc6.ok() && bc6.status == TextureUploadStatus::unsupported &&
+                bc6.diagnostic.code == "gpu_required",
+            "decoded DDS plan preserves the explicit BC6H GPU boundary");
+}
+
 } // namespace
 
 int main() {
@@ -334,6 +389,7 @@ int main() {
         rejectsMalformedPayloadAndLimits();
         rejectsUnsupportedDx10LayoutsAndInvalidBits();
         rejectsUnsupportedWithoutApproximation();
+        plansPortableDecodedTextureResources();
         std::cout << "texture upload tests passed\n";
         return 0;
     } catch (const std::exception& error) {

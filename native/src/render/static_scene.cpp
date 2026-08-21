@@ -1,9 +1,12 @@
 #include "apex/render/static_scene.hpp"
 
+#include "apex/render/decoded_dds_texture.hpp"
+
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <new>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -79,6 +82,27 @@ StaticSceneResourceStatus map_upload_status(StaticMeshUploadStatus status) noexc
     return StaticSceneResourceStatus::upload_failed;
 }
 
+StaticSceneResourceStatus map_texture_status(TextureStatus status) noexcept {
+    switch (status) {
+    case TextureStatus::ready: return StaticSceneResourceStatus::ready;
+    case TextureStatus::invalid_description: return StaticSceneResourceStatus::invalid_request;
+    case TextureStatus::unsupported: return StaticSceneResourceStatus::unsupported;
+    case TextureStatus::allocation_failed: return StaticSceneResourceStatus::allocation_failed;
+    case TextureStatus::upload_failed: return StaticSceneResourceStatus::upload_failed;
+    }
+    return StaticSceneResourceStatus::upload_failed;
+}
+
+StaticSceneResourceStatus map_sampler_status(SamplerStatus status) noexcept {
+    switch (status) {
+    case SamplerStatus::ready: return StaticSceneResourceStatus::ready;
+    case SamplerStatus::invalid_description: return StaticSceneResourceStatus::invalid_request;
+    case SamplerStatus::unsupported: return StaticSceneResourceStatus::unsupported;
+    case SamplerStatus::allocation_failed: return StaticSceneResourceStatus::allocation_failed;
+    }
+    return StaticSceneResourceStatus::allocation_failed;
+}
+
 struct ExecutorPipelineValidation {
     StaticSceneResourceStatus status = StaticSceneResourceStatus::ready;
     std::string error;
@@ -129,6 +153,10 @@ ExecutorPipelineValidation validate_executor_pipeline(
         pipeline.depth.write_enabled != packet.flags.depth_write)
         return {StaticSceneResourceStatus::invalid_request,
                 "Pipeline depth state does not match its draw packet", 0U};
+    if ((pipeline.depth.test_enabled || pipeline.depth.write_enabled) &&
+        !pipeline.targets.has_depth)
+        return {StaticSceneResourceStatus::invalid_request,
+                "Static-scene depth state requires a depth target", 0U};
     if (pipeline.depth.test_enabled && pipeline.depth.compare != PipelineCompareOperation::less)
         return {StaticSceneResourceStatus::unsupported,
                 "Static-scene execution requires the source-evidenced LESS depth comparison", 0U};
@@ -177,17 +205,36 @@ const char* static_scene_resource_status_name(StaticSceneResourceStatus status) 
     return "unknown";
 }
 
+std::size_t StaticSceneResources::owned_texture_count() const noexcept {
+    std::size_t count = 0U;
+    for (const auto& texture : owned_textures_)
+        count += texture != nullptr ? 1U : 0U;
+    return count;
+}
+
 StaticSceneResourceResult prepare_static_scene_resources(
-    Device& device, const StaticScenePrepareRequest& request) {
+    Device& device, const StaticScenePrepareRequest& request) try {
     if (request.model == nullptr || request.scene == nullptr)
         return fail(StaticSceneResourceStatus::invalid_request, "static_scene_request_missing",
                     "Static-scene preparation requires a model and scene");
+    if (request.texture_authority != StaticSceneTextureAuthority::caller_tables &&
+        request.texture_authority != StaticSceneTextureAuthority::embedded_kn5)
+        return fail(StaticSceneResourceStatus::invalid_request,
+                    "static_scene_texture_authority_invalid",
+                    "The static-scene texture authority is invalid");
     const auto& model = *request.model;
     const auto& scene = *request.scene;
     const auto& limits = request.limits;
+    const bool embedded_textures =
+        request.texture_authority == StaticSceneTextureAuthority::embedded_kn5;
     if (limits.max_draws == 0U || limits.max_draws > max_indexed_static_mesh_batch_draws ||
         limits.max_materials == 0U || limits.max_textures == 0U ||
         limits.max_resource_string_bytes == 0U ||
+        (embedded_textures &&
+         (limits.texture_decode.maxInputBytes == 0U ||
+          limits.texture_decode.maxOutputBytes == 0U ||
+          limits.max_total_texture_source_bytes == 0U ||
+          limits.max_total_decoded_texture_bytes == 0U)) ||
         limits.max_total_vertex_bytes == 0U ||
         limits.max_total_index_bytes == 0U || limits.max_total_shader_bytes == 0U ||
         limits.max_validation_bytes == 0U)
@@ -360,6 +407,55 @@ StaticSceneResourceResult prepare_static_scene_resources(
         pipeline_for_packet[packet_index] = pipeline_by_material[material_index];
     }
 
+    std::vector<std::optional<DecodedDdsTexturePlan>> decoded_textures;
+    if (embedded_textures) {
+        decoded_textures.resize(model.textures.size());
+        std::uint64_t total_source_bytes = 0U;
+        std::uint64_t total_decoded_bytes = 0U;
+        for (const std::uint32_t raw_index : texture_for_packet) {
+            if (raw_index == invalid_draw_texture_index) continue;
+            const std::size_t texture_index = static_cast<std::size_t>(raw_index);
+            if (decoded_textures[texture_index].has_value()) continue;
+            const formats::Kn5Texture& source_texture = model.textures[texture_index];
+            if (source_texture.data.empty() ||
+                source_texture.size != source_texture.data.size())
+                return fail(StaticSceneResourceStatus::invalid_request,
+                            "static_scene_embedded_texture_payload_invalid",
+                            "A used embedded KN5 texture has missing or inconsistent bytes");
+            if (!checked_add(static_cast<std::uint64_t>(source_texture.data.size()),
+                             total_source_bytes) ||
+                total_source_bytes > limits.max_total_texture_source_bytes)
+                return fail(StaticSceneResourceStatus::invalid_request,
+                            "static_scene_texture_source_aggregate_limit",
+                            "Used embedded KN5 texture bytes exceed the aggregate limit");
+
+            DecodedDdsTexturePlanResult decoded = plan_decoded_dds_texture(
+                source_texture.data, source_texture.name, limits.texture_decode);
+            if (!decoded.ok()) {
+                const StaticSceneResourceStatus status =
+                    decoded.status == TextureUploadStatus::unsupported
+                        ? StaticSceneResourceStatus::unsupported
+                    : decoded.diagnostic.code == "allocation_failed"
+                        ? StaticSceneResourceStatus::allocation_failed
+                        : StaticSceneResourceStatus::invalid_request;
+                return fail(status,
+                            "static_scene_embedded_texture_" + decoded.diagnostic.code,
+                            decoded.diagnostic.source + " at byte " +
+                                std::to_string(decoded.diagnostic.offset) + ": " +
+                                decoded.diagnostic.message);
+            }
+            for (const formats::DdsLevel& level : decoded.plan.levels) {
+                if (!checked_add(static_cast<std::uint64_t>(level.pixels.size()),
+                                 total_decoded_bytes) ||
+                    total_decoded_bytes > limits.max_total_decoded_texture_bytes)
+                    return fail(StaticSceneResourceStatus::invalid_request,
+                                "static_scene_texture_decode_aggregate_limit",
+                                "Decoded embedded KN5 textures exceed the aggregate limit");
+            }
+            decoded_textures[texture_index] = std::move(decoded.plan);
+        }
+    }
+
     auto resources = std::make_unique<StaticSceneResources>();
     resources->backend_ = device.info().backend;
     resources->device_ = &device;
@@ -369,9 +465,25 @@ StaticSceneResourceResult prepare_static_scene_resources(
     resources->pipeline_for_packet_ = std::move(pipeline_for_packet);
     resources->texture_for_packet_ = std::move(texture_for_packet);
     resources->texture_count_ = model.textures.size();
+    resources->texture_authority_ = request.texture_authority;
     for (const std::uint32_t index : resources->texture_for_packet_)
         resources->has_material_resources_ =
             resources->has_material_resources_ || index != invalid_draw_texture_index;
+    if (resources->has_material_resources_ &&
+        request.texture_authority == StaticSceneTextureAuthority::embedded_kn5) {
+        resources->owned_textures_.resize(resources->texture_count_);
+        for (std::size_t index = 0U; index < decoded_textures.size(); ++index) {
+            if (!decoded_textures[index].has_value()) continue;
+            const TextureUploadPlan uploads =
+                decoded_textures[index]->make_upload_plan();
+            TextureResult texture = device.create_texture(
+                decoded_textures[index]->description, uploads);
+            if (!texture.ok())
+                return {map_texture_status(texture.status),
+                        std::move(texture.diagnostic), nullptr};
+            resources->owned_textures_[index] = std::move(texture.texture);
+        }
+    }
     resources->uploads_.reserve(unique_meshes.size());
     for (std::size_t index = 0U; index < unique_meshes.size(); ++index) {
         StaticMeshUploadResult uploaded = upload_static_mesh(
@@ -381,7 +493,26 @@ StaticSceneResourceResult prepare_static_scene_resources(
             return {map_upload_status(uploaded.status), std::move(uploaded.diagnostic), nullptr};
         resources->uploads_.push_back(std::move(uploaded.upload));
     }
+    if (resources->has_material_resources_ &&
+        request.texture_authority == StaticSceneTextureAuthority::embedded_kn5) {
+        SamplerDescription sampler_description;
+        Diagnostic sampler_diagnostic;
+        const SamplerStatus sampler_validation =
+            validate_sampler_description(sampler_description, sampler_diagnostic);
+        if (sampler_validation != SamplerStatus::ready)
+            return {map_sampler_status(sampler_validation),
+                    std::move(sampler_diagnostic), nullptr};
+        SamplerResult sampler = device.create_sampler(sampler_description);
+        if (!sampler.ok())
+            return {map_sampler_status(sampler.status),
+                    std::move(sampler.diagnostic), nullptr};
+        resources->owned_sampler_ = std::move(sampler.sampler);
+    }
     return {StaticSceneResourceStatus::ready, {}, std::move(resources)};
+} catch (const std::bad_alloc&) {
+    return fail(StaticSceneResourceStatus::allocation_failed,
+                "static_scene_allocation_failed",
+                "Static-scene preparation has insufficient memory for bounded storage");
 }
 
 IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
@@ -390,12 +521,18 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         return {IndexedStaticMeshBatchStatus::unsupported,
                 {"static_scene_device_mismatch",
                  "Static-scene resources require their preparing device and backend"}, {}};
+    if (texture_authority_ != StaticSceneTextureAuthority::caller_tables &&
+        texture_authority_ != StaticSceneTextureAuthority::embedded_kn5)
+        return {IndexedStaticMeshBatchStatus::invalid_request,
+                {"static_scene_texture_authority_invalid",
+                 "The prepared static-scene texture authority is invalid"}, {}};
     if (packets_.empty() || packets_.size() != upload_for_packet_.size() ||
         packets_.size() != pipeline_for_packet_.size() ||
         packets_.size() != texture_for_packet_.size())
         return {IndexedStaticMeshBatchStatus::invalid_request,
                 {"static_scene_resources_invalid", "Static-scene resource mappings are incomplete"}, {}};
     if (has_material_resources_ &&
+        texture_authority_ == StaticSceneTextureAuthority::caller_tables &&
         (frame.textures_by_global_index.size() != texture_count_ ||
          frame.samplers_by_global_index.size() != texture_count_))
         return {IndexedStaticMeshBatchStatus::invalid_request,
@@ -419,15 +556,29 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         const std::uint32_t texture_index = texture_for_packet_[index];
         if (texture_index != invalid_draw_texture_index) {
             const std::size_t resource_index = static_cast<std::size_t>(texture_index);
-            if (resource_index >= texture_count_ ||
-                frame.textures_by_global_index[resource_index] == nullptr ||
-                frame.samplers_by_global_index[resource_index] == nullptr)
-                return {IndexedStaticMeshBatchStatus::invalid_request,
-                        {"static_scene_resource_table_entry_missing",
-                         "A used static-scene texture-table entry has no texture or sampler handle"}, {}};
+            const Texture* texture = nullptr;
+            const Sampler* sampler = nullptr;
+            if (texture_authority_ == StaticSceneTextureAuthority::embedded_kn5) {
+                if (resource_index >= owned_textures_.size() ||
+                    owned_textures_[resource_index] == nullptr ||
+                    owned_sampler_ == nullptr)
+                    return {IndexedStaticMeshBatchStatus::invalid_request,
+                            {"static_scene_owned_resource_missing",
+                             "A used static-scene texture has no owned texture or sampler"}, {}};
+                texture = owned_textures_[resource_index].get();
+                sampler = owned_sampler_.get();
+            } else {
+                if (resource_index >= texture_count_ ||
+                    frame.textures_by_global_index[resource_index] == nullptr ||
+                    frame.samplers_by_global_index[resource_index] == nullptr)
+                    return {IndexedStaticMeshBatchStatus::invalid_request,
+                            {"static_scene_resource_table_entry_missing",
+                             "A used static-scene texture-table entry has no texture or sampler handle"}, {}};
+                texture = frame.textures_by_global_index[resource_index];
+                sampler = frame.samplers_by_global_index[resource_index];
+            }
             draw->resource_authority = IndexedResourceAuthority::explicit_bindings;
-            draw->sampled_binding = {frame.textures_by_global_index[resource_index],
-                                     frame.samplers_by_global_index[resource_index]};
+            draw->sampled_binding = {texture, sampler};
         }
         draws.push_back(std::move(*draw));
     }

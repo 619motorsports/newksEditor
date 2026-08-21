@@ -1,5 +1,6 @@
 #include "apex/render/static_scene.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -48,6 +49,8 @@ private:
 class FakeSampler final : public Sampler {
 public:
     explicit FakeSampler(Backend backend = Backend::Vulkan) : backend_(backend) {}
+    FakeSampler(SamplerDescription description, Backend backend = Backend::Vulkan)
+        : backend_(backend), info_({description}) {}
     Backend backend() const noexcept override { return backend_; }
     const SamplerInfo& info() const noexcept override { return info_; }
 private:
@@ -71,8 +74,20 @@ public:
     BufferUpdateResult update_buffer(Buffer&, std::uint64_t, std::span<const std::byte>) override {
         return {BufferStatus::unsupported, {"unused", "unused"}};
     }
-    TextureResult create_texture(const TextureDescription&, const TextureUploadPlan&) override {
-        return {TextureStatus::unsupported, {"unused", "unused"}, nullptr};
+    TextureResult create_texture(const TextureDescription& description,
+                                 const TextureUploadPlan& uploads) override {
+        ++texture_calls;
+        texture_descriptions.push_back(description);
+        texture_upload_bytes.emplace_back();
+        for (const TextureUpload& upload : uploads.subresources)
+            texture_upload_bytes.back().insert(texture_upload_bytes.back().end(),
+                                               upload.data.begin(), upload.data.end());
+        if (fail_texture_call != 0U && texture_calls == fail_texture_call)
+            return {TextureStatus::upload_failed,
+                    {"recording_texture_failure", "injected texture upload failure"},
+                    nullptr};
+        return {TextureStatus::ready, {},
+                std::make_unique<FakeTexture>(description)};
     }
     TextureUpdateResult update_texture(Texture&, const TextureUploadPlan&) override {
         return {TextureStatus::unsupported, {"unused", "unused"}};
@@ -84,8 +99,15 @@ public:
     TriangleDrawResult draw_triangle_and_readback(Texture&, const TriangleDrawRequest&) override {
         return {TriangleDrawStatus::unsupported, {"unused", "unused"}, {}};
     }
-    SamplerResult create_sampler(const SamplerDescription&) override {
-        return {SamplerStatus::unsupported, {"unused", "unused"}, nullptr};
+    SamplerResult create_sampler(const SamplerDescription& description) override {
+        ++sampler_calls;
+        sampler_descriptions.push_back(description);
+        if (fail_sampler)
+            return {SamplerStatus::allocation_failed,
+                    {"recording_sampler_failure", "injected sampler allocation failure"},
+                    nullptr};
+        return {SamplerStatus::ready, {},
+                std::make_unique<FakeSampler>(description)};
     }
     ShaderModuleResult create_shader_module(const ShaderModuleDescription&) override {
         return {ShaderModuleStatus::unsupported, {"unused", "unused"}, nullptr};
@@ -127,10 +149,17 @@ public:
     std::size_t buffer_calls = 0U;
     std::size_t fail_buffer_call = 0U;
     std::size_t batch_calls = 0U;
+    std::size_t texture_calls = 0U;
+    std::size_t fail_texture_call = 0U;
+    std::size_t sampler_calls = 0U;
+    bool fail_sampler = false;
     bool fail_batch = false;
     bool captured_load_color = false;
     std::array<float, 4> captured_clear_color{};
     std::vector<std::vector<std::byte>> uploaded_bytes;
+    std::vector<TextureDescription> texture_descriptions;
+    std::vector<std::vector<std::byte>> texture_upload_bytes;
+    std::vector<SamplerDescription> sampler_descriptions;
     std::vector<apex::scene::NodeId> nodes;
     std::vector<std::string> pipeline_names;
     std::vector<const Buffer*> vertex_buffers;
@@ -161,6 +190,36 @@ std::vector<std::uint8_t> shader_fixture() {
         bytes[index * 4U + 2U] = static_cast<std::uint8_t>((word >> 16U) & 0xffU);
         bytes[index * 4U + 3U] = static_cast<std::uint8_t>((word >> 24U) & 0xffU);
     }
+    return bytes;
+}
+
+void put32(std::vector<std::uint8_t>& bytes, std::size_t offset,
+           std::uint32_t value) {
+    require(offset + 4U <= bytes.size(), "DDS fixture write is in bounds");
+    bytes[offset] = static_cast<std::uint8_t>(value);
+    bytes[offset + 1U] = static_cast<std::uint8_t>(value >> 8U);
+    bytes[offset + 2U] = static_cast<std::uint8_t>(value >> 16U);
+    bytes[offset + 3U] = static_cast<std::uint8_t>(value >> 24U);
+}
+
+std::vector<std::uint8_t> rgba8_dds(bool srgb,
+                                    std::span<const std::uint8_t, 4> pixel) {
+    std::vector<std::uint8_t> bytes(152U, 0U);
+    put32(bytes, 0U, 0x20534444U);
+    put32(bytes, 4U, 124U);
+    put32(bytes, 12U, 1U);
+    put32(bytes, 16U, 1U);
+    put32(bytes, 28U, 1U);
+    put32(bytes, 76U, 32U);
+    put32(bytes, 80U, 4U);
+    bytes[84U] = 'D';
+    bytes[85U] = 'X';
+    bytes[86U] = '1';
+    bytes[87U] = '0';
+    put32(bytes, 128U, srgb ? 29U : 28U);
+    put32(bytes, 132U, 3U);
+    put32(bytes, 140U, 1U);
+    std::copy(pixel.begin(), pixel.end(), bytes.begin() + 148);
     return bytes;
 }
 
@@ -252,7 +311,12 @@ Fixture fixture() {
 
 StaticScenePrepareRequest request_for(Fixture& value) {
     value.pipelines = {&value.first_pipeline, &value.second_pipeline};
-    return {&value.model, &value.scene, value.packets, value.pipelines, {}};
+    StaticScenePrepareRequest request;
+    request.model = &value.model;
+    request.scene = &value.scene;
+    request.packets = value.packets;
+    request.pipelines_by_material = value.pipelines;
+    return request;
 }
 
 void prepares_deduplicated_resources_and_executes_one_ordered_batch() {
@@ -297,6 +361,33 @@ void rejects_invalid_late_inputs_before_backend_allocation() {
     require(!invalid_node.ok() && invalid_node.status == StaticSceneResourceStatus::invalid_request &&
                 device.buffer_calls == 0U && device.batch_calls == 0U,
             "invalid later packet cannot cause a partial upload or draw");
+
+    value = fixture();
+    auto invalid_authority_request = request_for(value);
+    invalid_authority_request.texture_authority =
+        static_cast<StaticSceneTextureAuthority>(255U);
+    const auto invalid_authority =
+        prepare_static_scene_resources(device, invalid_authority_request);
+    require(!invalid_authority.ok() &&
+                invalid_authority.diagnostic.code ==
+                    "static_scene_texture_authority_invalid" &&
+                device.buffer_calls == 0U && device.texture_calls == 0U &&
+                device.sampler_calls == 0U,
+            "invalid texture authority is rejected before allocation");
+
+    value = fixture();
+    auto resource_free_limits = request_for(value);
+    resource_free_limits.limits.texture_decode.maxInputBytes = 0U;
+    resource_free_limits.limits.texture_decode.maxOutputBytes = 0U;
+    resource_free_limits.limits.max_total_texture_source_bytes = 0U;
+    resource_free_limits.limits.max_total_decoded_texture_bytes = 0U;
+    RecordingDevice resource_free_device;
+    const auto resource_free = prepare_static_scene_resources(
+        resource_free_device, resource_free_limits);
+    require(resource_free.ok() && resource_free_device.buffer_calls == 4U &&
+                resource_free_device.texture_calls == 0U &&
+                resource_free_device.sampler_calls == 0U,
+            "caller-table scenes do not require embedded texture limits");
 
     value = fixture();
     value.model.root.children[1].indices[2] = 9U;
@@ -354,6 +445,19 @@ void rejects_invalid_late_inputs_before_backend_allocation() {
                     "static_scene_material_pipeline_unsupported" &&
                 device.buffer_calls == 0U,
             "non-D32 depth targets are rejected before allocation");
+
+    value = fixture();
+    value.second_pipeline.depth.test_enabled = true;
+    value.packets[1].flags.depth_test = true;
+    const auto missing_depth_target =
+        prepare_static_scene_resources(device, request_for(value));
+    require(!missing_depth_target.ok() &&
+                missing_depth_target.status ==
+                    StaticSceneResourceStatus::invalid_request &&
+                missing_depth_target.diagnostic.code ==
+                    "static_scene_material_pipeline_invalid" &&
+                device.buffer_calls == 0U,
+            "enabled depth state without a depth target is rejected before allocation");
 
     value = fixture();
     value.second_pipeline.vertex_layout.stride = 12U;
@@ -436,6 +540,212 @@ void resolves_portable_diffuse_tables_without_owning_handles() {
                 null_entry.diagnostic.code == "static_scene_resource_table_entry_missing" &&
                 device.batch_calls == 1U,
             "null used resource entries are rejected before the backend batch call");
+}
+
+void configure_embedded_diffuse(Fixture& value,
+                                std::vector<std::uint8_t> bytes) {
+    const std::uint32_t size = static_cast<std::uint32_t>(bytes.size());
+    value.model.textures.push_back(
+        {true, "body.dds", size, std::move(bytes), {}});
+    value.first_pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+    };
+    value.packets[0].resources.push_back(
+        {"txDiffuse", 21U, 0U, "body.dds"});
+    value.packets[2].resources.push_back(
+        {"txDiffuse", 21U, 0U, "body.dds"});
+}
+
+void owns_embedded_diffuse_resources_after_source_lifetime() {
+    RecordingDevice device;
+    std::unique_ptr<StaticSceneResources> resources;
+    {
+        Fixture value = fixture();
+        const std::array<std::uint8_t, 4> pixel = {17U, 34U, 51U, 255U};
+        configure_embedded_diffuse(value, rgba8_dds(true, pixel));
+        auto request = request_for(value);
+        request.texture_authority = StaticSceneTextureAuthority::embedded_kn5;
+        auto prepared = prepare_static_scene_resources(device, request);
+        require(prepared.ok() && prepared.resources->owned_texture_count() == 1U &&
+                    device.sampler_calls == 1U && device.texture_calls == 1U &&
+                    device.buffer_calls == 4U,
+                "embedded authority creates one deduplicated texture and sampler");
+        resources = std::move(prepared.resources);
+    }
+
+    require(device.texture_descriptions.size() == 1U &&
+                device.texture_descriptions.front().format ==
+                    TextureFormat::rgba8_srgb &&
+                device.texture_descriptions.front().usage == TextureUsage::sampled &&
+                device.texture_upload_bytes.front() ==
+                    std::vector<std::byte>{std::byte{17U}, std::byte{34U},
+                                           std::byte{51U}, std::byte{255U}},
+            "embedded DDS upload preserves sRGB format and decoded bytes");
+    require(device.sampler_descriptions.size() == 1U &&
+                device.sampler_descriptions.front().min_filter ==
+                    SamplerFilter::linear &&
+                device.sampler_descriptions.front().mag_filter ==
+                    SamplerFilter::linear &&
+                device.sampler_descriptions.front().mip_filter ==
+                    SamplerFilter::linear &&
+                device.sampler_descriptions.front().address_u ==
+                    SamplerAddressMode::repeat &&
+                device.sampler_descriptions.front().address_v ==
+                    SamplerAddressMode::repeat,
+            "embedded diffuse sampler matches the linear-repeat source path");
+
+    FakeTexture target;
+    StaticSceneFrameDescription frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    const auto drawn = resources->draw_and_readback(device, target, frame);
+    require(drawn.ok() && device.batch_calls == 1U &&
+                device.sampled_textures[0] != nullptr &&
+                device.sampled_textures[0] == device.sampled_textures[2] &&
+                device.sampled_samplers[0] != nullptr &&
+                device.sampled_samplers[0] == device.sampled_samplers[2],
+            "owned bindings survive the source model and reuse handles in order");
+}
+
+void rejects_malformed_embedded_textures_before_allocation() {
+    RecordingDevice device;
+    Fixture value = fixture();
+    configure_embedded_diffuse(value, {1U, 2U, 3U, 4U});
+    auto embedded_request = request_for(value);
+    embedded_request.texture_authority =
+        StaticSceneTextureAuthority::embedded_kn5;
+    const auto bad_header =
+        prepare_static_scene_resources(device, embedded_request);
+    require(!bad_header.ok() &&
+                bad_header.diagnostic.code ==
+                    "static_scene_embedded_texture_invalid_header" &&
+                device.buffer_calls == 0U && device.texture_calls == 0U &&
+                device.sampler_calls == 0U,
+            "malformed embedded DDS header fails before backend allocation");
+
+    value = fixture();
+    const std::array<std::uint8_t, 4> pixel = {1U, 2U, 3U, 4U};
+    auto truncated_bytes = rgba8_dds(false, pixel);
+    truncated_bytes.pop_back();
+    configure_embedded_diffuse(value, std::move(truncated_bytes));
+    embedded_request = request_for(value);
+    embedded_request.texture_authority =
+        StaticSceneTextureAuthority::embedded_kn5;
+    const auto truncated =
+        prepare_static_scene_resources(device, embedded_request);
+    require(!truncated.ok() &&
+                truncated.diagnostic.code ==
+                    "static_scene_embedded_texture_truncated" &&
+                device.buffer_calls == 0U && device.texture_calls == 0U &&
+                device.sampler_calls == 0U,
+            "truncated embedded DDS mip fails before backend allocation");
+
+    value = fixture();
+    configure_embedded_diffuse(value, rgba8_dds(false, pixel));
+    value.model.textures.push_back(
+        {true, "later.dds", 4U, {1U, 2U, 3U, 4U}, {}});
+    value.second_pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+    };
+    value.packets[1].resources = {{"txDiffuse", 21U, 1U, "later.dds"}};
+    embedded_request = request_for(value);
+    embedded_request.texture_authority =
+        StaticSceneTextureAuthority::embedded_kn5;
+    const auto later_malformed =
+        prepare_static_scene_resources(device, embedded_request);
+    require(!later_malformed.ok() &&
+                later_malformed.diagnostic.code ==
+                    "static_scene_embedded_texture_invalid_header" &&
+                device.buffer_calls == 0U && device.texture_calls == 0U &&
+                device.sampler_calls == 0U,
+            "a later malformed embedded DDS prevents all backend allocation");
+
+    value = fixture();
+    configure_embedded_diffuse(value, rgba8_dds(false, pixel));
+    value.model.textures.front().size -= 1U;
+    embedded_request = request_for(value);
+    embedded_request.texture_authority =
+        StaticSceneTextureAuthority::embedded_kn5;
+    const auto inconsistent =
+        prepare_static_scene_resources(device, embedded_request);
+    require(!inconsistent.ok() &&
+                inconsistent.diagnostic.code ==
+                    "static_scene_embedded_texture_payload_invalid" &&
+                device.buffer_calls == 0U && device.texture_calls == 0U &&
+                device.sampler_calls == 0U,
+            "inconsistent KN5 texture size fails before backend allocation");
+
+    value.model.textures.front().size =
+        static_cast<std::uint32_t>(value.model.textures.front().data.size());
+    embedded_request = request_for(value);
+    embedded_request.texture_authority =
+        StaticSceneTextureAuthority::embedded_kn5;
+    embedded_request.limits.max_total_texture_source_bytes = 1U;
+    const auto source_limited =
+        prepare_static_scene_resources(device, embedded_request);
+    require(!source_limited.ok() &&
+                source_limited.diagnostic.code ==
+                    "static_scene_texture_source_aggregate_limit" &&
+                device.buffer_calls == 0U && device.texture_calls == 0U &&
+                device.sampler_calls == 0U,
+            "embedded DDS source bytes have an aggregate preallocation limit");
+
+    embedded_request = request_for(value);
+    embedded_request.texture_authority =
+        StaticSceneTextureAuthority::embedded_kn5;
+    embedded_request.limits.max_total_decoded_texture_bytes = 3U;
+    const auto decoded_limited =
+        prepare_static_scene_resources(device, embedded_request);
+    require(!decoded_limited.ok() &&
+                decoded_limited.diagnostic.code ==
+                    "static_scene_texture_decode_aggregate_limit" &&
+                device.buffer_calls == 0U && device.texture_calls == 0U &&
+                device.sampler_calls == 0U,
+            "decoded DDS texels have an aggregate preallocation limit");
+}
+
+void propagates_embedded_resource_failures() {
+    Fixture value = fixture();
+    const std::array<std::uint8_t, 4> pixel = {1U, 2U, 3U, 4U};
+    configure_embedded_diffuse(value, rgba8_dds(false, pixel));
+    auto request = request_for(value);
+    request.texture_authority = StaticSceneTextureAuthority::embedded_kn5;
+
+    RecordingDevice device;
+    device.fail_sampler = true;
+    const auto sampler_failure =
+        prepare_static_scene_resources(device, request);
+    require(!sampler_failure.ok() &&
+                sampler_failure.status ==
+                    StaticSceneResourceStatus::allocation_failed &&
+                sampler_failure.diagnostic.code == "recording_sampler_failure" &&
+                device.sampler_calls == 1U && device.texture_calls == 1U &&
+                device.buffer_calls == 4U,
+            "terminal embedded sampler allocation failure propagates and cleans up resources");
+
+    device = RecordingDevice{};
+    device.fail_texture_call = 1U;
+    const auto texture_failure =
+        prepare_static_scene_resources(device, request);
+    require(!texture_failure.ok() &&
+                texture_failure.status == StaticSceneResourceStatus::upload_failed &&
+                texture_failure.diagnostic.code == "recording_texture_failure" &&
+                device.sampler_calls == 0U && device.texture_calls == 1U &&
+                device.buffer_calls == 0U,
+            "embedded texture upload failure cannot consume a sampler slot or allocate geometry");
+
+    device = RecordingDevice{};
+    device.fail_buffer_call = 1U;
+    const auto geometry_failure =
+        prepare_static_scene_resources(device, request);
+    require(!geometry_failure.ok() &&
+                geometry_failure.status ==
+                    StaticSceneResourceStatus::allocation_failed &&
+                geometry_failure.diagnostic.code == "recording_buffer_failure" &&
+                device.texture_calls == 1U && device.buffer_calls == 1U &&
+                device.sampler_calls == 0U,
+            "embedded geometry failure cannot consume a sampler slot");
 }
 
 void rejects_malformed_diffuse_packets_before_allocation() {
@@ -564,7 +874,10 @@ int main() {
         prepares_deduplicated_resources_and_executes_one_ordered_batch();
         rejects_invalid_late_inputs_before_backend_allocation();
         resolves_portable_diffuse_tables_without_owning_handles();
+        owns_embedded_diffuse_resources_after_source_lifetime();
+        rejects_malformed_embedded_textures_before_allocation();
         rejects_malformed_diffuse_packets_before_allocation();
+        propagates_embedded_resource_failures();
         propagates_upload_and_batch_failures();
         require(std::string(static_scene_resource_status_name(StaticSceneResourceStatus::ready)) ==
                     "ready",

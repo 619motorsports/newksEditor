@@ -83,13 +83,16 @@ ordered draw instances. It submits one batch with caller-supplied SPIR-V or
 DXIL pipelines. Production packets remain marked as staged. The adapter does
 not claim that stock KN5 shaders are executable. Window surfaces, swapchains,
 complete material binding, and production pixel comparisons remain roadmap
-work. The static-scene adapter can resolve the portable `txDiffuse` pair from
-caller-owned texture and sampler tables. The tables use the final KN5 texture
-ordering. BC7 has an exact, bounded CPU fallback.
+work. The static-scene adapter has two texture-authority modes. The first mode
+uses caller-owned tables in the final KN5 texture order. The second mode owns
+the used embedded KN5 textures and one linear-repeat sampler. It validates all
+used DDS payloads before backend allocation. It decodes supported 2D mip chains
+to RGBA8 and retains explicit sRGB metadata. This portable CPU decode is not a
+native block-compressed upload path. BC7 has an exact, bounded CPU fallback.
 BC6H still requires a capable GPU path. The upload planner supports DX10 2D
-arrays, cubemaps, and RGB24 conversion. It rejects 1D/3D textures and legacy
-D3D9 float textures.
-The CPU decoder can still reject arrays and cubemaps. The FBX converter handles
+arrays, cubemaps, and RGB24 conversion. The embedded static-scene mode rejects
+arrays, cubemaps, 1D/3D textures, BC6H, and legacy D3D9 float textures.
+The FBX converter handles
 static positions, triangulation, hierarchy, a bounded transform subset, and
 first material assignment. It explicitly diagnoses unsupported images,
 skinning, animation, layer mappings, and advanced transform semantics.

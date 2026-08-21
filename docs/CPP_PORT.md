@@ -145,9 +145,11 @@ remains unchanged and feature-complete.
   define the Vulkan and D3D12 clip-space conversions. The indexed backend
   shader contract uses these camera matrices. The static-scene adapter can
   dispatch bounded resource-free packets and the portable `txDiffuse` pair.
-  The pair resolves through caller-owned tables in the final KN5 texture
-  order. Stock shader translation and complete material-resource resolution
-  remain staged.
+  One authority resolves the pair through caller-owned tables in the final KN5
+  texture order. A second authority owns the used embedded KN5 textures. This
+  authority validates every DDS payload before backend allocation. It decodes
+  supported 2D mip chains to RGBA8 and retains explicit sRGB metadata. Stock
+  shader translation and complete material-resource resolution remain staged.
   Vulkan and D3D12 create a basic graphics pipeline and execute fixed and
   indexed R16 static-mesh draws. The indexed path executes only a deliberately
   restricted draw-packet subset. It supports one portable sampled-image and
@@ -161,13 +163,13 @@ remains unchanged and feature-complete.
   or swapchains, bind complete materials, or provide golden-image parity
   evidence.
 
-DDS BC7 now has a bounded CPU decoder covered by differential fixtures for all
-eight modes. BC6H remains recognized and explicitly GPU-required. The port
-does not substitute an approximate CPU decoder. The checked backend upload
+DDS BC7 has a bounded CPU decoder with differential fixtures for all eight
+modes. BC6H remains explicit and requires a GPU path. The checked upload
 planner supports DX10 2D arrays and cubemaps. It also converts legacy RGB24 to
-RGBA8 without changing color values. The CPU decoder can still reject arrays
-and cubemaps. The upload planner rejects 1D/3D textures, BC6H, and legacy D3D9
-float data. These limits must stay visible until their roadmap gates are met.
+RGBA8 without a color change. The embedded static-scene path uses the bounded
+CPU decoder for supported 2D mip chains. This path retains the DDS sRGB flag.
+It rejects arrays, cubemaps, BC6H, and legacy D3D9 float data. This portable
+decode does not prove native compressed-resource or stock-shader parity.
 
 ## Source-module mapping
 

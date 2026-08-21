@@ -129,6 +129,7 @@ target_link_libraries(apex_platform PUBLIC ApexEditor::Native)
 
 add_library(apex_render STATIC
   src/render/camera.cpp
+  src/render/decoded_dds_texture.cpp
   src/render/device.cpp
   src/render/draw_packet.cpp
   src/render/frame_plan.cpp

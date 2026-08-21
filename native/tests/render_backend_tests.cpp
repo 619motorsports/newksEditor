@@ -1,7 +1,9 @@
 #include "apex/render/device.hpp"
 #include "apex/render/draw_packet.hpp"
+#include "apex/render/static_scene.hpp"
 #include "apex/render/static_mesh_upload.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdlib>
@@ -46,6 +48,37 @@ void put_word(std::vector<std::byte>& bytes, std::size_t offset, std::uint32_t v
     bytes[offset + 1U] = std::byte{static_cast<unsigned char>((value >> 8U) & 0xffU)};
     bytes[offset + 2U] = std::byte{static_cast<unsigned char>((value >> 16U) & 0xffU)};
     bytes[offset + 3U] = std::byte{static_cast<unsigned char>((value >> 24U) & 0xffU)};
+}
+
+void put_u32(std::vector<std::uint8_t>& bytes, std::size_t offset,
+             std::uint32_t value) {
+    require(offset + sizeof(std::uint32_t) <= bytes.size(),
+            "DDS fixture write out of bounds");
+    bytes[offset] = static_cast<std::uint8_t>(value);
+    bytes[offset + 1U] = static_cast<std::uint8_t>(value >> 8U);
+    bytes[offset + 2U] = static_cast<std::uint8_t>(value >> 16U);
+    bytes[offset + 3U] = static_cast<std::uint8_t>(value >> 24U);
+}
+
+std::vector<std::uint8_t> rgba8_dds_fixture(
+    const std::array<std::uint8_t, 4>& pixel) {
+    std::vector<std::uint8_t> bytes(152U, 0U);
+    put_u32(bytes, 0U, 0x20534444U);
+    put_u32(bytes, 4U, 124U);
+    put_u32(bytes, 12U, 1U);
+    put_u32(bytes, 16U, 1U);
+    put_u32(bytes, 28U, 1U);
+    put_u32(bytes, 76U, 32U);
+    put_u32(bytes, 80U, 4U);
+    bytes[84U] = 'D';
+    bytes[85U] = 'X';
+    bytes[86U] = '1';
+    bytes[87U] = '0';
+    put_u32(bytes, 128U, 28U);  // DXGI_FORMAT_R8G8B8A8_UNORM
+    put_u32(bytes, 132U, 3U);   // D3D10_RESOURCE_DIMENSION_TEXTURE2D
+    put_u32(bytes, 140U, 1U);
+    std::copy(pixel.begin(), pixel.end(), bytes.begin() + 148);
+    return bytes;
 }
 
 std::vector<std::byte> minimal_spirv_fixture() {
@@ -689,19 +722,6 @@ bool contract_backend(apex::render::Backend backend) {
     require(!device.device->info().name.empty(), "device name");
     const SamplerResult sampler = device.device->create_sampler(SamplerDescription{});
     require(sampler.ok(), "real backend sampler creation");
-    std::vector<std::unique_ptr<Sampler>> d3d_sampler_handles;
-    if (backend == Backend::D3D12) {
-        d3d_sampler_handles.reserve(2047U);
-        for (std::size_t index = 0; index < 2047U; ++index) {
-            SamplerResult extra = device.device->create_sampler(SamplerDescription{});
-            require(extra.ok(), "D3D12 sampler capacity fixture allocation");
-            d3d_sampler_handles.push_back(std::move(extra.sampler));
-        }
-        const SamplerResult exhausted = device.device->create_sampler(SamplerDescription{});
-        require(exhausted.status == SamplerStatus::allocation_failed &&
-                    exhausted.diagnostic.code == "d3d12_sampler_limit",
-                "D3D12 sampler capacity limit");
-    }
     const auto minimal_spirv = minimal_spirv_fixture();
     const ShaderModuleResult shader = device.device->create_shader_module({ShaderStage::vertex, minimal_spirv});
     if (backend == Backend::Vulkan)
@@ -1041,6 +1061,112 @@ bool contract_backend(apex::render::Backend backend) {
                 sampled_batch_result.rgba8[center + 2U] == std::byte{83} &&
                 sampled_batch_result.rgba8[center + 3U] == std::byte{255},
             "portable diffuse ordered batch preserves sampled color");
+
+    // Prove that preparation owns and executes an embedded KN5 DDS resource
+    // on the real backend. This remains the portable diffuse ABI, not a claim
+    // of recovered stock material behavior.
+    apex::formats::Kn5File embedded_model;
+    embedded_model.source = "embedded-runtime.kn5";
+    embedded_model.materials.resize(1U);
+    embedded_model.root.type = 1U;
+    embedded_model.root.kind = "node";
+    embedded_model.root.name = "ROOT";
+    apex::formats::Kn5Node embedded_mesh = indexed_mesh;
+    embedded_mesh.name = "MESH";
+    embedded_mesh.materialId = 0U;
+    embedded_model.root.children.push_back(std::move(embedded_mesh));
+    const std::array<std::uint8_t, 4> embedded_pixel = {
+        17U, 201U, 83U, 255U};
+    std::vector<std::uint8_t> embedded_dds =
+        rgba8_dds_fixture(embedded_pixel);
+    embedded_model.textures.push_back(
+        {true, "body.dds",
+         static_cast<std::uint32_t>(embedded_dds.size()),
+         std::move(embedded_dds), {}});
+
+    apex::scene::SceneSnapshot embedded_scene;
+    (void)embedded_scene.add_material(
+        {"material", "portable", apex::scene::BlendMode::opaque});
+    apex::scene::SceneNode embedded_root;
+    embedded_root.name = "ROOT";
+    const apex::scene::NodeId embedded_root_id =
+        embedded_scene.add_node(std::move(embedded_root));
+    apex::scene::SceneNode embedded_mesh_node;
+    embedded_mesh_node.name = "MESH";
+    embedded_mesh_node.kind = apex::scene::NodeKind::mesh;
+    embedded_mesh_node.material = 0U;
+    const apex::scene::NodeId embedded_mesh_id = embedded_scene.add_node(
+        std::move(embedded_mesh_node), embedded_root_id);
+
+    DrawPacket embedded_packet = sampled_packet;
+    embedded_packet.node = embedded_mesh_id;
+    embedded_packet.material = 0U;
+    embedded_packet.shader_execution_supported = false;
+    embedded_packet.resources = {{"txDiffuse", 21U, 0U, "body.dds"}};
+    const std::array<DrawPacket, 1> embedded_packets = {embedded_packet};
+    const std::array<const PipelineProgram*, 1> embedded_pipelines = {
+        &sampled_pipeline};
+    StaticScenePrepareRequest embedded_request;
+    embedded_request.model = &embedded_model;
+    embedded_request.scene = &embedded_scene;
+    embedded_request.packets = embedded_packets;
+    embedded_request.pipelines_by_material = embedded_pipelines;
+    embedded_request.texture_authority =
+        StaticSceneTextureAuthority::embedded_kn5;
+    StaticSceneResourceResult embedded_resources =
+        prepare_static_scene_resources(*device.device, embedded_request);
+    require(embedded_resources.ok() &&
+                embedded_resources.resources->owned_texture_count() == 1U,
+            "real backend owns one embedded static-scene DDS texture");
+    StaticSceneFrameDescription embedded_frame;
+    embedded_frame.camera = *indexed_camera.frame;
+    const IndexedStaticMeshBatchResult embedded_result =
+        embedded_resources.resources->draw_and_readback(
+            *device.device, *triangle_texture.texture, embedded_frame);
+    require(embedded_result.ok(),
+            "embedded DDS static scene executes on the real backend");
+    require(embedded_result.rgba8[center] == std::byte{17} &&
+                embedded_result.rgba8[center + 1U] == std::byte{201} &&
+                embedded_result.rgba8[center + 2U] == std::byte{83} &&
+                embedded_result.rgba8[center + 3U] == std::byte{255},
+            "embedded DDS static scene samples the expected center pixel");
+
+    // An sRGB source and target form a decode/encode round trip. A wrong
+    // source format produces visibly different midtone bytes.
+    put_u32(embedded_model.textures.front().data, 128U, 29U);
+    PipelineProgram sampled_srgb_pipeline = sampled_pipeline;
+    sampled_srgb_pipeline.targets.colors.front().format =
+        PipelineRenderTargetFormat::rgba8_srgb;
+    const std::array<const PipelineProgram*, 1> embedded_srgb_pipelines = {
+        &sampled_srgb_pipeline};
+    embedded_request.pipelines_by_material = embedded_srgb_pipelines;
+    StaticSceneResourceResult embedded_srgb_resources =
+        prepare_static_scene_resources(*device.device, embedded_request);
+    require(embedded_srgb_resources.ok(),
+            "real backend prepares an embedded sRGB DDS texture");
+    const TextureDescription embedded_srgb_target_description{
+        32U, 32U, 1U, 1U, TextureFormat::rgba8_srgb,
+        TextureUsage::color_attachment | TextureUsage::transfer_source,
+        TextureMemory::device_local, TextureMutability::mutable_data};
+    TextureResult embedded_srgb_target =
+        device.device->create_texture(embedded_srgb_target_description);
+    require(embedded_srgb_target.ok(),
+            "real backend creates the embedded sRGB scene target");
+    const IndexedStaticMeshBatchResult embedded_srgb_result =
+        embedded_srgb_resources.resources->draw_and_readback(
+            *device.device, *embedded_srgb_target.texture, embedded_frame);
+    require(embedded_srgb_result.ok(),
+            "embedded sRGB DDS static scene executes on the real backend");
+    const auto near_byte = [](std::byte actual, std::uint8_t expected) {
+        const int value = static_cast<int>(std::to_integer<std::uint8_t>(actual));
+        const int target_value = static_cast<int>(expected);
+        return value >= target_value - 1 && value <= target_value + 1;
+    };
+    require(near_byte(embedded_srgb_result.rgba8[center], 17U) &&
+                near_byte(embedded_srgb_result.rgba8[center + 1U], 201U) &&
+                near_byte(embedded_srgb_result.rgba8[center + 2U], 83U) &&
+                embedded_srgb_result.rgba8[center + 3U] == std::byte{255},
+            "embedded sRGB DDS preserves midtones through the sampled draw");
 
     TextureResult uninitialized_diffuse =
         device.device->create_texture(diffuse_description);
@@ -1434,6 +1560,22 @@ bool contract_backend(apex::render::Backend backend) {
                 "D3D12 rejects combined render-target and sampled texture usage");
         require(invalid_texture.diagnostic.code == "d3d12_render_target_texture_exclusive",
                 "D3D12 combined texture usage diagnostic");
+
+        // Run this terminal capacity test after all sampler-dependent runtime
+        // cases. The D3D12 sampler heap uses monotonic descriptor slots.
+        std::vector<std::unique_ptr<Sampler>> d3d_sampler_handles;
+        d3d_sampler_handles.reserve(2045U);
+        for (std::size_t index = 0; index < 2045U; ++index) {
+            SamplerResult extra =
+                device.device->create_sampler(SamplerDescription{});
+            require(extra.ok(), "D3D12 sampler capacity fixture allocation");
+            d3d_sampler_handles.push_back(std::move(extra.sampler));
+        }
+        const SamplerResult exhausted =
+            device.device->create_sampler(SamplerDescription{});
+        require(exhausted.status == SamplerStatus::allocation_failed &&
+                    exhausted.diagnostic.code == "d3d12_sampler_limit",
+                "D3D12 sampler capacity limit");
     }
     device.device->wait_idle();
     std::cout << "PASS " << backend_name(backend) << ": " << device.device->info().name << '\n';
