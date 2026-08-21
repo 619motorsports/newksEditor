@@ -205,7 +205,7 @@ std::vector<std::uint8_t> inflateRaw(std::span<const std::uint8_t> compressed,
                     const auto symbol = codeTree.decode(bits);
                     if (symbol <= 15u) lengths[index++] = static_cast<std::uint8_t>(symbol);
                     else if (symbol == 16u) { if (index == 0u) throw std::runtime_error("invalid deflate repeat"); const auto repeat = static_cast<std::size_t>(bits.bits(2u)) + 3u; if (repeat > lengths.size()-index) throw std::runtime_error("deflate repeat exceeds tree"); std::fill_n(lengths.begin()+static_cast<std::ptrdiff_t>(index), repeat, lengths[index-1u]); index += repeat; }
-                    else if (symbol == 17u || symbol == 18u) { const auto repeat = static_cast<std::size_t>(bits.bits(symbol == 17u ? 3u : 7u)) + (symbol == 17u ? 3u : 11u); if (repeat > lengths.size()-index) throw std::runtime_error("deflate zero repeat exceeds tree"); std::fill_n(lengths.begin()+static_cast<std::ptrdiff_t>(index), repeat, 0); index += repeat; }
+                    else if (symbol == 17u || symbol == 18u) { const auto repeat = static_cast<std::size_t>(bits.bits(symbol == 17u ? 3u : 7u)) + (symbol == 17u ? 3u : 11u); if (repeat > lengths.size()-index) throw std::runtime_error("deflate zero repeat exceeds tree"); std::fill_n(lengths.begin()+static_cast<std::ptrdiff_t>(index), repeat, std::uint8_t{0}); index += repeat; }
                     else throw std::runtime_error("invalid deflate code length symbol");
                 }
                 if (lengths[256u] == 0u) throw std::runtime_error("deflate literal tree has no end code");
