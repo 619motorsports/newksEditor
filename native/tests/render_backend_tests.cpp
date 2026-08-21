@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -574,6 +575,30 @@ private:
     apex::render::TextureInfo info_;
 };
 
+class ContractDepth final : public apex::render::DepthAttachment {
+public:
+    explicit ContractDepth(apex::render::DepthAttachmentDescription description)
+        : info_({description}) {}
+
+    apex::render::Backend backend() const noexcept override { return apex::render::Backend::Vulkan; }
+    const apex::render::DepthAttachmentInfo& info() const noexcept override { return info_; }
+
+private:
+    apex::render::DepthAttachmentInfo info_;
+};
+
+class ContractD3D12Depth final : public apex::render::DepthAttachment {
+public:
+    explicit ContractD3D12Depth(apex::render::DepthAttachmentDescription description)
+        : info_({description}) {}
+
+    apex::render::Backend backend() const noexcept override { return apex::render::Backend::D3D12; }
+    const apex::render::DepthAttachmentInfo& info() const noexcept override { return info_; }
+
+private:
+    apex::render::DepthAttachmentInfo info_;
+};
+
 void contract_buffer_limits() {
     using namespace apex::render;
     Diagnostic diagnostic;
@@ -846,6 +871,44 @@ void contract_texture_readback_limits() {
             "backend ownership fixture");
 }
 
+void contract_depth_attachment_readback_limits() {
+    using namespace apex::render;
+    Diagnostic diagnostic;
+    const DepthAttachmentDescription description{16U, 8U, 1U, DepthAttachmentFormat::d32_float};
+    ContractDepth depth(description);
+    DepthAttachmentReadbackRequest request{16U, 8U};
+    require(validate_depth_attachment_readback(depth, request, diagnostic) ==
+                DepthAttachmentReadbackStatus::ready,
+            "valid D32 depth readback request accepted");
+    require(std::string(depth_attachment_readback_status_name(
+                DepthAttachmentReadbackStatus::execution_failed)) == "execution_failed",
+            "D32 depth readback status name");
+
+    request.output_width = 8U;
+    require(validate_depth_attachment_readback(depth, request, diagnostic) ==
+                DepthAttachmentReadbackStatus::invalid_request &&
+                diagnostic.code == "depth_attachment_readback_dimensions_mismatch",
+            "D32 depth readback dimensions must match attachment");
+    request = {16U, 8U};
+    DepthAttachmentDescription multisample_description = description;
+    multisample_description.samples = 4U;
+    ContractDepth multisample_depth(multisample_description);
+    require(validate_depth_attachment_readback(multisample_depth, request, diagnostic) ==
+                DepthAttachmentReadbackStatus::unsupported &&
+                diagnostic.code == "depth_attachment_readback_multisample_unsupported",
+            "multisample D32 depth readback rejected");
+
+    DepthAttachmentDescription oversized_description{max_texture_dimension, max_texture_dimension,
+                                                       1U, DepthAttachmentFormat::d32_float};
+    ContractDepth oversized_depth(oversized_description);
+    require(validate_depth_attachment_readback(
+                oversized_depth,
+                {max_texture_dimension, max_texture_dimension},
+                diagnostic) == DepthAttachmentReadbackStatus::invalid_request &&
+                diagnostic.code == "depth_attachment_readback_size_limit",
+            "D32 depth readback byte budget enforced");
+}
+
 void contract_triangle_draw_limits() {
     using namespace apex::render;
     Diagnostic diagnostic;
@@ -1093,11 +1156,85 @@ bool contract_backend(apex::render::Backend backend) {
         const PresentationFrameResult frame = presentation_device.device->clear_and_present(
             *target.target, {0.1F, 0.2F, 0.3F, 1.0F});
         require(frame.ok(), "Vulkan headless clear and present");
+
+        const PresentationTargetDescription& actual_target =
+            target.target->info().description;
+        TextureDescription presentation_source_description;
+        presentation_source_description.width = actual_target.width;
+        presentation_source_description.height = actual_target.height;
+        presentation_source_description.format = actual_target.format;
+        presentation_source_description.usage =
+            TextureUsage::color_attachment | TextureUsage::transfer_source;
+        presentation_source_description.mutability = TextureMutability::mutable_data;
+        TextureResult presentation_source = presentation_device.device->create_texture(
+            presentation_source_description);
+        require(presentation_source.ok(), "Vulkan presentation source creation");
+
+        PresentationFrameResult texture_frame = presentation_device.device->present_texture(
+            *target.target, *presentation_source.texture);
+        require(texture_frame.status == PresentationFrameStatus::invalid_request &&
+                    texture_frame.diagnostic.code == "presentation_texture_uninitialized",
+                "Vulkan rejects an uninitialized presentation source");
+
+        TextureDescription wrong_dimensions = presentation_source_description;
+        wrong_dimensions.width /= 2U;
+        TextureResult wrong_dimensions_source =
+            presentation_device.device->create_texture(wrong_dimensions);
+        require(wrong_dimensions_source.ok(), "Vulkan mismatched presentation source creation");
+        texture_frame = presentation_device.device->present_texture(
+            *target.target, *wrong_dimensions_source.texture);
+        require(texture_frame.status == PresentationFrameStatus::invalid_request &&
+                    texture_frame.diagnostic.code == "presentation_texture_dimensions_mismatch",
+                "Vulkan rejects mismatched presentation dimensions");
+
+        TextureDescription wrong_format = presentation_source_description;
+        wrong_format.format = actual_target.format == TextureFormat::rgba8_unorm
+                                  ? TextureFormat::bgra8_unorm
+                                  : TextureFormat::rgba8_unorm;
+        TextureResult wrong_format_source = presentation_device.device->create_texture(wrong_format);
+        require(wrong_format_source.ok(), "Vulkan alternate presentation format texture creation");
+        texture_frame = presentation_device.device->present_texture(
+            *target.target, *wrong_format_source.texture);
+        require(texture_frame.status == PresentationFrameStatus::invalid_request &&
+                    texture_frame.diagnostic.code == "presentation_texture_format_mismatch",
+                "Vulkan rejects mismatched presentation formats");
+
+        TextureDescription wrong_usage = presentation_source_description;
+        wrong_usage.usage = TextureUsage::color_attachment;
+        TextureResult wrong_usage_source = presentation_device.device->create_texture(wrong_usage);
+        require(wrong_usage_source.ok(), "Vulkan invalid-usage presentation texture creation");
+        texture_frame = presentation_device.device->present_texture(
+            *target.target, *wrong_usage_source.texture);
+        require(texture_frame.status == PresentationFrameStatus::invalid_request &&
+                    texture_frame.diagnostic.code == "presentation_texture_usage_invalid",
+                "Vulkan rejects presentation sources without transfer-source usage");
+
+        TextureResult foreign_source = device.device->create_texture(presentation_source_description);
+        require(foreign_source.ok(), "Vulkan foreign presentation texture creation");
+        texture_frame = presentation_device.device->present_texture(
+            *target.target, *foreign_source.texture);
+        require(texture_frame.status == PresentationFrameStatus::invalid_request &&
+                    texture_frame.diagnostic.code == "presentation_texture_device_mismatch",
+                "Vulkan rejects a presentation source from another device");
+
+        const TextureClearReadbackRequest presentation_clear{
+            {0.25F, 0.5F, 0.75F, 1.0F}, 0U, 0U, actual_target.width, actual_target.height};
+        const TextureClearReadbackResult rendered_source =
+            presentation_device.device->clear_texture_and_readback(
+                *presentation_source.texture, presentation_clear);
+        require(rendered_source.ok(), "Vulkan presentation source render and readback");
+        texture_frame = presentation_device.device->present_texture(
+            *target.target, *presentation_source.texture);
+        require(texture_frame.ok(), "Vulkan rendered texture presentation");
         target.target.reset();
         PresentationTargetResult recreated_target =
             presentation_device.device->create_presentation_target(presentation_description);
         require(recreated_target.ok(),
                 "Vulkan presentation target can be recreated after destruction");
+        texture_frame = presentation_device.device->present_texture(
+            *recreated_target.target, *presentation_source.texture);
+        require(texture_frame.ok(),
+                "Vulkan rendered texture presentation after target recreation");
         presentation_device.device->wait_idle();
     }
     const SamplerResult sampler = device.device->create_sampler(SamplerDescription{});
@@ -1357,6 +1494,86 @@ bool contract_backend(apex::render::Backend backend) {
     require(indexed_result.rgba8[0] == std::byte{0} && indexed_result.rgba8[1] == std::byte{0} &&
                 indexed_result.rgba8[2] == std::byte{0} && indexed_result.rgba8[3] == std::byte{255},
             "indexed static-mesh outside pixel retains clear color");
+
+    // Read back the persistent D32 attachment after a real indexed draw.
+    // This covers the complete depth-resource lifecycle: clear, depth test /
+    // write, backend state restoration, and tightly packed float32 readback.
+    PipelineProgram depth_readback_pipeline = indexed_pipeline;
+    depth_readback_pipeline.name = "indexed-depth-readback-triangle";
+    depth_readback_pipeline.targets.has_depth = true;
+    depth_readback_pipeline.targets.depth = {PipelineRenderTargetFormat::depth32_float, 1U};
+    depth_readback_pipeline.depth.test_enabled = true;
+    depth_readback_pipeline.depth.write_enabled = true;
+    depth_readback_pipeline.depth.compare = PipelineCompareOperation::less;
+    DrawPacket depth_packet = indexed_packet;
+    depth_packet.world_matrix = apex::scene::identity_matrix;
+    depth_packet.flags.depth_test = true;
+    depth_packet.flags.depth_write = true;
+    StaticMeshUploadResult depth_upload =
+        upload_static_mesh(*device.device, indexed_mesh, depth_packet);
+    require(depth_upload.ok(), "depth readback static-mesh upload");
+    IndexedStaticMeshDrawRequest depth_readback_request =
+        depth_upload.upload->make_request(depth_readback_pipeline, *indexed_camera.frame);
+    DepthAttachmentDescription depth_readback_description;
+    depth_readback_description.width = triangle_description.width;
+    depth_readback_description.height = triangle_description.height;
+    depth_readback_description.samples = 1U;
+    depth_readback_description.format = DepthAttachmentFormat::d32_float;
+    DepthAttachmentResult depth_readback_attachment =
+        device.device->create_depth_attachment(depth_readback_description);
+    require(depth_readback_attachment.ok(), "single-sample persistent depth creation");
+    const DepthAttachmentReadbackResult unread_depth = device.device->read_depth_attachment(
+        *depth_readback_attachment.attachment,
+        {depth_readback_description.width, depth_readback_description.height});
+    require(unread_depth.status == DepthAttachmentReadbackStatus::invalid_request &&
+                unread_depth.diagnostic.code == "depth_attachment_uninitialized",
+            "uninitialized depth readback rejected");
+    if (backend == Backend::Vulkan) {
+        ContractD3D12Depth foreign_depth(depth_readback_description);
+        const DepthAttachmentReadbackResult foreign_depth_result =
+            device.device->read_depth_attachment(foreign_depth,
+                                                 {depth_readback_description.width,
+                                                  depth_readback_description.height});
+        require(foreign_depth_result.status == DepthAttachmentReadbackStatus::unsupported &&
+                    foreign_depth_result.diagnostic.code == "depth_attachment_backend_mismatch",
+                "Vulkan rejects foreign depth attachment readback");
+    } else {
+        ContractDepth foreign_depth(depth_readback_description);
+        const DepthAttachmentReadbackResult foreign_depth_result =
+            device.device->read_depth_attachment(foreign_depth,
+                                                 {depth_readback_description.width,
+                                                  depth_readback_description.height});
+        require(foreign_depth_result.status == DepthAttachmentReadbackStatus::unsupported &&
+                    foreign_depth_result.diagnostic.code == "depth_attachment_backend_mismatch",
+                "D3D12 rejects foreign depth attachment readback");
+    }
+    depth_readback_request.depth_attachment = depth_readback_attachment.attachment.get();
+    depth_readback_request.clear_depth = true;
+    depth_readback_request.depth_clear_value = 1.0F;
+    depth_readback_request.clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
+    const IndexedStaticMeshDrawResult depth_readback_draw =
+        device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture,
+                                                               depth_readback_request);
+    require(depth_readback_draw.ok(), "indexed depth draw before readback");
+    const DepthAttachmentReadbackResult depth_readback_result = device.device->read_depth_attachment(
+        *depth_readback_attachment.attachment,
+        {depth_readback_description.width, depth_readback_description.height});
+    require(depth_readback_result.ok() && depth_readback_result.depth.size() ==
+                                     static_cast<std::size_t>(depth_readback_description.width) *
+                                         depth_readback_description.height,
+            "real D32 depth readback execution");
+    const float depth_center = depth_readback_result.depth[16U * depth_readback_description.width + 16U];
+    const float depth_outside = depth_readback_result.depth.front();
+    require(std::isfinite(depth_center) && std::isfinite(depth_outside) &&
+                depth_center < depth_outside - 0.01F && depth_outside > 0.99F,
+            "indexed geometry changes center depth while outside remains clear");
+    const DepthAttachmentReadbackResult repeated_depth = device.device->read_depth_attachment(
+        *depth_readback_attachment.attachment,
+        {depth_readback_description.width, depth_readback_description.height});
+    require(repeated_depth.ok() && repeated_depth.depth.size() == depth_readback_result.depth.size() &&
+                std::abs(repeated_depth.depth[16U * depth_readback_description.width + 16U] - depth_center) <
+                    0.0001F,
+            "repeated D32 depth readback preserves tracked state");
 
     // Exercise the bounded 4x color/depth-independent path. The backend must
     // render to the multisampled target, then resolve it to a single-sample
@@ -3285,19 +3502,21 @@ bool contract_backend(apex::render::Backend backend) {
         {"txMaps", 2U, "damage-maps.dds"},
         {"txDamage", 4U, "damage-color.dds"},
         {"txDamageMask", 21U, "damage-mask.dds"},
+        {"txDust", 5U, "damage-dust.dds"},
     };
     damage_facade_model.materials.push_back(
         std::move(damage_facade_material));
-    const std::array<std::array<std::uint8_t, 4>, 5> damage_facade_pixels = {
+    const std::array<std::array<std::uint8_t, 4>, 6> damage_facade_pixels = {
         std::array<std::uint8_t, 4>{17U, 201U, 83U, 255U},
         std::array<std::uint8_t, 4>{128U, 128U, 255U, 255U},
         std::array<std::uint8_t, 4>{255U, 255U, 255U, 255U},
         std::array<std::uint8_t, 4>{200U, 20U, 40U, 128U},
         std::array<std::uint8_t, 4>{255U, 0U, 0U, 0U},
+        std::array<std::uint8_t, 4>{255U, 255U, 255U, 255U},
     };
-    const std::array<const char*, 5> damage_facade_texture_names = {
+    const std::array<const char*, 6> damage_facade_texture_names = {
         "damage-body.dds", "damage-normal.dds", "damage-maps.dds",
-        "damage-color.dds", "damage-mask.dds"};
+        "damage-color.dds", "damage-mask.dds", "damage-dust.dds"};
     for (std::size_t index = 0U; index < damage_facade_pixels.size(); ++index) {
         std::vector<std::uint8_t> dds =
             rgba8_dds_fixture(damage_facade_pixels[index]);
@@ -3333,7 +3552,8 @@ bool contract_backend(apex::render::Backend backend) {
         damage_facade_shader_modules = {StockMaterialShaderModules{
             StockMaterialShaderKeyKind::shader_family,
             "ksPerPixelMultiMap_damage_dirt",
-            std::span<const PipelineShaderModule>(damage_pipeline.shaders),
+            std::span<const PipelineShaderModule>(damage_dust_pipeline.shaders),
+            StockMaterialShaderVariant::damage_dust,
         }};
     StockSceneExecutionRequest damage_facade_request;
     damage_facade_request.model = &damage_facade_model;
@@ -3352,7 +3572,7 @@ bool contract_backend(apex::render::Backend backend) {
                         ->executable_zero_dirt_materials ==
                     std::vector<apex::scene::MaterialId>{0U} &&
                 damage_facade_broken.render_plan.items.size() == 2U &&
-                damage_facade_broken.resources->owned_texture_count() == 5U,
+                damage_facade_broken.resources->owned_texture_count() == 6U,
             "broken F4 facade prepares its complete bounded damage draw");
     StaticSceneFrameDescription damage_facade_frame;
     damage_facade_frame.camera = *indexed_camera.frame;
@@ -3364,6 +3584,26 @@ bool contract_backend(apex::render::Backend backend) {
             "broken F4 facade executes on the real backend");
     require_nm_pixel(damage_facade_broken_draw.rgba8, 81U, 81U, 60U,
                      "broken F4 facade applies damageZones before submission");
+
+    damage_facade_model.textures[5U].data =
+        rgba8_dds_fixture({255U, 255U, 255U, 0U});
+    damage_facade_model.textures[5U].size = static_cast<std::uint32_t>(
+        damage_facade_model.textures[5U].data.size());
+    StockSceneExecutionResult damage_facade_dust_alpha =
+        prepare_stock_scene_execution(*device.device, damage_facade_request);
+    require(damage_facade_dust_alpha.ok(),
+            "broken F4 facade accepts the zero-alpha dust fixture");
+    const IndexedStaticMeshBatchResult damage_facade_dust_alpha_draw =
+        damage_facade_dust_alpha.resources->draw_and_readback(
+            *device.device, *triangle_texture.texture, damage_facade_frame);
+    require(damage_facade_dust_alpha_draw.ok(),
+            "broken F4 dust-alpha facade executes on the real backend");
+    require_nm_pixel(damage_facade_dust_alpha_draw.rgba8, 4U, 4U, 2U,
+                     "F4 facade routes txDust alpha through the damage-dust ABI");
+    damage_facade_model.textures[5U].data =
+        rgba8_dds_fixture({255U, 255U, 255U, 255U});
+    damage_facade_model.textures[5U].size = static_cast<std::uint32_t>(
+        damage_facade_model.textures[5U].data.size());
 
     damage_facade_model.textures[1U].data =
         rgba8_dds_fixture({128U, 128U, 255U, 0U});
@@ -3387,7 +3627,7 @@ bool contract_backend(apex::render::Backend backend) {
     require(damage_facade_intact.ok() &&
                 damage_facade_intact.damage_preview.has_value() &&
                 damage_facade_intact.render_plan.items.size() == 1U &&
-                damage_facade_intact.resources->owned_texture_count() == 5U,
+                damage_facade_intact.resources->owned_texture_count() == 6U,
             "intact F4 facade keeps the selected damage root inactive");
     const IndexedStaticMeshBatchResult damage_facade_intact_draw =
         damage_facade_intact.resources->draw_and_readback(
@@ -3975,6 +4215,7 @@ int main() {
         contract_buffer_limits();
         contract_texture_limits();
         contract_texture_readback_limits();
+        contract_depth_attachment_readback_limits();
         contract_triangle_draw_limits();
         contract_sampler_shader_limits();
         const std::string requested = environment_value("APEX_RENDER_BACKEND");

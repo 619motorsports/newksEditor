@@ -338,6 +338,32 @@ struct DepthAttachmentResult {
     }
 };
 
+// A bounded synchronous readback of an initialized single-sample D32
+// attachment. The result is tightly packed native float32 depth values in
+// row-major order. Output dimensions must match the attachment dimensions;
+// the request does not resize or filter depth data.
+struct DepthAttachmentReadbackRequest {
+    std::uint32_t output_width = 0U;
+    std::uint32_t output_height = 0U;
+};
+
+enum class DepthAttachmentReadbackStatus : std::uint8_t {
+    ready,
+    invalid_request,
+    unsupported,
+    execution_failed,
+};
+
+struct DepthAttachmentReadbackResult {
+    DepthAttachmentReadbackStatus status = DepthAttachmentReadbackStatus::unsupported;
+    Diagnostic diagnostic;
+    std::vector<float> depth;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == DepthAttachmentReadbackStatus::ready;
+    }
+};
+
 struct TextureResult {
     TextureStatus status = TextureStatus::unsupported;
     Diagnostic diagnostic;
@@ -784,6 +810,11 @@ inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
     const DepthAttachmentDescription& description,
     Diagnostic& diagnostic);
 
+[[nodiscard]] DepthAttachmentReadbackStatus validate_depth_attachment_readback(
+    const DepthAttachment& attachment,
+    const DepthAttachmentReadbackRequest& request,
+    Diagnostic& diagnostic);
+
 [[nodiscard]] TextureReadbackStatus validate_texture_clear_readback(
     const Texture& texture,
     const TextureClearReadbackRequest& request,
@@ -858,6 +889,16 @@ public:
                  "This backend has not enabled presentation execution"}};
     }
 
+    // Presents a completed, same-format offscreen color attachment without
+    // exposing backend image or swapchain handles. Backends that implement
+    // this seam retain ownership and synchronization validation.
+    [[nodiscard]] virtual PresentationFrameResult present_texture(
+        PresentationTarget&, Texture&) {
+        return {PresentationFrameStatus::unsupported,
+                {"presentation_texture_unsupported",
+                 "This backend has not enabled rendered-texture presentation"}};
+    }
+
     // Buffer lifetimes may extend beyond this Device object: backend handles
     // retain their private shared context. Public callers only see this
     // backend-neutral RAII contract, never Vk* or ID3D12* types.
@@ -886,6 +927,20 @@ public:
                 {"depth_attachment_execution_unsupported",
                  "This backend has not enabled persistent depth attachments"},
                 nullptr};
+    }
+
+    [[nodiscard]] virtual DepthAttachmentReadbackResult read_depth_attachment(
+        DepthAttachment& attachment,
+        const DepthAttachmentReadbackRequest& request) {
+        Diagnostic diagnostic;
+        const DepthAttachmentReadbackStatus validation =
+            validate_depth_attachment_readback(attachment, request, diagnostic);
+        if (validation != DepthAttachmentReadbackStatus::ready)
+            return {validation, std::move(diagnostic), {}};
+        return {DepthAttachmentReadbackStatus::unsupported,
+                {"depth_attachment_readback_unsupported",
+                 "This backend has not enabled D32 depth readback"},
+                {}};
     }
 
     [[nodiscard]] virtual TextureClearReadbackResult clear_texture_and_readback(
@@ -947,6 +1002,8 @@ struct DeviceResult {
 [[nodiscard]] const char* buffer_status_name(BufferStatus status) noexcept;
 [[nodiscard]] const char* texture_status_name(TextureStatus status) noexcept;
 [[nodiscard]] const char* depth_attachment_status_name(DepthAttachmentStatus status) noexcept;
+[[nodiscard]] const char* depth_attachment_readback_status_name(
+    DepthAttachmentReadbackStatus status) noexcept;
 [[nodiscard]] const char* texture_readback_status_name(TextureReadbackStatus status) noexcept;
 [[nodiscard]] const char* triangle_draw_status_name(TriangleDrawStatus status) noexcept;
 [[nodiscard]] const char* indexed_static_mesh_draw_status_name(

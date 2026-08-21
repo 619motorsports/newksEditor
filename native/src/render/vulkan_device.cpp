@@ -993,7 +993,10 @@ bool create_raw_depth_attachment(const std::shared_ptr<VulkanContext>& context,
     image_info.arrayLayers = 1U;
     image_info.samples = sample_count;
     image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    image_info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    // Keep the persistent attachment readable without creating a second
+    // depth image. Readback transitions the image to TRANSFER_SRC and then
+    // restores the tracked depth-attachment layout synchronously.
+    image_info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
@@ -1087,6 +1090,153 @@ public:
     void mark_invalid() noexcept {
         raw_.layout = VK_IMAGE_LAYOUT_UNDEFINED;
         raw_.initialized = false;
+    }
+
+    bool readback(const DepthAttachmentReadbackRequest& request,
+                  std::vector<float>& output,
+                  Diagnostic& diagnostic) {
+        if (!raw_.initialized || raw_.layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+            diagnostic = {"depth_attachment_uninitialized",
+                          "D32 depth readback requires an initialized depth attachment"};
+            return false;
+        }
+
+        const std::size_t output_size = static_cast<std::size_t>(request.output_width) *
+                                        static_cast<std::size_t>(request.output_height) * sizeof(float);
+        BufferDescription staging_description;
+        staging_description.size_bytes = output_size;
+        staging_description.usage = BufferUsage::transfer_destination;
+        staging_description.memory = BufferMemory::host_visible;
+        RawVulkanBuffer staging;
+        if (!create_raw_buffer(context_, staging_description, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                               BufferMemory::host_visible, staging, diagnostic)) {
+            diagnostic.code = "depth_attachment_readback_failed";
+            return false;
+        }
+
+        std::lock_guard command_guard(context_->command_mutex);
+        VkCommandBufferAllocateInfo allocation{};
+        allocation.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocation.commandPool = context_->command_pool;
+        allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocation.commandBufferCount = 1U;
+        VkCommandBuffer command = VK_NULL_HANDLE;
+        VkResult result = vkAllocateCommandBuffers(context_->device, &allocation, &command);
+        bool submitted = false;
+        bool completed = false;
+        if (result == VK_SUCCESS) {
+            VkCommandBufferBeginInfo begin{};
+            begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            result = vkBeginCommandBuffer(command, &begin);
+            if (result == VK_SUCCESS) {
+                VkImageMemoryBarrier barrier{};
+                barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                barrier.oldLayout = raw_.layout;
+                barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                barrier.image = raw_.image;
+                barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+                barrier.subresourceRange.levelCount = 1U;
+                barrier.subresourceRange.layerCount = 1U;
+                vkCmdPipelineBarrier(command,
+                                     VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                                         VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0U, 0U, nullptr, 0U, nullptr,
+                                     1U, &barrier);
+
+                VkBufferImageCopy copy{};
+                copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+                copy.imageSubresource.mipLevel = 0U;
+                copy.imageSubresource.baseArrayLayer = 0U;
+                copy.imageSubresource.layerCount = 1U;
+                copy.imageExtent = {request.output_width, request.output_height, 1U};
+                vkCmdCopyImageToBuffer(command, raw_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                       staging.buffer, 1U, &copy);
+
+                barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                barrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                     VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                                         VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                                     0U, 0U, nullptr, 0U, nullptr, 1U, &barrier);
+                result = vkEndCommandBuffer(command);
+            }
+        }
+        if (result == VK_SUCCESS) {
+            VkSubmitInfo submit{};
+            submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            submit.commandBufferCount = 1U;
+            submit.pCommandBuffers = &command;
+            VkFenceCreateInfo fence_info{};
+            fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+            VkFence fence = VK_NULL_HANDLE;
+            result = vkCreateFence(context_->device, &fence_info, nullptr, &fence);
+            if (result == VK_SUCCESS) {
+                result = vkQueueSubmit(context_->queue, 1U, &submit, fence);
+                submitted = result == VK_SUCCESS;
+                if (result == VK_SUCCESS) {
+                    result = vkWaitForFences(context_->device, 1U, &fence, VK_TRUE, UINT64_MAX);
+                    completed = result == VK_SUCCESS;
+                }
+                vkDestroyFence(context_->device, fence, nullptr);
+            }
+        }
+        if (submitted && !completed) {
+            const VkResult drain = vkDeviceWaitIdle(context_->device);
+            if (drain != VK_SUCCESS) result = drain;
+            else completed = true;
+        }
+        if (command != VK_NULL_HANDLE)
+            vkFreeCommandBuffers(context_->device, context_->command_pool, 1U, &command);
+        if (result != VK_SUCCESS || !completed) {
+            diagnostic = vk_error("Vulkan depth attachment readback", result);
+            diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost"
+                                                              : "depth_attachment_readback_failed";
+            return false;
+        }
+
+        void* mapped = nullptr;
+        result = vkMapMemory(context_->device, staging.memory, 0U, VK_WHOLE_SIZE, 0U, &mapped);
+        if (result != VK_SUCCESS) {
+            diagnostic = vk_error("vkMapMemory(depth readback)", result);
+            diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost"
+                                                              : "depth_attachment_readback_failed";
+            return false;
+        }
+        if ((staging.properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0U) {
+            VkMappedMemoryRange range{};
+            range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+            range.memory = staging.memory;
+            range.offset = 0U;
+            range.size = VK_WHOLE_SIZE;
+            result = vkInvalidateMappedMemoryRanges(context_->device, 1U, &range);
+        }
+        if (result == VK_SUCCESS) {
+            try {
+                output.resize(static_cast<std::size_t>(request.output_width) *
+                              static_cast<std::size_t>(request.output_height));
+                std::memcpy(output.data(), mapped, output_size);
+            } catch (const std::bad_alloc&) {
+                result = VK_ERROR_OUT_OF_HOST_MEMORY;
+            }
+        }
+        vkUnmapMemory(context_->device, staging.memory);
+        if (result != VK_SUCCESS) {
+            output.clear();
+            diagnostic = vk_error("Vulkan depth readback map", result);
+            diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost"
+                                                              : "depth_attachment_readback_failed";
+            return false;
+        }
+        return true;
     }
 
 private:
@@ -4111,7 +4261,8 @@ public:
                          "Presentation clear colors must contain finite values"}};
             }
         }
-        if (context_ == nullptr || swapchain_ == VK_NULL_HANDLE || command_buffer_ == VK_NULL_HANDLE) {
+        if (context_ == nullptr || swapchain_ == VK_NULL_HANDLE || command_buffer_ == VK_NULL_HANDLE ||
+            !usable_) {
             return {PresentationFrameStatus::execution_failed,
                     {"vulkan_presentation_target_invalid",
                      "The Vulkan presentation target is not initialized"}};
@@ -4153,7 +4304,11 @@ public:
         if (result != VK_SUCCESS) return failure("Vulkan presentation command recording", result);
 
         result = vkResetFences(context_->device, 1U, &frame_fence_);
-        if (result != VK_SUCCESS) return failure("vkResetFences(presentation)", result);
+        if (result != VK_SUCCESS) {
+            usable_ = false;
+            return failure("vkResetFences(presentation)", result);
+        }
+        usable_ = false;
 
         const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         VkSubmitInfo submit{};
@@ -4178,6 +4333,142 @@ public:
         const VkResult present_result = vkQueuePresentKHR(context_->queue, &present);
         const VkResult wait_result = vkWaitForFences(context_->device, 1U, &frame_fence_, VK_TRUE, UINT64_MAX);
         if (wait_result != VK_SUCCESS) return failure("vkWaitForFences(presentation completion)", wait_result);
+        usable_ = true;
+        if (present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR)
+            return {PresentationFrameStatus::ready, {}};
+        if (present_result == VK_ERROR_OUT_OF_DATE_KHR)
+            return {PresentationFrameStatus::execution_failed,
+                    {"vulkan_presentation_target_out_of_date",
+                     "The Vulkan presentation target requires swapchain recreation"}};
+        return failure("vkQueuePresentKHR", present_result);
+    }
+
+    PresentationFrameResult present_texture(VulkanTexture& source) {
+        if (context_ == nullptr || swapchain_ == VK_NULL_HANDLE || command_buffer_ == VK_NULL_HANDLE ||
+            !usable_) {
+            return {PresentationFrameStatus::execution_failed,
+                    {"vulkan_presentation_target_invalid",
+                     "The Vulkan presentation target is not initialized"}};
+        }
+        if (!source.initialized()) {
+            return {PresentationFrameStatus::invalid_request,
+                    {"presentation_texture_uninitialized",
+                     "The presentation source must be rendered or initialized before use"}};
+        }
+
+        std::lock_guard command_guard(context_->command_mutex);
+        VkResult result = vkWaitForFences(context_->device, 1U, &frame_fence_, VK_TRUE, UINT64_MAX);
+        if (result != VK_SUCCESS) return failure("vkWaitForFences(presentation texture)", result);
+        result = vkAcquireNextImageKHR(context_->device, swapchain_, UINT64_MAX,
+                                       image_available_, VK_NULL_HANDLE, &image_index_);
+        if (result == VK_ERROR_OUT_OF_DATE_KHR)
+            return {PresentationFrameStatus::execution_failed,
+                    {"vulkan_presentation_target_out_of_date",
+                     "The Vulkan presentation target requires swapchain recreation"}};
+        if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
+            return failure("vkAcquireNextImageKHR", result);
+        result = vkResetCommandBuffer(command_buffer_, 0U);
+        if (result != VK_SUCCESS) return failure("vkResetCommandBuffer(presentation texture)", result);
+
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        result = vkBeginCommandBuffer(command_buffer_, &begin);
+        const VkImageLayout source_layout = source.layout();
+        if (result == VK_SUCCESS) {
+            VkImageMemoryBarrier source_to_copy{};
+            source_to_copy.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            source_to_copy.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            source_to_copy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            source_to_copy.oldLayout = source_layout;
+            source_to_copy.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            source_to_copy.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            source_to_copy.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            source_to_copy.image = source.image();
+            source_to_copy.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            source_to_copy.subresourceRange.levelCount = 1U;
+            source_to_copy.subresourceRange.layerCount = 1U;
+
+            VkImageMemoryBarrier swapchain_to_copy{};
+            swapchain_to_copy.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            swapchain_to_copy.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            swapchain_to_copy.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            swapchain_to_copy.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            swapchain_to_copy.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            swapchain_to_copy.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            swapchain_to_copy.image = images_[image_index_];
+            swapchain_to_copy.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            swapchain_to_copy.subresourceRange.levelCount = 1U;
+            swapchain_to_copy.subresourceRange.layerCount = 1U;
+            const std::array<VkImageMemoryBarrier, 2U> before_copy = {
+                source_to_copy, swapchain_to_copy};
+            vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0U, 0U, nullptr, 0U,
+                                 nullptr, static_cast<std::uint32_t>(before_copy.size()),
+                                 before_copy.data());
+
+            VkImageCopy copy{};
+            copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            copy.srcSubresource.layerCount = 1U;
+            copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            copy.dstSubresource.layerCount = 1U;
+            copy.extent = {extent_.width, extent_.height, 1U};
+            vkCmdCopyImage(command_buffer_, source.image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           images_[image_index_], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1U, &copy);
+
+            VkImageMemoryBarrier source_from_copy = source_to_copy;
+            source_from_copy.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            source_from_copy.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            source_from_copy.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            source_from_copy.newLayout = source_layout;
+            VkImageMemoryBarrier swapchain_to_present = swapchain_to_copy;
+            swapchain_to_present.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            swapchain_to_present.dstAccessMask = 0U;
+            swapchain_to_present.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            swapchain_to_present.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            const std::array<VkImageMemoryBarrier, 2U> after_copy = {
+                source_from_copy, swapchain_to_present};
+            vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0U, 0U, nullptr, 0U,
+                                 nullptr, static_cast<std::uint32_t>(after_copy.size()),
+                                 after_copy.data());
+            result = vkEndCommandBuffer(command_buffer_);
+        }
+        if (result != VK_SUCCESS)
+            return failure("Vulkan texture presentation command recording", result);
+
+        result = vkResetFences(context_->device, 1U, &frame_fence_);
+        if (result != VK_SUCCESS) {
+            usable_ = false;
+            return failure("vkResetFences(presentation texture)", result);
+        }
+        usable_ = false;
+        const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.waitSemaphoreCount = 1U;
+        submit.pWaitSemaphores = &image_available_;
+        submit.pWaitDstStageMask = &wait_stage;
+        submit.commandBufferCount = 1U;
+        submit.pCommandBuffers = &command_buffer_;
+        submit.signalSemaphoreCount = 1U;
+        submit.pSignalSemaphores = &render_finished_;
+        result = vkQueueSubmit(context_->queue, 1U, &submit, frame_fence_);
+        if (result != VK_SUCCESS) return failure("vkQueueSubmit(presentation texture)", result);
+
+        VkPresentInfoKHR present{};
+        present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        present.waitSemaphoreCount = 1U;
+        present.pWaitSemaphores = &render_finished_;
+        present.swapchainCount = 1U;
+        present.pSwapchains = &swapchain_;
+        present.pImageIndices = &image_index_;
+        const VkResult present_result = vkQueuePresentKHR(context_->queue, &present);
+        const VkResult wait_result =
+            vkWaitForFences(context_->device, 1U, &frame_fence_, VK_TRUE, UINT64_MAX);
+        if (wait_result != VK_SUCCESS)
+            return failure("vkWaitForFences(presentation texture completion)", wait_result);
+        usable_ = true;
         if (present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR)
             return {PresentationFrameStatus::ready, {}};
         if (present_result == VK_ERROR_OUT_OF_DATE_KHR)
@@ -4214,9 +4505,11 @@ private:
             diagnostic.code = "vulkan_presentation_capabilities_failed";
             return false;
         }
-        if ((capabilities.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) == 0U) {
-            diagnostic = {"vulkan_presentation_color_attachment_unsupported",
-                          "The headless surface does not support color-attachment swapchain images"};
+        constexpr VkImageUsageFlags required_usage =
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        if ((capabilities.supportedUsageFlags & required_usage) != required_usage) {
+            diagnostic = {"vulkan_presentation_image_usage_unsupported",
+                          "The headless surface does not support color and transfer-destination swapchain images"};
             return false;
         }
 
@@ -4339,7 +4632,7 @@ private:
         swapchain_info.imageColorSpace = format.colorSpace;
         swapchain_info.imageExtent = extent;
         swapchain_info.imageArrayLayers = 1U;
-        swapchain_info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        swapchain_info.imageUsage = required_usage;
         swapchain_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         swapchain_info.preTransform = capabilities.currentTransform;
         swapchain_info.compositeAlpha = composite_alpha;
@@ -4505,6 +4798,7 @@ private:
     VkExtent2D extent_{0U, 0U};
     std::uint32_t image_index_ = 0U;
     bool valid_ = false;
+    bool usable_ = true;
 };
 
 class VulkanDevice final : public Device {
@@ -4559,6 +4853,51 @@ public:
                      "The Vulkan device received an unknown presentation target"}};
         }
         return vulkan_target->clear_and_present(clear_color);
+    }
+
+    PresentationFrameResult present_texture(
+        PresentationTarget& target, Texture& source) override {
+        if (target.backend() != Backend::Vulkan || source.backend() != Backend::Vulkan) {
+            return {PresentationFrameStatus::invalid_request,
+                    {"presentation_texture_backend_mismatch",
+                     "The presentation target and source texture must use Vulkan"}};
+        }
+        auto* vulkan_target = dynamic_cast<VulkanHeadlessPresentationTarget*>(&target);
+        auto* vulkan_source = dynamic_cast<VulkanTexture*>(&source);
+        if (vulkan_target == nullptr || vulkan_source == nullptr ||
+            vulkan_target->context().get() != context_.get() ||
+            vulkan_source->context().get() != context_.get()) {
+            return {PresentationFrameStatus::invalid_request,
+                    {"presentation_texture_device_mismatch",
+                     "The presentation target and source texture must belong to this Vulkan device"}};
+        }
+        const PresentationTargetDescription& target_description = target.info().description;
+        const TextureDescription& source_description = source.info().description;
+        if (source_description.width != target_description.width ||
+            source_description.height != target_description.height) {
+            return {PresentationFrameStatus::invalid_request,
+                    {"presentation_texture_dimensions_mismatch",
+                     "The presentation source dimensions must match the target exactly"}};
+        }
+        if (source_description.format != target_description.format) {
+            return {PresentationFrameStatus::invalid_request,
+                    {"presentation_texture_format_mismatch",
+                     "The presentation source format must match the target exactly"}};
+        }
+        if (source_description.mip_levels != 1U || source_description.array_layers != 1U ||
+            source_description.samples != 1U) {
+            return {PresentationFrameStatus::invalid_request,
+                    {"presentation_texture_shape_unsupported",
+                     "The presentation source must have one mip, one layer, and one sample"}};
+        }
+        constexpr TextureUsage required_usage =
+            TextureUsage::color_attachment | TextureUsage::transfer_source;
+        if ((source_description.usage & required_usage) != required_usage) {
+            return {PresentationFrameStatus::invalid_request,
+                    {"presentation_texture_usage_invalid",
+                     "The presentation source must support color attachment and transfer source usage"}};
+        }
+        return vulkan_target->present_texture(*vulkan_source);
     }
 
     BufferResult create_buffer(const BufferDescription& description,
@@ -4666,6 +5005,41 @@ public:
         }
         return {DepthAttachmentStatus::ready, {},
                 std::make_unique<VulkanDepthAttachment>(context_, std::move(raw), description)};
+    }
+
+    DepthAttachmentReadbackResult read_depth_attachment(
+        DepthAttachment& attachment,
+        const DepthAttachmentReadbackRequest& request) override {
+        Diagnostic diagnostic;
+        const DepthAttachmentReadbackStatus validation =
+            validate_depth_attachment_readback(attachment, request, diagnostic);
+        if (validation != DepthAttachmentReadbackStatus::ready)
+            return {validation, std::move(diagnostic), {}};
+        if (attachment.backend() != Backend::Vulkan)
+            return {DepthAttachmentReadbackStatus::unsupported,
+                    {"depth_attachment_backend_mismatch",
+                     "The Vulkan device received a depth attachment from another backend"},
+                    {}};
+        auto* vulkan_depth = dynamic_cast<VulkanDepthAttachment*>(&attachment);
+        if (vulkan_depth == nullptr)
+            return {DepthAttachmentReadbackStatus::unsupported,
+                    {"depth_attachment_type_unsupported",
+                     "The Vulkan device received an unknown depth attachment handle"},
+                    {}};
+        if (vulkan_depth->context().get() != context_.get())
+            return {DepthAttachmentReadbackStatus::unsupported,
+                    {"depth_attachment_context_mismatch",
+                     "The depth attachment belongs to another Vulkan device"},
+                    {}};
+        if (!vulkan_depth->initialized())
+            return {DepthAttachmentReadbackStatus::invalid_request,
+                    {"depth_attachment_uninitialized",
+                     "D32 depth readback requires an initialized depth attachment"},
+                    {}};
+        std::vector<float> output;
+        if (!vulkan_depth->readback(request, output, diagnostic))
+            return {DepthAttachmentReadbackStatus::execution_failed, std::move(diagnostic), {}};
+        return {DepthAttachmentReadbackStatus::ready, {}, std::move(output)};
     }
 
     TextureClearReadbackResult clear_texture_and_readback(

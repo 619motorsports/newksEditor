@@ -532,6 +532,187 @@ public:
     void set_state(D3D12_RESOURCE_STATES state) noexcept { state_ = state; }
     void set_cleared() noexcept { cleared_ = true; }
 
+    bool readback(const DepthAttachmentReadbackRequest& request,
+                  std::vector<float>& output,
+                  Diagnostic& diagnostic) {
+        if (!cleared_) {
+            diagnostic = {"depth_attachment_uninitialized",
+                          "D32 depth readback requires an initialized depth attachment"};
+            return false;
+        }
+
+        const D3D12_RESOURCE_DESC resource_description = resource_->GetDesc();
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        UINT row_count = 0U;
+        UINT64 row_size = 0U;
+        UINT64 readback_size = 0U;
+        context_->device->GetCopyableFootprints(&resource_description, 0U, 1U, 0U, &footprint,
+                                                &row_count, &row_size, &readback_size);
+        constexpr UINT64 max_size_t = static_cast<UINT64>(std::numeric_limits<std::size_t>::max());
+        const UINT64 row_bytes = static_cast<UINT64>(request.output_width) * sizeof(float);
+        bool footprint_valid = row_count >= request.output_height && row_size >= row_bytes &&
+                               footprint.Footprint.RowPitch >= row_bytes &&
+                               footprint.Offset <= max_size_t &&
+                               footprint.Footprint.RowPitch <= max_size_t &&
+                               readback_size <= max_texture_readback_bytes &&
+                               readback_size <= max_size_t;
+        if (footprint_valid) {
+            const UINT64 rows_before_last = static_cast<UINT64>(request.output_height - 1U);
+            if (rows_before_last > (std::numeric_limits<UINT64>::max() - footprint.Offset) /
+                                       footprint.Footprint.RowPitch) {
+                footprint_valid = false;
+            } else {
+                const UINT64 last_row = footprint.Offset +
+                                         rows_before_last * footprint.Footprint.RowPitch;
+                footprint_valid = row_bytes <= std::numeric_limits<UINT64>::max() - last_row &&
+                                  last_row + row_bytes <= readback_size;
+            }
+        }
+        if (!footprint_valid) {
+            diagnostic = {"depth_attachment_readback_footprint_invalid",
+                          "D3D12 D32 depth readback footprint exceeds the bounded output"};
+            return false;
+        }
+
+        D3D12_HEAP_PROPERTIES readback_heap{};
+        readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC readback_description{};
+        readback_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        readback_description.Width = readback_size;
+        readback_description.Height = 1U;
+        readback_description.DepthOrArraySize = 1U;
+        readback_description.MipLevels = 1U;
+        readback_description.SampleDesc.Count = 1U;
+        readback_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12Resource> readback_resource;
+        HRESULT result = context_->device->CreateCommittedResource(
+            &readback_heap, D3D12_HEAP_FLAG_NONE, &readback_description,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback_resource));
+        if (FAILED(result)) {
+            diagnostic = hresult_error("ID3D12Device::CreateCommittedResource(depth readback)", result);
+            diagnostic.code = "depth_attachment_readback_failed";
+            return false;
+        }
+
+        ComPtr<ID3D12CommandAllocator> allocator;
+        result = context_->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                            IID_PPV_ARGS(&allocator));
+        if (FAILED(result)) {
+            diagnostic = hresult_error("ID3D12Device::CreateCommandAllocator(depth readback)", result);
+            diagnostic.code = "depth_attachment_readback_failed";
+            return false;
+        }
+        ComPtr<ID3D12GraphicsCommandList> list;
+        result = context_->device->CreateCommandList(0U, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                       allocator.Get(), nullptr,
+                                                       IID_PPV_ARGS(&list));
+        if (FAILED(result)) {
+            diagnostic = hresult_error("ID3D12Device::CreateCommandList(depth readback)", result);
+            diagnostic.code = "depth_attachment_readback_failed";
+            return false;
+        }
+        const D3D12_RESOURCE_STATES final_state = state_;
+        if (state_ != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+            D3D12_RESOURCE_BARRIER barrier{};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition.pResource = resource_.Get();
+            barrier.Transition.StateBefore = state_;
+            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            list->ResourceBarrier(1U, &barrier);
+        }
+        D3D12_TEXTURE_COPY_LOCATION source{};
+        source.pResource = resource_.Get();
+        source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        source.SubresourceIndex = 0U;
+        D3D12_TEXTURE_COPY_LOCATION target{};
+        target.pResource = readback_resource.Get();
+        target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        target.PlacedFootprint = footprint;
+        list->CopyTextureRegion(&target, 0U, 0U, 0U, &source, nullptr);
+        if (final_state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+            D3D12_RESOURCE_BARRIER barrier{};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition.pResource = resource_.Get();
+            barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            barrier.Transition.StateAfter = final_state;
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            list->ResourceBarrier(1U, &barrier);
+        }
+        result = list->Close();
+        if (FAILED(result)) {
+            diagnostic = hresult_error("ID3D12GraphicsCommandList::Close(depth readback)", result);
+            diagnostic.code = "depth_attachment_readback_failed";
+            return false;
+        }
+        ComPtr<ID3D12Fence> fence;
+        result = context_->device->CreateFence(0U, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
+        if (FAILED(result)) {
+            diagnostic = hresult_error("ID3D12Device::CreateFence(depth readback)", result);
+            diagnostic.code = "depth_attachment_readback_failed";
+            return false;
+        }
+        HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (!event) {
+            diagnostic = {"depth_attachment_readback_failed",
+                          "CreateEventW failed while waiting for a D3D12 depth readback"};
+            return false;
+        }
+        ID3D12CommandList* command_lists[] = {list.Get()};
+        context_->queue->ExecuteCommandLists(1U, command_lists);
+        constexpr UINT64 fence_value = 1U;
+        result = context_->queue->Signal(fence.Get(), fence_value);
+        if (SUCCEEDED(result) && fence->GetCompletedValue() < fence_value)
+            result = fence->SetEventOnCompletion(fence_value, event);
+        if (SUCCEEDED(result) && fence->GetCompletedValue() < fence_value) {
+            const DWORD wait_result = WaitForSingleObject(event, INFINITE);
+            if (wait_result != WAIT_OBJECT_0) result = E_FAIL;
+        }
+        CloseHandle(event);
+        if (FAILED(result)) {
+            const bool drained = context_->wait_idle();
+            state_ = drained ? final_state : D3D12_RESOURCE_STATE_COMMON;
+            diagnostic = hresult_error("D3D12 depth readback fence", result);
+            diagnostic.code = (result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET)
+                                  ? "d3d12_device_removed"
+                                  : "depth_attachment_readback_failed";
+            return false;
+        }
+        state_ = final_state;
+
+        void* mapped = nullptr;
+        D3D12_RANGE read_range{0U, static_cast<SIZE_T>(readback_size)};
+        result = readback_resource->Map(0U, &read_range, &mapped);
+        if (FAILED(result)) {
+            diagnostic = hresult_error("ID3D12Resource::Map(depth readback)", result);
+            diagnostic.code = (result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET)
+                                  ? "d3d12_device_removed"
+                                  : "depth_attachment_readback_failed";
+            return false;
+        }
+        try {
+            output.resize(static_cast<std::size_t>(request.output_width) *
+                          static_cast<std::size_t>(request.output_height));
+            const auto* source_bytes = static_cast<const std::byte*>(mapped) + footprint.Offset;
+            for (std::uint32_t row = 0U; row < request.output_height; ++row) {
+                std::memcpy(output.data() + static_cast<std::size_t>(row) * request.output_width,
+                            source_bytes + static_cast<std::size_t>(row) *
+                                               footprint.Footprint.RowPitch,
+                            static_cast<std::size_t>(row_bytes));
+            }
+        } catch (const std::bad_alloc&) {
+            result = E_OUTOFMEMORY;
+        }
+        readback_resource->Unmap(0U, nullptr);
+        if (FAILED(result)) {
+            output.clear();
+            diagnostic = hresult_error("D3D12 depth readback allocation", result);
+            diagnostic.code = "depth_attachment_readback_failed";
+            return false;
+        }
+        return true;
+    }
+
 private:
     std::shared_ptr<D3D12Context> context_;
     ComPtr<ID3D12Resource> resource_;
@@ -4153,6 +4334,41 @@ public:
                 std::make_unique<D3D12DepthAttachment>(context_, std::move(resource), std::move(dsv_heap),
                                                         description, D3D12_RESOURCE_STATE_DEPTH_WRITE,
                                                         write_dsv, read_dsv)};
+    }
+
+    DepthAttachmentReadbackResult read_depth_attachment(
+        DepthAttachment& attachment,
+        const DepthAttachmentReadbackRequest& request) override {
+        Diagnostic diagnostic;
+        const DepthAttachmentReadbackStatus validation =
+            validate_depth_attachment_readback(attachment, request, diagnostic);
+        if (validation != DepthAttachmentReadbackStatus::ready)
+            return {validation, std::move(diagnostic), {}};
+        if (attachment.backend() != Backend::D3D12)
+            return {DepthAttachmentReadbackStatus::unsupported,
+                    {"depth_attachment_backend_mismatch",
+                     "The D3D12 device received a depth attachment from another backend"},
+                    {}};
+        auto* d3d_depth = dynamic_cast<D3D12DepthAttachment*>(&attachment);
+        if (d3d_depth == nullptr)
+            return {DepthAttachmentReadbackStatus::unsupported,
+                    {"depth_attachment_type_unsupported",
+                     "The D3D12 device received an unknown depth attachment handle"},
+                    {}};
+        if (d3d_depth->context() != context_.get())
+            return {DepthAttachmentReadbackStatus::unsupported,
+                    {"depth_attachment_context_mismatch",
+                     "The depth attachment belongs to another D3D12 device"},
+                    {}};
+        if (!d3d_depth->cleared())
+            return {DepthAttachmentReadbackStatus::invalid_request,
+                    {"depth_attachment_uninitialized",
+                     "D32 depth readback requires an initialized depth attachment"},
+                    {}};
+        std::vector<float> output;
+        if (!d3d_depth->readback(request, output, diagnostic))
+            return {DepthAttachmentReadbackStatus::execution_failed, std::move(diagnostic), {}};
+        return {DepthAttachmentReadbackStatus::ready, {}, std::move(output)};
     }
 
     TextureResult create_texture(const TextureDescription& description,

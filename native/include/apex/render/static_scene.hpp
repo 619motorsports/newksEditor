@@ -151,6 +151,9 @@ private:
         std::uint32_t maps = invalid_draw_texture_index;
         std::uint32_t detail = invalid_draw_texture_index;
         std::uint32_t normal_detail = invalid_draw_texture_index;
+        // txDust uses the same portable binding pair as detail, but only for
+        // the mutually exclusive damage-dust layout.
+        std::uint32_t dust = invalid_draw_texture_index;
         std::uint32_t damage = invalid_draw_texture_index;
         std::uint32_t damage_mask = invalid_draw_texture_index;
     };

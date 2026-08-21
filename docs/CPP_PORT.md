@@ -92,7 +92,9 @@ remains unchanged and feature-complete.
   devices, buffers, 2D textures, samplers, and shader modules. Both backends
   report presentation prerequisites through the neutral API. An optional
   Vulkan mode creates a headless surface and swapchain. It acquires, clears,
-  submits, and presents swapchain images. D3D12 reports the DXGI factory,
+  submits, and presents swapchain images. It also presents a completed,
+  same-format offscreen color attachment through a backend-neutral API.
+  D3D12 reports the DXGI factory,
   device, and queue prerequisite. D3D12 still requires a native-window seam
   before it can create a swapchain.
   Both backends implement bounded synchronous RGBA8/BGRA8 texture
@@ -108,7 +110,9 @@ remains unchanged and feature-complete.
   constants at `b0`. Backend-specific camera frames make the clip-space
   conversion explicit. Both backends create persistent 1x or 4x D32
   attachments. Explicit load and clear controls retain color and depth across
-  indexed draws. The executable main-pass subset uses the source-evidenced
+  indexed draws. Both backends read initialized, single-sample D32 attachments
+  through a bounded synchronous API. This readback is execution evidence. It
+  is not a sampled shadow-map or receiver path. The executable main-pass subset uses the source-evidenced
   `LESS` depth comparison. It also executes explicitly blended packets. The
   ordinary alpha, multiply, and transparent-as-black factors match
   `applyItemRenderState` in `public/app.js`. The indexed path supports 4x
@@ -211,12 +215,15 @@ remains unchanged and feature-complete.
   `txDamage` at 12/13 and `txDamageMask` at 14/15. The handoff rejects nonzero
   dirt. A low-level ABI binds `txDust` at the mutually exclusive bindings 8/9.
   Pixel tests prove that its alpha changes direct diffuse and specular light.
-  The stock material handoff does not yet select this ABI. It also rejects
+  The stock material handoff selects this ABI for exact six-resource damage
+  packets. The caller must label the matching module set as `damage_dust`.
+  Legacy five-resource damage packets retain the 12-resource ABI.
+  The handoff also rejects
   active detail, sun-specular, Fresnel, and reflection branches. The
   stock-scene facade can resolve this F4 state before allocation.
   It merges node activity and the complete material table into the handoff.
   A real backend test executes broken and intact F4 states through this facade.
-  The test also executes the recovered normal-alpha attenuation.
+  The test executes `txDust` alpha and the recovered normal-alpha attenuation.
   The caller must still resolve surface overlays. A
   bounded workspace adapter maps metadata to merged scene roots. It attaches
   file and auxiliary labels without partial mutation. A bounded resolver implements
@@ -342,7 +349,8 @@ remains unchanged and feature-complete.
   stable draw ordering, CSP mesh state, and packet validation for a
   pre-resolved snapshot.
   It does not execute stock KN5 shader containers. Vulkan can create a
-  headless surface and swapchain. The port does not create native windows or
+  headless surface and swapchain. Vulkan can present a completed offscreen
+  color attachment with the same size and format. The port does not create native windows or
   D3D12 swapchains. It does not provide full golden-image parity.
 
 The production WebGL material gate uses the synthetic `BC7_PLANE` scene. The

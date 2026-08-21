@@ -19,10 +19,18 @@ enum class StockMaterialShaderKeyKind : std::uint8_t {
     shader_family,
 };
 
+enum class StockMaterialShaderVariant : std::uint8_t {
+    standard,
+    damage_dust,
+};
+
 struct StockMaterialShaderModules {
     StockMaterialShaderKeyKind key_kind = StockMaterialShaderKeyKind::shader_family;
     std::string key;
     std::span<const PipelineShaderModule> modules{};
+    // The label is part of the executable shader contract. A packet that
+    // binds txDust must not silently use bytecode that omits txDust.
+    StockMaterialShaderVariant variant = StockMaterialShaderVariant::standard;
 };
 
 struct StockMaterialExecutionLimits {

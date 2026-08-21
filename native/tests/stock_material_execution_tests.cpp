@@ -184,6 +184,9 @@ Fixture fixture(std::string shader) {
 
 Fixture damage_fixture(float dirt = 0.0F, bool include_dust = true) {
     Fixture result = fixture("ksPerPixelMultiMap_damage_dirt");
+    result.module_set.variant = include_dust
+                                    ? StockMaterialShaderVariant::damage_dust
+                                    : StockMaterialShaderVariant::standard;
     auto& material = result.model.materials.front();
     material.properties.push_back(
         {"damageZones", 0.0F, {}, {}, {1.0F, 0.5F, 0.25F, 0.0F}});
@@ -245,7 +248,7 @@ void test_success_and_a2c() {
     const auto damage_result =
         prepare_stock_material_execution(device, request_for(damage));
     require(damage_result.ok() && damage_result.resources->draw_count() == 1U,
-            "dirt-zero damage handoff accepts the exact five textures and optional txDust");
+            "dirt-zero damage handoff accepts six textures including txDust");
     bool found_damage_constants = false;
     for (const std::vector<std::byte>& bytes : device.initial_buffers) {
         if (bytes.size() < sizeof(KsPerPixelMaterialConstants)) continue;
@@ -257,6 +260,48 @@ void test_success_and_a2c() {
     }
     require(found_damage_constants,
             "dirt-zero damage handoff uploads the authored damageZones record");
+
+    Fixture no_dust = damage_fixture(0.0F, false);
+    const auto no_dust_result =
+        prepare_stock_material_execution(device, request_for(no_dust));
+    require(no_dust_result.ok(),
+            "dirt-zero damage without txDust retains the legacy 12-resource path");
+
+    Fixture missing_packet_dust = damage_fixture();
+    missing_packet_dust.packets.front().resources.pop_back();
+    const auto missing_packet_dust_result =
+        prepare_stock_material_execution(device, request_for(missing_packet_dust));
+    require(missing_packet_dust_result.status == StaticSceneResourceStatus::invalid_request &&
+                missing_packet_dust_result.diagnostic.code == "stock_material_resource_layout_mismatch",
+            "a packet cannot silently drop material txDust");
+
+    Fixture missing_dust_shader_variant = damage_fixture();
+    missing_dust_shader_variant.module_set.variant =
+        StockMaterialShaderVariant::standard;
+    const auto missing_dust_shader_variant_result = prepare_stock_material_execution(
+        device, request_for(missing_dust_shader_variant));
+    require(missing_dust_shader_variant_result.status ==
+                    StaticSceneResourceStatus::unsupported &&
+                missing_dust_shader_variant_result.diagnostic.code ==
+                    "stock_material_shader_variant_missing",
+            "txDust packets reject shader modules without the damage-dust label");
+
+    Fixture wrong_optional_role = damage_fixture();
+    wrong_optional_role.packets.front().resources.back().slot = "txDetail";
+    const auto wrong_optional_role_result =
+        prepare_stock_material_execution(device, request_for(wrong_optional_role));
+    require(wrong_optional_role_result.status == StaticSceneResourceStatus::invalid_request &&
+                wrong_optional_role_result.diagnostic.code == "stock_material_resource_unsupported",
+            "damage dust slot cannot be replaced by generic detail");
+
+    Fixture duplicate_dust = damage_fixture();
+    duplicate_dust.packets.front().resources.back().slot = "txDust";
+    duplicate_dust.packets.front().resources[3].slot = "txDust";
+    const auto duplicate_dust_result =
+        prepare_stock_material_execution(device, request_for(duplicate_dust));
+    require(duplicate_dust_result.status == StaticSceneResourceStatus::invalid_request &&
+                duplicate_dust_result.diagnostic.code == "stock_material_resource_duplicate",
+            "duplicate damage dust slots are rejected before pipeline creation");
 
     Fixture dirty_damage = damage_fixture(0.25F);
     const auto dirty_damage_result =

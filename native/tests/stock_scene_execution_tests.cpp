@@ -166,10 +166,11 @@ Fixture damage_fixture() {
         {"txMaps", 2U, "maps"},
         {"txDamage", 4U, "damage"},
         {"txDamageMask", 21U, "damage_mask"},
+        {"txDust", 5U, "dust"},
     };
     result.model.textures.clear();
     for (const std::string name : {"diffuse", "normal", "maps", "damage",
-                                   "damage_mask"})
+                                   "damage_mask", "dust"})
         result.model.textures.push_back({true, name, 4U, {}, std::nullopt});
     result.model.root.children.front().name = "DAMAGE_GLASS_FRONT_1";
     result.model.root.children.front().active = false;
@@ -177,6 +178,7 @@ Fixture damage_fixture() {
     result.scene.nodes[1U].active = false;
     result.scene.materials.front().shader = material.shader;
     result.module_set.key = material.shader;
+    result.module_set.variant = StockMaterialShaderVariant::damage_dust;
     return result;
 }
 

@@ -9,6 +9,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <tuple>
 #include <utility>
 
 namespace apex::render {
@@ -64,11 +65,12 @@ namespace {
 
 [[nodiscard]] const StockMaterialShaderModules* find_modules(
     std::span<const StockMaterialShaderModules> sets, std::string_view material,
-    std::string_view shader) {
+    std::string_view shader, StockMaterialShaderVariant variant) {
     const std::string material_key = canonical(material);
     const std::string shader_key = canonical(shader);
     const StockMaterialShaderModules* family = nullptr;
     for (const StockMaterialShaderModules& set : sets) {
+        if (set.variant != variant) continue;
         if (canonical(set.key) == material_key &&
             set.key_kind == StockMaterialShaderKeyKind::material_name)
             return &set;
@@ -79,7 +81,8 @@ namespace {
     return family;
 }
 
-[[nodiscard]] std::vector<PipelineResourceBinding> resources_for(std::string_view shader) {
+[[nodiscard]] std::vector<PipelineResourceBinding> resources_for(
+    std::string_view shader, bool include_damage_dust = false) {
     const std::string key = canonical(shader);
     std::vector<PipelineResourceBinding> resources;
     const auto add = [&](PipelineResourceKind kind, std::uint32_t binding,
@@ -114,6 +117,10 @@ namespace {
         add(PipelineResourceKind::sampler, 5U, "txNormalSampler");
         add(PipelineResourceKind::sampled_texture, 6U, "txMaps");
         add(PipelineResourceKind::sampler, 7U, "txMapsSampler");
+        if (include_damage_dust) {
+            add(PipelineResourceKind::sampled_texture, 8U, "txDust");
+            add(PipelineResourceKind::sampler, 9U, "txDustSampler");
+        }
         add(PipelineResourceKind::sampled_texture, 12U, "txDamage");
         add(PipelineResourceKind::sampler, 13U, "txDamageSampler");
         add(PipelineResourceKind::sampled_texture, 14U, "txDamageMask");
@@ -137,15 +144,23 @@ bool validate_module_sets(std::span<const StockMaterialShaderModules> sets,
         diagnostic = diag("stock_material_shader_set_limit", "Shader module set count exceeds the configured limit");
         return false;
     }
-    std::set<std::pair<int, std::string>> keys;
+    std::set<std::tuple<int, std::string, int>> keys;
     const PipelineShaderFormat expected = backend_shader_format(backend);
     for (const StockMaterialShaderModules& set : sets) {
         if (set.key.empty() || set.key.size() > limits.max_shader_key_bytes) {
             diagnostic = diag("stock_material_shader_key_invalid", "Shader module key is empty or exceeds the configured limit");
             return false;
         }
-        if (!keys.insert({static_cast<int>(set.key_kind), canonical(set.key)}).second) {
+        if (!keys.insert({static_cast<int>(set.key_kind), canonical(set.key),
+                          static_cast<int>(set.variant)}).second) {
             diagnostic = diag("stock_material_shader_key_duplicate", "Shader module keys must be unique");
+            return false;
+        }
+        if (set.variant == StockMaterialShaderVariant::damage_dust &&
+            set.key_kind == StockMaterialShaderKeyKind::shader_family &&
+            canonical(set.key) != "ksperpixelmultimap_damage_dirt") {
+            diagnostic = diag("stock_material_shader_variant_invalid",
+                              "The damage-dust shader variant requires the damage-dirt shader family");
             return false;
         }
         if (set.modules.size() != 2U) {
@@ -204,10 +219,12 @@ bool validate_module_sets(std::span<const StockMaterialShaderModules> sets,
             diagnostic = diag("stock_material_resource_duplicate", "Draw packet resource slots must be unique");
             return false;
         }
-        if (key != "txdiffuse" && key != "txnormal" && key != "txmaps" &&
-            key != "txdetail" && key != "txnormaldetail" && key != "txdetailnm" &&
-            (!damage || (key != "txdamage" && key != "txdamagemask" &&
-                         key != "txdust"))) {
+        const bool allowed = damage
+                                 ? key == "txdiffuse" || key == "txnormal" || key == "txmaps" ||
+                                       key == "txdamage" || key == "txdamagemask" || key == "txdust"
+                                 : key == "txdiffuse" || key == "txnormal" || key == "txmaps" ||
+                                       key == "txdetail" || key == "txnormaldetail" || key == "txdetailnm";
+        if (!allowed) {
             diagnostic = diag("stock_material_resource_unsupported", "Draw packet contains a resource outside the supported stock family");
             return false;
         }
@@ -222,7 +239,13 @@ bool validate_module_sets(std::span<const StockMaterialShaderModules> sets,
     const bool missing_damage = damage &&
                                 (seen.count("txdamage") == 0U ||
                                  seen.count("txdamagemask") == 0U);
-    if (missing_diffuse || missing_normal || missing_maps || missing_detail || missing_damage) {
+    const bool dust_count_mismatch = damage &&
+                                     ((packet.resources.size() == expected + 1U &&
+                                       seen.count("txdust") == 0U) ||
+                                      (packet.resources.size() == expected &&
+                                       seen.count("txdust") != 0U));
+    if (missing_diffuse || missing_normal || missing_maps || missing_detail || missing_damage ||
+        dust_count_mismatch) {
         diagnostic = diag("stock_material_resources_incomplete", "Draw packet is missing a required stock texture role");
         return false;
     }
@@ -494,12 +517,6 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                             "The bounded material constant resolver produced non-finite values");
             constants[material_index] = resolved.constants;
 
-            const StockMaterialShaderModules* modules = find_modules(
-                request.shader_modules, source.name, binding.shader);
-            if (modules == nullptr)
-                return fail(StaticSceneResourceStatus::unsupported,
-                            "stock_material_shader_module_missing", "No caller-supplied executable shader modules match the material or shader family");
-
             if (source.serializedBlendMode > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
                 source.depthMode > static_cast<std::uint32_t>(std::numeric_limits<int>::max()))
                 return fail(StaticSceneResourceStatus::invalid_request,
@@ -523,11 +540,45 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                     profile_override.is_transparent = packet.flags.transparent;
                 const bool desired_transparent = *profile_override.is_transparent;
                 const std::size_t state_index = desired_transparent ? 1U : 0U;
+                const bool damage_dirt_shader =
+                    canonical(binding.shader) == "ksperpixelmultimap_damage_dirt";
+                const bool packet_has_dust = std::any_of(
+                    packet.resources.begin(), packet.resources.end(), [](const DrawResourceSlot& resource) {
+                        return canonical(resource.slot) == "txdust";
+                    });
+                const bool material_has_dust =
+                    binding.textures.find("txdust") != binding.textures.end();
+                if (damage_dirt_shader && packet_has_dust != material_has_dust)
+                    return fail(StaticSceneResourceStatus::invalid_request,
+                                "stock_material_resource_layout_mismatch",
+                                "The damage packet resource set must match the material txDust declaration");
+                const StockMaterialShaderVariant shader_variant =
+                    damage_dirt_shader && packet_has_dust
+                        ? StockMaterialShaderVariant::damage_dust
+                        : StockMaterialShaderVariant::standard;
+                const StockMaterialShaderModules* modules = find_modules(
+                    request.shader_modules, source.name, binding.shader, shader_variant);
+                if (modules == nullptr)
+                    return fail(
+                        StaticSceneResourceStatus::unsupported,
+                        shader_variant == StockMaterialShaderVariant::damage_dust
+                            ? "stock_material_shader_variant_missing"
+                            : "stock_material_shader_module_missing",
+                        shader_variant == StockMaterialShaderVariant::damage_dust
+                            ? "The txDust packet requires caller-supplied damage-dust shader modules"
+                            : "No caller-supplied executable shader modules match the material or shader family");
                 const apex::scene::SceneNode* packet_node = request.scene->find_node(packet.node);
                 if (pipeline_indices[material_index][state_index] !=
                     std::numeric_limits<std::size_t>::max()) {
                     const std::size_t pipeline_index =
                         pipeline_indices[material_index][state_index];
+                    const bool pipeline_has_dust =
+                        classify_indexed_portable_resource_layout(pipelines[pipeline_index]) ==
+                        IndexedPortableResourceLayout::diffuse_normal_maps_damage_dust_with_constants_and_frame;
+                    if (pipeline_has_dust != (damage_dirt_shader && packet_has_dust))
+                        return fail(StaticSceneResourceStatus::invalid_request,
+                                    "stock_material_resource_layout_mismatch",
+                                    "Packets sharing one stock material state must agree on txDust presence");
                     pipeline_ptrs[packet_index] = &pipelines[pipeline_index];
                     const MaterialRenderProfile& profile = pipeline_profiles[pipeline_index];
                     packet.material_profile = profile;
@@ -544,7 +595,8 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                 pipeline_request.override_values = &profile_override;
                 pipeline_request.shaders.assign(modules->modules.begin(), modules->modules.end());
                 pipeline_request.targets = request.targets;
-                pipeline_request.resources = resources_for(binding.shader);
+                pipeline_request.resources = resources_for(binding.shader,
+                                                           damage_dirt_shader && packet_has_dust);
                 pipeline_request.wireframe = request.wireframe;
                 StockPipelineResult built =
                     build_stock_pipeline(pipeline_request, request.limits.scene.pipeline);

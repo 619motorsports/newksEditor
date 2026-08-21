@@ -505,6 +505,60 @@ DepthAttachmentStatus validate_depth_attachment_description(
     return DepthAttachmentStatus::ready;
 }
 
+DepthAttachmentReadbackStatus validate_depth_attachment_readback(
+    const DepthAttachment& attachment,
+    const DepthAttachmentReadbackRequest& request,
+    Diagnostic& diagnostic) {
+    const DepthAttachmentDescription& description = attachment.info().description;
+    Diagnostic description_diagnostic;
+    const DepthAttachmentStatus description_status =
+        validate_depth_attachment_description(description, description_diagnostic);
+    if (description_status != DepthAttachmentStatus::ready) {
+        diagnostic = {description_diagnostic.code.empty() ? "depth_attachment_invalid"
+                                                            : description_diagnostic.code,
+                      description_diagnostic.message};
+        return description_status == DepthAttachmentStatus::unsupported
+                   ? DepthAttachmentReadbackStatus::unsupported
+                   : DepthAttachmentReadbackStatus::invalid_request;
+    }
+    if (description.samples != 1U) {
+        diagnostic = {"depth_attachment_readback_multisample_unsupported",
+                      "D32 depth readback supports only single-sample attachments"};
+        return DepthAttachmentReadbackStatus::unsupported;
+    }
+    if (request.output_width != description.width || request.output_height != description.height) {
+        diagnostic = {"depth_attachment_readback_dimensions_mismatch",
+                      "D32 depth readback dimensions must match the attachment exactly"};
+        return DepthAttachmentReadbackStatus::invalid_request;
+    }
+    const std::uint64_t width = request.output_width;
+    const std::uint64_t height = request.output_height;
+    if (height != 0U && width > std::numeric_limits<std::uint64_t>::max() / height) {
+        diagnostic = {"depth_attachment_readback_size_overflow",
+                      "D32 depth readback dimensions overflow byte arithmetic"};
+        return DepthAttachmentReadbackStatus::invalid_request;
+    }
+    const std::uint64_t texels = width * height;
+    if (texels > std::numeric_limits<std::uint64_t>::max() / sizeof(float)) {
+        diagnostic = {"depth_attachment_readback_size_overflow",
+                      "D32 depth readback byte size overflows byte arithmetic"};
+        return DepthAttachmentReadbackStatus::invalid_request;
+    }
+    const std::uint64_t bytes = texels * sizeof(float);
+    if (bytes > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        diagnostic = {"depth_attachment_readback_size_platform_limit",
+                      "D32 depth readback cannot be represented by this platform"};
+        return DepthAttachmentReadbackStatus::invalid_request;
+    }
+    if (bytes > max_texture_readback_bytes) {
+        diagnostic = {"depth_attachment_readback_size_limit",
+                      "D32 depth readback exceeds the backend-neutral output limit"};
+        return DepthAttachmentReadbackStatus::invalid_request;
+    }
+    diagnostic = {};
+    return DepthAttachmentReadbackStatus::ready;
+}
+
 TextureReadbackStatus validate_texture_clear_readback(
     const Texture& texture, const TextureClearReadbackRequest& request, Diagnostic& diagnostic) {
     const TextureDescription& description = texture.info().description;
@@ -2166,6 +2220,21 @@ const char* depth_attachment_status_name(DepthAttachmentStatus status) noexcept 
         return "unsupported";
     case DepthAttachmentStatus::allocation_failed:
         return "allocation_failed";
+    }
+    return "unknown";
+}
+
+const char* depth_attachment_readback_status_name(
+    DepthAttachmentReadbackStatus status) noexcept {
+    switch (status) {
+    case DepthAttachmentReadbackStatus::ready:
+        return "ready";
+    case DepthAttachmentReadbackStatus::invalid_request:
+        return "invalid_request";
+    case DepthAttachmentReadbackStatus::unsupported:
+        return "unsupported";
+    case DepthAttachmentReadbackStatus::execution_failed:
+        return "execution_failed";
     }
     return "unknown";
 }

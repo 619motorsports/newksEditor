@@ -36,14 +36,16 @@ the `perspective`, `lookAt`, and `multiply` formulas from `public/app.js`.
 It defines the Vulkan and D3D12 clip-space conversions separately. Its
 backend-neutral contract supports headless Vulkan and Windows D3D12. Both
 backends implement devices, buffers, 2D textures, samplers, shader modules,
-and clear/readback operations. Portable validation protects the desktop
+and bounded color and D32 readback. Portable validation protects the desktop
 boundary. Backend API types stay inside `src/render`. Format and authoring
 libraries do not depend on a graphics API.
 
 The device API reports presentation prerequisites without creating a window.
 An optional Vulkan mode creates a `VK_EXT_headless_surface` surface and a
 swapchain. It can acquire, clear, submit, and present an image. The target owns
-its image views, framebuffers, commands, and synchronization objects. D3D12
+its image views, framebuffers, commands, and synchronization objects. It can
+also copy a completed, same-format color attachment into a swapchain image.
+D3D12
 reports its DXGI factory, device, and queue prerequisites. D3D12 does not create
 a swapchain because the application does not yet supply a native window handle.
 
@@ -134,9 +136,10 @@ It adds `txDamage` at bindings 12 and 13. It adds `txDamageMask` at bindings
 14 and 15. A low-level extension binds `txDust` at the mutually exclusive
 bindings 8 and 9. Vulkan and D3D12 use its alpha for direct diffuse and
 specular light. Pixel tests cover alpha values of zero and one. The stock
-material handoff still validates `txDust` without binding this extension.
-Thus, stock-facade `txDust` execution remains staged. Stock detail,
-sun-specular, Fresnel, and reflection also remain staged.
+material handoff selects this extension for six-resource damage packets. It
+requires the caller to label the matching shader module set as `damage_dust`.
+It retains the 12-resource path for legacy packets without `txDust`. Stock detail,
+sun-specular, Fresnel, and reflection remain staged.
 The serialized KN5 resource ID remains a shader bind point, not a
 texture-table index. A bounded static-scene adapter maps the final KN5 tree to
 dense scene IDs. It validates all packets and pipelines before buffer creation.
@@ -150,8 +153,9 @@ depth samples. A bounded material handoff derives the supported resource
 layouts, constants, and profile state from KN5 materials. The caller must
 supply explicit SPIR-V or DXIL modules. Production packets remain marked as
 staged. The handoff does not translate stock shader containers. Vulkan can
-create a headless surface and swapchain. Native window surfaces, D3D12
-swapchains, and complete stock execution remain roadmap work.
+create a headless surface and swapchain. It can present a completed offscreen
+color attachment with the same size and format. Native window surfaces,
+D3D12 swapchains, and complete stock execution remain roadmap work.
 A bounded stock-scene facade composes the render plan, draw packets, material
 handoff, and static-scene preparation. It uses linear topology preflight and
 rejects malformed edges, cycles, and over-budget plans before backend
@@ -161,8 +165,8 @@ real SwiftShader test executes the complete facade through
 pixel readback. A second test executes the three-texture MultiMap facade and
 checks the `maps.r` and `maps.g` result. It also executes the AT family on a
 4x target and checks partial resolved coverage. An F4 facade test executes
-broken and intact states with five embedded textures. It also checks the
-recovered normal-alpha attenuation. The same tests run through D3D12/WARP in
+broken and intact states with six embedded textures. It checks `txDust` alpha
+and the recovered normal-alpha attenuation. The same tests run through D3D12/WARP in
 CI. The input snapshot must contain resolved workspace and CSP state. A
 bounded workspace adapter
 maps files to merged scene roots in source order. It attaches file and
