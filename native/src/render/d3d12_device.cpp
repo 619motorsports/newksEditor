@@ -815,6 +815,317 @@ bool clear_texture_readback(const std::shared_ptr<D3D12Context>& context,
     return true;
 }
 
+DXGI_FORMAT d3d12_pipeline_vertex_format(PipelineVertexAttributeFormat format) noexcept {
+    switch (format) {
+    case PipelineVertexAttributeFormat::float32: return DXGI_FORMAT_R32_FLOAT;
+    case PipelineVertexAttributeFormat::float32x2: return DXGI_FORMAT_R32G32_FLOAT;
+    case PipelineVertexAttributeFormat::float32x3: return DXGI_FORMAT_R32G32B32_FLOAT;
+    case PipelineVertexAttributeFormat::float32x4: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+    case PipelineVertexAttributeFormat::uint32x4: return DXGI_FORMAT_R32G32B32A32_UINT;
+    }
+    return DXGI_FORMAT_UNKNOWN;
+}
+
+const char* d3d12_pipeline_semantic(PipelineVertexSemantic semantic) noexcept {
+    switch (semantic) {
+    case PipelineVertexSemantic::position: return "POSITION";
+    case PipelineVertexSemantic::normal: return "NORMAL";
+    case PipelineVertexSemantic::texcoord0: return "TEXCOORD";
+    case PipelineVertexSemantic::texcoord1: return "TEXCOORD";
+    case PipelineVertexSemantic::tangent: return "TANGENT";
+    case PipelineVertexSemantic::color: return "COLOR";
+    case PipelineVertexSemantic::bone_weights: return "BLENDWEIGHT";
+    case PipelineVertexSemantic::bone_indices: return "BLENDINDICES";
+    }
+    return "POSITION";
+}
+
+bool draw_triangle_and_readback(const std::shared_ptr<D3D12Context>& context,
+                                ID3D12Resource* destination,
+                                const TextureDescription& description,
+                                const TriangleDrawRequest& request,
+                                D3D12_RESOURCE_STATES& destination_state,
+                                std::vector<std::byte>& output,
+                                Diagnostic& diagnostic) {
+    const auto& shaders = request.pipeline->shaders;
+    const PipelineShaderModule* vertex_shader = nullptr;
+    const PipelineShaderModule* fragment_shader = nullptr;
+    for (const PipelineShaderModule& shader : shaders) {
+        if (shader.format != PipelineShaderFormat::dxil) {
+            diagnostic = {"triangle_shader_format_unsupported", "D3D12 triangle execution requires DXIL/DXBC shaders"};
+            return false;
+        }
+        if (shader.stage == PipelineShaderStage::vertex) vertex_shader = &shader;
+        if (shader.stage == PipelineShaderStage::fragment) fragment_shader = &shader;
+    }
+    if (vertex_shader == nullptr || fragment_shader == nullptr) {
+        diagnostic = {"triangle_shader_pair_invalid", "D3D12 triangle execution requires vertex and fragment shaders"};
+        return false;
+    }
+    D3D12_HEAP_PROPERTIES upload_heap{};
+    upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC vertex_description{};
+    vertex_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    vertex_description.Width = request.vertex_data.size();
+    vertex_description.Height = 1U;
+    vertex_description.DepthOrArraySize = 1U;
+    vertex_description.MipLevels = 1U;
+    vertex_description.SampleDesc.Count = 1U;
+    vertex_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> vertices;
+    HRESULT result = context->device->CreateCommittedResource(
+        &upload_heap, D3D12_HEAP_FLAG_NONE, &vertex_description, D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr, IID_PPV_ARGS(&vertices));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("CreateCommittedResource(triangle vertices)", result);
+        diagnostic.code = "triangle_execution_failed";
+        return false;
+    }
+    void* mapped_vertices = nullptr;
+    result = vertices->Map(0U, nullptr, &mapped_vertices);
+    if (FAILED(result)) {
+        diagnostic = hresult_error("Map(triangle vertices)", result);
+        diagnostic.code = "triangle_execution_failed";
+        return false;
+    }
+    std::memcpy(mapped_vertices, request.vertex_data.data(), request.vertex_data.size());
+    vertices->Unmap(0U, nullptr);
+
+    D3D12_ROOT_SIGNATURE_DESC root_description{};
+    root_description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    ComPtr<ID3DBlob> root_blob;
+    ComPtr<ID3DBlob> root_error;
+    result = D3D12SerializeRootSignature(&root_description, D3D_ROOT_SIGNATURE_VERSION_1,
+                                         &root_blob, &root_error);
+    if (FAILED(result)) {
+        diagnostic = hresult_error("D3D12SerializeRootSignature(triangle)", result);
+        diagnostic.code = "triangle_pipeline_failed";
+        return false;
+    }
+    ComPtr<ID3D12RootSignature> root_signature;
+    result = context->device->CreateRootSignature(0U, root_blob->GetBufferPointer(), root_blob->GetBufferSize(),
+                                                   IID_PPV_ARGS(&root_signature));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("CreateRootSignature(triangle)", result);
+        diagnostic.code = "triangle_pipeline_failed";
+        return false;
+    }
+    std::vector<D3D12_INPUT_ELEMENT_DESC> input_elements;
+    input_elements.reserve(request.pipeline->vertex_layout.attributes.size());
+    for (const PipelineVertexAttribute& attribute : request.pipeline->vertex_layout.attributes) {
+        D3D12_INPUT_ELEMENT_DESC element{};
+        element.SemanticName = d3d12_pipeline_semantic(attribute.semantic);
+        element.SemanticIndex = attribute.semantic == PipelineVertexSemantic::texcoord1 ? 1U : 0U;
+        element.Format = d3d12_pipeline_vertex_format(attribute.format);
+        element.InputSlot = 0U;
+        element.AlignedByteOffset = attribute.offset;
+        element.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+        input_elements.push_back(element);
+    }
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_description{};
+    pipeline_description.pRootSignature = root_signature.Get();
+    pipeline_description.VS = {vertex_shader->bytes.data(), vertex_shader->bytes.size()};
+    pipeline_description.PS = {fragment_shader->bytes.data(), fragment_shader->bytes.size()};
+    pipeline_description.InputLayout = {input_elements.data(), static_cast<UINT>(input_elements.size())};
+    pipeline_description.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pipeline_description.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pipeline_description.RasterizerState.CullMode = request.pipeline->raster.cull == PipelineCullMode::none ? D3D12_CULL_MODE_NONE
+                                             : request.pipeline->raster.cull == PipelineCullMode::front ? D3D12_CULL_MODE_FRONT
+                                                                                                         : D3D12_CULL_MODE_BACK;
+    pipeline_description.RasterizerState.FrontCounterClockwise = request.pipeline->raster.front_face == PipelineFrontFace::counter_clockwise;
+    pipeline_description.RasterizerState.DepthClipEnable = TRUE;
+    pipeline_description.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pipeline_description.DepthStencilState.DepthEnable = FALSE;
+    pipeline_description.DepthStencilState.StencilEnable = FALSE;
+    pipeline_description.NumRenderTargets = 1U;
+    pipeline_description.RTVFormats[0] = dxgi_texture_format(description.format);
+    pipeline_description.SampleDesc.Count = 1U;
+    ComPtr<ID3D12PipelineState> pipeline;
+    result = context->device->CreateGraphicsPipelineState(&pipeline_description, IID_PPV_ARGS(&pipeline));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("CreateGraphicsPipelineState(triangle)", result);
+        diagnostic.code = "triangle_pipeline_failed";
+        return false;
+    }
+    D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_description{1U, D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
+                                                    D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0U};
+    ComPtr<ID3D12DescriptorHeap> rtv_heap;
+    result = context->device->CreateDescriptorHeap(&rtv_heap_description, IID_PPV_ARGS(&rtv_heap));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("CreateDescriptorHeap(triangle RTV)", result);
+        diagnostic.code = "triangle_pipeline_failed";
+        return false;
+    }
+    D3D12_RENDER_TARGET_VIEW_DESC rtv_description{};
+    rtv_description.Format = dxgi_texture_format(description.format);
+    rtv_description.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+    rtv_description.Texture2D.MipSlice = 0U;
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
+    context->device->CreateRenderTargetView(destination, &rtv_description, rtv);
+    D3D12_RESOURCE_DESC resource_description = destination->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT row_count = 0U;
+    UINT64 row_size = 0U;
+    UINT64 readback_size = 0U;
+    context->device->GetCopyableFootprints(&resource_description, 0U, 1U, 0U, &footprint,
+                                           &row_count, &row_size, &readback_size);
+    const UINT64 row_bytes = static_cast<UINT64>(description.width) * 4U;
+    constexpr UINT64 max_size_t = static_cast<UINT64>(std::numeric_limits<std::size_t>::max());
+    if (row_count < description.height || row_size < row_bytes || footprint.Footprint.RowPitch < row_bytes ||
+        footprint.Offset > max_size_t || readback_size > max_texture_readback_bytes ||
+        readback_size > max_size_t) {
+        diagnostic = {"triangle_readback_footprint_invalid", "D3D12 triangle readback footprint is out of bounds"};
+        return false;
+    }
+    const UINT64 last_row = footprint.Offset + static_cast<UINT64>(description.height - 1U) * footprint.Footprint.RowPitch;
+    if (last_row < footprint.Offset || last_row > readback_size || row_bytes > readback_size - last_row) {
+        diagnostic = {"triangle_readback_footprint_invalid", "D3D12 triangle readback rows exceed the bounded footprint"};
+        return false;
+    }
+    D3D12_RESOURCE_DESC readback_description{};
+    readback_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    readback_description.Width = readback_size;
+    readback_description.Height = 1U;
+    readback_description.DepthOrArraySize = 1U;
+    readback_description.MipLevels = 1U;
+    readback_description.SampleDesc.Count = 1U;
+    readback_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    D3D12_HEAP_PROPERTIES readback_heap{};
+    readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
+    ComPtr<ID3D12Resource> readback;
+    result = context->device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE,
+                                                        &readback_description, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                        nullptr, IID_PPV_ARGS(&readback));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("CreateCommittedResource(triangle readback)", result);
+        diagnostic.code = "triangle_execution_failed";
+        return false;
+    }
+    ComPtr<ID3D12CommandAllocator> allocator;
+    result = context->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("CreateCommandAllocator(triangle)", result);
+        diagnostic.code = "triangle_execution_failed";
+        return false;
+    }
+    ComPtr<ID3D12GraphicsCommandList> list;
+    result = context->device->CreateCommandList(0U, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
+                                                 IID_PPV_ARGS(&list));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("CreateCommandList(triangle)", result);
+        diagnostic.code = "triangle_execution_failed";
+        return false;
+    }
+    if (destination_state != D3D12_RESOURCE_STATE_RENDER_TARGET) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = destination;
+        barrier.Transition.StateBefore = destination_state;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
+    }
+    const float clear_color[4] = {request.clear_color[0], request.clear_color[1], request.clear_color[2], request.clear_color[3]};
+    list->OMSetRenderTargets(1U, &rtv, FALSE, nullptr);
+    list->ClearRenderTargetView(rtv, clear_color, 0U, nullptr);
+    list->SetGraphicsRootSignature(root_signature.Get());
+    list->SetPipelineState(pipeline.Get());
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    D3D12_VERTEX_BUFFER_VIEW vertex_view{};
+    vertex_view.BufferLocation = vertices->GetGPUVirtualAddress();
+    vertex_view.SizeInBytes = static_cast<UINT>(request.vertex_data.size());
+    vertex_view.StrideInBytes = request.pipeline->vertex_layout.stride;
+    list->IASetVertexBuffers(0U, 1U, &vertex_view);
+    D3D12_VIEWPORT viewport{0.0F, 0.0F, static_cast<float>(description.width), static_cast<float>(description.height), 0.0F, 1.0F};
+    D3D12_RECT scissor{0, 0, static_cast<LONG>(description.width), static_cast<LONG>(description.height)};
+    list->RSSetViewports(1U, &viewport);
+    list->RSSetScissorRects(1U, &scissor);
+    list->DrawInstanced(request.vertex_count, 1U, 0U, 0U);
+    D3D12_RESOURCE_BARRIER to_copy{};
+    to_copy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    to_copy.Transition.pResource = destination;
+    to_copy.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    to_copy.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    to_copy.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    list->ResourceBarrier(1U, &to_copy);
+    D3D12_TEXTURE_COPY_LOCATION source{};
+    source.pResource = destination;
+    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    source.SubresourceIndex = 0U;
+    D3D12_TEXTURE_COPY_LOCATION target{};
+    target.pResource = readback.Get();
+    target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    target.PlacedFootprint = footprint;
+    list->CopyTextureRegion(&target, 0U, 0U, 0U, &source, nullptr);
+    const D3D12_RESOURCE_STATES final_state = texture_state(description.usage);
+    if (final_state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = destination;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barrier.Transition.StateAfter = final_state;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
+    }
+    result = list->Close();
+    if (FAILED(result)) {
+        diagnostic = hresult_error("Close(triangle)", result);
+        diagnostic.code = "triangle_execution_failed";
+        return false;
+    }
+    ComPtr<ID3D12Fence> fence;
+    result = context->device->CreateFence(0U, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("CreateFence(triangle)", result);
+        diagnostic.code = "triangle_execution_failed";
+        return false;
+    }
+    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!event) {
+        diagnostic = {"triangle_execution_failed", "CreateEventW failed for triangle execution"};
+        return false;
+    }
+    ID3D12CommandList* command_lists[] = {list.Get()};
+    context->queue->ExecuteCommandLists(1U, command_lists);
+    result = context->queue->Signal(fence.Get(), 1U);
+    if (SUCCEEDED(result)) result = fence->SetEventOnCompletion(1U, event);
+    if (SUCCEEDED(result) && WaitForSingleObject(event, INFINITE) != WAIT_OBJECT_0) result = E_FAIL;
+    CloseHandle(event);
+    if (FAILED(result)) {
+        const bool drained = context->wait_idle();
+        destination_state = drained ? final_state : D3D12_RESOURCE_STATE_COMMON;
+        diagnostic = hresult_error("D3D12 triangle fence", result);
+        diagnostic.code = result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET
+                              ? "d3d12_device_removed" : "triangle_execution_failed";
+        return false;
+    }
+    destination_state = final_state;
+    void* mapped = nullptr;
+    D3D12_RANGE read_range{0U, static_cast<SIZE_T>(readback_size)};
+    result = readback->Map(0U, &read_range, &mapped);
+    if (SUCCEEDED(result)) {
+        try {
+            output.resize(output_size);
+            const auto* source_bytes = static_cast<const std::byte*>(mapped) + footprint.Offset;
+            for (std::uint32_t row = 0; row < description.height; ++row)
+                std::memcpy(output.data() + static_cast<std::size_t>(row) * description.width * 4U,
+                            source_bytes + static_cast<std::size_t>(row) * footprint.Footprint.RowPitch,
+                            static_cast<std::size_t>(row_bytes));
+        } catch (const std::bad_alloc&) { result = E_OUTOFMEMORY; }
+        readback->Unmap(0U, nullptr);
+    }
+    if (FAILED(result)) {
+        diagnostic = hresult_error("Map(triangle readback)", result);
+        diagnostic.code = result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET
+                              ? "d3d12_device_removed" : "triangle_execution_failed";
+        output.clear();
+        return false;
+    }
+    if (description.format == TextureFormat::bgra8_unorm || description.format == TextureFormat::bgra8_srgb)
+        for (std::size_t index = 0; index < output.size(); index += 4U) std::swap(output[index], output[index + 2U]);
+    return true;
+}
+
 class D3D12Texture final : public Texture {
 public:
     D3D12Texture(std::shared_ptr<D3D12Context> context,
@@ -839,6 +1150,13 @@ public:
                         Diagnostic& diagnostic) {
         return clear_texture_readback(context_, resource_.Get(), info_.description, request, state_, output,
                                       diagnostic);
+    }
+
+    bool draw_triangle(const TriangleDrawRequest& request,
+                       std::vector<std::byte>& output,
+                       Diagnostic& diagnostic) {
+        return draw_triangle_and_readback(context_, resource_.Get(), info_.description, request, state_, output,
+                                          diagnostic);
     }
 
 private:
@@ -1084,6 +1402,24 @@ public:
         if (!d3d_texture->clear_readback(request, output, diagnostic))
             return {TextureReadbackStatus::execution_failed, std::move(diagnostic), {}};
         return {TextureReadbackStatus::ready, {}, std::move(output)};
+    }
+
+    TriangleDrawResult draw_triangle_and_readback(
+        Texture& texture, const TriangleDrawRequest& request) override {
+        Diagnostic diagnostic;
+        const TriangleDrawStatus validation = validate_triangle_draw_request(texture, request, diagnostic);
+        if (validation != TriangleDrawStatus::ready) return {validation, std::move(diagnostic), {}};
+        if (texture.backend() != Backend::D3D12)
+            return {TriangleDrawStatus::unsupported,
+                    {"texture_backend_mismatch", "The texture belongs to another graphics backend"}, {}};
+        auto* d3d_texture = dynamic_cast<D3D12Texture*>(&texture);
+        if (d3d_texture == nullptr)
+            return {TriangleDrawStatus::unsupported,
+                    {"texture_type_unsupported", "The D3D12 device received an unknown texture handle"}, {}};
+        std::vector<std::byte> output;
+        if (!d3d_texture->draw_triangle(request, output, diagnostic))
+            return {TriangleDrawStatus::execution_failed, std::move(diagnostic), {}};
+        return {TriangleDrawStatus::ready, {}, std::move(output)};
     }
 
     SamplerResult create_sampler(const SamplerDescription& description) override {

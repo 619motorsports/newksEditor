@@ -1,7 +1,9 @@
 #include "apex/render/texture_upload.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
+#include <new>
 #include <string_view>
 #include <utility>
 
@@ -66,9 +68,12 @@ constexpr std::uint32_t DXGI_FORMAT_BC7_UNORM_SRGB = 99u;
 
 [[nodiscard]] TextureFormatMappingResult mapped(TextureFormat format, std::uint32_t vulkan,
                                                 std::uint32_t dxgi, bool compressed, bool srgb,
-                                                bool signedChannels = false) {
+                                                bool signedChannels = false,
+                                                std::uint8_t sourceBytesPerPixel = 0,
+                                                bool cpuConversion = false) {
     TextureFormatMappingResult result;
-    result.mapping = TextureFormatMapping{format, vulkan, dxgi, compressed, srgb, signedChannels};
+    result.mapping = TextureFormatMapping{format, vulkan, dxgi, compressed, srgb, signedChannels,
+                                          sourceBytesPerPixel, cpuConversion};
     return result;
 }
 
@@ -162,6 +167,23 @@ constexpr std::uint32_t DXGI_FORMAT_BC7_UNORM_SRGB = 99u;
     }
 }
 
+[[nodiscard]] std::uint8_t maskByte(std::uint32_t pixel, std::uint32_t mask) noexcept {
+    if (mask == 0u) return 0u;
+    std::uint32_t shift = 0u;
+    while (shift < 32u && ((mask >> shift) & 1u) == 0u) ++shift;
+    if (shift == 32u) return 0u;
+    const auto maximum = mask >> shift;
+    const auto value = (pixel & mask) >> shift;
+    if (maximum == 0u) return 0u;
+    const auto scaled = static_cast<double>(value) * 255.0 / static_cast<double>(maximum);
+    return static_cast<std::uint8_t>(std::clamp(std::floor(scaled + 0.5), 0.0, 255.0));
+}
+
+[[nodiscard]] bool isBc6(apex::formats::DdsFormat format) noexcept {
+    return format == apex::formats::DdsFormat::BC6HUf16 ||
+           format == apex::formats::DdsFormat::BC6HSf16;
+}
+
 } // namespace
 
 const char* textureFormatName(TextureFormat format) noexcept {
@@ -217,7 +239,10 @@ TextureFormatMappingResult mapDdsTextureFormat(const apex::formats::DdsDescripto
         if (!isRgb565Mask(descriptor)) return mappingFailure("unsupported_format", "masked 16-bit DDS is not a canonical RGB565 texture");
         return mapped(TextureFormat::r5g6b5_unorm, VK_FORMAT_R5G6B5_UNORM_PACK16, DXGI_FORMAT_B5G6R5_UNORM, false, false);
     case DdsFormat::Raw24:
-        return mappingFailure("unsupported_format", "DDS 24-bit RGB has no portable native upload format");
+        if (descriptor.dxgi != 0u)
+            return mappingFailure("unsupported_format", "24-bit RGB cannot carry a DXGI format tag");
+        return mapped(TextureFormat::rgba8_unorm, VK_FORMAT_R8G8B8A8_UNORM,
+                      DXGI_FORMAT_R8G8B8A8_UNORM, false, false, false, 3u, true);
     case DdsFormat::Raw32:
         if (descriptor.dxgi == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)
             return mapped(TextureFormat::rgba8_srgb, VK_FORMAT_R8G8B8A8_SRGB, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, false, true);
@@ -287,6 +312,10 @@ DdsUploadPlanResult buildDdsUploadPlan(std::span<const std::uint8_t> bytes,
     if (!formatResult.ok())
         return planFailure(TextureUploadStatus::unsupported, formatResult.diagnostic.code,
                            formatResult.diagnostic.message, formatResult.diagnostic.offset, source);
+    if (isBc6(descriptor.format))
+        return planFailure(TextureUploadStatus::unsupported, "gpu_required",
+                           "BC6H upload requires a backend-native compressed texture path",
+                           descriptor.dataOffset, source);
     if (bytes.size() > limits.maxInputBytes)
         return planFailure(TextureUploadStatus::invalid, "input_too_large", "DDS input exceeds configured size limit", 0, source);
     if (descriptor.width == 0u || descriptor.height == 0u || descriptor.width > MAX_DIMENSION ||
@@ -296,81 +325,171 @@ DdsUploadPlanResult buildDdsUploadPlan(std::span<const std::uint8_t> bytes,
     if (descriptor.resourceDimension != 0u && descriptor.resourceDimension != 3u)
         return planFailure(TextureUploadStatus::unsupported, "unsupported_layout",
                            "Only DX10 2D texture resources are supported", 0, source);
-    if (descriptor.arraySize != 0u && descriptor.arraySize != 1u)
-        return planFailure(TextureUploadStatus::unsupported, "unsupported_layout",
-                           "DX10 texture arrays are not supported by this upload plan", 0, source);
+    const bool dx10 = descriptor.resourceDimension != 0u;
+    if (dx10 && descriptor.arraySize == 0u)
+        return planFailure(TextureUploadStatus::invalid, "invalid_array_size",
+                           "DX10 array size must be non-zero", 140u, source);
     // D3D11_RESOURCE_MISC_TEXTURECUBE is bit 2 in the DX10 extension misc flag.
-    if ((descriptor.miscFlags & 0x4u) != 0u)
-        return planFailure(TextureUploadStatus::unsupported, "unsupported_layout",
-                           "DX10 cubemap resources are not supported by this upload plan", 0, source);
+    const bool cube = dx10 && (descriptor.miscFlags & 0x4u) != 0u;
+    const std::uint32_t arrayCount = dx10 ? descriptor.arraySize : 1u;
+    const std::uint32_t faceCount = cube ? 6u : 1u;
+    std::size_t subresourceCount = 0u;
+    if (!multiplySize(static_cast<std::size_t>(arrayCount), static_cast<std::size_t>(faceCount),
+                      subresourceCount) ||
+        !multiplySize(subresourceCount, static_cast<std::size_t>(descriptor.mipCount),
+                      subresourceCount) ||
+        subresourceCount > 65535u)
+        return planFailure(TextureUploadStatus::invalid, "subresource_limit",
+                           "DDS array, cube, and mip subresources exceed the bounded planner limit", 0, source);
     if (descriptor.dataOffset > bytes.size())
         return planFailure(TextureUploadStatus::invalid, "truncated_header", "DDS data offset exceeds input", descriptor.dataOffset, source);
     const auto mapping = *formatResult.mapping;
     const auto compressed = mapping.compressed;
     const auto expectedBlockBytes = blockBytes(mapping.format);
     const auto expectedBytesPerPixel = bytesPerPixel(mapping.format);
+    const auto expectedSourceBytesPerPixel = mapping.sourceBytesPerPixel != 0u
+                                                 ? static_cast<std::size_t>(mapping.sourceBytesPerPixel)
+                                                 : expectedBytesPerPixel;
     if (compressed) {
         if (!descriptor.compressed || descriptor.blockBytes != expectedBlockBytes)
             return planFailure(TextureUploadStatus::invalid, "block_size_mismatch", "DDS block size does not match its mapped format", descriptor.dataOffset, source);
     } else if (descriptor.compressed || descriptor.bitsPerPixel % 8u != 0u ||
-               descriptor.bitsPerPixel / 8u != expectedBytesPerPixel) {
+               descriptor.bitsPerPixel / 8u != expectedSourceBytesPerPixel) {
         return planFailure(TextureUploadStatus::invalid, "pixel_size_mismatch", "DDS pixel size does not match its mapped format", descriptor.dataOffset, source);
     }
 
-    DdsUploadPlan plan;
-    plan.descriptor = descriptor;
-    plan.mapping = mapping;
-    plan.subresources.reserve(descriptor.mipCount);
-    std::size_t offset = descriptor.dataOffset;
-    std::size_t totalPayload = 0;
-    auto width = descriptor.width;
-    auto height = descriptor.height;
-    for (std::uint32_t level = 0; level < descriptor.mipCount; ++level) {
-        std::size_t rowPitch = 0;
-        std::size_t rowCount = 0;
-        std::size_t blocksWide = 0;
-        std::size_t blocksHigh = 0;
-        if (compressed) {
-            blocksWide = (static_cast<std::size_t>(width) + 3u) / 4u;
-            blocksHigh = (static_cast<std::size_t>(height) + 3u) / 4u;
-            if (!multiplySize(blocksWide, expectedBlockBytes, rowPitch))
-                return planFailure(TextureUploadStatus::invalid, "size_overflow", "DDS row pitch overflows", offset, source);
-            rowCount = blocksHigh;
-        } else {
-            std::size_t minimumPitch = 0;
-            if (!multiplySize(static_cast<std::size_t>(width), expectedBytesPerPixel, minimumPitch))
-                return planFailure(TextureUploadStatus::invalid, "size_overflow", "DDS row pitch overflows", offset, source);
-            if (level == 0u && descriptor.pitch != 0u &&
-                static_cast<std::size_t>(descriptor.pitch) < minimumPitch)
-                return planFailure(TextureUploadStatus::invalid, "row_pitch_mismatch",
-                                   "DDS top-level row pitch is smaller than the packed row", offset, source);
-            rowPitch = level == 0u && descriptor.pitch != 0u
-                           ? static_cast<std::size_t>(descriptor.pitch)
-                           : minimumPitch;
-            rowCount = height;
+    try {
+        DdsUploadPlan plan;
+        plan.descriptor = descriptor;
+        plan.mapping = mapping;
+        plan.subresources.reserve(subresourceCount);
+        std::size_t offset = descriptor.dataOffset;
+        std::size_t totalPayload = 0u;
+        std::size_t totalConverted = 0u;
+        for (std::uint32_t arrayLayer = 0u; arrayLayer < arrayCount; ++arrayLayer) {
+            for (std::uint32_t face = 0u; face < faceCount; ++face) {
+                auto width = descriptor.width;
+                auto height = descriptor.height;
+                for (std::uint32_t level = 0; level < descriptor.mipCount; ++level) {
+                    std::size_t rowPitch = 0u;
+                    std::size_t rowCount = 0u;
+                    std::size_t blocksWide = 0u;
+                    std::size_t blocksHigh = 0u;
+                    if (compressed) {
+                        blocksWide = (static_cast<std::size_t>(width) + 3u) / 4u;
+                        blocksHigh = (static_cast<std::size_t>(height) + 3u) / 4u;
+                        if (!multiplySize(blocksWide, expectedBlockBytes, rowPitch))
+                            return planFailure(TextureUploadStatus::invalid, "size_overflow",
+                                               "DDS row pitch overflows", offset, source);
+                        rowCount = blocksHigh;
+                    } else {
+                        std::size_t minimumPitch = 0u;
+                        if (!multiplySize(static_cast<std::size_t>(width), expectedSourceBytesPerPixel,
+                                          minimumPitch))
+                            return planFailure(TextureUploadStatus::invalid, "size_overflow",
+                                               "DDS row pitch overflows", offset, source);
+                        if (level == 0u && descriptor.pitch != 0u &&
+                            static_cast<std::size_t>(descriptor.pitch) < minimumPitch)
+                            return planFailure(TextureUploadStatus::invalid, "row_pitch_mismatch",
+                                               "DDS top-level row pitch is smaller than the packed row",
+                                               offset, source);
+                        rowPitch = level == 0u && descriptor.pitch != 0u &&
+                                           static_cast<std::size_t>(descriptor.pitch) <= minimumPitch + 16u
+                                       ? static_cast<std::size_t>(descriptor.pitch)
+                                       : minimumPitch;
+                        rowCount = height;
+                    }
+                    std::size_t slicePitch = 0u;
+                    if (!multiplySize(rowPitch, rowCount, slicePitch))
+                        return planFailure(TextureUploadStatus::invalid, "size_overflow",
+                                           "DDS mip size overflows", offset, source);
+                    if (slicePitch > bytes.size() - offset)
+                        return planFailure(TextureUploadStatus::invalid, "truncated_payload",
+                                           "DDS mip payload exceeds input", offset, source);
+                    std::size_t nextTotal = 0u;
+                    if (!addSize(totalPayload, slicePitch, nextTotal))
+                        return planFailure(TextureUploadStatus::invalid, "size_overflow",
+                                           "DDS payload size overflows", offset, source);
+                    if (nextTotal > limits.maxOutputBytes)
+                        return planFailure(TextureUploadStatus::invalid, "payload_too_large",
+                                           "DDS upload payload exceeds configured size limit", offset, source);
+                    DdsUploadSubresource subresource;
+                    subresource.mipLevel = level;
+                    subresource.arrayLayer = arrayLayer;
+                    subresource.cubeFace = face;
+                    subresource.width = width;
+                    subresource.height = height;
+                    subresource.offset = offset;
+                    subresource.size = slicePitch;
+                    subresource.rowPitch = rowPitch;
+                    subresource.rowCount = rowCount;
+                    subresource.slicePitch = slicePitch;
+                    subresource.blocksWide = blocksWide;
+                    subresource.blocksHigh = blocksHigh;
+                    if (mapping.cpuConversion) {
+                        std::size_t convertedRowPitch = 0u;
+                        std::size_t convertedSize = 0u;
+                        if (!multiplySize(static_cast<std::size_t>(width), expectedBytesPerPixel,
+                                          convertedRowPitch) ||
+                            !multiplySize(convertedRowPitch, static_cast<std::size_t>(height),
+                                          convertedSize))
+                            return planFailure(TextureUploadStatus::invalid, "size_overflow",
+                                               "converted DDS payload overflows", offset, source);
+                        std::size_t nextConverted = 0u;
+                        if (!addSize(totalConverted, convertedSize, nextConverted) ||
+                            nextConverted > limits.maxOutputBytes)
+                            return planFailure(TextureUploadStatus::invalid, "payload_too_large",
+                                               "converted DDS payload exceeds configured size limit",
+                                               offset, source);
+                        const auto convertedOffset = totalConverted;
+                        plan.convertedPayload.resize(nextConverted);
+                        for (std::uint32_t y = 0u; y < height; ++y) {
+                            for (std::uint32_t x = 0u; x < width; ++x) {
+                                const auto sourcePixel = offset + static_cast<std::size_t>(y) * rowPitch +
+                                                          static_cast<std::size_t>(x) * expectedSourceBytesPerPixel;
+                                const auto packed = static_cast<std::uint32_t>(bytes[sourcePixel]) |
+                                                     (static_cast<std::uint32_t>(bytes[sourcePixel + 1u]) << 8u) |
+                                                     (static_cast<std::uint32_t>(bytes[sourcePixel + 2u]) << 16u);
+                                const auto target = convertedOffset +
+                                                    static_cast<std::size_t>(y) * convertedRowPitch +
+                                                    static_cast<std::size_t>(x) * 4u;
+                                const auto red = maskByte(packed, descriptor.masks[0]);
+                                plan.convertedPayload[target] = red;
+                                plan.convertedPayload[target + 1u] =
+                                    descriptor.luminance || descriptor.masks[1] == 0u
+                                        ? red
+                                        : maskByte(packed, descriptor.masks[1]);
+                                plan.convertedPayload[target + 2u] =
+                                    descriptor.luminance || descriptor.masks[2] == 0u
+                                        ? red
+                                        : maskByte(packed, descriptor.masks[2]);
+                                plan.convertedPayload[target + 3u] = descriptor.masks[3] == 0u
+                                                                         ? 255u
+                                                                         : maskByte(packed, descriptor.masks[3]);
+                            }
+                        }
+                        subresource.convertedOffset = convertedOffset;
+                        subresource.convertedSize = convertedSize;
+                        subresource.convertedRowPitch = convertedRowPitch;
+                        totalConverted = nextConverted;
+                    }
+                    plan.subresources.push_back(subresource);
+                    totalPayload = nextTotal;
+                    offset += slicePitch;
+                    width = std::max(1u, width >> 1u);
+                    height = std::max(1u, height >> 1u);
+                }
+            }
         }
-        std::size_t slicePitch = 0;
-        if (!multiplySize(rowPitch, rowCount, slicePitch))
-            return planFailure(TextureUploadStatus::invalid, "size_overflow", "DDS mip size overflows", offset, source);
-        if (slicePitch > bytes.size() - offset)
-            return planFailure(TextureUploadStatus::invalid, "truncated_payload", "DDS mip payload exceeds input", offset, source);
-        std::size_t nextTotal = 0;
-        if (!addSize(totalPayload, slicePitch, nextTotal))
-            return planFailure(TextureUploadStatus::invalid, "size_overflow", "DDS payload size overflows", offset, source);
-        if (nextTotal > limits.maxOutputBytes)
-            return planFailure(TextureUploadStatus::invalid, "payload_too_large", "DDS upload payload exceeds configured size limit", offset, source);
-        plan.subresources.push_back({level, width, height, offset, slicePitch, rowPitch, rowCount,
-                                     slicePitch, blocksWide, blocksHigh});
-        totalPayload = nextTotal;
-        offset += slicePitch;
-        width = std::max(1u, width >> 1u);
-        height = std::max(1u, height >> 1u);
+        plan.payloadBytes = totalPayload;
+        DdsUploadPlanResult result;
+        result.status = TextureUploadStatus::ready;
+        result.plan = std::move(plan);
+        return result;
+    } catch (const std::bad_alloc&) {
+        return planFailure(TextureUploadStatus::invalid, "allocation_failed",
+                           "DDS upload plan allocation failed", descriptor.dataOffset, source);
     }
-    plan.payloadBytes = totalPayload;
-    DdsUploadPlanResult result;
-    result.status = TextureUploadStatus::ready;
-    result.plan = std::move(plan);
-    return result;
 }
 
 DdsUploadPlanResult buildDdsUploadPlan(std::span<const std::uint8_t> bytes, std::string source,

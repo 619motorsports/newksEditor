@@ -56,15 +56,19 @@ std::vector<std::uint8_t> raw(std::uint32_t width, std::uint32_t height,
 }
 
 std::vector<std::uint8_t> dx10(std::uint32_t width, std::uint32_t height,
-                               std::uint32_t dxgi, std::size_t payloadBytes) {
+                               std::uint32_t dxgi, std::size_t payloadBytes,
+                               std::uint32_t mipCount = 1u,
+                               std::uint32_t resourceDimension = 3u,
+                               std::uint32_t miscFlags = 0u,
+                               std::uint32_t arraySize = 1u) {
     std::vector<std::uint8_t> bytes(148u + payloadBytes, 0);
     put32(bytes, 0, 0x20534444u); put32(bytes, 4, 124u); put32(bytes, 12, height);
-    put32(bytes, 16, width); put32(bytes, 28, 1u); put32(bytes, 76, 32u); put32(bytes, 80, 4u);
+    put32(bytes, 16, width); put32(bytes, 28, mipCount); put32(bytes, 76, 32u); put32(bytes, 80, 4u);
     bytes[84] = 'D'; bytes[85] = 'X'; bytes[86] = '1'; bytes[87] = '0';
     put32(bytes, 128, dxgi);       // DXGI format
-    put32(bytes, 132, 3u);         // D3D10_RESOURCE_DIMENSION_TEXTURE2D
-    put32(bytes, 136, 0u);         // misc flags
-    put32(bytes, 140, 1u);         // array size
+    put32(bytes, 132, resourceDimension);
+    put32(bytes, 136, miscFlags);
+    put32(bytes, 140, arraySize);
     return bytes;
 }
 
@@ -99,7 +103,20 @@ void mapsPortableAndSdkFormats() {
 
     const auto rgb24 = apex::formats::inspectDds(raw(4, 4, 1, 24, {0xff0000u, 0xff00u, 0xffu, 0}, 48));
     require(rgb24.has_value(), "RGB24 descriptor");
-    require(!mapDdsTextureFormat(*rgb24).ok(), "unsupported RGB24 mapping");
+    const auto rgb24Mapping = mapDdsTextureFormat(*rgb24);
+    require(rgb24Mapping.ok() && rgb24Mapping.mapping->format == TextureFormat::rgba8_unorm &&
+                rgb24Mapping.mapping->cpuConversion && rgb24Mapping.mapping->sourceBytesPerPixel == 3u,
+            "RGB24 conversion mapping");
+
+    auto rgb24Bytes = raw(2, 1, 1, 24, {0xff0000u, 0xff00u, 0xffu, 0}, 6u);
+    rgb24Bytes[128] = 30u; rgb24Bytes[129] = 20u; rgb24Bytes[130] = 10u;
+    rgb24Bytes[131] = 60u; rgb24Bytes[132] = 50u; rgb24Bytes[133] = 40u;
+    const auto rgb24Plan = buildDdsUploadPlan(rgb24Bytes, "rgb24.dds");
+    require(rgb24Plan.ok() && rgb24Plan.plan->convertedPayload ==
+                std::vector<std::uint8_t>{10u, 20u, 30u, 255u, 40u, 50u, 60u, 255u} &&
+                rgb24Plan.plan->subresources[0].convertedRowPitch == 8u &&
+                rgb24Plan.plan->subresources[0].convertedSize == 8u,
+            "exact RGB24-to-RGBA8 conversion");
 }
 
 void plansCompressedEdgesAndMips() {
@@ -144,6 +161,13 @@ void plansRawPitches() {
                 paddedPlan.plan->subresources[1].offset == 192u,
             "large raw pitch controls mip offsets");
 
+    auto excessivePadding = raw(4, 2, 2, 32, {0xffu, 0xff00u, 0xff0000u, 0xff000000u}, 56, 40);
+    const auto packedPlan = buildDdsUploadPlan(excessivePadding, "packed-pitch.dds");
+    require(packedPlan.ok() && packedPlan.plan->subresources[0].rowPitch == 16u &&
+                packedPlan.plan->subresources[0].size == 32u &&
+                packedPlan.plan->subresources[1].offset == 160u,
+            "excessive raw pitch follows JavaScript packed-row rule");
+
     const auto shortPitch = raw(4, 2, 1, 32,
                                 {0xffu, 0xff00u, 0xff0000u, 0xff000000u}, 32, 15);
     const auto shortPitchPlan = buildDdsUploadPlan(shortPitch, "short-pitch.dds");
@@ -162,6 +186,13 @@ void rejectsMalformedPayloadAndLimits() {
     require(attributed.diagnostic.source == "cars/body.dds" && attributed.diagnostic.offset == 128u,
             "upload diagnostic source attribution");
 
+    const auto shortRgb24 = raw(2, 1, 1, 24, {0xff0000u, 0xff00u, 0xffu, 0}, 5u);
+    const auto shortRgb24Plan = buildDdsUploadPlan(shortRgb24, "short-rgb24.dds");
+    require(!shortRgb24Plan.ok() && !shortRgb24Plan.plan.has_value() &&
+                shortRgb24Plan.diagnostic.code == "truncated_payload" &&
+                shortRgb24Plan.diagnostic.offset == 128u,
+            "truncated RGB24 conversion has no partial plan");
+
     auto excessiveMips = legacyBc("DXT1", 4, 4, 99, 8);
     put32(excessiveMips, 28, 99u);
     const auto mipPlan = buildDdsUploadPlan(excessiveMips);
@@ -175,6 +206,15 @@ void rejectsMalformedPayloadAndLimits() {
     limits.maxOutputBytes = 7u;
     const auto limited = buildDdsUploadPlan(legacyBc("DXT1", 4, 4, 1, 8), "limited.dds", limits);
     require(!limited.ok() && limited.diagnostic.code == "payload_too_large", "payload output limit");
+
+    apex::core::ParseLimits convertedLimits;
+    convertedLimits.maxOutputBytes = 15u;
+    const auto convertedLimited = buildDdsUploadPlan(
+        raw(2, 2, 1, 24, {0xff0000u, 0xff00u, 0xffu, 0}, 12u),
+        "converted-limited.dds", convertedLimits);
+    require(!convertedLimited.ok() && !convertedLimited.plan.has_value() &&
+                convertedLimited.diagnostic.code == "payload_too_large",
+            "converted payload aggregate limit has no partial plan");
 
     auto malformed = legacyBc("DXT1", 4, 4, 1, 8);
     malformed.resize(100);
@@ -193,14 +233,31 @@ void rejectsUnsupportedDx10LayoutsAndInvalidBits() {
                 oneDimensionalPlan.diagnostic.code == "unsupported_layout",
             "DX10 1D upload rejection");
 
-    auto array = dx10(4, 4, 29, 64);
-    put32(array, 140, 2u);
+    auto array = dx10(2, 1, 29, 24u, 2u, 3u, 0u, 2u);
+    for (std::size_t index = 0; index < 24u; ++index) array[148u + index] = static_cast<std::uint8_t>(index);
     const auto arrayDescriptor = apex::formats::inspectDds(array);
     require(arrayDescriptor.has_value(), "valid DX10 array descriptor inspection");
     const auto arrayPlan = buildDdsUploadPlan(array, *arrayDescriptor, "array.dds");
-    require(arrayPlan.status == TextureUploadStatus::unsupported &&
-                arrayPlan.diagnostic.code == "unsupported_layout",
-            "DX10 array upload rejection");
+    require(arrayPlan.ok() && arrayPlan.plan->subresources.size() == 4u &&
+                arrayPlan.plan->subresources[0].arrayLayer == 0u &&
+                arrayPlan.plan->subresources[0].mipLevel == 0u &&
+                arrayPlan.plan->subresources[0].offset == 148u &&
+                arrayPlan.plan->subresources[1].arrayLayer == 0u &&
+                arrayPlan.plan->subresources[1].mipLevel == 1u &&
+                arrayPlan.plan->subresources[1].offset == 156u &&
+                arrayPlan.plan->subresources[2].arrayLayer == 1u &&
+                arrayPlan.plan->subresources[2].mipLevel == 0u &&
+                arrayPlan.plan->subresources[2].offset == 160u,
+            "DX10 array subresource ordering and offsets");
+
+    auto truncatedArray = dx10(2, 1, 29, 20u, 2u, 3u, 0u, 2u);
+    const auto truncatedArrayDescriptor = apex::formats::inspectDds(truncatedArray);
+    require(truncatedArrayDescriptor.has_value(), "truncated array descriptor inspection");
+    const auto truncatedArrayPlan = buildDdsUploadPlan(truncatedArray, *truncatedArrayDescriptor,
+                                                       "truncated-array.dds");
+    require(!truncatedArrayPlan.ok() && !truncatedArrayPlan.plan.has_value() &&
+                truncatedArrayPlan.diagnostic.code == "truncated_payload",
+            "truncated DX10 array has no partial plan");
 
     auto volume = dx10(4, 4, 29, 64);
     put32(volume, 132, 4u); // TEXTURE3D
@@ -211,14 +268,17 @@ void rejectsUnsupportedDx10LayoutsAndInvalidBits() {
                 volumePlan.diagnostic.code == "unsupported_layout",
             "DX10 volume upload rejection");
 
-    auto cube = dx10(4, 4, 29, 64);
-    put32(cube, 136, 0x4u); // D3D11_RESOURCE_MISC_TEXTURECUBE
+    auto cube = dx10(1, 1, 29, 24u, 1u, 3u, 0x4u, 1u); // D3D11_RESOURCE_MISC_TEXTURECUBE
+    for (std::size_t index = 0; index < 24u; ++index) cube[148u + index] = static_cast<std::uint8_t>(index);
     const auto cubeDescriptor = apex::formats::inspectDds(cube);
     require(cubeDescriptor.has_value(), "valid DX10 cubemap descriptor inspection");
     const auto cubePlan = buildDdsUploadPlan(cube, *cubeDescriptor, "cube.dds");
-    require(cubePlan.status == TextureUploadStatus::unsupported &&
-                cubePlan.diagnostic.code == "unsupported_layout",
-            "DX10 cubemap upload rejection");
+    require(cubePlan.ok() && cubePlan.plan->subresources.size() == 6u &&
+                cubePlan.plan->subresources[0].cubeFace == 0u &&
+                cubePlan.plan->subresources[0].offset == 148u &&
+                cubePlan.plan->subresources[5].cubeFace == 5u &&
+                cubePlan.plan->subresources[5].offset == 168u,
+            "DX10 cubemap face subresources");
 
     auto malformedArray = dx10(4, 4, 29, 64);
     put32(malformedArray, 140, 0u);
@@ -237,6 +297,13 @@ void rejectsUnsupportedDx10LayoutsAndInvalidBits() {
     require(bitPlan.status == TextureUploadStatus::invalid &&
                 bitPlan.diagnostic.code == "pixel_size_mismatch",
             "non-byte-aligned bit depth rejection");
+
+    const auto bc6 = apex::formats::inspectDds(dx10(4, 4, 95, 16u));
+    require(bc6.has_value(), "BC6H descriptor for GPU rejection");
+    const auto bc6Plan = buildDdsUploadPlan(dx10(4, 4, 95, 16u), *bc6, "bc6h.dds");
+    require(bc6Plan.status == TextureUploadStatus::unsupported &&
+                bc6Plan.diagnostic.code == "gpu_required" && !bc6Plan.plan.has_value(),
+            "BC6H upload remains explicitly GPU-required");
 }
 
 void rejectsUnsupportedWithoutApproximation() {
@@ -246,7 +313,8 @@ void rejectsUnsupportedWithoutApproximation() {
     unsupported.dataOffset = 128; unsupported.bitsPerPixel = 24;
     unsupported.masks = {0xff0000u, 0xff00u, 0xffu, 0};
     const auto result = mapDdsTextureFormat(unsupported);
-    require(!result.ok() && result.diagnostic.code == "unsupported_format", "explicit unsupported diagnostic");
+    require(result.ok() && result.mapping->cpuConversion && result.mapping->sourceBytesPerPixel == 3u,
+            "raw 24-bit mapping uses an explicit conversion path");
 
     auto bc7 = apex::formats::inspectDds(dx10(4, 4, 99, 16));
     require(bc7.has_value(), "BC7 descriptor");

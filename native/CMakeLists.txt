@@ -65,6 +65,7 @@ add_library(apex_formats STATIC
   src/formats/bc7.cpp
   src/formats/dds.cpp
   src/formats/fbx.cpp
+  src/formats/fbx_conversion.cpp
   src/formats/ini.cpp
   src/formats/kn5.cpp
   src/formats/kn5_write.cpp
@@ -99,6 +100,8 @@ add_library(ApexEditor::Csp ALIAS apex_csp)
 target_link_libraries(apex_csp PUBLIC ApexEditor::Formats)
 
 add_library(apex_domain STATIC
+  src/domain/car_damage.cpp
+  src/domain/car_validation.cpp
   src/domain/driver.cpp
   src/domain/skin_metadata.cpp
   src/domain/track_data.cpp
@@ -131,6 +134,7 @@ add_library(apex_render STATIC
   src/render/lighting.cpp
   src/render/material_binding.cpp
   src/render/material_profile.cpp
+  src/render/pipeline.cpp
   src/render/render_plan.cpp
   src/render/texture_upload.cpp
   src/render/vulkan_device.cpp
@@ -181,6 +185,7 @@ apex_add_native_test(kn5_write_tests.cpp kn5_write_tests ApexEditor::Formats)
 apex_add_native_test(dds_tests.cpp dds_tests ApexEditor::Formats)
 apex_add_native_test(bc7_tests.cpp bc7_tests ApexEditor::Formats)
 apex_add_native_test(fbx_tests.cpp fbx_tests ApexEditor::Formats)
+apex_add_native_test(fbx_conversion_tests.cpp fbx_conversion_tests ApexEditor::Formats)
 apex_add_native_test(acd_tests.cpp acd_tests ApexEditor::Formats)
 apex_add_native_test(ini_tests.cpp ini_tests ApexEditor::Formats)
 apex_add_native_test(vao_tests.cpp vao_tests ApexEditor::Formats)
@@ -191,6 +196,8 @@ apex_add_native_test(asset_index_tests.cpp asset_index_tests ApexEditor::Assets)
 apex_add_native_test(asset_source_tests.cpp asset_source_tests ApexEditor::Assets)
 apex_add_native_test(csp_config_model_tests.cpp csp_config_model_tests ApexEditor::Csp)
 apex_add_native_test(csp_material_evaluator_tests.cpp csp_material_evaluator_tests ApexEditor::Csp)
+apex_add_native_test(car_damage_tests.cpp car_damage_tests ApexEditor::Domain)
+apex_add_native_test(car_validation_tests.cpp car_validation_tests ApexEditor::Domain)
 apex_add_native_test(driver_tests.cpp driver_tests ApexEditor::Domain)
 apex_add_native_test(skin_metadata_tests.cpp skin_metadata_tests ApexEditor::Domain)
 apex_add_native_test(track_data_tests.cpp track_data_tests ApexEditor::Domain)
@@ -202,9 +209,16 @@ apex_add_native_test(frame_plan_tests.cpp frame_plan_tests ApexEditor::Render)
 apex_add_native_test(lighting_tests.cpp lighting_tests ApexEditor::Render)
 apex_add_native_test(material_binding_tests.cpp material_binding_tests ApexEditor::Render)
 apex_add_native_test(material_profile_tests.cpp material_profile_tests ApexEditor::Render)
+apex_add_native_test(pipeline_tests.cpp pipeline_tests ApexEditor::Render)
 apex_add_native_test(render_plan_tests.cpp render_plan_tests ApexEditor::Render)
 apex_add_native_test(texture_upload_tests.cpp texture_upload_tests ApexEditor::Render)
 apex_add_native_test(platform_security_tests.cpp platform_security_tests ApexEditor::Platform)
+
+if(TARGET render_backend_tests AND WIN32)
+  # The Windows execution test compiles its small HLSL fixture at runtime so
+  # CI exercises real D3D12 shader bytecode instead of a shaped container.
+  target_link_libraries(render_backend_tests PRIVATE d3dcompiler)
+endif()
 
 if(TEST ksanim_tests)
   set_tests_properties(ksanim_tests PROPERTIES LABELS "unit;malformed")
@@ -212,14 +226,16 @@ endif()
 if(TEST knh_tests)
   set_tests_properties(knh_tests PROPERTIES LABELS "unit;malformed")
 endif()
-foreach(parser_test IN ITEMS kn5_tests kn5_write_tests dds_tests bc7_tests fbx_tests acd_tests ini_tests vao_tests)
+foreach(parser_test IN ITEMS kn5_tests kn5_write_tests dds_tests bc7_tests fbx_tests
+                             fbx_conversion_tests acd_tests ini_tests vao_tests)
   if(TEST ${parser_test})
     set_tests_properties(${parser_test} PROPERTIES LABELS "unit;malformed")
   endif()
 endforeach()
 foreach(boundary_test IN ITEMS authoring_project_tests geometry_bake_tests project_io_tests
                                asset_index_tests asset_source_tests csp_config_model_tests
-                               csp_material_evaluator_tests driver_tests skin_metadata_tests
+                               csp_material_evaluator_tests car_damage_tests car_validation_tests
+                               driver_tests skin_metadata_tests
                                track_data_tests kn5_scene_tests workspace_tests)
   if(TEST ${boundary_test})
     set_tests_properties(${boundary_test} PROPERTIES LABELS "unit;malformed")
@@ -236,7 +252,7 @@ if(TEST render_backend_tests)
   endif()
 endif()
 foreach(render_test IN ITEMS draw_packet_tests frame_plan_tests lighting_tests material_binding_tests
-                             material_profile_tests render_plan_tests texture_upload_tests)
+                             material_profile_tests pipeline_tests render_plan_tests texture_upload_tests)
   if(TEST ${render_test})
     set_tests_properties(${render_test} PROPERTIES LABELS "unit;render")
   endif()

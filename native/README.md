@@ -8,14 +8,17 @@ native implementation works through the parity gates in
 The native port has shared bounded input utilities. It reads KN5 v4/v5/v6,
 DDS, ACD, VAO, ordered INI/CSP, KSANIM v1/v2, and KNH. It writes KN5 files
 without byte changes when the model is unchanged. DDS includes bounded BC7 CPU
-decode. FBX support is currently a bounded binary/ASCII DOM foundation.
+decode. Its upload planner supports DX10 2D arrays, cubemaps, and exact RGB24
+to RGBA8 conversion. FBX support includes a bounded binary/ASCII DOM and a
+static-geometry conversion subset.
 
 The port supports surfaces, cameras, splines, workspaces, asset folders, skin
 indexes, and skin metadata. It includes staged CSP evaluation and KN5 scene
 conversion. The render model includes material profiles, bindings, and
 validated draw packets. Driver rigs include CPU reference skinning. The
 authoring model includes transactions, bounded project/CSP serialization,
-geometry edits, and KN5 baking.
+geometry edits, KN5 baking, car damage data, bottom colliders, and initial car
+validation.
 
 The render library includes DDS upload, recovered lighting math, shadow math,
 reflection math, and frame-pass plans. Its backend-neutral contract supports
@@ -50,16 +53,23 @@ out/native/dev/native/apex-native --inspect-ksanim animation.ksanim
 An unavailable SDK, driver, validation layer, or adapter is reported
 explicitly. It is never presented as a successful backend initialization.
 The current backends initialize devices and create/upload buffers and bounded
-2D textures, samplers, and immutable shader modules. They can execute bounded
-RGBA8/BGRA8 texture clears and canonical RGBA8 readback for backend validation.
+2D textures, samplers, and immutable shader modules. They execute bounded
+RGBA8/BGRA8 texture clears and canonical RGBA8 readback. They also validate a
+pipeline and execute one fixed, resource-free triangle draw with readback.
 This is not evidence of complete scene pixels. Window surfaces, swapchains,
-descriptor binding, pipeline states, shader execution, drawing, and production
-pixel comparisons remain roadmap work. BC7 has an exact, bounded CPU fallback.
-BC6H still requires a capable GPU path. The native CPU decode/upload paths also
-reject DX10 arrays, cubemaps, 1D/3D textures, raw 24-bit uploads, and legacy
-D3D9 float textures. Those paths remain available in the unchanged WebGL
-reference. The FBX parser currently stops at a bounded DOM and does not claim
-geometry, material, image, skin, or animation conversion parity.
+descriptor binding, scene draws, and production pixel comparisons remain
+roadmap work. BC7 has an exact, bounded CPU fallback. BC6H still requires a
+capable GPU path. The upload planner supports DX10 2D arrays, cubemaps, and
+RGB24 conversion. It rejects 1D/3D textures and legacy D3D9 float textures.
+The CPU decoder can still reject arrays and cubemaps. The FBX converter handles
+static positions, triangulation, hierarchy, a bounded transform subset, and
+first material assignment. It explicitly diagnoses unsupported images,
+skinning, animation, layer mappings, and advanced transform semantics.
+
+The Vulkan SDK is detected by the strict Linux builds. This machine has no
+usable Vulkan physical device, so the local runtime test reports a skip. CI can
+run the same test with a software Vulkan device. The production WebGL visual
+check is still required before any visible-rendering parity claim.
 
 ## Contribution rules
 

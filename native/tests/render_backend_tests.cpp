@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -11,6 +12,11 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+#include <d3dcompiler.h>
+#include <wrl/client.h>
+#endif
 
 namespace {
 
@@ -58,6 +64,62 @@ std::vector<std::byte> minimal_spirv_fixture() {
     return bytes;
 }
 
+std::vector<std::uint8_t> pipeline_shader_fixture() {
+    const std::vector<std::byte> bytes = minimal_spirv_fixture();
+    std::vector<std::uint8_t> result;
+    result.reserve(bytes.size());
+    for (const std::byte value : bytes) result.push_back(std::to_integer<std::uint8_t>(value));
+    return result;
+}
+
+std::uint8_t hex_digit(char value) {
+    if (value >= '0' && value <= '9') return static_cast<std::uint8_t>(value - '0');
+    if (value >= 'a' && value <= 'f') return static_cast<std::uint8_t>(value - 'a' + 10);
+    if (value >= 'A' && value <= 'F') return static_cast<std::uint8_t>(value - 'A' + 10);
+    throw std::runtime_error("invalid embedded shader hex");
+}
+
+std::vector<std::uint8_t> executable_vertex_shader() {
+    constexpr std::string_view hex =
+        "03022307000001000b000d001b0000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00070000000000040000006d61696e000000000d00000012000000470003000b00000002000000480005000b000000000000000b00000000000000480005000b000000010000000b00000001000000480005000b000000020000000b00000003000000480005000b000000030000000b0000000400000047000400120000001e00000000000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000004000000150004000800000020000000000000002b0004000800000009000000010000001c0004000a00000006000000090000001e0006000b00000007000000060000000a0000000a000000200004000c000000030000000b0000003b0004000c0000000d00000003000000150004000e00000020000000010000002b0004000e0000000f0000000000000017000400100000000600000003000000200004001100000001000000100000003b0004001100000012000000010000002b00040006000000140000000000803f200004001900000003000000070000003600050002000000040000000000000003000000f8000200050000003d0004001000000013000000120000005100050006000000150000001300000000000000510005000600000016000000130000000100000051000500060000001700000013000000020000005000070007000000180000001500000016000000170000001400000041000500190000001a0000000d0000000f0000003e0003001a00000018000000fd00010038000100";
+    require(hex.size() % 2U == 0U, "embedded vertex shader hex alignment");
+    std::vector<std::uint8_t> result(hex.size() / 2U);
+    for (std::size_t index = 0U; index < result.size(); ++index)
+        result[index] = static_cast<std::uint8_t>((hex_digit(hex[index * 2U]) << 4U) |
+                                                   hex_digit(hex[index * 2U + 1U]));
+    return result;
+}
+
+std::vector<std::uint8_t> executable_fragment_shader() {
+    constexpr std::string_view hex =
+        "03022307000001000b000d000d0000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00060004000000040000006d61696e000000000900000010000300040000000700000047000400090000001e00000000000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000004000000200004000800000003000000070000003b0004000800000009000000030000002b000400060000000a0000000000803f2b000400060000000b000000000000002c000700070000000c0000000a0000000b0000000b0000000a0000003600050002000000040000000000000003000000f8000200050000003e000300090000000c000000fd00010038000100";
+    require(hex.size() % 2U == 0U, "embedded fragment shader hex alignment");
+    std::vector<std::uint8_t> result(hex.size() / 2U);
+    for (std::size_t index = 0U; index < result.size(); ++index)
+        result[index] = static_cast<std::uint8_t>((hex_digit(hex[index * 2U]) << 4U) |
+                                                   hex_digit(hex[index * 2U + 1U]));
+    return result;
+}
+
+#if defined(_WIN32)
+std::vector<std::uint8_t> executable_d3d_shader(std::string_view source, std::string_view profile) {
+    using Microsoft::WRL::ComPtr;
+    ComPtr<ID3DBlob> bytecode;
+    ComPtr<ID3DBlob> errors;
+    const HRESULT result = D3DCompile(source.data(), source.size(), "apex_triangle", nullptr, nullptr, "main",
+                                      profile.data(), D3DCOMPILE_ENABLE_STRICTNESS, 0U, &bytecode, &errors);
+    if (FAILED(result)) {
+        const std::string message = errors == nullptr
+                                        ? "D3DCompile failed"
+                                        : std::string(static_cast<const char*>(errors->GetBufferPointer()),
+                                                      errors->GetBufferSize());
+        throw std::runtime_error(message);
+    }
+    const auto* begin = static_cast<const std::uint8_t*>(bytecode->GetBufferPointer());
+    return {begin, begin + bytecode->GetBufferSize()};
+}
+#endif
+
 std::vector<std::byte> minimal_dxbc_fixture() {
     std::vector<std::byte> bytes(48U);
     put_word(bytes, 0U, 0x43425844U); // DXBC
@@ -89,6 +151,9 @@ void contract_names() {
     require(std::string(apex::render::texture_readback_status_name(
                 apex::render::TextureReadbackStatus::execution_failed)) == "execution_failed",
             "texture readback status name");
+    require(std::string(apex::render::triangle_draw_status_name(
+                apex::render::TriangleDrawStatus::execution_failed)) == "execution_failed",
+            "triangle draw status name");
     require(std::string(apex::render::sampler_status_name(apex::render::SamplerStatus::ready)) == "ready",
             "sampler ready status name");
     require(std::string(apex::render::shader_module_status_name(apex::render::ShaderModuleStatus::unsupported)) ==
@@ -351,6 +416,69 @@ void contract_texture_readback_limits() {
             "backend ownership fixture");
 }
 
+void contract_triangle_draw_limits() {
+    using namespace apex::render;
+    Diagnostic diagnostic;
+    const TextureDescription target_description{16U, 16U, 1U, 1U, TextureFormat::rgba8_unorm,
+                                                TextureUsage::color_attachment | TextureUsage::transfer_source,
+                                                TextureMemory::device_local, TextureMutability::mutable_data};
+    ContractTexture target(target_description);
+    PipelineProgram pipeline;
+    pipeline.name = "triangle-contract";
+    pipeline.targets.colors.push_back({PipelineRenderTargetFormat::rgba8_unorm, 1U});
+    pipeline.raster.cull = PipelineCullMode::none;
+    pipeline.depth.test_enabled = false;
+    pipeline.depth.write_enabled = false;
+    pipeline.vertex_layout.stride = 12U;
+    pipeline.vertex_layout.attributes.push_back({PipelineVertexSemantic::position,
+                                                  PipelineVertexAttributeFormat::float32x3, 0U, 0U});
+    pipeline.shaders.push_back({PipelineShaderStage::vertex, PipelineShaderFormat::spirv, pipeline_shader_fixture()});
+    pipeline.shaders.push_back({PipelineShaderStage::fragment, PipelineShaderFormat::spirv, pipeline_shader_fixture()});
+    const std::array<std::byte, 36> vertices{};
+    TriangleDrawRequest request{&pipeline, vertices, 3U, 0U, 0U, {0.0F, 0.0F, 0.0F, 1.0F}};
+    require(validate_triangle_draw_request(target, request, diagnostic) == TriangleDrawStatus::ready,
+            "bounded triangle request accepted");
+    std::vector<std::uint8_t> truncated_spirv = pipeline_shader_fixture();
+    truncated_spirv.resize(24U);
+    pipeline.shaders[0].bytes = truncated_spirv;
+    require(validate_triangle_draw_request(target, request, diagnostic) == TriangleDrawStatus::invalid_request &&
+                diagnostic.code == "triangle_shader_shader_spirv_instruction_truncated",
+            "triangle truncated SPIR-V instruction rejected");
+    pipeline.shaders[0].bytes = pipeline_shader_fixture();
+    std::vector<std::byte> malformed_dxbc = minimal_dxbc_fixture();
+    put_word(malformed_dxbc, 24U, 47U);
+    put_word(malformed_dxbc, 40U, 3U);
+    pipeline.shaders[0].format = PipelineShaderFormat::dxil;
+    pipeline.shaders[0].bytes.clear();
+    pipeline.shaders[0].bytes.reserve(malformed_dxbc.size());
+    for (const std::byte value : malformed_dxbc) pipeline.shaders[0].bytes.push_back(std::to_integer<std::uint8_t>(value));
+    require(validate_triangle_draw_request(target, request, diagnostic) == TriangleDrawStatus::invalid_request &&
+                diagnostic.code == "triangle_shader_shader_dxbc_size_invalid",
+            "triangle malformed DXBC rejected");
+    pipeline.shaders[0].format = PipelineShaderFormat::spirv;
+    pipeline.shaders[0].bytes = pipeline_shader_fixture();
+    request.vertex_count = 4U;
+    require(validate_triangle_draw_request(target, request, diagnostic) == TriangleDrawStatus::invalid_request &&
+                diagnostic.code == "triangle_vertex_layout_invalid", "triangle vertex count rejected");
+    request.vertex_count = 3U;
+    const std::array<std::byte, 40> extra_vertex_data{};
+    request.vertex_data = extra_vertex_data;
+    require(validate_triangle_draw_request(target, request, diagnostic) == TriangleDrawStatus::invalid_request &&
+                diagnostic.code == "triangle_vertex_data_invalid", "triangle trailing vertex data rejected");
+    request.vertex_data = vertices;
+    pipeline.targets.colors[0].format = PipelineRenderTargetFormat::bgra8_unorm;
+    require(validate_triangle_draw_request(target, request, diagnostic) == TriangleDrawStatus::invalid_request &&
+                diagnostic.code == "triangle_target_format_mismatch", "triangle target format mismatch rejected");
+    pipeline.targets.colors[0].format = PipelineRenderTargetFormat::rgba8_unorm;
+    pipeline.blend.alpha_to_coverage = true;
+    require(validate_triangle_draw_request(target, request, diagnostic) == TriangleDrawStatus::invalid_request &&
+                diagnostic.code == "triangle_pipeline_a2c_sample_count", "triangle alpha-to-coverage rejected");
+    pipeline.blend.alpha_to_coverage = false;
+    pipeline.resources.push_back({PipelineResourceKind::sampled_texture, 0U, 0U, "texture"});
+    require(validate_triangle_draw_request(target, request, diagnostic) == TriangleDrawStatus::unsupported &&
+                diagnostic.code == "triangle_pipeline_unsupported", "triangle resource bindings rejected explicitly");
+}
+
 void contract_sampler_shader_limits() {
     using namespace apex::render;
     Diagnostic diagnostic;
@@ -595,6 +723,77 @@ bool contract_backend(apex::render::Backend backend) {
                 repeated_clear.rgba8[3] == std::byte{255},
             "repeated clear/readback pixels");
 
+    PipelineProgram triangle_pipeline;
+    triangle_pipeline.name = "embedded-triangle";
+    triangle_pipeline.targets.colors.push_back({PipelineRenderTargetFormat::rgba8_unorm, 1U});
+    triangle_pipeline.raster.cull = PipelineCullMode::none;
+    triangle_pipeline.depth.test_enabled = false;
+    triangle_pipeline.depth.write_enabled = false;
+    triangle_pipeline.vertex_layout.stride = 12U;
+    triangle_pipeline.vertex_layout.attributes.push_back({PipelineVertexSemantic::position,
+                                                           PipelineVertexAttributeFormat::float32x3, 0U, 0U});
+    std::vector<std::uint8_t> vertex_shader;
+    std::vector<std::uint8_t> fragment_shader;
+    if (backend == Backend::Vulkan) {
+        vertex_shader = executable_vertex_shader();
+        fragment_shader = executable_fragment_shader();
+        triangle_pipeline.shaders.push_back({PipelineShaderStage::vertex, PipelineShaderFormat::spirv,
+                                              std::move(vertex_shader)});
+        triangle_pipeline.shaders.push_back({PipelineShaderStage::fragment, PipelineShaderFormat::spirv,
+                                              std::move(fragment_shader)});
+    } else {
+#if defined(_WIN32)
+        constexpr std::string_view vertex_source =
+            "struct Input { float3 position : POSITION; };"
+            "struct Output { float4 position : SV_Position; };"
+            "Output main(Input input) { Output output; output.position = float4(input.position, 1.0); return output; }";
+        constexpr std::string_view fragment_source =
+            "float4 main(float4 position : SV_Position) : SV_Target { return float4(1, 0, 0, 1); }";
+        triangle_pipeline.shaders.push_back({PipelineShaderStage::vertex, PipelineShaderFormat::dxil,
+                                              executable_d3d_shader(vertex_source, "vs_5_0")});
+        triangle_pipeline.shaders.push_back({PipelineShaderStage::fragment, PipelineShaderFormat::dxil,
+                                              executable_d3d_shader(fragment_source, "ps_5_0")});
+#else
+        require(false, "D3D12 executable shader test requires Windows D3DCompile");
+#endif
+    }
+    const TextureDescription triangle_description{32U, 32U, 1U, 1U, TextureFormat::rgba8_unorm,
+                                                   TextureUsage::color_attachment | TextureUsage::transfer_source,
+                                                   TextureMemory::device_local, TextureMutability::mutable_data};
+    TextureResult triangle_texture = device.device->create_texture(triangle_description);
+    require(triangle_texture.ok(), "executable triangle target creation");
+    const std::array<float, 9> triangle_vertices = {
+        -0.75F, -0.75F, 0.0F,
+        0.75F, -0.75F, 0.0F,
+        0.0F, 0.75F, 0.0F,
+    };
+    const std::span<const std::byte> triangle_vertex_bytes(
+        reinterpret_cast<const std::byte*>(triangle_vertices.data()), sizeof(triangle_vertices));
+    const TriangleDrawRequest triangle_request{&triangle_pipeline, triangle_vertex_bytes, 3U, 0U, 0U,
+                                                {0.0F, 0.0F, 0.0F, 1.0F}};
+    TriangleDrawResult foreign_triangle;
+    if (backend == Backend::Vulkan) {
+        ContractD3D12Texture foreign_texture(triangle_description);
+        foreign_triangle = device.device->draw_triangle_and_readback(foreign_texture, triangle_request);
+    } else {
+        ContractTexture foreign_texture(triangle_description);
+        foreign_triangle = device.device->draw_triangle_and_readback(foreign_texture, triangle_request);
+    }
+    require(foreign_triangle.status == TriangleDrawStatus::unsupported &&
+                foreign_triangle.diagnostic.code == "texture_backend_mismatch",
+            "real backend rejects foreign triangle texture ownership");
+    const TriangleDrawResult triangle_result =
+        device.device->draw_triangle_and_readback(*triangle_texture.texture, triangle_request);
+    require(triangle_result.ok() && triangle_result.rgba8.size() == 32U * 32U * 4U,
+            "executable triangle draw/readback");
+    const std::size_t center = (16U * 32U + 16U) * 4U;
+    require(triangle_result.rgba8[center] == std::byte{255} && triangle_result.rgba8[center + 1U] == std::byte{0} &&
+                triangle_result.rgba8[center + 2U] == std::byte{0} && triangle_result.rgba8[center + 3U] == std::byte{255},
+            "triangle center pixel is shader red");
+    require(triangle_result.rgba8[0] == std::byte{0} && triangle_result.rgba8[1] == std::byte{0} &&
+                triangle_result.rgba8[2] == std::byte{0} && triangle_result.rgba8[3] == std::byte{255},
+            "triangle outside pixel retains clear color");
+
     const TextureDescription bgra_description{3U, 2U, 1U, 1U, TextureFormat::bgra8_unorm,
                                                TextureUsage::color_attachment | TextureUsage::transfer_source,
                                                TextureMemory::device_local, TextureMutability::mutable_data};
@@ -668,6 +867,7 @@ int main() {
         contract_buffer_limits();
         contract_texture_limits();
         contract_texture_readback_limits();
+        contract_triangle_draw_limits();
         contract_sampler_shader_limits();
         const std::string requested = environment_value("APEX_RENDER_BACKEND");
         if (requested == "vulkan") {

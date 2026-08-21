@@ -344,6 +344,165 @@ TextureReadbackStatus validate_texture_clear_readback(
     return TextureReadbackStatus::ready;
 }
 
+TriangleDrawStatus validate_triangle_draw_request(const Texture& texture,
+                                                  const TriangleDrawRequest& request,
+                                                  Diagnostic& diagnostic) {
+    if (request.pipeline == nullptr) {
+        diagnostic = {"triangle_pipeline_missing", "Triangle drawing requires a pipeline program"};
+        return TriangleDrawStatus::invalid_request;
+    }
+    const TextureDescription& description = texture.info().description;
+    for (const float component : request.clear_color) {
+        if (!std::isfinite(component)) {
+            diagnostic = {"triangle_clear_color_non_finite", "Triangle clear color components must be finite"};
+            return TriangleDrawStatus::invalid_request;
+        }
+    }
+    if (request.mip_level != 0U || request.array_layer != 0U || description.mip_levels != 1U ||
+        description.array_layers != 1U) {
+        diagnostic = {"triangle_subresource_unsupported",
+                      "Triangle drawing currently targets the only mip and array layer"};
+        return TriangleDrawStatus::unsupported;
+    }
+    const auto usage = static_cast<std::uint32_t>(description.usage);
+    const auto required_usage = static_cast<std::uint32_t>(TextureUsage::color_attachment) |
+                                static_cast<std::uint32_t>(TextureUsage::transfer_source);
+    if ((usage & required_usage) != required_usage) {
+        diagnostic = {"triangle_target_usage_invalid", "Triangle drawing requires color attachment and transfer-source usage"};
+        return TriangleDrawStatus::invalid_request;
+    }
+    if (description.width == 0U || description.height == 0U || description.mip_levels == 0U ||
+        description.array_layers == 0U || description.format == TextureFormat::r8_unorm ||
+        description.format == TextureFormat::r5g6b5_unorm) {
+        diagnostic = {"triangle_target_invalid", "Triangle drawing target dimensions or format are invalid"};
+        return TriangleDrawStatus::invalid_request;
+    }
+    const std::uint64_t row_bytes = static_cast<std::uint64_t>(description.width) * 4U;
+    const std::uint64_t target_bytes = static_cast<std::uint64_t>(description.height) > 0U &&
+                                               row_bytes > max_texture_readback_bytes /
+                                                               static_cast<std::uint64_t>(description.height)
+                                           ? max_texture_readback_bytes + 1U
+                                           : row_bytes * static_cast<std::uint64_t>(description.height);
+    if (target_bytes > max_texture_readback_bytes ||
+        target_bytes > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        diagnostic = {"triangle_target_size_limit", "Triangle target exceeds the bounded readback size"};
+        return TriangleDrawStatus::invalid_request;
+    }
+    if (request.vertex_count != 3U || request.pipeline->vertex_layout.stride == 0U ||
+        request.pipeline->vertex_layout.stride > 4096U ||
+        request.pipeline->vertex_layout.attributes.empty() ||
+        request.pipeline->vertex_layout.attributes.size() > 16U) {
+        diagnostic = {"triangle_vertex_layout_invalid", "Triangle vertex layout or vertex count is invalid"};
+        return TriangleDrawStatus::invalid_request;
+    }
+    const std::size_t stride = request.pipeline->vertex_layout.stride;
+    if (stride > std::numeric_limits<std::size_t>::max() / request.vertex_count ||
+        request.vertex_data.size() != stride * request.vertex_count ||
+        request.vertex_data.size() > 1U * 1024U * 1024U) {
+        diagnostic = {"triangle_vertex_data_invalid", "Triangle vertex data exceeds the bounded layout"};
+        return TriangleDrawStatus::invalid_request;
+    }
+    std::array<bool, 32> locations{};
+    for (const PipelineVertexAttribute& attribute : request.pipeline->vertex_layout.attributes) {
+        std::uint32_t attribute_bytes = 0U;
+        switch (attribute.format) {
+        case PipelineVertexAttributeFormat::float32: attribute_bytes = 4U; break;
+        case PipelineVertexAttributeFormat::float32x2: attribute_bytes = 8U; break;
+        case PipelineVertexAttributeFormat::float32x3: attribute_bytes = 12U; break;
+        case PipelineVertexAttributeFormat::float32x4: attribute_bytes = 16U; break;
+        case PipelineVertexAttributeFormat::uint32x4: attribute_bytes = 16U; break;
+        default:
+            diagnostic = {"triangle_vertex_attribute_invalid", "Triangle vertex attribute format is unknown"};
+            return TriangleDrawStatus::invalid_request;
+        }
+        if (attribute.location >= locations.size() || locations[attribute.location] ||
+            attribute.offset > request.pipeline->vertex_layout.stride ||
+            attribute_bytes > request.pipeline->vertex_layout.stride - attribute.offset) {
+            diagnostic = {"triangle_vertex_attribute_invalid", "Triangle vertex attribute exceeds its vertex stride"};
+            return TriangleDrawStatus::invalid_request;
+        }
+        locations[attribute.location] = true;
+    }
+    const PipelineProgram& pipeline = *request.pipeline;
+    const PipelineValidationResult pipeline_validation = validate_pipeline(pipeline);
+    if (!pipeline_validation.valid) {
+        if (!pipeline_validation.diagnostics.empty()) {
+            const PipelineDiagnostic& failure = pipeline_validation.diagnostics.front();
+            diagnostic = {"triangle_pipeline_" + failure.code, failure.message};
+        } else {
+            diagnostic = {"triangle_pipeline_invalid", "Pipeline validation failed without a diagnostic"};
+        }
+        return TriangleDrawStatus::invalid_request;
+    }
+    for (const PipelineShaderModule& shader : pipeline.shaders) {
+        if (shader.stage == PipelineShaderStage::geometry) continue;
+        const ShaderStage stage = shader.stage == PipelineShaderStage::vertex ? ShaderStage::vertex : ShaderStage::fragment;
+        const std::span<const std::byte> bytecode(reinterpret_cast<const std::byte*>(shader.bytes.data()),
+                                                   shader.bytes.size());
+        Diagnostic shader_diagnostic;
+        const ShaderModuleStatus shader_status =
+            validate_shader_module_description({stage, bytecode}, shader_diagnostic);
+        if (shader_status != ShaderModuleStatus::ready) {
+            const std::string code = shader_diagnostic.code.empty()
+                                         ? "triangle_shader_invalid"
+                                         : "triangle_shader_" + shader_diagnostic.code;
+            diagnostic = {code, shader_diagnostic.message};
+            return shader_status == ShaderModuleStatus::unsupported ? TriangleDrawStatus::unsupported
+                                                                      : TriangleDrawStatus::invalid_request;
+        }
+    }
+    if (pipeline.targets.colors.size() != 1U || pipeline.targets.has_depth ||
+        pipeline.targets.colors[0].samples != 1U || pipeline.resources.size() != 0U) {
+        diagnostic = {"triangle_pipeline_unsupported", "Triangle drawing supports one single-sample color target without resources"};
+        return TriangleDrawStatus::unsupported;
+    }
+    const auto expected_target = [&] {
+        switch (description.format) {
+        case TextureFormat::rgba8_unorm: return PipelineRenderTargetFormat::rgba8_unorm;
+        case TextureFormat::rgba8_srgb: return PipelineRenderTargetFormat::rgba8_srgb;
+        case TextureFormat::bgra8_unorm: return PipelineRenderTargetFormat::bgra8_unorm;
+        case TextureFormat::bgra8_srgb: return PipelineRenderTargetFormat::bgra8_srgb;
+        default: return PipelineRenderTargetFormat::unknown;
+        }
+    }();
+    if (pipeline.targets.colors[0].format != expected_target) {
+        diagnostic = {"triangle_target_format_mismatch", "Pipeline color format does not match the target texture"};
+        return TriangleDrawStatus::invalid_request;
+    }
+    bool has_vertex = false;
+    bool has_fragment = false;
+    std::size_t shader_bytes = 0U;
+    for (const PipelineShaderModule& shader : pipeline.shaders) {
+        if (shader.bytes.empty() || shader.bytes.size() > max_shader_module_bytes ||
+            shader_bytes > std::numeric_limits<std::size_t>::max() - shader.bytes.size()) {
+            diagnostic = {"triangle_shader_data_invalid", "Triangle shader bytecode exceeds the bounded module limit"};
+            return TriangleDrawStatus::invalid_request;
+        }
+        shader_bytes += shader.bytes.size();
+        if (shader_bytes > 32U * 1024U * 1024U) {
+            diagnostic = {"triangle_shader_size_limit", "Triangle shader bytecode exceeds the total module limit"};
+            return TriangleDrawStatus::invalid_request;
+        }
+        if (shader.stage == PipelineShaderStage::vertex) has_vertex = true;
+        else if (shader.stage == PipelineShaderStage::fragment) has_fragment = true;
+        else {
+            diagnostic = {"triangle_shader_stage_unsupported", "Triangle drawing supports only vertex and fragment shaders"};
+            return TriangleDrawStatus::unsupported;
+        }
+    }
+    if (pipeline.shaders.size() != 2U || !has_vertex || !has_fragment) {
+        diagnostic = {"triangle_shader_pair_invalid", "Triangle drawing requires one vertex and one fragment shader"};
+        return TriangleDrawStatus::invalid_request;
+    }
+    if (pipeline.raster.fill != PipelineFillMode::solid || pipeline.blend.enabled ||
+        pipeline.blend.alpha_to_coverage ||
+        pipeline.depth.test_enabled || pipeline.depth.write_enabled) {
+        diagnostic = {"triangle_pipeline_state_unsupported", "Triangle drawing supports solid opaque rasterization"};
+        return TriangleDrawStatus::unsupported;
+    }
+    return TriangleDrawStatus::ready;
+}
+
 SamplerStatus validate_sampler_description(const SamplerDescription& description,
                                            Diagnostic& diagnostic) {
     const auto valid_filter = [](SamplerFilter filter) {
@@ -666,6 +825,16 @@ const char* texture_readback_status_name(TextureReadbackStatus status) noexcept 
         return "unsupported";
     case TextureReadbackStatus::execution_failed:
         return "execution_failed";
+    }
+    return "unknown";
+}
+
+const char* triangle_draw_status_name(TriangleDrawStatus status) noexcept {
+    switch (status) {
+    case TriangleDrawStatus::ready: return "ready";
+    case TriangleDrawStatus::invalid_request: return "invalid_request";
+    case TriangleDrawStatus::unsupported: return "unsupported";
+    case TriangleDrawStatus::execution_failed: return "execution_failed";
     }
     return "unknown";
 }

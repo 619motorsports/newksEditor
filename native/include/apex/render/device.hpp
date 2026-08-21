@@ -1,5 +1,6 @@
 #pragma once
 
+#include "apex/render/pipeline.hpp"
 #include "apex/render/texture_format.hpp"
 
 #include <array>
@@ -262,6 +263,35 @@ struct TextureClearReadbackResult {
     [[nodiscard]] bool ok() const noexcept { return status == TextureReadbackStatus::ready; }
 };
 
+// A bounded executable triangle request. The pipeline must contain one
+// vertex and one fragment shader, one RGBA8 color target, and no resource
+// bindings. The supplied vertex bytes are interpreted using the pipeline's
+// vertex layout. This is a real backend draw contract, not a CPU fill or a
+// pixel-fidelity claim for the complete renderer.
+struct TriangleDrawRequest {
+    const PipelineProgram* pipeline = nullptr;
+    std::span<const std::byte> vertex_data{};
+    std::uint32_t vertex_count = 3U;
+    std::uint32_t mip_level = 0U;
+    std::uint32_t array_layer = 0U;
+    std::array<float, 4> clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
+};
+
+enum class TriangleDrawStatus {
+    ready,
+    invalid_request,
+    unsupported,
+    execution_failed,
+};
+
+struct TriangleDrawResult {
+    TriangleDrawStatus status = TriangleDrawStatus::unsupported;
+    Diagnostic diagnostic;
+    std::vector<std::byte> rgba8;
+
+    [[nodiscard]] bool ok() const noexcept { return status == TriangleDrawStatus::ready; }
+};
+
 inline constexpr std::uint64_t max_texture_readback_bytes = 256ULL * 1024ULL * 1024ULL;
 
 enum class SamplerFilter : std::uint8_t {
@@ -415,6 +445,9 @@ inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
     const TextureClearReadbackRequest& request,
     Diagnostic& diagnostic);
 
+[[nodiscard]] TriangleDrawStatus validate_triangle_draw_request(
+    const Texture& texture, const TriangleDrawRequest& request, Diagnostic& diagnostic);
+
 [[nodiscard]] SamplerStatus validate_sampler_description(
     const SamplerDescription& description,
     Diagnostic& diagnostic);
@@ -461,6 +494,9 @@ public:
         Texture& texture,
         const TextureClearReadbackRequest& request) = 0;
 
+    [[nodiscard]] virtual TriangleDrawResult draw_triangle_and_readback(
+        Texture& texture, const TriangleDrawRequest& request) = 0;
+
     [[nodiscard]] virtual SamplerResult create_sampler(
         const SamplerDescription& description) = 0;
 
@@ -485,6 +521,7 @@ struct DeviceResult {
 [[nodiscard]] const char* buffer_status_name(BufferStatus status) noexcept;
 [[nodiscard]] const char* texture_status_name(TextureStatus status) noexcept;
 [[nodiscard]] const char* texture_readback_status_name(TextureReadbackStatus status) noexcept;
+[[nodiscard]] const char* triangle_draw_status_name(TriangleDrawStatus status) noexcept;
 [[nodiscard]] const char* sampler_status_name(SamplerStatus status) noexcept;
 [[nodiscard]] const char* shader_module_status_name(ShaderModuleStatus status) noexcept;
 

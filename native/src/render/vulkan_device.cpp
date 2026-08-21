@@ -1002,6 +1002,357 @@ bool clear_texture_and_readback(const std::shared_ptr<VulkanContext>& context,
     return true;
 }
 
+VkFormat vk_pipeline_vertex_format(PipelineVertexAttributeFormat format) {
+    switch (format) {
+    case PipelineVertexAttributeFormat::float32: return VK_FORMAT_R32_SFLOAT;
+    case PipelineVertexAttributeFormat::float32x2: return VK_FORMAT_R32G32_SFLOAT;
+    case PipelineVertexAttributeFormat::float32x3: return VK_FORMAT_R32G32B32_SFLOAT;
+    case PipelineVertexAttributeFormat::float32x4: return VK_FORMAT_R32G32B32A32_SFLOAT;
+    case PipelineVertexAttributeFormat::uint32x4: return VK_FORMAT_R32G32B32A32_UINT;
+    }
+    return VK_FORMAT_UNDEFINED;
+}
+
+VkShaderStageFlagBits vk_pipeline_stage(PipelineShaderStage stage) {
+    return stage == PipelineShaderStage::vertex ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
+}
+
+bool draw_triangle_and_readback(const std::shared_ptr<VulkanContext>& context,
+                                RawVulkanImage& image,
+                                const TextureDescription& description,
+                                const TriangleDrawRequest& request,
+                                VkImageLayout& current_layout,
+                                std::vector<std::byte>& output,
+                                Diagnostic& diagnostic) {
+    std::lock_guard command_guard(context->command_mutex);
+    const std::size_t output_size = static_cast<std::size_t>(description.width) * description.height * 4U;
+    BufferDescription vertex_description;
+    vertex_description.size_bytes = request.vertex_data.size();
+    vertex_description.usage = BufferUsage::vertex;
+    vertex_description.memory = BufferMemory::host_visible;
+    RawVulkanBuffer vertices;
+    if (!create_raw_buffer(context, vertex_description, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                           BufferMemory::host_visible, vertices, diagnostic) ||
+        !write_host_buffer(context, vertices, 0U, request.vertex_data, diagnostic)) {
+        diagnostic.code = "triangle_execution_failed";
+        return false;
+    }
+    BufferDescription readback_description;
+    readback_description.size_bytes = output_size;
+    readback_description.usage = BufferUsage::transfer_destination;
+    readback_description.memory = BufferMemory::host_visible;
+    RawVulkanBuffer readback;
+    if (!create_raw_buffer(context, readback_description, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                           BufferMemory::host_visible, readback, diagnostic)) {
+        diagnostic.code = "triangle_execution_failed";
+        return false;
+    }
+
+    std::vector<VkShaderModule> shader_modules;
+    std::vector<std::vector<std::uint32_t>> shader_words;
+    shader_modules.reserve(request.pipeline->shaders.size());
+    shader_words.reserve(request.pipeline->shaders.size());
+    VkResult result = VK_SUCCESS;
+    for (const PipelineShaderModule& shader : request.pipeline->shaders) {
+        if (shader.format != PipelineShaderFormat::spirv || shader.bytes.size() % sizeof(std::uint32_t) != 0U) {
+            diagnostic = {"triangle_shader_format_unsupported", "Vulkan triangle execution requires aligned SPIR-V shaders"};
+            return false;
+        }
+        shader_words.emplace_back(shader.bytes.size() / sizeof(std::uint32_t));
+        std::memcpy(shader_words.back().data(), shader.bytes.data(), shader.bytes.size());
+        if (shader_words.back().empty() || shader_words.back()[0] != 0x07230203U) {
+            diagnostic = {"triangle_shader_invalid", "Vulkan triangle shader has an invalid SPIR-V signature"};
+            return false;
+        }
+        VkShaderModuleCreateInfo module_info{};
+        module_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        module_info.codeSize = shader.bytes.size();
+        module_info.pCode = shader_words.back().data();
+        VkShaderModule module = VK_NULL_HANDLE;
+        result = vkCreateShaderModule(context->device, &module_info, nullptr, &module);
+        if (result != VK_SUCCESS) break;
+        shader_modules.push_back(module);
+    }
+    auto destroy_modules = [&] {
+        for (VkShaderModule module : shader_modules) vkDestroyShaderModule(context->device, module, nullptr);
+        shader_modules.clear();
+    };
+    if (result != VK_SUCCESS) {
+        destroy_modules();
+        diagnostic = vk_error("vkCreateShaderModule(triangle)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "triangle_execution_failed";
+        return false;
+    }
+
+    VkAttachmentDescription attachment{};
+    attachment.format = vk_texture_format(description.format);
+    attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    attachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    VkAttachmentReference color_reference{0U, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1U;
+    subpass.pColorAttachments = &color_reference;
+    VkRenderPassCreateInfo render_pass_info{};
+    render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    render_pass_info.attachmentCount = 1U;
+    render_pass_info.pAttachments = &attachment;
+    render_pass_info.subpassCount = 1U;
+    render_pass_info.pSubpasses = &subpass;
+    VkRenderPass render_pass = VK_NULL_HANDLE;
+    result = vkCreateRenderPass(context->device, &render_pass_info, nullptr, &render_pass);
+    if (result != VK_SUCCESS) {
+        destroy_modules();
+        diagnostic = vk_error("vkCreateRenderPass(triangle)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "triangle_execution_failed";
+        return false;
+    }
+    VkFramebufferCreateInfo framebuffer_info{};
+    framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    framebuffer_info.renderPass = render_pass;
+    framebuffer_info.attachmentCount = 1U;
+    framebuffer_info.pAttachments = &image.view;
+    framebuffer_info.width = description.width;
+    framebuffer_info.height = description.height;
+    framebuffer_info.layers = 1U;
+    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    result = vkCreateFramebuffer(context->device, &framebuffer_info, nullptr, &framebuffer);
+    if (result != VK_SUCCESS) {
+        vkDestroyRenderPass(context->device, render_pass, nullptr);
+        destroy_modules();
+        diagnostic = vk_error("vkCreateFramebuffer(triangle)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "triangle_execution_failed";
+        return false;
+    }
+    VkPipelineLayoutCreateInfo layout_info{};
+    layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
+    result = vkCreatePipelineLayout(context->device, &layout_info, nullptr, &pipeline_layout);
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    if (result == VK_SUCCESS) {
+        std::vector<VkPipelineShaderStageCreateInfo> stages;
+        stages.reserve(request.pipeline->shaders.size());
+        for (std::size_t index = 0; index < request.pipeline->shaders.size(); ++index) {
+            VkPipelineShaderStageCreateInfo stage{};
+            stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            stage.stage = vk_pipeline_stage(request.pipeline->shaders[index].stage);
+            stage.module = shader_modules[index];
+            stage.pName = "main";
+            stages.push_back(stage);
+        }
+        const auto& attributes = request.pipeline->vertex_layout.attributes;
+        std::vector<VkVertexInputAttributeDescription> vertex_attributes;
+        vertex_attributes.reserve(attributes.size());
+        for (const PipelineVertexAttribute& attribute : attributes)
+            vertex_attributes.push_back({attribute.location, 0U, vk_pipeline_vertex_format(attribute.format), attribute.offset});
+        VkVertexInputBindingDescription vertex_binding{0U, request.pipeline->vertex_layout.stride,
+                                                       VK_VERTEX_INPUT_RATE_VERTEX};
+        VkPipelineVertexInputStateCreateInfo vertex_input{};
+        vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        vertex_input.vertexBindingDescriptionCount = 1U;
+        vertex_input.pVertexBindingDescriptions = &vertex_binding;
+        vertex_input.vertexAttributeDescriptionCount = static_cast<std::uint32_t>(vertex_attributes.size());
+        vertex_input.pVertexAttributeDescriptions = vertex_attributes.data();
+        VkPipelineInputAssemblyStateCreateInfo assembly{};
+        assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkViewport viewport{0.0F, 0.0F, static_cast<float>(description.width),
+                            static_cast<float>(description.height), 0.0F, 1.0F};
+        VkRect2D scissor{{0, 0}, {description.width, description.height}};
+        VkPipelineViewportStateCreateInfo viewport_state{};
+        viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewport_state.viewportCount = 1U;
+        viewport_state.pViewports = &viewport;
+        viewport_state.scissorCount = 1U;
+        viewport_state.pScissors = &scissor;
+        VkPipelineRasterizationStateCreateInfo raster{};
+        raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        raster.polygonMode = VK_POLYGON_MODE_FILL;
+        raster.cullMode = request.pipeline->raster.cull == PipelineCullMode::none ? VK_CULL_MODE_NONE
+                          : request.pipeline->raster.cull == PipelineCullMode::front ? VK_CULL_MODE_FRONT_BIT
+                                                                                      : VK_CULL_MODE_BACK_BIT;
+        raster.frontFace = request.pipeline->raster.front_face == PipelineFrontFace::clockwise
+                               ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        raster.lineWidth = 1.0F;
+        VkPipelineMultisampleStateCreateInfo multisample{};
+        multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineColorBlendAttachmentState blend{};
+        blend.blendEnable = VK_FALSE;
+        blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                               VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        VkPipelineColorBlendStateCreateInfo color_blend{};
+        color_blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        color_blend.attachmentCount = 1U;
+        color_blend.pAttachments = &blend;
+        VkGraphicsPipelineCreateInfo pipeline_info{};
+        pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipeline_info.stageCount = static_cast<std::uint32_t>(stages.size());
+        pipeline_info.pStages = stages.data();
+        pipeline_info.pVertexInputState = &vertex_input;
+        pipeline_info.pInputAssemblyState = &assembly;
+        pipeline_info.pViewportState = &viewport_state;
+        pipeline_info.pRasterizationState = &raster;
+        pipeline_info.pMultisampleState = &multisample;
+        pipeline_info.pColorBlendState = &color_blend;
+        pipeline_info.layout = pipeline_layout;
+        pipeline_info.renderPass = render_pass;
+        pipeline_info.subpass = 0U;
+        result = vkCreateGraphicsPipelines(context->device, VK_NULL_HANDLE, 1U, &pipeline_info, nullptr, &pipeline);
+    }
+    if (result != VK_SUCCESS) {
+        if (pipeline_layout != VK_NULL_HANDLE) vkDestroyPipelineLayout(context->device, pipeline_layout, nullptr);
+        vkDestroyFramebuffer(context->device, framebuffer, nullptr);
+        vkDestroyRenderPass(context->device, render_pass, nullptr);
+        destroy_modules();
+        diagnostic = vk_error("vkCreateGraphicsPipelines(triangle)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "triangle_execution_failed";
+        return false;
+    }
+
+    VkCommandBufferAllocateInfo allocation{};
+    allocation.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocation.commandPool = context->command_pool;
+    allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocation.commandBufferCount = 1U;
+    VkCommandBuffer command = VK_NULL_HANDLE;
+    result = vkAllocateCommandBuffers(context->device, &allocation, &command);
+    bool submitted = false;
+    bool completed = false;
+    if (result == VK_SUCCESS) {
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        result = vkBeginCommandBuffer(command, &begin);
+        if (result == VK_SUCCESS) {
+            if (current_layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+                VkImageMemoryBarrier barrier{};
+                barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                barrier.oldLayout = current_layout;
+                barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                barrier.image = image.image;
+                barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                barrier.subresourceRange.levelCount = description.mip_levels;
+                barrier.subresourceRange.layerCount = description.array_layers;
+                barrier.srcAccessMask = current_layout == VK_IMAGE_LAYOUT_UNDEFINED ? 0U : VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+                barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                vkCmdPipelineBarrier(command,
+                                     current_layout == VK_IMAGE_LAYOUT_UNDEFINED ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+            }
+            VkClearValue clear{};
+            for (std::size_t index = 0; index < 4U; ++index) clear.color.float32[index] = request.clear_color[index];
+            VkRenderPassBeginInfo render_begin{};
+            render_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            render_begin.renderPass = render_pass;
+            render_begin.framebuffer = framebuffer;
+            render_begin.renderArea.extent = {description.width, description.height};
+            render_begin.clearValueCount = 1U;
+            render_begin.pClearValues = &clear;
+            vkCmdBeginRenderPass(command, &render_begin, VK_SUBPASS_CONTENTS_INLINE);
+            vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            VkDeviceSize vertex_offset = 0U;
+            vkCmdBindVertexBuffers(command, 0U, 1U, &vertices.buffer, &vertex_offset);
+            vkCmdDraw(command, request.vertex_count, 1U, 0U, 0U);
+            vkCmdEndRenderPass(command);
+            VkImageMemoryBarrier barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = image.image;
+            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            barrier.subresourceRange.levelCount = description.mip_levels;
+            barrier.subresourceRange.layerCount = description.array_layers;
+            barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 0, 0, nullptr, 0, nullptr, 1, &barrier);
+            VkBufferImageCopy copy{};
+            copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            copy.imageSubresource.layerCount = 1U;
+            copy.imageExtent = {description.width, description.height, 1U};
+            vkCmdCopyImageToBuffer(command, image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                   readback.buffer, 1U, &copy);
+            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barrier.newLayout = texture_final_layout(description.usage);
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                 0, 0, nullptr, 0, nullptr, 1, &barrier);
+            result = vkEndCommandBuffer(command);
+        }
+    }
+    if (result == VK_SUCCESS) {
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1U;
+        submit.pCommandBuffers = &command;
+        VkFenceCreateInfo fence_info{};
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        VkFence fence = VK_NULL_HANDLE;
+        result = vkCreateFence(context->device, &fence_info, nullptr, &fence);
+        if (result == VK_SUCCESS) {
+            result = vkQueueSubmit(context->queue, 1U, &submit, fence);
+            submitted = result == VK_SUCCESS;
+            if (result == VK_SUCCESS) {
+                result = vkWaitForFences(context->device, 1U, &fence, VK_TRUE, UINT64_MAX);
+                completed = result == VK_SUCCESS;
+            }
+            vkDestroyFence(context->device, fence, nullptr);
+        }
+    }
+    if (submitted && !completed) {
+        const VkResult drain = vkDeviceWaitIdle(context->device);
+        if (drain == VK_SUCCESS) current_layout = texture_final_layout(description.usage);
+        else { current_layout = VK_IMAGE_LAYOUT_UNDEFINED; result = drain; }
+    } else if (completed) {
+        current_layout = texture_final_layout(description.usage);
+    }
+    if (command != VK_NULL_HANDLE) vkFreeCommandBuffers(context->device, context->command_pool, 1U, &command);
+    if (pipeline != VK_NULL_HANDLE) vkDestroyPipeline(context->device, pipeline, nullptr);
+    if (pipeline_layout != VK_NULL_HANDLE) vkDestroyPipelineLayout(context->device, pipeline_layout, nullptr);
+    vkDestroyFramebuffer(context->device, framebuffer, nullptr);
+    vkDestroyRenderPass(context->device, render_pass, nullptr);
+    destroy_modules();
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("Vulkan triangle execution", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "triangle_execution_failed";
+        return false;
+    }
+    void* mapped = nullptr;
+    result = vkMapMemory(context->device, readback.memory, 0, VK_WHOLE_SIZE, 0, &mapped);
+    if (result == VK_SUCCESS && (readback.properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0U) {
+        VkMappedMemoryRange range{};
+        range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+        range.memory = readback.memory;
+        range.size = VK_WHOLE_SIZE;
+        result = vkInvalidateMappedMemoryRanges(context->device, 1U, &range);
+    }
+    if (result == VK_SUCCESS) {
+        try { output.assign(static_cast<const std::byte*>(mapped), static_cast<const std::byte*>(mapped) + output_size); }
+        catch (const std::bad_alloc&) { result = VK_ERROR_OUT_OF_HOST_MEMORY; }
+    }
+    if (mapped != nullptr) vkUnmapMemory(context->device, readback.memory);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("Vulkan triangle readback", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "triangle_execution_failed";
+        output.clear();
+        return false;
+    }
+    if (description.format == TextureFormat::bgra8_unorm || description.format == TextureFormat::bgra8_srgb)
+        for (std::size_t index = 0; index < output.size(); index += 4U) std::swap(output[index], output[index + 2U]);
+    return true;
+}
+
 class VulkanTexture final : public Texture {
 public:
     VulkanTexture(std::shared_ptr<VulkanContext> context,
@@ -1022,6 +1373,12 @@ public:
                         std::vector<std::byte>& output,
                         Diagnostic& diagnostic) {
         return clear_texture_and_readback(context_, raw_, info_.description, request, layout_, output, diagnostic);
+    }
+
+    bool draw_triangle(const TriangleDrawRequest& request,
+                       std::vector<std::byte>& output,
+                       Diagnostic& diagnostic) {
+        return draw_triangle_and_readback(context_, raw_, info_.description, request, layout_, output, diagnostic);
     }
 
 private:
@@ -1247,6 +1604,24 @@ public:
         if (!vulkan_texture->clear_readback(request, output, diagnostic))
             return {TextureReadbackStatus::execution_failed, std::move(diagnostic), {}};
         return {TextureReadbackStatus::ready, {}, std::move(output)};
+    }
+
+    TriangleDrawResult draw_triangle_and_readback(
+        Texture& texture, const TriangleDrawRequest& request) override {
+        Diagnostic diagnostic;
+        const TriangleDrawStatus validation = validate_triangle_draw_request(texture, request, diagnostic);
+        if (validation != TriangleDrawStatus::ready) return {validation, std::move(diagnostic), {}};
+        if (texture.backend() != Backend::Vulkan)
+            return {TriangleDrawStatus::unsupported,
+                    {"texture_backend_mismatch", "The texture belongs to another graphics backend"}, {}};
+        auto* vulkan_texture = dynamic_cast<VulkanTexture*>(&texture);
+        if (vulkan_texture == nullptr)
+            return {TriangleDrawStatus::unsupported,
+                    {"texture_type_unsupported", "The Vulkan device received an unknown texture handle"}, {}};
+        std::vector<std::byte> output;
+        if (!vulkan_texture->draw_triangle(request, output, diagnostic))
+            return {TriangleDrawStatus::execution_failed, std::move(diagnostic), {}};
+        return {TriangleDrawStatus::ready, {}, std::move(output)};
     }
 
     SamplerResult create_sampler(const SamplerDescription& description) override {

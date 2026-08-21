@@ -22,6 +22,8 @@ struct TextureFormatMapping {
     bool compressed = false;
     bool srgb = false;
     bool signedChannels = false;
+    std::uint8_t sourceBytesPerPixel = 0;
+    bool cpuConversion = false;
 };
 
 struct TextureUploadDiagnostic {
@@ -40,6 +42,9 @@ struct TextureFormatMappingResult {
 
 struct DdsUploadSubresource {
     std::uint32_t mipLevel = 0;
+    // DX10 array index and cube face. For ordinary 2D textures these are 0.
+    std::uint32_t arrayLayer = 0;
+    std::uint32_t cubeFace = 0;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::size_t offset = 0;
@@ -49,6 +54,12 @@ struct DdsUploadSubresource {
     std::size_t slicePitch = 0;
     std::size_t blocksWide = 0;
     std::size_t blocksHigh = 0;
+    // Non-zero only when the source payload needs a CPU conversion (currently
+    // masked 24-bit RGB to tightly packed RGBA8). These offsets address the
+    // plan-owned convertedPayload, not the DDS input bytes.
+    std::size_t convertedOffset = 0;
+    std::size_t convertedSize = 0;
+    std::size_t convertedRowPitch = 0;
 };
 
 struct DdsUploadPlan {
@@ -56,6 +67,7 @@ struct DdsUploadPlan {
     TextureFormatMapping mapping;
     std::vector<DdsUploadSubresource> subresources;
     std::size_t payloadBytes = 0;
+    std::vector<std::uint8_t> convertedPayload;
 };
 
 enum class TextureUploadStatus {
@@ -75,8 +87,8 @@ struct DdsUploadPlanResult {
 };
 
 // Map source DDS metadata to portable format and authoritative SDK numeric
-// constants. 24-bit RGB and legacy floating-point layouts have no portable
-// CPU approximation in this boundary; callers receive an unsupported result.
+// constants. 24-bit RGB is converted exactly from its source masks to RGBA8
+// in the bounded upload plan; legacy floating-point layouts remain unsupported.
 // No Vulkan or DirectX headers are required by this function.
 [[nodiscard]] TextureFormatMappingResult mapDdsTextureFormat(
     const apex::formats::DdsDescriptor& descriptor);
