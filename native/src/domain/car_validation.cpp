@@ -427,7 +427,9 @@ struct EdgeHash {
                     return false;
                 }
                 auto iterator = found;
-                if (iterator == edges.end()) iterator = edges.emplace(key, 0).first;
+                if (iterator == edges.end()) {
+                    iterator = edges.emplace(key, std::uint8_t{0U}).first;
+                }
                 if (iterator->second < std::numeric_limits<std::uint8_t>::max()) ++iterator->second;
                 return true;
             };
