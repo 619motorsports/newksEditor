@@ -34,6 +34,11 @@ export function isStockDamageDirtShader(value) {
   return value === STOCK_DAMAGE_DIRT_SHADER;
 }
 
+/** The recovered stock response is exact only for the dirt-zero shader branch. */
+export function isStockDamageDirtZero(shader, dirt = 0) {
+  return isStockDamageDirtShader(shader) && Number(dirt) === 0;
+}
+
 /** Audit the five exact, numbered node sequences used by native F4. */
 export function auditNativeDamagePreview(root, materials = []) {
   const nodes = sceneNodes(root), roots = [], warnings = [];
@@ -63,17 +68,20 @@ export function auditNativeDamagePreview(root, materials = []) {
   const materialEntries = (materials || []).map((material, materialId) => {
     const damageZones = property(material, "damageZones");
     if (!damageZones) return null;
-    const missingResources = isStockDamageDirtShader(material.shader)
+    const exactShader = isStockDamageDirtShader(material.shader);
+    const dirt = Number(property(material, "dirt")?.value ?? 0);
+    const missingResources = exactShader
       ? ["txDamage", "txDamageMask"].filter((slot) => !resource(material, slot))
       : [];
     if (missingResources.length) warnings.push(`${material.name || `Material ${materialId}`} is missing ${missingResources.join(", ")}.`);
-    return { material, materialId, damageZones, missingResources, exactShader: isStockDamageDirtShader(material.shader) };
+    if (exactShader && dirt !== 0) warnings.push(`${material.name || `Material ${materialId}`} has dirt ${Number.isFinite(dirt) ? dirt : "that is not finite"}; the exact preview supports only the recovered dirt-zero branch.`);
+    return { material, materialId, damageZones, missingResources, dirt, exactShader, exactZeroDirt: exactShader && dirt === 0 };
   }).filter(Boolean);
   const rootSet = new WeakSet(roots);
   return {
     groups, roots, rootSet, warnings, materialEntries,
     available: roots.length > 0 || materialEntries.length > 0,
-    exactMaterials: materialEntries.filter((entry) => entry.exactShader && !entry.missingResources.length),
+    exactMaterials: materialEntries.filter((entry) => entry.exactZeroDirt && !entry.missingResources.length),
     authoredBrokenVisible: roots.some((node) => Boolean(node.active)),
     authoredDamageVisible: materialEntries.some((entry) => entry.damageZones.value4?.some((value) => Number(value) > 0))
   };
@@ -100,9 +108,19 @@ export function damagePreviewBranchActive(nodes, audit, brokenVisible) {
   return true;
 }
 
-/** Apply the native one-way glassDamage write after any F4 edge. */
-export function nativeDamageGlassValue(nodes, audit, currentPreview, authoredValue) {
-  return currentPreview !== null && nativeDamageRootForPath(nodes, audit) ? 1 : authoredValue;
+/** Collect shared material objects written by native F4 through selected descendants. */
+export function nativeDamageGlassMaterials(items, audit) {
+  const affected = new Set();
+  for (const item of items || []) {
+    if (!nativeDamageRootForPath(item?.ancestors, audit)) continue;
+    if (property(item?.material, "glassDamage")) affected.add(item.material);
+  }
+  return affected;
+}
+
+/** Apply the native one-way shared-material glassDamage write after any F4 edge. */
+export function nativeDamageGlassValue(material, affectedMaterials, currentPreview, authoredValue) {
+  return currentPreview !== null && affectedMaterials?.has(material) ? 1 : authoredValue;
 }
 
 /** Reproduce the damage factor at instructions 44 through 47 of the stock pixel shader. */
