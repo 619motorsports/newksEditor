@@ -939,6 +939,7 @@ bool draw_triangle_and_readback(const std::shared_ptr<D3D12Context>& context,
     pipeline_description.DepthStencilState.StencilEnable = FALSE;
     pipeline_description.NumRenderTargets = 1U;
     pipeline_description.RTVFormats[0] = dxgi_texture_format(description.format);
+    pipeline_description.SampleMask = std::numeric_limits<UINT>::max();
     pipeline_description.SampleDesc.Count = 1U;
     ComPtr<ID3D12PipelineState> pipeline;
     result = context->device->CreateGraphicsPipelineState(&pipeline_description, IID_PPV_ARGS(&pipeline));
