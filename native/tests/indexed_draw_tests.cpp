@@ -98,7 +98,7 @@ PipelineProgram pipeline_fixture() {
     pipeline.depth.test_enabled = false;
     pipeline.depth.write_enabled = false;
     pipeline.transform_contract = PipelineTransformContract::draw_matrices;
-    pipeline.vertex_layout.stride = 12U;
+    pipeline.vertex_layout.stride = 11U * sizeof(float);
     pipeline.vertex_layout.attributes.push_back({PipelineVertexSemantic::position,
                                                    PipelineVertexAttributeFormat::float32x3, 0U, 0U});
     pipeline.shaders.push_back({PipelineShaderStage::vertex, PipelineShaderFormat::spirv, shader_fixture()});
@@ -111,9 +111,24 @@ DrawPacket packet_fixture() {
     packet.primitive = DrawPrimitiveKind::static_mesh;
     packet.vertex_count = 3U;
     packet.index_count = 3U;
-    packet.vertex_stride_floats = 3U;
+    packet.vertex_stride_floats = 11U;
     packet.shader_execution_supported = true;
     packet.flags = {false, false, false, false, false, false, false, false};
+    return packet;
+}
+
+PipelineProgram skinned_pipeline_fixture() {
+    PipelineProgram pipeline = pipeline_fixture();
+    pipeline.name = "indexed-skinned-contract";
+    pipeline.vertex_layout.stride = 19U * sizeof(float);
+    return pipeline;
+}
+
+DrawPacket skinned_packet_fixture() {
+    DrawPacket packet = packet_fixture();
+    packet.primitive = DrawPrimitiveKind::skinned_mesh;
+    packet.vertex_stride_floats = 19U;
+    packet.bone_palette.push_back(apex::scene::identity_matrix);
     return packet;
 }
 
@@ -142,7 +157,7 @@ void accepts_bounded_static_indexed_contract() {
     PipelineProgram pipeline = pipeline_fixture();
     DrawPacket packet = packet_fixture();
     FakeTexture target(Backend::Vulkan, target_description());
-    FakeBuffer vertices(Backend::Vulkan, {36U, BufferUsage::vertex, BufferMemory::device_local,
+    FakeBuffer vertices(Backend::Vulkan, {132U, BufferUsage::vertex, BufferMemory::device_local,
                                           BufferMutability::immutable});
     FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index, BufferMemory::device_local,
                                          BufferMutability::immutable});
@@ -156,7 +171,7 @@ void accepts_bounded_static_indexed_contract() {
             "indexed status name");
 
     FakeTexture d3d_target(Backend::D3D12, target_description());
-    FakeBuffer d3d_vertices(Backend::D3D12, {36U, BufferUsage::vertex, BufferMemory::device_local,
+    FakeBuffer d3d_vertices(Backend::D3D12, {132U, BufferUsage::vertex, BufferMemory::device_local,
                                              BufferMutability::immutable});
     FakeBuffer d3d_indices(Backend::D3D12, {6U, BufferUsage::index, BufferMemory::device_local,
                                             BufferMutability::immutable});
@@ -164,6 +179,115 @@ void accepts_bounded_static_indexed_contract() {
     require(validate_indexed_static_mesh_draw_request(d3d_target, d3d_request, diagnostic) ==
                 IndexedStaticMeshDrawStatus::ready,
             "D3D12 camera clip contract accepted");
+}
+
+void accepts_static_and_skinned_buffer_contracts() {
+    FakeTexture target(Backend::Vulkan, target_description());
+    FakeBuffer static_vertices(Backend::Vulkan, {132U, BufferUsage::vertex,
+                                                 BufferMemory::device_local,
+                                                 BufferMutability::immutable});
+    FakeBuffer skinned_vertices(Backend::Vulkan, {228U, BufferUsage::vertex,
+                                                  BufferMemory::device_local,
+                                                  BufferMutability::mutable_data});
+    FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index, BufferMemory::device_local,
+                                         BufferMutability::immutable});
+    Diagnostic diagnostic;
+
+    PipelineProgram static_pipeline = pipeline_fixture();
+    DrawPacket static_packet = packet_fixture();
+    auto static_request = request_fixture(static_packet, static_pipeline,
+                                          static_vertices, indices);
+    require(validate_indexed_static_mesh_draw_request(target, static_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            "static mesh accepts empty palette and immutable vertex buffer");
+
+    PipelineProgram skinned_pipeline = skinned_pipeline_fixture();
+    DrawPacket skinned_packet = skinned_packet_fixture();
+    auto skinned_request = request_fixture(skinned_packet, skinned_pipeline,
+                                           skinned_vertices, indices);
+    require(validate_indexed_static_mesh_draw_request(target, skinned_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            "skinned mesh accepts non-empty palette and mutable vertex buffer");
+
+    static_packet.bone_palette.push_back(apex::scene::identity_matrix);
+    static_request = request_fixture(static_packet, static_pipeline,
+                                     static_vertices, indices);
+    require(validate_indexed_static_mesh_draw_request(target, static_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_static_mesh_skinning_unsupported",
+            "static mesh with a palette is rejected");
+
+    static_packet = packet_fixture();
+    static_vertices = FakeBuffer(Backend::Vulkan, {132U, BufferUsage::vertex,
+                                                   BufferMemory::device_local,
+                                                   BufferMutability::mutable_data});
+    static_request = request_fixture(static_packet, static_pipeline,
+                                     static_vertices, indices);
+    require(validate_indexed_static_mesh_draw_request(target, static_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_static_mesh_buffer_mutable",
+            "static mesh with a mutable vertex buffer is rejected");
+
+    skinned_packet.bone_palette.clear();
+    skinned_request = request_fixture(skinned_packet, skinned_pipeline,
+                                      skinned_vertices, indices);
+    require(validate_indexed_static_mesh_draw_request(target, skinned_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_skinned_mesh_palette_missing",
+            "skinned mesh without a palette is rejected");
+    skinned_packet = skinned_packet_fixture();
+    skinned_vertices = FakeBuffer(Backend::Vulkan, {228U, BufferUsage::vertex,
+                                                    BufferMemory::device_local,
+                                                    BufferMutability::immutable});
+    skinned_request = request_fixture(skinned_packet, skinned_pipeline,
+                                      skinned_vertices, indices);
+    require(validate_indexed_static_mesh_draw_request(target, skinned_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_static_mesh_buffer_mutable",
+            "skinned mesh with immutable vertex buffer is rejected");
+
+    skinned_vertices = FakeBuffer(Backend::Vulkan, {228U, BufferUsage::vertex,
+                                                    BufferMemory::device_local,
+                                                    BufferMutability::mutable_data});
+    FakeBuffer mutable_indices(Backend::Vulkan, {6U, BufferUsage::index,
+                                                 BufferMemory::device_local,
+                                                 BufferMutability::mutable_data});
+    skinned_request = request_fixture(skinned_packet, skinned_pipeline,
+                                      skinned_vertices, mutable_indices);
+    require(validate_indexed_static_mesh_draw_request(target, skinned_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_static_mesh_buffer_mutable",
+            "skinned mesh with mutable index buffer is rejected");
+
+    static_packet = packet_fixture();
+    static_packet.primitive = static_cast<DrawPrimitiveKind>(0xffU);
+    static_vertices = FakeBuffer(Backend::Vulkan, {132U, BufferUsage::vertex,
+                                                   BufferMemory::device_local,
+                                                   BufferMutability::immutable});
+    static_request = request_fixture(static_packet, static_pipeline,
+                                     static_vertices, indices);
+    require(validate_indexed_static_mesh_draw_request(target, static_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_static_mesh_primitive_unsupported",
+            "unknown mesh primitive is rejected");
+
+    static_packet = packet_fixture();
+    static_pipeline.vertex_layout.stride = 19U * sizeof(float);
+    static_request = request_fixture(static_packet, static_pipeline,
+                                     static_vertices, indices);
+    require(validate_indexed_static_mesh_draw_request(target, static_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_static_mesh_stride_mismatch",
+            "static mesh requires the 11-float pipeline layout");
+
+    skinned_pipeline = skinned_pipeline_fixture();
+    skinned_packet.vertex_stride_floats = 11U;
+    skinned_request = request_fixture(skinned_packet, skinned_pipeline,
+                                      skinned_vertices, indices);
+    require(validate_indexed_static_mesh_draw_request(target, skinned_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_static_mesh_stride_mismatch",
+            "skinned mesh requires the 19-float pipeline layout");
 }
 
 void accepts_explicit_d32_depth_contract() {
@@ -177,7 +301,7 @@ void accepts_explicit_d32_depth_contract() {
     packet.flags.depth_test = true;
     packet.flags.depth_write = true;
     FakeTexture target(Backend::Vulkan, target_description());
-    FakeBuffer vertices(Backend::Vulkan, {36U, BufferUsage::vertex, BufferMemory::device_local,
+    FakeBuffer vertices(Backend::Vulkan, {132U, BufferUsage::vertex, BufferMemory::device_local,
                                           BufferMutability::immutable});
     FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index, BufferMemory::device_local,
                                          BufferMutability::immutable});
@@ -207,7 +331,7 @@ void accepts_source_evidenced_blend_state() {
     packet.flags.transparent = true;
     packet.flags.blend_enabled = true;
     FakeTexture target(Backend::Vulkan, target_description());
-    FakeBuffer vertices(Backend::Vulkan, {36U, BufferUsage::vertex,
+    FakeBuffer vertices(Backend::Vulkan, {132U, BufferUsage::vertex,
                                           BufferMemory::device_local,
                                           BufferMutability::immutable});
     FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index,
@@ -240,7 +364,7 @@ void accepts_source_evidenced_wireframe_topology() {
     DrawPacket packet = packet_fixture();
     packet.flags.wireframe = true;
     FakeTexture target(Backend::Vulkan, target_description());
-    FakeBuffer vertices(Backend::Vulkan, {36U, BufferUsage::vertex,
+    FakeBuffer vertices(Backend::Vulkan, {132U, BufferUsage::vertex,
                                           BufferMemory::device_local,
                                           BufferMutability::immutable});
     FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index,
@@ -275,7 +399,7 @@ void validates_portable_diffuse_resource_contract() {
     FakeTexture target(Backend::Vulkan, target_description());
     FakeTexture sampled(Backend::Vulkan, sampled_description());
     FakeSampler sampler(Backend::Vulkan);
-    FakeBuffer vertices(Backend::Vulkan, {36U, BufferUsage::vertex, BufferMemory::device_local,
+    FakeBuffer vertices(Backend::Vulkan, {132U, BufferUsage::vertex, BufferMemory::device_local,
                                           BufferMutability::immutable});
     FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index, BufferMemory::device_local,
                                          BufferMutability::immutable});
@@ -375,7 +499,7 @@ void validates_portable_material_buffer_contract() {
     FakeTexture target(Backend::Vulkan, target_description());
     FakeTexture diffuse(Backend::Vulkan, sampled_description());
     FakeSampler sampler(Backend::Vulkan);
-    FakeBuffer vertices(Backend::Vulkan, {36U, BufferUsage::vertex,
+    FakeBuffer vertices(Backend::Vulkan, {132U, BufferUsage::vertex,
                                           BufferMemory::device_local,
                                           BufferMutability::immutable});
     FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index,
@@ -469,7 +593,7 @@ void rejects_invalid_depth_contract() {
     packet.flags.depth_test = true;
     packet.flags.depth_write = true;
     FakeTexture target(Backend::Vulkan, target_description());
-    FakeBuffer vertices(Backend::Vulkan, {36U, BufferUsage::vertex, BufferMemory::device_local,
+    FakeBuffer vertices(Backend::Vulkan, {132U, BufferUsage::vertex, BufferMemory::device_local,
                                           BufferMutability::immutable});
     FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index, BufferMemory::device_local,
                                          BufferMutability::immutable});
@@ -519,7 +643,7 @@ void validates_ordered_indexed_batch_contract() {
     first_packet.world_matrix[12] = -0.25F;
     second_packet.world_matrix[12] = 0.25F;
     FakeTexture target(Backend::Vulkan, target_description());
-    FakeBuffer vertices(Backend::Vulkan, {36U, BufferUsage::vertex, BufferMemory::device_local,
+    FakeBuffer vertices(Backend::Vulkan, {132U, BufferUsage::vertex, BufferMemory::device_local,
                                           BufferMutability::immutable});
     FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index, BufferMemory::device_local,
                                          BufferMutability::immutable});
@@ -576,7 +700,7 @@ void rejects_static_indexed_limits_and_ownership() {
     PipelineProgram pipeline = pipeline_fixture();
     DrawPacket packet = packet_fixture();
     FakeTexture target(Backend::Vulkan, target_description());
-    FakeBuffer vertices(Backend::Vulkan, {36U, BufferUsage::vertex, BufferMemory::device_local,
+    FakeBuffer vertices(Backend::Vulkan, {132U, BufferUsage::vertex, BufferMemory::device_local,
                                           BufferMutability::immutable});
     FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index, BufferMemory::device_local,
                                          BufferMutability::immutable});
@@ -626,12 +750,12 @@ void rejects_static_indexed_limits_and_ownership() {
                 diagnostic.code == "indexed_static_mesh_range_invalid",
             "non-triangle index count rejected");
     packet.index_count = 3U;
-    packet.vertex_stride_floats = 4U;
+    packet.vertex_stride_floats = 12U;
     require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
                 IndexedStaticMeshDrawStatus::invalid_request &&
                 diagnostic.code == "indexed_static_mesh_stride_mismatch",
             "float32 and byte stride mismatch rejected");
-    packet.vertex_stride_floats = 3U;
+    packet.vertex_stride_floats = 11U;
     packet.vertex_offset = 2U;
     require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
                 IndexedStaticMeshDrawStatus::invalid_request &&
@@ -645,7 +769,7 @@ void rejects_static_indexed_limits_and_ownership() {
                 IndexedStaticMeshDrawStatus::invalid_request &&
                 diagnostic.code == "indexed_static_mesh_vertex_usage_invalid",
             "vertex usage rejected");
-    vertices = FakeBuffer(Backend::Vulkan, {36U, BufferUsage::vertex, BufferMemory::device_local,
+    vertices = FakeBuffer(Backend::Vulkan, {132U, BufferUsage::vertex, BufferMemory::device_local,
                                             BufferMutability::immutable});
     request.vertex_buffer = &vertices;
     FakeBuffer mutable_indices(Backend::Vulkan, {6U, BufferUsage::index, BufferMemory::device_local,
@@ -740,6 +864,7 @@ void rejects_staged_draw_packet() {
 int main() {
     try {
         accepts_bounded_static_indexed_contract();
+        accepts_static_and_skinned_buffer_contracts();
         accepts_explicit_d32_depth_contract();
         accepts_source_evidenced_blend_state();
         accepts_source_evidenced_wireframe_topology();

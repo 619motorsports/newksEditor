@@ -3,6 +3,7 @@
 #include "apex/formats/kn5.hpp"
 #include "apex/core/parse_limits.hpp"
 #include "apex/render/kn5_scene_node_map.hpp"
+#include "apex/render/skinned_mesh_upload.hpp"
 #include "apex/render/static_mesh_upload.hpp"
 #include "apex/scene/scene.hpp"
 
@@ -18,6 +19,7 @@ namespace apex::render {
 struct StaticSceneResourceLimits {
     Kn5SceneNodeMapLimits node_map{};
     StaticMeshUploadLimits mesh{};
+    SkinnedMeshUploadLimits skinned{};
     PipelineLimits pipeline{};
     std::size_t max_draws = max_indexed_static_mesh_batch_draws;
     std::size_t max_materials = 4096U;
@@ -31,6 +33,7 @@ struct StaticSceneResourceLimits {
     std::uint64_t max_total_index_bytes = 256ULL * 1024ULL * 1024ULL;
     std::uint64_t max_total_shader_bytes = 64ULL * 1024ULL * 1024ULL;
     std::uint64_t max_total_material_constant_bytes = 1ULL * 1024ULL * 1024ULL;
+    std::uint64_t max_total_update_bytes = 512ULL * 1024ULL * 1024ULL;
     // Counts full source payloads once per packet. This limit bounds repeated
     // validation work when many packets reference one large mesh.
     std::uint64_t max_validation_bytes = 1024ULL * 1024ULL * 1024ULL;
@@ -75,6 +78,15 @@ struct StaticSceneFrameDescription {
     std::array<float, 4> clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
     bool clear_depth = false;
     float depth_clear_value = 1.0F;
+    // Optional current packet states for animated scenes. The span must have
+    // exactly the prepared packet count when supplied. Node/material,
+    // primitive, ranges, pipeline flags, and resources must remain stable;
+    // world matrices and bone palettes may change.
+    std::span<const DrawPacket> refreshed_packets{};
+    // When false, skinned uploads are restored to their bind-pose bytes. When
+    // true, each skinned upload is CPU-skinned from refreshed_packets (or the
+    // prepared packets when the span is empty) before the batch is submitted.
+    bool apply_skinning = false;
     // For caller_tables authority, these non-owning tables use the final
     // Kn5File::textures ordering. When a prepared packet uses txDiffuse, both
     // lengths must equal the final texture count. Used entries must remain
@@ -90,7 +102,9 @@ class StaticSceneResources final {
 public:
     [[nodiscard]] Backend backend() const noexcept { return backend_; }
     [[nodiscard]] std::size_t draw_count() const noexcept { return packets_.size(); }
-    [[nodiscard]] std::size_t unique_geometry_count() const noexcept { return uploads_.size(); }
+    [[nodiscard]] std::size_t unique_geometry_count() const noexcept {
+        return uploads_.size() + skinned_uploads_.size();
+    }
     [[nodiscard]] std::size_t owned_texture_count() const noexcept;
     [[nodiscard]] std::size_t owned_material_constant_count() const noexcept {
         return owned_material_constants_.size();
@@ -101,7 +115,7 @@ public:
     // until it returns.
     [[nodiscard]] IndexedStaticMeshBatchResult draw_and_readback(
         Device& device, Texture& target,
-        const StaticSceneFrameDescription& frame) const;
+        const StaticSceneFrameDescription& frame);
 
 private:
     Backend backend_ = Backend::Vulkan;
@@ -110,7 +124,9 @@ private:
     std::vector<DrawPacket> packets_;
     std::vector<PipelineProgram> pipelines_;
     std::vector<std::unique_ptr<StaticMeshUpload>> uploads_;
+    std::vector<std::unique_ptr<SkinnedMeshUpload>> skinned_uploads_;
     std::vector<std::size_t> upload_for_packet_;
+    std::vector<std::size_t> skinned_upload_for_packet_;
     std::vector<std::size_t> pipeline_for_packet_;
     std::vector<std::uint32_t> texture_for_packet_;
     std::vector<std::size_t> material_constant_for_packet_;

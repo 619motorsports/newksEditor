@@ -255,6 +255,51 @@ void cpu_skinning_matches_reference_transform_and_validates_influences() {
     require(invalid_index, "invalid skin index is rejected");
 }
 
+void palette_skinning_overload_matches_kn5_helper_and_rejects_malformed_streams() {
+    apex::formats::Kn5Node mesh;
+    mesh.kind = "skinnedMesh";
+    mesh.vertexStride = 19;
+    mesh.bones.push_back({"Bone", identity(0)});
+    mesh.vertices = {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0,
+                     1, 0, 0, 0, 0, 0, 0, 0};
+    const std::map<std::string, apex::scene::Matrix4> bones = {{"Bone", identity(2)}};
+    const auto expected = apex::render::skin_vertices_reference(mesh, bones, identity(10));
+    const std::array<apex::scene::Matrix4, 1> palette = {identity(2)};
+    const auto actual = apex::render::skin_vertices_reference(mesh.vertices, palette, identity(10));
+    require(actual.size() == expected.size(), "palette overload preserves vertex stream size");
+    for (std::size_t index = 0; index < actual.size(); ++index)
+        require(std::abs(actual[index] - expected[index]) < 1e-6F, "palette overload matches KN5 helper");
+
+    const std::vector<float> truncated(mesh.vertices.begin(), mesh.vertices.end() - 1);
+    bool truncated_rejected = false;
+    try {
+        (void)apex::render::skin_vertices_reference(truncated, palette, identity());
+    } catch (const apex::render::DrawPacketError& error) {
+        truncated_rejected = error.code() == "INVALID_SKIN_LAYOUT";
+    }
+    require(truncated_rejected, "truncated-like skin stream is rejected");
+
+    auto nonfinite_palette = palette;
+    nonfinite_palette[0][0] = std::numeric_limits<float>::quiet_NaN();
+    bool nonfinite_rejected = false;
+    try {
+        (void)apex::render::skin_vertices_reference(mesh.vertices, nonfinite_palette, identity());
+    } catch (const apex::render::DrawPacketError& error) {
+        nonfinite_rejected = error.code() == "NON_FINITE_MATRIX";
+    }
+    require(nonfinite_rejected, "non-finite palette is rejected");
+
+    apex::render::DrawPacketLimits byte_limits;
+    byte_limits.max_cpu_skin_bytes = 18U * sizeof(float);
+    bool byte_limited = false;
+    try {
+        (void)apex::render::skin_vertices_reference(mesh.vertices, palette, identity(), byte_limits);
+    } catch (const apex::render::DrawPacketError& error) {
+        byte_limited = error.code() == "SKIN_BYTE_LIMIT";
+    }
+    require(byte_limited, "palette overload enforces bounded output bytes");
+}
+
 void builds_validated_skinned_packet_with_bone_palette() {
     auto model = static_model("ksSkinnedMesh");
     auto& mesh = model.root.children.front();
@@ -416,6 +461,7 @@ int main() {
         builds_static_packet_with_stock_state_and_ranges();
         preserves_deterministic_transparent_order_and_unknown_shader_diagnostic();
         cpu_skinning_matches_reference_transform_and_validates_influences();
+        palette_skinning_overload_matches_kn5_helper_and_rejects_malformed_streams();
         builds_validated_skinned_packet_with_bone_palette();
         validates_layout_resource_identity_and_metadata_limits();
         cpu_skinning_matches_rotation_nonuniform_scale_and_inverse_bind();

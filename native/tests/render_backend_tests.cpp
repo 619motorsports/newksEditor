@@ -1,5 +1,6 @@
 #include "apex/render/device.hpp"
 #include "apex/render/draw_packet.hpp"
+#include "apex/render/skinned_mesh_upload.hpp"
 #include "apex/render/static_scene.hpp"
 #include "apex/render/static_mesh_upload.hpp"
 
@@ -990,6 +991,86 @@ bool contract_backend(apex::render::Backend backend) {
     require(indexed_result.rgba8[0] == std::byte{0} && indexed_result.rgba8[1] == std::byte{0} &&
                 indexed_result.rgba8[2] == std::byte{0} && indexed_result.rgba8[3] == std::byte{255},
             "indexed static-mesh outside pixel retains clear color");
+
+    // Exercise the CPU-skinned mutable-vertex contract. The source stream is
+    // the KN5 19-float layout; skin_vertices_reference produces the local
+    // 19-float stream that the backend uploads before the next draw. This is
+    // deliberately a real backend update, not a fake-buffer validation test.
+    std::array<float, 57> skinned_source = {
+        -0.75F, -0.75F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+        1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F,
+         0.75F, -0.75F, 0.0F, 0.0F, 1.0F, 0.0F, 1.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+        1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F,
+         0.0F,  0.75F, 0.0F, 0.0F, 1.0F, 0.0F, 0.5F, 1.0F, 1.0F, 0.0F, 0.0F,
+        1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F,
+    };
+    apex::formats::Kn5Node skinned_mesh;
+    skinned_mesh.type = 3U;
+    skinned_mesh.kind = "skinnedMesh";
+    skinned_mesh.vertexStride = 19U;
+    skinned_mesh.vertices.assign(skinned_source.begin(), skinned_source.end());
+    skinned_mesh.indices = {0U, 1U, 2U};
+    skinned_mesh.bones.push_back({"Bone", apex::scene::identity_matrix});
+    DrawPacket skinned_packet;
+    skinned_packet.primitive = DrawPrimitiveKind::skinned_mesh;
+    skinned_packet.vertex_count = 3U;
+    skinned_packet.index_count = 3U;
+    skinned_packet.vertex_stride_floats = 19U;
+    skinned_packet.world_matrix = apex::scene::identity_matrix;
+    skinned_packet.shader_execution_supported = true;
+    skinned_packet.flags.depth_test = false;
+    skinned_packet.flags.depth_write = false;
+    skinned_packet.bone_palette = {apex::scene::identity_matrix};
+
+    const SkinnedMeshUploadResult skinned_upload = upload_skinned_mesh(
+        *device.device, skinned_mesh, skinned_packet);
+    require(skinned_upload.ok(), "validated mutable skinned mesh upload");
+
+    PipelineProgram skinned_pipeline = indexed_pipeline;
+    skinned_pipeline.name = "indexed-cpu-skinned-transform";
+    skinned_pipeline.vertex_layout.stride = 19U * sizeof(float);
+    const std::vector<float> initial_skinned = apex::render::skin_vertices_reference(
+        std::span<const float>(skinned_source),
+        std::span<const apex::scene::Matrix4>(skinned_packet.bone_palette),
+        skinned_packet.world_matrix);
+    require(initial_skinned == std::vector<float>(skinned_source.begin(), skinned_source.end()) &&
+                skinned_upload.upload->bind_vertices().size() == skinned_source.size(),
+            "identity CPU skin preserves the bind-pose stream");
+    IndexedStaticMeshDrawRequest skinned_request =
+        skinned_upload.upload->make_request(skinned_pipeline, *indexed_camera.frame);
+    skinned_request.clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
+    const IndexedStaticMeshDrawResult skinned_initial_result =
+        device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture,
+                                                               skinned_request);
+    require(skinned_initial_result.ok(), "initial CPU-skinned indexed draw/readback");
+    require(skinned_initial_result.rgba8[center] == std::byte{255} &&
+                skinned_initial_result.rgba8[center + 1U] == std::byte{0} &&
+                skinned_initial_result.rgba8[center + 2U] == std::byte{0} &&
+                skinned_initial_result.rgba8[center + 3U] == std::byte{255},
+            "initial CPU-skinned pose fills the center pixel");
+
+    apex::scene::Matrix4 translated_palette = apex::scene::identity_matrix;
+    translated_palette[12] = 1.5F;
+    DrawPacket translated_packet = skinned_packet;
+    translated_packet.bone_palette[0] = translated_palette;
+    const SkinnedMeshPoseUpdateResult skinned_update =
+        skinned_upload.upload->update_pose(*device.device, translated_packet);
+    require(skinned_update.ok() && skinned_update.skinned_vertices.size() == skinned_source.size(),
+            "mutable CPU-skinned vertex update");
+    const IndexedStaticMeshDrawResult skinned_translated_result =
+        device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture,
+                                                               skinned_request);
+    require(skinned_translated_result.ok(), "translated CPU-skinned indexed draw/readback");
+    require(skinned_translated_result.rgba8[center] == std::byte{0} &&
+                skinned_translated_result.rgba8[center + 1U] == std::byte{0} &&
+                skinned_translated_result.rgba8[center + 2U] == std::byte{0} &&
+                skinned_translated_result.rgba8[center + 3U] == std::byte{255},
+            "translated CPU-skinned pose leaves the center pixel clear");
+    require(skinned_translated_result.rgba8[right] == std::byte{255} &&
+                skinned_translated_result.rgba8[right + 1U] == std::byte{0} &&
+                skinned_translated_result.rgba8[right + 2U] == std::byte{0} &&
+                skinned_translated_result.rgba8[right + 3U] == std::byte{255},
+            "translated CPU-skinned pose reaches the expected right pixel");
 
     // Exercise the explicitly labeled portable diffuse-resource ABI. This
     // proves backend descriptor execution; it is not a stock ksPerPixel claim.

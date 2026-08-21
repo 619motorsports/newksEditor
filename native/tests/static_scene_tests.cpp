@@ -74,8 +74,15 @@ public:
                     {"recording_buffer_failure", "injected buffer allocation failure"}, nullptr};
         return {BufferStatus::ready, {}, std::make_unique<FakeBuffer>(description)};
     }
-    BufferUpdateResult update_buffer(Buffer&, std::uint64_t, std::span<const std::byte>) override {
-        return {BufferStatus::unsupported, {"unused", "unused"}};
+    BufferUpdateResult update_buffer(Buffer&, std::uint64_t offset,
+                                     std::span<const std::byte> data) override {
+        ++update_calls;
+        update_offsets.push_back(offset);
+        updated_bytes.emplace_back(data.begin(), data.end());
+        if (fail_update_call != 0U && update_calls == fail_update_call)
+            return {BufferStatus::upload_failed,
+                    {"recording_update_failure", "injected buffer update failure"}};
+        return {BufferStatus::ready, {}};
     }
     TextureResult create_texture(const TextureDescription& description,
                                  const TextureUploadPlan& uploads) override {
@@ -165,6 +172,8 @@ public:
 
     std::size_t buffer_calls = 0U;
     std::size_t fail_buffer_call = 0U;
+    std::size_t update_calls = 0U;
+    std::size_t fail_update_call = 0U;
     std::size_t batch_calls = 0U;
     std::size_t texture_calls = 0U;
     std::size_t fail_texture_call = 0U;
@@ -174,6 +183,8 @@ public:
     bool captured_load_color = false;
     std::array<float, 4> captured_clear_color{};
     std::vector<std::vector<std::byte>> uploaded_bytes;
+    std::vector<std::uint64_t> update_offsets;
+    std::vector<std::vector<std::byte>> updated_bytes;
     std::vector<BufferDescription> buffer_descriptions;
     std::vector<TextureDescription> texture_descriptions;
     std::vector<std::vector<std::byte>> texture_upload_bytes;
@@ -342,6 +353,121 @@ StaticScenePrepareRequest request_for(Fixture& value) {
     request.packets = value.packets;
     request.pipelines_by_material = value.pipelines;
     return request;
+}
+
+void make_second_mesh_skinned(Fixture& value) {
+    auto& mesh = value.model.root.children[1];
+    mesh.type = 3U;
+    mesh.kind = "skinnedMesh";
+    mesh.vertexStride = 19U;
+    mesh.vertices.assign(57U, 0.0F);
+    mesh.vertices[0] = -0.5F;
+    mesh.vertices[19U] = 0.5F;
+    mesh.vertices[38U + 1U] = 0.5F;
+    for (std::size_t offset = 0U; offset < mesh.vertices.size(); offset += 19U) {
+        mesh.vertices[offset + 4U] = 1.0F;
+        mesh.vertices[offset + 8U] = 1.0F;
+        mesh.vertices[offset + 11U] = 1.0F;
+        mesh.vertices[offset + 15U] = 0.0F;
+    }
+    mesh.indices = {0U, 1U, 2U};
+    mesh.bones = {{"BONE", {}}};
+    apex::formats::Kn5Node source_bone;
+    source_bone.type = 1U;
+    source_bone.kind = "node";
+    source_bone.name = "BONE";
+    source_bone.active = true;
+    value.model.root.children.push_back(std::move(source_bone));
+    value.scene.nodes[2].kind = apex::scene::NodeKind::skinned_mesh;
+    value.second_pipeline.vertex_layout.stride = 19U * sizeof(float);
+    value.second_pipeline.vertex_layout.attributes = {
+        {PipelineVertexSemantic::position, PipelineVertexAttributeFormat::float32x3, 0U, 0U},
+        {PipelineVertexSemantic::normal, PipelineVertexAttributeFormat::float32x3, 1U, 12U},
+        {PipelineVertexSemantic::texcoord0, PipelineVertexAttributeFormat::float32x2, 2U, 24U},
+        {PipelineVertexSemantic::tangent, PipelineVertexAttributeFormat::float32x3, 3U, 32U},
+        {PipelineVertexSemantic::bone_weights, PipelineVertexAttributeFormat::float32x4, 4U, 44U},
+        {PipelineVertexSemantic::bone_indices, PipelineVertexAttributeFormat::float32x4, 5U, 60U},
+    };
+    value.packets[1].primitive = DrawPrimitiveKind::skinned_mesh;
+    value.packets[1].vertex_stride_floats = 19U;
+    value.packets[1].bone_palette = {apex::scene::identity_matrix};
+    apex::scene::SceneNode bone;
+    bone.name = "BONE";
+    bone.kind = apex::scene::NodeKind::node;
+    bone.renderable = false;
+    bone.active = true;
+    bone.visible = true;
+    (void)value.scene.add_node(std::move(bone), 0U);
+}
+
+void prepares_mixed_static_and_skinned_scene_and_updates_only_after_preflight() {
+    Fixture value = fixture();
+    make_second_mesh_skinned(value);
+    RecordingDevice device;
+    auto prepared = prepare_static_scene_resources(device, request_for(value));
+    require(prepared.ok() && prepared.resources->unique_geometry_count() == 2U &&
+                device.buffer_calls == 4U,
+            "mixed scene retains static deduplication and creates one skinned upload");
+
+    FakeTexture target;
+    StaticSceneFrameDescription frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    const auto bind_pose = prepared.resources->draw_and_readback(device, target, frame);
+    require(bind_pose.ok() && device.update_calls == 1U &&
+                device.updated_bytes.front().size() == 57U * sizeof(float) &&
+                device.batch_calls == 1U,
+            "inactive animation restores the complete skinned bind pose before drawing");
+    const auto bind_bytes = device.updated_bytes.front();
+
+    std::vector<DrawPacket> refreshed = value.packets;
+    refreshed[1].bone_palette.front()[12] = 1.0F;
+    frame.refreshed_packets = refreshed;
+    frame.apply_skinning = true;
+    const auto animated = prepared.resources->draw_and_readback(device, target, frame);
+    require(animated.ok() && device.update_calls == 2U && device.updated_bytes.size() == 2U &&
+                device.updated_bytes.back() != bind_bytes,
+            "active animation precomputes and commits the refreshed skinned pose");
+
+    const std::size_t updates_before_invalid = device.update_calls;
+    const std::array<DrawPacket, 1> short_refresh = {refreshed.front()};
+    frame.refreshed_packets = short_refresh;
+    const auto invalid_count = prepared.resources->draw_and_readback(device, target, frame);
+    require(invalid_count.status == IndexedStaticMeshBatchStatus::invalid_request &&
+                invalid_count.diagnostic.code == "static_scene_frame_packet_count_invalid" &&
+                device.update_calls == updates_before_invalid,
+            "a short refreshed packet table is rejected before any update");
+
+    frame.refreshed_packets = refreshed;
+    refreshed[1].flags.wireframe = !refreshed[1].flags.wireframe;
+    frame.refreshed_packets = refreshed;
+    const auto invalid_contract = prepared.resources->draw_and_readback(device, target, frame);
+    require(invalid_contract.status == IndexedStaticMeshBatchStatus::invalid_request &&
+                invalid_contract.diagnostic.code == "static_scene_frame_packet_contract_invalid" &&
+                device.update_calls == updates_before_invalid,
+            "changed pipeline flags are rejected before any skinned update");
+
+    refreshed[1].flags.wireframe = false;
+    refreshed[1].material_profile.shader = "changed-profile";
+    frame.refreshed_packets = refreshed;
+    const auto invalid_profile = prepared.resources->draw_and_readback(device, target, frame);
+    require(invalid_profile.status == IndexedStaticMeshBatchStatus::invalid_request &&
+                invalid_profile.diagnostic.code == "static_scene_frame_packet_contract_invalid" &&
+                device.update_calls == updates_before_invalid,
+            "changed material profiles are rejected before any skinned update");
+
+    frame.refreshed_packets = std::span<const DrawPacket>{};
+    frame.apply_skinning = true;
+    // The prepared resource owns its original packet; a separately refreshed
+    // state with no palette must still fail before touching the mutable buffer.
+    std::vector<DrawPacket> missing_palette = refreshed;
+    missing_palette[1].material_profile = value.packets[1].material_profile;
+    missing_palette[1].bone_palette.clear();
+    frame.refreshed_packets = missing_palette;
+    const auto invalid_palette = prepared.resources->draw_and_readback(device, target, frame);
+    require(invalid_palette.status == IndexedStaticMeshBatchStatus::invalid_request &&
+                invalid_palette.diagnostic.code == "static_scene_frame_skin_palette_invalid" &&
+                device.update_calls == updates_before_invalid,
+            "invalid refreshed palettes are rejected before any update");
 }
 
 void prepares_deduplicated_resources_and_executes_one_ordered_batch() {
@@ -1167,6 +1293,7 @@ void propagates_upload_and_batch_failures() {
 int main() {
     try {
         prepares_deduplicated_resources_and_executes_one_ordered_batch();
+        prepares_mixed_static_and_skinned_scene_and_updates_only_after_preflight();
         prepares_source_evidenced_wireframe_batch_state();
         rejects_invalid_late_inputs_before_backend_allocation();
         resolves_portable_diffuse_tables_without_owning_handles();

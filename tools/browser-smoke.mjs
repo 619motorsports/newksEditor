@@ -11,6 +11,8 @@ const layoutName = option("workspace", option("layout"));
 const lodChoice = option("lod", "auto");
 const skinName = option("skin");
 const animationName = option("animation");
+const requireAnimationDisplacement = option("require-animation-displacement", "");
+const requireAnimationDisplacementThreshold = requireAnimationDisplacement === "" ? null : Number(requireAnimationDisplacement);
 const rpmValue = option("rpm");
 const compareRpmValue = option("compare-rpm");
 const configPath = option("config");
@@ -81,8 +83,13 @@ const conditionChanges = process.argv.flatMap((argument, index) => argument === 
   return [entry.slice(0, separator).toUpperCase(), Number(entry.slice(separator + 1))];
 });
 const animationPositions = process.argv.flatMap((argument, index) => argument === "--animation-position" ? [Number(process.argv[index + 1])] : []);
-if ((!modelPath && !layoutName) || !meshName || (layoutName && !assetsPath)) throw new Error("Usage: node tools/browser-smoke.mjs (--model FILE.kn5 | --workspace MANIFEST.ini --assets FOLDER) --mesh NAME [--assembled --show-hidden] [--wireframe] [--rpm 1000 --compare-rpm 6000] [--dynamic-advance 2] [--require-shared-geometry] [--require-dynamic-shadow-refresh] [--csp-assets assettocorsa/extension/textures --clouds] [--reflection-environment SHOWROOM.kn5 --reflection-root NODE] [--seasons --year-progress 0.5 --compare-year-progress 0] [--vao FILE.vao-patch] [--lighting --weather PRESET --sun-heading 40 --sun-height 55 --compare-sun-height 10 --manual-exposure 0.35] [--shadows] [--reflection-compare] [--surface-overlay] [--grass-fx] [--rain-fx --rain-wetness 1] [--tyre-blur 0 --tyre-dirt 0 --compare-tyre-blur 1 --compare-tyre-dirt 1] [--brake-temperature 160 --brake-front-glow 64 --brake-rear-glow 24 --brake-blur 0 --compare-brake-temperature 10 --compare-brake-blur 1] [--blurred-rims] [--cockpit-resolution] [--damage-preview] [--grid] [--view-axis] [--selection-axis] [--track-camera LABEL --track-camera-position 0.5 --play-track-camera] [--driver FILE.kn5 --driver-cockpit] [--skin NAME] [--animation NAME --animation-position 0.5] [--lod auto|INDEX] [--config FILE.ini] [--input NAME=VALUE] [--port 9222] [--app-port 4173]");
+if ((!modelPath && !layoutName) || !meshName || (layoutName && !assetsPath)) throw new Error("Usage: node tools/browser-smoke.mjs (--model FILE.kn5 | --workspace MANIFEST.ini --assets FOLDER) --mesh NAME [--assembled --show-hidden] [--wireframe] [--rpm 1000 --compare-rpm 6000] [--dynamic-advance 2] [--require-shared-geometry] [--require-dynamic-shadow-refresh] [--csp-assets assettocorsa/extension/textures --clouds] [--reflection-environment SHOWROOM.kn5 --reflection-root NODE] [--seasons --year-progress 0.5 --compare-year-progress 0] [--vao FILE.vao-patch] [--lighting --weather PRESET --sun-heading 40 --sun-height 55 --compare-sun-height 10 --manual-exposure 0.35] [--shadows] [--reflection-compare] [--surface-overlay] [--grass-fx] [--rain-fx --rain-wetness 1] [--tyre-blur 0 --tyre-dirt 0 --compare-tyre-blur 1 --compare-tyre-dirt 1] [--brake-temperature 160 --brake-front-glow 64 --brake-rear-glow 24 --brake-blur 0 --compare-brake-temperature 10 --compare-brake-blur 1] [--blurred-rims] [--cockpit-resolution] [--damage-preview] [--grid] [--view-axis] [--selection-axis] [--track-camera LABEL --track-camera-position 0.5 --play-track-camera] [--driver FILE.kn5 --driver-cockpit] [--skin NAME] [--animation NAME --animation-position 0.5 --require-animation-displacement 0.1] [--lod auto|INDEX] [--config FILE.ini] [--input NAME=VALUE] [--port 9222] [--app-port 4173]");
 if (requireDynamicShadowRefresh && dynamicAdvance === "") throw new Error("--require-dynamic-shadow-refresh requires --dynamic-advance");
+if (requireAnimationDisplacement !== "") {
+  if (!Number.isFinite(requireAnimationDisplacementThreshold) || requireAnimationDisplacementThreshold <= 0) throw new Error("--require-animation-displacement requires a finite positive threshold");
+  if (!animationName) throw new Error("--require-animation-displacement requires --animation");
+  if (!animationPositions.length) throw new Error("--require-animation-displacement requires --animation-position");
+}
 
 const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
 const page = pages.find((item) => item.type === "page");
@@ -133,7 +140,8 @@ async function screenshotState(path = "") {
     hash: createHash("sha256").update(data).digest("hex").slice(0, 16),
     bytes: bytes.length,
     glError: await evaluate(`document.querySelector('#view').getContext('webgl2').getError()`),
-    wireframe: await evaluate(`Boolean(window.__apexRenderer?.wireframe)`)
+    wireframe: await evaluate(`Boolean(window.__apexRenderer?.wireframe)`),
+    animation: await evaluate(`window.__apexRenderer?.animationStatus??null`)
   };
 }
 async function setInput(name, value) {
@@ -321,6 +329,12 @@ for (const [name, value] of conditionChanges) {
     };
   } else states[`${name}=${value}`] = null;
   if (present) await setCondition(name, 0);
+}
+if (requireAnimationDisplacement !== "") {
+  const finalAnimation = await evaluate(`window.__apexRenderer?.animationStatus??null`);
+  if (!finalAnimation || finalAnimation.skinnedMeshes < 1 || finalAnimation.skinnedVertices < 1) throw new Error(`Animation displacement check requires skinned geometry: ${JSON.stringify(finalAnimation)}`);
+  if (!(Number(finalAnimation.maxSkinnedDisplacement) >= requireAnimationDisplacementThreshold)) throw new Error(`Animation displacement ${finalAnimation.maxSkinnedDisplacement} is below required ${requireAnimationDisplacementThreshold}: ${JSON.stringify(finalAnimation)}`);
+  trace(`animation displacement ${finalAnimation.maxSkinnedDisplacement} >= ${requireAnimationDisplacementThreshold}`);
 }
 const summary = await evaluate(`({pipeline:document.querySelector('#pipeline').textContent,status:document.querySelector('#status').textContent,textures:window.__apexRenderer?.textureStatus,fbx:window.__apexFbx?{sourceName:window.__apexFbx.sourceName,format:window.__apexFbx.format,version:window.__apexFbx.version,textureSummary:window.__apexFbx.textureSummary,references:window.__apexFbx.textureReferences.map(reference=>({material:reference.material,slot:reference.slot,source:reference.source,status:reference.status,matchedBy:reference.matchedBy,path:reference.path,format:reference.format,output:reference.output})),warnings:window.__apexFbx.warnings}:null,skinTextures:window.__apexRenderer?.skinTextureStatus,externalTextures:window.__apexRenderer?.externalTextureStatus,animation:window.__apexRenderer?.animationStatus,analogInstruments:window.__apexRenderer?.analogInstrumentStatus,selectionAxis:window.__apexRenderer?.selectionAxisStatus,viewAxis:window.__apexRenderer?.viewAxisStatus,dynamicTrack:window.__apexRenderer?.dynamicTrackStatus,packedData:window.__apexPackedData?{source:window.__apexPackedData.source,assetName:window.__apexPackedData.assetName,entries:window.__apexPackedData.entries.length,warnings:window.__apexPackedData.warnings}:null,carHierarchyAudit:window.__apexCarHierarchyAudit,colliderAudit:window.__apexColliderAudit,bottomColliders:window.__apexBottomColliders,driverAudit:window.__apexDriverAudit,trackCameras:window.__apexTrackCameras?{sets:window.__apexTrackCameras.length,cameras:window.__apexTrackCameras.reduce((sum,set)=>sum+set.cameras.length,0),warnings:window.__apexTrackCameras.reduce((sum,set)=>sum+set.warnings.length,0)}:null,trackAudit:window.__apexTrackAudit,grass:window.__apexRenderer?.grassStatus,rain:window.__apexRenderer?.rainStatus,clouds:window.__apexRenderer?.cloudStatus,tyres:window.__apexRenderer?.tyreStatus,rims:window.__apexRenderer?.rimBlurStatus,cockpit:window.__apexRenderer?.cockpitPreviewStatus,damage:window.__apexRenderer?.damagePreviewStatus,brakes:window.__apexRenderer?.brakeDiscStatus,shadows:window.__apexRenderer?.shadowStatus,lighting:window.__apexRenderer?.lightingStatus,shaderProfiles:window.__apexRenderer?.shaderProfileStatus,vao:window.__apexRenderer?.vaoStatus,seasons:window.__apexRenderer?.seasonalStatus,scene:window.__apexRenderer?.sceneStatus,workspaceLod:window.__apexRenderer?.workspaceLodStatus})`);
 summary.brakes=await evaluate(`window.__apexRenderer?.brakeDiscStatus`);

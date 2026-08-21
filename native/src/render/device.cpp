@@ -687,9 +687,11 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     }
 
     const DrawPacket& packet = *request.packet;
-    if (packet.primitive != DrawPrimitiveKind::static_mesh) {
+    const bool static_mesh = packet.primitive == DrawPrimitiveKind::static_mesh;
+    const bool skinned_mesh = packet.primitive == DrawPrimitiveKind::skinned_mesh;
+    if (!static_mesh && !skinned_mesh) {
         diagnostic = {"indexed_static_mesh_primitive_unsupported",
-                      "Indexed static-mesh drawing does not execute skinned packets"};
+                      "Indexed drawing requires a static or skinned mesh primitive"};
         return IndexedStaticMeshDrawStatus::unsupported;
     }
     if (!packet.shader_execution_supported &&
@@ -698,9 +700,14 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                       "The draw packet does not contain an executable shader contract"};
         return IndexedStaticMeshDrawStatus::unsupported;
     }
-    if (!packet.bone_palette.empty()) {
+    if (static_mesh && !packet.bone_palette.empty()) {
         diagnostic = {"indexed_static_mesh_skinning_unsupported",
-                      "Indexed static-mesh drawing does not consume a bone palette"};
+                      "Static indexed drawing requires an empty bone palette"};
+        return IndexedStaticMeshDrawStatus::unsupported;
+    }
+    if (skinned_mesh && packet.bone_palette.empty()) {
+        diagnostic = {"indexed_skinned_mesh_palette_missing",
+                      "Skinned indexed drawing requires a non-empty bone palette"};
         return IndexedStaticMeshDrawStatus::unsupported;
     }
     if (request.pipeline->transform_contract != PipelineTransformContract::draw_matrices) {
@@ -972,11 +979,12 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                       "Indexed static-mesh baseline requires one vertex and one fragment shader"};
         return IndexedStaticMeshDrawStatus::invalid_request;
     }
-    if (packet.vertex_stride_floats == 0U ||
+    const std::uint32_t expected_stride_floats = static_mesh ? 11U : 19U;
+    if (packet.vertex_stride_floats != expected_stride_floats ||
         static_cast<std::uint64_t>(packet.vertex_stride_floats) * sizeof(float) !=
             pipeline.vertex_layout.stride) {
         diagnostic = {"indexed_static_mesh_stride_mismatch",
-                      "Draw packet float32 stride must match the executable pipeline byte stride"};
+                      "Draw packet stride must be exactly 11 or 19 float32 values and match the executable pipeline byte stride"};
         return IndexedStaticMeshDrawStatus::invalid_request;
     }
     const Buffer& vertex_buffer = *request.vertex_buffer;
@@ -988,10 +996,11 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     }
     const std::uint32_t vertex_usage = static_cast<std::uint32_t>(vertex_buffer.info().description.usage);
     const std::uint32_t index_usage = static_cast<std::uint32_t>(index_buffer.info().description.usage);
-    if (vertex_buffer.info().description.mutability != BufferMutability::immutable ||
+    if ((static_mesh && vertex_buffer.info().description.mutability != BufferMutability::immutable) ||
+        (skinned_mesh && vertex_buffer.info().description.mutability != BufferMutability::mutable_data) ||
         index_buffer.info().description.mutability != BufferMutability::immutable) {
         diagnostic = {"indexed_static_mesh_buffer_mutable",
-                      "Indexed static-mesh execution requires immutable geometry buffers"};
+                      "Indexed drawing requires an immutable index buffer, an immutable static vertex buffer, and a mutable skinned vertex buffer"};
         return IndexedStaticMeshDrawStatus::unsupported;
     }
     if ((vertex_usage & static_cast<std::uint32_t>(BufferUsage::vertex)) == 0U) {

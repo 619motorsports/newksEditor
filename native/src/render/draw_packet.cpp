@@ -186,47 +186,35 @@ DrawPacketError::DrawPacketError(std::string code, std::string message)
     : std::runtime_error(std::move(message)), code_(std::move(code)) {}
 
 std::vector<float> skin_vertices_reference(
-    const apex::formats::Kn5Node& mesh,
-    const std::map<std::string, Matrix>& bone_world_by_name,
+    std::span<const float> vertices,
+    std::span<const Matrix> palettes,
     const Matrix& mesh_world,
     const DrawPacketLimits& limits) {
-    if (mesh.kind != "skinnedMesh" || mesh.vertexStride != 19)
-        throw DrawPacketError("INVALID_SKIN_LAYOUT", "expected a 19-float skinned KN5 mesh");
     if (!finite_matrix(mesh_world)) throw DrawPacketError("NON_FINITE_MATRIX", "skinned mesh world matrix is not finite");
     std::size_t max_vertex_values = 0;
     if (!checked_mul(limits.max_vertices, 19U, std::numeric_limits<std::size_t>::max(), max_vertex_values) ||
-        mesh.bones.size() > limits.max_bones || mesh.vertices.size() > max_vertex_values)
+        palettes.size() > limits.max_bones || vertices.size() > max_vertex_values)
         throw DrawPacketError("SKIN_LIMIT", "skinned mesh exceeds CPU skinning limits");
-    if (mesh.vertices.size() % 19U != 0) throw DrawPacketError("INVALID_SKIN_LAYOUT", "skinned vertices are not stride aligned");
+    if (vertices.size() % 19U != 0) throw DrawPacketError("INVALID_SKIN_LAYOUT", "skinned vertices are not stride aligned");
     std::size_t output_bytes = 0;
-    if (!checked_mul(mesh.vertices.size(), sizeof(float), limits.max_cpu_skin_bytes, output_bytes))
+    if (!checked_mul(vertices.size(), sizeof(float), limits.max_cpu_skin_bytes, output_bytes))
         throw DrawPacketError("SKIN_BYTE_LIMIT", "CPU skinned output exceeds byte budget");
-    std::vector<Matrix> palettes;
-    palettes.reserve(mesh.bones.size());
-    for (const auto& bone : mesh.bones) {
-        if (bone.name.size() > limits.max_string_bytes)
-            throw DrawPacketError("STRING_LIMIT", "skinned mesh bone name exceeds draw-packet limits");
-        if (!finite_matrix(bone.transform)) throw DrawPacketError("NON_FINITE_MATRIX", "bone transform is not finite");
-        const auto found = bone_world_by_name.find(bone.name);
-        if (found == bone_world_by_name.end()) throw DrawPacketError("MISSING_BONE", "skinned mesh bone has no world transform");
-        if (!finite_matrix(found->second)) throw DrawPacketError("NON_FINITE_MATRIX", "bone world transform is not finite");
-        palettes.push_back(multiply_matrix(found->second, bone.transform));
-    }
-
-    for (const float value : mesh.vertices)
+    for (const Matrix& palette : palettes)
+        if (!finite_matrix(palette)) throw DrawPacketError("NON_FINITE_MATRIX", "bone palette is not finite");
+    for (const float value : vertices)
         if (!std::isfinite(value)) throw DrawPacketError("NON_FINITE_VERTEX", "skinned vertex data is not finite");
     const auto inverse_mesh = invert_matrix(mesh_world);
     if (!inverse_mesh.has_value()) throw DrawPacketError("NON_INVERTIBLE_MATRIX", "skinned mesh world transform is not invertible");
-    std::vector<float> output = mesh.vertices;
-    for (std::size_t offset = 0; offset < mesh.vertices.size(); offset += 19U) {
-        std::array<double, 3> source_position = {mesh.vertices[offset], mesh.vertices[offset + 1], mesh.vertices[offset + 2]};
-        std::array<double, 3> source_normal = {mesh.vertices[offset + 3], mesh.vertices[offset + 4], mesh.vertices[offset + 5]};
-        std::array<double, 3> source_tangent = {mesh.vertices[offset + 8], mesh.vertices[offset + 9], mesh.vertices[offset + 10]};
+    std::vector<float> output(vertices.begin(), vertices.end());
+    for (std::size_t offset = 0; offset < vertices.size(); offset += 19U) {
+        std::array<double, 3> source_position = {vertices[offset], vertices[offset + 1], vertices[offset + 2]};
+        std::array<double, 3> source_normal = {vertices[offset + 3], vertices[offset + 4], vertices[offset + 5]};
+        std::array<double, 3> source_tangent = {vertices[offset + 8], vertices[offset + 9], vertices[offset + 10]};
         std::array<double, 3> world_position{}, world_normal{}, world_tangent{};
         double total = 0.0;
         for (std::size_t influence = 0; influence < 4; ++influence) {
-            const float weight = mesh.vertices[offset + 11U + influence];
-            const float index_value = mesh.vertices[offset + 15U + influence];
+            const float weight = vertices[offset + 11U + influence];
+            const float index_value = vertices[offset + 15U + influence];
             if (!std::isfinite(weight) || !std::isfinite(index_value) || index_value < 0.0F ||
                 std::trunc(index_value) != index_value ||
                 static_cast<double>(index_value) >= static_cast<double>(palettes.size()))
@@ -268,6 +256,30 @@ std::vector<float> skin_vertices_reference(
         }
     }
     return output;
+}
+
+std::vector<float> skin_vertices_reference(
+    const apex::formats::Kn5Node& mesh,
+    const std::map<std::string, Matrix>& bone_world_by_name,
+    const Matrix& mesh_world,
+    const DrawPacketLimits& limits) {
+    if (mesh.kind != "skinnedMesh" || mesh.vertexStride != 19)
+        throw DrawPacketError("INVALID_SKIN_LAYOUT", "expected a 19-float skinned KN5 mesh");
+    if (mesh.bones.size() > limits.max_bones)
+        throw DrawPacketError("SKIN_LIMIT", "skinned mesh exceeds CPU skinning limits");
+    std::vector<Matrix> palettes;
+    palettes.reserve(mesh.bones.size());
+    for (const auto& bone : mesh.bones) {
+        if (bone.name.size() > limits.max_string_bytes)
+            throw DrawPacketError("STRING_LIMIT", "skinned mesh bone name exceeds draw-packet limits");
+        if (!finite_matrix(bone.transform)) throw DrawPacketError("NON_FINITE_MATRIX", "bone transform is not finite");
+        const auto found = bone_world_by_name.find(bone.name);
+        if (found == bone_world_by_name.end()) throw DrawPacketError("MISSING_BONE", "skinned mesh bone has no world transform");
+        if (!finite_matrix(found->second)) throw DrawPacketError("NON_FINITE_MATRIX", "bone world transform is not finite");
+        palettes.push_back(multiply_matrix(found->second, bone.transform));
+    }
+    return skin_vertices_reference(std::span<const float>(mesh.vertices),
+                                   std::span<const Matrix>(palettes), mesh_world, limits);
 }
 
 DrawPacketBuildResult build_draw_packets(

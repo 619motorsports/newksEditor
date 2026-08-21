@@ -91,11 +91,13 @@ remains unchanged and feature-complete.
   port has a backend-neutral device API. Vulkan and D3D12 implement headless
   devices, buffers, 2D textures, samplers, and shader modules. Both backends
   also implement bounded synchronous RGBA8/BGRA8 texture clear/readback. Each
-  backend validates a pipeline and executes fixed and indexed R16 static-mesh
-  draws with readback. The indexed path uses immutable vertex and index
-  buffers. A bounded adapter validates and uploads 11-float KN5 static
-  geometry. It rejects malformed geometry, unsafe indices, and invalid packet
-  ranges before allocation. A 128-byte draw-matrix contract binds world and
+  backend validates a pipeline and executes fixed and indexed R16 mesh draws
+  with readback. Static draws use immutable vertex and index buffers. Skinned
+  draws use mutable vertex buffers and immutable index buffers. A bounded
+  adapter validates and uploads 11-float KN5 static geometry. A second adapter
+  owns 19-float KN5 bind vertices and indices. It rejects malformed geometry,
+  unsafe indices, invalid influences, and invalid packet ranges before
+  allocation. A 128-byte draw-matrix contract binds world and
   camera transforms. Vulkan uses vertex push constants. D3D12 uses root
   constants at `b0`. Backend-specific camera frames make the clip-space
   conversion explicit. Both backends also create persistent single-sample D32
@@ -120,8 +122,12 @@ remains unchanged and feature-complete.
   complete lighting formula. This remains a test ABI, not recovered stock KN5
   or CSP behavior. A bounded resolver reads parsed KN5 values and typed CSP
   overrides. It preserves override precedence and WebGL emissive conversion.
-  A bounded static-scene adapter validates the complete packet set before allocation.
-  It uploads each referenced node once and retains duplicate ordered draws.
+  A bounded static-scene adapter validates the complete packet set before
+  allocation. It uploads each static node once and retains duplicate ordered
+  draws. It owns one mutable skinned upload for each skinned packet.
+  A frame can supply new world matrices and bone palettes. The adapter computes
+  all skinned vertices before it updates the first buffer. It restores exact
+  bind-pose bytes when animation is not active.
   It owns one 256-byte material buffer per used material. Duplicate packets
   reuse the same buffer. Count and byte limits bound these allocations.
   Caller-supplied SPIR-V or DXIL pipelines authorize only their local requests.
@@ -160,7 +166,10 @@ remains unchanged and feature-complete.
   resource references, render state, and bone palettes. KN5 material resource
   IDs remain shader bind points. The draw-packet builder resolves textures by
   canonical resource name and rejects missing or ambiguous names. A stricter
-  CPU reference skinning path bridges KN5 scenes to the render contract. CSP
+  CPU skinning matches `src/skinning.js`. It transforms positions, normals,
+  and tangents, then uploads the complete 19-float vertex stream. This path
+  also preserves the production bind-pose behavior when animation is not
+  active. CSP
   selectors and recovered lighting, shadow, and reflection math feed
   deterministic plans. Source-based camera math matches the `perspective`,
   `lookAt`, and `multiply` functions in `public/app.js`. Separate projections
@@ -176,7 +185,11 @@ remains unchanged and feature-complete.
   supported 2D mip chains to RGBA8 and retains explicit sRGB metadata. Stock
   shader translation and complete material-resource resolution remain staged.
   Vulkan and D3D12 create a basic graphics pipeline and execute fixed and
-  indexed R16 static-mesh draws. The indexed path executes only a deliberately
+  indexed R16 static and CPU-skinned mesh draws. A real Vulkan pixel test
+  proves that a one-bone update moves the triangle. The same test runs on the
+  D3D12/WARP CI path. A production WebGL gate uses the same one-bone behavior.
+  It reports distinct captures, a `1.0` displacement, and no WebGL errors. The
+  indexed path executes only a deliberately
   restricted draw-packet subset. It supports one portable sampled-image and
   sampler descriptor pair plus a request-local material record. It executes
   the three source-evidenced WebGL blend
@@ -280,7 +293,8 @@ diagnostics. Hierarchy-only edits remain excluded from CSP export as today.
 Implement geometry upload, texture/mipmap resources, stock shader profiles,
 material state ordering, camera controls, visibility/LOD, skinning, normal and
 detail maps, multilayers, transparency, alpha-to-coverage, culling, depth,
-wireframe, isolation, and selection overlays.
+wireframe, isolation, and selection overlays. CPU skinning must keep the
+production 19-float layout and bind-pose behavior.
 
 Exit evidence: Vulkan and DirectX render the KN5/FBX fixture set with no GPU
 validation errors; production WebGL checks still pass; capture hashes and

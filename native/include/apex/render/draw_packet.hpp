@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <map>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -140,10 +141,16 @@ private:
     return build_draw_packets(model, scene, build_render_plan(scene), options, limits);
 }
 
-// CPU reference skinning follows src/skinning.js. It is a validation/reference
-// helper only; backends remain responsible for choosing a GPU skinning path.
-// It intentionally applies stricter validation than src/skinning.js: missing
-// palettes and malformed inactive influences are rejected instead of ignored.
+// CPU skinning follows src/skinning.js and produces the same 19-float local
+// vertex stream that production WebGL uploads before drawing. It intentionally
+// applies stricter validation: malformed inactive influences are rejected
+// instead of ignored.
+[[nodiscard]] std::vector<float> skin_vertices_reference(
+    std::span<const float> vertices,
+    std::span<const apex::scene::Matrix4> bone_palette,
+    const apex::scene::Matrix4& mesh_world,
+    const DrawPacketLimits& limits = {});
+
 [[nodiscard]] std::vector<float> skin_vertices_reference(
     const apex::formats::Kn5Node& mesh,
     const std::map<std::string, apex::scene::Matrix4>& bone_world_by_name,

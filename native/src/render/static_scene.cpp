@@ -83,6 +83,77 @@ StaticSceneResourceStatus map_upload_status(StaticMeshUploadStatus status) noexc
     return StaticSceneResourceStatus::upload_failed;
 }
 
+StaticSceneResourceStatus map_skinned_upload_status(SkinnedMeshUploadStatus status) noexcept {
+    switch (status) {
+    case SkinnedMeshUploadStatus::ready: return StaticSceneResourceStatus::ready;
+    case SkinnedMeshUploadStatus::invalid_request: return StaticSceneResourceStatus::invalid_request;
+    case SkinnedMeshUploadStatus::unsupported: return StaticSceneResourceStatus::unsupported;
+    case SkinnedMeshUploadStatus::allocation_failed: return StaticSceneResourceStatus::allocation_failed;
+    case SkinnedMeshUploadStatus::upload_failed: return StaticSceneResourceStatus::upload_failed;
+    }
+    return StaticSceneResourceStatus::upload_failed;
+}
+
+bool same_draw_flags(const DrawPacketFlags& left, const DrawPacketFlags& right) noexcept {
+    return left.transparent == right.transparent && left.blend_enabled == right.blend_enabled &&
+           left.alpha_to_coverage == right.alpha_to_coverage && left.depth_test == right.depth_test &&
+           left.depth_write == right.depth_write && left.wireframe == right.wireframe &&
+           left.selected == right.selected && left.cast_shadows == right.cast_shadows;
+}
+
+bool same_draw_resources(const DrawPacket& left, const DrawPacket& right) noexcept {
+    if (left.resources.size() != right.resources.size()) return false;
+    for (std::size_t index = 0U; index < left.resources.size(); ++index) {
+        const DrawResourceSlot& a = left.resources[index];
+        const DrawResourceSlot& b = right.resources[index];
+        if (a.slot != b.slot || a.bind_point != b.bind_point ||
+            a.texture_index != b.texture_index || a.texture != b.texture)
+            return false;
+    }
+    return true;
+}
+
+bool same_material_profile(const MaterialRenderProfile& left,
+                           const MaterialRenderProfile& right) noexcept {
+    return left.shader == right.shader && left.stock == right.stock &&
+           left.serialized_blend_mode == right.serialized_blend_mode &&
+           left.native_blend_mode == right.native_blend_mode &&
+           left.effective_blend_mode == right.effective_blend_mode &&
+           left.blend_source == right.blend_source &&
+           left.alpha_to_coverage == right.alpha_to_coverage &&
+           left.shadow_alpha_tested == right.shadow_alpha_tested &&
+           left.transparent == right.transparent &&
+           left.blend_enabled == right.blend_enabled && left.blend == right.blend &&
+           left.blend_mode == right.blend_mode && left.depth_mode == right.depth_mode &&
+           left.depth_test == right.depth_test && left.depth_write == right.depth_write &&
+           left.cull == right.cull && left.cull_source == right.cull_source &&
+           left.windscreen == right.windscreen && left.broken_glass == right.broken_glass &&
+           left.reflection_alpha == right.reflection_alpha &&
+           left.refractive == right.refractive && left.glass_mode == right.glass_mode;
+}
+
+bool same_prepared_draw_contract(const DrawPacket& prepared,
+                                 const DrawPacket& refreshed) noexcept {
+    return prepared.node == refreshed.node && prepared.material == refreshed.material &&
+           prepared.primitive == refreshed.primitive &&
+           prepared.vertex_offset == refreshed.vertex_offset &&
+           prepared.vertex_count == refreshed.vertex_count &&
+           prepared.index_offset == refreshed.index_offset &&
+           prepared.index_count == refreshed.index_count &&
+           prepared.vertex_stride_floats == refreshed.vertex_stride_floats &&
+           prepared.order == refreshed.order && prepared.layer == refreshed.layer &&
+           same_material_profile(prepared.material_profile, refreshed.material_profile) &&
+           same_draw_flags(prepared.flags, refreshed.flags) &&
+           same_draw_resources(prepared, refreshed) &&
+           prepared.shader_execution_supported == refreshed.shader_execution_supported;
+}
+
+bool finite_world_matrix(const DrawPacket& packet) noexcept {
+    for (const float value : packet.world_matrix)
+        if (!std::isfinite(value)) return false;
+    return true;
+}
+
 StaticSceneResourceStatus map_texture_status(TextureStatus status) noexcept {
     switch (status) {
     case TextureStatus::ready: return StaticSceneResourceStatus::ready;
@@ -257,7 +328,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
           limits.max_total_decoded_texture_bytes == 0U)) ||
         limits.max_total_vertex_bytes == 0U ||
         limits.max_total_index_bytes == 0U || limits.max_total_shader_bytes == 0U ||
-        limits.max_validation_bytes == 0U)
+        limits.max_validation_bytes == 0U || limits.max_total_update_bytes == 0U)
         return fail(StaticSceneResourceStatus::invalid_request, "static_scene_limits_invalid",
                     "Static-scene resource limits are invalid");
     if (request.packets.empty() || request.packets.size() > limits.max_draws)
@@ -283,6 +354,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
     std::vector<std::size_t> upload_by_node(node_map.source_nodes.size(), invalid_resource_index);
     std::vector<std::size_t> pipeline_by_material(model.materials.size(), invalid_resource_index);
     std::vector<std::size_t> upload_for_packet(request.packets.size(), invalid_resource_index);
+    std::vector<std::size_t> skinned_upload_for_packet(request.packets.size(), invalid_resource_index);
     std::vector<std::size_t> pipeline_for_packet(request.packets.size(), invalid_resource_index);
     std::vector<std::uint32_t> texture_for_packet(request.packets.size(),
                                                   invalid_draw_texture_index);
@@ -292,6 +364,8 @@ StaticSceneResourceResult prepare_static_scene_resources(
                                                           invalid_resource_index);
     std::vector<const formats::Kn5Node*> unique_meshes;
     std::vector<std::size_t> representative_packets;
+    std::vector<const formats::Kn5Node*> skinned_meshes;
+    std::vector<std::size_t> skinned_packet_indices;
     std::vector<PipelineProgram> pipelines;
     std::vector<KsPerPixelMaterialConstants> material_constants;
     unique_meshes.reserve(request.packets.size());
@@ -304,6 +378,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
     std::uint64_t total_index_bytes = 0U;
     std::uint64_t total_shader_bytes = 0U;
     std::uint64_t total_material_constant_bytes = 0U;
+    std::uint64_t total_update_bytes = 0U;
     std::uint64_t validation_bytes = 0U;
     std::optional<bool> batch_has_depth;
     std::optional<PipelineRenderTargetFormat> batch_color_format;
@@ -311,11 +386,17 @@ StaticSceneResourceResult prepare_static_scene_resources(
         const DrawPacket& packet = request.packets[packet_index];
         const auto node_index = static_cast<std::size_t>(packet.node);
         const auto material_index = static_cast<std::size_t>(packet.material);
-        if (packet.primitive != DrawPrimitiveKind::static_mesh || !packet.bone_palette.empty() ||
-            packet.flags.alpha_to_coverage)
+        const bool static_mesh = packet.primitive == DrawPrimitiveKind::static_mesh;
+        const bool skinned_mesh = packet.primitive == DrawPrimitiveKind::skinned_mesh;
+        if ((!static_mesh && !skinned_mesh) || packet.flags.alpha_to_coverage)
             return fail(StaticSceneResourceStatus::unsupported,
                         "static_scene_packet_unsupported",
-                        "Static-scene execution supports static meshes without alpha-to-coverage");
+                        "Static-scene execution supports static or skinned meshes without alpha-to-coverage");
+        if ((static_mesh && !packet.bone_palette.empty()) ||
+            (skinned_mesh && packet.bone_palette.empty()))
+            return fail(StaticSceneResourceStatus::invalid_request,
+                        "static_scene_packet_palette_invalid",
+                        "Static and skinned packets must have the corresponding bone-palette state");
         if (node_index >= node_map.source_nodes.size() || material_index >= model.materials.size())
             return fail(StaticSceneResourceStatus::invalid_request,
                         "static_scene_packet_identity_invalid",
@@ -336,12 +417,19 @@ StaticSceneResourceResult prepare_static_scene_resources(
                         "static_scene_validation_work_limit",
                         "Static-scene source validation exceeds its byte-work limit");
         Diagnostic mesh_diagnostic;
-        const StaticMeshUploadStatus mesh_status =
-            validate_static_mesh_upload(mesh, packet, limits.mesh, mesh_diagnostic);
-        if (mesh_status != StaticMeshUploadStatus::ready)
-            return {map_upload_status(mesh_status), std::move(mesh_diagnostic), nullptr};
+        if (static_mesh) {
+            const StaticMeshUploadStatus mesh_status =
+                validate_static_mesh_upload(mesh, packet, limits.mesh, mesh_diagnostic);
+            if (mesh_status != StaticMeshUploadStatus::ready)
+                return {map_upload_status(mesh_status), std::move(mesh_diagnostic), nullptr};
+        } else {
+            const SkinnedMeshUploadStatus mesh_status =
+                validate_skinned_mesh_upload(mesh, packet, limits.skinned, mesh_diagnostic);
+            if (mesh_status != SkinnedMeshUploadStatus::ready)
+                return {map_skinned_upload_status(mesh_status), std::move(mesh_diagnostic), nullptr};
+        }
 
-        if (upload_by_node[node_index] == invalid_resource_index) {
+        if (static_mesh && upload_by_node[node_index] == invalid_resource_index) {
             std::uint64_t vertex_bytes = 0U;
             std::uint64_t index_bytes = 0U;
             if (!checked_bytes(mesh.vertices.size(), sizeof(float), vertex_bytes) ||
@@ -357,7 +445,25 @@ StaticSceneResourceResult prepare_static_scene_resources(
             unique_meshes.push_back(&mesh);
             representative_packets.push_back(packet_index);
         }
-        upload_for_packet[packet_index] = upload_by_node[node_index];
+        if (static_mesh) {
+            upload_for_packet[packet_index] = upload_by_node[node_index];
+        } else {
+            if (!checked_add(packet_vertex_bytes, total_update_bytes) ||
+                total_update_bytes > limits.max_total_update_bytes)
+                return fail(StaticSceneResourceStatus::invalid_request,
+                            "static_scene_skinning_update_aggregate_limit",
+                            "Skinned frame updates exceed the aggregate byte limit");
+            skinned_upload_for_packet[packet_index] = skinned_meshes.size();
+            skinned_meshes.push_back(&mesh);
+            skinned_packet_indices.push_back(packet_index);
+            if (!checked_add(packet_vertex_bytes, total_vertex_bytes) ||
+                !checked_add(packet_index_bytes, total_index_bytes) ||
+                total_vertex_bytes > limits.max_total_vertex_bytes ||
+                total_index_bytes > limits.max_total_index_bytes)
+                return fail(StaticSceneResourceStatus::invalid_request,
+                            "static_scene_geometry_aggregate_limit",
+                            "Unique static-scene geometry exceeds aggregate byte limits");
+        }
 
         const PipelineProgram* pipeline = request.pipelines_by_material[material_index];
         if (pipeline == nullptr)
@@ -525,6 +631,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
     resources->packets_.assign(request.packets.begin(), request.packets.end());
     resources->pipelines_ = std::move(pipelines);
     resources->upload_for_packet_ = std::move(upload_for_packet);
+    resources->skinned_upload_for_packet_ = std::move(skinned_upload_for_packet);
     resources->pipeline_for_packet_ = std::move(pipeline_for_packet);
     resources->texture_for_packet_ = std::move(texture_for_packet);
     resources->material_constant_for_packet_ =
@@ -570,6 +677,16 @@ StaticSceneResourceResult prepare_static_scene_resources(
             return {map_upload_status(uploaded.status), std::move(uploaded.diagnostic), nullptr};
         resources->uploads_.push_back(std::move(uploaded.upload));
     }
+    resources->skinned_uploads_.reserve(skinned_meshes.size());
+    for (std::size_t index = 0U; index < skinned_meshes.size(); ++index) {
+        const std::size_t packet_index = skinned_packet_indices[index];
+        SkinnedMeshUploadResult uploaded = upload_skinned_mesh(
+            device, *skinned_meshes[index], resources->packets_[packet_index], limits.skinned);
+        if (!uploaded.ok())
+            return {map_skinned_upload_status(uploaded.status),
+                    std::move(uploaded.diagnostic), nullptr};
+        resources->skinned_uploads_.push_back(std::move(uploaded.upload));
+    }
     if (resources->has_texture_resources_ &&
         request.texture_authority == StaticSceneTextureAuthority::embedded_kn5) {
         SamplerDescription sampler_description;
@@ -593,7 +710,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
 }
 
 IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
-    Device& device, Texture& target, const StaticSceneFrameDescription& frame) const {
+    Device& device, Texture& target, const StaticSceneFrameDescription& frame) {
     if (&device != device_ || device.info().backend != backend_ || target.backend() != backend_)
         return {IndexedStaticMeshBatchStatus::unsupported,
                 {"static_scene_device_mismatch",
@@ -606,9 +723,15 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
     if (packets_.empty() || packets_.size() != upload_for_packet_.size() ||
         packets_.size() != pipeline_for_packet_.size() ||
         packets_.size() != texture_for_packet_.size() ||
-        packets_.size() != material_constant_for_packet_.size())
+        packets_.size() != material_constant_for_packet_.size() ||
+        packets_.size() != skinned_upload_for_packet_.size())
         return {IndexedStaticMeshBatchStatus::invalid_request,
                 {"static_scene_resources_invalid", "Static-scene resource mappings are incomplete"}, {}};
+    if (!frame.refreshed_packets.empty() &&
+        frame.refreshed_packets.size() != packets_.size())
+        return {IndexedStaticMeshBatchStatus::invalid_request,
+                {"static_scene_frame_packet_count_invalid",
+                 "Refreshed static-scene packet states must match the prepared packet count"}, {}};
     if (has_texture_resources_ &&
         texture_authority_ == StaticSceneTextureAuthority::caller_tables &&
         (frame.textures_by_global_index.size() != texture_count_ ||
@@ -617,17 +740,90 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
                 {"static_scene_resource_table_size_invalid",
                  "Static-scene texture and sampler tables must match the final KN5 texture count"}, {}};
 
+    const auto packet_for_frame = [&](std::size_t index) -> const DrawPacket& {
+        return frame.refreshed_packets.empty() ? packets_[index] : frame.refreshed_packets[index];
+    };
+    for (std::size_t index = 0U; index < packets_.size(); ++index) {
+        const DrawPacket& packet = packet_for_frame(index);
+        if (!same_prepared_draw_contract(packets_[index], packet) || !finite_world_matrix(packet))
+            return {IndexedStaticMeshBatchStatus::invalid_request,
+                    {"static_scene_frame_packet_contract_invalid",
+                     "Refreshed packet state changed a prepared draw contract"}, {}};
+        if (packet.primitive == DrawPrimitiveKind::skinned_mesh) {
+            if (packet.bone_palette.empty())
+                return {IndexedStaticMeshBatchStatus::invalid_request,
+                        {"static_scene_frame_skin_palette_invalid",
+                         "A skinned frame packet must contain a bone palette"}, {}};
+            for (const auto& matrix : packet.bone_palette)
+                for (const float value : matrix)
+                    if (!std::isfinite(value))
+                        return {IndexedStaticMeshBatchStatus::invalid_request,
+                                {"static_scene_frame_skin_palette_invalid",
+                                 "A skinned frame packet contains a non-finite bone palette"}, {}};
+        }
+    }
+
+    struct PendingSkinUpdate {
+        std::size_t upload_index = invalid_resource_index;
+        const DrawPacket* packet = nullptr;
+        std::vector<float> vertices;
+    };
+    std::vector<PendingSkinUpdate> pending_skin_updates;
+    pending_skin_updates.reserve(skinned_uploads_.size());
+    for (std::size_t index = 0U; index < packets_.size(); ++index) {
+        const std::size_t upload_index = skinned_upload_for_packet_[index];
+        if (upload_index == invalid_resource_index) continue;
+        if (upload_index >= skinned_uploads_.size() || skinned_uploads_[upload_index] == nullptr)
+            return {IndexedStaticMeshBatchStatus::invalid_request,
+                    {"static_scene_resources_invalid", "Skinned static-scene resource index is invalid"}, {}};
+        const DrawPacket& packet = packet_for_frame(index);
+        PendingSkinUpdate pending;
+        pending.upload_index = upload_index;
+        pending.packet = &packet;
+        if (frame.apply_skinning) {
+            SkinnedMeshPoseUpdateResult prepared =
+                skinned_uploads_[upload_index]->prepare_pose(packet);
+            if (!prepared.ok()) {
+                const IndexedStaticMeshBatchStatus status =
+                    prepared.status == SkinnedMeshUploadStatus::unsupported
+                        ? IndexedStaticMeshBatchStatus::unsupported
+                        : prepared.status == SkinnedMeshUploadStatus::invalid_request
+                              ? IndexedStaticMeshBatchStatus::invalid_request
+                              : IndexedStaticMeshBatchStatus::execution_failed;
+                return {status, std::move(prepared.diagnostic), {}};
+            }
+            pending.vertices = std::move(prepared.skinned_vertices);
+        } else {
+            const auto bind_vertices = skinned_uploads_[upload_index]->bind_vertices();
+            pending.vertices.assign(bind_vertices.begin(), bind_vertices.end());
+        }
+        pending_skin_updates.push_back(std::move(pending));
+    }
     std::vector<IndexedStaticMeshDrawRequest> draws;
     draws.reserve(packets_.size());
     for (std::size_t index = 0U; index < packets_.size(); ++index) {
-        if (upload_for_packet_[index] >= uploads_.size() ||
-            pipeline_for_packet_[index] >= pipelines_.size())
+        const DrawPacket& packet = packet_for_frame(index);
+        const bool upload_index_invalid =
+            packet.primitive == DrawPrimitiveKind::skinned_mesh
+                ? skinned_upload_for_packet_[index] >= skinned_uploads_.size()
+                : upload_for_packet_[index] >= uploads_.size();
+        if (upload_index_invalid || pipeline_for_packet_[index] >= pipelines_.size())
             return {IndexedStaticMeshBatchStatus::invalid_request,
                     {"static_scene_resources_invalid", "Static-scene resource index is invalid"}, {}};
         Diagnostic diagnostic;
-        auto draw = uploads_[upload_for_packet_[index]]->make_request(
-            packets_[index], pipelines_[pipeline_for_packet_[index]], frame.camera,
-            0U, 0U, {0.0F, 0.0F, 0.0F, 1.0F}, diagnostic);
+        std::optional<IndexedStaticMeshDrawRequest> draw;
+        if (packet.primitive == DrawPrimitiveKind::skinned_mesh) {
+            if (skinned_upload_for_packet_[index] >= skinned_uploads_.size())
+                return {IndexedStaticMeshBatchStatus::invalid_request,
+                        {"static_scene_resources_invalid", "Skinned static-scene resource index is invalid"}, {}};
+            draw = skinned_uploads_[skinned_upload_for_packet_[index]]->make_request(
+                packet, pipelines_[pipeline_for_packet_[index]], frame.camera,
+                0U, 0U, {0.0F, 0.0F, 0.0F, 1.0F}, diagnostic);
+        } else {
+            draw = uploads_[upload_for_packet_[index]]->make_request(
+                packet, pipelines_[pipeline_for_packet_[index]], frame.camera,
+                0U, 0U, {0.0F, 0.0F, 0.0F, 1.0F}, diagnostic);
+        }
         if (!draw.has_value())
             return {IndexedStaticMeshBatchStatus::invalid_request, std::move(diagnostic), {}};
         draw->shader_authority = IndexedShaderAuthority::explicit_pipeline;
@@ -675,6 +871,22 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
     const IndexedStaticMeshBatchDescription batch{
         draws, frame.depth_attachment, frame.load_color, frame.clear_color,
         frame.clear_depth, frame.depth_clear_value};
+    Diagnostic batch_diagnostic;
+    const IndexedStaticMeshBatchStatus batch_validation =
+        validate_indexed_static_mesh_batch_description(target, batch, batch_diagnostic);
+    if (batch_validation != IndexedStaticMeshBatchStatus::ready)
+        return {batch_validation, std::move(batch_diagnostic), {}};
+    // Every frame pose and every draw/resource mapping is now validated. Only
+    // after this point may a mutable skinned buffer be touched.
+    for (PendingSkinUpdate& pending : pending_skin_updates) {
+        SkinnedMeshPoseUpdateResult committed = skinned_uploads_[pending.upload_index]->commit_pose(
+            device, *pending.packet, pending.vertices);
+        if (!committed.ok())
+            return {committed.status == SkinnedMeshUploadStatus::unsupported
+                        ? IndexedStaticMeshBatchStatus::unsupported
+                        : IndexedStaticMeshBatchStatus::execution_failed,
+                    std::move(committed.diagnostic), {}};
+    }
     return device.draw_indexed_static_mesh_batch_and_readback(target, batch);
 }
 
