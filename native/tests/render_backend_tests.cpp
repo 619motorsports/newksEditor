@@ -1744,9 +1744,12 @@ bool contract_backend(apex::render::Backend backend) {
 
         // Run this terminal capacity test after all sampler-dependent runtime
         // cases. The D3D12 sampler heap uses monotonic descriptor slots.
+        // One direct sampler and three prepared embedded scenes have already
+        // consumed four of the 2,048 monotonic slots.
+        constexpr std::size_t remaining_sampler_slots = 2044U;
         std::vector<std::unique_ptr<Sampler>> d3d_sampler_handles;
-        d3d_sampler_handles.reserve(2045U);
-        for (std::size_t index = 0; index < 2045U; ++index) {
+        d3d_sampler_handles.reserve(remaining_sampler_slots);
+        for (std::size_t index = 0; index < remaining_sampler_slots; ++index) {
             SamplerResult extra =
                 device.device->create_sampler(SamplerDescription{});
             require(extra.ok(), "D3D12 sampler capacity fixture allocation");
