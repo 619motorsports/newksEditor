@@ -9,11 +9,13 @@ The current slices provide shared bounded input utilities; KN5 v4/v5/v6 read
 and byte-stable write, DDS, ACD, VAO, ordered INI/CSP, KSANIM v1/v2, KNH,
 surface, camera, spline, and workspace support; bounded directory and ACD asset
 resolution; staged CSP evaluation; KN5 scene conversion; material
-classification and binding; DDS upload and frame-pass planning; a
+classification, selector evaluation, and binding; driver-rig assembly;
+transactional project edits and geometry/KN5 baking; DDS upload, recovered
+lighting/shadow/reflection math, and frame-pass planning; a
 backend-neutral GPU resource contract; headless Vulkan and Windows D3D12
-device, buffer, and 2D texture implementations; and portable desktop-boundary
-validation. Backend API types stay inside `src/render`; format and authoring
-libraries do not depend on a graphics API.
+device, buffer, 2D texture, sampler, and shader-module implementations; and
+portable desktop-boundary validation. Backend API types stay inside
+`src/render`; format and authoring libraries do not depend on a graphics API.
 
 ## Build and test
 
@@ -41,8 +43,9 @@ out/native/dev/native/apex-native --inspect-ksanim animation.ksanim
 An unavailable SDK, driver, validation layer, or adapter is reported
 explicitly. It is never presented as a successful backend initialization.
 The current backends initialize devices and create/upload buffers and bounded
-2D textures. Window surfaces, swapchains, samplers, shader execution, drawing,
-and production pixel comparisons remain roadmap work. BC6H/BC7 DDS files currently
+2D textures, samplers, and immutable shader modules. Window surfaces,
+swapchains, descriptor binding, pipeline states, shader execution, drawing, and
+production pixel comparisons remain roadmap work. BC6H/BC7 DDS files currently
 require a capable GPU path; the existing WebGL CPU fallback has not yet been
 ported. The native upload planner also rejects DX10 arrays, cubemaps, and 3D
 textures, and it does not upload raw 24-bit or legacy D3D9 float textures yet;

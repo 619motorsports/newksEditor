@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <memory>
 #include <limits>
+#include <mutex>
 #include <span>
 #include <utility>
 
@@ -22,6 +23,9 @@ namespace apex::render {
 namespace {
 
 using Microsoft::WRL::ComPtr;
+
+// Keep the CPU sampler heap within the SDK's documented sampler capacity.
+inline constexpr UINT kD3d12SamplerDescriptorCapacity = D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE;
 
 Diagnostic hresult_error(const char* operation, HRESULT result) {
     return {"d3d12_initialization_failed",
@@ -110,6 +114,10 @@ struct D3D12Context {
     ComPtr<IDXGIAdapter1> adapter;
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12CommandQueue> queue;
+    ComPtr<ID3D12DescriptorHeap> sampler_heap;
+    UINT sampler_descriptor_size = 0;
+    UINT next_sampler = 0;
+    std::mutex sampler_mutex;
     DeviceInfo info;
 
     ~D3D12Context() { wait_idle(); }
@@ -613,6 +621,88 @@ private:
     D3D12_RESOURCE_STATES state_;
 };
 
+class D3D12Sampler final : public Sampler {
+public:
+    D3D12Sampler(std::shared_ptr<D3D12Context> context,
+                 D3D12_CPU_DESCRIPTOR_HANDLE descriptor,
+                 SamplerDescription description)
+        : context_(std::move(context)), descriptor_(descriptor), info_({description}) {}
+    Backend backend() const noexcept override { return Backend::D3D12; }
+    const SamplerInfo& info() const noexcept override { return info_; }
+
+private:
+    std::shared_ptr<D3D12Context> context_;
+    D3D12_CPU_DESCRIPTOR_HANDLE descriptor_{};
+    SamplerInfo info_;
+};
+
+class D3D12ShaderModule final : public ShaderModule {
+public:
+    D3D12ShaderModule(std::shared_ptr<D3D12Context> context,
+                      std::shared_ptr<const std::vector<std::byte>> bytecode,
+                      ShaderModuleInfo info)
+        : context_(std::move(context)), bytecode_(std::move(bytecode)), info_(info) {}
+    Backend backend() const noexcept override { return Backend::D3D12; }
+    const ShaderModuleInfo& info() const noexcept override { return info_; }
+
+private:
+    std::shared_ptr<D3D12Context> context_;
+    std::shared_ptr<const std::vector<std::byte>> bytecode_;
+    ShaderModuleInfo info_;
+};
+
+[[nodiscard]] D3D12_TEXTURE_ADDRESS_MODE d3d12_sampler_address(SamplerAddressMode mode) noexcept {
+    switch (mode) {
+    case SamplerAddressMode::repeat: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    case SamplerAddressMode::mirrored_repeat: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
+    case SamplerAddressMode::clamp_to_edge: return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    case SamplerAddressMode::clamp_to_border: return D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    }
+    return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+}
+
+[[nodiscard]] D3D12_COMPARISON_FUNC d3d12_sampler_compare(SamplerCompare compare) noexcept {
+    switch (compare) {
+    case SamplerCompare::less: return D3D12_COMPARISON_FUNC_LESS;
+    case SamplerCompare::less_equal: return D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    case SamplerCompare::greater: return D3D12_COMPARISON_FUNC_GREATER;
+    case SamplerCompare::greater_equal: return D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+    case SamplerCompare::equal: return D3D12_COMPARISON_FUNC_EQUAL;
+    case SamplerCompare::not_equal: return D3D12_COMPARISON_FUNC_NOT_EQUAL;
+    case SamplerCompare::always: return D3D12_COMPARISON_FUNC_ALWAYS;
+    case SamplerCompare::never: return D3D12_COMPARISON_FUNC_NEVER;
+    case SamplerCompare::disabled: break;
+    }
+    return D3D12_COMPARISON_FUNC_ALWAYS;
+}
+
+[[nodiscard]] D3D12_FILTER d3d12_sampler_filter(const SamplerDescription& description) noexcept {
+    const bool anisotropic = description.min_filter == SamplerFilter::anisotropic ||
+                             description.mag_filter == SamplerFilter::anisotropic ||
+                             description.mip_filter == SamplerFilter::anisotropic;
+    const bool comparison = description.compare != SamplerCompare::disabled;
+    if (anisotropic) return comparison ? D3D12_FILTER_COMPARISON_ANISOTROPIC : D3D12_FILTER_ANISOTROPIC;
+    const bool min_linear = description.min_filter == SamplerFilter::linear;
+    const bool mag_linear = description.mag_filter == SamplerFilter::linear;
+    const bool mip_linear = description.mip_filter == SamplerFilter::linear;
+    const unsigned key = (static_cast<unsigned>(min_linear) << 2U) |
+                         (static_cast<unsigned>(mag_linear) << 1U) | static_cast<unsigned>(mip_linear);
+    constexpr D3D12_FILTER normal[] = {
+        D3D12_FILTER_MIN_MAG_MIP_POINT, D3D12_FILTER_MIN_MAG_POINT_MIP_LINEAR,
+        D3D12_FILTER_MIN_POINT_MAG_LINEAR_MIP_POINT, D3D12_FILTER_MIN_POINT_MAG_MIP_LINEAR,
+        D3D12_FILTER_MIN_LINEAR_MAG_MIP_POINT, D3D12_FILTER_MIN_LINEAR_MAG_POINT_MIP_LINEAR,
+        D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT, D3D12_FILTER_MIN_MAG_MIP_LINEAR};
+    constexpr D3D12_FILTER comparison_filters[] = {
+        D3D12_FILTER_COMPARISON_MIN_MAG_MIP_POINT, D3D12_FILTER_COMPARISON_MIN_MAG_POINT_MIP_LINEAR,
+        D3D12_FILTER_COMPARISON_MIN_POINT_MAG_LINEAR_MIP_POINT,
+        D3D12_FILTER_COMPARISON_MIN_POINT_MAG_MIP_LINEAR,
+        D3D12_FILTER_COMPARISON_MIN_LINEAR_MAG_MIP_POINT,
+        D3D12_FILTER_COMPARISON_MIN_LINEAR_MAG_POINT_MIP_LINEAR,
+        D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT,
+        D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR};
+    return comparison ? comparison_filters[key] : normal[key];
+}
+
 class D3D12Device final : public Device {
 public:
     explicit D3D12Device(std::shared_ptr<D3D12Context> context) : context_(std::move(context)) {}
@@ -750,6 +840,58 @@ public:
                    : TextureUpdateResult{TextureStatus::upload_failed, std::move(diagnostic)};
     }
 
+    SamplerResult create_sampler(const SamplerDescription& description) override {
+        Diagnostic diagnostic;
+        if (!valid_sampler_description(description, diagnostic))
+            return {SamplerStatus::invalid_description, std::move(diagnostic), nullptr};
+        if (!context_->sampler_heap)
+            return {SamplerStatus::unsupported,
+                    {"d3d12_sampler_heap_unavailable", "The D3D12 sampler descriptor heap is unavailable"}, nullptr};
+        std::lock_guard lock(context_->sampler_mutex);
+        if (context_->next_sampler >= kD3d12SamplerDescriptorCapacity)
+            return {SamplerStatus::allocation_failed,
+                    {"d3d12_sampler_limit", "The D3D12 sampler descriptor heap is full"}, nullptr};
+        D3D12_SAMPLER_DESC sampler{};
+        sampler.Filter = d3d12_sampler_filter(description);
+        sampler.AddressU = d3d12_sampler_address(description.address_u);
+        sampler.AddressV = d3d12_sampler_address(description.address_v);
+        sampler.AddressW = d3d12_sampler_address(description.address_w);
+        sampler.MipLODBias = 0.0F;
+        sampler.MaxAnisotropy = static_cast<UINT>(description.max_anisotropy);
+        sampler.ComparisonFunc = d3d12_sampler_compare(description.compare);
+        sampler.MinLOD = description.min_lod;
+        sampler.MaxLOD = description.max_lod;
+        sampler.BorderColor[0] = 0.0F;
+        sampler.BorderColor[1] = 0.0F;
+        sampler.BorderColor[2] = 0.0F;
+        sampler.BorderColor[3] = 0.0F;
+        auto descriptor = context_->sampler_heap->GetCPUDescriptorHandleForHeapStart();
+        descriptor.ptr += static_cast<SIZE_T>(context_->next_sampler) * context_->sampler_descriptor_size;
+        ++context_->next_sampler;
+        context_->device->CreateSampler(&sampler, descriptor);
+        return {SamplerStatus::ready, {}, std::make_unique<D3D12Sampler>(context_, descriptor, description)};
+    }
+
+    ShaderModuleResult create_shader_module(const ShaderModuleDescription& description) override {
+        Diagnostic diagnostic;
+        const auto validation = validate_shader_module_description(description, diagnostic);
+        if (validation != ShaderModuleStatus::ready)
+            return {validation, std::move(diagnostic), nullptr};
+        ShaderBytecodeFormat format{};
+        if (!shader_bytecode_format(description.bytecode, format) || format != ShaderBytecodeFormat::dxil)
+            return {ShaderModuleStatus::unsupported,
+                    {"d3d12_shader_format_unsupported", "D3D12 shader modules require DXBC or DXIL bytecode"}, nullptr};
+        try {
+            auto bytecode = std::make_shared<std::vector<std::byte>>(description.bytecode.begin(), description.bytecode.end());
+            return {ShaderModuleStatus::ready, {},
+                    std::make_unique<D3D12ShaderModule>(context_, std::move(bytecode),
+                                                         ShaderModuleInfo{description.stage, format, description.bytecode.size()})};
+        } catch (const std::bad_alloc&) {
+            return {ShaderModuleStatus::allocation_failed,
+                    {"shader_module_allocation_failed", "D3D12 shader bytecode allocation failed"}, nullptr};
+        }
+    }
+
     void wait_idle() noexcept override {
         if (context_) context_->wait_idle();
     }
@@ -843,6 +985,17 @@ DeviceResult create_d3d12_device(const DeviceOptions& options) {
     context->device = std::move(device);
     context->queue = std::move(queue);
     context->info = info_from(selected.description);
+    D3D12_DESCRIPTOR_HEAP_DESC sampler_heap_description{};
+    sampler_heap_description.NumDescriptors = kD3d12SamplerDescriptorCapacity;
+    sampler_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+    sampler_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    result_code = context->device->CreateDescriptorHeap(&sampler_heap_description, IID_PPV_ARGS(&context->sampler_heap));
+    if (FAILED(result_code)) {
+        result.status = DeviceStatus::initialization_failed;
+        result.diagnostic = hresult_error("ID3D12Device::CreateDescriptorHeap(sampler)", result_code);
+        return result;
+    }
+    context->sampler_descriptor_size = context->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
     result.device = std::make_unique<D3D12Device>(std::move(context));
     return result;
 }

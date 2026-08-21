@@ -73,6 +73,14 @@ add_library(apex_formats STATIC
 add_library(ApexEditor::Formats ALIAS apex_formats)
 target_link_libraries(apex_formats PUBLIC ApexEditor::Core)
 
+add_library(apex_authoring STATIC
+  src/authoring/geometry.cpp
+  src/authoring/project.cpp
+  src/formats/kn5_bake.cpp
+)
+add_library(ApexEditor::Authoring ALIAS apex_authoring)
+target_link_libraries(apex_authoring PUBLIC ApexEditor::Formats)
+
 add_library(apex_assets STATIC
   src/assets/asset_source.cpp
 )
@@ -81,11 +89,13 @@ target_link_libraries(apex_assets PUBLIC ApexEditor::Formats)
 
 add_library(apex_csp STATIC
   src/csp/config_model.cpp
+  src/csp/material_evaluator.cpp
 )
 add_library(ApexEditor::Csp ALIAS apex_csp)
 target_link_libraries(apex_csp PUBLIC ApexEditor::Formats)
 
 add_library(apex_domain STATIC
+  src/domain/driver.cpp
   src/domain/track_data.cpp
 )
 add_library(ApexEditor::Domain ALIAS apex_domain)
@@ -112,6 +122,7 @@ target_link_libraries(apex_platform PUBLIC ApexEditor::Native)
 add_library(apex_render STATIC
   src/render/device.cpp
   src/render/frame_plan.cpp
+  src/render/lighting.cpp
   src/render/material_binding.cpp
   src/render/material_profile.cpp
   src/render/render_plan.cpp
@@ -165,13 +176,18 @@ apex_add_native_test(dds_tests.cpp dds_tests ApexEditor::Formats)
 apex_add_native_test(acd_tests.cpp acd_tests ApexEditor::Formats)
 apex_add_native_test(ini_tests.cpp ini_tests ApexEditor::Formats)
 apex_add_native_test(vao_tests.cpp vao_tests ApexEditor::Formats)
+apex_add_native_test(authoring_project_tests.cpp authoring_project_tests ApexEditor::Authoring)
+apex_add_native_test(geometry_bake_tests.cpp geometry_bake_tests ApexEditor::Authoring)
 apex_add_native_test(asset_source_tests.cpp asset_source_tests ApexEditor::Assets)
 apex_add_native_test(csp_config_model_tests.cpp csp_config_model_tests ApexEditor::Csp)
+apex_add_native_test(csp_material_evaluator_tests.cpp csp_material_evaluator_tests ApexEditor::Csp)
+apex_add_native_test(driver_tests.cpp driver_tests ApexEditor::Domain)
 apex_add_native_test(track_data_tests.cpp track_data_tests ApexEditor::Domain)
 apex_add_native_test(kn5_scene_tests.cpp kn5_scene_tests ApexEditor::Scene)
 apex_add_native_test(workspace_tests.cpp workspace_tests ApexEditor::Workspace)
 apex_add_native_test(render_backend_tests.cpp render_backend_tests ApexEditor::Render)
 apex_add_native_test(frame_plan_tests.cpp frame_plan_tests ApexEditor::Render)
+apex_add_native_test(lighting_tests.cpp lighting_tests ApexEditor::Render)
 apex_add_native_test(material_binding_tests.cpp material_binding_tests ApexEditor::Render)
 apex_add_native_test(material_profile_tests.cpp material_profile_tests ApexEditor::Render)
 apex_add_native_test(render_plan_tests.cpp render_plan_tests ApexEditor::Render)
@@ -189,7 +205,9 @@ foreach(parser_test IN ITEMS kn5_tests kn5_write_tests dds_tests acd_tests ini_t
     set_tests_properties(${parser_test} PROPERTIES LABELS "unit;malformed")
   endif()
 endforeach()
-foreach(boundary_test IN ITEMS asset_source_tests csp_config_model_tests track_data_tests kn5_scene_tests workspace_tests)
+foreach(boundary_test IN ITEMS authoring_project_tests geometry_bake_tests asset_source_tests
+                               csp_config_model_tests csp_material_evaluator_tests driver_tests
+                               track_data_tests kn5_scene_tests workspace_tests)
   if(TEST ${boundary_test})
     set_tests_properties(${boundary_test} PROPERTIES LABELS "unit;malformed")
   endif()
@@ -197,7 +215,8 @@ endforeach()
 if(TEST render_backend_tests)
   set_tests_properties(render_backend_tests PROPERTIES LABELS "unit;render")
 endif()
-foreach(render_test IN ITEMS frame_plan_tests material_binding_tests material_profile_tests render_plan_tests texture_upload_tests)
+foreach(render_test IN ITEMS frame_plan_tests lighting_tests material_binding_tests material_profile_tests
+                             render_plan_tests texture_upload_tests)
   if(TEST ${render_test})
     set_tests_properties(${render_test} PROPERTIES LABELS "unit;render")
   endif()

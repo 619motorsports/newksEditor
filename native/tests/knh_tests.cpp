@@ -128,6 +128,27 @@ void test_depth_limit() {
   require_knh_error([&] { apex::formats::parse_knh(bytes); }, "depth limit");
 }
 
+void test_direct_walk_is_bounded_and_iterative() {
+  apex::formats::KnhNode root;
+  root.name = "root";
+  root.transform = {1, 0, 0, 0, 0, 1, 0, 0,
+                    0, 0, 1, 0, 0, 0, 0, 1};
+  auto* cursor = &root;
+  for (std::size_t index = 0; index < 2'000; ++index) {
+    cursor->children.emplace_back();
+    cursor = &cursor->children.back();
+    cursor->name = "deep";
+    cursor->transform = root.transform;
+  }
+  require_knh_error([&] { (void)apex::formats::walk_knh(root); }, "direct depth limit");
+
+  apex::formats::KnhNode invalid;
+  invalid.name = "invalid";
+  invalid.transform = root.transform;
+  invalid.transform[0] = std::numeric_limits<float>::quiet_NaN();
+  require_knh_error([&] { (void)apex::formats::walk_knh(invalid); }, "direct non-finite transform");
+}
+
 }  // namespace
 
 int main() {
@@ -136,6 +157,7 @@ int main() {
     test_every_truncated_prefix();
     test_malformed_values();
     test_depth_limit();
+    test_direct_walk_is_bounded_and_iterative();
     std::cout << "KNH tests passed\n";
     return 0;
   } catch (const std::exception& error) {

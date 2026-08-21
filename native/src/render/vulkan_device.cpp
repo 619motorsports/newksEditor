@@ -178,6 +178,8 @@ struct VulkanContext {
     VkQueue queue = VK_NULL_HANDLE;
     std::uint32_t queue_family = UINT32_MAX;
     VkCommandPool command_pool = VK_NULL_HANDLE;
+    bool sampler_anisotropy = false;
+    float max_sampler_anisotropy = 1.0F;
     DeviceInfo info;
 
     VulkanContext(Instance instance_value,
@@ -185,9 +187,12 @@ struct VulkanContext {
                   VkDevice device_value,
                   VkQueue queue_value,
                   std::uint32_t family,
-                  DeviceInfo info_value)
+                  DeviceInfo info_value,
+                  bool sampler_anisotropy_value,
+                  float max_sampler_anisotropy_value)
         : instance(std::move(instance_value)), physical_device(physical), device(device_value),
-          queue(queue_value), queue_family(family), info(std::move(info_value)) {}
+          queue(queue_value), queue_family(family), sampler_anisotropy(sampler_anisotropy_value),
+          max_sampler_anisotropy(max_sampler_anisotropy_value), info(std::move(info_value)) {}
 
     ~VulkanContext() {
         if (device != VK_NULL_HANDLE) {
@@ -821,6 +826,115 @@ private:
     VkImageLayout layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
 };
 
+struct RawVulkanSampler {
+    std::shared_ptr<VulkanContext> context;
+    VkSampler sampler = VK_NULL_HANDLE;
+
+    ~RawVulkanSampler() { reset(); }
+    RawVulkanSampler() = default;
+    RawVulkanSampler(const RawVulkanSampler&) = delete;
+    RawVulkanSampler& operator=(const RawVulkanSampler&) = delete;
+    RawVulkanSampler(RawVulkanSampler&& other) noexcept
+        : context(std::move(other.context)), sampler(std::exchange(other.sampler, VK_NULL_HANDLE)) {}
+    RawVulkanSampler& operator=(RawVulkanSampler&& other) noexcept {
+        if (this == &other) return *this;
+        reset();
+        context = std::move(other.context);
+        sampler = std::exchange(other.sampler, VK_NULL_HANDLE);
+        return *this;
+    }
+    void reset() noexcept {
+        if (context && sampler != VK_NULL_HANDLE) vkDestroySampler(context->device, sampler, nullptr);
+        sampler = VK_NULL_HANDLE;
+        context.reset();
+    }
+};
+
+struct RawVulkanShaderModule {
+    std::shared_ptr<VulkanContext> context;
+    VkShaderModule module = VK_NULL_HANDLE;
+
+    ~RawVulkanShaderModule() { reset(); }
+    RawVulkanShaderModule() = default;
+    RawVulkanShaderModule(const RawVulkanShaderModule&) = delete;
+    RawVulkanShaderModule& operator=(const RawVulkanShaderModule&) = delete;
+    RawVulkanShaderModule(RawVulkanShaderModule&& other) noexcept
+        : context(std::move(other.context)), module(std::exchange(other.module, VK_NULL_HANDLE)) {}
+    RawVulkanShaderModule& operator=(RawVulkanShaderModule&& other) noexcept {
+        if (this == &other) return *this;
+        reset();
+        context = std::move(other.context);
+        module = std::exchange(other.module, VK_NULL_HANDLE);
+        return *this;
+    }
+    void reset() noexcept {
+        if (context && module != VK_NULL_HANDLE) vkDestroyShaderModule(context->device, module, nullptr);
+        module = VK_NULL_HANDLE;
+        context.reset();
+    }
+};
+
+class VulkanSampler final : public Sampler {
+public:
+    VulkanSampler(std::shared_ptr<VulkanContext> context, RawVulkanSampler raw,
+                  SamplerDescription description)
+        : context_(std::move(context)), raw_(std::move(raw)), info_({description}) {}
+    Backend backend() const noexcept override { return Backend::Vulkan; }
+    const SamplerInfo& info() const noexcept override { return info_; }
+
+private:
+    std::shared_ptr<VulkanContext> context_;
+    RawVulkanSampler raw_;
+    SamplerInfo info_;
+};
+
+class VulkanShaderModule final : public ShaderModule {
+public:
+    VulkanShaderModule(std::shared_ptr<VulkanContext> context, RawVulkanShaderModule raw,
+                       ShaderModuleInfo info)
+        : context_(std::move(context)), raw_(std::move(raw)), info_(info) {}
+    Backend backend() const noexcept override { return Backend::Vulkan; }
+    const ShaderModuleInfo& info() const noexcept override { return info_; }
+
+private:
+    std::shared_ptr<VulkanContext> context_;
+    RawVulkanShaderModule raw_;
+    ShaderModuleInfo info_;
+};
+
+VkFilter vk_sampler_filter(SamplerFilter filter) noexcept {
+    return filter == SamplerFilter::nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+}
+
+VkSamplerMipmapMode vk_sampler_mipmap(SamplerFilter filter) noexcept {
+    return filter == SamplerFilter::nearest ? VK_SAMPLER_MIPMAP_MODE_NEAREST : VK_SAMPLER_MIPMAP_MODE_LINEAR;
+}
+
+VkSamplerAddressMode vk_sampler_address(SamplerAddressMode mode) noexcept {
+    switch (mode) {
+    case SamplerAddressMode::repeat: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    case SamplerAddressMode::mirrored_repeat: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+    case SamplerAddressMode::clamp_to_edge: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    case SamplerAddressMode::clamp_to_border: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    }
+    return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+}
+
+VkCompareOp vk_sampler_compare(SamplerCompare compare) noexcept {
+    switch (compare) {
+    case SamplerCompare::less: return VK_COMPARE_OP_LESS;
+    case SamplerCompare::less_equal: return VK_COMPARE_OP_LESS_OR_EQUAL;
+    case SamplerCompare::greater: return VK_COMPARE_OP_GREATER;
+    case SamplerCompare::greater_equal: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+    case SamplerCompare::equal: return VK_COMPARE_OP_EQUAL;
+    case SamplerCompare::not_equal: return VK_COMPARE_OP_NOT_EQUAL;
+    case SamplerCompare::always: return VK_COMPARE_OP_ALWAYS;
+    case SamplerCompare::never: return VK_COMPARE_OP_NEVER;
+    case SamplerCompare::disabled: break;
+    }
+    return VK_COMPARE_OP_ALWAYS;
+}
+
 class VulkanDevice final : public Device {
 public:
     explicit VulkanDevice(std::shared_ptr<VulkanContext> context) : context_(std::move(context)) {}
@@ -909,6 +1023,77 @@ public:
         return vulkan_texture->upload(uploads, diagnostic)
                    ? TextureUpdateResult{TextureStatus::ready, {}}
                    : TextureUpdateResult{TextureStatus::upload_failed, std::move(diagnostic)};
+    }
+
+    SamplerResult create_sampler(const SamplerDescription& description) override {
+        Diagnostic diagnostic;
+        if (!valid_sampler_description(description, diagnostic))
+            return {SamplerStatus::invalid_description, std::move(diagnostic), nullptr};
+        const bool anisotropic = description.min_filter == SamplerFilter::anisotropic ||
+                                 description.mag_filter == SamplerFilter::anisotropic ||
+                                 description.mip_filter == SamplerFilter::anisotropic;
+        if (anisotropic && !context_->sampler_anisotropy)
+            return {SamplerStatus::unsupported,
+                    {"vulkan_sampler_anisotropy_unsupported", "The Vulkan device does not expose sampler anisotropy"},
+                    nullptr};
+        if (anisotropic && description.max_anisotropy > context_->max_sampler_anisotropy)
+            return {SamplerStatus::unsupported,
+                    {"vulkan_sampler_anisotropy_limit", "The requested sampler anisotropy exceeds the physical device limit"},
+                    nullptr};
+        VkSamplerCreateInfo sampler_info{};
+        sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        sampler_info.magFilter = vk_sampler_filter(description.mag_filter);
+        sampler_info.minFilter = vk_sampler_filter(description.min_filter);
+        sampler_info.mipmapMode = vk_sampler_mipmap(description.mip_filter);
+        sampler_info.addressModeU = vk_sampler_address(description.address_u);
+        sampler_info.addressModeV = vk_sampler_address(description.address_v);
+        sampler_info.addressModeW = vk_sampler_address(description.address_w);
+        sampler_info.mipLodBias = 0.0F;
+        sampler_info.anisotropyEnable = anisotropic ? VK_TRUE : VK_FALSE;
+        sampler_info.maxAnisotropy = description.max_anisotropy;
+        sampler_info.compareEnable = description.compare == SamplerCompare::disabled ? VK_FALSE : VK_TRUE;
+        sampler_info.compareOp = vk_sampler_compare(description.compare);
+        sampler_info.minLod = description.min_lod;
+        sampler_info.maxLod = description.max_lod;
+        sampler_info.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+        sampler_info.unnormalizedCoordinates = VK_FALSE;
+        RawVulkanSampler raw;
+        raw.context = context_;
+        const VkResult result = vkCreateSampler(context_->device, &sampler_info, nullptr, &raw.sampler);
+        if (result != VK_SUCCESS) {
+            Diagnostic failure = vk_error("vkCreateSampler", result);
+            failure.code = "sampler_allocation_failed";
+            return {SamplerStatus::allocation_failed, std::move(failure), nullptr};
+        }
+        return {SamplerStatus::ready, {}, std::make_unique<VulkanSampler>(context_, std::move(raw), description)};
+    }
+
+    ShaderModuleResult create_shader_module(const ShaderModuleDescription& description) override {
+        Diagnostic diagnostic;
+        const auto validation = validate_shader_module_description(description, diagnostic);
+        if (validation != ShaderModuleStatus::ready)
+            return {validation, std::move(diagnostic), nullptr};
+        ShaderBytecodeFormat format{};
+        if (!shader_bytecode_format(description.bytecode, format) || format != ShaderBytecodeFormat::spirv)
+            return {ShaderModuleStatus::unsupported,
+                    {"vulkan_shader_format_unsupported", "Vulkan shader modules require SPIR-V bytecode"}, nullptr};
+        std::vector<std::uint32_t> words(description.bytecode.size() / sizeof(std::uint32_t));
+        std::memcpy(words.data(), description.bytecode.data(), description.bytecode.size());
+        VkShaderModuleCreateInfo module_info{};
+        module_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        module_info.codeSize = description.bytecode.size();
+        module_info.pCode = words.data();
+        RawVulkanShaderModule raw;
+        raw.context = context_;
+        const VkResult result = vkCreateShaderModule(context_->device, &module_info, nullptr, &raw.module);
+        if (result != VK_SUCCESS) {
+            Diagnostic failure = vk_error("vkCreateShaderModule", result);
+            failure.code = "shader_module_allocation_failed";
+            return {ShaderModuleStatus::allocation_failed, std::move(failure), nullptr};
+        }
+        return {ShaderModuleStatus::ready, {},
+                std::make_unique<VulkanShaderModule>(context_, std::move(raw),
+                                                      ShaderModuleInfo{description.stage, format, description.bytecode.size()})};
     }
 
     void wait_idle() noexcept override {
@@ -1001,7 +1186,10 @@ DeviceResult create_vulkan_device(const DeviceOptions& options) {
     queue_info.queueFamilyIndex = selected.graphics_queue_family;
     queue_info.queueCount = 1;
     queue_info.pQueuePriorities = &priority;
+    VkPhysicalDeviceFeatures supported_features{};
+    vkGetPhysicalDeviceFeatures(selected.handle, &supported_features);
     VkPhysicalDeviceFeatures features{};
+    features.samplerAnisotropy = supported_features.samplerAnisotropy;
     VkDeviceCreateInfo create_info{};
     create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     create_info.queueCreateInfoCount = 1;
@@ -1023,7 +1211,9 @@ DeviceResult create_vulkan_device(const DeviceOptions& options) {
     command_pool_info.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     command_pool_info.queueFamilyIndex = selected.graphics_queue_family;
     auto context = std::make_shared<VulkanContext>(std::move(instance), selected.handle, device, queue,
-                                                   selected.graphics_queue_family, info_from(selected.properties));
+                                                   selected.graphics_queue_family, info_from(selected.properties),
+                                                   supported_features.samplerAnisotropy == VK_TRUE,
+                                                   selected.properties.limits.maxSamplerAnisotropy);
     const VkResult pool_result = vkCreateCommandPool(device, &command_pool_info, nullptr, &context->command_pool);
     if (pool_result != VK_SUCCESS) {
         DeviceResult failure;

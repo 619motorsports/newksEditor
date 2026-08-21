@@ -4,14 +4,49 @@
 #include <cstddef>
 #include <cstdlib>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace {
 
 void require(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
+}
+
+void put_word(std::vector<std::byte>& bytes, std::size_t offset, std::uint32_t value) {
+    require(offset + sizeof(std::uint32_t) <= bytes.size(), "shader fixture write out of bounds");
+    bytes[offset] = std::byte{static_cast<unsigned char>(value & 0xffU)};
+    bytes[offset + 1U] = std::byte{static_cast<unsigned char>((value >> 8U) & 0xffU)};
+    bytes[offset + 2U] = std::byte{static_cast<unsigned char>((value >> 16U) & 0xffU)};
+    bytes[offset + 3U] = std::byte{static_cast<unsigned char>((value >> 24U) & 0xffU)};
+}
+
+std::vector<std::byte> minimal_spirv_fixture() {
+    std::vector<std::byte> bytes(24U);
+    put_word(bytes, 0U, 0x07230203U);
+    put_word(bytes, 4U, 0x00010000U);
+    put_word(bytes, 8U, 0U);
+    put_word(bytes, 12U, 1U);
+    put_word(bytes, 16U, 0U);
+    put_word(bytes, 20U, 0x00010000U); // OpNop: one-word instruction.
+    return bytes;
+}
+
+std::vector<std::byte> minimal_dxbc_fixture() {
+    std::vector<std::byte> bytes(48U);
+    put_word(bytes, 0U, 0x43425844U); // DXBC
+    put_word(bytes, 20U, 1U);
+    put_word(bytes, 24U, static_cast<std::uint32_t>(bytes.size()));
+    put_word(bytes, 28U, 1U);
+    put_word(bytes, 32U, 36U);
+    put_word(bytes, 36U, 0x58454853U); // SHEX
+    put_word(bytes, 40U, 4U);
+    put_word(bytes, 44U, 0U);
+    return bytes;
 }
 
 void contract_names() {
@@ -29,6 +64,11 @@ void contract_names() {
             "texture ready status name");
     require(std::string(apex::render::texture_status_name(apex::render::TextureStatus::upload_failed)) == "upload_failed",
             "texture upload status name");
+    require(std::string(apex::render::sampler_status_name(apex::render::SamplerStatus::ready)) == "ready",
+            "sampler ready status name");
+    require(std::string(apex::render::shader_module_status_name(apex::render::ShaderModuleStatus::unsupported)) ==
+                "unsupported",
+            "shader unsupported status name");
 }
 
 void contract_options() {
@@ -206,6 +246,107 @@ void contract_texture_limits() {
             "duplicate array-mip subresource rejected");
 }
 
+void contract_sampler_shader_limits() {
+    using namespace apex::render;
+    Diagnostic diagnostic;
+    SamplerDescription sampler;
+    require(validate_sampler_description(sampler, diagnostic) == SamplerStatus::ready,
+            "default sampler accepted");
+    sampler.min_filter = SamplerFilter::anisotropic;
+    require(validate_sampler_description(sampler, diagnostic) == SamplerStatus::invalid_description &&
+                diagnostic.code == "sampler_anisotropy_invalid", "anisotropy requires a non-unit limit");
+    sampler.min_filter = SamplerFilter::linear;
+    sampler.max_anisotropy = 17.0F;
+    require(validate_sampler_description(sampler, diagnostic) == SamplerStatus::invalid_description &&
+                diagnostic.code == "sampler_anisotropy_invalid", "anisotropy limit enforced");
+    sampler.max_anisotropy = 1.0F;
+    sampler.min_lod = 4.0F;
+    sampler.max_lod = 2.0F;
+    require(validate_sampler_description(sampler, diagnostic) == SamplerStatus::invalid_description &&
+                diagnostic.code == "sampler_lod_invalid", "sampler LOD ordering enforced");
+
+    const std::array<std::byte, 3> short_bytecode{};
+    ShaderModuleDescription shader{ShaderStage::vertex, short_bytecode};
+    require(validate_shader_module_description(shader, diagnostic) == ShaderModuleStatus::invalid_description &&
+                diagnostic.code == "shader_bytecode_alignment", "short shader alignment rejected");
+    std::vector<std::byte> oversized_shader(max_shader_module_bytes + 4U);
+    require(validate_shader_module_description({ShaderStage::vertex, oversized_shader}, diagnostic) ==
+                ShaderModuleStatus::invalid_description && diagnostic.code == "shader_bytecode_size_limit",
+            "shader bytecode size limit enforced");
+    const auto spirv = minimal_spirv_fixture();
+    shader.bytecode = spirv;
+    require(validate_shader_module_description(shader, diagnostic) == ShaderModuleStatus::ready,
+            "structurally valid SPIR-V accepted");
+    for (std::size_t prefix = 0; prefix < spirv.size(); ++prefix) {
+        shader.bytecode = std::span<const std::byte>(spirv).first(prefix);
+        require(validate_shader_module_description(shader, diagnostic) != ShaderModuleStatus::ready,
+                "truncated SPIR-V prefix rejected");
+    }
+    std::vector<std::byte> bad_spirv = spirv;
+    put_word(bad_spirv, 12U, 0U);
+    shader.bytecode = bad_spirv;
+    require(validate_shader_module_description(shader, diagnostic) == ShaderModuleStatus::invalid_description &&
+                diagnostic.code == "shader_spirv_bound_invalid", "zero SPIR-V bound rejected");
+    bad_spirv = spirv;
+    put_word(bad_spirv, 16U, 1U);
+    shader.bytecode = bad_spirv;
+    require(validate_shader_module_description(shader, diagnostic) == ShaderModuleStatus::invalid_description &&
+                diagnostic.code == "shader_spirv_schema_invalid", "nonzero SPIR-V schema rejected");
+    bad_spirv = spirv;
+    put_word(bad_spirv, 20U, 0x00020000U);
+    shader.bytecode = bad_spirv;
+    require(validate_shader_module_description(shader, diagnostic) == ShaderModuleStatus::invalid_description &&
+                diagnostic.code == "shader_spirv_instruction_truncated", "truncated SPIR-V instruction rejected");
+    const std::array<std::byte, 4> reversed_magic = {
+        std::byte{0x07}, std::byte{0x23}, std::byte{0x02}, std::byte{0x03}};
+    shader.bytecode = reversed_magic;
+    require(validate_shader_module_description(shader, diagnostic) == ShaderModuleStatus::unsupported &&
+                diagnostic.code == "shader_bytecode_signature", "non-little-endian SPIR-V rejected");
+    const std::array<std::byte, 4> unknown = {
+        std::byte{'N'}, std::byte{'O'}, std::byte{'P'}, std::byte{'E'}};
+    shader.bytecode = unknown;
+    require(validate_shader_module_description(shader, diagnostic) == ShaderModuleStatus::unsupported &&
+                diagnostic.code == "shader_bytecode_signature", "unknown shader signature rejected");
+    const auto dxbc = minimal_dxbc_fixture();
+    shader.bytecode = dxbc;
+    require(validate_shader_module_description(shader, diagnostic) == ShaderModuleStatus::ready,
+            "structurally valid DXBC accepted");
+    std::vector<std::byte> dxil_chunk = dxbc;
+    put_word(dxil_chunk, 36U, 0x4C495844U); // DXIL chunk inside a DXBC container.
+    shader.bytecode = dxil_chunk;
+    require(validate_shader_module_description(shader, diagnostic) == ShaderModuleStatus::ready,
+            "DXIL chunk in DXBC accepted");
+    for (std::size_t prefix = 0; prefix < dxbc.size(); ++prefix) {
+        shader.bytecode = std::span<const std::byte>(dxbc).first(prefix);
+        require(validate_shader_module_description(shader, diagnostic) != ShaderModuleStatus::ready,
+                "truncated DXBC prefix rejected");
+    }
+    std::vector<std::byte> bad_dxbc = dxbc;
+    put_word(bad_dxbc, 24U, 44U);
+    shader.bytecode = bad_dxbc;
+    require(validate_shader_module_description(shader, diagnostic) == ShaderModuleStatus::invalid_description &&
+                diagnostic.code == "shader_dxbc_size_invalid", "DXBC total size mismatch rejected");
+    bad_dxbc = dxbc;
+    put_word(bad_dxbc, 32U, 0U);
+    shader.bytecode = bad_dxbc;
+    require(validate_shader_module_description(shader, diagnostic) == ShaderModuleStatus::invalid_description &&
+                diagnostic.code == "shader_dxbc_offset_invalid", "DXBC invalid offset rejected");
+    std::vector<std::byte> no_shader_chunk = dxbc;
+    put_word(no_shader_chunk, 36U, 0x4D41504DU); // MAP0, structurally valid but unsupported.
+    shader.bytecode = no_shader_chunk;
+    require(validate_shader_module_description(shader, diagnostic) == ShaderModuleStatus::unsupported &&
+                diagnostic.code == "shader_dxbc_chunk_unsupported", "unsupported DXBC chunk rejected");
+    const std::array<std::byte, 32> standalone_dxil = {
+        std::byte{'D'}, std::byte{'X'}, std::byte{'I'}, std::byte{'L'},
+        std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0},
+        std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0},
+        std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0},
+        std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}};
+    shader.bytecode = standalone_dxil;
+    require(validate_shader_module_description(shader, diagnostic) == ShaderModuleStatus::unsupported &&
+                diagnostic.code == "shader_bytecode_signature", "standalone DXIL rejected");
+}
+
 bool contract_backend(apex::render::Backend backend) {
     using namespace apex::render;
     DeviceOptions options{};
@@ -234,6 +375,37 @@ bool contract_backend(apex::render::Backend backend) {
     require(device.device != nullptr, "created device");
     require(device.device->info().backend == backend, "created backend");
     require(!device.device->info().name.empty(), "device name");
+    const SamplerResult sampler = device.device->create_sampler(SamplerDescription{});
+    require(sampler.ok(), "real backend sampler creation");
+    std::vector<std::unique_ptr<Sampler>> d3d_sampler_handles;
+    if (backend == Backend::D3D12) {
+        d3d_sampler_handles.reserve(2047U);
+        for (std::size_t index = 0; index < 2047U; ++index) {
+            SamplerResult extra = device.device->create_sampler(SamplerDescription{});
+            require(extra.ok(), "D3D12 sampler capacity fixture allocation");
+            d3d_sampler_handles.push_back(std::move(extra.sampler));
+        }
+        const SamplerResult exhausted = device.device->create_sampler(SamplerDescription{});
+        require(exhausted.status == SamplerStatus::allocation_failed &&
+                    exhausted.diagnostic.code == "d3d12_sampler_limit",
+                "D3D12 sampler capacity limit");
+    }
+    const auto minimal_spirv = minimal_spirv_fixture();
+    const ShaderModuleResult shader = device.device->create_shader_module({ShaderStage::vertex, minimal_spirv});
+    if (backend == Backend::Vulkan)
+        require(shader.ok(), "Vulkan structurally valid shader module creation");
+    else
+        require(shader.status == ShaderModuleStatus::unsupported &&
+                    shader.diagnostic.code == "d3d12_shader_format_unsupported",
+                "D3D12 rejects SPIR-V shader modules explicitly");
+    const auto minimal_dxbc = minimal_dxbc_fixture();
+    const ShaderModuleResult dxil = device.device->create_shader_module({ShaderStage::vertex, minimal_dxbc});
+    if (backend == Backend::D3D12)
+        require(dxil.ok(), "D3D12 immutable shader blob resource");
+    else
+        require(dxil.status == ShaderModuleStatus::unsupported &&
+                    dxil.diagnostic.code == "vulkan_shader_format_unsupported",
+                "Vulkan rejects DXIL shader modules explicitly");
     const std::array<std::byte, 4> initial = {std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
     BufferDescription mutable_description{16U, BufferUsage::vertex, BufferMemory::host_visible,
                                           BufferMutability::mutable_data};
@@ -305,6 +477,7 @@ int main() {
         contract_options();
         contract_buffer_limits();
         contract_texture_limits();
+        contract_sampler_shader_limits();
         const char* requested = std::getenv("APEX_RENDER_BACKEND");
         if (requested && std::string(requested) == "vulkan") {
             return contract_backend(apex::render::Backend::Vulkan) ? 0 : 77;

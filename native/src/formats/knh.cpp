@@ -2,6 +2,7 @@
 
 #include <apex/core/byte_reader.hpp>
 
+#include <cmath>
 #include <limits>
 #include <sstream>
 #include <utility>
@@ -50,12 +51,6 @@ KnhNode read_node(apex::core::ByteReader& reader, std::size_t depth,
   return node;
 }
 
-void walk(const KnhNode& node, const KnhNode* parent, std::size_t depth,
-          std::vector<KnhWalkEntry>& result) {
-  result.push_back({&node, parent, depth});
-  for (const auto& child : node.children) walk(child, &node, depth + 1, result);
-}
-
 }  // namespace
 
 KnhError::KnhError(std::string message, std::size_t offset)
@@ -91,7 +86,35 @@ KnhFile parse_knh(std::span<const std::uint8_t> bytes, std::string_view source) 
 
 std::vector<KnhWalkEntry> walk_knh(const KnhNode& root) {
   std::vector<KnhWalkEntry> result;
-  walk(root, nullptr, 0, result);
+  struct Pending {
+    const KnhNode* node;
+    const KnhNode* parent;
+    std::size_t depth;
+  };
+  std::vector<Pending> pending;
+  pending.push_back({&root, nullptr, 0});
+  while (!pending.empty()) {
+    const auto current = pending.back();
+    pending.pop_back();
+    if (current.depth > kMaxDepth) {
+      throw KnhError("KNH hierarchy is too deep", current.node->record_offset);
+    }
+    if (result.size() >= kMaxNodes) {
+      throw KnhError("Too many KNH nodes", current.node->record_offset);
+    }
+    for (const auto value : current.node->transform) {
+      if (!std::isfinite(value)) {
+        throw KnhError("Non-finite KNH transform", current.node->record_offset);
+      }
+    }
+    result.push_back({current.node, current.parent, current.depth});
+    if (current.node->children.size() > kMaxNodes - result.size()) {
+      throw KnhError("Too many KNH nodes", current.node->record_offset);
+    }
+    for (std::size_t index = current.node->children.size(); index != 0; --index) {
+      pending.push_back({&current.node->children[index - 1], current.node, current.depth + 1});
+    }
+  }
   return result;
 }
 

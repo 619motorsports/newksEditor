@@ -88,8 +88,8 @@ remains unchanged and feature-complete.
 
 - P0 is partial: CMake, strict warnings, sanitizers, cross-platform CI,
   portable security checks, a native inspection CLI, a backend-neutral device
-  API, and headless Vulkan/D3D12 device, buffer, and 2D texture creation are
-  implemented.
+  API, and headless Vulkan/D3D12 device, buffer, 2D texture, sampler, and
+  shader-module creation are implemented.
 - P1 is partial: bounded KN5 v4/v5/v6, DDS, ACD, INI/CSP, KSANIM v1/v2, and
   KNH readers are implemented, together with byte-stable KN5 writing, VAO ZIP
   decoding, track surfaces/cameras/splines, bounded directory/ACD asset
@@ -97,11 +97,15 @@ remains unchanged and feature-complete.
   asset indexing, and the remaining image formats are not ported.
 - P2 is partial: KN5 conversion feeds the neutral scene snapshot, material
   binding is explicit, track/car workspace manifests assemble deterministically,
-  and render/frame-plan selection is implemented. Authoring transactions,
-  undo/recovery, full validation, and project/CSP export are not ported.
+  driver rigs assemble, and bounded project transactions, undo/redo/recovery,
+  geometry authoring, KN5 baking, and render/frame-plan selection are
+  implemented. Serialized project recovery, full validation, and CSP export
+  are not ported.
 - P3–P7 are not complete. The native graphics backends create real devices and
-  buffers plus bounded 2D textures, and DDS data has a checked backend upload
-  plan, but the port does not yet create windows/swapchains or samplers, execute
+  buffers plus bounded 2D textures, samplers, and shader modules, and DDS data
+  has a checked backend upload plan. CSP selectors and recovered
+  lighting/shadow/reflection math feed deterministic plans, but the port does
+  not yet create windows/swapchains, bind descriptors or pipelines, execute
   shaders, draw pixels, or provide golden-image parity evidence.
 
 DDS BC6H and BC7 are recognized and routed as GPU-required formats. The

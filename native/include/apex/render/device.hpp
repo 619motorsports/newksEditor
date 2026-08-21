@@ -234,6 +234,126 @@ struct TextureUpdateResult {
     [[nodiscard]] bool ok() const noexcept { return status == TextureStatus::ready; }
 };
 
+enum class SamplerFilter : std::uint8_t {
+    nearest,
+    linear,
+    anisotropic,
+};
+
+enum class SamplerAddressMode : std::uint8_t {
+    repeat,
+    mirrored_repeat,
+    clamp_to_edge,
+    clamp_to_border,
+};
+
+enum class SamplerCompare : std::uint8_t {
+    disabled,
+    less,
+    less_equal,
+    greater,
+    greater_equal,
+    equal,
+    not_equal,
+    always,
+    never,
+};
+
+struct SamplerDescription {
+    SamplerFilter min_filter = SamplerFilter::linear;
+    SamplerFilter mag_filter = SamplerFilter::linear;
+    SamplerFilter mip_filter = SamplerFilter::linear;
+    SamplerAddressMode address_u = SamplerAddressMode::repeat;
+    SamplerAddressMode address_v = SamplerAddressMode::repeat;
+    SamplerAddressMode address_w = SamplerAddressMode::repeat;
+    SamplerCompare compare = SamplerCompare::disabled;
+    float max_anisotropy = 1.0F;
+    float min_lod = 0.0F;
+    float max_lod = 1000.0F;
+};
+
+enum class SamplerStatus {
+    ready,
+    invalid_description,
+    unsupported,
+    allocation_failed,
+};
+
+struct SamplerInfo {
+    SamplerDescription description{};
+};
+
+class Sampler {
+public:
+    virtual ~Sampler() = default;
+
+    [[nodiscard]] virtual Backend backend() const noexcept = 0;
+    [[nodiscard]] virtual const SamplerInfo& info() const noexcept = 0;
+};
+
+struct SamplerResult {
+    SamplerStatus status = SamplerStatus::unsupported;
+    Diagnostic diagnostic;
+    std::unique_ptr<Sampler> sampler;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == SamplerStatus::ready && sampler != nullptr;
+    }
+};
+
+enum class ShaderStage : std::uint8_t {
+    vertex,
+    fragment,
+    compute,
+};
+
+enum class ShaderBytecodeFormat : std::uint8_t {
+    spirv,
+    // Direct3D shader bytecode is a DXBC container; DXIL is a supported
+    // chunk inside that container, not a standalone top-level signature.
+    dxil,
+};
+
+struct ShaderModuleDescription {
+    ShaderStage stage = ShaderStage::vertex;
+    // Serialized shader/container words must be little-endian and four-byte
+    // aligned. Backends perform bounded structural validation before use.
+    std::span<const std::byte> bytecode{};
+};
+
+struct ShaderModuleInfo {
+    ShaderStage stage = ShaderStage::vertex;
+    ShaderBytecodeFormat format = ShaderBytecodeFormat::spirv;
+    std::size_t size_bytes = 0;
+};
+
+enum class ShaderModuleStatus {
+    ready,
+    invalid_description,
+    unsupported,
+    allocation_failed,
+};
+
+class ShaderModule {
+public:
+    virtual ~ShaderModule() = default;
+
+    [[nodiscard]] virtual Backend backend() const noexcept = 0;
+    [[nodiscard]] virtual const ShaderModuleInfo& info() const noexcept = 0;
+};
+
+struct ShaderModuleResult {
+    ShaderModuleStatus status = ShaderModuleStatus::unsupported;
+    Diagnostic diagnostic;
+    std::unique_ptr<ShaderModule> shader_module;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == ShaderModuleStatus::ready && shader_module != nullptr;
+    }
+};
+
+inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
+
 [[nodiscard]] BufferStatus validate_buffer_description(
     const BufferDescription& description,
     std::size_t initial_data_size,
@@ -258,6 +378,14 @@ struct TextureUpdateResult {
 [[nodiscard]] TextureStatus validate_texture_update(
     const Texture& texture,
     const TextureUploadPlan& uploads,
+    Diagnostic& diagnostic);
+
+[[nodiscard]] SamplerStatus validate_sampler_description(
+    const SamplerDescription& description,
+    Diagnostic& diagnostic);
+
+[[nodiscard]] ShaderModuleStatus validate_shader_module_description(
+    const ShaderModuleDescription& description,
     Diagnostic& diagnostic);
 
 struct AdapterResult {
@@ -294,6 +422,12 @@ public:
         Texture& texture,
         const TextureUploadPlan& uploads) = 0;
 
+    [[nodiscard]] virtual SamplerResult create_sampler(
+        const SamplerDescription& description) = 0;
+
+    [[nodiscard]] virtual ShaderModuleResult create_shader_module(
+        const ShaderModuleDescription& description) = 0;
+
     virtual void wait_idle() noexcept = 0;
 };
 
@@ -311,6 +445,8 @@ struct DeviceResult {
 [[nodiscard]] const char* device_status_name(DeviceStatus status) noexcept;
 [[nodiscard]] const char* buffer_status_name(BufferStatus status) noexcept;
 [[nodiscard]] const char* texture_status_name(TextureStatus status) noexcept;
+[[nodiscard]] const char* sampler_status_name(SamplerStatus status) noexcept;
+[[nodiscard]] const char* shader_module_status_name(ShaderModuleStatus status) noexcept;
 
 [[nodiscard]] AdapterResult enumerate_adapters(Backend backend,
                                                 const DeviceOptions& options = {});

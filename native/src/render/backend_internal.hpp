@@ -27,5 +27,11 @@ namespace apex::render {
 [[nodiscard]] bool valid_texture_update(const Texture& texture,
                                         const TextureUploadPlan& uploads,
                                         Diagnostic& diagnostic);
+[[nodiscard]] bool valid_sampler_description(const SamplerDescription& description,
+                                             Diagnostic& diagnostic);
+[[nodiscard]] bool valid_shader_module_description(const ShaderModuleDescription& description,
+                                                   Diagnostic& diagnostic);
+[[nodiscard]] bool shader_bytecode_format(std::span<const std::byte> bytecode,
+                                          ShaderBytecodeFormat& format) noexcept;
 
 } // namespace apex::render
