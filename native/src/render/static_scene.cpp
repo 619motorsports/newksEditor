@@ -436,7 +436,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
         !charge(request.packets.size(), 4U * sizeof(void*)) ||
         (embedded_textures &&
          (!charge(model.textures.size(),
-                  sizeof(std::optional<DecodedDdsTexturePlan>) + 2U * sizeof(bool)) ||
+                  sizeof(std::optional<DecodedTexturePlan>) + 2U * sizeof(bool)) ||
           !charge(model.textures.size(), sizeof(std::unique_ptr<Texture>)))))
         return preparation_limit();
     for (const formats::Kn5Texture& texture : model.textures) {
@@ -963,7 +963,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
             "static_scene_directional_shadow_constant_aggregate_limit",
             "The directional-shadow receiver buffer exceeds the static-scene aggregate limit");
 
-    std::vector<std::optional<DecodedDdsTexturePlan>> decoded_textures;
+    std::vector<std::optional<DecodedTexturePlan>> decoded_textures;
     if (embedded_textures) {
         decoded_textures.resize(model.textures.size());
         std::vector<bool> maps_texture_indices(model.textures.size(), false);
@@ -1013,7 +1013,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
                     static_cast<std::size_t>(std::min<std::uint64_t>(
                         remaining_decoded_bytes,
                         std::numeric_limits<std::size_t>::max())));
-                DecodedDdsTexturePlanResult decoded = plan_decoded_dds_texture(
+                DecodedTexturePlanResult decoded = plan_decoded_texture_payload(
                     source_texture.data, source_texture.name, decode_limits);
                 if (!decoded.ok()) {
                     if (decoded.diagnostic.code == "output_too_large" &&
@@ -1049,10 +1049,10 @@ StaticSceneResourceResult prepare_static_scene_resources(
                                     : normal_detail_texture_indices[texture_index]
                                         ? "An embedded txNormalDetail texture must decode to linear RGBA8 or BGRA8"
                                         : "An embedded txDamageMask texture must decode to linear RGBA8 or BGRA8");
-                if (!charge(decoded.plan.levels.size(), sizeof(formats::DdsLevel)) ||
+                if (!charge(decoded.plan.levels.size(), sizeof(DecodedTextureLevel)) ||
                     !charge(decoded.plan.levels.size(), sizeof(TextureUpload)))
                     return preparation_limit();
-                for (const formats::DdsLevel& level : decoded.plan.levels) {
+                for (const DecodedTextureLevel& level : decoded.plan.levels) {
                     if (!checked_add(static_cast<std::uint64_t>(level.pixels.size()),
                                      total_decoded_bytes) ||
                         total_decoded_bytes > limits.max_total_decoded_texture_bytes)

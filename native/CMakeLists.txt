@@ -55,6 +55,7 @@ endif()
 
 add_library(apex_core STATIC
   src/core/byte_reader.cpp
+  src/core/deflate.cpp
   src/core/parse_error.cpp
 )
 add_library(ApexEditor::Core ALIAS apex_core)
@@ -71,6 +72,7 @@ add_library(apex_formats STATIC
   src/formats/kn5_write.cpp
   src/formats/knh.cpp
   src/formats/ksanim.cpp
+  src/formats/png.cpp
   src/formats/vao.cpp
 )
 add_library(ApexEditor::Formats ALIAS apex_formats)
@@ -207,6 +209,7 @@ apex_add_native_test(kn5_tests.cpp kn5_tests ApexEditor::Formats)
 apex_add_native_test(kn5_write_tests.cpp kn5_write_tests ApexEditor::Formats)
 apex_add_native_test(dds_tests.cpp dds_tests ApexEditor::Formats)
 apex_add_native_test(bc7_tests.cpp bc7_tests ApexEditor::Formats)
+apex_add_native_test(png_tests.cpp png_tests ApexEditor::Formats)
 apex_add_native_test(fbx_tests.cpp fbx_tests ApexEditor::Formats)
 apex_add_native_test(fbx_conversion_tests.cpp fbx_conversion_tests ApexEditor::Formats)
 apex_add_native_test(acd_tests.cpp acd_tests ApexEditor::Formats)
@@ -263,7 +266,7 @@ endif()
 if(TEST knh_tests)
   set_tests_properties(knh_tests PROPERTIES LABELS "unit;malformed")
 endif()
-foreach(parser_test IN ITEMS kn5_tests kn5_write_tests dds_tests bc7_tests fbx_tests
+foreach(parser_test IN ITEMS kn5_tests kn5_write_tests dds_tests bc7_tests png_tests fbx_tests
                              fbx_conversion_tests acd_tests ini_tests vao_tests)
   if(TEST ${parser_test})
     set_tests_properties(${parser_test} PROPERTIES LABELS "unit;malformed")

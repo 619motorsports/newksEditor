@@ -1,6 +1,7 @@
 #include "apex/formats/vao.hpp"
 
 #include "apex/core/byte_reader.hpp"
+#include "apex/core/deflate.hpp"
 #include "apex/core/parse_error.hpp"
 
 #include <algorithm>
@@ -232,216 +233,6 @@ void reserveRecordCapacity(VaoData& result, NativeAllocationBudget& budget,
     return crc ^ 0xffffffffu;
 }
 
-class BitReader final {
-public:
-    explicit BitReader(std::span<const std::uint8_t> bytes) : bytes_(bytes) {}
-
-    [[nodiscard]] std::uint32_t bits(unsigned count) {
-        if (count > 24u) throw std::runtime_error("deflate bit request is too large");
-        std::uint32_t result = 0;
-        for (unsigned index = 0; index < count; ++index) {
-            if ((bitOffset_ >> 3u) >= bytes_.size()) throw std::runtime_error("truncated deflate stream");
-            const auto byte = static_cast<std::uint32_t>(bytes_[bitOffset_ >> 3u]);
-            result |= ((byte >> (bitOffset_ & 7u)) & 1u) << index;
-            ++bitOffset_;
-        }
-        return result;
-    }
-
-    void align() noexcept { bitOffset_ = (bitOffset_ + 7u) & ~std::size_t{7u}; }
-
-    [[nodiscard]] std::size_t position() const noexcept { return bitOffset_; }
-
-private:
-    std::span<const std::uint8_t> bytes_;
-    std::size_t bitOffset_ = 0;
-};
-
-struct HuffmanCode {
-    std::uint16_t code = 0;
-    std::uint8_t length = 0;
-    std::uint16_t symbol = 0;
-};
-
-class Huffman final {
-public:
-    void build(std::span<const std::uint8_t> lengths, bool allowSingleIncomplete) {
-        std::array<unsigned, 16> count{};
-        unsigned maximumLength = 0;
-        for (const auto length : lengths) {
-            if (length > 15u) throw std::runtime_error("invalid deflate code length");
-            if (length != 0u) {
-                ++count[length];
-                maximumLength = std::max(maximumLength, static_cast<unsigned>(length));
-            }
-        }
-        int left = 1;
-        for (unsigned length = 1; length <= 15u; ++length) {
-            left = (left << 1) - static_cast<int>(count[length]);
-            if (left < 0) throw std::runtime_error("oversubscribed deflate Huffman tree");
-        }
-        std::array<unsigned, 16> next{};
-        unsigned code = 0;
-        for (unsigned length = 1; length <= 15u; ++length) {
-            code = (code + count[length - 1u]) << 1u;
-            next[length] = code;
-        }
-        codes_.clear();
-        for (std::uint16_t symbol = 0; symbol < lengths.size(); ++symbol) {
-            const auto length = lengths[symbol];
-            if (length == 0u) continue;
-            // Deflate writes each canonical code least-significant bit first.
-            // Keep the wire order in the lookup table while the canonical
-            // numbering above remains the one from RFC 1951.
-            const auto canonical = static_cast<std::uint16_t>(next[length]++);
-            std::uint32_t wire = 0;
-            for (std::uint8_t bit = 0; bit < length; ++bit)
-                wire = (wire << 1u) | ((static_cast<std::uint32_t>(canonical) >> bit) & 1u);
-            codes_.push_back({static_cast<std::uint16_t>(wire), length, symbol});
-        }
-        if (codes_.empty()) throw std::runtime_error("empty deflate Huffman tree");
-        // RFC 1951 permits an incomplete tree only when it consists of one
-        // one-bit code (the usual degenerate distance/code-length tree).
-        if (left != 0 && !(allowSingleIncomplete && maximumLength == 1u && codes_.size() == 1u))
-            throw std::runtime_error("incomplete deflate Huffman tree");
-    }
-
-    [[nodiscard]] std::uint16_t decode(BitReader& bits) const {
-        std::uint16_t value = 0;
-        for (std::uint8_t length = 1; length <= 15u; ++length) {
-            value = static_cast<std::uint16_t>(value | (bits.bits(1u) << (length - 1u)));
-            for (const auto& code : codes_)
-                if (code.length == length && code.code == value) return code.symbol;
-        }
-        throw std::runtime_error("invalid deflate Huffman symbol");
-    }
-
-private:
-    std::vector<HuffmanCode> codes_;
-};
-
-[[nodiscard]] std::vector<std::uint8_t> inflateRaw(std::span<const std::uint8_t> compressed,
-                                                   std::size_t expected,
-                                                   std::size_t maximum) {
-    try {
-        BitReader bits(compressed);
-        std::vector<std::uint8_t> output;
-        output.reserve(std::min(expected, maximum));
-        bool final = false;
-        while (!final) {
-            final = bits.bits(1u) != 0u;
-            const auto type = bits.bits(2u);
-            if (type == 0u) {
-                bits.align();
-                const auto length = static_cast<std::uint16_t>(bits.bits(16u));
-                const auto inverse = static_cast<std::uint16_t>(bits.bits(16u));
-                if (static_cast<std::uint16_t>(length ^ inverse) != 0xffffu)
-                    throw std::runtime_error("invalid stored deflate block length");
-                if (length > maximum - std::min(output.size(), maximum))
-                    throw std::runtime_error("deflate output exceeds limit");
-                for (std::uint32_t index = 0; index < length; ++index)
-                    output.push_back(static_cast<std::uint8_t>(bits.bits(8u)));
-                continue;
-            }
-            if (type == 3u) throw std::runtime_error("reserved deflate block type");
-            Huffman literalTree, distanceTree;
-            if (type == 1u) {
-                std::array<std::uint8_t, 288> lengths{};
-                for (std::size_t index = 0; index <= 143u; ++index) lengths[index] = 8;
-                for (std::size_t index = 144; index <= 255u; ++index) lengths[index] = 9;
-                for (std::size_t index = 256; index <= 279u; ++index) lengths[index] = 7;
-                for (std::size_t index = 280; index < lengths.size(); ++index) lengths[index] = 8;
-                literalTree.build(lengths, false);
-                std::array<std::uint8_t, 32> distances{};
-                distances.fill(5);
-                distanceTree.build(distances, false);
-            } else {
-                const auto literalCount = static_cast<std::size_t>(bits.bits(5u)) + 257u;
-                const auto distanceCount = static_cast<std::size_t>(bits.bits(5u)) + 1u;
-                const auto codeLengthCount = static_cast<std::size_t>(bits.bits(4u)) + 4u;
-                if (literalCount > 286u || distanceCount > 32u) throw std::runtime_error("invalid deflate tree counts");
-                constexpr std::array<std::uint8_t, 19> order = {16, 17, 18, 0, 8, 7, 9, 6, 10, 5,
-                                                                  11, 4, 12, 3, 13, 2, 14, 1, 15};
-                std::array<std::uint8_t, 19> codeLengths{};
-                for (std::size_t index = 0; index < codeLengthCount; ++index)
-                    codeLengths[order[index]] = static_cast<std::uint8_t>(bits.bits(3u));
-                Huffman codeLengthTree;
-                codeLengthTree.build(codeLengths, true);
-                std::vector<std::uint8_t> lengths(literalCount + distanceCount);
-                std::size_t index = 0;
-                while (index < lengths.size()) {
-                    const auto symbol = codeLengthTree.decode(bits);
-                    if (symbol <= 15u) {
-                        lengths[index++] = static_cast<std::uint8_t>(symbol);
-                    } else if (symbol == 16u) {
-                        if (index == 0u) throw std::runtime_error("invalid deflate repeat");
-                        const auto repeat = static_cast<std::size_t>(bits.bits(2u)) + 3u;
-                        if (repeat > lengths.size() - index) throw std::runtime_error("deflate repeat exceeds tree");
-                        std::fill_n(lengths.begin() + static_cast<std::ptrdiff_t>(index), repeat, lengths[index - 1u]);
-                        index += repeat;
-                    } else if (symbol == 17u || symbol == 18u) {
-                        const auto repeat = static_cast<std::size_t>(bits.bits(symbol == 17u ? 3u : 7u)) +
-                                            (symbol == 17u ? 3u : 11u);
-                        if (repeat > lengths.size() - index) throw std::runtime_error("deflate zero repeat exceeds tree");
-                        std::fill_n(lengths.begin() + static_cast<std::ptrdiff_t>(index), repeat,
-                                    std::uint8_t{0});
-                        index += repeat;
-                    } else {
-                        throw std::runtime_error("invalid deflate code length symbol");
-                    }
-                }
-                if (lengths[256u] == 0u) throw std::runtime_error("deflate literal tree has no end-of-block code");
-                literalTree.build(std::span<const std::uint8_t>(lengths.data(), literalCount), true);
-                distanceTree.build(std::span<const std::uint8_t>(lengths.data() + literalCount, distanceCount), true);
-            }
-            constexpr std::array<unsigned, 29> lengthBase = {
-                3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27,
-                31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258};
-            constexpr std::array<unsigned, 29> lengthExtra = {
-                0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2,
-                2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0};
-            constexpr std::array<unsigned, 30> distanceBase = {
-                1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129,
-                193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097,
-                6145, 8193, 12289, 16385, 24577};
-            constexpr std::array<unsigned, 30> distanceExtra = {
-                0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6,
-                6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13};
-            for (;;) {
-                const auto symbol = literalTree.decode(bits);
-                if (symbol < 256u) {
-                    if (output.size() >= maximum) throw std::runtime_error("deflate output exceeds limit");
-                    output.push_back(static_cast<std::uint8_t>(symbol));
-                } else if (symbol == 256u) {
-                    break;
-                } else if (symbol <= 285u) {
-                    const auto lengthIndex = static_cast<std::size_t>(symbol - 257u);
-                    const auto length = static_cast<std::size_t>(lengthBase[lengthIndex] + bits.bits(lengthExtra[lengthIndex]));
-                    const auto distanceSymbol = distanceTree.decode(bits);
-                    if (distanceSymbol >= distanceBase.size()) throw std::runtime_error("invalid deflate distance symbol");
-                    const auto distance = static_cast<std::size_t>(distanceBase[distanceSymbol] + bits.bits(distanceExtra[distanceSymbol]));
-                    if (distance == 0u || distance > output.size() || length > maximum - std::min(output.size(), maximum))
-                        throw std::runtime_error("invalid deflate back-reference");
-                    for (std::size_t count = 0; count < length; ++count)
-                        output.push_back(output[output.size() - distance]);
-                } else {
-                    throw std::runtime_error("invalid deflate literal/length symbol");
-                }
-            }
-        }
-        if (output.size() != expected) throw std::runtime_error("deflate output size mismatch");
-        const auto position = bits.position();
-        const auto consumedBytes = position / 8u + (position % 8u != 0u ? 1u : 0u);
-        if (consumedBytes > compressed.size()) throw std::runtime_error("deflate stream exceeds compressed span");
-        if (position % 8u != 0u && (compressed[position / 8u] >> (position % 8u)) != 0u)
-            throw std::runtime_error("nonzero deflate final padding");
-        if (consumedBytes != compressed.size()) throw std::runtime_error("trailing bytes after deflate stream");
-        return output;
-    } catch (const std::runtime_error& error) {
-        throw std::runtime_error(std::string("invalid deflate stream: ") + error.what());
-    }
-}
-
 struct ZipEntry {
     std::string name;
     std::uint16_t flags = 0;
@@ -630,8 +421,13 @@ struct ZipArchive {
         output.assign(bytes.begin() + static_cast<std::ptrdiff_t>(start),
                       bytes.begin() + static_cast<std::ptrdiff_t>(start + entry.compressedSize));
     } else {
+        apex::core::ParseLimits deflateLimits = limits;
+        deflateLimits.maxOutputBytes = maximumEntry;
         try {
-            output = inflateRaw(bytes.subspan(start, entry.compressedSize), entry.uncompressedSize, maximumEntry);
+            output = apex::core::inflateDeflateRaw(
+                bytes.subspan(start, entry.compressedSize),
+                entry.uncompressedSize, std::string(source), deflateLimits,
+                start);
         } catch (const std::runtime_error& error) {
             throw vaoError(source, start, "INVALID_DEFLATE", error.what());
         }

@@ -1,6 +1,7 @@
 #include "apex/render/external_texture_authority.hpp"
 
 #include "apex/formats/acd.hpp"
+#include "png_fixture.hpp"
 
 #include <array>
 #include <chrono>
@@ -352,7 +353,7 @@ void materializesOwnedEffectiveScene(const std::filesystem::path& root) {
     require(material.resources.size() == 1U && material.resources.front().textureId == 17U,
             "effective replacement preserves the serialized bind point");
     const auto& synthetic = result.input->model.textures.back();
-    require(synthetic.name.rfind("__apex_external_dds_", 0U) == 0U &&
+    require(synthetic.name.rfind("__apex_external_image_", 0U) == 0U &&
                 synthetic.name.find("override.dds") == std::string::npos &&
                 synthetic.workspaceFileIndex == 7U && synthetic.data == rgba8Dds({1U, 2U, 3U, 255U}),
             "effective texture has opaque name, source scope, and exact DDS bytes");
@@ -360,6 +361,30 @@ void materializesOwnedEffectiveScene(const std::filesystem::path& root) {
                 result.input->external_bindings.front().grant_id == "car-grant" &&
                 result.input->external_bindings.front().requested_path == "textures/override.dds",
             "effective binding retains source identity outside renderer input");
+}
+
+void materializesOwnedPngEffectiveScene(const std::filesystem::path& root) {
+    auto fixture = effectiveFixture(root, "textures/override.png");
+    const std::array<std::uint8_t, 4> pixel = {13U, 47U, 149U, 229U};
+    const auto png = apex::tests::rgba8PngFixture(pixel);
+    writeBytes(root / "textures/override.png", png);
+    AssetSource source;
+    source.addDirectory(root, "car");
+    fixture.grants = {{"car-grant", &source}};
+
+    const auto authority = resolve_external_texture_authority(
+        fixture.grants, fixture.requests);
+    const auto result = prepare_effective_stock_scene_input(
+        fixture.model, fixture.overrides, fixture.grants, fixture.requests);
+    require(authority.ok() && authority.resources.size() == 1U &&
+                authority.resources.front().source_bytes == png &&
+                authority.resources.front().plan.description.format ==
+                    apex::render::TextureFormat::rgba8_unorm &&
+                authority.resources.front().plan.levels.front().pixels ==
+                    std::vector<std::uint8_t>(pixel.begin(), pixel.end()) &&
+                result.ok() &&
+                result.input->model.textures.back().data == png,
+            "external PNG becomes a decoded plan and exact owned effective payload");
 }
 
 void rejectsEffectiveMalformedScopeAndCollisions(const std::filesystem::path& root) {
@@ -373,6 +398,21 @@ void rejectsEffectiveMalformedScopeAndCollisions(const std::filesystem::path& ro
     require(result.status == ExternalTextureAuthorityStatus::invalid_request &&
                 result.input == nullptr,
             "truncated effective DDS fails atomically");
+
+    auto malformed_png = effectiveFixture(
+        root / "malformed-png", "textures/bad.png");
+    auto short_png = apex::tests::rgba8PngFixture({1U, 2U, 3U, 255U});
+    short_png.pop_back();
+    writeBytes(root / "malformed-png" / "textures/bad.png", short_png);
+    AssetSource malformed_png_source;
+    malformed_png_source.addDirectory(root / "malformed-png", "malformed-png");
+    malformed_png.grants = {{"car-grant", &malformed_png_source}};
+    result = prepare_effective_stock_scene_input(
+        malformed_png.model, malformed_png.overrides,
+        malformed_png.grants, malformed_png.requests);
+    require(result.status == ExternalTextureAuthorityStatus::invalid_request &&
+                result.input == nullptr,
+            "truncated effective PNG fails atomically");
 
     auto scoped = effectiveFixture(root / "scope");
     AssetSource scoped_source;
@@ -403,7 +443,7 @@ void rejectsEffectiveMalformedScopeAndCollisions(const std::filesystem::path& ro
 
     auto name_collision = effectiveFixture(root / "name-collision");
     name_collision.model.textures.push_back(
-        {true, "__apex_external_dds_0", 0U, {}, 7U});
+        {true, "__apex_external_image_0", 0U, {}, 7U});
     AssetSource name_source;
     name_source.addDirectory(root / "name-collision", "name");
     name_collision.grants = {{"car-grant", &name_source}};
@@ -411,7 +451,7 @@ void rejectsEffectiveMalformedScopeAndCollisions(const std::filesystem::path& ro
         name_collision.model, name_collision.overrides,
         name_collision.grants, name_collision.requests);
     require(result.ok() && result.input->model.textures.back().name !=
-                "__apex_external_dds_0",
+                "__apex_external_image_0",
             "synthetic texture names avoid scoped table collisions");
 
     auto budget = effectiveFixture(root / "budget");
@@ -439,6 +479,7 @@ int main() {
         rejectsUnsafeAndInvalidRequests(root / "invalid");
         enforcesSourceAndDecodedLimits(root / "limits");
         materializesOwnedEffectiveScene(root / "effective");
+        materializesOwnedPngEffectiveScene(root / "effective-png");
         rejectsEffectiveMalformedScopeAndCollisions(root / "effective-cases");
         std::error_code cleanup;
         std::filesystem::remove_all(root, cleanup);

@@ -7,6 +7,7 @@
 #include "apex/render/static_scene.hpp"
 #include "apex/render/static_mesh_upload.hpp"
 #include "apex/render/stock_scene_execution.hpp"
+#include "png_fixture.hpp"
 
 #include <algorithm>
 #include <array>
@@ -3494,6 +3495,33 @@ bool contract_backend(apex::render::Backend backend) {
                 embedded_result.rgba8[center + 3U] == std::byte{255},
             "embedded DDS static scene samples the expected center pixel");
 
+    const std::array<std::uint8_t, 4> embedded_png_pixel = {
+        23U, 71U, 181U, 255U};
+    std::vector<std::uint8_t> embedded_png =
+        apex::tests::rgba8PngFixture(embedded_png_pixel);
+    embedded_model.textures.front().name = "body.dds";
+    embedded_model.textures.front().size =
+        static_cast<std::uint32_t>(embedded_png.size());
+    embedded_model.textures.front().data = std::move(embedded_png);
+    StaticSceneResourceResult embedded_png_resources =
+        prepare_static_scene_resources(*device.device, embedded_request);
+    require(embedded_png_resources.ok() &&
+                embedded_png_resources.resources->owned_texture_count() == 1U,
+            "real backend owns one signature-identified embedded PNG texture");
+    const IndexedStaticMeshBatchResult embedded_png_result =
+        embedded_png_resources.resources->draw_and_readback(
+            *device.device, *triangle_texture.texture, embedded_frame);
+    require(embedded_png_result.ok() &&
+                embedded_png_result.rgba8[center] == std::byte{23} &&
+                embedded_png_result.rgba8[center + 1U] == std::byte{71} &&
+                embedded_png_result.rgba8[center + 2U] == std::byte{181} &&
+                embedded_png_result.rgba8[center + 3U] == std::byte{255},
+            "embedded PNG static scene samples the expected center pixel");
+    embedded_model.textures.front().data =
+        rgba8_dds_fixture(embedded_pixel);
+    embedded_model.textures.front().size = static_cast<std::uint32_t>(
+        embedded_model.textures.front().data.size());
+
     const std::array<const PipelineProgram*, 1> embedded_material_pipelines = {
         &material_pipeline};
     const std::array<KsPerPixelMaterialConstants, 1> embedded_material_constants = {
@@ -3680,10 +3708,10 @@ bool contract_backend(apex::render::Backend backend) {
     external_archive.source = "fixture/data.acd";
     external_archive.assetName = "fixture";
     apex::formats::AcdEntry external_entry;
-    external_entry.name = "textures/external.dds";
+    external_entry.name = "textures/external.png";
     external_entry.path = external_entry.name;
     external_entry.safe = true;
-    external_entry.data = rgba8_dds_fixture(external_pixel);
+    external_entry.data = apex::tests::rgba8PngFixture(external_pixel);
     external_entry.size = external_entry.data.size();
     external_archive.entries.push_back(std::move(external_entry));
     apex::assets::AssetSource external_source;
@@ -3691,7 +3719,7 @@ bool contract_backend(apex::render::Backend backend) {
 
     std::vector<MaterialBindingOverrides> external_overrides(1U);
     MaterialTextureOverride external_override;
-    external_override.file = "textures/external.dds";
+    external_override.file = "textures/external.png";
     external_overrides[0].resources.emplace("txDiffuse", std::move(external_override));
     const std::array<ExternalTextureGrant, 1> external_grants = {
         ExternalTextureGrant{"car-grant", &external_source}};
@@ -3699,7 +3727,7 @@ bool contract_backend(apex::render::Backend backend) {
     external_texture_request.grant_id = "car-grant";
     external_texture_request.binding.slot = "txDiffuse";
     external_texture_request.binding.kind = MaterialTextureKind::external_file;
-    external_texture_request.binding.file = "textures/external.dds";
+    external_texture_request.binding.file = "textures/external.png";
     external_texture_request.material_index = 0U;
     const std::array<ExternalTextureRequest, 1> external_requests = {
         std::move(external_texture_request)};
@@ -3709,7 +3737,7 @@ bool contract_backend(apex::render::Backend backend) {
     require(effective_external.ok() &&
                 effective_external.input->external_bindings.size() == 1U &&
                 effective_external.input->model.textures.size() == 2U,
-            "external authority prepares one owned effective DDS");
+            "external authority prepares one owned effective PNG");
     require(stock_model.materials[0].resources[0].texture == "body.dds" &&
                 effective_external.input->model.materials[0].resources[0].texture ==
                     effective_external.input->external_bindings[0].synthetic_texture_name &&
@@ -3735,7 +3763,7 @@ bool contract_backend(apex::render::Backend backend) {
                 near_material_channel(external_stock_draw.rgba8[center + 1U], 10U) &&
                 near_material_channel(external_stock_draw.rgba8[center + 2U], 34U) &&
                 near_material_channel(external_stock_draw.rgba8[center + 3U], 255U),
-            "external authority effective DDS controls the rendered center pixel");
+            "external authority effective PNG controls the rendered center pixel");
 
     // Execute the bounded base ksPerPixelMultiMap family through the same
     // stock-scene facade. This path implements only the source-evidenced

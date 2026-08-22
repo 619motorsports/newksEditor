@@ -312,7 +312,7 @@ ExternalTextureAuthorityResult resolve_external_texture_authority(
                 decode_limits.maxOutputBytes,
                 static_cast<std::size_t>(std::min<std::uint64_t>(
                     remaining_decoded, std::numeric_limits<std::size_t>::max())));
-            const auto planned = plan_decoded_dds_texture(
+            const auto planned = plan_decoded_texture_payload(
                 bytes, diagnostic_source(grant.id, item.file->path), decode_limits);
             if (!planned.ok()) {
                 const auto status =
@@ -353,14 +353,14 @@ ExternalTextureAuthorityResult resolve_external_texture_authority(
                                "Decoded external texture bytes exceed the aggregate limit");
                 break;
             }
-            std::uint64_t plan_bytes = sizeof(DecodedDdsTexturePlan);
+            std::uint64_t plan_bytes = sizeof(DecodedTexturePlan);
             std::uint64_t level_metadata = 0U;
             std::uint64_t source_payload_bytes = 0U;
             if (!checked_size_to_u64(planned.plan.levels.size(), level_metadata) ||
                 !checked_size_to_u64(bytes.size(), source_payload_bytes) ||
                 level_metadata > std::numeric_limits<std::uint64_t>::max() /
-                                     sizeof(formats::DdsLevel) ||
-                !checked_add(level_metadata * sizeof(formats::DdsLevel), plan_bytes,
+                                     sizeof(DecodedTextureLevel) ||
+                !checked_add(level_metadata * sizeof(DecodedTextureLevel), plan_bytes,
                              std::numeric_limits<std::uint64_t>::max()) ||
                 !checked_add(source_payload_bytes, plan_bytes,
                              std::numeric_limits<std::uint64_t>::max()) ||
@@ -617,7 +617,7 @@ ExternalTextureEffectiveStockSceneResult prepare_effective_stock_scene_input(
                                              "Synthetic effective texture exceeds the configured limit");
                 std::string name;
                 do {
-                    name = "__apex_external_dds_" + std::to_string(next_name++);
+                    name = "__apex_external_image_" + std::to_string(next_name++);
                     if (name.size() > limits.max_effective_texture_name_bytes)
                         return effective_failure(Status::resource_limit, item.request_index,
                                                  request.grant_id, request.binding.file,

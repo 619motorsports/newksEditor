@@ -552,13 +552,23 @@ BC3, 767 BC1, 75 BC2, 737 PNGs, and 759 legacy uncompressed DDS images in 8-, 16
 24-, or 32-bit masked layouts. No BC5 or BC7 image appeared in that sample, so the
 highest-impact missing paths were the uncompressed and PNG images rather than BC7.
 
-The renderer now decodes arbitrary contiguous legacy channel masks, including BGR24,
+The WebGL renderer now decodes arbitrary contiguous legacy channel masks, including BGR24,
 BGRA/RGBA32, RGB565, luminance, and luminance-alpha, and uses browser-native image
 decoding for embedded PNG, JPEG, and WebP. BC4 and BC5 have bounded CPU decoders;
 BC5 reconstructs the positive normal Z channel. On the complete 43.9 MB Kunos Abarth
 500 Assetto Corse, a production WebGL run loaded all 80 embedded textures: 43 BC1/2/3,
 29 raw DDS images, and 13 PNGs, with zero unsupported textures or WebGL errors. The
 raw underside texture and PNG grille texture were also isolated and visually checked.
+
+The native path now has a separate bounded PNG decoder for non-interlaced
+8-bit grayscale, RGB, indexed, grayscale-alpha, and RGBA inputs. It checks
+chunk order and CRCs, concatenates consecutive IDAT chunks, uses one shared
+bounded DEFLATE implementation, and emits straight-alpha, top-to-bottom RGBA8
+UNORM pixels. Embedded KN5 and explicitly granted external payloads retain
+owned source bytes and use the backend-neutral texture plan. Malformed,
+truncated, dimension, compressed/decompressed, aggregate, failure-atomicity,
+and real Vulkan sampled-pixel tests cover this path. JPEG, WebP, unsupported
+PNG modes, and native FBX image conversion remain staged.
 
 A wider follow-up sample found 49 DX10 BC7 images. Modern WebGL implementations can
 upload those blocks through `EXT_texture_compression_bptc`; BC6H uses the same path,
@@ -2595,6 +2605,8 @@ Apex embeds resolved DDS, PNG, JPEG, and WebP bytes in the KN5 output. The impor
 also captures supported embedded FBX images through their temporary blob or data URL.
 Missing, ambiguous, unreadable, and unsupported images retain the material-color DDS.
 The inspector shows the slot, state, and output name for each texture reference.
+This paragraph describes the WebGL/importer path; native FBX image conversion
+remains staged.
 
 `FBXImporter::load` at `0x10004200` starts each material with `ksPerPixel`.
 It also sets `ksSpecularEXP` to 1. For recognized surface materials, it reads

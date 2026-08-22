@@ -278,12 +278,12 @@ remains unchanged and feature-complete.
   has a configurable aggregate byte budget. Count-driven containers, strings,
   texture payloads, and encryption records consume it before allocation.
   Bounded asset support includes directory/ACD resolution, asset-folder/skin
-  indexing, and skin metadata JSON. A CPU bridge resolves external DDS files
+  indexing, and skin metadata JSON. A CPU bridge resolves external DDS and PNG files
   through explicit `AssetSource` grants. It rejects unsafe, missing, ambiguous,
   and over-budget input. It retains source identity and returns no partial
-  table after an error. It creates an owned effective model with opaque DDS
+  table after an error. It creates an owned effective model with opaque image
   names. It rewrites exact material slots and preserves serialized bind points.
-  A real backend test executes an ACD DDS through the stock-scene facade. The
+  Real backend tests execute ACD DDS and PNG payloads through the stock-scene facade. The
   renderer receives no `AssetSource`, grant, or external path. A staged CSP
   configuration model is implemented. A bounded
   binary/ASCII FBX DOM parser is implemented. A bounded FBX conversion subset
@@ -297,7 +297,9 @@ remains unchanged and feature-complete.
   eligible normal channels. The VAO reader also limits aggregate native
   objects, ZIP metadata, extracted payloads, and record arrays. Alternate
   records and split-AO application remain staged with explicit diagnostics.
-  KN5 baking is available. The remaining image formats are not ported.
+  KN5 baking is available. Bounded PNG decoding supports non-interlaced,
+  8-bit grayscale, RGB, indexed, grayscale-alpha, and RGBA images. JPEG,
+  WebP, unsupported PNG variants, and remaining image formats are not ported.
 - P2 is partial. KN5 conversion feeds the neutral scene snapshot. Material
   binding is explicit. KN5 scene conversion has aggregate limits for native
   records, copied strings, child links, geometry metadata, and path state.
@@ -312,8 +314,8 @@ remains unchanged and feature-complete.
   single-hierarchy car validator checks required nodes, wheels, pivots,
   colliders, and visual-model bounds. Multi-LOD validation is still staged.
   Full validation and the remaining project/export categories are not ported.
-- P3–P7 are not complete. The native backends create real resources. DDS data
-  has a checked backend upload plan. Validated draw packets include resolved
+- P3–P7 are not complete. The native backends create real resources. DDS and
+  bounded PNG data have checked decode and backend upload paths. Validated draw packets include resolved
   resource references, render state, and bone palettes. KN5 material resource
   IDs remain shader bind points. The draw-packet builder resolves textures by
   canonical resource name and rejects missing or ambiguous names. A stricter
@@ -346,11 +348,12 @@ remains unchanged and feature-complete.
   only used records and rejects non-finite values before backend allocation.
   One authority resolves the textures through caller-owned tables in the final KN5
   texture order. A second authority owns the used embedded KN5 textures. This
-  authority validates every DDS payload before backend allocation. It decodes
-  supported 2D mip chains to RGBA8 and retains explicit sRGB metadata. Stock
+  authority validates every supported DDS and PNG payload before backend allocation. It decodes
+  supported DDS 2D mip chains and bounded PNG images to RGBA8. DDS retains
+  explicit sRGB metadata; PNG follows the WebGL no-conversion RGBA8 UNORM contract. Stock
   shader translation and complete material-resource resolution remain staged.
   The external-texture bridge is a separate target above Assets and Render.
-  It materializes owned DDS bytes before the stock-scene handoff. Thus,
+  It materializes owned DDS or PNG bytes before the stock-scene handoff. Thus,
   filesystem authority does not enter the renderer library.
   Vulkan and D3D12 create a basic graphics pipeline and execute fixed and
   indexed R16 static and CPU-skinned mesh draws. A real Vulkan pixel test
@@ -613,7 +616,7 @@ package launches all pass.
 
 | Area | Must retain | Minimum proof before declaring parity |
 | --- | --- | --- |
-| Asset I/O | KN5 v4/v5/v6, DDS, FBX, KSANIM, KNH, ACD, VAO, CSP/INI and safe external assets | Fixture round trips; malformed/truncated tests; diagnostics compare |
+| Asset I/O | KN5 v4/v5/v6, DDS, bounded PNG, FBX, KSANIM, KNH, ACD, VAO, CSP/INI and safe external assets | Fixture round trips; malformed/truncated PNG and parser tests; diagnostics compare |
 | Scene model | Hierarchy, active/visible/renderable rules, static/skinned meshes, materials, resources, bounds | Structural snapshots and visibility tests |
 | Track workflow | `models*.ini`, placement/dynamic objects, surfaces, cameras/splines, physics overlay | Manifest/surface export equivalence and assembled-layout audits |
 | Car workflow | ACD/LODs, skin overrides, collider checks, SDK node audit, driver pose/cockpit mode | LOD/skin/driver/collider fixtures and inspector diagnostics |

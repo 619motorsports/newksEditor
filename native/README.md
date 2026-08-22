@@ -6,7 +6,9 @@ native implementation works through the parity gates in
 [`docs/CPP_PORT.md`](../docs/CPP_PORT.md).
 
 The native port has shared bounded input utilities. It reads KN5 v4/v5/v6,
-DDS, ACD, VAO, ordered INI/CSP, KSANIM v1/v2, and KNH. It writes KN5 files
+DDS, bounded PNG, ACD, VAO, ordered INI/CSP, KSANIM v1/v2, and KNH. PNG
+support covers non-interlaced 8-bit grayscale, RGB, indexed,
+grayscale-alpha, and RGBA images. It writes KN5 files
 without byte changes when the model is unchanged. KN5 parsing also has an
 aggregate native-object budget. Counts, strings, texture payloads, and
 encryption records consume this budget before allocation. DDS includes bounded
@@ -79,6 +81,7 @@ The current backends initialize devices and create/upload buffers and bounded
 RGBA8/BGRA8 texture clears and canonical RGBA8 readback. They also validate a
 pipeline and execute fixed and indexed R16 static-mesh draws with readback.
 The device API uploads immutable, one-layer BC1 and BC3 sampled textures.
+The owned static-scene path uploads bounded PNG decodes as RGBA8 UNORM.
 It validates each block row before allocation. Vulkan and D3D12 query format
 support before they create a compressed image. Other block formats remain
 outside this direct-upload path.
@@ -217,8 +220,10 @@ reflection branches also remain staged.
 The static-scene adapter has two texture-authority modes. The first mode
 uses caller-owned tables in the final KN5 texture order. The second mode owns
 the used embedded KN5 textures and one linear-repeat sampler. It validates all
-used DDS payloads before backend allocation. It decodes supported 2D mip chains
-to RGBA8 and retains explicit sRGB metadata. This portable CPU decode is not a
+used supported DDS and PNG payloads before backend allocation. It decodes
+supported DDS 2D mip chains and bounded PNG images to RGBA8. DDS retains
+explicit sRGB metadata. PNG retains straight alpha and top-to-bottom rows and
+uses RGBA8 UNORM without implicit color conversion. This portable CPU decode is not a
 direct block-compressed path. The separate device API supports direct BC1 and
 BC3 uploads. BC7 has an exact, bounded CPU fallback.
 BC6H still requires a capable GPU path. The upload planner supports DX10 2D
@@ -226,10 +231,10 @@ arrays, cubemaps, and RGB24 conversion. The embedded static-scene mode rejects
 arrays, cubemaps, 1D/3D textures, BC6H, and legacy D3D9 float textures.
 The maps path rejects sRGB payloads before backend allocation. Source, decoded,
 and host-preparation budgets include the maps resource and its retained tables.
-A separate CPU bridge resolves external DDS files through explicit
+A separate CPU bridge resolves external DDS and PNG files through explicit
 `AssetSource` grants. It rejects unsafe, missing, ambiguous, and over-budget
 requests. It retains source identity and returns no partial table after an
-error. The bridge copies validated DDS bytes into opaque, synthetic KN5
+error. The bridge copies validated image bytes into opaque, synthetic KN5
 textures. It rewrites only the requested material slots and preserves their
 bind points. Then the stock-scene facade can own and execute the effective
 model. A real backend pixel test proves the ACD-to-GPU path. The renderer does

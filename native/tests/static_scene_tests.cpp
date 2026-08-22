@@ -1,4 +1,5 @@
 #include "apex/render/static_scene.hpp"
+#include "png_fixture.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1078,6 +1079,25 @@ void owns_embedded_diffuse_resources_after_source_lifetime() {
             "owned bindings survive the source model and reuse handles in order");
 }
 
+void owns_signature_identified_png_resources() {
+    Fixture value = fixture();
+    const std::array<std::uint8_t, 4> pixel = {9U, 41U, 137U, 223U};
+    configure_embedded_diffuse(value, apex::tests::rgba8PngFixture(pixel));
+    auto request = request_for(value);
+    request.texture_authority = StaticSceneTextureAuthority::embedded_kn5;
+
+    RecordingDevice device;
+    const auto prepared = prepare_static_scene_resources(device, request);
+    require(prepared.ok() && prepared.resources->owned_texture_count() == 1U &&
+                device.texture_calls == 1U && device.sampler_calls == 1U &&
+                device.texture_descriptions.front().format ==
+                    TextureFormat::rgba8_unorm &&
+                device.texture_upload_bytes.front() ==
+                    std::vector<std::byte>{std::byte{9U}, std::byte{41U},
+                                           std::byte{137U}, std::byte{223U}},
+            "embedded PNG is decoded to one owned backend-neutral RGBA8 texture");
+}
+
 void rejects_malformed_embedded_textures_before_allocation() {
     RecordingDevice device;
     Fixture value = fixture();
@@ -1110,6 +1130,23 @@ void rejects_malformed_embedded_textures_before_allocation() {
                 device.buffer_calls == 0U && device.texture_calls == 0U &&
                 device.sampler_calls == 0U,
             "truncated embedded DDS mip fails before backend allocation");
+
+    value = fixture();
+    auto truncated_png =
+        apex::tests::rgba8PngFixture({5U, 7U, 11U, 255U});
+    truncated_png.pop_back();
+    configure_embedded_diffuse(value, std::move(truncated_png));
+    embedded_request = request_for(value);
+    embedded_request.texture_authority =
+        StaticSceneTextureAuthority::embedded_kn5;
+    const auto truncated_png_result =
+        prepare_static_scene_resources(device, embedded_request);
+    require(!truncated_png_result.ok() &&
+                truncated_png_result.diagnostic.code ==
+                    "static_scene_embedded_texture_truncated" &&
+                device.buffer_calls == 0U && device.texture_calls == 0U &&
+                device.sampler_calls == 0U,
+            "truncated embedded PNG fails before backend allocation");
 
     value = fixture();
     configure_embedded_diffuse(value, rgba8_dds(false, pixel));
@@ -2851,6 +2888,7 @@ int main() {
         validates_alpha_to_coverage_sample_contract_before_allocation();
         resolves_portable_diffuse_tables_without_owning_handles();
         owns_embedded_diffuse_resources_after_source_lifetime();
+        owns_signature_identified_png_resources();
         rejects_malformed_embedded_textures_before_allocation();
         rejects_malformed_diffuse_packets_before_allocation();
         bounds_host_preparation_metadata_before_allocation();

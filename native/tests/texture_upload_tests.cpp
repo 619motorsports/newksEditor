@@ -2,6 +2,7 @@
 #include "apex/formats/dds.hpp"
 #include "apex/render/decoded_dds_texture.hpp"
 #include "apex/render/texture_upload.hpp"
+#include "png_fixture.hpp"
 
 #include <algorithm>
 #include <array>
@@ -378,6 +379,36 @@ void plansPortableDecodedTextureResources() {
     require(!bc6.ok() && bc6.status == TextureUploadStatus::unsupported &&
                 bc6.diagnostic.code == "gpu_required",
             "decoded DDS plan preserves the explicit BC6H GPU boundary");
+
+    const std::array<std::uint8_t, 4> png_pixel = {3U, 29U, 101U, 211U};
+    auto png = apex::tests::rgba8PngFixture(png_pixel);
+    const auto decoded_png =
+        plan_decoded_texture_payload(png, "misleading.dds");
+    require(decoded_png.ok() &&
+                decoded_png.plan.description.width == 1U &&
+                decoded_png.plan.description.height == 1U &&
+                decoded_png.plan.description.mip_levels == 1U &&
+                decoded_png.plan.description.format == TextureFormat::rgba8_unorm &&
+                decoded_png.plan.levels.front().pixels ==
+                    std::vector<std::uint8_t>(png_pixel.begin(), png_pixel.end()),
+            "generic texture planner identifies PNG bytes and preserves RGBA texels");
+
+    png.pop_back();
+    const auto truncated_png =
+        plan_decoded_texture_payload(png, "truncated.png");
+    require(!truncated_png.ok() &&
+                truncated_png.status == TextureUploadStatus::invalid &&
+                truncated_png.diagnostic.code == "truncated" &&
+                truncated_png.diagnostic.source == "truncated.png",
+            "generic texture planner rejects truncated PNG before upload");
+
+    apex::core::ParseLimits png_limits;
+    png_limits.maxOutputBytes = 3U;
+    const auto limited_png = plan_decoded_texture_payload(
+        apex::tests::rgba8PngFixture(png_pixel), "limited.png", png_limits);
+    require(!limited_png.ok() &&
+                limited_png.diagnostic.code == "output_too_large",
+            "generic texture planner applies the decoded-output limit to PNG");
 }
 
 void rejectsOversizedUploadSubresourceLists() {

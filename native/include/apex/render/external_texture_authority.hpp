@@ -85,11 +85,12 @@ struct ExternalTextureResource {
     std::string requested_path;
     std::string resolved_path;
     apex::assets::AssetSourceKind source_kind = apex::assets::AssetSourceKind::directory;
-    // The exact, bounded DDS bytes read under the grant. This is retained so
+    // The exact, bounded supported image bytes read under the grant. This is
+    // retained so
     // the effective scene can hand only owned embedded payloads to a renderer
     // and cannot be affected by a later source mutation.
     std::vector<std::uint8_t> source_bytes;
-    DecodedDdsTexturePlan plan;
+    DecodedTexturePlan plan;
 };
 
 struct ExternalTextureAuthorityResult {
@@ -148,7 +149,7 @@ struct ExternalTextureEffectiveStockSceneResult {
     }
 };
 
-// Resolve and materialize external DDS resource overrides into an owned
+// Resolve and materialize supported external image overrides into an owned
 // effective stock-scene input. Each request must carry a material index and
 // exact workspace scope matching the source material. Only the matching
 // resource override is consumed; unrelated overrides remain visible and are
