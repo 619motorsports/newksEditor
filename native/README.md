@@ -35,7 +35,9 @@ node, mesh, geometry, collider, damage, and bottom-collider edits. It also
 retains the source identity for each secondary asset. Missing or mismatched
 identities do not match when related edits exist. A bounded adapter sends KN5
 edits to the bake path. The adapter retains diagnostics for CSP-only material
-values.
+values. Material number strings use JavaScript number syntax. Empty strings and
+decimal underflow become zero. Overflow and boolean material properties are not
+stored.
 
 The render library includes DDS upload, recovered lighting math, shadow math,
 reflection math, camera matrices, and frame-pass plans. The camera code uses

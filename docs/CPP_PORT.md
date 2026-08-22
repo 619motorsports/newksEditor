@@ -315,7 +315,9 @@ remains unchanged and feature-complete.
   edits without an identity remain unbound. The native identity gate rejects a
   missing or mismatched identity when related edits exist. A bounded adapter
   sends KN5 edits to the bake path. It retains diagnostics for CSP-only
-  material modes, properties, and resources.
+  material modes, properties, and resources. Material number strings follow
+  JavaScript syntax. Decimal underflow becomes signed zero. Overflow and
+  boolean material properties remain invalid.
   The port deterministically exports modeled material and mesh edits to CSP.
   It reports unsupported project categories instead of approximating them. Car damage and
   bottom-collider authoring have bounded schemas and deterministic output. A

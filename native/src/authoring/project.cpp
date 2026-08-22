@@ -137,12 +137,23 @@ void validateWorkspaceEdit(WorkspaceFileEdit& edit, const AuthoringLimits& limit
     if (edit.playWav) *edit.playWav = safeText(std::move(*edit.playWav), limits.maxStringBytes, "workspace wav", true);
 }
 
-void validateMaterialScalar(MaterialScalar& value, const AuthoringLimits& limits) {
+[[nodiscard]] bool isMaterialStateField(std::string_view field) {
+    return field == "shader" || field == "blendMode" || field == "depthMode" ||
+           field == "cullMode";
+}
+
+void validateMaterialScalar(MaterialScalar& value, const AuthoringLimits& limits,
+                            std::string_view field) {
+    const bool stateField = isMaterialStateField(field);
     if (auto* number = std::get_if<float>(&value)) {
+        if (stateField)
+            throw error("EDIT_INVALID", "material state fields must be strings");
         if (!std::isfinite(*number)) throw error("EDIT_INVALID", "material scalar must be finite");
     } else if (auto* text = std::get_if<std::string>(&value)) {
-        *text = safeText(std::move(*text), limits.maxStringBytes, "material scalar");
-    }
+        *text = safeText(std::move(*text), limits.maxStringBytes, "material scalar",
+                         !stateField);
+    } else
+        throw error("EDIT_INVALID", "boolean material properties are not modeled");
 }
 
 void validateMaterialVector(MaterialVector& value) {
@@ -419,7 +430,7 @@ void validateState(ProjectState& state, const AuthoringLimits& limits) {
         for (auto& [field, value] : edit.scalars) {
             if (safeKey(field, limits.maxStringBytes, "material scalar field") != field)
                 throw error("RECOVERY_INVALID", "recovery material field is not canonical");
-            validateMaterialScalar(value, limits);
+            validateMaterialScalar(value, limits, field);
         }
         for (auto& [field, value] : edit.vectors) {
             if (safeKey(field, limits.maxStringBytes, "material vector field") != field)
@@ -565,7 +576,7 @@ ProjectState ProjectSession::applyTransaction(const AuthoringTransaction& transa
             } else if constexpr (std::is_same_v<Operation, SetMaterialScalarEdit>) {
                 const auto material = safeKey(std::move(operationValue.material), limits_.maxStringBytes, "material key");
                 const auto field = safeKey(std::move(operationValue.field), limits_.maxStringBytes, "material scalar field");
-                validateMaterialScalar(operationValue.value, limits_);
+                validateMaterialScalar(operationValue.value, limits_, field);
                 candidate.materials[material].scalars[field] = std::move(operationValue.value);
             } else if constexpr (std::is_same_v<Operation, SetMaterialVectorEdit>) {
                 const auto material = safeKey(std::move(operationValue.material), limits_.maxStringBytes, "material key");

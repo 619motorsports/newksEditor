@@ -112,6 +112,14 @@ void validatesIdentityAndStablePaths() {
     expectsError([&] {
         session.commit({"nonfinite mesh", {SetMeshEdit{"BODY", nonFinite}}});
     }, "EDIT_INVALID");
+    expectsError([&] {
+        session.commit({"boolean material", {
+            SetMaterialScalarEdit{"Body", "useDetail", true}}});
+    }, "EDIT_INVALID");
+    expectsError([&] {
+        session.commit({"numeric shader", {
+            SetMaterialScalarEdit{"Body", "shader", 1.0F}}});
+    }, "EDIT_INVALID");
     GeometryEdit nonFiniteGeometry;
     nonFiniteGeometry.transform = apex::authoring::Matrix4{};
     (*nonFiniteGeometry.transform)[0] = std::numeric_limits<float>::quiet_NaN();

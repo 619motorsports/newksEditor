@@ -4,6 +4,7 @@
 
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <limits>
@@ -62,7 +63,7 @@ void mapsOnlySupportedStateExactly() {
     material.scalars["depthMode"] = std::string("7");
     material.scalars["cullMode"] = std::string("NONE");
     material.scalars["ksDiffuse"] = 0.25F;
-    material.scalars["useDetail"] = true;
+    material.scalars["useDetail"] = 1.0F;
     material.scalars["detailUVMultiplier"] = std::string("2.5");
     MaterialVector vector;
     vector.values = {2.0F, 3.0F, 0.0F, 0.0F};
@@ -152,6 +153,10 @@ void rejectsMalformedStateBeforeCopy() {
 
     state = {};
     state.materials["Body"].scalars["shader"] = 1.0F;
+    expectsError([&] { (void)buildKn5BakeProject(state, {}); }, "field_type");
+
+    state = {};
+    state.materials["Body"].scalars["useDetail"] = true;
     expectsError([&] { (void)buildKn5BakeProject(state, {}); }, "field_type");
 
     state = {};
@@ -372,17 +377,29 @@ void matchesJavaScriptNumberConversion() {
     state.materials["Body"].scalars["blendMode"] = std::string("0x");
     state.materials["Body"].scalars["depthMode"] = std::string("0b");
     state.materials["Body"].scalars["asciiSpace"] = std::string(" ");
+    state.materials["Body"].scalars["empty"] = std::string("");
     state.materials["Body"].scalars["unicodeSpace"] = std::string("\xc2\xa0");
     state.materials["Body"].scalars["badOctal"] = std::string("0o");
+    state.materials["Body"].scalars["badHexDigit"] = std::string("0xg");
+    state.materials["Body"].scalars["underflow"] = std::string("1e-324");
+    state.materials["Body"].scalars["negativeUnderflow"] = std::string("-1e-324");
+    state.materials["Body"].scalars["overflow"] = std::string("1e309");
 
     const auto project = buildKn5BakeProject(state, {});
     const auto& material = project.materials.at("Body");
     require(project.warnings.size() == 2u && !material.blend_mode &&
                 !material.depth_mode &&
                 material.properties.at("asciiSpace") == std::vector<float>({0.0F}) &&
+                material.properties.at("empty") == std::vector<float>({0.0F}) &&
                 material.properties.at("unicodeSpace") == std::vector<float>({0.0F}) &&
                 material.properties.at("badOctal").empty(),
             "project bake follows finite JavaScript Number conversion");
+    require(material.properties.at("badHexDigit").empty() &&
+                material.properties.at("underflow") == std::vector<float>({0.0F}) &&
+                material.properties.at("negativeUnderflow").size() == 1u &&
+                std::signbit(material.properties.at("negativeUnderflow")[0]) &&
+                material.properties.at("overflow").empty(),
+            "project bake distinguishes decimal underflow from overflow");
 }
 
 void preservesMaterialLossDiagnostics() {

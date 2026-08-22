@@ -122,6 +122,50 @@ std::string_view trimNumber(std::string_view value) {
     return value;
 }
 
+struct DecimalOrder {
+    bool zero = false;
+    std::int64_t value = 0;
+};
+
+[[nodiscard]] std::optional<DecimalOrder> decimalOrder(std::string_view value) {
+    if (!value.empty() && value.front() == '-') value.remove_prefix(1u);
+    const auto exponentMarker = value.find_first_of("eE");
+    const auto mantissa = value.substr(0u, exponentMarker);
+    std::int64_t explicitExponent = 0;
+    if (exponentMarker != std::string_view::npos) {
+        auto exponent = value.substr(exponentMarker + 1u);
+        bool negative = false;
+        if (!exponent.empty() && (exponent.front() == '+' || exponent.front() == '-')) {
+            negative = exponent.front() == '-';
+            exponent.remove_prefix(1u);
+        }
+        if (exponent.empty()) return std::nullopt;
+        constexpr std::int64_t saturation = 1'000'000;
+        for (const auto character : exponent) {
+            if (character < '0' || character > '9') return std::nullopt;
+            const auto digit = static_cast<std::int64_t>(character - '0');
+            explicitExponent = explicitExponent > (saturation - digit) / 10
+                                   ? saturation
+                                   : explicitExponent * 10 + digit;
+        }
+        if (negative) explicitExponent = -explicitExponent;
+    }
+
+    const auto point = mantissa.find('.');
+    const auto digitsBeforePoint = static_cast<std::int64_t>(
+        point == std::string_view::npos ? mantissa.size() : point);
+    std::int64_t digitIndex = 0;
+    std::optional<std::int64_t> firstNonzero;
+    for (const auto character : mantissa) {
+        if (character == '.') continue;
+        if (character < '0' || character > '9') return std::nullopt;
+        if (!firstNonzero && character != '0') firstNonzero = digitIndex;
+        ++digitIndex;
+    }
+    if (!firstNonzero) return DecimalOrder{true, 0};
+    return DecimalOrder{false, explicitExponent + digitsBeforePoint - *firstNonzero - 1};
+}
+
 std::optional<double> jsNumber(std::string_view source) {
     auto value = trimNumber(source);
     if (value.empty()) return 0.0;
@@ -157,6 +201,12 @@ std::optional<double> jsNumber(std::string_view source) {
     double result = 0.0;
     const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result,
                                         std::chars_format::general);
+    if (parsed.ec == std::errc::result_out_of_range &&
+        parsed.ptr == value.data() + value.size()) {
+        const auto order = decimalOrder(value);
+        if (order && (order->zero || order->value <= -324))
+            return std::copysign(0.0, !value.empty() && value.front() == '-' ? -1.0 : 1.0);
+    }
     if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() ||
         !std::isfinite(result))
         return std::nullopt;
@@ -192,7 +242,8 @@ std::vector<float> propertyScalar(const MaterialScalar& value) {
         if (!std::isfinite(*number)) fail("non_finite", "material property must be finite");
         return {*number};
     }
-    if (const auto* boolean = std::get_if<bool>(&value)) return {*boolean ? 1.0F : 0.0F};
+    if (std::holds_alternative<bool>(value))
+        fail("field_type", "boolean material properties are not modeled");
     const auto number = jsNumber(std::get<std::string>(value));
     if (!number) return {};
     const auto converted = static_cast<float>(*number);
@@ -265,7 +316,7 @@ void mapMaterialEdit(std::string_view name, const MaterialEdit& edit,
             mapped.cull_mode = text;
         } else {
             if (const auto* text = std::get_if<std::string>(&value))
-                validateText(*text, limits, "material property", stringBytes);
+                validateString(*text, limits, "material property", stringBytes);
             mapped.properties.emplace(field, propertyScalar(value));
         }
     }

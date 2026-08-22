@@ -65,6 +65,7 @@ void roundTripsModeledFields() {
         SetGeometryEdit{"0", geometry},
         SetWorkspaceFileEdit{2, [] { apex::authoring::WorkspaceFileEdit value; value.position = apex::authoring::Vector3{1.0F, 2.0F, 3.0F}; value.lodIn = 15.0F; return value; }()},
         SetMaterialScalarEdit{"Body", "shader", std::string("ksPerPixel")},
+        SetMaterialScalarEdit{"Body", "emptyNumeric", std::string("")},
         SetMaterialVectorEdit{"Body", "ksDiffuse", MaterialVector{{1.0F, 0.5F, 0.0F, 1.0F}, 4}},
         SetMaterialResourceEdit{"Body", "txDiffuse", MaterialResource{false, std::string("textures/body.dds"), {}, {}}},
         SetSurfaceEdit{0, [] { apex::authoring::SurfaceEdit value; value.key = "TARMAC"; value.friction = 1.05F; return value; }()},
@@ -96,6 +97,8 @@ void roundTripsModeledFields() {
             "geometry reload");
     require(loaded.project->materials.at("Body").resources.at("txDiffuse").texture == "textures/body.dds",
             "material resource reload");
+    require(std::get<std::string>(loaded.project->materials.at("Body").scalars.at("emptyNumeric")).empty(),
+            "empty numeric property string round trip");
     require(loaded.project->damage.at("VISUAL_OBJECT_0").minSpeed == 25.0F, "damage reload");
     require(loaded.project->colliderAsset->name == "COLLIDER/collider.kn5" &&
                 loaded.project->colliderAsset->sha256 == std::string(64, 'b') &&
@@ -217,10 +220,19 @@ void rejectsDirectInvalidStateAndPreservesJsonUnicodeRules() {
     direct.materials["Body"].scalars["shader"] = 1.0F;
     bool rejected = false;
     try { (void)apex::authoring::serializeProject(direct); }
-    catch (const apex::core::ParseError& error) { rejected = error.code() == "FIELD_TYPE"; }
+    catch (const apex::core::ParseError& error) {
+        rejected = error.code() == "FIELD_TYPE" || error.code() == "EDIT_INVALID";
+    }
     require(rejected, "direct material state fields must remain strings");
 
     direct.materials["Body"].scalars["shader"] = std::string("ksPerPixel");
+    direct.materials["Body"].scalars["useDetail"] = true;
+    rejected = false;
+    try { (void)apex::authoring::serializeProject(direct); }
+    catch (const apex::core::ParseError& error) { rejected = error.code() == "EDIT_INVALID"; }
+    require(rejected, "boolean material properties cannot create non-round-trippable state");
+
+    direct.materials["Body"].scalars.erase("useDetail");
     direct.workspaceFiles[0].name = "../escape.kn5";
     rejected = false;
     try { (void)apex::authoring::serializeProject(direct); }
