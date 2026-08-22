@@ -30,6 +30,15 @@ private:
     BufferInfo info_{};
 };
 
+class FakeSampler final : public Sampler {
+public:
+    explicit FakeSampler(SamplerDescription description) : info_{description} {}
+    Backend backend() const noexcept override { return Backend::Vulkan; }
+    const SamplerInfo& info() const noexcept override { return info_; }
+private:
+    SamplerInfo info_{};
+};
+
 class FakeDevice final : public Device {
 public:
     const DeviceInfo& info() const noexcept override { return info_; }
@@ -56,8 +65,9 @@ public:
     TriangleDrawResult draw_triangle_and_readback(Texture&, const TriangleDrawRequest&) override {
         return {TriangleDrawStatus::unsupported, {"unused", "unused"}, {}};
     }
-    SamplerResult create_sampler(const SamplerDescription&) override {
-        return {SamplerStatus::unsupported, {"unused", "unused"}, nullptr};
+    SamplerResult create_sampler(const SamplerDescription& description) override {
+        return {SamplerStatus::ready, {},
+                std::make_unique<FakeSampler>(description)};
     }
     ShaderModuleResult create_shader_module(const ShaderModuleDescription&) override {
         return {ShaderModuleStatus::unsupported, {"unused", "unused"}, nullptr};
@@ -219,6 +229,17 @@ void test_success_and_plan_evidence() {
                         }),
             "pre-resolved snapshot limitations must remain explicit");
     require(device.buffer_calls != 0U, "successful scene preparation must allocate resources");
+}
+
+void test_directional_shadow_receiver_reaches_material_handoff() {
+    Fixture fixture_value = fixture();
+    fixture_value.module_set.directional_shadow_receiver = true;
+    FakeDevice device;
+    auto request = request_for(fixture_value);
+    request.directional_shadow_receiver = true;
+    const auto result = prepare_stock_scene_execution(device, request);
+    require(result.ok() && result.resources->owns_directional_shadow_receiver(),
+            "stock-scene receiver selection must reach the material handoff");
 }
 
 void test_resolved_subtree_filter_and_isolation_reach_facade() {
@@ -533,6 +554,7 @@ void test_preflight_and_missing_modules() {
 int main() {
     try {
         test_success_and_plan_evidence();
+        test_directional_shadow_receiver_reaches_material_handoff();
         test_resolved_subtree_filter_and_isolation_reach_facade();
         test_csp_node_state_reaches_per_packet_pipelines();
         test_damage_preview_reaches_scene_and_material_handoff();

@@ -533,6 +533,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
     std::optional<PipelineRenderTargetFormat> batch_color_format;
     std::optional<std::uint32_t> batch_color_samples;
     bool requires_frame_constants = false;
+    bool requires_directional_shadow_receiver = false;
     for (std::size_t packet_index = 0U; packet_index < request.packets.size(); ++packet_index) {
         const DrawPacket& packet = request.packets[packet_index];
         const auto node_index = static_cast<std::size_t>(packet.node);
@@ -633,6 +634,9 @@ StaticSceneResourceResult prepare_static_scene_resources(
                         pipeline_validation.error);
         const IndexedPortableResourceLayout material_layout =
             classify_indexed_portable_resource_layout(*pipeline);
+        requires_directional_shadow_receiver =
+            requires_directional_shadow_receiver ||
+            pipeline_declares_directional_shadow_receiver(*pipeline);
         const bool normal_layout =
             material_layout ==
             IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame;
@@ -951,6 +955,13 @@ StaticSceneResourceResult prepare_static_scene_resources(
         return fail(StaticSceneResourceStatus::invalid_request,
                     "static_scene_frame_constant_aggregate_limit",
                     "The frame-constant buffer exceeds the static-scene aggregate limit");
+    if (requires_directional_shadow_receiver &&
+        limits.max_total_directional_shadow_constant_bytes <
+            portable_directional_shadow_buffer_view_bytes)
+        return fail(
+            StaticSceneResourceStatus::invalid_request,
+            "static_scene_directional_shadow_constant_aggregate_limit",
+            "The directional-shadow receiver buffer exceeds the static-scene aggregate limit");
 
     std::vector<std::optional<DecodedDdsTexturePlan>> decoded_textures;
     if (embedded_textures) {
@@ -1100,6 +1111,36 @@ StaticSceneResourceResult prepare_static_scene_resources(
             return {map_buffer_status(buffer.status), std::move(buffer.diagnostic), nullptr};
         resources->owned_frame_constants_ = std::move(buffer.buffer);
     }
+    if (requires_directional_shadow_receiver) {
+        std::array<std::byte, portable_directional_shadow_buffer_view_bytes> bytes{};
+        const BufferDescription description{
+            bytes.size(), BufferUsage::uniform, BufferMemory::device_local,
+            BufferMutability::mutable_data};
+        BufferResult buffer = device.create_buffer(description, bytes);
+        if (!buffer.ok())
+            return {map_buffer_status(buffer.status), std::move(buffer.diagnostic), nullptr};
+        resources->owned_directional_shadow_constants_ = std::move(buffer.buffer);
+
+        SamplerDescription sampler_description;
+        sampler_description.min_filter = SamplerFilter::nearest;
+        sampler_description.mag_filter = SamplerFilter::nearest;
+        sampler_description.mip_filter = SamplerFilter::nearest;
+        sampler_description.address_u = SamplerAddressMode::clamp_to_edge;
+        sampler_description.address_v = SamplerAddressMode::clamp_to_edge;
+        sampler_description.address_w = SamplerAddressMode::clamp_to_edge;
+        sampler_description.compare = SamplerCompare::disabled;
+        Diagnostic sampler_diagnostic;
+        const SamplerStatus sampler_validation =
+            validate_sampler_description(sampler_description, sampler_diagnostic);
+        if (sampler_validation != SamplerStatus::ready)
+            return {map_sampler_status(sampler_validation),
+                    std::move(sampler_diagnostic), nullptr};
+        SamplerResult sampler = device.create_sampler(sampler_description);
+        if (!sampler.ok())
+            return {map_sampler_status(sampler.status),
+                    std::move(sampler.diagnostic), nullptr};
+        resources->owned_directional_shadow_sampler_ = std::move(sampler.sampler);
+    }
     if (resources->has_texture_resources_ &&
         request.texture_authority == StaticSceneTextureAuthority::embedded_kn5) {
         resources->owned_textures_.resize(resources->texture_count_);
@@ -1186,6 +1227,140 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         return {IndexedStaticMeshBatchStatus::invalid_request,
                 {"static_scene_resource_table_size_invalid",
                  "Static-scene texture and sampler tables must match the final KN5 texture count"}, {}};
+
+    const bool has_directional_shadow_maps =
+        frame.directional_shadow_maps != nullptr;
+    const bool requires_directional_shadow_receiver =
+        owns_directional_shadow_receiver();
+    if (requires_directional_shadow_receiver != has_directional_shadow_maps)
+        return {IndexedStaticMeshBatchStatus::invalid_request,
+                {requires_directional_shadow_receiver
+                     ? "static_scene_directional_shadow_maps_missing"
+                     : "static_scene_directional_shadow_maps_unexpected",
+                 requires_directional_shadow_receiver
+                     ? "A prepared receiver pipeline requires retained directional-shadow maps"
+                     : "Directional-shadow maps were supplied to a scene without a receiver pipeline"},
+                {}};
+
+    std::array<std::byte, portable_directional_shadow_buffer_view_bytes>
+        directional_shadow_bytes{};
+    IndexedDirectionalShadowBinding directional_shadow_binding;
+    if (requires_directional_shadow_receiver) {
+        DirectionalShadowMapResources& maps = *frame.directional_shadow_maps;
+        if (&device != maps.device_ || maps.backend_ != backend_)
+            return {IndexedStaticMeshBatchStatus::unsupported,
+                    {"static_scene_directional_shadow_device_mismatch",
+                     "Retained directional-shadow maps require the preparing device and backend"},
+                    {}};
+        if (maps.metadata_.cascades.size() != directional_shadow_cascade_count ||
+            maps.metadata_.splits.size() != directional_shadow_cascade_count ||
+            maps.metadata_.map_size == 0U)
+            return {IndexedStaticMeshBatchStatus::invalid_request,
+                    {"static_scene_directional_shadow_contract_invalid",
+                     "Retained directional-shadow metadata must contain exactly three cascades"},
+                    {}};
+        const CameraClipSpace expected_clip_space =
+            backend_ == Backend::Vulkan ? CameraClipSpace::vulkan
+                                        : CameraClipSpace::d3d12;
+        if (frame.camera.clip_space != expected_clip_space)
+            return {IndexedStaticMeshBatchStatus::invalid_request,
+                    {"static_scene_directional_shadow_camera_invalid",
+                     "The receiver camera clip space does not match the prepared backend"},
+                    {}};
+        const auto finite_vector = [](const apex::scene::Vector3& value) {
+            return std::all_of(value.begin(), value.end(),
+                               [](float component) {
+                                   return std::isfinite(component);
+                               });
+        };
+        if (!finite_vector(frame.camera.position) ||
+            !finite_vector(frame.camera.forward) ||
+            !finite_vector(maps.receiver_position_) ||
+            !finite_vector(maps.metadata_.forward))
+            return {IndexedStaticMeshBatchStatus::invalid_request,
+                    {"static_scene_directional_shadow_camera_invalid",
+                     "Directional-shadow receiver camera values must be finite"},
+                    {}};
+        double forward_length_squared = 0.0;
+        double map_forward_length_squared = 0.0;
+        double forward_dot = 0.0;
+        bool same_position = true;
+        for (std::size_t component = 0U; component < 3U; ++component) {
+            const double frame_forward = frame.camera.forward[component];
+            const double map_forward = maps.metadata_.forward[component];
+            forward_length_squared += frame_forward * frame_forward;
+            map_forward_length_squared += map_forward * map_forward;
+            forward_dot += frame_forward * map_forward;
+            same_position = same_position &&
+                            std::abs(frame.camera.position[component] -
+                                     maps.receiver_position_[component]) <= 1.0e-4F;
+        }
+        if (!(forward_length_squared > 1.0e-12) ||
+            !(map_forward_length_squared > 1.0e-12) || !same_position ||
+            forward_dot /
+                    std::sqrt(forward_length_squared * map_forward_length_squared) <
+                0.9999)
+            return {IndexedStaticMeshBatchStatus::invalid_request,
+                    {"static_scene_directional_shadow_camera_mismatch",
+                     "The main camera must match the camera used to build the retained cascades"},
+                    {}};
+
+        DirectionalShadowReceiverConstants constants;
+        constants.camera_position = {frame.camera.position[0],
+                                     frame.camera.position[1],
+                                     frame.camera.position[2], 0.0F};
+        constants.camera_forward = {maps.metadata_.forward[0],
+                                    maps.metadata_.forward[1],
+                                    maps.metadata_.forward[2], 0.0F};
+        for (std::size_t cascade = 0U;
+             cascade < directional_shadow_cascade_count; ++cascade) {
+            const ShadowCascade& metadata = maps.metadata_.cascades[cascade];
+            if (metadata.index != cascade ||
+                !std::isfinite(maps.metadata_.splits[cascade]) ||
+                (cascade != 0U &&
+                 !(maps.metadata_.splits[cascade] >
+                   maps.metadata_.splits[cascade - 1U])))
+                return {IndexedStaticMeshBatchStatus::invalid_request,
+                        {"static_scene_directional_shadow_contract_invalid",
+                         "Directional-shadow cascades and splits must be finite and ordered"},
+                        {}};
+            if (maps.attachments_[cascade] == nullptr ||
+                maps.cameras_[cascade].clip_space != expected_clip_space ||
+                !std::all_of(maps.cameras_[cascade].view_projection.begin(),
+                             maps.cameras_[cascade].view_projection.end(),
+                             [](float value) { return std::isfinite(value); }))
+                return {IndexedStaticMeshBatchStatus::invalid_request,
+                        {"static_scene_directional_shadow_contract_invalid",
+                         "A retained directional-shadow cascade is incomplete"},
+                        {}};
+            const DepthAttachmentDescription& description =
+                maps.attachments_[cascade]->info().description;
+            if (maps.attachments_[cascade]->backend() != backend_ ||
+                description.width != maps.metadata_.map_size ||
+                description.height != maps.metadata_.map_size ||
+                description.samples != 1U ||
+                description.format != DepthAttachmentFormat::d32_float ||
+                !description.shader_readable)
+                return {IndexedStaticMeshBatchStatus::unsupported,
+                        {"static_scene_directional_shadow_map_unsupported",
+                         "Each retained receiver map must be shader-readable single-sample D32"},
+                        {}};
+            constants.shadow_matrices[cascade] =
+                maps.cameras_[cascade].view_projection;
+            constants.split_distances[cascade] = maps.metadata_.splits[cascade];
+            constants.depth_biases[cascade] = ks_shadow_biases[cascade];
+            directional_shadow_binding.maps[cascade] =
+                maps.attachments_[cascade].get();
+        }
+        std::memcpy(directional_shadow_bytes.data(), &constants,
+                    sizeof(constants));
+        directional_shadow_binding.sampler =
+            owned_directional_shadow_sampler_.get();
+        directional_shadow_binding.constants =
+            owned_directional_shadow_constants_.get();
+        directional_shadow_binding.constants_range_bytes =
+            portable_directional_shadow_buffer_view_bytes;
+    }
 
     if (owns_frame_constants()) {
         if (!frame.frame_constants.has_value())
@@ -1386,6 +1561,11 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
             draw->frame_binding = {
                 owned_frame_constants_.get(), 0U, portable_frame_buffer_view_bytes};
         }
+        if (pipeline_declares_directional_shadow_receiver(*draw->pipeline)) {
+            draw->resource_authority =
+                IndexedResourceAuthority::explicit_bindings;
+            draw->directional_shadow_binding = directional_shadow_binding;
+        }
         draws.push_back(std::move(*draw));
     }
     const IndexedStaticMeshBatchDescription batch{
@@ -1400,8 +1580,36 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
     // validated. Backend updates are sequential, so a runtime upload failure
     // can leave earlier mutable uploads committed even though no batch is
     // submitted. A caller can safely retry the complete frame. Commit the
-    // shared frame record last so a failed skin upload cannot advance lighting
-    // independently of the requested pose.
+    // directional receiver record first so its update failure cannot advance
+    // skinning. Commit the shared lighting frame record last so a failed skin
+    // upload cannot advance lighting independently of the requested pose.
+    if (requires_directional_shadow_receiver) {
+        Diagnostic update_diagnostic;
+        const BufferStatus range_status = validate_buffer_update(
+            *owned_directional_shadow_constants_, 0U,
+            directional_shadow_bytes.size(), update_diagnostic);
+        if (range_status != BufferStatus::ready)
+            return {range_status == BufferStatus::unsupported
+                        ? IndexedStaticMeshBatchStatus::unsupported
+                        : range_status == BufferStatus::invalid_description
+                              ? IndexedStaticMeshBatchStatus::invalid_request
+                              : IndexedStaticMeshBatchStatus::execution_failed,
+                    {"static_scene_directional_shadow_constant_range_invalid",
+                     update_diagnostic.message}, {}};
+        const BufferUpdateResult updated = device.update_buffer(
+            *owned_directional_shadow_constants_, 0U,
+            directional_shadow_bytes);
+        if (!updated.ok())
+            return {updated.status == BufferStatus::unsupported
+                        ? IndexedStaticMeshBatchStatus::unsupported
+                        : updated.status == BufferStatus::invalid_description
+                              ? IndexedStaticMeshBatchStatus::invalid_request
+                              : IndexedStaticMeshBatchStatus::execution_failed,
+                    {updated.diagnostic.code.empty()
+                         ? "static_scene_directional_shadow_constant_update_failed"
+                         : updated.diagnostic.code,
+                     updated.diagnostic.message}, {}};
+    }
     for (PendingSkinUpdate& pending : pending_skin_updates) {
         SkinnedMeshPoseUpdateResult committed = skinned_uploads_[pending.upload_index]->commit_pose(
             device, *pending.packet, pending.vertices);

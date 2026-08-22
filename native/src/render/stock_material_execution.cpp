@@ -65,12 +65,15 @@ namespace {
 
 [[nodiscard]] const StockMaterialShaderModules* find_modules(
     std::span<const StockMaterialShaderModules> sets, std::string_view material,
-    std::string_view shader, StockMaterialShaderVariant variant) {
+    std::string_view shader, StockMaterialShaderVariant variant,
+    bool directional_shadow_receiver) {
     const std::string material_key = canonical(material);
     const std::string shader_key = canonical(shader);
     const StockMaterialShaderModules* family = nullptr;
     for (const StockMaterialShaderModules& set : sets) {
-        if (set.variant != variant) continue;
+        if (set.variant != variant ||
+            set.directional_shadow_receiver != directional_shadow_receiver)
+            continue;
         if (canonical(set.key) == material_key &&
             set.key_kind == StockMaterialShaderKeyKind::material_name)
             return &set;
@@ -82,7 +85,8 @@ namespace {
 }
 
 [[nodiscard]] std::vector<PipelineResourceBinding> resources_for(
-    std::string_view shader, bool include_damage_dust = false) {
+    std::string_view shader, bool include_damage_dust = false,
+    bool directional_shadow_receiver = false) {
     const std::string key = canonical(shader);
     std::vector<PipelineResourceBinding> resources;
     const auto add = [&](PipelineResourceKind kind, std::uint32_t binding,
@@ -126,6 +130,13 @@ namespace {
         add(PipelineResourceKind::sampled_texture, 14U, "txDamageMask");
         add(PipelineResourceKind::sampler, 15U, "txDamageMaskSampler");
     }
+    if (directional_shadow_receiver) {
+        add(PipelineResourceKind::sampled_texture, 16U, "txShadow0");
+        add(PipelineResourceKind::sampled_texture, 17U, "txShadow1");
+        add(PipelineResourceKind::sampled_texture, 18U, "txShadow2");
+        add(PipelineResourceKind::sampler, 19U, "shadowSampler");
+        add(PipelineResourceKind::uniform_buffer, 20U, "shadowReceiver");
+    }
     return resources;
 }
 
@@ -144,7 +155,7 @@ bool validate_module_sets(std::span<const StockMaterialShaderModules> sets,
         diagnostic = diag("stock_material_shader_set_limit", "Shader module set count exceeds the configured limit");
         return false;
     }
-    std::set<std::tuple<int, std::string, int>> keys;
+    std::set<std::tuple<int, std::string, int, bool>> keys;
     const PipelineShaderFormat expected = backend_shader_format(backend);
     for (const StockMaterialShaderModules& set : sets) {
         if (set.key.empty() || set.key.size() > limits.max_shader_key_bytes) {
@@ -152,7 +163,8 @@ bool validate_module_sets(std::span<const StockMaterialShaderModules> sets,
             return false;
         }
         if (!keys.insert({static_cast<int>(set.key_kind), canonical(set.key),
-                          static_cast<int>(set.variant)}).second) {
+                          static_cast<int>(set.variant),
+                          set.directional_shadow_receiver}).second) {
             diagnostic = diag("stock_material_shader_key_duplicate", "Shader module keys must be unique");
             return false;
         }
@@ -383,8 +395,14 @@ bool estimate_adapter_copy(const StockMaterialExecutionRequest& request,
     const std::uint64_t resource_pipeline_count = std::max(
         static_cast<std::uint64_t>(request.model->materials.size()),
         peak_pipeline_copy_count);
-    if (resource_pipeline_count > std::numeric_limits<std::size_t>::max() / 12U ||
-        !charge_count(static_cast<std::size_t>(resource_pipeline_count) * 12U,
+    // Reserve the base twelve declarations plus the five directional-shadow
+    // receiver declarations when the orthogonal extension is selected.
+    const std::size_t max_resource_declarations =
+        request.directional_shadow_receiver ? 17U : 12U;
+    if (resource_pipeline_count >
+            std::numeric_limits<std::size_t>::max() / max_resource_declarations ||
+        !charge_count(static_cast<std::size_t>(resource_pipeline_count) *
+                          max_resource_declarations,
                       sizeof(PipelineResourceBinding))) {
         diagnostic = diag("stock_material_preparation_limit",
                           "Copied pipeline resource declarations exceed the adapter preparation limit");
@@ -557,7 +575,8 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                         ? StockMaterialShaderVariant::damage_dust
                         : StockMaterialShaderVariant::standard;
                 const StockMaterialShaderModules* modules = find_modules(
-                    request.shader_modules, source.name, binding.shader, shader_variant);
+                    request.shader_modules, source.name, binding.shader, shader_variant,
+                    request.directional_shadow_receiver);
                 if (modules == nullptr)
                     return fail(
                         StaticSceneResourceStatus::unsupported,
@@ -596,7 +615,8 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                 pipeline_request.shaders.assign(modules->modules.begin(), modules->modules.end());
                 pipeline_request.targets = request.targets;
                 pipeline_request.resources = resources_for(binding.shader,
-                                                           damage_dirt_shader && packet_has_dust);
+                                                           damage_dirt_shader && packet_has_dust,
+                                                           request.directional_shadow_receiver);
                 pipeline_request.wireframe = request.wireframe;
                 StockPipelineResult built =
                     build_stock_pipeline(pipeline_request, request.limits.scene.pipeline);

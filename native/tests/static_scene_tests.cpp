@@ -212,6 +212,10 @@ public:
         frame_buffers.clear();
         frame_offsets.clear();
         frame_ranges.clear();
+        directional_shadow_maps.clear();
+        directional_shadow_samplers.clear();
+        directional_shadow_buffers.clear();
+        directional_shadow_ranges.clear();
         for (const auto& draw : batch.draws) {
             nodes.push_back(draw.packet->node);
             pipeline_names.push_back(draw.pipeline->name);
@@ -239,6 +243,14 @@ public:
             frame_buffers.push_back(draw.frame_binding.buffer);
             frame_offsets.push_back(draw.frame_binding.offset_bytes);
             frame_ranges.push_back(draw.frame_binding.range_bytes);
+            directional_shadow_maps.push_back(
+                draw.directional_shadow_binding.maps);
+            directional_shadow_samplers.push_back(
+                draw.directional_shadow_binding.sampler);
+            directional_shadow_buffers.push_back(
+                draw.directional_shadow_binding.constants);
+            directional_shadow_ranges.push_back(
+                draw.directional_shadow_binding.constants_range_bytes);
         }
         Diagnostic diagnostic;
         const auto validation = validate_indexed_static_mesh_batch_description(texture, batch, diagnostic);
@@ -325,6 +337,12 @@ public:
     std::vector<const Buffer*> frame_buffers;
     std::vector<std::uint64_t> frame_offsets;
     std::vector<std::uint32_t> frame_ranges;
+    std::vector<std::array<const DepthAttachment*,
+                           indexed_directional_shadow_cascade_count>>
+        directional_shadow_maps;
+    std::vector<const Sampler*> directional_shadow_samplers;
+    std::vector<const Buffer*> directional_shadow_buffers;
+    std::vector<std::uint32_t> directional_shadow_ranges;
     std::vector<DepthAttachmentDescription> depth_descriptions;
     std::vector<std::vector<apex::scene::NodeId>> depth_nodes;
     std::vector<apex::scene::Matrix4> depth_camera_matrices;
@@ -2624,6 +2642,204 @@ void retains_three_directional_maps_and_executes_only_opaque_static_casters() {
             "directional shadow status names are stable");
 }
 
+void binds_retained_directional_maps_through_static_scene_frames() {
+    const auto configure_receiver = [](Fixture& value) {
+        value.model.textures.push_back(
+            {true, "body.dds", 4U, {1U, 2U, 3U, 4U}, {}});
+        value.first_pipeline.resources = {
+            {PipelineResourceKind::sampled_texture, 0U, 0U,
+             "diffuseTexture"},
+            {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+            {PipelineResourceKind::sampled_texture, 0U, 16U, "txShadow0"},
+            {PipelineResourceKind::sampled_texture, 0U, 17U, "txShadow1"},
+            {PipelineResourceKind::sampled_texture, 0U, 18U, "txShadow2"},
+            {PipelineResourceKind::sampler, 0U, 19U, "shadowSampler"},
+            {PipelineResourceKind::uniform_buffer, 0U, 20U,
+             "shadowReceiver"},
+        };
+        value.packets[0].resources = {
+            {"txDiffuse", 21U, 0U, "body.dds"}};
+        value.packets[2].resources = value.packets[0].resources;
+    };
+    const auto make_maps = [](RecordingDevice& device) {
+        DirectionalShadowMapRequest request;
+        request.lighting.eye = {0.0F, 0.0F, 0.0F};
+        request.lighting.target = {0.0F, 0.0F, -1.0F};
+        request.lighting.map_size = 32U;
+        return prepare_directional_shadow_maps(device, request);
+    };
+
+    Fixture value = fixture();
+    configure_receiver(value);
+    RecordingDevice device;
+    auto prepared = prepare_static_scene_resources(device, request_for(value));
+    auto maps = make_maps(device);
+    require(prepared.ok() && maps.ok() &&
+                prepared.resources->owns_directional_shadow_receiver() &&
+                device.buffer_calls == 5U && device.sampler_calls == 1U,
+            "receiver preparation owns one bounded record and nearest sampler");
+    require(device.sampler_descriptions.front().min_filter ==
+                    SamplerFilter::nearest &&
+                device.sampler_descriptions.front().mag_filter ==
+                    SamplerFilter::nearest &&
+                device.sampler_descriptions.front().address_u ==
+                    SamplerAddressMode::clamp_to_edge &&
+                device.sampler_descriptions.front().address_v ==
+                    SamplerAddressMode::clamp_to_edge &&
+                device.sampler_descriptions.front().compare ==
+                    SamplerCompare::disabled,
+            "owned receiver sampler preserves explicit PCF state");
+
+    const TextureDescription sampled_description{
+        1U, 1U, 1U, 1U, TextureFormat::rgba8_unorm, TextureUsage::sampled,
+        TextureMemory::device_local, TextureMutability::immutable};
+    FakeTexture diffuse(sampled_description);
+    FakeSampler diffuse_sampler;
+    const std::array<const Texture*, 1> textures = {&diffuse};
+    const std::array<const Sampler*, 1> samplers = {&diffuse_sampler};
+    FakeTexture target;
+    StaticSceneFrameDescription frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.camera.position = {0.0F, 0.0F, 0.0F};
+    frame.camera.forward = {0.0F, 0.0F, -1.0F};
+    frame.textures_by_global_index = textures;
+    frame.samplers_by_global_index = samplers;
+    frame.directional_shadow_maps = maps.resources.get();
+    const auto drawn = prepared.resources->draw_and_readback(
+        device, target, frame);
+    require(drawn.ok() && device.update_calls == 1U &&
+                device.batch_calls == 1U &&
+                device.directional_shadow_maps.size() == 3U,
+            "retained receiver scene executes one preflighted ordered batch");
+    for (const std::size_t packet_index : {0U, 2U}) {
+        for (std::size_t cascade = 0U;
+             cascade < directional_shadow_cascade_count; ++cascade)
+            require(device.directional_shadow_maps[packet_index][cascade] ==
+                        &maps.resources->attachment(cascade),
+                    "receiver draw binds each retained cascade in order");
+        require(device.directional_shadow_samplers[packet_index] != nullptr &&
+                    device.directional_shadow_buffers[packet_index] != nullptr &&
+                    device.directional_shadow_ranges[packet_index] ==
+                        portable_directional_shadow_buffer_view_bytes,
+                "receiver draw binds the owned sampler and complete constants view");
+    }
+    require(std::all_of(device.directional_shadow_maps[1U].begin(),
+                        device.directional_shadow_maps[1U].end(),
+                        [](const DepthAttachment* map) { return map == nullptr; }) &&
+                device.directional_shadow_samplers[1U] == nullptr &&
+                device.directional_shadow_buffers[1U] == nullptr,
+            "ordinary mixed-scene draws do not receive shadow resources");
+    require(device.updated_bytes.front().size() ==
+                portable_directional_shadow_buffer_view_bytes,
+            "receiver update writes one complete bounded record");
+    DirectionalShadowReceiverConstants constants;
+    std::memcpy(&constants, device.updated_bytes.front().data(),
+                sizeof(constants));
+    require(constants.shadow_matrices[0] == maps.resources->camera(0U).view_projection &&
+                constants.split_distances[0] == 2.0F &&
+                constants.split_distances[1] == 12.0F &&
+                constants.split_distances[2] == 50.0F &&
+                constants.depth_biases[0] == ks_shadow_biases[0] &&
+                constants.depth_biases[1] == ks_shadow_biases[1] &&
+                constants.depth_biases[2] == ks_shadow_biases[2] &&
+                constants.camera_position[0] == 0.0F &&
+                constants.camera_forward[2] == -1.0F,
+            "receiver record carries matrices, recovered splits and biases, and camera state");
+
+    const std::size_t updates_before_missing = device.update_calls;
+    const std::size_t batches_before_missing = device.batch_calls;
+    frame.directional_shadow_maps = nullptr;
+    const auto missing = prepared.resources->draw_and_readback(
+        device, target, frame);
+    require(missing.status == IndexedStaticMeshBatchStatus::invalid_request &&
+                missing.diagnostic.code ==
+                    "static_scene_directional_shadow_maps_missing" &&
+                device.update_calls == updates_before_missing &&
+                device.batch_calls == batches_before_missing,
+            "missing retained maps fail before constants updates or submission");
+
+    frame.directional_shadow_maps = maps.resources.get();
+    frame.camera.forward = {1.0F, 0.0F, 0.0F};
+    const auto mismatched_camera = prepared.resources->draw_and_readback(
+        device, target, frame);
+    require(mismatched_camera.status ==
+                    IndexedStaticMeshBatchStatus::invalid_request &&
+                mismatched_camera.diagnostic.code ==
+                    "static_scene_directional_shadow_camera_mismatch" &&
+                device.update_calls == updates_before_missing &&
+                device.batch_calls == batches_before_missing,
+            "stale receiver camera state fails atomically");
+
+    Fixture ordinary = fixture();
+    RecordingDevice ordinary_device;
+    auto ordinary_prepared = prepare_static_scene_resources(
+        ordinary_device, request_for(ordinary));
+    auto ordinary_maps = make_maps(ordinary_device);
+    StaticSceneFrameDescription unexpected_frame;
+    unexpected_frame.camera.clip_space = CameraClipSpace::vulkan;
+    unexpected_frame.directional_shadow_maps = ordinary_maps.resources.get();
+    const auto unexpected = ordinary_prepared.resources->draw_and_readback(
+        ordinary_device, target, unexpected_frame);
+    require(unexpected.status == IndexedStaticMeshBatchStatus::invalid_request &&
+                unexpected.diagnostic.code ==
+                    "static_scene_directional_shadow_maps_unexpected" &&
+                ordinary_device.update_calls == 0U &&
+                ordinary_device.batch_calls == 0U,
+            "maps supplied to a nonreceiver scene are not silently ignored");
+
+    RecordingDevice other_device;
+    auto other_maps = make_maps(other_device);
+    frame.camera.forward = {0.0F, 0.0F, -1.0F};
+    frame.directional_shadow_maps = other_maps.resources.get();
+    const auto cross_device = prepared.resources->draw_and_readback(
+        device, target, frame);
+    require(cross_device.status == IndexedStaticMeshBatchStatus::unsupported &&
+                cross_device.diagnostic.code ==
+                    "static_scene_directional_shadow_device_mismatch" &&
+                device.update_calls == updates_before_missing &&
+                device.batch_calls == batches_before_missing,
+            "cross-device receiver maps fail before mutable state changes");
+
+    Fixture limited = fixture();
+    configure_receiver(limited);
+    auto limited_request = request_for(limited);
+    limited_request.limits.max_total_directional_shadow_constant_bytes =
+        portable_directional_shadow_buffer_view_bytes - 1U;
+    RecordingDevice limited_device;
+    const auto limited_result = prepare_static_scene_resources(
+        limited_device, limited_request);
+    require(!limited_result.ok() &&
+                limited_result.diagnostic.code ==
+                    "static_scene_directional_shadow_constant_aggregate_limit" &&
+                limited_device.buffer_calls == 0U &&
+                limited_device.sampler_calls == 0U,
+            "truncated-equivalent receiver budget fails before allocation");
+
+    Fixture retry = fixture();
+    configure_receiver(retry);
+    RecordingDevice retry_device;
+    auto retry_prepared = prepare_static_scene_resources(
+        retry_device, request_for(retry));
+    auto retry_maps = make_maps(retry_device);
+    StaticSceneFrameDescription retry_frame = frame;
+    retry_frame.directional_shadow_maps = retry_maps.resources.get();
+    retry_device.fail_update_call = 1U;
+    const auto failed_update = retry_prepared.resources->draw_and_readback(
+        retry_device, target, retry_frame);
+    require(failed_update.status ==
+                    IndexedStaticMeshBatchStatus::execution_failed &&
+                failed_update.diagnostic.code == "recording_update_failure" &&
+                retry_device.update_calls == 1U &&
+                retry_device.batch_calls == 0U,
+            "receiver constant upload failure prevents batch submission");
+    retry_device.fail_update_call = 0U;
+    const auto retried = retry_prepared.resources->draw_and_readback(
+        retry_device, target, retry_frame);
+    require(retried.ok() && retry_device.update_calls == 2U &&
+                retry_device.batch_calls == 1U,
+            "complete receiver frame retries after an upload failure");
+}
+
 }  // namespace
 
 int main() {
@@ -2649,6 +2865,7 @@ int main() {
         propagates_embedded_resource_failures();
         propagates_upload_and_batch_failures();
         retains_three_directional_maps_and_executes_only_opaque_static_casters();
+        binds_retained_directional_maps_through_static_scene_frames();
         require(std::string(static_scene_resource_status_name(StaticSceneResourceStatus::ready)) ==
                     "ready",
                 "static scene status name");

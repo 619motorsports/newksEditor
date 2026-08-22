@@ -110,6 +110,9 @@ DirectionalShadowMapResult prepare_directional_shadow_maps(
     resources->backend_ = device.info().backend;
     resources->device_ = &device;
     resources->metadata_ = std::move(metadata);
+    resources->receiver_position_ = request.lighting.eye;
+    for (float& value : resources->receiver_position_)
+        if (!std::isfinite(value)) value = 0.0F;
     for (std::size_t index = 0U; index < directional_shadow_cascade_count; ++index) {
         if (resources->metadata_.cascades[index].index != index)
             return fail(DirectionalShadowMapStatus::invalid_request,

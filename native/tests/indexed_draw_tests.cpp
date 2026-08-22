@@ -813,6 +813,56 @@ void validates_directional_shadow_receiver_contract() {
                 IndexedStaticMeshDrawStatus::ready,
             "complete three-map directional-shadow receiver accepted");
 
+    // Keep the receiver resources request-local, but verify that every
+    // partial binding fails closed when the pipeline does not declare the
+    // receiver extension. In particular, maps[0] alone must not be treated
+    // as an ignorable staged resource.
+    PipelineProgram non_receiver_pipeline = pipeline_fixture();
+    non_receiver_pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 3U, "ksPerPixelFrame"},
+    };
+    auto non_receiver_request =
+        request_fixture(packet, non_receiver_pipeline, vertices, indices);
+    non_receiver_request.resource_authority =
+        IndexedResourceAuthority::explicit_bindings;
+    non_receiver_request.sampled_binding = {&diffuse, &diffuse_sampler};
+    non_receiver_request.frame_binding = {
+        &frame, 0U, portable_frame_buffer_view_bytes};
+    const auto require_unexpected_shadow_binding =
+        [&](const IndexedDirectionalShadowBinding& binding,
+            std::string_view description) {
+            non_receiver_request.directional_shadow_binding = binding;
+            require(validate_indexed_static_mesh_draw_request(
+                        target, non_receiver_request, diagnostic) ==
+                        IndexedStaticMeshDrawStatus::invalid_request &&
+                        diagnostic.code ==
+                            "indexed_directional_shadow_binding_unexpected",
+                    description);
+        };
+    IndexedDirectionalShadowBinding partial_shadow_binding{};
+    partial_shadow_binding.maps[0] = &shadow0;
+    require_unexpected_shadow_binding(
+        partial_shadow_binding,
+        "a non-receiver pipeline rejects only its first directional-shadow map");
+    partial_shadow_binding = {};
+    partial_shadow_binding.sampler = &shadow_sampler;
+    require_unexpected_shadow_binding(
+        partial_shadow_binding,
+        "a non-receiver pipeline rejects an unexpected shadow sampler");
+    partial_shadow_binding = {};
+    partial_shadow_binding.constants = &shadow_constants;
+    require_unexpected_shadow_binding(
+        partial_shadow_binding,
+        "a non-receiver pipeline rejects an unexpected shadow constants buffer");
+    partial_shadow_binding = {};
+    partial_shadow_binding.constants_range_bytes =
+        portable_directional_shadow_buffer_view_bytes;
+    require_unexpected_shadow_binding(
+        partial_shadow_binding,
+        "a non-receiver pipeline rejects an unexpected shadow constants range");
+
     request.directional_shadow_binding.maps[2] = nullptr;
     require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
                 IndexedStaticMeshDrawStatus::invalid_request &&

@@ -119,6 +119,43 @@ Fixture identities:
 - Validator: SPIRV-Tools `2026.3` (`vulkan-sdk-1.4.357.0-0-g9a49b0883`)
 - Target: SPIR-V 1.0 for Vulkan 1.0
 
+`indexed_ks_per_pixel_shadow.frag` is the optional Vulkan receiver variant of
+the bounded `ksPerPixel` fixture. It retains bindings 0-3 and adds three
+sampled D32 maps at bindings 16-18, one nearest clamp-to-edge sampler at
+binding 19, and a 256-byte receiver record at binding 20. The record contains
+the three native-clip-space matrices, 2/12/50 splits, source biases, main
+camera position, and camera direction.
+
+The shader follows `public/app.js:2067-2068` for hard cascade selection and
+explicit 3x3 PCF. Because native matrices already convert depth to Vulkan's
+`[0,1]` convention, the receiver remaps only projected x and y. It follows
+`public/app.js:2082` by multiplying direct diffuse and Blinn specular by the
+shadow factor while leaving ambient and emissive unchanged. It is a
+source-evidenced portable fixture, not recovered stock bytecode. D3D12
+receiver execution remains staged pending a Windows WARP verification.
+
+Compile and verify it with:
+
+```sh
+glslangValidator -V --target-env vulkan1.0 -Os -g0 -S frag \
+  -o /tmp/apex_indexed_ks_per_pixel_shadow_frag.spv \
+  native/tests/shaders/indexed_ks_per_pixel_shadow.frag
+spirv-val --target-env vulkan1.0 \
+  /tmp/apex_indexed_ks_per_pixel_shadow_frag.spv
+```
+
+- Fragment source SHA-256: `8d391c75453b6eb4457f0c0bf65db61259bc7b3d412b47151b5fde9f0a4ed089`
+- Fragment SPIR-V SHA-256: `0087e7f207c1c8f2f03d2a6e9bf830001a5b1938f21ba9c178225fd72f49c58a`
+- Compiler: glslang `16.4.0`
+- Validator: SPIRV-Tools `2026.3` (`vulkan-sdk-1.4.357.0-0-g9a49b0883`)
+- Target: SPIR-V 1.0 for Vulkan 1.0
+
+SwiftShader Vulkan pixel evidence with validation enabled uses the complete
+stock-scene facade and uniform retained maps:
+
+- Zero-depth maps: `(3,40,18,255)`; direct sun is fully attenuated.
+- One-depth maps: `(16,116,34,255)`; the original direct-light pixel remains.
+
 `indexed_ks_per_pixel_nm.vert` and `indexed_ks_per_pixel_nm.frag` are the
 bounded tangent-space normal-map extension of that fixture. They retain the
 same draw-matrices push constant and material/frame UBOs, and add a normal

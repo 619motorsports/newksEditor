@@ -437,12 +437,51 @@ void test_preflight_failures() {
             "external texture overrides need an explicit boundary");
 }
 
+void test_directional_shadow_receiver_module_opt_in() {
+    FakeDevice device;
+
+    Fixture non_receiver = fixture("ksPerPixel");
+    auto non_receiver_request = request_for(non_receiver);
+    non_receiver_request.directional_shadow_receiver = true;
+    const auto rejected = prepare_stock_material_execution(
+        device, non_receiver_request);
+    require(rejected.status == StaticSceneResourceStatus::unsupported &&
+                rejected.diagnostic.code == "stock_material_shader_module_missing" &&
+                device.buffer_calls == 0U,
+            "receiver-enabled requests reject non-receiver modules before allocation");
+
+    Fixture receiver = fixture("ksPerPixel");
+    receiver.module_set.directional_shadow_receiver = true;
+    auto receiver_request = request_for(receiver);
+    receiver_request.directional_shadow_receiver = true;
+    const auto accepted = prepare_stock_material_execution(
+        device, receiver_request);
+    require(accepted.ok(),
+            "receiver-enabled requests accept matching receiver modules");
+
+    // A receiver and non-receiver set may coexist for the same key and
+    // variant. The receiver flag is part of module-set uniqueness and
+    // selection, so this must still select the matching receiver set.
+    Fixture ordinary = fixture("ksPerPixel");
+    Fixture matching = fixture("ksPerPixel");
+    matching.module_set.directional_shadow_receiver = true;
+    const std::array<StockMaterialShaderModules, 2> variants = {
+        ordinary.module_set, matching.module_set};
+    auto both_request = request_for(matching);
+    both_request.shader_modules = variants;
+    both_request.directional_shadow_receiver = true;
+    const auto both = prepare_stock_material_execution(device, both_request);
+    require(both.ok(),
+            "receiver and non-receiver module sets have independent uniqueness keys");
+}
+
 } // namespace
 
 int main() {
     try {
         test_success_and_a2c();
         test_preflight_failures();
+        test_directional_shadow_receiver_module_opt_in();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

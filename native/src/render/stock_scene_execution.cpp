@@ -546,6 +546,8 @@ StockSceneExecutionResult prepare_stock_scene_execution(
         material_request.overrides_by_material = material_overrides;
         material_request.targets = request.targets;
         material_request.wireframe = request.wireframe;
+        material_request.directional_shadow_receiver =
+            request.directional_shadow_receiver;
         material_request.texture_authority = request.texture_authority;
         material_request.limits = request.limits.material;
         StockMaterialExecutionResult material_result =

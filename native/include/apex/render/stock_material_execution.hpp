@@ -31,6 +31,9 @@ struct StockMaterialShaderModules {
     // The label is part of the executable shader contract. A packet that
     // binds txDust must not silently use bytecode that omits txDust.
     StockMaterialShaderVariant variant = StockMaterialShaderVariant::standard;
+    // The receiver extension is an orthogonal shader-module contract. The
+    // selector never mixes receiver and non-receiver modules for one request.
+    bool directional_shadow_receiver = false;
 };
 
 struct StockMaterialExecutionLimits {
@@ -55,6 +58,10 @@ struct StockMaterialExecutionRequest {
     std::span<const MaterialBindingOverrides> overrides_by_material{};
     PipelineRenderTargets targets{};
     bool wireframe = false;
+    // Selects shader modules and the matching set 0/bindings 16-20 receiver
+    // declaration. The per-frame resource binding is supplied separately by
+    // StaticSceneFrameDescription when the prepared scene is drawn.
+    bool directional_shadow_receiver = false;
     StaticSceneTextureAuthority texture_authority =
         StaticSceneTextureAuthority::caller_tables;
     StockMaterialExecutionLimits limits{};

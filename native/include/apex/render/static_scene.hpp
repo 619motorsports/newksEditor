@@ -38,6 +38,10 @@ struct StaticSceneResourceLimits {
     // One D3D12/Vulkan-aligned frame record is allocated when a prepared
     // pipeline declares the portable frame binding.
     std::uint64_t max_total_frame_constant_bytes = portable_frame_buffer_view_bytes;
+    // One shared mutable receiver record is allocated when any prepared
+    // pipeline declares the fixed three-cascade extension at bindings 16-20.
+    std::uint64_t max_total_directional_shadow_constant_bytes =
+        portable_directional_shadow_buffer_view_bytes;
     std::uint64_t max_total_update_bytes = 512ULL * 1024ULL * 1024ULL;
     // Counts full source payloads once per packet. This limit bounds repeated
     // validation work when many packets reference one large mesh.
@@ -104,6 +108,11 @@ struct StaticSceneFrameDescription {
     // ordered batch is recorded. It always derives the record's camera
     // position from camera.position.
     std::optional<KsPerPixelFrameConstants> frame_constants;
+    // Optional retained maps for pipelines that declare the directional
+    // receiver extension. The maps must come from the same device and remain
+    // alive through this synchronous call. Caster execution remains an
+    // explicit operation through draw_opaque_directional_shadows().
+    DirectionalShadowMapResources* directional_shadow_maps = nullptr;
     // For caller_tables authority, these non-owning tables use the final
     // Kn5File::textures ordering. When a prepared packet uses txDiffuse,
     // txNormal, txMaps, txDetail, txNormalDetail, txDamage, or txDamageMask,
@@ -133,6 +142,10 @@ public:
     }
     [[nodiscard]] bool owns_frame_constants() const noexcept {
         return owned_frame_constants_ != nullptr;
+    }
+    [[nodiscard]] bool owns_directional_shadow_receiver() const noexcept {
+        return owned_directional_shadow_constants_ != nullptr &&
+               owned_directional_shadow_sampler_ != nullptr;
     }
 
     // Keep the preparing device alive and use it for every draw. The call is
@@ -183,6 +196,8 @@ private:
     std::vector<std::unique_ptr<Texture>> owned_textures_;
     std::vector<std::unique_ptr<Buffer>> owned_material_constants_;
     std::unique_ptr<Buffer> owned_frame_constants_;
+    std::unique_ptr<Buffer> owned_directional_shadow_constants_;
+    std::unique_ptr<Sampler> owned_directional_shadow_sampler_;
     std::unique_ptr<Sampler> owned_sampler_;
     std::size_t texture_count_ = 0U;
     bool has_texture_resources_ = false;

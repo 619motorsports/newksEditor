@@ -13,9 +13,11 @@
 namespace apex::render {
 
 // This is the bounded main-color scene boundary. It deliberately does not
-// execute frame-plan effects such as shadows, reflections, sky, CSP lights,
-// or post-processing. Per-node CSP mesh state is supported, while CSP shader,
-// property, and resource changes remain explicit evidence in render_plan.
+// execute most frame-plan effects such as reflections, sky, CSP lights, or
+// post-processing. A caller can opt into the bounded retained directional-
+// shadow receiver contract. Per-node CSP mesh state is supported, while CSP
+// shader, property, and resource changes remain explicit evidence in
+// render_plan.
 struct StockSceneExecutionLimits {
     std::size_t max_scene_nodes = 1'000'000U;
     std::size_t max_scene_materials = 1'000'000U;
@@ -42,6 +44,9 @@ struct StockSceneExecutionRequest {
     std::optional<bool> damage_broken_visible;
     PipelineRenderTargets targets{};
     bool wireframe = false;
+    // Selects receiver-capable stock shader modules and prepares the scene-
+    // owned bindings used by StaticSceneFrameDescription.
+    bool directional_shadow_receiver = false;
     StaticSceneTextureAuthority texture_authority =
         StaticSceneTextureAuthority::caller_tables;
     StockSceneExecutionLimits limits{};

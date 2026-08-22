@@ -99,6 +99,12 @@ R32 resource with a D32 view and an R32_FLOAT sampled view. D3D12 receiver
 descriptor execution stays staged until a Windows WARP build verifies it.
 The native binding numbers and clip conversion are portable choices. They are
 not claims about the recovered native register layout.
+Static scenes that declare this receiver ABI own the sampler and 256-byte
+record. Each frame must supply retained maps made for the same device, backend,
+camera position, and camera direction. The adapter validates all maps and all
+draws before it updates receiver, skin, or frame buffers. The stock-scene
+facade exposes the same receiver opt-in and selects only matching shader
+modules.
 Indexed requests use explicit color-load and depth-clear controls. The
 source-evidenced main path uses `LESS` depth testing. The execution path accepts
 opaque and explicitly blended packets. The packet and pipeline blend flags must
@@ -122,8 +128,12 @@ contain `damageZones`. A bounded resolver reads parsed KN5
 values and typed CSP overrides. It preserves CSP precedence and the WebGL
 emissive conversion. The plain `ksPerPixel` fixture executes ambient,
 directional diffuse, direct Blinn specular, and emissive output. Pixel tests
-prove specular enable and removal and per-draw record selection. Fresnel,
-reflections, fog, shadows, and CSP lights remain staged. A bounded batch
+prove specular enable and removal and per-draw record selection. An optional
+Vulkan `ksPerPixel` receiver fixture applies the source-evidenced three-cascade
+selection and explicit 3x3 PCF to direct diffuse and specular light. A real
+stock-scene test proves fully shadowed `(3,40,18,255)` and fully lit
+`(16,116,34,255)` center pixels. Fresnel, reflections, fog, D3D12 receiver
+execution, and CSP lights remain staged. A bounded batch
 preflights all requests. It clears or loads attachments once and returns one
 final readback. Draw-packet texture resources resolve by canonical name.
 An exact tangent-space extension adds `txNormal` at bindings 4 and 5. A second
@@ -139,7 +149,8 @@ Fresnel. The AT profile retains alpha-to-coverage on a 4x target. A fourth ABI s
 adds `txNormalDetail` at bindings 10 and 11. The legacy `txDetailNM` name is an
 alias for `txNormalDetail`. The 80-byte material record includes the detail UV
 multiplier, normal-detail strength, and detail enable value. The AT profile
-retains the production A2C state. Reflections and shadows remain staged.
+retains the production A2C state. Reflections and executable receiver shader
+variants for these extended profiles remain staged.
 Runtime tests cover known pixels and mixed resource layouts.
 The dirt-zero damage ABI uses the same diffuse, normal, and maps resources.
 It adds `txDamage` at bindings 12 and 13. It adds `txDamageMask` at bindings
@@ -172,7 +183,9 @@ rejects malformed edges, cycles, and over-budget plans before backend
 allocation. The facade can resolve F4 damage before it creates the plan. It
 merges the activity writes and complete material table before allocation. A
 real SwiftShader test executes the complete facade through
-pixel readback. A second test executes the three-texture MultiMap facade and
+pixel readback. Its optional retained-shadow receiver uses the same validated
+facade and static-scene ownership path. A second test executes the
+three-texture MultiMap facade and
 checks the `maps.r` and `maps.g` result. It also executes the AT family on a
 4x target and checks partial resolved coverage. An F4 facade test executes
 broken and intact states with six embedded textures. It checks `txDust` alpha
@@ -192,8 +205,8 @@ driver suppression, workspace LOD exclusions, or mesh LOD. Isolation bypasses
 visibility and subtree filters. It still applies the selected mesh LOD range.
 The contract follows `itemPreviewVisible()` and the draw filter in
 `public/app.js`. The cockpit audit in `src/cockpit-preview.js` supplies the F3
-pair. Surface overlays, shadows, reflections, and post-processing remain
-staged. A separate bounded damage adapter resolves the
+pair. Surface overlays, extended-profile shadow shader variants, reflections,
+and post-processing remain staged. A separate bounded damage adapter resolves the
 five exact F4 node sequences. It creates scene activity and material overrides
 without changing the parsed model. It applies `damageZones` after CSP values.
 It also retains the native one-way `glassDamage` write for shared materials.

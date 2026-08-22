@@ -70,6 +70,9 @@ private:
     Backend backend_ = Backend::Vulkan;
     const Device* device_ = nullptr;
     DirectionalShadowResult metadata_;
+    // Sanitized camera origin used to compute metadata_.cascades. The
+    // retained receiver verifies that the main camera still matches it.
+    apex::scene::Vector3 receiver_position_{};
     std::array<CameraFrame, directional_shadow_cascade_count> cameras_{};
     std::array<std::unique_ptr<DepthAttachment>, directional_shadow_cascade_count>
         attachments_{};

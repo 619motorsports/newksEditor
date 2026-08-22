@@ -1201,6 +1201,21 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     const bool has_shadow_range =
         request.directional_shadow_binding.constants_offset_bytes != 0U ||
         request.directional_shadow_binding.constants_range_bytes != 0U;
+    const bool shadow_declaration =
+        pipeline_declares_directional_shadow_receiver(pipeline);
+    const bool has_directional_shadow_binding =
+        has_shadow_map || has_shadow_sampler || has_shadow_constants || has_shadow_range;
+    // Check this before classifying the material layout. A partial receiver
+    // declaration is intentionally unsupported, but a valid non-receiver
+    // pipeline must fail closed when a caller supplies even one directional
+    // shadow resource. Otherwise the error can be obscured by the unrelated
+    // material-layout classifier and a caller may accidentally treat the
+    // shadow binding as staged rather than rejected.
+    if (!shadow_declaration && has_directional_shadow_binding) {
+        diagnostic = {"indexed_directional_shadow_binding_unexpected",
+                      "A pipeline without the receiver extension cannot receive directional-shadow resources"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
     const IndexedPortableResourceLayout resource_layout =
         classify_indexed_portable_resource_layout(pipeline);
     if (resource_layout == IndexedPortableResourceLayout::resource_free) {
@@ -1265,8 +1280,6 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
         const bool damage_declaration =
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_dust_with_constants_and_frame;
-        const bool shadow_declaration =
-            pipeline_declares_directional_shadow_receiver(pipeline);
         if (request.resource_authority != IndexedResourceAuthority::explicit_bindings) {
             diagnostic = {"indexed_resource_execution_staged",
                           "Material resources require explicit request-local binding authority"};

@@ -129,8 +129,13 @@ remains unchanged and feature-complete.
   also reports the missing recovered `doubleFaceShadow` cull state. The
   portable cull state is not exact `ksShadowGen` behavior. A real SwiftShader
   test reads all three maps and finds caster depth and clear depth in each map.
-  The same test is in the Windows D3D12/WARP path. Depth sampling, receiver
-  cascade selection, and receiver PCF remain staged. The executable main-pass subset uses the source-evidenced
+  The SwiftShader fixture also executes the portable receiver ABI and samples
+  all three retained maps. Bounded reference tests cover the source-evidenced
+  2/12/50 cascade boundaries and explicit 3x3 PCF. D3D12 retains the caster
+  path and creates sampled-depth views, but receiver descriptor execution remains
+  staged until a Windows WARP build verifies it. Vulkan integrates the receiver
+  with the bounded stock `ksPerPixel` facade; extended material variants and
+  recovered DXBC register packing remain staged. The executable main-pass subset uses the source-evidenced
   `LESS` depth comparison. It also executes explicitly blended packets. The
   ordinary alpha, multiply, and transparent-as-black factors match
   `applyItemRenderState` in `public/app.js`. The indexed path supports 4x
@@ -156,9 +161,16 @@ remains unchanged and feature-complete.
   Both backends execute the source-evidenced ambient, directional diffuse,
   direct Blinn specular, and emissive equation. Known-pixel tests cover
   specular enable and removal, light reversal, frame updates, and per-draw
-  frame selection. This fixture does not include Fresnel, reflections, fog,
-  shadows, alpha tests, normal maps, detail maps, CSP lights, or overlays.
-  This remains a bounded test ABI, not a complete stock KN5 or CSP shader.
+  frame selection. A Vulkan receiver variant appends three sampled D32 maps,
+  one nearest sampler, and one 256-byte record at bindings 16-20. It follows
+  `public/app.js:2067-2068` for cascade selection and explicit 3x3 PCF. It
+  follows `public/app.js:2082` by applying shadow only to direct diffuse and
+  specular light. A real stock-scene fixture produces `(3,40,18,255)` with
+  zero-depth maps and `(16,116,34,255)` with one-depth maps. The fixture does
+  not include Fresnel, reflections, fog, alpha tests, normal maps, detail maps,
+  CSP lights, or overlays. D3D12 receiver execution remains staged pending a
+  WARP verification. This remains a bounded test ABI, not a complete stock KN5
+  or CSP shader.
   A bounded resolver reads parsed KN5 values and typed CSP
   overrides. It preserves override precedence and WebGL emissive conversion.
   A second bounded ABI executes tangent-space `ksPerPixelNM`. It adds a normal
@@ -183,7 +195,8 @@ remains unchanged and feature-complete.
   multiplier, normal-detail strength, and detail enable value. The AT profile
   retains the production alpha-to-coverage state. Tests cover detail alpha,
   repeated UVs, normal blending, descriptor selection, and mixed resource
-  layouts. Fresnel, reflections, shadow cutouts, and shadows remain staged.
+  layouts. Fresnel, reflections, shadow cutouts, and executable receiver
+  variants for these extended profiles remain staged.
   The resolver rejects oversized CSP shader, blend, depth, and cull strings
   before profile selection.
   A bounded static-scene adapter validates the complete packet set before
@@ -208,6 +221,9 @@ remains unchanged and feature-complete.
   traversal. It rejects malformed edges, cycles, and over-budget plans before
   backend allocation. A real SwiftShader pixel test executes the complete
   facade with an embedded DDS texture and owned material and frame records.
+  The facade can opt into receiver-capable modules. Its static scene owns the
+  receiver sampler and constants. A frame accepts only retained maps from the
+  same device, backend, and camera before any mutable update or batch submit.
   A second facade test executes the three-texture MultiMap path. It checks the
   exact bounded `maps.r` and `maps.g` result. It also executes the AT family on
   a 4x target and checks partial resolved coverage. The same tests run on the
@@ -359,8 +375,10 @@ remains unchanged and feature-complete.
   persistent single-sample D32 target without a color allocation or readback.
   The retained static-scene path filters the equivalent
   `DrawPacket::flags.cast_shadows` state. It submits the supported opaque
-  static subset to exactly three owned D32 maps. The maps are not sampled
-  receiver resources. The
+  static subset to exactly three owned shader-readable D32 maps. Vulkan binds
+  these maps through the portable receiver ABI. D3D12 creates typeless depth
+  resources and sampled views, but descriptor execution remains staged pending
+  WARP verification. The
   device API directly uploads immutable, one-layer BC1 and BC3 sampled
   textures. The upload path validates compressed block rows before allocation.
   Vulkan and D3D12 query format support before image creation. Direct BC5
