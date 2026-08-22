@@ -28,6 +28,7 @@ struct WorkspaceLimits {
     std::size_t maxTextureBytes = std::size_t{2} * 1024U * 1024U * 1024U;
     std::size_t maxAggregateBytes = std::size_t{4} * 1024U * 1024U * 1024U;
     std::size_t maxPathBytes = 1024U * 1024U;
+    std::size_t maxOutputBytes = 16U * 1024U * 1024U;
 };
 
 struct TrackModelManifest {
@@ -40,7 +41,10 @@ struct TrackModelManifest {
 };
 
 struct DynamicObjectManifest {
-    std::uint32_t index = 0;
+    // Parsed sections always have an index.  An absent value is retained for
+    // manually assembled workspace entries so serializers can assign the
+    // same independent fallback index as the JavaScript editor.
+    std::optional<std::uint32_t> index;
     std::string file;
     float probability = 100.0F;
     std::array<float, 2> multiplicity = {1.0F, 1.0F};
@@ -81,6 +85,9 @@ struct CarManifest {
     std::size_t ignoredSections = 0;
 };
 
+struct WorkspaceFile;
+struct WorkspaceMetadata;
+
 [[nodiscard]] TrackManifest parseModelsIni(
     const apex::formats::IniDocument& document,
     std::string_view source = "models.ini", WorkspaceLimits limits = {});
@@ -94,6 +101,15 @@ struct CarManifest {
 [[nodiscard]] CarManifest parseCarLodsIni(
     std::string_view text, std::string source = "data/lods.ini",
     apex::formats::IniParseLimits iniLimits = {}, WorkspaceLimits limits = {});
+
+[[nodiscard]] std::string serializeModelsIni(
+    const WorkspaceMetadata& workspace, WorkspaceLimits limits = {});
+[[nodiscard]] std::string serializeModelsIni(
+    std::span<const WorkspaceFile> files, WorkspaceLimits limits = {});
+[[nodiscard]] std::string serializeCarLodsIni(
+    const WorkspaceMetadata& workspace, WorkspaceLimits limits = {});
+[[nodiscard]] std::string serializeCarLodsIni(
+    std::span<const WorkspaceFile> files, WorkspaceLimits limits = {});
 
 [[nodiscard]] std::vector<DynamicObjectManifest> contiguousDynamicTrackObjects(
     std::span<const DynamicObjectManifest> objects, std::vector<std::string>& warnings);
@@ -212,6 +228,22 @@ inline CarManifest parse_car_lods_ini(const apex::formats::IniDocument& document
                                       std::string_view source = "data/lods.ini",
                                       WorkspaceLimits limits = {}) {
     return parseCarLodsIni(document, source, limits);
+}
+inline std::string serialize_models_ini(const WorkspaceMetadata& workspace,
+                                        WorkspaceLimits limits = {}) {
+    return serializeModelsIni(workspace, limits);
+}
+inline std::string serialize_models_ini(std::span<const WorkspaceFile> files,
+                                        WorkspaceLimits limits = {}) {
+    return serializeModelsIni(files, limits);
+}
+inline std::string serialize_car_lods_ini(const WorkspaceMetadata& workspace,
+                                          WorkspaceLimits limits = {}) {
+    return serializeCarLodsIni(workspace, limits);
+}
+inline std::string serialize_car_lods_ini(std::span<const WorkspaceFile> files,
+                                          WorkspaceLimits limits = {}) {
+    return serializeCarLodsIni(files, limits);
 }
 inline WorkspaceAssembly merge_kn5_models(std::span<const WorkspaceModelInput> entries,
                                           WorkspaceOptions options = {}) {

@@ -1,3 +1,4 @@
+#include "apex/app/authoring_service.hpp"
 #include "apex/core/parse_limits.hpp"
 #include "apex/formats/acd.hpp"
 #include "apex/formats/dds.hpp"
@@ -7,14 +8,27 @@
 #include "apex/formats/vao.hpp"
 #include "apex/render/device.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
+
+#if defined(_WIN32)
+#define NOMINMAX
+#include <windows.h>
+#else
+#include <cerrno>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -26,7 +40,10 @@ void usage(std::ostream& output) {
            << "  apex-native --inspect-acd <asset-directory-name> <file>\n"
            << "  apex-native --inspect-ini <file>\n"
            << "  apex-native --inspect-vao <file>\n"
-           << "  apex-native --inspect-ksanim <file>\n";
+           << "  apex-native --inspect-ksanim <file>\n"
+           << "  apex-native --export-project kn5|csp <source.kn5> <project.apex.json> <output>\n"
+           << "  apex-native --export-project collider|damage|bottom-colliders <source.kn5> "
+              "<project.apex.json> <secondary-input> <output>\n";
 }
 
 std::vector<std::uint8_t> read_file(const std::filesystem::path& path) {
@@ -42,6 +59,252 @@ std::vector<std::uint8_t> read_file(const std::filesystem::path& path) {
     if (!bytes.empty() && !input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size())))
         throw std::runtime_error("cannot read " + path.string());
     return bytes;
+}
+
+std::string bytes_as_text(const std::vector<std::uint8_t>& bytes) {
+    if (bytes.empty()) return {};
+    return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
+}
+
+std::filesystem::path write_temporary_exclusive(
+    const std::filesystem::path& path, std::span<const std::uint8_t> bytes) {
+    constexpr std::size_t maxAttempts = 1'024U;
+    for (std::size_t attempt = 0; attempt < maxAttempts; ++attempt) {
+        auto temporary = path;
+        temporary += ".apex-tmp-" + std::to_string(attempt);
+
+#if defined(_WIN32)
+        const HANDLE handle = CreateFileW(
+            temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) {
+            const auto error = GetLastError();
+            if (error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS) continue;
+            throw std::system_error(static_cast<int>(error), std::system_category(),
+                                    "cannot create " + temporary.string());
+        }
+        std::size_t offset = 0;
+        bool succeeded = true;
+        while (offset < bytes.size()) {
+            const auto remaining = bytes.size() - offset;
+            const auto chunk = static_cast<DWORD>(std::min<std::size_t>(
+                remaining, static_cast<std::size_t>(std::numeric_limits<DWORD>::max())));
+            DWORD written = 0;
+            if (WriteFile(handle, bytes.data() + offset, chunk, &written, nullptr) == FALSE ||
+                written == 0U) {
+                succeeded = false;
+                break;
+            }
+            offset += written;
+        }
+        if (succeeded) succeeded = FlushFileBuffers(handle) != FALSE;
+        const auto writeError = succeeded ? ERROR_SUCCESS : GetLastError();
+        const bool closed = CloseHandle(handle) != FALSE;
+        if (!succeeded || !closed) {
+            std::error_code ignored;
+            (void)std::filesystem::remove(temporary, ignored);
+            const auto error = writeError != ERROR_SUCCESS ? writeError : GetLastError();
+            throw std::system_error(static_cast<int>(error), std::system_category(),
+                                    "cannot write " + temporary.string());
+        }
+#else
+        const int descriptor = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
+                                      0666);
+        if (descriptor < 0) {
+            if (errno == EEXIST) continue;
+            throw std::system_error(errno, std::generic_category(),
+                                    "cannot create " + temporary.string());
+        }
+        std::size_t offset = 0;
+        int writeError = 0;
+        while (offset < bytes.size()) {
+            const auto remaining = bytes.size() - offset;
+            const auto chunk = std::min<std::size_t>(
+                remaining, static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()));
+            const auto written = ::write(descriptor, bytes.data() + offset, chunk);
+            if (written < 0) {
+                if (errno == EINTR) continue;
+                writeError = errno;
+                break;
+            }
+            if (written == 0) {
+                writeError = EIO;
+                break;
+            }
+            offset += static_cast<std::size_t>(written);
+        }
+        if (writeError == 0 && ::fsync(descriptor) != 0) writeError = errno;
+        if (::close(descriptor) != 0 && writeError == 0) writeError = errno;
+        if (writeError != 0) {
+            std::error_code ignored;
+            (void)std::filesystem::remove(temporary, ignored);
+            throw std::system_error(writeError, std::generic_category(),
+                                    "cannot write " + temporary.string());
+        }
+#endif
+        return temporary;
+    }
+    throw std::runtime_error("cannot allocate a temporary output beside " + path.string());
+}
+
+void promote_temporary_no_replace(const std::filesystem::path& temporary,
+                                  const std::filesystem::path& path) {
+#if defined(_WIN32)
+    if (MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_WRITE_THROUGH) == FALSE) {
+        const auto error = GetLastError();
+        if (error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS)
+            throw std::runtime_error("output already exists: " + path.string());
+        throw std::system_error(static_cast<int>(error), std::system_category(),
+                                "cannot finalize " + path.string());
+    }
+#else
+    if (::link(temporary.c_str(), path.c_str()) != 0) {
+        if (errno == EEXIST)
+            throw std::runtime_error("output already exists: " + path.string());
+        throw std::system_error(errno, std::generic_category(),
+                                "cannot finalize " + path.string());
+    }
+    if (::unlink(temporary.c_str()) != 0) {
+        const auto cleanupError = errno;
+        (void)::unlink(path.c_str());
+        throw std::system_error(cleanupError, std::generic_category(),
+                                "cannot remove temporary output " + temporary.string());
+    }
+#endif
+}
+
+void write_file_exclusive(const std::filesystem::path& path,
+                          std::span<const std::uint8_t> bytes) {
+    if (path.empty()) throw std::runtime_error("output path is empty");
+    const auto temporary = write_temporary_exclusive(path, bytes);
+    try {
+        promote_temporary_no_replace(temporary, path);
+    } catch (...) {
+        std::error_code ignored;
+        (void)std::filesystem::remove(temporary, ignored);
+        throw;
+    }
+}
+
+void write_file_exclusive(const std::filesystem::path& path,
+                          std::string_view text) {
+    const auto* data = reinterpret_cast<const std::uint8_t*>(text.data());
+    write_file_exclusive(path, std::span<const std::uint8_t>(data, text.size()));
+}
+
+template <typename Result>
+void report_authoring_diagnostics(const Result& result) {
+    for (const auto& item : result.diagnostics) {
+        std::cerr << item.code;
+        if (!item.path.empty()) std::cerr << " [" << item.path << ']';
+        if (item.line != 0U) std::cerr << ":" << item.line;
+        std::cerr << ": " << item.message << '\n';
+    }
+}
+
+template <typename Result>
+int report_authoring_failure(std::string_view operation, const Result& result) {
+    std::cerr << operation << ": "
+              << apex::app::authoring_service_status_name(result.status) << '\n';
+    report_authoring_diagnostics(result);
+    return 1;
+}
+
+std::string secondary_logical_name(const apex::app::AuthoringService& service,
+                                   std::string_view kind,
+                                   const std::filesystem::path& path) {
+    const auto* state = service.state();
+    if (state != nullptr) {
+        if (kind == "collider" && state->colliderAsset)
+            return state->colliderAsset->name;
+        if (kind == "damage" && state->damageAsset)
+            return state->damageAsset->name;
+        if (kind == "bottom-colliders" && state->bottomColliderAsset)
+            return state->bottomColliderAsset->name;
+    }
+    return path.filename().generic_string();
+}
+
+int export_project(int argc, char** argv) {
+    if (argc < 3) throw std::runtime_error("invalid --export-project arguments");
+    const std::string_view kind = argv[2];
+    const bool primaryOutput = kind == "kn5" || kind == "csp";
+    const bool secondaryOutput = kind == "collider" || kind == "damage" ||
+                                 kind == "bottom-colliders";
+    if ((!primaryOutput && !secondaryOutput) ||
+        (primaryOutput && argc != 6) || (secondaryOutput && argc != 7)) {
+        throw std::runtime_error("invalid --export-project arguments");
+    }
+
+    const std::filesystem::path sourcePath = argv[3];
+    const std::filesystem::path projectPath = argv[4];
+    const auto sourceBytes = read_file(sourcePath);
+    const auto projectBytes = read_file(projectPath);
+
+    apex::app::AuthoringService service;
+    const auto opened = service.openPrimary(
+        sourcePath.filename().generic_string(), sourceBytes);
+    if (!opened.ok()) return report_authoring_failure("open primary", opened);
+    const auto loaded = service.loadProject(bytes_as_text(projectBytes));
+    if (!loaded.ok()) return report_authoring_failure("load project", loaded);
+
+    if (primaryOutput) {
+        const std::filesystem::path outputPath = argv[5];
+        if (kind == "kn5") {
+            const auto exported = service.exportPrimaryKn5();
+            if (!exported.ok()) return report_authoring_failure("export KN5", exported);
+            report_authoring_diagnostics(exported);
+            write_file_exclusive(outputPath, exported.bytes);
+            std::cout << outputPath.string() << ": " << exported.bytes.size()
+                      << " bytes, revision " << exported.revision << '\n';
+        } else {
+            const auto exported = service.exportCsp();
+            if (!exported.ok()) return report_authoring_failure("export CSP", exported);
+            report_authoring_diagnostics(exported);
+            write_file_exclusive(outputPath, std::string_view(exported.text));
+            std::cout << outputPath.string() << ": " << exported.text.size()
+                      << " bytes, revision " << exported.revision << '\n';
+        }
+        return 0;
+    }
+
+    const std::filesystem::path secondaryPath = argv[5];
+    const std::filesystem::path outputPath = argv[6];
+    const auto secondaryBytes = read_file(secondaryPath);
+    const auto logicalName = secondary_logical_name(service, kind, secondaryPath);
+    if (kind == "collider") {
+        const auto bound = service.openCollider(logicalName, secondaryBytes);
+        if (!bound.ok()) return report_authoring_failure("open collider", bound);
+        report_authoring_diagnostics(bound);
+        const auto exported = service.exportColliderKn5();
+        if (!exported.ok()) return report_authoring_failure("export collider", exported);
+        report_authoring_diagnostics(exported);
+        write_file_exclusive(outputPath, exported.bytes);
+        std::cout << outputPath.string() << ": " << exported.bytes.size()
+                  << " bytes, revision " << exported.revision << '\n';
+    } else if (kind == "damage") {
+        const auto bound = service.openDamage(logicalName, secondaryBytes);
+        if (!bound.ok()) return report_authoring_failure("open damage.ini", bound);
+        report_authoring_diagnostics(bound);
+        const auto exported = service.exportDamageIni();
+        if (!exported.ok()) return report_authoring_failure("export damage.ini", exported);
+        report_authoring_diagnostics(exported);
+        write_file_exclusive(outputPath, std::string_view(exported.text));
+        std::cout << outputPath.string() << ": " << exported.text.size()
+                  << " bytes, revision " << exported.revision << '\n';
+    } else {
+        const auto bound = service.openBottomColliders(logicalName, secondaryBytes);
+        if (!bound.ok()) return report_authoring_failure("open colliders.ini", bound);
+        report_authoring_diagnostics(bound);
+        const auto exported = service.exportBottomCollidersIni();
+        if (!exported.ok())
+            return report_authoring_failure("export colliders.ini", exported);
+        report_authoring_diagnostics(exported);
+        write_file_exclusive(outputPath, std::string_view(exported.text));
+        std::cout << outputPath.string() << ": " << exported.text.size()
+                  << " bytes, revision " << exported.revision << '\n';
+    }
+    return 0;
 }
 
 apex::render::Backend parse_backend(std::string_view value) {
@@ -143,6 +406,13 @@ int probe_backend(apex::render::Backend backend, bool validation) {
 
 int main(int argc, char** argv) {
     try {
+        if (argc >= 2 && std::string_view(argv[1]) == "--export-project") {
+            if (argc < 3) {
+                usage(std::cerr);
+                return 2;
+            }
+            return export_project(argc, argv);
+        }
         if (argc == 3 && std::string_view(argv[1]) == "--inspect-ksanim")
             return inspect_ksanim(argv[2]);
         if (argc == 3 && std::string_view(argv[1]) == "--inspect-kn5")

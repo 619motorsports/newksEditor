@@ -3,15 +3,19 @@
 
 #include <array>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
 
 using apex::core::ParseError;
+using apex::domain::TrackSurface;
 using apex::domain::TrackDataLimits;
+using apex::domain::TrackSurfaces;
 
 void require(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
@@ -47,6 +51,115 @@ void parses_sepang_surface_fields_in_order() {
     require(matched.status == apex::domain::RuntimeSurfaceStatus::matched &&
                 matched.surface->key == "KERB" && matched.sector_id == 21,
             "runtime substring match");
+}
+
+TrackSurface serializable_surface(std::size_t index, std::string key) {
+    TrackSurface surface;
+    surface.index = index;
+    surface.key = std::move(key);
+    surface.friction = 0.1234567;
+    surface.damping = -0.0000004;
+    surface.dirt_additive = 0.25;
+    surface.black_flag_time = 12.5;
+    surface.is_valid_track = true;
+    surface.is_pitlane = false;
+    surface.sin_height = -1.25;
+    surface.sin_length = 0.0000005;
+    surface.vibration_gain = 0.6;
+    surface.vibration_length = 1.5;
+    surface.wav = " kerb.wav ";
+    surface.wav_pitch = 1.3;
+    surface.ff_effect = " road ";
+    return surface;
+}
+
+void serializes_surfaces_with_canonical_fields() {
+    TrackSurfaces config;
+    config.source = "serialize-surfaces.ini";
+    config.surfaces.push_back(serializable_surface(4U, " ROAD "));
+    const auto output = apex::domain::serialize_track_surfaces_ini(config);
+    require(output ==
+                "[SURFACE_4]\nKEY=ROAD\nFRICTION=0.123457\nDAMPING=0\n"
+                "DIRT_ADDITIVE=0.25\nBLACK_FLAG_TIME=12.5\nIS_VALID_TRACK=1\n"
+                "IS_PITLANE=0\nSIN_HEIGHT=-1.25\nSIN_LENGTH=0\nVIBRATION_GAIN=0.6\n"
+                "VIBRATION_LENGTH=1.5\nWAV=kerb.wav\nWAV_PITCH=1.3\nFF_EFFECT=road\n",
+            "surface serializer follows canonical JavaScript field order and numbers");
+    const auto reparsed = apex::domain::parse_track_surfaces(output, config.source);
+    require(reparsed.surfaces.size() == 1U && reparsed.surfaces[0].index == 4U &&
+                reparsed.surfaces[0].key == "ROAD" && reparsed.surfaces[0].is_valid_track &&
+                !reparsed.surfaces[0].is_pitlane && reparsed.surfaces[0].wav_pitch == 1.3,
+            "serialized surface round-trips through the native parser");
+}
+
+void preserves_sparse_indices_and_unknown_fields() {
+    const auto parsed = apex::domain::parse_track_surfaces(
+        "[SURFACE_4]\nKEY=ROAD\nCUSTOM_ALPHA=one\n"
+        "[SURFACE_9]\nKEY=KERB\nCUSTOM_BETA=two\n",
+        "sparse-surfaces.ini");
+    const auto output = apex::domain::serialize_track_surfaces_ini(parsed);
+    require(output.find("[SURFACE_4]\n") != std::string::npos &&
+                output.find("[SURFACE_9]\n") != std::string::npos &&
+                output.find("CUSTOM_ALPHA=one\n") != std::string::npos &&
+                output.find("CUSTOM_BETA=two\n") != std::string::npos,
+            "surface serializer preserves sparse indices and ordered unknown fields");
+    const auto reparsed = apex::domain::parse_track_surfaces(output, "sparse-roundtrip.ini");
+    require(reparsed.surfaces.size() == 2U && reparsed.surfaces[0].index == 4U &&
+                reparsed.surfaces[1].index == 9U && reparsed.surfaces[0].fields.size() == 15U &&
+                reparsed.surfaces[0].fields.back().key == "CUSTOM_ALPHA" &&
+                reparsed.surfaces[1].fields.back().key == "CUSTOM_BETA",
+            "unknown surface fields remain in source order after round-trip");
+}
+
+void rejects_invalid_surface_serialization_input() {
+    TrackSurfaces empty;
+    empty.source = "invalid-surfaces.ini";
+    expects_error([&] { (void)apex::domain::serialize_track_surfaces_ini(empty); },
+                  "EMPTY_SURFACE_MANIFEST");
+
+    TrackSurfaces duplicate;
+    duplicate.source = "duplicate-surfaces.ini";
+    duplicate.surfaces.push_back(serializable_surface(2U, "ROAD"));
+    duplicate.surfaces.push_back(serializable_surface(2U, "KERB"));
+    expects_error([&] { (void)apex::domain::serialize_track_surfaces_ini(duplicate); },
+                  "DUPLICATE_SURFACE_INDEX");
+
+    TrackSurfaces invalid;
+    invalid.source = "unsafe-surfaces.ini";
+    invalid.surfaces.push_back(serializable_surface(0U, "  "));
+    expects_error([&] { (void)apex::domain::serialize_track_surfaces_ini(invalid); },
+                  "EMPTY_SURFACE_FIELD");
+    invalid.surfaces[0] = serializable_surface(0U, "ROAD");
+    invalid.surfaces[0].wav = "bad\nname.wav";
+    expects_error([&] { (void)apex::domain::serialize_track_surfaces_ini(invalid); },
+                  "UNSAFE_TEXT");
+    invalid.surfaces[0].wav = "safe.wav";
+    invalid.surfaces[0].friction = std::numeric_limits<double>::quiet_NaN();
+    expects_error([&] { (void)apex::domain::serialize_track_surfaces_ini(invalid); },
+                  "NON_FINITE_VALUE");
+    invalid.surfaces[0] = serializable_surface(0U, "ROAD");
+    invalid.surfaces[0].fields.push_back({"CUSTOM=BAD", "value", 0U, 0U});
+    expects_error([&] { (void)apex::domain::serialize_track_surfaces_ini(invalid); },
+                  "UNSAFE_TEXT");
+}
+
+void enforces_surface_serializer_limits() {
+    TrackSurfaces config;
+    config.source = "limited-surfaces.ini";
+    config.surfaces.push_back(serializable_surface(0U, "ROAD"));
+    TrackDataLimits output_limits;
+    output_limits.maxOutputBytes = 16U;
+    expects_error([&] { (void)apex::domain::serialize_track_surfaces_ini(config, output_limits); },
+                  "OUTPUT_LIMIT");
+
+    TrackDataLimits section_limits;
+    section_limits.maxSections = 0U;
+    expects_error([&] { (void)apex::domain::serialize_track_surfaces_ini(config, section_limits); },
+                  "SECTION_LIMIT");
+
+    TrackDataLimits field_limits;
+    field_limits.maxFields = 13U;
+    expects_error([&] { (void)apex::domain::serialize_track_surfaces_ini(config, field_limits); },
+                  "FIELD_LIMIT");
 }
 
 void diagnoses_surface_duplicates_and_runtime_ambiguity() {
@@ -85,6 +198,44 @@ void audits_markers_and_surface_names() {
         missing_endpoint = missing_endpoint || diagnostic.code == "INCOMPLETE_TIME_GATE";
     }
     require(gap && missing_endpoint, "marker diagnostics");
+
+    const std::vector<std::string> no_names;
+    const std::vector<apex::domain::TrackMeshName> no_meshes;
+    const auto empty = apex::domain::audit_track_markers(no_names, no_meshes);
+    bool missing_start = false, missing_pit = false;
+    for (const auto& diagnostic : empty.diagnostics) {
+        if (diagnostic.code != "MISSING_MARKER") continue;
+        missing_start = missing_start ||
+            (diagnostic.severity == apex::domain::TrackDiagnosticSeverity::error &&
+             diagnostic.message == "AC_START_0 is missing");
+        missing_pit = missing_pit ||
+            (diagnostic.severity == apex::domain::TrackDiagnosticSeverity::warning &&
+             diagnostic.message == "AC_PIT_0 is missing");
+    }
+    require(missing_start && missing_pit,
+            "empty marker sets retain JavaScript missing-marker severities");
+
+    const std::vector<std::string> mixed_case = {
+        "ac_start_0", "ac_pit_0", "ac_time_0_l", "AC_TIME_0_R",
+        "ac_hotlap_start_0"};
+    const auto case_audit = apex::domain::audit_track_markers(mixed_case, no_meshes);
+    require(case_audit.starts == 1 && case_audit.pits == 1 &&
+                case_audit.time_gates == 1 && !case_audit.hotlap,
+            "numbered and time markers are case-insensitive but hotlap is exact");
+
+    const auto plus = apex::domain::resolve_runtime_surface("+1ROAD");
+    require(plus.sector_id == 1 &&
+                plus.status == apex::domain::RuntimeSurfaceStatus::matched,
+            "positive signed physics sector");
+    const auto whitespace = apex::domain::resolve_runtime_surface(
+        std::string("\xc2\xa0") + "+2ROAD");
+    require(whitespace.sector_id == 2 &&
+                whitespace.status == apex::domain::RuntimeSurfaceStatus::matched,
+            "JavaScript whitespace before physics sector");
+    const auto unsafe = apex::domain::resolve_runtime_surface("9007199254740992ROAD");
+    require(unsafe.sector_id == 0 &&
+                unsafe.status == apex::domain::RuntimeSurfaceStatus::not_physics,
+            "unsafe JavaScript integer is not a physics sector");
 }
 
 void parses_sepang_camera_basis_and_metadata() {
@@ -163,6 +314,10 @@ void appliesTrackLimitsBeforeIniProjection() {
 int main() {
     try {
         parses_sepang_surface_fields_in_order();
+        serializes_surfaces_with_canonical_fields();
+        preserves_sparse_indices_and_unknown_fields();
+        rejects_invalid_surface_serialization_input();
+        enforces_surface_serializer_limits();
         diagnoses_surface_duplicates_and_runtime_ambiguity();
         audits_markers_and_surface_names();
         parses_sepang_camera_basis_and_metadata();

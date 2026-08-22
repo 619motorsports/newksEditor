@@ -124,17 +124,153 @@ bool boolean_field(const apex::formats::IniSection& section, std::string_view ke
     return std::find(std::begin(keys), std::end(keys), normalized) != std::end(keys);
 }
 
+[[nodiscard]] bool valid_utf8(std::string_view text) noexcept {
+    std::size_t index = 0;
+    while (index < text.size()) {
+        const auto first = static_cast<unsigned char>(text[index++]);
+        std::size_t continuation_count = 0;
+        std::uint32_t codepoint = 0;
+        if (first <= 0x7fU) continue;
+        if (first >= 0xc2U && first <= 0xdfU) {
+            continuation_count = 1;
+            codepoint = first & 0x1fU;
+        } else if (first >= 0xe0U && first <= 0xefU) {
+            continuation_count = 2;
+            codepoint = first & 0x0fU;
+        } else if (first >= 0xf0U && first <= 0xf4U) {
+            continuation_count = 3;
+            codepoint = first & 0x07U;
+        } else {
+            return false;
+        }
+        if (continuation_count > text.size() - index) return false;
+        for (std::size_t part = 0; part < continuation_count; ++part) {
+            const auto byte = static_cast<unsigned char>(text[index++]);
+            if ((byte & 0xc0U) != 0x80U) return false;
+            codepoint = (codepoint << 6U) | (byte & 0x3fU);
+        }
+        if ((continuation_count == 2 && codepoint < 0x800U) ||
+            (continuation_count == 3 && codepoint < 0x10000U) ||
+            codepoint > 0x10ffffU ||
+            (codepoint >= 0xd800U && codepoint <= 0xdfffU)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] std::string surface_text(std::string_view value, std::string_view label,
+                                        bool required, const TrackDataLimits& limits,
+                                        std::string_view source, std::size_t line) {
+    const auto text = trim(value);
+    if (required && text.empty())
+        fail(source, line, "EMPTY_SURFACE_FIELD", std::string(label) + " cannot be empty");
+    if (text.size() > limits.maxStringBytes)
+        fail(source, line, "STRING_LIMIT", std::string(label) + " exceeds its string limit");
+    if (text.find_first_of("\r\n;") != std::string_view::npos ||
+        text.find('\0') != std::string_view::npos || !valid_utf8(text))
+        fail(source, line, "UNSAFE_TEXT", std::string(label) + " contains unsafe text");
+    return std::string(text);
+}
+
+[[nodiscard]] std::string surface_number(double value, std::string_view label,
+                                          std::string_view source, std::size_t line) {
+    if (!std::isfinite(value))
+        fail(source, line, "NON_FINITE_VALUE", std::string(label) + " must be finite");
+
+    // JavaScript applies toFixed(6), converts the result back to Number, and
+    // then uses Number#toString. Fixed formatting below mirrors that common
+    // range and the general form covers the JavaScript exponential range.
+    if (std::abs(value) >= 1.0e21) {
+        std::array<char, 128> buffer{};
+        const auto converted = std::to_chars(
+            buffer.data(), buffer.data() + buffer.size(), value,
+            std::chars_format::general);
+        if (converted.ec != std::errc{})
+            fail(source, line, "NUMBER_FORMAT", std::string(label) + " cannot be formatted");
+        return std::string(buffer.data(), converted.ptr);
+    }
+
+    // Keep the original binary64 value exact through the decimal scaling.
+    // Using double multiplication would turn 0.0000005 into an exact 0.5 and
+    // incorrectly round it up, while JavaScript's toFixed sees it below 0.5.
+    const long double rounded_units =
+        std::round(static_cast<long double>(value) * 1.0e6L);
+    if (rounded_units == 0.0L) return "0";
+    const double rounded = static_cast<double>(rounded_units / 1.0e6L);
+    std::array<char, 128> buffer{};
+    const auto converted = std::to_chars(
+        buffer.data(), buffer.data() + buffer.size(), rounded,
+        std::chars_format::fixed, 6);
+    if (converted.ec != std::errc{})
+        fail(source, line, "NUMBER_FORMAT", std::string(label) + " cannot be formatted");
+    std::string output(buffer.data(), converted.ptr);
+    while (!output.empty() && output.back() == '0') output.pop_back();
+    if (!output.empty() && output.back() == '.') output.pop_back();
+    return output.empty() || output == "-0" ? "0" : output;
+}
+
+void append_surface_output(std::string& output, std::string_view value,
+                           const TrackDataLimits& limits, std::string_view source,
+                           std::size_t line) {
+    if (value.size() > limits.maxOutputBytes ||
+        output.size() > limits.maxOutputBytes - value.size())
+        fail(source, line, "OUTPUT_LIMIT", "surface output exceeds its byte limit");
+    output.append(value.data(), value.size());
+}
+
+void append_surface_line(std::string& output, std::string_view value,
+                         const TrackDataLimits& limits, std::string_view source,
+                         std::size_t line) {
+    append_surface_output(output, value, limits, source, line);
+    append_surface_output(output, "\n", limits, source, line);
+}
+
 [[nodiscard]] long long physics_sector_id(std::string_view value) noexcept {
     std::size_t start = 0;
-    while (start < value.size() && (value[start] == ' ' || value[start] == '\t')) ++start;
-    const auto first = start;
-    if (start < value.size() && (value[start] == '+' || value[start] == '-')) ++start;
+    const auto consume_js_whitespace = [&](std::size_t offset) {
+        const auto byte = [&](std::size_t index) {
+            return static_cast<unsigned char>(value[index]);
+        };
+        if (offset >= value.size()) return std::size_t{0};
+        const auto first = byte(offset);
+        if (first == 0x09U || first == 0x0aU || first == 0x0bU || first == 0x0cU ||
+            first == 0x0dU || first == 0x20U)
+            return std::size_t{1};
+        if (offset + 1U < value.size() && first == 0xc2U && byte(offset + 1U) == 0xa0U)
+            return std::size_t{2};
+        if (offset + 2U >= value.size()) return std::size_t{0};
+        const auto second = byte(offset + 1U);
+        const auto third = byte(offset + 2U);
+        if ((first == 0xe1U && second == 0x9aU && third == 0x80U) ||
+            (first == 0xe2U && second == 0x81U && third == 0x9fU) ||
+            (first == 0xe3U && second == 0x80U && third == 0x80U) ||
+            (first == 0xefU && second == 0xbbU && third == 0xbfU))
+            return std::size_t{3};
+        if (first == 0xe2U && second == 0x80U &&
+            ((third >= 0x80U && third <= 0x8aU) || third == 0xa8U ||
+             third == 0xa9U || third == 0xafU))
+            return std::size_t{3};
+        return std::size_t{0};
+    };
+    while (const auto width = consume_js_whitespace(start)) start += width;
+    bool negative = false;
+    if (start < value.size() && (value[start] == '+' || value[start] == '-')) {
+        negative = value[start] == '-';
+        ++start;
+    }
     const auto digits = start;
     while (start < value.size() && value[start] >= '0' && value[start] <= '9') ++start;
     if (digits == start) return 0;
-    long long result = 0;
-    const auto parsed = std::from_chars(value.data() + first, value.data() + start, result);
-    return parsed.ec == std::errc{} ? result : 0;
+    constexpr std::uint64_t maxSafeInteger = 9'007'199'254'740'991ULL;
+    std::uint64_t magnitude = 0;
+    for (auto index = digits; index < start; ++index) {
+        const auto digit = static_cast<std::uint64_t>(value[index] - '0');
+        if (magnitude > (maxSafeInteger - digit) / 10U) return 0;
+        magnitude = magnitude * 10U + digit;
+    }
+    const auto signedMagnitude = static_cast<long long>(magnitude);
+    return negative ? -signedMagnitude : signedMagnitude;
 }
 
 [[nodiscard]] std::vector<RuntimeSurface> stock_runtime_surfaces() {
@@ -346,6 +482,112 @@ TrackSurfaces parse_track_surfaces(std::string_view text, std::string source,
     return parse_track_surfaces(apex::formats::parse_ini(text, source, ini_limits_for(limits)), limits);
 }
 
+std::string serialize_track_surfaces_ini(const TrackSurfaces& surfaces,
+                                         TrackDataLimits limits) {
+    const std::string source_name = surfaces.source.empty() ? "surfaces.ini" : surfaces.source;
+    const std::string_view source = source_name;
+    if (surfaces.surfaces.empty())
+        fail(source, 0, "EMPTY_SURFACE_MANIFEST", "a surface manifest needs at least one surface");
+    if (surfaces.surfaces.size() > limits.maxSections)
+        fail(source, 0, "SECTION_LIMIT", "surface section count exceeds configured limit");
+
+    constexpr std::size_t canonical_field_count = 14U;
+    std::set<std::size_t> used_indexes;
+    std::size_t total_fields = 0;
+    for (std::size_t position = 0; position < surfaces.surfaces.size(); ++position) {
+        const auto& surface = surfaces.surfaces[position];
+        const auto line = surface.line == 0U ? position : surface.line;
+        if (!used_indexes.insert(surface.index).second)
+            fail(source, line, "DUPLICATE_SURFACE_INDEX",
+                 "SURFACE_" + std::to_string(surface.index) + " is duplicated");
+        (void)surface_text(surface.key, "KEY", true, limits, source, line);
+        (void)surface_text(surface.wav, "WAV", false, limits, source, line);
+        (void)surface_text(surface.ff_effect, "FF_EFFECT", false, limits, source, line);
+
+        const auto validate_number = [&](double value, std::string_view label) {
+            (void)surface_number(value, label, source, line);
+        };
+        validate_number(surface.friction, "FRICTION");
+        validate_number(surface.damping, "DAMPING");
+        validate_number(surface.dirt_additive, "DIRT_ADDITIVE");
+        validate_number(surface.black_flag_time, "BLACK_FLAG_TIME");
+        validate_number(surface.sin_height, "SIN_HEIGHT");
+        validate_number(surface.sin_length, "SIN_LENGTH");
+        validate_number(surface.vibration_gain, "VIBRATION_GAIN");
+        validate_number(surface.vibration_length, "VIBRATION_LENGTH");
+        validate_number(surface.wav_pitch, "WAV_PITCH");
+
+        std::size_t unknown_count = 0;
+        for (const auto& field : surface.fields) {
+            if (known_surface_key(field.key)) continue;
+            const auto key = surface_text(field.key, "surface field key", true,
+                                          limits, source, line);
+            if (key.find('=') != std::string::npos)
+                fail(source, line, "UNSAFE_TEXT", "surface field key contains '='");
+            (void)surface_text(field.value, "surface field value", false,
+                               limits, source, line);
+            if (unknown_count == std::numeric_limits<std::size_t>::max())
+                fail(source, line, "FIELD_LIMIT", "surface field count overflows");
+            ++unknown_count;
+        }
+        if (canonical_field_count > limits.maxFields ||
+            unknown_count > limits.maxFields - canonical_field_count ||
+            canonical_field_count > limits.maxFieldsPerSection ||
+            unknown_count > limits.maxFieldsPerSection - canonical_field_count)
+            fail(source, line, "FIELD_LIMIT", "surface field output exceeds configured limit");
+        if (total_fields > limits.maxFields - canonical_field_count - unknown_count)
+            fail(source, line, "FIELD_LIMIT", "surface field output exceeds configured limit");
+        total_fields += canonical_field_count + unknown_count;
+    }
+
+    std::string output;
+    for (std::size_t position = 0; position < surfaces.surfaces.size(); ++position) {
+        const auto& surface = surfaces.surfaces[position];
+        const auto line = surface.line == 0U ? position : surface.line;
+        if (position != 0U) append_surface_output(output, "\n", limits, source, line);
+        append_surface_line(output, "[SURFACE_" + std::to_string(surface.index) + "]",
+                            limits, source, line);
+        append_surface_line(output, "KEY=" + surface_text(surface.key, "KEY", true,
+                                                             limits, source, line),
+                            limits, source, line);
+        append_surface_line(output, "FRICTION=" + surface_number(surface.friction, "FRICTION", source, line),
+                            limits, source, line);
+        append_surface_line(output, "DAMPING=" + surface_number(surface.damping, "DAMPING", source, line),
+                            limits, source, line);
+        append_surface_line(output, "DIRT_ADDITIVE=" + surface_number(surface.dirt_additive, "DIRT_ADDITIVE", source, line),
+                            limits, source, line);
+        append_surface_line(output, "BLACK_FLAG_TIME=" + surface_number(surface.black_flag_time, "BLACK_FLAG_TIME", source, line),
+                            limits, source, line);
+        append_surface_line(output, std::string("IS_VALID_TRACK=") + (surface.is_valid_track ? "1" : "0"),
+                            limits, source, line);
+        append_surface_line(output, std::string("IS_PITLANE=") + (surface.is_pitlane ? "1" : "0"),
+                            limits, source, line);
+        append_surface_line(output, "SIN_HEIGHT=" + surface_number(surface.sin_height, "SIN_HEIGHT", source, line),
+                            limits, source, line);
+        append_surface_line(output, "SIN_LENGTH=" + surface_number(surface.sin_length, "SIN_LENGTH", source, line),
+                            limits, source, line);
+        append_surface_line(output, "VIBRATION_GAIN=" + surface_number(surface.vibration_gain, "VIBRATION_GAIN", source, line),
+                            limits, source, line);
+        append_surface_line(output, "VIBRATION_LENGTH=" + surface_number(surface.vibration_length, "VIBRATION_LENGTH", source, line),
+                            limits, source, line);
+        append_surface_line(output, "WAV=" + surface_text(surface.wav, "WAV", false, limits, source, line),
+                            limits, source, line);
+        append_surface_line(output, "WAV_PITCH=" + surface_number(surface.wav_pitch, "WAV_PITCH", source, line),
+                            limits, source, line);
+        append_surface_line(output, "FF_EFFECT=" + surface_text(surface.ff_effect, "FF_EFFECT", false, limits, source, line),
+                            limits, source, line);
+        for (const auto& field : surface.fields) {
+            if (known_surface_key(field.key)) continue;
+            const auto key = surface_text(field.key, "surface field key", true,
+                                          limits, source, line);
+            const auto value = surface_text(field.value, "surface field value", false,
+                                            limits, source, line);
+            append_surface_line(output, key + "=" + value, limits, source, line);
+        }
+    }
+    return output;
+}
+
 std::vector<RuntimeSurface> runtime_surfaces(const TrackSurfaces* configured) {
     auto result = stock_runtime_surfaces();
     if (configured == nullptr) return result;
@@ -424,7 +666,7 @@ TrackMarkerAudit audit_track_markers(std::span<const std::string> node_names,
         numbered(name, "AC_START", starts);
         numbered(name, "AC_PIT", pits);
         const auto normalized = upper_ascii(name);
-        if (normalized == "AC_HOTLAP_START_0") result.hotlap = true;
+        if (name == "AC_HOTLAP_START_0") result.hotlap = true;
         constexpr std::string_view time_prefix = "AC_TIME_";
         if (normalized.rfind(time_prefix, 0) == 0 && normalized.size() > time_prefix.size() + 2 &&
             normalized[normalized.size() - 2] == '_') {
@@ -440,9 +682,12 @@ TrackMarkerAudit audit_track_markers(std::span<const std::string> node_names,
     result.pits = pits.size();
     result.time_gates = times.size();
     const auto gaps = [&](const std::set<std::size_t>& values, std::string_view label,
-                          std::string_view marker_prefix) {
+                          std::string_view marker_prefix,
+                          TrackDiagnosticSeverity missing_severity) {
+        if (!values.contains(0))
+            add(missing_severity, "MISSING_MARKER",
+                std::string(marker_prefix) + "_0 is missing");
         if (values.empty()) return;
-        if (!values.contains(0)) add(TrackDiagnosticSeverity::error, "MISSING_MARKER", std::string(marker_prefix) + "_0 is missing");
         if (*values.rbegin() > limits.maxNodes) {
             add(TrackDiagnosticSeverity::warning, "INDEX_LIMIT", std::string(label) + " index exceeds configured marker limit");
             return;
@@ -460,8 +705,8 @@ TrackMarkerAudit audit_track_markers(std::span<const std::string> node_names,
             add(TrackDiagnosticSeverity::warning, "MARKER_GAP", message);
         }
     };
-    gaps(starts, "Starting-grid", "AC_START");
-    gaps(pits, "Pit", "AC_PIT");
+    gaps(starts, "Starting-grid", "AC_START", TrackDiagnosticSeverity::error);
+    gaps(pits, "Pit", "AC_PIT", TrackDiagnosticSeverity::warning);
     if (!times.contains(0)) add(TrackDiagnosticSeverity::error, "MISSING_TIME_GATE", "AC_TIME_0_L/R timing gate is missing");
     for (const auto& [index, sides] : times) {
         if (sides != 3U) add(TrackDiagnosticSeverity::error, "INCOMPLETE_TIME_GATE",

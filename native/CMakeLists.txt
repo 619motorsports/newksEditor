@@ -57,6 +57,7 @@ add_library(apex_core STATIC
   src/core/byte_reader.cpp
   src/core/deflate.cpp
   src/core/parse_error.cpp
+  src/core/sha256.cpp
 )
 add_library(ApexEditor::Core ALIAS apex_core)
 target_link_libraries(apex_core PUBLIC ApexEditor::Native)
@@ -120,6 +121,17 @@ target_link_libraries(apex_secondary_assets
   PUBLIC ApexEditor::Authoring ApexEditor::Domain
 )
 
+# Application composition owns project sessions and format baselines. It
+# returns owned data and diagnostics without exposing filesystem or renderer
+# capabilities to the authoring model.
+add_library(apex_app STATIC
+  src/app/authoring_service.cpp
+)
+add_library(ApexEditor::App ALIAS apex_app)
+target_link_libraries(apex_app
+  PUBLIC ApexEditor::SecondaryAssets
+)
+
 add_library(apex_scene STATIC
   src/scene/scene.cpp
   src/scene/kn5_scene.cpp
@@ -179,11 +191,18 @@ target_link_libraries(apex_external_texture_authority
 
 add_executable(apex_native_app src/app/main.cpp)
 set_target_properties(apex_native_app PROPERTIES OUTPUT_NAME apex-native)
-target_link_libraries(apex_native_app PRIVATE ApexEditor::Formats ApexEditor::Render)
+target_link_libraries(apex_native_app PRIVATE ApexEditor::App ApexEditor::Formats ApexEditor::Render)
 
 if(NOT BUILD_TESTING OR NOT APEX_BUILD_TESTS)
   return()
 endif()
+
+add_test(NAME apex_native_cli_usage
+  COMMAND ${CMAKE_COMMAND}
+    "-DAPEX_NATIVE_COMMAND=$<TARGET_FILE:apex_native_app>"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_usage_test.cmake"
+)
+set_tests_properties(apex_native_cli_usage PROPERTIES LABELS "unit;security")
 
 # Tests are intentionally discovered by filename. This keeps the native build
 # usable while the port is staged and gives each format/backend a separate
@@ -213,6 +232,7 @@ function(apex_add_native_test source stem library)
 endfunction()
 
 apex_add_native_test(ksanim_tests.cpp ksanim_tests ApexEditor::Formats)
+apex_add_native_test(sha256_tests.cpp sha256_tests ApexEditor::Core)
 apex_add_native_test(knh_tests.cpp knh_tests ApexEditor::Formats)
 apex_add_native_test(kn5_tests.cpp kn5_tests ApexEditor::Formats)
 apex_add_native_test(kn5_write_tests.cpp kn5_write_tests ApexEditor::Formats)
@@ -225,6 +245,7 @@ apex_add_native_test(acd_tests.cpp acd_tests ApexEditor::Formats)
 apex_add_native_test(ini_tests.cpp ini_tests ApexEditor::Formats)
 apex_add_native_test(vao_tests.cpp vao_tests ApexEditor::Formats)
 apex_add_native_test(authoring_project_tests.cpp authoring_project_tests ApexEditor::Authoring)
+apex_add_native_test(authoring_service_tests.cpp authoring_service_tests ApexEditor::App)
 apex_add_native_test(project_bake_tests.cpp project_bake_tests ApexEditor::Authoring)
 apex_add_native_test(geometry_bake_tests.cpp geometry_bake_tests ApexEditor::Authoring)
 apex_add_native_test(project_io_tests.cpp project_io_tests ApexEditor::Authoring)
@@ -274,6 +295,9 @@ endif()
 if(TEST ksanim_tests)
   set_tests_properties(ksanim_tests PROPERTIES LABELS "unit;malformed")
 endif()
+if(TEST sha256_tests)
+  set_tests_properties(sha256_tests PROPERTIES LABELS "unit")
+endif()
 if(TEST knh_tests)
   set_tests_properties(knh_tests PROPERTIES LABELS "unit;malformed")
 endif()
@@ -284,6 +308,7 @@ foreach(parser_test IN ITEMS kn5_tests kn5_write_tests dds_tests bc7_tests png_t
   endif()
 endforeach()
 foreach(boundary_test IN ITEMS authoring_project_tests project_bake_tests geometry_bake_tests project_io_tests
+                               authoring_service_tests
                                asset_index_tests asset_source_tests csp_config_model_tests
                                csp_material_evaluator_tests car_damage_tests secondary_asset_tests car_validation_tests
                                driver_tests skin_metadata_tests

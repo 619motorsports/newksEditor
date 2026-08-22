@@ -207,6 +207,181 @@ void appendDocumentWarnings(const IniDocument& document, std::vector<std::string
     return true;
 }
 
+// Car LOD manifests intentionally retain the JavaScript editor's support for
+// a parent-relative shared-car path (for example, ../shared/car_lod_b.kn5).
+// Track model names use portableManifestFile, which is stricter because they
+// are resolved inside the selected track workspace.
+[[nodiscard]] bool portableCarLodFile(std::string_view raw, std::size_t maxBytes,
+                                      std::string& normalized, std::string& reason) {
+    normalized = unquote(raw);
+    if (normalized.empty()) {
+        reason = "car LOD file name is required";
+        return false;
+    }
+    std::replace(normalized.begin(), normalized.end(), '\\', '/');
+    if (normalized.size() > maxBytes || normalized.front() == '/' ||
+        normalized.find('\0') != std::string::npos ||
+        (normalized.size() >= 2 &&
+         std::isalpha(static_cast<unsigned char>(normalized[0])) != 0 &&
+         normalized[1] == ':')) {
+        reason = "car LOD file name must be relative and bounded";
+        return false;
+    }
+    std::size_t begin = 0;
+    while (begin <= normalized.size()) {
+        const auto end = normalized.find('/', begin);
+        const auto part = normalized.substr(begin, end == std::string::npos
+                                                       ? normalized.size() - begin
+                                                       : end - begin);
+        if (part.empty() || part == ".") {
+            reason = "car LOD file name contains an empty or dot path component";
+            return false;
+        }
+        if (part != "..") {
+            const auto deviceName = upperAscii(part.substr(0, part.find('.')));
+            if (part.back() == '.' || part.back() == ' ' ||
+                part.find_first_of("<>:\"|?*") != std::string::npos ||
+                deviceName == "CON" || deviceName == "PRN" || deviceName == "AUX" ||
+                deviceName == "NUL" ||
+                ((deviceName.size() == 4 &&
+                  (deviceName.rfind("COM", 0) == 0 || deviceName.rfind("LPT", 0) == 0)) &&
+                 deviceName.back() >= '1' && deviceName.back() <= '9')) {
+                reason = "car LOD file name is not portable";
+                return false;
+            }
+        }
+        for (const auto character : part)
+            if (static_cast<unsigned char>(character) < 0x20U || character == '\x7f') {
+                reason = "car LOD file name contains a control character";
+                return false;
+            }
+        if (end == std::string::npos) {
+            if (part == "..") {
+                reason = "car LOD file name cannot end with a parent component";
+                return false;
+            }
+            break;
+        }
+        begin = end + 1;
+    }
+    if (normalized.size() < 4 ||
+        lowerAscii(normalized.substr(normalized.size() - 4)) != ".kn5") {
+        reason = "car LOD file name must end with .kn5";
+        return false;
+    }
+    return true;
+}
+
+[[nodiscard]] std::string formatManifestNumber(float value, std::string_view source,
+                                                std::string_view label) {
+    if (!std::isfinite(value))
+        throw error(source, 0, "NON_FINITE_VALUE",
+                    std::string(label) + " must contain a finite number");
+    const auto number = static_cast<double>(value);
+    const auto rounded = std::round(number * 1'000'000.0) / 1'000'000.0;
+    if (rounded == 0.0) return "0";
+    std::array<char, 128> buffer{};
+    const auto format = std::abs(rounded) >= 1.0e21 ? std::chars_format::general
+                                                    : std::chars_format::fixed;
+    const auto result = format == std::chars_format::fixed
+                            ? std::to_chars(buffer.data(), buffer.data() + buffer.size(), rounded,
+                                             format, 6)
+                            : std::to_chars(buffer.data(), buffer.data() + buffer.size(), rounded,
+                                             format);
+    if (result.ec != std::errc{})
+        throw error(source, 0, "NUMBER_FORMAT", std::string(label) + " cannot be formatted");
+    std::string output(buffer.data(), result.ptr);
+    if (format == std::chars_format::fixed) {
+        const auto decimal = output.find('.');
+        if (decimal != std::string::npos) {
+            while (!output.empty() && output.back() == '0') output.pop_back();
+            if (!output.empty() && output.back() == '.') output.pop_back();
+        }
+    }
+    return output == "-0" ? "0" : output;
+}
+
+[[nodiscard]] std::string iniFileValue(std::string_view raw, std::string_view source,
+                                       std::string_view label) {
+    const auto file = trim(raw);
+    if (file.empty())
+        throw error(source, 0, "UNSAFE_REFERENCE", std::string(label) + " needs a file name");
+    for (const auto character : file)
+        if (static_cast<unsigned char>(character) < 0x20U || character == '\x7f')
+            throw error(source, 0, "UNSAFE_REFERENCE",
+                        std::string(label) + " contains a control character");
+    const bool needsQuotes = std::any_of(file.begin(), file.end(), [](char character) {
+        return std::isspace(static_cast<unsigned char>(character)) != 0 ||
+               character == ';' || character == ',';
+    });
+    if (!needsQuotes) return file;
+    if (file.find('\'') == std::string::npos) return "'" + file + "'";
+    if (file.find('"') == std::string::npos) return "\"" + file + "\"";
+    throw error(source, 0, "UNSAFE_REFERENCE",
+                std::string(label) + " cannot contain both quote characters");
+}
+
+[[nodiscard]] std::string manifestMode(std::string_view raw, std::string_view source,
+                                       std::string_view label, std::size_t maxBytes) {
+    auto output = upperAscii(trim(raw));
+    if (output.empty()) output = "RANDOM";
+    if (output.size() > maxBytes)
+        throw error(source, 0, "OUTPUT_LIMIT", std::string(label) + " exceeds its size limit");
+    for (const auto character : output)
+        if (static_cast<unsigned char>(character) < 0x20U || character == '\x7f' ||
+            character == '=' || character == '[' || character == ']' || character == ';')
+            throw error(source, 0, "UNSAFE_REFERENCE", std::string(label) + " contains unsafe text");
+    return output;
+}
+
+void appendManifest(std::string& output, std::string_view value, const WorkspaceLimits& limits,
+                    std::string_view source) {
+    if (value.size() > limits.maxOutputBytes ||
+        output.size() > limits.maxOutputBytes - value.size())
+        throw error(source, output.size(), "OUTPUT_LIMIT", "workspace manifest exceeds its output limit");
+    output.append(value);
+}
+
+void appendManifestLine(std::string& output, std::string_view key, std::string_view value,
+                        const WorkspaceLimits& limits, std::string_view source) {
+    appendManifest(output, key, limits, source);
+    appendManifest(output, "=", limits, source);
+    appendManifest(output, value, limits, source);
+    appendManifest(output, "\n", limits, source);
+}
+
+void appendManifestVector(std::string& output, std::string_view key, const Vector3& values,
+                          const WorkspaceLimits& limits, std::string_view source) {
+    appendManifest(output, key, limits, source);
+    appendManifest(output, "=", limits, source);
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        if (index != 0) appendManifest(output, ", ", limits, source);
+        appendManifest(output, formatManifestNumber(values[index], source, key), limits, source);
+    }
+    appendManifest(output, "\n", limits, source);
+}
+
+void appendManifestVector(std::string& output, std::string_view key,
+                          const std::array<float, 2>& values, const WorkspaceLimits& limits,
+                          std::string_view source) {
+    appendManifest(output, key, limits, source);
+    appendManifest(output, "=", limits, source);
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        if (index != 0) appendManifest(output, ", ", limits, source);
+        appendManifest(output, formatManifestNumber(values[index], source, key), limits, source);
+    }
+    appendManifest(output, "\n", limits, source);
+}
+
+void beginManifestSection(std::string& output, std::string_view name, bool& first,
+                          const WorkspaceLimits& limits, std::string_view source) {
+    if (!first) appendManifest(output, "\n", limits, source);
+    first = false;
+    appendManifest(output, "[", limits, source);
+    appendManifest(output, name, limits, source);
+    appendManifest(output, "]\n", limits, source);
+}
+
 [[nodiscard]] std::string sectionSuffix(std::string_view name, std::string_view prefix,
                                         std::uint32_t& index) {
     const auto upper = upperAscii(name);
@@ -459,16 +634,186 @@ CarManifest parseCarLodsIni(std::string_view text, std::string source,
     return parseCarLodsIni(apex::formats::parse_csp_ini(text, source, iniLimits), source, limits);
 }
 
+std::string serializeModelsIni(std::span<const WorkspaceFile> files, WorkspaceLimits limits) {
+    const std::string source = "models.ini";
+    if (files.size() > limits.maxFiles)
+        throw error(source, 0, "COUNT_LIMIT", "workspace file count exceeds configured limit");
+    std::set<std::uint32_t> reservedModels;
+    std::set<std::uint32_t> reservedDynamic;
+    for (const auto& file : files) {
+        if (file.manifestIndex.has_value()) reservedModels.insert(*file.manifestIndex);
+        if (file.dynamic.has_value() && file.dynamic->index.has_value())
+            reservedDynamic.insert(*file.dynamic->index);
+    }
+    std::set<std::uint32_t> emittedModels;
+    std::set<std::uint32_t> emittedDynamic;
+    std::uint32_t nextModel = 0U;
+    std::uint32_t nextDynamic = 0U;
+    std::size_t sectionCount = 0;
+    std::string output;
+    bool first = true;
+    const auto fallbackIndex = [&](std::set<std::uint32_t>& reserved, std::uint32_t& next) {
+        while (reserved.contains(next)) {
+            if (next == std::numeric_limits<std::uint32_t>::max())
+                throw error(source, 0, "COUNT_LIMIT", "manifest index space is exhausted");
+            ++next;
+        }
+        const auto result = next;
+        reserved.insert(result);
+        if (next != std::numeric_limits<std::uint32_t>::max()) ++next;
+        return result;
+    };
+    const auto rejectDuplicate = [&](const auto& emitted, std::uint32_t index) {
+        if (emitted.contains(index))
+            throw error(source, 0, "AMBIGUOUS_REFERENCE", "manifest index is duplicated");
+    };
+
+    for (const auto& file : files) {
+        if (!file.auxiliary.empty()) continue;
+        if (sectionCount >= limits.maxManifestEntries)
+            throw error(source, 0, "COUNT_LIMIT", "manifest entry count exceeds configured limit");
+        ++sectionCount;
+        std::string normalized;
+        std::string reason;
+        if (!portableManifestFile(file.name, limits.maxPathBytes, normalized, reason))
+            throw error(source, 0, "UNSAFE_REFERENCE", reason);
+        if (file.dynamic.has_value()) {
+            const auto index = file.dynamic->index.has_value()
+                                   ? *file.dynamic->index
+                                   : fallbackIndex(reservedDynamic, nextDynamic);
+            rejectDuplicate(emittedDynamic, index);
+            emittedDynamic.insert(index);
+            beginManifestSection(output, "DYNAMIC_OBJECT_" + std::to_string(index), first, limits, source);
+            appendManifestLine(output, "FILE", iniFileValue(normalized, source, "FILE"), limits, source);
+            appendManifestLine(output, "PROBABILITY",
+                               formatManifestNumber(file.dynamic->probability, source, "PROBABILITY"),
+                               limits, source);
+            appendManifestVector(output, "MULT", file.dynamic->multiplicity, limits, source);
+            appendManifestLine(output, "POS_MODE",
+                               manifestMode(file.dynamic->posMode, source, "POS_MODE", limits.maxPathBytes),
+                               limits, source);
+            appendManifestVector(output, "RND_POS_CENTER", file.dynamic->positionCenter, limits, source);
+            appendManifestVector(output, "RND_POS_RANGE", file.dynamic->positionRange, limits, source);
+            appendManifestLine(output, "VEL_MODE",
+                               manifestMode(file.dynamic->velMode, source, "VEL_MODE", limits.maxPathBytes),
+                               limits, source);
+            appendManifestVector(output, "RND_VEL_BASE", file.dynamic->velocityBase, limits, source);
+            appendManifestVector(output, "RND_VEL_RANGE", file.dynamic->velocityRange, limits, source);
+            if (!file.dynamic->playWav.empty())
+                appendManifestLine(output, "PLAY_WAV",
+                                   iniFileValue(file.dynamic->playWav, source, "PLAY_WAV"), limits, source);
+            continue;
+        }
+        const auto index = file.manifestIndex.has_value()
+                               ? *file.manifestIndex
+                               : fallbackIndex(reservedModels, nextModel);
+        rejectDuplicate(emittedModels, index);
+        emittedModels.insert(index);
+        beginManifestSection(output, "MODEL_" + std::to_string(index), first, limits, source);
+        appendManifestLine(output, "FILE", iniFileValue(normalized, source, "FILE"), limits, source);
+        appendManifestVector(output, "POSITION", file.position, limits, source);
+        appendManifestVector(output, "ROTATION", file.rotation, limits, source);
+    }
+    if (sectionCount == 0U)
+        throw error(source, 0, "EMPTY_WORKSPACE", "a track manifest needs at least one model file");
+    return output;
+}
+
+std::string serializeModelsIni(const WorkspaceMetadata& workspace, WorkspaceLimits limits) {
+    return serializeModelsIni(std::span<const WorkspaceFile>(workspace.files), limits);
+}
+
+std::string serializeCarLodsIni(std::span<const WorkspaceFile> files, WorkspaceLimits limits) {
+    const std::string source = "data/lods.ini";
+    if (files.size() > limits.maxFiles)
+        throw error(source, 0, "COUNT_LIMIT", "workspace file count exceeds configured limit");
+    std::vector<const WorkspaceFile*> lods;
+    lods.reserve(files.size());
+    for (const auto& file : files)
+        if (file.lod.has_value() && file.auxiliary.empty()) lods.push_back(&file);
+    if (lods.empty())
+        throw error(source, 0, "EMPTY_WORKSPACE", "a car LOD manifest needs at least one LOD file");
+    if (lods.size() > limits.maxManifestEntries)
+        throw error(source, 0, "COUNT_LIMIT", "LOD section count exceeds configured limit");
+    std::stable_sort(lods.begin(), lods.end(), [](const auto* left, const auto* right) {
+        return left->lod->index < right->lod->index;
+    });
+    std::set<std::uint32_t> indexes;
+    std::string output;
+    bool first = true;
+    for (const auto* file : lods) {
+        const auto index = file->lod->index;
+        if (!indexes.insert(index).second)
+            throw error(source, 0, "AMBIGUOUS_REFERENCE", "LOD manifest index is duplicated");
+        std::string normalized;
+        std::string reason;
+        if (!portableCarLodFile(file->name, limits.maxPathBytes, normalized, reason))
+            throw error(source, 0, "UNSAFE_REFERENCE", reason);
+        beginManifestSection(output, "LOD_" + std::to_string(index), first, limits, source);
+        appendManifestLine(output, "FILE", iniFileValue(normalized, source, "FILE"), limits, source);
+        appendManifestLine(output, "IN", formatManifestNumber(file->lod->inDistance, source, "IN"), limits, source);
+        appendManifestLine(output, "OUT", formatManifestNumber(file->lod->outDistance, source, "OUT"), limits, source);
+    }
+    return output;
+}
+
+std::string serializeCarLodsIni(const WorkspaceMetadata& workspace, WorkspaceLimits limits) {
+    const std::string source = workspace.manifest.empty() ? "data/lods.ini" : workspace.manifest;
+    if (workspace.files.size() > limits.maxFiles)
+        throw error(source, 0, "COUNT_LIMIT", "workspace file count exceeds configured limit");
+    std::vector<const WorkspaceFile*> lods;
+    lods.reserve(workspace.files.size());
+    for (const auto& file : workspace.files)
+        if (file.lod.has_value() && file.auxiliary.empty()) lods.push_back(&file);
+    if (lods.empty())
+        throw error(source, 0, "EMPTY_WORKSPACE", "a car LOD manifest needs at least one LOD file");
+    if (lods.size() > limits.maxManifestEntries)
+        throw error(source, 0, "COUNT_LIMIT", "LOD section count exceeds configured limit");
+    std::stable_sort(lods.begin(), lods.end(), [](const auto* left, const auto* right) {
+        return left->lod->index < right->lod->index;
+    });
+    std::set<std::uint32_t> indexes;
+    std::string output;
+    bool first = true;
+    if (workspace.cockpitHrDistance.has_value()) {
+        beginManifestSection(output, "COCKPIT_HR", first, limits, source);
+        appendManifestLine(output, "DISTANCE_SWITCH",
+                           formatManifestNumber(*workspace.cockpitHrDistance, source, "DISTANCE_SWITCH"),
+                           limits, source);
+    }
+    if (workspace.driverHrDistance.has_value()) {
+        beginManifestSection(output, "DRIVER_HR", first, limits, source);
+        appendManifestLine(output, "DISTANCE_SWITCH",
+                           formatManifestNumber(*workspace.driverHrDistance, source, "DISTANCE_SWITCH"),
+                           limits, source);
+    }
+    for (const auto* file : lods) {
+        const auto index = file->lod->index;
+        if (!indexes.insert(index).second)
+            throw error(source, 0, "AMBIGUOUS_REFERENCE", "LOD manifest index is duplicated");
+        std::string normalized;
+        std::string reason;
+        if (!portableCarLodFile(file->name, limits.maxPathBytes, normalized, reason))
+            throw error(source, 0, "UNSAFE_REFERENCE", reason);
+        beginManifestSection(output, "LOD_" + std::to_string(index), first, limits, source);
+        appendManifestLine(output, "FILE", iniFileValue(normalized, source, "FILE"), limits, source);
+        appendManifestLine(output, "IN", formatManifestNumber(file->lod->inDistance, source, "IN"), limits, source);
+        appendManifestLine(output, "OUT", formatManifestNumber(file->lod->outDistance, source, "OUT"), limits, source);
+    }
+    return output;
+}
+
 std::vector<DynamicObjectManifest> contiguousDynamicTrackObjects(
     std::span<const DynamicObjectManifest> objects, std::vector<std::string>& warnings) {
     std::map<std::uint32_t, const DynamicObjectManifest*> byIndex;
     for (const auto& object : objects) {
-        if (byIndex.contains(object.index)) {
-            warnings.push_back("DYNAMIC_OBJECT_" + std::to_string(object.index) +
+        const auto index = object.index.value_or(0U);
+        if (byIndex.contains(index)) {
+            warnings.push_back("DYNAMIC_OBJECT_" + std::to_string(index) +
                                " is duplicated; the preview uses its first entry");
             continue;
         }
-        byIndex.emplace(object.index, &object);
+        byIndex.emplace(index, &object);
     }
     std::vector<DynamicObjectManifest> output;
     for (std::uint64_t index = 0;

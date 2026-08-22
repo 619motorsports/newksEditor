@@ -711,22 +711,74 @@ ProjectIoResult parseProjectInternal(std::string_view text, const SourceIdentity
         double size = 0.0, kn5Version = 0.0;
         std::string name, sha256;
         if (getString(*asset, "name", name, diagnostics, "asset", true)) source.name = name;
-        if (getNumber(*asset, "size", size, diagnostics, "asset", true)) {
+        const bool hasSize = getNumber(*asset, "size", size, diagnostics, "asset", true);
+        if (hasSize) {
             if (size >= 0.0 && std::trunc(size) == size && size <= kJsSafeIntegerMaximum)
                 source.size = static_cast<std::uint64_t>(size);
             else addDiagnostic(diagnostics, "SOURCE_SIZE", "asset.size", "asset size must be a non-negative JavaScript safe integer");
         }
-        if (getString(*asset, "sha256", sha256, diagnostics, "asset", true)) source.sha256 = sha256;
-        if (getNumber(*asset, "kn5Version", kn5Version, diagnostics, "asset") && kn5Version >= 0.0 && std::trunc(kn5Version) == kn5Version && static_cast<long double>(kn5Version) <= static_cast<long double>(std::numeric_limits<std::uint32_t>::max())) source.kn5Version = static_cast<std::uint32_t>(kn5Version);
+        const auto persistedSha = member(*asset, "sha256");
+        const bool hasSha = persistedSha != nullptr;
+        if (getString(*asset, "sha256", sha256, diagnostics, "asset", expectedSource == nullptr && !hasSha))
+            source.sha256 = sha256;
+        const auto persistedVersion = member(*asset, "kn5Version");
+        const bool hasVersion = persistedVersion != nullptr;
+        if (getNumber(*asset, "kn5Version", kn5Version, diagnostics, "asset")) {
+            if (kn5Version >= 0.0 && std::trunc(kn5Version) == kn5Version &&
+                static_cast<long double>(kn5Version) <=
+                    static_cast<long double>(std::numeric_limits<std::uint32_t>::max()))
+                source.kn5Version = static_cast<std::uint32_t>(kn5Version);
+            else
+                addDiagnostic(diagnostics, "SOURCE_VERSION", "asset.kn5Version",
+                              "asset KN5 version must be a non-negative uint32 integer");
+        }
         for (const auto& [key, ignored] : asset->object)
             if (key != "name" && key != "size" && key != "sha256" && key != "kn5Version")
                 addDiagnostic(diagnostics, "UNSUPPORTED_FIELD", "asset." + key, "asset field is not modeled");
+
+        // Current JavaScript projects omit the primary SHA-256. When the
+        // caller also supplies the observed source, validate the persisted
+        // metadata under the native identity policy and fill that missing
+        // digest from the observed bytes. Keep this compatibility limited to
+        // the primary asset; secondary identities remain strict.
+        if (!hasSha && expectedSource != nullptr) {
+            try {
+                const SourceIdentity expected = normalizeSourceIdentity(*expectedSource);
+                SourceIdentity persisted = source;
+                persisted.sha256 = expected.sha256;
+                SourceIdentity comparisonExpected = expected;
+                // JS loadEditorProject treats zero size and zero KN5 version
+                // as unspecified values.  A missing field is still diagnosed
+                // by getString/getNumber above and is not made valid here.
+                if (hasSize && source.size == 0U) comparisonExpected.size = 0U;
+                if (hasVersion && source.kn5Version.has_value() && *source.kn5Version == 0U)
+                    comparisonExpected.kn5Version = 0U;
+                if (!sourceIdentityMatches(comparisonExpected, persisted))
+                    addDiagnostic(diagnostics, "STALE_SOURCE", "asset",
+                                  "project asset identity does not match the expected source");
+                // Do not retain a browser wildcard or an omitted hash in the
+                // native session.  The observed source is the authoritative
+                // identity after the persisted metadata has been checked.
+                source = expected;
+            } catch (const AuthoringError& errorValue) {
+                addDiagnostic(diagnostics, errorValue.code(), "asset", errorValue.what());
+            }
+        }
     } else if (expectedSource != nullptr) source = *expectedSource;
     else addDiagnostic(diagnostics, "FIELD_MISSING", "asset", "asset identity is required");
     try { source = normalizeSourceIdentity(std::move(source)); }
     catch (const AuthoringError& errorValue) { addDiagnostic(diagnostics, errorValue.code(), "asset", errorValue.what()); return {std::nullopt, std::move(diagnostics)}; }
     if (expectedSource != nullptr) {
-        try { if (!sourceIdentityMatches(normalizeSourceIdentity(*expectedSource), source)) addDiagnostic(diagnostics, "STALE_SOURCE", "asset", "project asset identity does not match the expected source"); }
+        try {
+            const SourceIdentity expected = normalizeSourceIdentity(*expectedSource);
+            SourceIdentity comparisonExpected = expected;
+            const bool hasAssetObject = isObject(asset);
+            if (hasAssetObject && source.size == 0U) comparisonExpected.size = 0U;
+            if (hasAssetObject && source.kn5Version.has_value() && *source.kn5Version == 0U)
+                comparisonExpected.kn5Version = 0U;
+            if (!sourceIdentityMatches(comparisonExpected, source))
+                addDiagnostic(diagnostics, "STALE_SOURCE", "asset", "project asset identity does not match the expected source");
+        }
         catch (const AuthoringError& errorValue) { addDiagnostic(diagnostics, errorValue.code(), "asset", errorValue.what()); }
     }
     ProjectSession session(source, AuthoringLimits{0, limits.maxEdits == 0 ? 1 : limits.maxEdits, limits.maxEdits, limits.maxStringBytes, limits.maxEdits});

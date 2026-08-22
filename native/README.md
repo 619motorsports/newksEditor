@@ -47,6 +47,21 @@ or edit error. Export uses the bounded KN5 and INI writers. A bounded
 `colliders.ini` parser retains sparse source section numbers. It records
 rejected sections, and export rejects this incomplete source data.
 
+The application library now owns the native authoring session and its source
+baselines. It accepts caller-owned bytes and returns owned export data. It does
+not open files or give paths to the renderer. The service calculates SHA-256
+identities for all opened assets. It accepts a current JavaScript project that
+omits the primary hash only when the caller supplies the matching source. The
+normalized file name, stored nonzero size and KN5 version, and observed bytes
+must agree. An explicit stored hash must also agree.
+Failed loads and exports do not replace the committed session or a bound
+secondary baseline.
+
+The workspace library writes bounded `models.ini` and `lods.ini` manifests.
+The track-data library writes bounded `surfaces.ini` files. These writers use
+deterministic field order and reject unsafe text, duplicate identities,
+non-finite values, and output that exceeds its limit.
+
 The render library includes DDS upload, recovered lighting math, shadow math,
 reflection math, camera matrices, and frame-pass plans. The camera code uses
 the `perspective`, `lookAt`, and `multiply` formulas from `public/app.js`.
@@ -88,6 +103,21 @@ out/native/dev/native/apex-native --inspect-ini ext_config.ini
 out/native/dev/native/apex-native --inspect-vao car.vao-patch
 out/native/dev/native/apex-native --inspect-ksanim animation.ksanim
 ```
+
+Export a project through the native authoring service:
+
+```sh
+out/native/dev/native/apex-native --export-project kn5 car.kn5 car.apex.json car_apex.kn5
+out/native/dev/native/apex-native --export-project csp car.kn5 car.apex.json car_apex.ini
+out/native/dev/native/apex-native --export-project collider car.kn5 car.apex.json collider.kn5 collider_apex.kn5
+out/native/dev/native/apex-native --export-project damage car.kn5 car.apex.json damage.ini damage_apex.ini
+out/native/dev/native/apex-native --export-project bottom-colliders car.kn5 car.apex.json colliders.ini colliders_apex.ini
+```
+
+The command reads all input before it writes output. The output path must not
+exist. The command creates a temporary file exclusively in the output directory
+and promotes it with a platform no-replace operation. A project diagnostic
+stops the export.
 
 An unavailable SDK, driver, validation layer, or adapter is reported
 explicitly. It is never presented as a successful backend initialization.

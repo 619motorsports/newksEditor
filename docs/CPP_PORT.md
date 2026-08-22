@@ -320,14 +320,26 @@ remains unchanged and feature-complete.
   asset after a stale identity or malformed edit. Bottom-collider export keeps
   sparse source section numbers and rejects a baseline with rejected sections.
   A bounded native parser supplies this bottom-collider source metadata.
+  An in-memory application service now owns the primary KN5, the project
+  session, and all secondary baselines. It calculates SHA-256 identities and
+  returns owned output without giving filesystem access to the renderer.
+  Project load, transactions, undo, redo, and export use this service. A
+  one-shot native command exports KN5, CSP, collider KN5, `damage.ini`, or
+  `colliders.ini` output. The command refuses to replace an existing file.
+  The service accepts current JavaScript projects that omit the primary hash.
+  This compatibility requires matching normalized file name, stored nonzero
+  size and KN5 version, and observed primary KN5 bytes. Explicit hashes and
+  secondary identities stay strict.
   A bounded adapter
   sends KN5 edits to the bake path. It retains diagnostics for CSP-only
   material modes, properties, and resources. Material number strings follow
   JavaScript syntax. Decimal underflow becomes signed zero. Overflow and
   boolean material properties remain invalid.
   The port deterministically exports modeled material and mesh edits to CSP.
-  It reports unsupported project categories instead of approximating them. Car damage and
-  bottom-collider authoring have bounded schemas and deterministic output. A
+  It reports unsupported project categories instead of approximating them.
+  Bounded serializers now write `models.ini`, `lods.ini`, and `surfaces.ini`.
+  They retain sparse source identities and reject unsafe or unbounded output.
+  Car damage and bottom-collider authoring have bounded schemas and deterministic output. A
   single-hierarchy car validator checks required nodes, wheels, pivots,
   colliders, and visual-model bounds. Multi-LOD validation is still staged.
   Full validation and the remaining project/export categories are not ported.

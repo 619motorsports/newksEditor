@@ -32,6 +32,8 @@ using apex::workspace::mergeKn5Models;
 using apex::workspace::modelPlacementMatrix;
 using apex::workspace::parseCarLodsIni;
 using apex::workspace::parseModelsIni;
+using apex::workspace::serializeCarLodsIni;
+using apex::workspace::serializeModelsIni;
 
 void require(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
@@ -258,6 +260,137 @@ void reusesManifestInputsAndAppliesDynamicCenters() {
     expectsError([&] { (void)mergeKn5Models(malformedInput); }, "NON_FINITE_TRANSFORM");
 }
 
+void serializesTrackManifestWithSparseAndDynamicEntries() {
+    apex::workspace::WorkspaceMetadata workspace;
+    apex::workspace::WorkspaceFile staticFile;
+    staticFile.name = "main.kn5";
+    staticFile.manifestIndex = 4U;
+    staticFile.position = {1.2345678F, 0.0F, -0.0000001F};
+    staticFile.rotation = {0.0F, 90.0F, 0.0F};
+
+    apex::workspace::WorkspaceFile fallbackFile;
+    fallbackFile.name = "details.kn5";
+    fallbackFile.position = {2.0F, 3.0F, 4.0F};
+
+    apex::workspace::WorkspaceFile dynamicFile;
+    dynamicFile.name = "fly by.kn5";
+    apex::workspace::DynamicObjectManifest dynamic;
+    dynamic.index.reset();
+    dynamic.probability = 75.0F;
+    dynamic.multiplicity = {1.0F, 3.0F};
+    dynamic.posMode = " fixed ";
+    dynamic.positionCenter = {-10.0F, 20.0F, 30.0F};
+    dynamic.positionRange = {4.0F, 5.0F, 6.0F};
+    dynamic.velMode = "linear";
+    dynamic.velocityBase = {1.0F, 2.0F, 3.0F};
+    dynamic.velocityRange = {7.0F, 8.0F, 9.0F};
+    dynamic.playWav = "fly by.wav";
+    dynamicFile.dynamic = dynamic;
+    dynamicFile.position = dynamic.positionCenter;
+
+    apex::workspace::WorkspaceFile auxiliary;
+    auxiliary.name = "driver.kn5";
+    auxiliary.auxiliary = "driver";
+    auxiliary.manifestIndex = 0U;
+    workspace.files = {staticFile, fallbackFile, dynamicFile, auxiliary};
+
+    const auto text = serializeModelsIni(workspace);
+    require(text.find("[MODEL_4]\nFILE=main.kn5\nPOSITION=1.234568, 0, 0\nROTATION=0, 90, 0") !=
+                std::string::npos,
+            "sparse static manifest index and JavaScript number formatting");
+    require(text.find("[MODEL_1]") != std::string::npos,
+            "auxiliary explicit index reserves the independent static fallback index");
+    require(text.find("[DYNAMIC_OBJECT_0]\nFILE='fly by.kn5'") != std::string::npos,
+            "dynamic fallback index and quoted file");
+    require(text.find("POS_MODE=FIXED") != std::string::npos &&
+                text.find("VEL_MODE=LINEAR") != std::string::npos &&
+                text.find("PLAY_WAV='fly by.wav'") != std::string::npos,
+            "dynamic fields and mode normalization");
+    const auto parsed = parseModelsIni(text);
+    require(parsed.models.size() == 2U && parsed.models[0].index == 1U &&
+                parsed.models[1].index == 4U,
+            "serialized sparse static entries round-trip");
+    require(parsed.dynamicObjects.size() == 1U && parsed.dynamicObjects[0].index == 0U &&
+                parsed.dynamicObjects[0].positionRange == apex::workspace::Vector3{4, 5, 6} &&
+                parsed.dynamicObjects[0].playWav == "fly by.wav" && parsed.warnings.empty(),
+            "serialized dynamic fields round-trip without warnings");
+}
+
+void serializesCarLodManifestWithSwitchesAndPortableParentPath() {
+    apex::workspace::WorkspaceMetadata workspace;
+    workspace.manifest = "data/lods.ini";
+    workspace.cockpitHrDistance = 6.0F;
+    workspace.driverHrDistance = 25.125F;
+    apex::workspace::WorkspaceFile first;
+    first.name = "Car LOD A.kn5";
+    first.lod = apex::workspace::CarLodManifest{0U, first.name, 0.0F, 15.0F, {}, 0U};
+    apex::workspace::WorkspaceFile second;
+    second.name = "body_lod_b.kn5";
+    second.lod = apex::workspace::CarLodManifest{1U, second.name, 15.0F, 45.0F, {}, 0U};
+    apex::workspace::WorkspaceFile driver;
+    driver.name = "Driver.kn5";
+    driver.auxiliary = "driver";
+    workspace.files = {second, driver, first};
+
+    const auto text = serializeCarLodsIni(workspace);
+    require(text.find("[COCKPIT_HR]\nDISTANCE_SWITCH=6") != std::string::npos &&
+                text.find("[DRIVER_HR]\nDISTANCE_SWITCH=25.125") != std::string::npos,
+            "car distance switches formatting");
+    require(text.find("FILE='Car LOD A.kn5'") != std::string::npos &&
+                text.find("FILE=body_lod_b.kn5") != std::string::npos,
+            "car LOD quoting and portable path");
+    const auto parsed = parseCarLodsIni(text);
+    require(parsed.lods.size() == 2U && parsed.lods[0].file == "Car LOD A.kn5" &&
+                parsed.lods[1].file == "body_lod_b.kn5" &&
+                parsed.cockpitHrDistance == 6.0F && parsed.driverHrDistance == 25.125F &&
+                parsed.warnings.empty(),
+            "car LOD manifest round-trip");
+    second.name = "..\\shared_car\\body_lod_b.kn5";
+    workspace.files[0].name = second.name;
+    const auto parentRelative = serializeCarLodsIni(workspace);
+    require(parentRelative.find("FILE=../shared_car/body_lod_b.kn5") != std::string::npos,
+            "car LOD parent-relative path normalization");
+}
+
+void rejectsUnsafeAmbiguousAndUnboundedManifestOutput() {
+    apex::workspace::WorkspaceMetadata workspace;
+    apex::workspace::WorkspaceFile first;
+    first.name = "first.kn5";
+    first.manifestIndex = 2U;
+    apex::workspace::WorkspaceFile second;
+    second.name = "second.kn5";
+    second.manifestIndex = 2U;
+    workspace.files = {first, second};
+    expectsError([&] { (void)serializeModelsIni(workspace); }, "AMBIGUOUS_REFERENCE");
+
+    workspace.files[1].manifestIndex.reset();
+    workspace.files[1].name = "../escape.kn5";
+    expectsError([&] { (void)serializeModelsIni(workspace); }, "UNSAFE_REFERENCE");
+
+    workspace.files[1].name = "second.kn5";
+    workspace.files[1].position[0] = std::numeric_limits<float>::infinity();
+    expectsError([&] { (void)serializeModelsIni(workspace); }, "NON_FINITE_VALUE");
+
+    workspace.files = {first};
+    WorkspaceLimits outputLimit;
+    outputLimit.maxOutputBytes = 8U;
+    expectsError([&] { (void)serializeModelsIni(workspace, outputLimit); }, "OUTPUT_LIMIT");
+
+    apex::workspace::WorkspaceMetadata car;
+    apex::workspace::WorkspaceFile carFirst;
+    carFirst.name = "car.kn5";
+    carFirst.lod = apex::workspace::CarLodManifest{0U, carFirst.name, 0.0F, 10.0F, {}, 0U};
+    apex::workspace::WorkspaceFile carSecond = carFirst;
+    carSecond.name = "car_lod_b.kn5";
+    carSecond.lod->index = 0U;
+    car.files = {carFirst, carSecond};
+    expectsError([&] { (void)serializeCarLodsIni(car); }, "AMBIGUOUS_REFERENCE");
+
+    car.files[1].lod->index = 1U;
+    car.files[1].name = "car?.kn5";
+    expectsError([&] { (void)serializeCarLodsIni(car); }, "UNSAFE_REFERENCE");
+}
+
 } // namespace
 
 int main() {
@@ -267,6 +400,9 @@ int main() {
         mergesScenesWithTransformsAndResourceRemapping();
         assemblesManifestInputsAndRejectsInvalidReferences();
         reusesManifestInputsAndAppliesDynamicCenters();
+        serializesTrackManifestWithSparseAndDynamicEntries();
+        serializesCarLodManifestWithSwitchesAndPortableParentPath();
+        rejectsUnsafeAmbiguousAndUnboundedManifestOutput();
         std::cout << "workspace tests passed\n";
         return 0;
     } catch (const std::exception& error) {

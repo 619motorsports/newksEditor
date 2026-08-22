@@ -1,5 +1,6 @@
 #include "apex/authoring/project_io.hpp"
 
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -214,6 +215,100 @@ void reportsUnsupportedFieldsAndStaleSource() {
     require(result.diagnostics.size() >= 2, "unsupported and stale diagnostics");
 }
 
+void acceptsCurrentJavaScriptPrimaryIdentity() {
+    const std::string currentJs =
+        "{\"format\":\"apex-editor-project\",\"version\":1,"
+        "\"asset\":{\"name\":\"car.kn5\",\"size\":42,\"kn5Version\":6},"
+        "\"nodeEdits\":{\"0\":{\"active\":false}}}";
+    const auto loaded = apex::authoring::parseProject(currentJs, identity());
+    require(loaded.project.has_value() && loaded.diagnostics.empty() &&
+                loaded.project->source.name == "car.kn5" &&
+                loaded.project->source.size == 42U &&
+                loaded.project->source.sha256 == std::string(64, 'a') &&
+                loaded.project->source.kn5Version == 6U &&
+                loaded.project->nodes.at("0").active == false,
+            "current JavaScript project fills the observed primary hash after metadata validation");
+
+    const auto wildcard = apex::authoring::parseProject(
+        "{\"format\":\"apex-editor-project\",\"version\":1,"
+        "\"asset\":{\"name\":\"car.kn5\",\"size\":0,\"kn5Version\":0}}",
+        identity());
+    require(wildcard.project.has_value() && wildcard.diagnostics.empty() &&
+                wildcard.project->source.sha256 == std::string(64, 'a'),
+            "JavaScript zero size and KN5 version retain wildcard semantics");
+
+    const auto staleSize = apex::authoring::parseProject(
+        "{\"format\":\"apex-editor-project\",\"version\":1,"
+        "\"asset\":{\"name\":\"car.kn5\",\"size\":43,\"kn5Version\":6}}",
+        identity());
+    require(staleSize.project.has_value() &&
+                std::any_of(staleSize.diagnostics.begin(), staleSize.diagnostics.end(),
+                            [](const auto& diagnostic) { return diagnostic.code == "STALE_SOURCE"; }),
+            "stale JavaScript project size is diagnosed");
+
+    const auto staleVersion = apex::authoring::parseProject(
+        "{\"format\":\"apex-editor-project\",\"version\":1,"
+        "\"asset\":{\"name\":\"car.kn5\",\"size\":42,\"kn5Version\":7}}",
+        identity());
+    require(staleVersion.project.has_value() &&
+                std::any_of(staleVersion.diagnostics.begin(), staleVersion.diagnostics.end(),
+                            [](const auto& diagnostic) { return diagnostic.code == "STALE_SOURCE"; }),
+            "stale JavaScript project KN5 version is diagnosed");
+
+    const auto staleName = apex::authoring::parseProject(
+        "{\"format\":\"apex-editor-project\",\"version\":1,"
+        "\"asset\":{\"name\":\"other.kn5\",\"size\":42,\"kn5Version\":6}}",
+        identity());
+    require(staleName.project.has_value() &&
+                std::any_of(staleName.diagnostics.begin(), staleName.diagnostics.end(),
+                            [](const auto& diagnostic) { return diagnostic.code == "STALE_SOURCE"; }),
+            "stale JavaScript project name is diagnosed");
+
+    const auto malformedVersion = apex::authoring::parseProject(
+        "{\"format\":\"apex-editor-project\",\"version\":1,"
+        "\"asset\":{\"name\":\"car.kn5\",\"size\":42,\"kn5Version\":-1}}",
+        identity());
+    require(malformedVersion.project.has_value() &&
+                std::any_of(malformedVersion.diagnostics.begin(), malformedVersion.diagnostics.end(),
+                            [](const auto& diagnostic) { return diagnostic.code == "SOURCE_VERSION"; }),
+            "malformed JavaScript project KN5 version is diagnosed");
+
+    const auto staleHash = apex::authoring::parseProject(
+        "{\"format\":\"apex-editor-project\",\"version\":1,"
+        "\"asset\":{\"name\":\"car.kn5\",\"size\":42,"
+        "\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\","
+        "\"kn5Version\":6}}",
+        identity());
+    require(staleHash.project.has_value() &&
+                std::any_of(staleHash.diagnostics.begin(), staleHash.diagnostics.end(),
+                            [](const auto& diagnostic) { return diagnostic.code == "STALE_SOURCE"; }) &&
+                staleHash.project->source.sha256 == std::string(64, 'b'),
+            "explicit primary hash remains strict and stale");
+
+    const auto malformedHash = apex::authoring::parseProject(
+        "{\"format\":\"apex-editor-project\",\"version\":1,"
+        "\"asset\":{\"name\":\"car.kn5\",\"size\":42,\"sha256\":\"short\"},"
+        "\"nodeEdits\":{\"0\":{\"active\":false}}}",
+        identity());
+    require(!malformedHash.project.has_value() &&
+                !malformedHash.diagnostics.empty() &&
+                malformedHash.diagnostics.back().code == "SOURCE_IDENTITY_INVALID",
+            "malformed explicit primary hash fails before applying edits");
+
+    expectsIoError([&] {
+        (void)apex::authoring::parseProject(
+            "{\"format\":\"apex-editor-project\",\"version\":1,"
+            "\"asset\":{\"name\":\"car.kn5\",\"size\":42},"
+            "\"nodeEdits\":{\"0\":{\"active\":false}}",
+            identity());
+    }, "JSON_TRUNCATED");
+
+    const auto withoutObservedSource = apex::authoring::parseProject(currentJs);
+    require(!withoutObservedSource.project.has_value() &&
+                !withoutObservedSource.diagnostics.empty(),
+            "JavaScript project without an observed source remains fail-closed");
+}
+
 void rejectsDirectInvalidStateAndPreservesJsonUnicodeRules() {
     apex::authoring::ProjectState direct;
     direct.source = identity();
@@ -356,6 +451,7 @@ int main() {
         exportsDeterministicCspAndReportsUnsupported();
         rejectsUntrustedJson();
         reportsUnsupportedFieldsAndStaleSource();
+        acceptsCurrentJavaScriptPrimaryIdentity();
         rejectsDirectInvalidStateAndPreservesJsonUnicodeRules();
         enforcesFieldSchemasNullsAndSafeIntegers();
         handlesUntrustedSecondaryIdentities();

@@ -15,6 +15,7 @@ namespace apex::domain {
 
 struct TrackDataLimits {
     std::size_t maxInputBytes = 64U * 1024U * 1024U;
+    std::size_t maxOutputBytes = 64U * 1024U * 1024U;
     std::size_t maxLineBytes = 1U * 1024U * 1024U;
     std::size_t maxLines = 1'000'000;
     std::size_t maxSections = 100'000;
@@ -85,10 +86,16 @@ struct TrackSurfaces {
 [[nodiscard]] TrackSurfaces parse_track_surfaces(
     std::string_view text, std::string source = "data/surfaces.ini",
     TrackDataLimits limits = {});
+[[nodiscard]] std::string serialize_track_surfaces_ini(
+    const TrackSurfaces& surfaces, TrackDataLimits limits = {});
 inline TrackSurfaces parse_surfaces_ini(std::string_view text,
                                         std::string source = "data/surfaces.ini",
                                         TrackDataLimits limits = {}) {
     return parse_track_surfaces(text, std::move(source), limits);
+}
+inline std::string serialize_surfaces_ini(const TrackSurfaces& surfaces,
+                                          TrackDataLimits limits = {}) {
+    return serialize_track_surfaces_ini(surfaces, limits);
 }
 
 enum class RuntimeSurfaceStatus { not_physics, matched, fallback, ambiguous };
