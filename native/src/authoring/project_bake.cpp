@@ -1,11 +1,17 @@
 #include "apex/authoring/project_bake.hpp"
 
+#include <array>
+#include <charconv>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <map>
+#include <optional>
+#include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace apex::authoring {
 namespace {
@@ -62,6 +68,243 @@ void validatePath(std::string_view path, std::string_view label) {
         if (slash == std::string_view::npos) break;
         start = slash + 1u;
     }
+}
+
+std::string canonical(std::string_view value) {
+    std::string result(value);
+    for (auto& character : result) {
+        if (character >= 'A' && character <= 'Z')
+            character = static_cast<char>(character + ('a' - 'A'));
+    }
+    return result;
+}
+
+template <typename T>
+void rejectKeyCollisions(const std::map<std::string, T>& entries,
+                         std::string_view label) {
+    std::map<std::string, std::string> seen;
+    for (const auto& [key, value] : entries) {
+        (void)value;
+        const auto [position, inserted] = seen.emplace(canonical(key), key);
+        if (!inserted && position->second != key)
+            fail("ambiguous_key", std::string(label) +
+                                      " contains case-insensitive key collisions");
+    }
+}
+
+std::string_view trimNumber(std::string_view value) {
+    static constexpr std::array<std::string_view, 25> whitespace = {
+        "\x09",       "\x0a",       "\x0b",       "\x0c",       "\x0d",
+        "\x20",       "\xc2\xa0",   "\xe1\x9a\x80", "\xe2\x80\x80", "\xe2\x80\x81",
+        "\xe2\x80\x82", "\xe2\x80\x83", "\xe2\x80\x84", "\xe2\x80\x85", "\xe2\x80\x86",
+        "\xe2\x80\x87", "\xe2\x80\x88", "\xe2\x80\x89", "\xe2\x80\x8a", "\xe2\x80\xa8",
+        "\xe2\x80\xa9", "\xe2\x80\xaf", "\xe2\x81\x9f", "\xe3\x80\x80", "\xef\xbb\xbf"};
+    const auto trimFront = [&value](const auto& values) {
+        for (const auto item : values) {
+            if (value.starts_with(item)) {
+                value.remove_prefix(item.size());
+                return true;
+            }
+        }
+        return false;
+    };
+    const auto trimBack = [&value](const auto& values) {
+        for (const auto item : values) {
+            if (value.ends_with(item)) {
+                value.remove_suffix(item.size());
+                return true;
+            }
+        }
+        return false;
+    };
+    while (trimFront(whitespace)) {}
+    while (trimBack(whitespace)) {}
+    return value;
+}
+
+std::optional<double> jsNumber(std::string_view source) {
+    auto value = trimNumber(source);
+    if (value.empty()) return 0.0;
+    if (value.size() > 2u && value.front() == '0' &&
+        (value[1] == 'x' || value[1] == 'X' || value[1] == 'b' || value[1] == 'B' ||
+         value[1] == 'o' || value[1] == 'O')) {
+        const auto base = value[1] == 'x' || value[1] == 'X'
+                              ? 16u
+                              : value[1] == 'b' || value[1] == 'B' ? 2u : 8u;
+        double result = 0.0;
+        for (std::size_t index = 2u; index < value.size(); ++index) {
+            const auto character = value[index];
+            unsigned digit = 0u;
+            if (character >= '0' && character <= '9')
+                digit = static_cast<unsigned>(character - '0');
+            else if (character >= 'a' && character <= 'f')
+                digit = 10u + static_cast<unsigned>(character - 'a');
+            else if (character >= 'A' && character <= 'F')
+                digit = 10u + static_cast<unsigned>(character - 'A');
+            else
+                return std::nullopt;
+            if (digit >= base) return std::nullopt;
+            result = result * static_cast<double>(base) + static_cast<double>(digit);
+            if (!std::isfinite(result)) return std::nullopt;
+        }
+        return result;
+    }
+
+    if (value.front() == '+') {
+        value.remove_prefix(1u);
+        if (value.empty()) return std::nullopt;
+    }
+    double result = 0.0;
+    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result,
+                                        std::chars_format::general);
+    if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() ||
+        !std::isfinite(result))
+        return std::nullopt;
+    return result;
+}
+
+std::optional<std::uint32_t> unsignedMode(std::string_view value,
+                                          std::uint32_t maximum) {
+    const auto number = jsNumber(value);
+    if (!number || *number < 0.0 || *number > static_cast<double>(maximum) ||
+        std::floor(*number) != *number)
+        return std::nullopt;
+    return static_cast<std::uint32_t>(*number);
+}
+
+void appendWarning(formats::Kn5BakeProject& output, std::string warning,
+                   const ProjectBakeLimits& limits, std::size_t& stringBytes) {
+    validateString(warning, limits, "project bake warning", stringBytes);
+    output.warnings.push_back(std::move(warning));
+}
+
+const std::string& stringScalar(const MaterialScalar& value, std::string_view field) {
+    const auto* text = std::get_if<std::string>(&value);
+    if (text == nullptr)
+        fail("field_type", std::string(field) + " must be a string");
+    return *text;
+}
+
+void validateFinite(float value, std::string_view label);
+
+std::vector<float> propertyScalar(const MaterialScalar& value) {
+    if (const auto* number = std::get_if<float>(&value)) {
+        if (!std::isfinite(*number)) fail("non_finite", "material property must be finite");
+        return {*number};
+    }
+    if (const auto* boolean = std::get_if<bool>(&value)) return {*boolean ? 1.0F : 0.0F};
+    const auto number = jsNumber(std::get<std::string>(value));
+    if (!number) return {};
+    const auto converted = static_cast<float>(*number);
+    if (!std::isfinite(converted)) return {};
+    return {converted};
+}
+
+void mapMaterialEdit(std::string_view name, const MaterialEdit& edit,
+                     formats::Kn5BakeProject& output, const ProjectBakeLimits& limits,
+                     std::size_t& stringBytes, std::size_t& materialFields,
+                     std::size_t& materialResources) {
+    if (edit.scalars.empty() && edit.vectors.empty() && edit.resources.empty())
+        fail("empty_edit", "material edit has no fields");
+    addBounded(materialFields, edit.scalars.size(), limits.maxMaterialFields,
+               "material fields");
+    addBounded(materialFields, edit.vectors.size(), limits.maxMaterialFields,
+               "material fields");
+    addBounded(materialResources, edit.resources.size(), limits.maxMaterialResources,
+               "material resources");
+    rejectKeyCollisions(edit.scalars, "material scalar fields");
+    rejectKeyCollisions(edit.vectors, "material vector fields");
+    rejectKeyCollisions(edit.resources, "material resources");
+
+    std::map<std::string, std::string> properties;
+    for (const auto& [field, value] : edit.scalars) {
+        (void)value;
+        if (field == "shader" || field == "blendMode" || field == "depthMode" ||
+            field == "cullMode")
+            continue;
+        properties.emplace(canonical(field), field);
+    }
+    for (const auto& [field, value] : edit.vectors) {
+        (void)value;
+        const auto [position, inserted] = properties.emplace(canonical(field), field);
+        if (!inserted)
+            fail("ambiguous_key", std::string(name) + "." + position->second +
+                                      " has both scalar and vector values");
+    }
+
+    formats::Kn5BakeMaterialEdit mapped;
+    for (const auto& [field, value] : edit.scalars) {
+        validateText(field, limits, "material field", stringBytes);
+        if (field == "shader") {
+            const auto& text = stringScalar(value, field);
+            validateText(text, limits, "material shader", stringBytes);
+            mapped.shader = text;
+        } else if (field == "blendMode") {
+            const auto& text = stringScalar(value, field);
+            validateText(text, limits, "material blend mode", stringBytes);
+            const auto mode = unsignedMode(text, 255u);
+            if (mode)
+                mapped.blend_mode = *mode;
+            else
+                appendWarning(output, std::string(name) + ": blendMode " + text +
+                                          " is CSP-only and was not baked",
+                              limits, stringBytes);
+        } else if (field == "depthMode") {
+            const auto& text = stringScalar(value, field);
+            validateText(text, limits, "material depth mode", stringBytes);
+            const auto mode = unsignedMode(text, std::numeric_limits<std::uint32_t>::max());
+            if (mode)
+                mapped.depth_mode = *mode;
+            else
+                appendWarning(output, std::string(name) + ": depthMode " + text +
+                                          " is CSP-only and was not baked",
+                              limits, stringBytes);
+        } else if (field == "cullMode") {
+            const auto& text = stringScalar(value, field);
+            validateText(text, limits, "material cull mode", stringBytes);
+            mapped.cull_mode = text;
+        } else {
+            if (const auto* text = std::get_if<std::string>(&value))
+                validateText(*text, limits, "material property", stringBytes);
+            mapped.properties.emplace(field, propertyScalar(value));
+        }
+    }
+    for (const auto& [field, value] : edit.vectors) {
+        validateText(field, limits, "material vector field", stringBytes);
+        if (value.components < 2u || value.components > value.values.size())
+            fail("vector_size", "material vector must contain two to four components");
+        for (const auto component : value.values)
+            validateFinite(component, "material vector");
+        mapped.properties.emplace(
+            field, std::vector<float>(value.values.begin(),
+                                      value.values.begin() + value.components));
+    }
+    for (const auto& [slot, value] : edit.resources) {
+        validateText(slot, limits, "material resource slot", stringBytes);
+        if (value.clear)
+            fail("resource_clear", "cleared material resources must not survive project state");
+        const auto valueCount = static_cast<unsigned>(value.texture.has_value()) +
+                                static_cast<unsigned>(value.file.has_value()) +
+                                static_cast<unsigned>(value.color.has_value());
+        if (valueCount != 1u)
+            fail("resource_value", "material resource must contain exactly one value");
+        formats::Kn5BakeResourceEdit resource;
+        if (value.texture) {
+            validateText(*value.texture, limits, "material texture", stringBytes);
+            resource.texture = *value.texture;
+        }
+        if (value.file) {
+            validateText(*value.file, limits, "material resource file", stringBytes);
+            resource.file = *value.file;
+        }
+        if (value.color) {
+            for (const auto component : *value.color)
+                validateFinite(component, "material resource color");
+            resource.color = *value.color;
+        }
+        mapped.resources.emplace(slot, std::move(resource));
+    }
+    output.materials.emplace(std::string(name), std::move(mapped));
 }
 
 void validateFinite(float value, std::string_view label) {
@@ -126,6 +369,8 @@ void validateBaseline(const GeometryBaseline& baseline, std::string_view path,
 formats::Kn5BakeProject buildKn5BakeProject(const ProjectState& state,
                                              const GeometryBaselines& baselines,
                                              ProjectBakeLimits limits) {
+    if (state.materials.size() > limits.maxMaterialEdits)
+        fail("material_limit", "project material edit count exceeds the project bake limit");
     if (state.nodes.size() > limits.maxNodeEdits)
         fail("node_limit", "project node edit count exceeds the project bake limit");
     if (state.meshes.size() > limits.maxMeshEdits)
@@ -135,14 +380,23 @@ formats::Kn5BakeProject buildKn5BakeProject(const ProjectState& state,
     if (baselines.size() > limits.maxBaselines)
         fail("baseline_limit", "geometry baseline count exceeds the project bake limit");
 
+    rejectKeyCollisions(state.materials, "material edits");
+    formats::Kn5BakeProject result;
     std::size_t stringBytes = 0u;
+    std::size_t materialFields = 0u;
+    std::size_t materialResources = 0u;
+    for (const auto& [name, edit] : state.materials) {
+        validateText(name, limits, "material edit name", stringBytes);
+        mapMaterialEdit(name, edit, result, limits, stringBytes, materialFields,
+                        materialResources);
+    }
     for (const auto& [path, edit] : state.nodes) {
         validateString(path, limits, "node edit path", stringBytes);
         validatePath(path, "node edit path");
         validateNodeEdit(edit, limits, stringBytes);
     }
     for (const auto& [name, edit] : state.meshes) {
-        validateString(name, limits, "mesh edit name", stringBytes);
+        validateText(name, limits, "mesh edit name", stringBytes);
         validateMeshEdit(edit);
     }
     for (const auto& [path, edit] : state.geometry) {
@@ -157,7 +411,6 @@ formats::Kn5BakeProject buildKn5BakeProject(const ProjectState& state,
         validateBaseline(baseline, path, limits, baselineBytes);
     }
 
-    formats::Kn5BakeProject result;
     for (const auto& [path, edit] : state.nodes) {
         formats::Kn5BakeNodeEdit mapped;
         mapped.name = edit.name;

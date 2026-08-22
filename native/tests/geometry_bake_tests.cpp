@@ -204,6 +204,25 @@ void geometryWarningsAndBakeCopy() {
     catch (const Kn5BakeError& error) { threw = true; require(error.code() == "ambiguous_key", "bake collision code"); }
     require(threw, "case-insensitive bake keys are rejected");
 
+    auto ambiguousSource = source;
+    ambiguousSource.materials.push_back(ambiguousSource.materials.front());
+    ambiguousSource.materials.back().name = "body";
+    Kn5BakeProject materialEdit;
+    materialEdit.materials["Body"].shader = "ksPerPixelNM";
+    threw = false;
+    try { (void)bakeKn5(ambiguousSource, materialEdit); }
+    catch (const Kn5BakeError& error) { threw = true; require(error.code() == "ambiguous_key", "source material collision code"); }
+    require(threw, "case-insensitive source material names are rejected before editing");
+
+    ambiguousSource = source;
+    ambiguousSource.textures.push_back(ambiguousSource.textures.front());
+    ambiguousSource.textures.back().name = "BODY.DDS";
+    materialEdit.materials["Body"].resources["txDiffuse"].texture = "body.dds";
+    threw = false;
+    try { (void)bakeKn5(ambiguousSource, materialEdit); }
+    catch (const Kn5BakeError& error) { threw = true; require(error.code() == "ambiguous_key", "source texture collision code"); }
+    require(threw, "case-insensitive source texture names are rejected before editing");
+
     Kn5BakeProject nonCanonical;
     nonCanonical.nodes["01"].active = false;
     threw = false;
@@ -218,6 +237,15 @@ void geometryWarningsAndBakeCopy() {
     try { (void)bakeKn5(source, nonCanonicalBaseline); }
     catch (const Kn5BakeError& error) { threw = true; require(error.code() == "invalid_path", "bake baseline path code"); }
     require(threw, "non-canonical baseline paths are rejected");
+
+    Kn5BakeProject oversizedWarning;
+    oversizedWarning.warnings.push_back("adapter warning");
+    auto warningLimits = apex::core::ParseLimits{};
+    warningLimits.maxStringBytes = 4u;
+    threw = false;
+    try { (void)bakeKn5(source, oversizedWarning, warningLimits); }
+    catch (const Kn5BakeError& error) { threw = true; require(error.code() == "string_limit", "bake warning limit code"); }
+    require(threw, "oversized carried bake warnings are rejected before allocation");
 
     Kn5BakeProject malformedBaseline;
     malformedBaseline.geometry["0"].reverse_winding = true;

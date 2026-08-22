@@ -51,6 +51,7 @@ struct Kn5BakeProject {
     std::map<std::string, Kn5BakeNodeEdit> nodes;
     std::map<std::string, authoring::GeometryEdit> geometry;
     authoring::GeometryBaselines baselines;
+    std::vector<std::string> warnings;
 };
 
 struct Kn5BakeApplied {

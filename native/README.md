@@ -30,8 +30,9 @@ links, geometry metadata, and path state. The render model includes material
 profiles, bindings, and validated draw packets. Driver rigs include CPU
 reference skinning. The authoring model includes transactions, bounded
 project/CSP serialization, geometry edits, KN5 baking, car damage data, bottom
-colliders, and initial car validation. Project persistence includes node, mesh,
-and geometry edits. A bounded adapter sends these edits to the KN5 bake path.
+colliders, and initial car validation. Project persistence includes material,
+node, mesh, and geometry edits. A bounded adapter sends these edits to the KN5
+bake path. The adapter retains diagnostics for CSP-only material values.
 
 The render library includes DDS upload, recovered lighting math, shadow math,
 reflection math, camera matrices, and frame-pass plans. The camera code uses

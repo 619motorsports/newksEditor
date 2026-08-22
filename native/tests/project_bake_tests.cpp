@@ -1,5 +1,6 @@
 #include "apex/authoring/project_bake.hpp"
 #include "apex/formats/kn5_bake.hpp"
+#include "apex/formats/kn5_write.hpp"
 
 #include <array>
 #include <bit>
@@ -15,6 +16,9 @@ using apex::authoring::GeometryBaseline;
 using apex::authoring::GeometryEdit;
 using apex::authoring::GeometryBaselines;
 using apex::authoring::MeshEdit;
+using apex::authoring::MaterialEdit;
+using apex::authoring::MaterialResource;
+using apex::authoring::MaterialVector;
 using apex::authoring::NodeEdit;
 using apex::authoring::ProjectBakeError;
 using apex::authoring::ProjectBakeLimits;
@@ -52,6 +56,22 @@ GeometryBaseline baseline() {
 
 void mapsOnlySupportedStateExactly() {
     ProjectState state;
+    MaterialEdit material;
+    material.scalars["shader"] = std::string("ksPerPixelNM");
+    material.scalars["blendMode"] = std::string("0x1");
+    material.scalars["depthMode"] = std::string("7");
+    material.scalars["cullMode"] = std::string("NONE");
+    material.scalars["ksDiffuse"] = 0.25F;
+    material.scalars["useDetail"] = true;
+    material.scalars["detailUVMultiplier"] = std::string("2.5");
+    MaterialVector vector;
+    vector.values = {2.0F, 3.0F, 0.0F, 0.0F};
+    vector.components = 2u;
+    material.vectors["detailScale"] = vector;
+    material.resources["txDiffuse"].texture = "body.dds";
+    material.resources["txNormal"].file = "textures/body_nm.dds";
+    material.resources["txMaps"].color = std::array<float, 4>{1.0F, 0.5F, 0.25F, 1.0F};
+    state.materials.emplace("Body", material);
     NodeEdit node;
     node.name = "CHASSIS";
     node.active = false;
@@ -76,8 +96,25 @@ void mapsOnlySupportedStateExactly() {
     baselines.emplace("0", baseline());
 
     const auto result = buildKn5BakeProject(state, baselines);
-    require(result.nodes.size() == 1u && result.meshes.size() == 1u && result.geometry.size() == 1u &&
-                result.baselines.size() == 1u, "project bake output counts");
+    require(result.materials.size() == 1u && result.nodes.size() == 1u &&
+                result.meshes.size() == 1u && result.geometry.size() == 1u &&
+                result.baselines.size() == 1u && result.warnings.empty(),
+            "project bake output counts");
+    const auto& mappedMaterial = result.materials.at("Body");
+    require(mappedMaterial.shader == "ksPerPixelNM" && mappedMaterial.blend_mode == 1u &&
+                mappedMaterial.depth_mode == 7u && mappedMaterial.cull_mode == "NONE" &&
+                mappedMaterial.properties.at("ksDiffuse") == std::vector<float>({0.25F}) &&
+                mappedMaterial.properties.at("useDetail") == std::vector<float>({1.0F}) &&
+                mappedMaterial.properties.at("detailUVMultiplier") ==
+                    std::vector<float>({2.5F}) &&
+                mappedMaterial.properties.at("detailScale") ==
+                    std::vector<float>({2.0F, 3.0F}),
+            "project bake preserves material state and property values");
+    require(mappedMaterial.resources.at("txDiffuse").texture == "body.dds" &&
+                mappedMaterial.resources.at("txNormal").file == "textures/body_nm.dds" &&
+                mappedMaterial.resources.at("txMaps").color ==
+                    std::array<float, 4>{1.0F, 0.5F, 0.25F, 1.0F},
+            "project bake preserves embedded and CSP-only material resources");
     const auto& mappedNode = result.nodes.at("root");
     require(mappedNode.name == "CHASSIS" && mappedNode.active.has_value() &&
                 !*mappedNode.active && mappedNode.transform->at(12) == 4.0F,
@@ -98,9 +135,11 @@ void mapsOnlySupportedStateExactly() {
             "project bake copies caller-owned baselines");
 
     state.meshes.at("BODY").layer = 99u;
+    state.materials.at("Body").scalars["shader"] = std::string("MUTATED");
     state.nodes.at("root").name = "MUTATED";
     baselines.at("0").vertices[0] = 99.0F;
-    require(result.nodes.at("root").name == "CHASSIS" &&
+    require(result.materials.at("Body").shader == "ksPerPixelNM" &&
+                result.nodes.at("root").name == "CHASSIS" &&
                 *result.meshes.at("BODY").layer == 0u &&
                 result.baselines.at("0").vertices[0] == 0.0F,
             "project bake output does not alias caller state");
@@ -108,6 +147,36 @@ void mapsOnlySupportedStateExactly() {
 
 void rejectsMalformedStateBeforeCopy() {
     ProjectState state;
+    state.materials["Body"] = {};
+    expectsError([&] { (void)buildKn5BakeProject(state, {}); }, "empty_edit");
+
+    state = {};
+    state.materials["Body"].scalars["shader"] = 1.0F;
+    expectsError([&] { (void)buildKn5BakeProject(state, {}); }, "field_type");
+
+    state = {};
+    state.materials["Body"].vectors["bad"].components = 1u;
+    expectsError([&] { (void)buildKn5BakeProject(state, {}); }, "vector_size");
+
+    state = {};
+    state.materials["Body"].scalars["same"] = 1.0F;
+    state.materials["Body"].vectors["SAME"].components = 2u;
+    expectsError([&] { (void)buildKn5BakeProject(state, {}); }, "ambiguous_key");
+
+    state = {};
+    state.materials["Body"].resources["txDiffuse"] = MaterialResource{};
+    expectsError([&] { (void)buildKn5BakeProject(state, {}); }, "resource_value");
+
+    state = {};
+    state.materials["Body"].resources["txDiffuse"].texture = "body.dds";
+    state.materials["Body"].resources["txDiffuse"].file = "body.png";
+    expectsError([&] { (void)buildKn5BakeProject(state, {}); }, "resource_value");
+
+    state = {};
+    state.materials["Body"].resources["txDiffuse"].clear = true;
+    expectsError([&] { (void)buildKn5BakeProject(state, {}); }, "resource_clear");
+
+    state = {};
     state.nodes["root"] = {};
     expectsError([&] { (void)buildKn5BakeProject(state, {}); }, "empty_edit");
 
@@ -131,6 +200,10 @@ void rejectsMalformedStateBeforeCopy() {
     state = {};
     state.meshes["BODY"] = {};
     expectsError([&] { (void)buildKn5BakeProject(state, {}); }, "empty_edit");
+
+    state = {};
+    state.meshes[""].layer = 1u;
+    expectsError([&] { (void)buildKn5BakeProject(state, {}); }, "empty_string");
 
     state = {};
     GeometryEdit edit;
@@ -157,6 +230,22 @@ void enforcesCopyLimits() {
     ProjectState state;
     state.meshes["BODY"].layer = 1u;
     ProjectBakeLimits limits;
+    limits.maxMaterialEdits = 0u;
+    ProjectState materialState;
+    materialState.materials["Body"].scalars["shader"] = std::string("ksPerPixel");
+    expectsError([&] { (void)buildKn5BakeProject(materialState, {}, limits); },
+                 "material_limit");
+    limits = {};
+    limits.maxMaterialFields = 0u;
+    expectsError([&] { (void)buildKn5BakeProject(materialState, {}, limits); },
+                 "output_limit");
+    limits = {};
+    limits.maxMaterialResources = 0u;
+    ProjectState resourceState;
+    resourceState.materials["Body"].resources["txDiffuse"].texture = "body.dds";
+    expectsError([&] { (void)buildKn5BakeProject(resourceState, {}, limits); },
+                 "output_limit");
+    limits = {};
     limits.maxNodeEdits = 0u;
     ProjectState nodeState;
     nodeState.nodes["root"].active = false;
@@ -191,7 +280,14 @@ apex::formats::Kn5File bakeFixture() {
     apex::formats::Kn5Material material;
     material.name = "Body";
     material.shader = "ksPerPixel";
+    material.resources.push_back({"txDiffuse", 21u, "body.dds"});
     file.materials.push_back(std::move(material));
+    apex::formats::Kn5Texture texture;
+    texture.active = true;
+    texture.name = "body.dds";
+    texture.size = 3u;
+    texture.data = {1u, 2u, 3u};
+    file.textures.push_back(std::move(texture));
     file.root.type = 1u;
     file.root.kind = "node";
     file.root.name = "root";
@@ -213,6 +309,15 @@ apex::formats::Kn5File bakeFixture() {
 
 void adapterFeedsProductionBakeAuthority() {
     ProjectState state;
+    state.materials["body"].scalars["shader"] = std::string("ksPerPixelNM");
+    state.materials["body"].scalars["blendMode"] = std::string("1");
+    state.materials["body"].scalars["depthMode"] = std::string("7");
+    state.materials["body"].scalars["ksDiffuse"] = 0.25F;
+    MaterialVector detailScale;
+    detailScale.values = {2.0F, 3.0F, 0.0F, 0.0F};
+    detailScale.components = 2u;
+    state.materials["body"].vectors["detailScale"] = detailScale;
+    state.materials["body"].resources["txDiffuse"].texture = "BODY.DDS";
     state.nodes["root"].name = "CHASSIS";
     state.nodes["root"].active = false;
     state.nodes["root"].transform = apex::authoring::Matrix4{1, 0, 0, 0, 0, 1, 0, 0,
@@ -225,13 +330,71 @@ void adapterFeedsProductionBakeAuthority() {
 
     const auto project = buildKn5BakeProject(state, baselines);
     const auto baked = apex::formats::bakeKn5(bakeFixture(), project);
-    require(baked.applied.nodes == 1u && baked.applied.meshes == 1u &&
+    require(baked.applied.materials == 1u && baked.applied.properties == 2u &&
+                baked.applied.resources == 1u && baked.applied.nodes == 1u &&
+                baked.applied.meshes == 1u &&
                 baked.applied.geometry == 1u && !baked.model.root.active &&
+                baked.model.materials[0].shader == "ksPerPixelNM" &&
+                baked.model.materials[0].blendMode == 1u &&
+                baked.model.materials[0].depthMode == 7u &&
+                baked.model.materials[0].resources[0].texture == "body.dds" &&
+                baked.model.materials[0].resources[0].textureId == 21u &&
                 baked.model.root.name == "CHASSIS" && baked.model.root.transform[12] == 2.0F &&
                 baked.model.root.children[0].transparent &&
                 baked.model.root.children[0].layer == 7u &&
                 baked.model.root.children[0].indices == std::vector<std::uint16_t>({0u, 0u, 1u}),
-            "project-state adapter feeds node, mesh, and geometry edits into the production KN5 bake");
+            "project-state adapter feeds material, node, mesh, and geometry edits into the production KN5 bake");
+
+    const auto reparsed = apex::formats::parseKn5(apex::formats::serializeKn5(baked.model));
+    require(reparsed.materials[0].shader == "ksPerPixelNM" &&
+                reparsed.materials[0].blendMode == 1u &&
+                reparsed.materials[0].depthMode == 7u &&
+                reparsed.materials[0].properties.size() == 2u &&
+                reparsed.materials[0].properties[0].value2 ==
+                    std::array<float, 2>{2.0F, 3.0F} &&
+                reparsed.materials[0].properties[1].value == 0.25F &&
+                reparsed.materials[0].resources[0].texture == "body.dds" &&
+                reparsed.materials[0].resources[0].textureId == 21u &&
+                reparsed.root.name == "CHASSIS" && !reparsed.root.active &&
+                reparsed.root.transform[12] == 2.0F &&
+                reparsed.root.children[0].transparent &&
+                reparsed.root.children[0].layer == 7u,
+            "project-state material and node edits survive KN5 serialization");
+}
+
+void matchesJavaScriptNumberConversion() {
+    ProjectState state;
+    state.materials["Body"].scalars["blendMode"] = std::string("0x");
+    state.materials["Body"].scalars["depthMode"] = std::string("0b");
+    state.materials["Body"].scalars["asciiSpace"] = std::string(" ");
+    state.materials["Body"].scalars["unicodeSpace"] = std::string("\xc2\xa0");
+    state.materials["Body"].scalars["badOctal"] = std::string("0o");
+
+    const auto project = buildKn5BakeProject(state, {});
+    const auto& material = project.materials.at("Body");
+    require(project.warnings.size() == 2u && !material.blend_mode &&
+                !material.depth_mode &&
+                material.properties.at("asciiSpace") == std::vector<float>({0.0F}) &&
+                material.properties.at("unicodeSpace") == std::vector<float>({0.0F}) &&
+                material.properties.at("badOctal").empty(),
+            "project bake follows finite JavaScript Number conversion");
+}
+
+void preservesMaterialLossDiagnostics() {
+    ProjectState state;
+    state.materials["Body"].scalars["blendMode"] = std::string("ALPHA_BLEND");
+    state.materials["Body"].scalars["depthMode"] = std::string("READ_ONLY");
+    state.materials["Body"].scalars["cullMode"] = std::string("NONE");
+    state.materials["Body"].scalars["ksDiffuse"] = std::string("ORIGINAL");
+    state.materials["Body"].resources["txNormal"].file = "textures/body_nm.dds";
+
+    const auto project = buildKn5BakeProject(state, {});
+    require(project.warnings.size() == 2u &&
+                project.materials.at("Body").properties.at("ksDiffuse").empty(),
+            "adapter retains unsupported mode and property diagnostics");
+    const auto baked = apex::formats::bakeKn5(bakeFixture(), project);
+    require(baked.warnings.size() == 5u && baked.applied.materials == 0u,
+            "production bake returns adapter and CSP-only material warnings");
 }
 
 } // namespace
@@ -242,6 +405,8 @@ int main() {
         rejectsMalformedStateBeforeCopy();
         enforcesCopyLimits();
         adapterFeedsProductionBakeAuthority();
+        matchesJavaScriptNumberConversion();
+        preservesMaterialLossDiagnostics();
         std::cout << "project bake tests passed\n";
         return 0;
     } catch (const std::exception& error) {

@@ -11,10 +11,13 @@
 namespace apex::authoring {
 
 // This adapter owns the conversion boundary between the transaction model and
-// the KN5 writer. It deliberately maps only node, mesh, and geometry edits. Other
-// ProjectState categories remain outside the KN5 bake contract until their
-// serializers are implemented.
+// the KN5 writer. It deliberately maps only material, node, mesh, and geometry
+// edits. Other ProjectState categories remain outside the KN5 bake contract
+// until their serializers are implemented.
 struct ProjectBakeLimits {
+    std::size_t maxMaterialEdits = 10'000;
+    std::size_t maxMaterialFields = 100'000;
+    std::size_t maxMaterialResources = 100'000;
     std::size_t maxNodeEdits = 10'000;
     std::size_t maxMeshEdits = 10'000;
     std::size_t maxGeometryEdits = 10'000;

@@ -51,6 +51,18 @@ void add(std::size_t& total, std::size_t value, std::size_t limit) {
     total += value;
 }
 
+void appendWarning(std::vector<std::string>& warnings, std::string warning,
+                   const apex::core::ParseLimits& limits, std::size_t& warningBytes) {
+    stringValue(warning, limits, "bake warning");
+    if (warnings.size() == kMaxElements)
+        fail("count_limit", "KN5 bake warning count exceeds the safety limit");
+    const auto bytes = warning.size() + sizeof(std::string);
+    if (bytes > limits.maxOutputBytes || warningBytes > limits.maxOutputBytes - bytes)
+        fail("output_limit", "KN5 bake diagnostics exceed the configured output limit");
+    warningBytes += bytes;
+    warnings.push_back(std::move(warning));
+}
+
 std::size_t checkedAdd(std::size_t left, std::size_t right) {
     if (right > std::numeric_limits<std::size_t>::max() - left)
         fail("size_overflow", "Baked KN5 size overflows");
@@ -152,6 +164,17 @@ void rejectKeyCollisions(const std::map<std::string, T>& entries, std::string_vi
     }
 }
 
+template <typename T>
+void rejectNameCollisions(const std::vector<T>& entries, std::string_view label) {
+    std::map<std::string, std::string> seen;
+    for (const auto& entry : entries) {
+        const auto inserted = seen.emplace(canonical(entry.name), entry.name).second;
+        if (!inserted)
+            fail("ambiguous_key", std::string(label) +
+                                      " contains case-insensitive name collisions");
+    }
+}
+
 void validatePath(std::string_view path) {
     if (path == "root") return;
     if (path.empty()) fail("invalid_path", "Empty hierarchy path is not canonical");
@@ -169,6 +192,9 @@ void validatePath(std::string_view path) {
 }
 
 void validateProject(const Kn5BakeProject& project, const apex::core::ParseLimits& limits) {
+    count(project.warnings.size(), "project warning");
+    for (const auto& warning : project.warnings)
+        stringValue(warning, limits, "project warning");
     rejectKeyCollisions(project.materials, "material edits");
     rejectKeyCollisions(project.meshes, "mesh edits");
     rejectKeyCollisions(project.nodes, "node edits");
@@ -229,6 +255,7 @@ void preflightProjectBudget(const Kn5BakeProject& project, std::size_t sourceByt
     const auto bytesFor = [](std::size_t left, std::size_t right) {
         return checkedAdd(left, right);
     };
+    for (const auto& warning : project.warnings) reserve(bytesFor(warning.size(), 32u));
     for (const auto& [name, edit] : project.materials) {
         reserve(bytesFor(name.size(), 256u));
         if (edit.shader) reserve(bytesFor(edit.shader->size(), 8u));
@@ -286,19 +313,21 @@ Kn5Node* nodeAtPath(Kn5Node& root, std::string_view path) {
 }
 
 void visitMeshes(Kn5Node& node, const std::map<std::string, Kn5BakeMeshEdit>& edits,
-                 Kn5BakeApplied& applied, std::vector<std::string>& warnings) {
+                 Kn5BakeApplied& applied, std::vector<std::string>& warnings,
+                 const apex::core::ParseLimits& limits, std::size_t& warningBytes) {
     if (node.type == 2u || node.type == 3u) {
         const auto* edit = findByName(edits, node.name);
         if (edit) {
             if (edit->transparent) node.transparent = *edit->transparent;
             if (edit->cast_shadows) node.castShadows = *edit->cast_shadows;
             if (edit->layer) node.layer = *edit->layer;
-            if (edit->lod_in) { if (!std::isfinite(*edit->lod_in)) warnings.push_back(node.name + ": LOD in is not finite"); else node.lodIn = *edit->lod_in; }
-            if (edit->lod_out) { if (!std::isfinite(*edit->lod_out)) warnings.push_back(node.name + ": LOD out is not finite"); else node.lodOut = *edit->lod_out; }
+            if (edit->lod_in) { if (!std::isfinite(*edit->lod_in)) appendWarning(warnings, node.name + ": LOD in is not finite", limits, warningBytes); else node.lodIn = *edit->lod_in; }
+            if (edit->lod_out) { if (!std::isfinite(*edit->lod_out)) appendWarning(warnings, node.name + ": LOD out is not finite", limits, warningBytes); else node.lodOut = *edit->lod_out; }
             ++applied.meshes;
         }
     }
-    for (auto& child : node.children) visitMeshes(child, edits, applied, warnings);
+    for (auto& child : node.children)
+        visitMeshes(child, edits, applied, warnings, limits, warningBytes);
 }
 
 } // namespace
@@ -308,21 +337,35 @@ Kn5BakeResult bakeKn5(const Kn5File& source, const Kn5BakeProject& project, apex
     const bool hasEdits = !project.materials.empty() || !project.meshes.empty() || !project.nodes.empty() || !project.geometry.empty();
     if (source.encryption && hasEdits) fail("protected_payload", "CSP-protected KN5 payloads cannot be edited safely");
     const auto sourceBytes = estimate(source, limits);
+    if (!project.materials.empty()) {
+        rejectNameCollisions(source.materials, "source materials");
+        const auto hasResourceEdits = std::any_of(
+            project.materials.begin(), project.materials.end(),
+            [](const auto& entry) { return !entry.second.resources.empty(); });
+        if (hasResourceEdits) rejectNameCollisions(source.textures, "source textures");
+    }
     preflightProjectBudget(project, sourceBytes, limits);
-    Kn5BakeResult result{source, {}, {}};
+    std::size_t warningBytes = 0u;
+    for (const auto& warning : project.warnings) {
+        const auto bytes = warning.size() + sizeof(std::string);
+        if (bytes > limits.maxOutputBytes || warningBytes > limits.maxOutputBytes - bytes)
+            fail("output_limit", "KN5 bake diagnostics exceed the configured output limit");
+        warningBytes += bytes;
+    }
+    Kn5BakeResult result{source, {}, project.warnings};
 
     for (const auto& [editName, edit] : project.materials) {
         auto* material = findMaterial(result.model.materials, editName);
-        if (!material) { result.warnings.push_back(editName + ": material was not found"); continue; }
+        if (!material) { appendWarning(result.warnings, editName + ": material was not found", limits, warningBytes); continue; }
         bool changed = false;
         if (edit.shader && !edit.shader->empty()) { stringValue(*edit.shader, limits, "shader"); material->shader = *edit.shader; changed = true; }
-        if (edit.blend_mode) { if (*edit.blend_mode <= 2u) { material->blendMode = *edit.blend_mode; changed = true; } else result.warnings.push_back(editName + ": blendMode is CSP-only and was not baked"); }
+        if (edit.blend_mode) { if (*edit.blend_mode <= 2u) { material->blendMode = *edit.blend_mode; changed = true; } else appendWarning(result.warnings, editName + ": blendMode is CSP-only and was not baked", limits, warningBytes); }
         if (edit.depth_mode) { material->depthMode = *edit.depth_mode; changed = true; }
-        if (edit.cull_mode) result.warnings.push_back(editName + ": cullMode is CSP-only and was not baked");
+        if (edit.cull_mode) appendWarning(result.warnings, editName + ": cullMode is CSP-only and was not baked", limits, warningBytes);
         for (const auto& [name, values] : edit.properties) {
-            if (values.empty() || values.size() > 4u) { result.warnings.push_back(editName + "." + name + ": property value cannot be stored by KN5"); continue; }
+            if (values.empty() || values.size() > 4u) { appendWarning(result.warnings, editName + "." + name + ": property value cannot be stored by KN5", limits, warningBytes); continue; }
             bool valid = true; for (const auto value : values) if (!std::isfinite(value)) valid = false;
-            if (!valid) { result.warnings.push_back(editName + "." + name + ": property value cannot be stored by KN5"); continue; }
+            if (!valid) { appendWarning(result.warnings, editName + "." + name + ": property value cannot be stored by KN5", limits, warningBytes); continue; }
             Kn5MaterialProperty* property = nullptr; const auto wanted = canonical(name);
             for (auto& candidate : material->properties) if (canonical(candidate.name) == wanted) { property = &candidate; break; }
             if (!property) { material->properties.push_back({name, 0, {}, {}, {}}); property = &material->properties.back(); }
@@ -338,11 +381,11 @@ Kn5BakeResult bakeKn5(const Kn5File& source, const Kn5BakeProject& project, apex
             // embedded texture and CSP-only file/color metadata are supplied,
             // the embedded texture is the serializable source of truth.
             if (resourceEdit.texture.empty()) {
-                result.warnings.push_back(editName + "." + slot + ": external files and solid colors require CSP and were not baked"); continue;
+                appendWarning(result.warnings, editName + "." + slot + ": external files and solid colors require CSP and were not baked", limits, warningBytes); continue;
             }
             const auto wantedTexture = canonical(resourceEdit.texture); std::string actualTexture;
             for (const auto& texture : result.model.textures) if (canonical(texture.name) == wantedTexture) { actualTexture = texture.name; break; }
-            if (actualTexture.empty()) { result.warnings.push_back(editName + "." + slot + ": embedded texture " + resourceEdit.texture + " was not found and was not baked"); continue; }
+            if (actualTexture.empty()) { appendWarning(result.warnings, editName + "." + slot + ": embedded texture " + resourceEdit.texture + " was not found and was not baked", limits, warningBytes); continue; }
             Kn5MaterialResource* resource = nullptr; const auto wantedSlot = canonical(slot);
             for (auto& candidate : material->resources) if (canonical(candidate.slot) == wantedSlot) { resource = &candidate; break; }
             if (!resource) { material->resources.push_back({slot, resourceEdit.bind_point.value_or(0u), actualTexture}); resource = &material->resources.back(); }
@@ -351,22 +394,27 @@ Kn5BakeResult bakeKn5(const Kn5File& source, const Kn5BakeProject& project, apex
         }
         if (changed) ++result.applied.materials;
     }
-    visitMeshes(result.model.root, project.meshes, result.applied, result.warnings);
+    visitMeshes(result.model.root, project.meshes, result.applied, result.warnings, limits,
+                warningBytes);
     for (const auto& [path, edit] : project.nodes) {
         auto* node = nodeAtPath(result.model.root, path);
-        if (!node) { result.warnings.push_back(path + ": hierarchy node was not found"); continue; }
+        if (!node) { appendWarning(result.warnings, path + ": hierarchy node was not found", limits, warningBytes); continue; }
         bool changed = false;
         if (edit.name && !edit.name->empty()) { stringValue(*edit.name, limits, "node name"); node->name = *edit.name; changed = true; }
         if (edit.active) { node->active = *edit.active; changed = true; }
         if (edit.transform) {
-            if (node->type != 1u) result.warnings.push_back(path + ": " + node->name + " cannot store a local transform");
+            if (node->type != 1u) appendWarning(result.warnings, path + ": " + node->name + " cannot store a local transform", limits, warningBytes);
             else { finiteArray(*edit.transform, "node transform"); node->transform = *edit.transform; changed = true; }
         }
         if (changed) ++result.applied.nodes;
     }
-    result.applied.geometry = authoring::apply_geometry_edits(result.model.root, project.geometry,
-                                                               project.geometry.empty() || project.baselines.empty() ? nullptr : &project.baselines,
-                                                               &result.warnings);
+    std::vector<std::string> geometryWarnings;
+    result.applied.geometry = authoring::apply_geometry_edits(
+        result.model.root, project.geometry,
+        project.geometry.empty() || project.baselines.empty() ? nullptr : &project.baselines,
+        &geometryWarnings);
+    for (auto& warning : geometryWarnings)
+        appendWarning(result.warnings, std::move(warning), limits, warningBytes);
     estimate(result.model, limits);
     return result;
 }
