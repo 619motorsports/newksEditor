@@ -308,9 +308,12 @@ remains unchanged and feature-complete.
   deterministically. Driver rigs assemble. Bounded project transactions,
   undo/redo/recovery, geometry authoring, KN5 baking, and render/frame-plan
   selection are implemented. Bounded `.apex.json` persistence includes
-  material, node, mesh, and geometry edits. A bounded adapter sends these edits
-  to the KN5 bake path. It retains diagnostics for CSP-only material modes,
-  properties, and resources.
+  material, node, mesh, geometry, collider, damage, and bottom-collider edits.
+  It retains bounded identities for the three secondary asset types. Legacy
+  edits without an identity remain unbound. The native identity gate rejects a
+  missing or mismatched identity when related edits exist. A bounded adapter
+  sends KN5 edits to the bake path. It retains diagnostics for CSP-only
+  material modes, properties, and resources.
   The port deterministically exports modeled material and mesh edits to CSP.
   It reports unsupported project categories instead of approximating them. Car damage and
   bottom-collider authoring have bounded schemas and deterministic output. A

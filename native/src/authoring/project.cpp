@@ -334,8 +334,66 @@ void mergeDamage(DamageEdit& destination, const DamageEdit& source) {
     return value;
 }
 
+[[nodiscard]] std::string secondaryAssetName(std::string value) {
+    value = trim(value);
+    std::replace(value.begin(), value.end(), '\\', '/');
+    value.erase(std::unique(value.begin(), value.end(), [](char left, char right) {
+        return left == '/' && right == '/';
+    }), value.end());
+    if (value.empty())
+        throw error("SOURCE_IDENTITY_INVALID", "secondary asset name is empty");
+    for (const auto character : value)
+        if (static_cast<unsigned char>(character) < 0x20U || character == '\x7f' || character == '\0')
+            throw error("SOURCE_IDENTITY_INVALID", "secondary asset name contains an unsafe character");
+    std::size_t index = 0;
+    std::size_t utf16Units = 0;
+    while (index < value.size()) {
+        const auto first = static_cast<unsigned char>(value[index]);
+        std::size_t bytes = 1;
+        std::uint32_t codepoint = first;
+        if (first >= 0xc2U && first <= 0xdfU) { bytes = 2; codepoint = first & 0x1fU; }
+        else if (first >= 0xe0U && first <= 0xefU) { bytes = 3; codepoint = first & 0x0fU; }
+        else if (first >= 0xf0U && first <= 0xf4U) { bytes = 4; codepoint = first & 0x07U; }
+        else if (first >= 0x80U)
+            throw error("SOURCE_IDENTITY_INVALID", "secondary asset name is not valid UTF-8");
+        if (index + bytes > value.size())
+            throw error("SOURCE_IDENTITY_INVALID", "secondary asset name is not valid UTF-8");
+        for (std::size_t byteIndex = 1; byteIndex < bytes; ++byteIndex) {
+            const auto byte = static_cast<unsigned char>(value[index + byteIndex]);
+            if ((byte & 0xc0U) != 0x80U)
+                throw error("SOURCE_IDENTITY_INVALID", "secondary asset name is not valid UTF-8");
+            codepoint = (codepoint << 6U) | (byte & 0x3fU);
+        }
+        if ((bytes == 2 && codepoint < 0x80U) || (bytes == 3 && codepoint < 0x800U) ||
+            (bytes == 4 && codepoint < 0x10000U) || codepoint > 0x10ffffU ||
+            (codepoint >= 0xd800U && codepoint <= 0xdfffU))
+            throw error("SOURCE_IDENTITY_INVALID", "secondary asset name is not valid UTF-8");
+        const std::size_t units = codepoint > 0xffffU ? 2U : 1U;
+        if (utf16Units + units > 2048U) {
+            value.resize(index);
+            break;
+        }
+        utf16Units += units;
+        index += bytes;
+    }
+    if (value.empty())
+        throw error("SOURCE_IDENTITY_INVALID", "secondary asset name is empty");
+    return value;
+}
+
+void normalizeSecondaryAsset(std::optional<SourceIdentity>& identity, bool hasEdits) {
+    if (!hasEdits) {
+        identity.reset();
+        return;
+    }
+    if (identity) *identity = normalizeSecondaryAssetIdentity(std::move(*identity));
+}
+
 void validateState(ProjectState& state, const AuthoringLimits& limits) {
     state.source = normalizeSourceIdentity(std::move(state.source));
+    normalizeSecondaryAsset(state.colliderAsset, !state.colliders.empty());
+    normalizeSecondaryAsset(state.damageAsset, !state.damage.empty());
+    normalizeSecondaryAsset(state.bottomColliderAsset, !state.bottomColliders.empty());
     for (auto& [path, edit] : state.nodes) {
         if (nodePath(path, limits.maxStringBytes) != path)
             throw error("RECOVERY_INVALID", "recovery node path is not canonical");
@@ -415,12 +473,39 @@ SourceIdentity normalizeSourceIdentity(SourceIdentity identity) {
     return identity;
 }
 
+SourceIdentity normalizeSecondaryAssetIdentity(SourceIdentity identity) {
+    constexpr std::uint64_t jsSafeIntegerMaximum = 9'007'199'254'740'991ULL;
+    identity.name = secondaryAssetName(std::move(identity.name));
+    if (identity.size > jsSafeIntegerMaximum)
+        throw error("SOURCE_IDENTITY_INVALID", "secondary asset size exceeds the JavaScript safe-integer range");
+    identity.sha256 = lowerAscii(trim(identity.sha256));
+    if (identity.sha256.size() != 64 ||
+        !std::all_of(identity.sha256.begin(), identity.sha256.end(), [](char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        }))
+        throw error("SOURCE_IDENTITY_INVALID", "secondary asset SHA-256 must contain 64 hexadecimal characters");
+    return identity;
+}
+
 bool sourceIdentityMatches(const SourceIdentity& expected, const SourceIdentity& actual) {
     if (lowerAscii(expected.name) != lowerAscii(actual.name) || expected.size != actual.size ||
         lowerAscii(expected.sha256) != lowerAscii(actual.sha256))
         return false;
     return !expected.kn5Version.has_value() || !actual.kn5Version.has_value() ||
            expected.kn5Version == actual.kn5Version;
+}
+
+bool secondaryAssetIdentityMatches(bool hasEdits,
+                                   const std::optional<SourceIdentity>& expected,
+                                   const std::optional<SourceIdentity>& actual) {
+    if (!hasEdits) return true;
+    if (!expected || !actual) return false;
+    try {
+        return sourceIdentityMatches(normalizeSecondaryAssetIdentity(*expected),
+                                     normalizeSecondaryAssetIdentity(*actual));
+    } catch (const AuthoringError&) {
+        return false;
+    }
 }
 
 ProjectSession::ProjectSession(SourceIdentity source, AuthoringLimits limits)
@@ -508,6 +593,10 @@ ProjectState ProjectSession::applyTransaction(const AuthoringTransaction& transa
                 mergeCollider(candidate.colliders[operationValue.index], operationValue.edit);
             } else if constexpr (std::is_same_v<Operation, ClearColliderEdit>) {
                 candidate.colliders.erase(operationValue.index);
+            } else if constexpr (std::is_same_v<Operation, SetColliderAsset>) {
+                candidate.colliderAsset = normalizeSecondaryAssetIdentity(std::move(operationValue.identity));
+            } else if constexpr (std::is_same_v<Operation, ClearColliderAsset>) {
+                candidate.colliderAsset.reset();
             } else if constexpr (std::is_same_v<Operation, SetBottomColliderEdit>) {
                 validateBottomCollider(operationValue.edit);
                 if (!operationValue.edit.centre && !operationValue.edit.size && !operationValue.edit.groundEnabled)
@@ -515,17 +604,28 @@ ProjectState ProjectSession::applyTransaction(const AuthoringTransaction& transa
                 mergeBottomCollider(candidate.bottomColliders[operationValue.index], operationValue.edit);
             } else if constexpr (std::is_same_v<Operation, ClearBottomColliderEdit>) {
                 candidate.bottomColliders.erase(operationValue.index);
+            } else if constexpr (std::is_same_v<Operation, SetBottomColliderAsset>) {
+                candidate.bottomColliderAsset = normalizeSecondaryAssetIdentity(std::move(operationValue.identity));
+            } else if constexpr (std::is_same_v<Operation, ClearBottomColliderAsset>) {
+                candidate.bottomColliderAsset.reset();
             } else if constexpr (std::is_same_v<Operation, SetDamageEdit>) {
                 const auto section = upperAscii(safeKey(std::move(operationValue.section), limits_.maxStringBytes, "damage section"));
                 validateDamage(operationValue.edit, limits_);
                 mergeDamage(candidate.damage[section], operationValue.edit);
             } else if constexpr (std::is_same_v<Operation, ClearDamageEdit>) {
                 candidate.damage.erase(upperAscii(safeKey(std::move(operationValue.section), limits_.maxStringBytes, "damage section")));
+            } else if constexpr (std::is_same_v<Operation, SetDamageAsset>) {
+                candidate.damageAsset = normalizeSecondaryAssetIdentity(std::move(operationValue.identity));
+            } else if constexpr (std::is_same_v<Operation, ClearDamageAsset>) {
+                candidate.damageAsset.reset();
             }
         }, operation);
         if (editCount(candidate) > limits_.maxTotalEdits)
             throw error("EDIT_LIMIT", "project edit count exceeds its limit");
     }
+    normalizeSecondaryAsset(candidate.colliderAsset, !candidate.colliders.empty());
+    normalizeSecondaryAsset(candidate.damageAsset, !candidate.damage.empty());
+    normalizeSecondaryAsset(candidate.bottomColliderAsset, !candidate.bottomColliders.empty());
     return candidate;
 }
 

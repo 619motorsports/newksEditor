@@ -28,8 +28,12 @@ struct SourceIdentity {
 };
 
 [[nodiscard]] SourceIdentity normalizeSourceIdentity(SourceIdentity identity);
+[[nodiscard]] SourceIdentity normalizeSecondaryAssetIdentity(SourceIdentity identity);
 [[nodiscard]] bool sourceIdentityMatches(const SourceIdentity& expected,
                                          const SourceIdentity& actual);
+[[nodiscard]] bool secondaryAssetIdentityMatches(
+    bool hasEdits, const std::optional<SourceIdentity>& expected,
+    const std::optional<SourceIdentity>& actual);
 
 struct AuthoringLimits {
     std::size_t maxHistory = 128;
@@ -163,10 +167,16 @@ struct SetSurfaceEdit { std::uint32_t index = 0; SurfaceEdit edit; };
 struct ClearSurfaceEdit { std::uint32_t index = 0; };
 struct SetColliderEdit { std::uint32_t index = 0; ColliderEdit edit; };
 struct ClearColliderEdit { std::uint32_t index = 0; };
+struct SetColliderAsset { SourceIdentity identity; };
+struct ClearColliderAsset {};
 struct SetBottomColliderEdit { std::uint32_t index = 0; BottomColliderEdit edit; };
 struct ClearBottomColliderEdit { std::uint32_t index = 0; };
+struct SetBottomColliderAsset { SourceIdentity identity; };
+struct ClearBottomColliderAsset {};
 struct SetDamageEdit { std::string section; DamageEdit edit; };
 struct ClearDamageEdit { std::string section; };
+struct SetDamageAsset { SourceIdentity identity; };
+struct ClearDamageAsset {};
 
 using EditOperation = std::variant<
     SetNodeEdit, ClearNodeEdit,
@@ -176,9 +186,10 @@ using EditOperation = std::variant<
     SetWorkspaceSettingsEdit, ClearWorkspaceSettingsEdit,
     SetMaterialScalarEdit, SetMaterialVectorEdit, SetMaterialResourceEdit, ClearMaterialEdit,
     SetSurfaceEdit, ClearSurfaceEdit,
-    SetColliderEdit, ClearColliderEdit,
+    SetColliderEdit, ClearColliderEdit, SetColliderAsset, ClearColliderAsset,
     SetBottomColliderEdit, ClearBottomColliderEdit,
-    SetDamageEdit, ClearDamageEdit>;
+    SetBottomColliderAsset, ClearBottomColliderAsset,
+    SetDamageEdit, ClearDamageEdit, SetDamageAsset, ClearDamageAsset>;
 
 struct AuthoringTransaction {
     std::string label;
@@ -187,6 +198,9 @@ struct AuthoringTransaction {
 
 struct ProjectState {
     SourceIdentity source;
+    std::optional<SourceIdentity> colliderAsset;
+    std::optional<SourceIdentity> damageAsset;
+    std::optional<SourceIdentity> bottomColliderAsset;
     std::uint64_t revision = 0;
     WorkspaceSettingsEdit workspace;
     std::map<std::uint32_t, WorkspaceFileEdit> workspaceFiles;

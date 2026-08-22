@@ -493,6 +493,60 @@ void writeProjectMap(JsonWriter&, const ProjectState&, std::size_t);
 
 constexpr double kJsSafeIntegerMaximum = 9007199254740991.0;
 
+[[nodiscard]] std::optional<SourceIdentity> parseSecondaryAssetIdentity(
+    const JsonValue& root, std::string_view key, bool hasEdits,
+    std::vector<ProjectIoDiagnostic>& diagnostics) {
+    if (!hasEdits) return std::nullopt;
+    const auto value = member(root, key);
+    if (value == nullptr || value->kind == JsonValue::Kind::nullValue) return std::nullopt;
+    if (!isObject(value)) {
+        addDiagnostic(diagnostics, "FIELD_TYPE", key, "secondary asset identity must be an object or null");
+        return std::nullopt;
+    }
+
+    bool valid = true;
+    SourceIdentity identity;
+    double size = 0.0;
+    double kn5Version = 0.0;
+    if (!getString(*value, "name", identity.name, diagnostics, key, true)) valid = false;
+    if (getNumber(*value, "size", size, diagnostics, key, true)) {
+        if (size >= 0.0 && std::trunc(size) == size && size <= kJsSafeIntegerMaximum)
+            identity.size = static_cast<std::uint64_t>(size);
+        else {
+            addDiagnostic(diagnostics, "SOURCE_SIZE", std::string(key) + ".size",
+                          "secondary asset size must be a non-negative JavaScript safe integer");
+            valid = false;
+        }
+    } else valid = false;
+    if (!getString(*value, "sha256", identity.sha256, diagnostics, key, true)) valid = false;
+    if (member(*value, "kn5Version") != nullptr) {
+        if (getNumber(*value, "kn5Version", kn5Version, diagnostics, key)) {
+            if (kn5Version >= 0.0 && std::trunc(kn5Version) == kn5Version &&
+                static_cast<long double>(kn5Version) <=
+                    static_cast<long double>(std::numeric_limits<std::uint32_t>::max()))
+                identity.kn5Version = static_cast<std::uint32_t>(kn5Version);
+            else {
+                addDiagnostic(diagnostics, "SOURCE_VERSION", std::string(key) + ".kn5Version",
+                              "secondary asset KN5 version must be a non-negative uint32 integer");
+                valid = false;
+            }
+        } else valid = false;
+    }
+    for (const auto& [field, ignored] : value->object) {
+        (void)ignored;
+        if (field != "name" && field != "size" && field != "sha256" && field != "kn5Version")
+            addDiagnostic(diagnostics, "UNSUPPORTED_FIELD", std::string(key) + "." + field,
+                          "secondary asset identity field is not modeled");
+    }
+    if (!valid) return std::nullopt;
+    try {
+        return normalizeSecondaryAssetIdentity(std::move(identity));
+    } catch (const AuthoringError& errorValue) {
+        addDiagnostic(diagnostics, errorValue.code(), key, errorValue.what());
+        return std::nullopt;
+    }
+}
+
 [[nodiscard]] bool damageFieldAllowed(std::string_view section, std::string_view field) {
     std::string upper(section);
     std::transform(upper.begin(), upper.end(), upper.begin(), [](char c) {
@@ -565,6 +619,15 @@ void validateDirectProject(const ProjectState& project, const ProjectIoLimits& l
         throw ioError("EDIT_INVALID", 0, "workspace driver distance must be finite");
     checkIoText(project.source.name, "asset.name", limits);
     checkIoText(project.source.sha256, "asset.sha256", limits);
+    const auto checkSecondaryIdentity = [&](const std::optional<SourceIdentity>& identity,
+                                            std::string_view path, bool hasEdits) {
+        if (!hasEdits || !identity) return;
+        checkIoText(identity->name, std::string(path) + ".name", limits);
+        checkIoText(identity->sha256, std::string(path) + ".sha256", limits);
+    };
+    checkSecondaryIdentity(project.colliderAsset, "colliderAsset", !project.colliders.empty());
+    checkSecondaryIdentity(project.damageAsset, "damageAsset", !project.damage.empty());
+    checkSecondaryIdentity(project.bottomColliderAsset, "bottomColliderAsset", !project.bottomColliders.empty());
     for (const auto& [path, edit] : project.nodes) {
         checkIoText(path, "nodeEdits key", limits);
         if (!hasEdit(edit)) throw ioError("EDIT_INVALID", 0, "node edit has no fields");
@@ -694,13 +757,16 @@ ProjectIoResult parseProjectInternal(std::string_view text, const SourceIdentity
     if (const auto value = member(root, "colliderEdits"); value != nullptr) parseColliderEdits(*value, session, diagnostics, false);
     if (const auto value = member(root, "bottomColliderEdits"); value != nullptr) parseColliderEdits(*value, session, diagnostics, true);
     if (const auto value = member(root, "damageEdits"); value != nullptr) parseDamageEdits(*value, session, diagnostics);
-    for (const auto& key : {"skinEdits", "colliderAsset", "damageAsset", "bottomColliderAsset"})
+    for (const auto& key : {"skinEdits"})
         if (const auto value = member(root, key); value != nullptr && value->kind != JsonValue::Kind::nullValue && ((isObject(value) && !value->object.empty()) || value->kind != JsonValue::Kind::object))
             addDiagnostic(diagnostics, "UNSUPPORTED_FIELD", key, "project field is not modeled by the native authoring state");
     for (const auto& [key, value] : root.object)
         if (key != "format" && key != "version" && key != "revision" && key != "asset" && key != "materialEdits" && key != "meshEdits" && key != "nodeEdits" && key != "geometryEdits" && key != "colliderEdits" && key != "damageEdits" && key != "bottomColliderEdits" && key != "workspaceEdits" && key != "surfaceEdits" && key != "skinEdits" && key != "colliderAsset" && key != "damageAsset" && key != "bottomColliderAsset")
             addDiagnostic(diagnostics, "UNSUPPORTED_FIELD", key, "project field is not modeled");
     ProjectState parsed = session.state();
+    parsed.colliderAsset = parseSecondaryAssetIdentity(root, "colliderAsset", !parsed.colliders.empty(), diagnostics);
+    parsed.damageAsset = parseSecondaryAssetIdentity(root, "damageAsset", !parsed.damage.empty(), diagnostics);
+    parsed.bottomColliderAsset = parseSecondaryAssetIdentity(root, "bottomColliderAsset", !parsed.bottomColliders.empty(), diagnostics);
     parsed.revision = revision;
     return {std::move(parsed), std::move(diagnostics)};
 }
@@ -710,6 +776,12 @@ std::string serializeProjectInternal(const ProjectState& project, ProjectIoLimit
     auto source = normalizeSourceIdentity(project.source);
     ProjectState normalized = project;
     normalized.source = std::move(source);
+    if (normalized.colliders.empty()) normalized.colliderAsset.reset();
+    else if (normalized.colliderAsset) normalized.colliderAsset = normalizeSecondaryAssetIdentity(std::move(*normalized.colliderAsset));
+    if (normalized.damage.empty()) normalized.damageAsset.reset();
+    else if (normalized.damageAsset) normalized.damageAsset = normalizeSecondaryAssetIdentity(std::move(*normalized.damageAsset));
+    if (normalized.bottomColliders.empty()) normalized.bottomColliderAsset.reset();
+    else if (normalized.bottomColliderAsset) normalized.bottomColliderAsset = normalizeSecondaryAssetIdentity(std::move(*normalized.bottomColliderAsset));
     JsonWriter writer(limits.maxOutputBytes);
     writeProjectMap(writer, normalized, 0);
     writer.raw("\n");
@@ -1312,11 +1384,32 @@ void writeGeometry(JsonWriter& writer, const GeometryEdit& edit, std::size_t dep
     writer.raw("}");
 }
 
+void writeIdentity(JsonWriter& writer, const std::optional<SourceIdentity>& identity,
+                   std::size_t depth) {
+    if (!identity) {
+        writer.raw("null");
+        return;
+    }
+    writer.raw("{\n");
+    writer.indent(depth + 1); writer.string("name"); writer.raw(": "); writer.string(identity->name); writer.raw(",\n");
+    writer.indent(depth + 1); writer.string("size"); writer.raw(": "); writer.raw(std::to_string(identity->size)); writer.raw(",\n");
+    writer.indent(depth + 1); writer.string("sha256"); writer.raw(": "); writer.string(identity->sha256);
+    if (identity->kn5Version) {
+        writer.raw(",\n");
+        writer.indent(depth + 1); writer.string("kn5Version"); writer.raw(": "); writer.raw(std::to_string(*identity->kn5Version));
+    }
+    writer.raw("\n");
+    writer.indent(depth); writer.raw("}");
+}
+
 void writeProjectMap(JsonWriter& writer, const ProjectState& project, std::size_t depth) {
     writer.raw("{\n"); writer.indent(depth); writer.string("format"); writer.raw(": "); writer.string(kProjectFormat); writer.raw(",\n");
     writer.indent(depth); writer.string("version"); writer.raw(": 1,\n");
     writer.indent(depth); writer.string("revision"); writer.raw(": "); writer.raw(std::to_string(project.revision)); writer.raw(",\n");
     writer.indent(depth); writer.string("asset"); writer.raw(": {\n"); writer.indent(depth + 1); writer.string("name"); writer.raw(": "); writer.string(project.source.name); writer.raw(",\n"); writer.indent(depth + 1); writer.string("size"); writer.raw(": "); writer.raw(std::to_string(project.source.size)); writer.raw(",\n"); writer.indent(depth + 1); writer.string("sha256"); writer.raw(": "); writer.string(project.source.sha256); if (project.source.kn5Version) { writer.raw(",\n"); writer.indent(depth + 1); writer.string("kn5Version"); writer.raw(": "); writer.raw(std::to_string(*project.source.kn5Version)); } writer.raw("\n"); writer.indent(depth); writer.raw("},\n");
+    writer.indent(depth); writer.string("colliderAsset"); writer.raw(": "); writeIdentity(writer, project.colliderAsset, depth); writer.raw(",\n");
+    writer.indent(depth); writer.string("damageAsset"); writer.raw(": "); writeIdentity(writer, project.damageAsset, depth); writer.raw(",\n");
+    writer.indent(depth); writer.string("bottomColliderAsset"); writer.raw(": "); writeIdentity(writer, project.bottomColliderAsset, depth); writer.raw(",\n");
 
     writer.indent(depth); writer.string("materialEdits"); writer.raw(": {"); bool first = true; for (const auto& [key, edit] : project.materials) { if (!first) writer.raw(","); writer.raw("\n"); writer.indent(depth + 1); writer.string(key); writer.raw(": "); writeMaterial(writer, edit, depth + 1); first = false; } if (!first) { writer.raw("\n"); writer.indent(depth); } writer.raw("},\n");
     writer.indent(depth); writer.string("meshEdits"); writer.raw(": {"); first = true; for (const auto& [key, edit] : project.meshes) { if (!first) writer.raw(","); writer.raw("\n"); writer.indent(depth + 1); writer.string(key); writer.raw(": "); writeMesh(writer, edit, depth + 1); first = false; } if (!first) { writer.raw("\n"); writer.indent(depth); } writer.raw("},\n");

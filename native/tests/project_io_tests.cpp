@@ -15,6 +15,11 @@ using apex::authoring::MeshEdit;
 using apex::authoring::ProjectIoLimits;
 using apex::authoring::ProjectSession;
 using apex::authoring::SetDamageEdit;
+using apex::authoring::SetDamageAsset;
+using apex::authoring::SetColliderAsset;
+using apex::authoring::SetColliderEdit;
+using apex::authoring::SetBottomColliderAsset;
+using apex::authoring::SetBottomColliderEdit;
 using apex::authoring::SetGeometryEdit;
 using apex::authoring::SetMaterialResourceEdit;
 using apex::authoring::SetMaterialScalarEdit;
@@ -47,6 +52,13 @@ void roundTripsModeledFields() {
     geometry.reverse_winding = true;
     geometry.transform =
         apex::authoring::Matrix4{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 2, 3, 4, 1};
+    SourceIdentity colliderAsset{"COLLIDER\\//collider.kn5", 128, std::string(64, 'B'), 7};
+    SourceIdentity damageAsset{"data\\damage.ini", 32, std::string(64, 'C'), std::nullopt};
+    SourceIdentity bottomColliderAsset{"data//colliders.ini", 24, std::string(64, 'D'), std::nullopt};
+    apex::authoring::ColliderEdit collider;
+    collider.reverseWinding = true;
+    apex::authoring::BottomColliderEdit bottomCollider;
+    bottomCollider.groundEnabled = false;
     edits.operations = {
         SetNodeEdit{"0", node},
         SetMeshEdit{"BODY", mesh},
@@ -56,11 +68,20 @@ void roundTripsModeledFields() {
         SetMaterialVectorEdit{"Body", "ksDiffuse", MaterialVector{{1.0F, 0.5F, 0.0F, 1.0F}, 4}},
         SetMaterialResourceEdit{"Body", "txDiffuse", MaterialResource{false, std::string("textures/body.dds"), {}, {}}},
         SetSurfaceEdit{0, [] { apex::authoring::SurfaceEdit value; value.key = "TARMAC"; value.friction = 1.05F; return value; }()},
+        SetColliderAsset{colliderAsset},
+        SetColliderEdit{0, collider},
+        SetDamageAsset{damageAsset},
+        SetBottomColliderAsset{bottomColliderAsset},
+        SetBottomColliderEdit{0, bottomCollider},
         SetDamageEdit{"VISUAL_OBJECT_0", [] { apex::authoring::DamageEdit value; value.minSpeed = 25.0F; value.damageZone = "FRONT"; return value; }()}
     };
     session.commit(edits);
     const auto json = apex::authoring::serializeProject(session.state());
     require(json.find("\"format\": \"apex-editor-project\"") != std::string::npos, "project format output");
+    require(json.find("\"colliderAsset\": {") != std::string::npos &&
+                json.find("\"damageAsset\": {") != std::string::npos &&
+                json.find("\"bottomColliderAsset\": {") != std::string::npos,
+            "secondary identity output");
     const auto loaded = apex::authoring::parseProject(json, identity());
     require(loaded.project.has_value() && loaded.diagnostics.empty(), "project JSON round trip");
     require(loaded.project->nodes.at("0").active == false && loaded.project->workspaceFiles.at(2).lodIn == 15.0F,
@@ -76,6 +97,12 @@ void roundTripsModeledFields() {
     require(loaded.project->materials.at("Body").resources.at("txDiffuse").texture == "textures/body.dds",
             "material resource reload");
     require(loaded.project->damage.at("VISUAL_OBJECT_0").minSpeed == 25.0F, "damage reload");
+    require(loaded.project->colliderAsset->name == "COLLIDER/collider.kn5" &&
+                loaded.project->colliderAsset->sha256 == std::string(64, 'b') &&
+                loaded.project->colliderAsset->kn5Version == 7 &&
+                loaded.project->damageAsset->name == "data/damage.ini" &&
+                loaded.project->bottomColliderAsset->name == "data/colliders.ini",
+            "secondary identities reload canonically");
 }
 
 void exportsDeterministicCspAndReportsUnsupported() {
@@ -225,6 +252,55 @@ void enforcesFieldSchemasNullsAndSafeIntegers() {
     require(sizeResult.project.has_value() && !sizeResult.diagnostics.empty() && sizeResult.diagnostics.front().code == "SOURCE_SIZE", "unsafe source size is diagnosed");
 }
 
+void handlesUntrustedSecondaryIdentities() {
+    const std::string prefix =
+        "{\"format\":\"apex-editor-project\",\"version\":1,"
+        "\"asset\":{\"name\":\"car.kn5\",\"size\":42,"
+        "\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},";
+    const std::string colliderEdits = "\"colliderEdits\":{\"0\":{\"reverseWinding\":true}}";
+
+    const auto malformed = apex::authoring::parseProject(
+        prefix + "\"colliderAsset\":{\"name\":\"collider.kn5\",\"size\":128,\"sha256\":\"short\"}," +
+        colliderEdits + "}", identity());
+    require(malformed.project.has_value() && malformed.project->colliders.contains(0) &&
+                !malformed.project->colliderAsset && !malformed.diagnostics.empty(),
+            "malformed secondary identity is diagnosed while edits remain stale");
+
+    const auto wrongType = apex::authoring::parseProject(
+        prefix + "\"colliderAsset\":7," + colliderEdits + "}", identity());
+    require(wrongType.project.has_value() && !wrongType.project->colliderAsset &&
+                !wrongType.diagnostics.empty() && wrongType.diagnostics.front().code == "FIELD_TYPE",
+            "wrong-type secondary identity is diagnosed");
+
+    const auto unsafeSize = apex::authoring::parseProject(
+        prefix + "\"colliderAsset\":{\"name\":\"collider.kn5\",\"size\":9007199254740992,"
+                 "\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}," +
+        colliderEdits + "}", identity());
+    require(unsafeSize.project.has_value() && !unsafeSize.project->colliderAsset &&
+                !unsafeSize.diagnostics.empty(),
+            "unsafe secondary identity size is diagnosed");
+
+    const auto missing = apex::authoring::parseProject(prefix + colliderEdits + "}", identity());
+    require(missing.project.has_value() && missing.project->colliders.contains(0) &&
+                !missing.project->colliderAsset && missing.diagnostics.empty(),
+            "legacy edits without identity remain loaded but unbound");
+
+    const auto orphan = apex::authoring::parseProject(
+        prefix + "\"colliderAsset\":{\"name\":\"collider.kn5\",\"size\":128,"
+                 "\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}",
+        identity());
+    require(orphan.project.has_value() && !orphan.project->colliderAsset && orphan.diagnostics.empty(),
+            "orphan secondary identity normalizes to null");
+    const auto orphanJson = apex::authoring::serializeProject(*orphan.project);
+    require(orphanJson.find("\"colliderAsset\": null") != std::string::npos,
+            "orphan secondary identity serializes as null");
+
+    expectsIoError([&] {
+        (void)apex::authoring::parseProject(
+            prefix + "\"colliderAsset\":{\"name\":\"collider.kn5\",\"size\":128", identity());
+    }, "JSON_TRUNCATED");
+}
+
 } // namespace
 
 int main() {
@@ -235,6 +311,7 @@ int main() {
         reportsUnsupportedFieldsAndStaleSource();
         rejectsDirectInvalidStateAndPreservesJsonUnicodeRules();
         enforcesFieldSchemasNullsAndSafeIntegers();
+        handlesUntrustedSecondaryIdentities();
         std::cout << "project IO tests passed\n";
         return 0;
     } catch (const std::exception& error) {

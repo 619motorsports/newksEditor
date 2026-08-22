@@ -16,6 +16,9 @@ using apex::authoring::AuthoringError;
 using apex::authoring::AuthoringLimits;
 using apex::authoring::AuthoringTransaction;
 using apex::authoring::BottomColliderEdit;
+using apex::authoring::ClearBottomColliderEdit;
+using apex::authoring::ClearColliderEdit;
+using apex::authoring::ClearDamageEdit;
 using apex::authoring::ClearGeometryEdit;
 using apex::authoring::ClearMeshEdit;
 using apex::authoring::ClearNodeEdit;
@@ -27,6 +30,10 @@ using apex::authoring::MeshEdit;
 using apex::authoring::ProjectSession;
 using apex::authoring::RecoverySnapshot;
 using apex::authoring::SetBottomColliderEdit;
+using apex::authoring::SetBottomColliderAsset;
+using apex::authoring::SetColliderAsset;
+using apex::authoring::SetColliderEdit;
+using apex::authoring::SetDamageAsset;
 using apex::authoring::SetDamageEdit;
 using apex::authoring::SetGeometryEdit;
 using apex::authoring::SetMaterialResourceEdit;
@@ -38,6 +45,7 @@ using apex::authoring::SetSurfaceEdit;
 using apex::authoring::SetWorkspaceFileEdit;
 using apex::authoring::SourceIdentity;
 using apex::authoring::sourceIdentityMatches;
+using apex::authoring::secondaryAssetIdentityMatches;
 
 void require(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
@@ -187,6 +195,89 @@ void meshAndGeometryEditsHonorTotalLimits() {
     require(session.state().meshes.empty() && session.state().revision == 0 &&
                 !session.canUndo(),
             "mesh edit limit is atomic");
+}
+
+void secondaryAssetBindingsAreAtomicAndFailClosed() {
+    const auto bounded = apex::authoring::normalizeSecondaryAssetIdentity(
+        {std::string(2050, 'x'), 1, std::string(64, 'A'), std::nullopt});
+    require(bounded.name.size() == 2048 && bounded.sha256 == std::string(64, 'a'),
+            "secondary identity name follows the bounded JavaScript schema");
+    expectsError([] {
+        (void)apex::authoring::normalizeSecondaryAssetIdentity(
+            {"asset", 9'007'199'254'740'992ULL, std::string(64, 'a'), std::nullopt});
+    }, "SOURCE_IDENTITY_INVALID");
+    expectsError([] {
+        (void)apex::authoring::normalizeSecondaryAssetIdentity(
+            {std::string(1, static_cast<char>(0xff)), 1, std::string(64, 'a'), std::nullopt});
+    }, "SOURCE_IDENTITY_INVALID");
+
+    ProjectSession session(identity());
+    SourceIdentity collider{" Collider\\//collider.kn5 ", 128, std::string(64, 'B'), 7};
+    SourceIdentity damage{"data\\damage.ini", 32, std::string(64, 'C'), std::nullopt};
+    SourceIdentity bottom{"data//colliders.ini", 24, std::string(64, 'D'), std::nullopt};
+    apex::authoring::ColliderEdit colliderEdit;
+    colliderEdit.reverseWinding = true;
+    BottomColliderEdit bottomEdit;
+    bottomEdit.groundEnabled = false;
+    apex::authoring::DamageEdit damageEdit;
+    damageEdit.minSpeed = 5.0F;
+    session.commit({"bind secondary assets", {
+        SetColliderAsset{collider}, SetColliderEdit{0, colliderEdit},
+        SetDamageAsset{damage}, SetDamageEdit{"SCRATCHES", damageEdit},
+        SetBottomColliderAsset{bottom}, SetBottomColliderEdit{0, bottomEdit}}});
+
+    require(session.state().colliderAsset->name == "Collider/collider.kn5" &&
+                session.state().colliderAsset->sha256 == std::string(64, 'b') &&
+                session.state().damageAsset->name == "data/damage.ini" &&
+                session.state().bottomColliderAsset->name == "data/colliders.ini",
+            "secondary identities are canonicalized with their edits");
+    const auto expectedCollider = session.state().colliderAsset;
+    auto currentCollider = expectedCollider;
+    currentCollider->name = "collider/COLLIDER.KN5";
+    currentCollider->kn5Version.reset();
+    require(secondaryAssetIdentityMatches(true, expectedCollider, currentCollider),
+            "secondary identity uses case-insensitive names and version wildcard");
+    currentCollider->sha256 = std::string(64, 'e');
+    require(!secondaryAssetIdentityMatches(true, expectedCollider, currentCollider) &&
+                !secondaryAssetIdentityMatches(true, expectedCollider, std::nullopt) &&
+                !secondaryAssetIdentityMatches(true, std::nullopt, expectedCollider) &&
+                secondaryAssetIdentityMatches(false, std::nullopt, std::nullopt),
+            "secondary edit application fails closed for stale or missing identities");
+
+    session.undo();
+    require(session.state().colliders.empty() && !session.state().colliderAsset,
+            "undo removes secondary identities and edits together");
+    session.redo();
+    require(session.state().colliderAsset && session.state().damageAsset &&
+                session.state().bottomColliderAsset,
+            "redo restores secondary identities");
+    session.commit({"clear bound edits", {
+        ClearColliderEdit{0}, ClearDamageEdit{"SCRATCHES"}, ClearBottomColliderEdit{0}}});
+    require(!session.state().colliderAsset && !session.state().damageAsset &&
+                !session.state().bottomColliderAsset,
+            "clearing the last edit clears its secondary identity");
+
+    const auto before = session.state();
+    SourceIdentity unsafe = damage;
+    unsafe.sha256 = "short";
+    expectsError([&] {
+        session.commit({"invalid binding", {SetDamageAsset{unsafe}, SetDamageEdit{"SCRATCHES", damageEdit}}});
+    }, "SOURCE_IDENTITY_INVALID");
+    require(session.state().revision == before.revision && session.state().damage.empty(),
+            "invalid secondary identity transaction is atomic");
+
+    ProjectSession recoverySession(identity());
+    recoverySession.commit({"bound collider", {
+        SetColliderAsset{collider}, SetColliderEdit{0, colliderEdit}}});
+    const auto snapshot = recoverySession.recoverySnapshot();
+    recoverySession.restoreBaseline();
+    require(recoverySession.recover(snapshot, identity()).restored &&
+                recoverySession.state().colliderAsset,
+            "recovery preserves a canonical secondary identity");
+    auto malformed = snapshot;
+    malformed.state.colliderAsset->sha256 = "truncated";
+    require(!recoverySession.validateRecovery(malformed, identity()).restored,
+            "recovery rejects malformed secondary identity metadata");
 }
 
 void appliesTypedTransactionWithoutMutatingSource() {
@@ -339,6 +430,7 @@ int main() {
         validatesIdentityAndStablePaths();
         meshAndGeometryEditsAreAtomicAndUndoable();
         meshAndGeometryEditsHonorTotalLimits();
+        secondaryAssetBindingsAreAtomicAndFailClosed();
         appliesTypedTransactionWithoutMutatingSource();
         transactionsAreAtomicAndUndoable();
         recoveryValidatesSourceAndLimits();
