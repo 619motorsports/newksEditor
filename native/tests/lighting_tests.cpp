@@ -1,4 +1,5 @@
 #include "apex/core/parse_error.hpp"
+#include "apex/render/directional_shadow.hpp"
 #include "apex/render/lighting.hpp"
 
 #include <algorithm>
@@ -298,6 +299,49 @@ void reflectionsAndBounds() {
     require(finite(zero_fallback.color), "zero direction remains finite");
 }
 
+void evaluatesSourceEvidencedDirectionalReceiver() {
+    constexpr std::array<float, directional_shadow_cascade_count> splits = {
+        2.0F, 12.0F, 50.0F};
+    require(select_directional_shadow_cascade(2.0F, splits) == 0U &&
+                select_directional_shadow_cascade(2.0001F, splits) == 1U &&
+                select_directional_shadow_cascade(12.0F, splits) == 1U &&
+                select_directional_shadow_cascade(12.0001F, splits) == 2U &&
+                select_directional_shadow_cascade(50.0F, splits) == 2U &&
+                !select_directional_shadow_cascade(50.0001F, splits).has_value(),
+            "directional receiver uses hard 2/12/50 split boundaries");
+
+    constexpr std::array<float, 3> inside = {0.5F, 0.5F, 0.5F};
+    std::array<float, 9> samples{};
+    samples.fill(0.4F);
+    const auto occluded = evaluate_directional_shadow_pcf(inside, 0.0F, samples);
+    require(occluded.has_value() && *occluded == 0.0F,
+            "nine shallower D32 taps produce full occlusion");
+    samples.fill(0.5F);
+    const auto lit = evaluate_directional_shadow_pcf(inside, 0.0F, samples);
+    require(lit.has_value() && *lit == 1.0F,
+            "equal receiver and sampled depth is lit");
+    samples.fill(0.4F);
+    samples.front() = 0.6F;
+    const auto one_tap = evaluate_directional_shadow_pcf(inside, 0.0F, samples);
+    require(one_tap.has_value() &&
+                std::abs(*one_tap - 1.0F / 9.0F) < 0.000001F,
+            "explicit 3x3 PCF returns one ninth for one lit tap");
+    samples.fill(0.4999F);
+    const auto biased = evaluate_directional_shadow_pcf(inside, 0.0002F, samples);
+    require(biased.has_value() && *biased == 1.0F,
+            "per-cascade bias applies before the depth comparison");
+    require(evaluate_directional_shadow_pcf({0.0F, 0.5F, 0.5F}, 0.0F, {}) ==
+                1.0F,
+            "out-of-map receiver coordinates are fully lit without sampling");
+    require(!evaluate_directional_shadow_pcf(
+                 inside, 0.0F, std::span<const float>(samples).first(8U))
+                 .has_value(),
+            "truncated PCF tap input is rejected");
+    samples[3] = std::numeric_limits<float>::quiet_NaN();
+    require(!evaluate_directional_shadow_pcf(inside, 0.0F, samples).has_value(),
+            "non-finite sampled depth is rejected");
+}
+
 } // namespace
 
 int main() {
@@ -305,6 +349,7 @@ int main() {
         weatherAndExposure();
         cspAndShadows();
         convertsDirectionalCascadeClipSpace();
+        evaluatesSourceEvidencedDirectionalReceiver();
         reflectionsAndBounds();
         std::cout << "lighting tests passed\n";
         return 0;

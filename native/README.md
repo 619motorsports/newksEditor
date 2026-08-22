@@ -89,6 +89,16 @@ indices. The execution path accepts finite world and camera transforms.
 Vulkan uses a 128-byte vertex push-constant block. D3D12 uses an equivalent
 root-constant block. Each camera must use the clip-space convention for its
 backend. Both backends create persistent 1x or 4x D32 attachments.
+Single-sample D32 attachments can request shader-readable allocation. The
+fixed receiver ABI uses three distinct maps at bindings 16-18, one nearest
+clamp-to-edge sampler at binding 19, and one 256-byte constants record at
+binding 20. Vulkan executes this ABI and transitions retained maps between
+depth-write, shader-read, and transfer-read states. A SwiftShader test samples
+all three maps and then runs the caster pass again. D3D12 creates a typeless
+R32 resource with a D32 view and an R32_FLOAT sampled view. D3D12 receiver
+descriptor execution stays staged until a Windows WARP build verifies it.
+The native binding numbers and clip conversion are portable choices. They are
+not claims about the recovered native register layout.
 Indexed requests use explicit color-load and depth-clear controls. The
 source-evidenced main path uses `LESS` depth testing. The execution path accepts
 opaque and explicitly blended packets. The packet and pipeline blend flags must

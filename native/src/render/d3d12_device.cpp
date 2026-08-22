@@ -504,17 +504,21 @@ public:
     D3D12DepthAttachment(std::shared_ptr<D3D12Context> context,
                          ComPtr<ID3D12Resource> resource,
                          ComPtr<ID3D12DescriptorHeap> dsv_heap,
+                         ComPtr<ID3D12DescriptorHeap> srv_heap,
                          DepthAttachmentDescription description,
                          D3D12_RESOURCE_STATES state,
                          D3D12_CPU_DESCRIPTOR_HANDLE write_dsv,
-                         D3D12_CPU_DESCRIPTOR_HANDLE read_dsv)
+                         D3D12_CPU_DESCRIPTOR_HANDLE read_dsv,
+                         D3D12_CPU_DESCRIPTOR_HANDLE srv)
         : context_(std::move(context)),
           resource_(std::move(resource)),
           dsv_heap_(std::move(dsv_heap)),
+          srv_heap_(std::move(srv_heap)),
           info_({description}),
           state_(state),
           write_dsv_(write_dsv),
-          read_dsv_(read_dsv) {}
+          read_dsv_(read_dsv),
+          srv_(srv) {}
 
     ~D3D12DepthAttachment() override {
         if (context_) context_->wait_idle();
@@ -528,6 +532,7 @@ public:
     [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE dsv(bool writable) const noexcept {
         return writable ? write_dsv_ : read_dsv_;
     }
+    [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE srv() const noexcept { return srv_; }
     [[nodiscard]] bool cleared() const noexcept { return cleared_; }
     void set_state(D3D12_RESOURCE_STATES state) noexcept { state_ = state; }
     void set_cleared() noexcept { cleared_ = true; }
@@ -717,10 +722,12 @@ private:
     std::shared_ptr<D3D12Context> context_;
     ComPtr<ID3D12Resource> resource_;
     ComPtr<ID3D12DescriptorHeap> dsv_heap_;
+    ComPtr<ID3D12DescriptorHeap> srv_heap_;
     DepthAttachmentInfo info_;
     D3D12_RESOURCE_STATES state_ = D3D12_RESOURCE_STATE_DEPTH_WRITE;
     D3D12_CPU_DESCRIPTOR_HANDLE write_dsv_{};
     D3D12_CPU_DESCRIPTOR_HANDLE read_dsv_{};
+    D3D12_CPU_DESCRIPTOR_HANDLE srv_{};
     bool cleared_ = false;
 };
 
@@ -4509,7 +4516,9 @@ public:
         resource_description.Height = description.height;
         resource_description.DepthOrArraySize = 1U;
         resource_description.MipLevels = 1U;
-        resource_description.Format = DXGI_FORMAT_D32_FLOAT;
+        resource_description.Format = description.shader_readable
+                                          ? DXGI_FORMAT_R32_TYPELESS
+                                          : DXGI_FORMAT_D32_FLOAT;
         resource_description.SampleDesc.Count = description.samples;
         resource_description.SampleDesc.Quality = 0U;
         resource_description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
@@ -4552,11 +4561,38 @@ public:
         context_->device->CreateDepthStencilView(resource.Get(), &view_description, write_dsv);
         view_description.Flags = D3D12_DSV_FLAG_READ_ONLY_DEPTH;
         context_->device->CreateDepthStencilView(resource.Get(), &view_description, read_dsv);
+        ComPtr<ID3D12DescriptorHeap> srv_heap;
+        D3D12_CPU_DESCRIPTOR_HANDLE srv{};
+        if (description.shader_readable) {
+            D3D12_DESCRIPTOR_HEAP_DESC srv_heap_description{};
+            srv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+            srv_heap_description.NumDescriptors = 1U;
+            srv_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+            result = context_->device->CreateDescriptorHeap(
+                &srv_heap_description, IID_PPV_ARGS(&srv_heap));
+            if (FAILED(result)) {
+                Diagnostic failure = hresult_error(
+                    "ID3D12Device::CreateDescriptorHeap(depth SRV)", result);
+                failure.code = "depth_attachment_allocation_failed";
+                return {DepthAttachmentStatus::allocation_failed,
+                        std::move(failure), nullptr};
+            }
+            srv = srv_heap->GetCPUDescriptorHandleForHeapStart();
+            D3D12_SHADER_RESOURCE_VIEW_DESC srv_description{};
+            srv_description.Format = DXGI_FORMAT_R32_FLOAT;
+            srv_description.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            srv_description.Shader4ComponentMapping =
+                D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srv_description.Texture2D.MipLevels = 1U;
+            context_->device->CreateShaderResourceView(
+                resource.Get(), &srv_description, srv);
+        }
         return {DepthAttachmentStatus::ready,
                 {},
-                std::make_unique<D3D12DepthAttachment>(context_, std::move(resource), std::move(dsv_heap),
+                std::make_unique<D3D12DepthAttachment>(context_, std::move(resource),
+                                                        std::move(dsv_heap), std::move(srv_heap),
                                                         description, D3D12_RESOURCE_STATE_DEPTH_WRITE,
-                                                        write_dsv, read_dsv)};
+                                                        write_dsv, read_dsv, srv)};
     }
 
     DepthAttachmentReadbackResult read_depth_attachment(
@@ -4737,6 +4773,13 @@ public:
             validate_indexed_static_mesh_draw_request(texture, request, diagnostic);
         if (validation != IndexedStaticMeshDrawStatus::ready)
             return {validation, std::move(diagnostic), {}};
+        if (request.pipeline != nullptr &&
+            pipeline_declares_directional_shadow_receiver(*request.pipeline)) {
+            return {IndexedStaticMeshDrawStatus::unsupported,
+                    {"d3d12_directional_shadow_receiver_staged",
+                     "D3D12 sampled D32 allocation is ready, but receiver descriptor execution requires a Windows/WARP verification build"},
+                    {}};
+        }
         if (texture.backend() != Backend::D3D12)
             return {IndexedStaticMeshDrawStatus::unsupported,
                     {"texture_backend_mismatch", "The texture belongs to another graphics backend"}, {}};
@@ -4787,6 +4830,17 @@ public:
             validate_indexed_static_mesh_batch_description(texture, batch, diagnostic);
         if (validation != IndexedStaticMeshBatchStatus::ready)
             return {validation, std::move(diagnostic), {}};
+        if (std::any_of(batch.draws.begin(), batch.draws.end(),
+                        [](const IndexedStaticMeshDrawRequest& request) {
+                            return request.pipeline != nullptr &&
+                                   pipeline_declares_directional_shadow_receiver(
+                                       *request.pipeline);
+                        })) {
+            return {IndexedStaticMeshBatchStatus::unsupported,
+                    {"d3d12_directional_shadow_receiver_staged",
+                     "D3D12 sampled D32 allocation is ready, but receiver descriptor execution requires a Windows/WARP verification build"},
+                    {}};
+        }
         if (texture.backend() != Backend::D3D12)
             return {IndexedStaticMeshBatchStatus::unsupported,
                     {"texture_backend_mismatch", "The texture belongs to another graphics backend"}, {}};

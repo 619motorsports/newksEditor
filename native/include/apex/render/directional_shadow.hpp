@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -17,6 +18,21 @@ inline constexpr std::size_t directional_shadow_cascade_count = 3U;
 inline constexpr std::uint32_t max_directional_shadow_map_size = 4096U;
 inline constexpr std::uint64_t max_directional_shadow_map_bytes =
     3ULL * 4096ULL * 4096ULL * sizeof(float);
+
+// Source-evidenced hard cascade selection for the portable receiver. The
+// input is camera-forward depth. A value beyond the third split is fully lit
+// and therefore returns no cascade.
+[[nodiscard]] std::optional<std::size_t>
+select_directional_shadow_cascade(
+    float camera_forward_depth,
+    const std::array<float, directional_shadow_cascade_count>& splits) noexcept;
+
+// Reference evaluator for the recovered explicit 3x3 comparison equation.
+// The caller supplies the nine nearest-sampled D32 values. This keeps the
+// testable fidelity rule independent from backend descriptor plumbing.
+[[nodiscard]] std::optional<float> evaluate_directional_shadow_pcf(
+    const std::array<float, 3>& projected_coordinate, float depth_bias,
+    std::span<const float> sampled_depths) noexcept;
 
 struct DirectionalShadowMapLimits {
     std::uint32_t max_map_size = max_directional_shadow_map_size;

@@ -2523,7 +2523,8 @@ void retains_three_directional_maps_and_executes_only_opaque_static_casters() {
                 maps.resources->metadata().cascades.size() ==
                     directional_shadow_cascade_count &&
                 device.depth_attachment_calls == directional_shadow_cascade_count &&
-                device.live_depth_attachments == directional_shadow_cascade_count,
+                device.live_depth_attachments == directional_shadow_cascade_count &&
+                maps.resources->attachment(0U).info().description.shader_readable,
             "directional shadow preparation owns exactly three bounded D32 maps");
 
     PipelineProgram depth_pipeline = value.first_pipeline;

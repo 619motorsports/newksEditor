@@ -307,6 +307,9 @@ struct DepthAttachmentDescription {
     std::uint32_t height = 0;
     std::uint32_t samples = 1;
     DepthAttachmentFormat format = DepthAttachmentFormat::d32_float;
+    // Shader-readable depth is an allocation-time capability. It does not
+    // make the attachment a CPU-uploadable color Texture.
+    bool shader_readable = false;
 };
 
 struct DepthAttachmentInfo {
@@ -466,6 +469,36 @@ struct IndexedSampledTextureBinding {
     const Sampler* sampler = nullptr;
 };
 
+inline constexpr std::size_t indexed_directional_shadow_cascade_count = 3U;
+
+// Portable receiver packing. This is source-evidenced behavior carried by a
+// new cross-backend ABI; it is not a recovered native register layout.
+struct DirectionalShadowReceiverConstants {
+    std::array<apex::scene::Matrix4, indexed_directional_shadow_cascade_count>
+        shadow_matrices{};
+    std::array<float, 4> split_distances = {2.0F, 12.0F, 50.0F, 0.0F};
+    std::array<float, 4> depth_biases = {0.000002F, 0.000015F, 0.0003F, 0.0F};
+    std::array<float, 4> camera_position{};
+    std::array<float, 4> camera_forward = {0.0F, 0.0F, -1.0F, 0.0F};
+};
+
+static_assert(sizeof(DirectionalShadowReceiverConstants) == 256U);
+static_assert(std::is_trivially_copyable_v<DirectionalShadowReceiverConstants>);
+
+inline constexpr std::uint32_t portable_directional_shadow_buffer_view_bytes = 256U;
+
+struct IndexedDirectionalShadowBinding {
+    // Non-owning. All three maps and the sampler must remain alive until the
+    // synchronous draw returns. The sampler is nearest/clamp-to-edge with
+    // comparison disabled because the receiver performs explicit 3x3 PCF.
+    std::array<const DepthAttachment*, indexed_directional_shadow_cascade_count>
+        maps{};
+    const Sampler* sampler = nullptr;
+    const Buffer* constants = nullptr;
+    std::uint64_t constants_offset_bytes = 0U;
+    std::uint32_t constants_range_bytes = 0U;
+};
+
 // Values and semantic order follow the current production WebGL ksPerPixel
 // binder. The std140/HLSL-compatible packing is this portable test ABI.
 // Shader execution remains a separate, explicitly authorized contract.
@@ -553,6 +586,12 @@ enum class IndexedPortableResourceLayout : std::uint8_t {
 [[nodiscard]] IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
     const PipelineProgram& pipeline) noexcept;
 
+// A complete receiver extension is three sampled D32 images at bindings
+// 16-18, one sampler at 19, and one uniform buffer at 20. The extension is
+// orthogonal to the classified material layout.
+[[nodiscard]] bool pipeline_declares_directional_shadow_receiver(
+    const PipelineProgram& pipeline) noexcept;
+
 inline constexpr std::uint32_t max_indexed_static_mesh_vertices = 10'000'000U;
 inline constexpr std::uint32_t max_indexed_static_mesh_indices = 20'000'000U;
 
@@ -607,6 +646,7 @@ struct IndexedStaticMeshDrawRequest {
     IndexedSampledTextureBinding damage_mask_binding{};
     IndexedMaterialBufferBinding material_binding{};
     IndexedFrameBufferBinding frame_binding{};
+    IndexedDirectionalShadowBinding directional_shadow_binding{};
 };
 
 enum class IndexedStaticMeshDrawStatus {

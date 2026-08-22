@@ -2190,6 +2190,17 @@ logged no browser exception. These checks prove the portable implementation and 
 toggle, not pixel equality with a controlled ksEditor or game capture; that comparison
 remains a lighting acceptance gate.
 
+The native port now owns three shader-readable single-sample D32 attachments.
+Its portable receiver contract uses bindings 16-20 for three maps, one
+nearest clamp-to-edge sampler, and one 256-byte constants record. Vulkan
+executes the three sampled maps on SwiftShader and preserves the required
+depth-write, shader-read, and readback transitions. A bounded reference test
+checks the hard 2/12/50 split selection, out-of-map lit result, per-cascade
+bias, and all nine explicit PCF comparisons. D3D12 allocates `R32_TYPELESS`
+resources with `D32_FLOAT` DSVs and `R32_FLOAT` SRVs. Its receiver descriptor
+execution remains staged until it passes a Windows WARP build. This work does
+not establish the recovered DXBC register packing or native pixel parity.
+
 ## ksEditor weather, HDR, and exposure evidence
 
 The installed editor starts with `5_light_clouds` in `sdk/editor/cfg/race.ini`.

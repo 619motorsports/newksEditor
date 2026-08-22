@@ -1,5 +1,7 @@
 #include "apex/render/directional_shadow.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -14,6 +16,40 @@ DirectionalShadowMapResult fail(DirectionalShadowMapStatus status,
 }
 
 } // namespace
+
+std::optional<std::size_t> select_directional_shadow_cascade(
+    float camera_forward_depth,
+    const std::array<float, directional_shadow_cascade_count>& splits) noexcept {
+    if (!std::isfinite(camera_forward_depth) ||
+        !std::all_of(splits.begin(), splits.end(),
+                     [](float value) { return std::isfinite(value); }) ||
+        splits[0] < 0.0F || splits[0] > splits[1] || splits[1] > splits[2])
+        return std::nullopt;
+    for (std::size_t cascade = 0U; cascade < splits.size(); ++cascade)
+        if (camera_forward_depth <= splits[cascade]) return cascade;
+    return std::nullopt;
+}
+
+std::optional<float> evaluate_directional_shadow_pcf(
+    const std::array<float, 3>& projected_coordinate, float depth_bias,
+    std::span<const float> sampled_depths) noexcept {
+    if (!std::isfinite(depth_bias) ||
+        !std::all_of(projected_coordinate.begin(), projected_coordinate.end(),
+                     [](float value) { return std::isfinite(value); }))
+        return std::nullopt;
+    if (std::any_of(projected_coordinate.begin(), projected_coordinate.end(),
+                    [](float value) { return value <= 0.0F || value >= 1.0F; }))
+        return 1.0F;
+    if (sampled_depths.size() != 9U ||
+        !std::all_of(sampled_depths.begin(), sampled_depths.end(),
+                     [](float value) { return std::isfinite(value); }))
+        return std::nullopt;
+    std::size_t lit = 0U;
+    const float receiver_depth = projected_coordinate[2] - depth_bias;
+    for (const float sampled_depth : sampled_depths)
+        if (receiver_depth <= sampled_depth) ++lit;
+    return static_cast<float>(lit) / 9.0F;
+}
 
 const CameraFrame& DirectionalShadowMapResources::camera(std::size_t index) const {
     if (index >= directional_shadow_cascade_count)
@@ -95,7 +131,7 @@ DirectionalShadowMapResult prepare_directional_shadow_maps(
     }
     const DepthAttachmentDescription description{
         request.lighting.map_size, request.lighting.map_size, 1U,
-        DepthAttachmentFormat::d32_float};
+        DepthAttachmentFormat::d32_float, true};
     for (auto& attachment : resources->attachments_) {
         DepthAttachmentResult created = device.create_depth_attachment(description);
         if (!created.ok())
@@ -115,7 +151,8 @@ DirectionalShadowMapResult prepare_directional_shadow_maps(
         }
         const auto& actual = created.attachment->info().description;
         if (actual.width != description.width || actual.height != description.height ||
-            actual.samples != description.samples || actual.format != description.format) {
+            actual.samples != description.samples || actual.format != description.format ||
+            actual.shader_readable != description.shader_readable) {
             return fail(DirectionalShadowMapStatus::invalid_request,
                         "directional_shadow_map_description_mismatch",
                         "A directional shadow attachment changed the validated description");

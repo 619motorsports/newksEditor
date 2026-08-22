@@ -461,6 +461,11 @@ DepthAttachmentStatus validate_depth_attachment_description(
                       "Only D32 depth attachments are supported by the neutral contract"};
         return DepthAttachmentStatus::unsupported;
     }
+    if (description.shader_readable && description.samples != 1U) {
+        diagnostic = {"depth_attachment_sampled_multisample_unsupported",
+                      "Shader-readable D32 attachments require exactly one sample"};
+        return DepthAttachmentStatus::unsupported;
+    }
     if (description.width == 0U || description.height == 0U) {
         diagnostic = {"depth_attachment_dimensions_invalid",
                       "Depth attachment dimensions must be non-zero"};
@@ -783,14 +788,43 @@ TriangleDrawStatus validate_triangle_draw_request(const Texture& texture,
     return TriangleDrawStatus::ready;
 }
 
+bool pipeline_declares_directional_shadow_receiver(
+    const PipelineProgram& pipeline) noexcept {
+    std::array<bool, 5> found{};
+    for (const PipelineResourceBinding& resource : pipeline.resources) {
+        if (resource.set != 0U || resource.binding < 16U || resource.binding > 20U)
+            continue;
+        const std::size_t index = resource.binding - 16U;
+        const PipelineResourceKind expected = resource.binding <= 18U
+                                                  ? PipelineResourceKind::sampled_texture
+                                              : resource.binding == 19U
+                                                  ? PipelineResourceKind::sampler
+                                                  : PipelineResourceKind::uniform_buffer;
+        if (resource.kind != expected || found[index]) return false;
+        found[index] = true;
+    }
+    return std::all_of(found.begin(), found.end(), [](bool value) { return value; });
+}
+
 IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
     const PipelineProgram& pipeline) noexcept {
     if (pipeline.resources.empty())
         return IndexedPortableResourceLayout::resource_free;
-    if (pipeline.resources.size() != 2U && pipeline.resources.size() != 3U &&
-        pipeline.resources.size() != 4U && pipeline.resources.size() != 6U &&
-        pipeline.resources.size() != 8U && pipeline.resources.size() != 12U &&
-        pipeline.resources.size() != 14U)
+    const bool has_receiver = pipeline_declares_directional_shadow_receiver(pipeline);
+    const bool has_receiver_range = std::any_of(
+        pipeline.resources.begin(), pipeline.resources.end(),
+        [](const PipelineResourceBinding& resource) {
+            return resource.set == 0U && resource.binding >= 16U &&
+                   resource.binding <= 20U;
+        });
+    if (has_receiver_range && !has_receiver)
+        return IndexedPortableResourceLayout::unsupported;
+    const std::size_t material_resource_count =
+        pipeline.resources.size() - (has_receiver ? 5U : 0U);
+    if (material_resource_count != 2U && material_resource_count != 3U &&
+        material_resource_count != 4U && material_resource_count != 6U &&
+        material_resource_count != 8U && material_resource_count != 12U &&
+        material_resource_count != 14U)
         return IndexedPortableResourceLayout::unsupported;
     bool sampled_texture = false;
     bool sampler = false;
@@ -809,6 +843,9 @@ IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
     bool damage_mask_texture = false;
     bool damage_mask_sampler = false;
     for (const PipelineResourceBinding& resource : pipeline.resources) {
+        if (resource.set == 0U && resource.binding >= 16U &&
+            resource.binding <= 20U && has_receiver)
+            continue;
         if (resource.set == 0U && resource.binding == 0U &&
             resource.kind == PipelineResourceKind::sampled_texture) {
             if (sampled_texture) return IndexedPortableResourceLayout::unsupported;
@@ -882,29 +919,29 @@ IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
         normal_detail_texture != normal_detail_sampler || damage_texture != damage_sampler ||
         damage_mask_texture != damage_mask_sampler)
         return IndexedPortableResourceLayout::unsupported;
-    if (pipeline.resources.size() == 2U && !material_constants && !frame_constants)
+    if (material_resource_count == 2U && !material_constants && !frame_constants)
         return IndexedPortableResourceLayout::diffuse;
-    if (pipeline.resources.size() == 3U && material_constants && !frame_constants)
+    if (material_resource_count == 3U && material_constants && !frame_constants)
         return IndexedPortableResourceLayout::diffuse_with_constants;
-    if (pipeline.resources.size() == 3U && !material_constants && frame_constants)
+    if (material_resource_count == 3U && !material_constants && frame_constants)
         return IndexedPortableResourceLayout::diffuse_with_frame;
-    if (pipeline.resources.size() == 4U && material_constants && frame_constants)
+    if (material_resource_count == 4U && material_constants && frame_constants)
         return IndexedPortableResourceLayout::diffuse_with_constants_and_frame;
-    if (pipeline.resources.size() == 6U && material_constants && frame_constants &&
+    if (material_resource_count == 6U && material_constants && frame_constants &&
         normal_texture && normal_sampler)
         return IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame;
-    if (pipeline.resources.size() == 8U && material_constants && frame_constants &&
+    if (material_resource_count == 8U && material_constants && frame_constants &&
         normal_texture && normal_sampler && maps_texture && maps_sampler)
         return IndexedPortableResourceLayout::diffuse_normal_maps_with_constants_and_frame;
-    if (pipeline.resources.size() == 12U && material_constants && frame_constants &&
+    if (material_resource_count == 12U && material_constants && frame_constants &&
         normal_texture && normal_sampler && maps_texture && maps_sampler &&
         detail_texture && detail_sampler && normal_detail_texture && normal_detail_sampler)
         return IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame;
-    if (pipeline.resources.size() == 12U && material_constants && frame_constants &&
+    if (material_resource_count == 12U && material_constants && frame_constants &&
         normal_texture && normal_sampler && maps_texture && maps_sampler &&
         damage_texture && damage_sampler && damage_mask_texture && damage_mask_sampler)
         return IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame;
-    if (pipeline.resources.size() == 14U && material_constants && frame_constants &&
+    if (material_resource_count == 14U && material_constants && frame_constants &&
         normal_texture && normal_sampler && maps_texture && maps_sampler &&
         detail_texture && detail_sampler && damage_texture && damage_sampler &&
         damage_mask_texture && damage_mask_sampler)
@@ -1155,6 +1192,15 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     const bool has_frame_buffer = request.frame_binding.buffer != nullptr;
     const bool has_frame_range = request.frame_binding.offset_bytes != 0U ||
                                  request.frame_binding.range_bytes != 0U;
+    const bool has_shadow_map = std::any_of(
+        request.directional_shadow_binding.maps.begin(),
+        request.directional_shadow_binding.maps.end(),
+        [](const DepthAttachment* map) { return map != nullptr; });
+    const bool has_shadow_sampler = request.directional_shadow_binding.sampler != nullptr;
+    const bool has_shadow_constants = request.directional_shadow_binding.constants != nullptr;
+    const bool has_shadow_range =
+        request.directional_shadow_binding.constants_offset_bytes != 0U ||
+        request.directional_shadow_binding.constants_range_bytes != 0U;
     const IndexedPortableResourceLayout resource_layout =
         classify_indexed_portable_resource_layout(pipeline);
     if (resource_layout == IndexedPortableResourceLayout::resource_free) {
@@ -1167,6 +1213,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             has_damage_mask_sampler ||
             has_material_buffer || has_material_range ||
             has_frame_buffer || has_frame_range ||
+            has_shadow_map || has_shadow_sampler || has_shadow_constants || has_shadow_range ||
             request.resource_authority != IndexedResourceAuthority::packet_contract) {
             diagnostic = {"indexed_resource_binding_unexpected",
                           "A resource-free pipeline cannot receive explicit material bindings"};
@@ -1218,6 +1265,8 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
         const bool damage_declaration =
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_dust_with_constants_and_frame;
+        const bool shadow_declaration =
+            pipeline_declares_directional_shadow_receiver(pipeline);
         if (request.resource_authority != IndexedResourceAuthority::explicit_bindings) {
             diagnostic = {"indexed_resource_execution_staged",
                           "Material resources require explicit request-local binding authority"};
@@ -1351,6 +1400,124 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                     frame.size_bytes - request.frame_binding.offset_bytes) {
                 diagnostic = {"indexed_frame_buffer_range_invalid",
                               "The frame constants buffer view exceeds the declared buffer size"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+        }
+        const bool has_all_shadow_maps = std::all_of(
+            request.directional_shadow_binding.maps.begin(),
+            request.directional_shadow_binding.maps.end(),
+            [](const DepthAttachment* map) { return map != nullptr; });
+        if (shadow_declaration != has_all_shadow_maps ||
+            shadow_declaration != has_shadow_sampler ||
+            shadow_declaration != has_shadow_constants ||
+            (!shadow_declaration && has_shadow_range)) {
+            diagnostic = {shadow_declaration
+                              ? "indexed_directional_shadow_binding_missing"
+                              : "indexed_directional_shadow_binding_unexpected",
+                          shadow_declaration
+                              ? "The directional-shadow receiver requires exactly three maps, one sampler, and one constants buffer"
+                              : "A pipeline without the receiver extension cannot receive directional-shadow resources"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        if (shadow_declaration) {
+            const DepthAttachmentDescription* first_description = nullptr;
+            for (std::size_t map_index = 0U;
+                 map_index < request.directional_shadow_binding.maps.size();
+                 ++map_index) {
+                const DepthAttachment* map =
+                    request.directional_shadow_binding.maps[map_index];
+                for (std::size_t previous = 0U; previous < map_index; ++previous) {
+                    if (map == request.directional_shadow_binding.maps[previous]) {
+                        diagnostic = {"indexed_directional_shadow_map_duplicate",
+                                      "Directional-shadow receiver cascades must use three distinct maps"};
+                        return IndexedStaticMeshDrawStatus::invalid_request;
+                    }
+                }
+                if (map->backend() != texture.backend()) {
+                    diagnostic = {"indexed_directional_shadow_backend_mismatch",
+                                  "Directional-shadow maps and the color target must use the same backend"};
+                    return IndexedStaticMeshDrawStatus::unsupported;
+                }
+                if (map == request.depth_attachment) {
+                    diagnostic = {"indexed_directional_shadow_feedback_loop",
+                                  "A writable main-pass depth attachment cannot be sampled as a directional shadow"};
+                    return IndexedStaticMeshDrawStatus::invalid_request;
+                }
+                const DepthAttachmentDescription& description = map->info().description;
+                if (!description.shader_readable || description.samples != 1U ||
+                    description.format != DepthAttachmentFormat::d32_float) {
+                    diagnostic = {"indexed_directional_shadow_description_unsupported",
+                                  "Directional-shadow receiver maps require shader-readable single-sample D32 attachments"};
+                    return IndexedStaticMeshDrawStatus::unsupported;
+                }
+                if (first_description != nullptr &&
+                    (description.width != first_description->width ||
+                     description.height != first_description->height)) {
+                    diagnostic = {"indexed_directional_shadow_dimensions_mismatch",
+                                  "All directional-shadow receiver maps must have equal dimensions"};
+                    return IndexedStaticMeshDrawStatus::invalid_request;
+                }
+                first_description = &description;
+            }
+            const Sampler& shadow_sampler =
+                *request.directional_shadow_binding.sampler;
+            if (shadow_sampler.backend() != texture.backend()) {
+                diagnostic = {"indexed_directional_shadow_sampler_backend_mismatch",
+                              "The directional-shadow sampler and color target must use the same backend"};
+                return IndexedStaticMeshDrawStatus::unsupported;
+            }
+            Diagnostic shadow_sampler_diagnostic;
+            if (validate_sampler_description(shadow_sampler.info().description,
+                                             shadow_sampler_diagnostic) !=
+                SamplerStatus::ready) {
+                diagnostic = {shadow_sampler_diagnostic.code.empty()
+                                  ? "indexed_directional_shadow_sampler_invalid"
+                                  : "indexed_directional_shadow_" +
+                                        shadow_sampler_diagnostic.code,
+                              shadow_sampler_diagnostic.message};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+            const SamplerDescription& sampler_description =
+                shadow_sampler.info().description;
+            if (sampler_description.min_filter != SamplerFilter::nearest ||
+                sampler_description.mag_filter != SamplerFilter::nearest ||
+                sampler_description.mip_filter != SamplerFilter::nearest ||
+                sampler_description.address_u != SamplerAddressMode::clamp_to_edge ||
+                sampler_description.address_v != SamplerAddressMode::clamp_to_edge ||
+                sampler_description.address_w != SamplerAddressMode::clamp_to_edge ||
+                sampler_description.compare != SamplerCompare::disabled) {
+                diagnostic = {"indexed_directional_shadow_sampler_contract_invalid",
+                              "Directional-shadow PCF requires nearest clamp-to-edge sampling with comparison disabled"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+            const Buffer& shadow_constants =
+                *request.directional_shadow_binding.constants;
+            if (shadow_constants.backend() != texture.backend()) {
+                diagnostic = {"indexed_directional_shadow_constants_backend_mismatch",
+                              "Directional-shadow constants and the color target must use the same backend"};
+                return IndexedStaticMeshDrawStatus::unsupported;
+            }
+            const BufferDescription& constants_description =
+                shadow_constants.info().description;
+            if (constants_description.usage != BufferUsage::uniform) {
+                diagnostic = {"indexed_directional_shadow_constants_usage_invalid",
+                              "Directional-shadow constants require exclusive uniform-buffer usage"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+            const std::uint64_t shadow_offset =
+                request.directional_shadow_binding.constants_offset_bytes;
+            const std::uint64_t shadow_range =
+                request.directional_shadow_binding.constants_range_bytes;
+            if (shadow_offset % portable_directional_shadow_buffer_view_bytes != 0U ||
+                shadow_range != portable_directional_shadow_buffer_view_bytes) {
+                diagnostic = {"indexed_directional_shadow_constants_alignment_invalid",
+                              "Directional-shadow constants require a 256-byte aligned offset and 256-byte range"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+            if (shadow_offset > constants_description.size_bytes ||
+                shadow_range > constants_description.size_bytes - shadow_offset) {
+                diagnostic = {"indexed_directional_shadow_constants_range_invalid",
+                              "Directional-shadow constants exceed the declared buffer size"};
                 return IndexedStaticMeshDrawStatus::invalid_request;
             }
         }

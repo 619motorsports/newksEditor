@@ -748,6 +748,130 @@ void validates_portable_frame_buffer_contract() {
             "non-uniform frame buffer rejected");
 }
 
+void validates_directional_shadow_receiver_contract() {
+    PipelineProgram pipeline = pipeline_fixture();
+    pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 3U, "ksPerPixelFrame"},
+        {PipelineResourceKind::sampled_texture, 0U, 16U, "txShadow0"},
+        {PipelineResourceKind::sampled_texture, 0U, 17U, "txShadow1"},
+        {PipelineResourceKind::sampled_texture, 0U, 18U, "txShadow2"},
+        {PipelineResourceKind::sampler, 0U, 19U, "shadowSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 20U, "shadowReceiver"},
+    };
+    require(pipeline_declares_directional_shadow_receiver(pipeline) &&
+                classify_indexed_portable_resource_layout(pipeline) ==
+                    IndexedPortableResourceLayout::diffuse_with_frame,
+            "directional-shadow receiver extends the material layout orthogonally");
+
+    DrawPacket packet = packet_fixture();
+    packet.resources.push_back({"txDiffuse", 1U, 0U, "body.dds"});
+    FakeTexture target(Backend::Vulkan, target_description());
+    FakeTexture diffuse(Backend::Vulkan, sampled_description());
+    FakeSampler diffuse_sampler(Backend::Vulkan);
+    SamplerDescription shadow_sampler_description;
+    shadow_sampler_description.min_filter = SamplerFilter::nearest;
+    shadow_sampler_description.mag_filter = SamplerFilter::nearest;
+    shadow_sampler_description.mip_filter = SamplerFilter::nearest;
+    shadow_sampler_description.address_u = SamplerAddressMode::clamp_to_edge;
+    shadow_sampler_description.address_v = SamplerAddressMode::clamp_to_edge;
+    shadow_sampler_description.address_w = SamplerAddressMode::clamp_to_edge;
+    shadow_sampler_description.compare = SamplerCompare::disabled;
+    FakeSampler shadow_sampler(Backend::Vulkan, shadow_sampler_description);
+    FakeBuffer vertices(Backend::Vulkan, {132U, BufferUsage::vertex,
+                                          BufferMemory::device_local,
+                                          BufferMutability::immutable});
+    FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index,
+                                         BufferMemory::device_local,
+                                         BufferMutability::immutable});
+    FakeBuffer frame(Backend::Vulkan,
+                     {256U, BufferUsage::uniform, BufferMemory::host_visible,
+                      BufferMutability::mutable_data});
+    FakeBuffer shadow_constants(Backend::Vulkan,
+                                {256U, BufferUsage::uniform,
+                                 BufferMemory::host_visible,
+                                 BufferMutability::mutable_data});
+    FakeDepthAttachment shadow0(
+        Backend::Vulkan,
+        {32U, 32U, 1U, DepthAttachmentFormat::d32_float, true});
+    FakeDepthAttachment shadow1(
+        Backend::Vulkan,
+        {32U, 32U, 1U, DepthAttachmentFormat::d32_float, true});
+    FakeDepthAttachment shadow2(
+        Backend::Vulkan,
+        {32U, 32U, 1U, DepthAttachmentFormat::d32_float, true});
+    auto request = request_fixture(packet, pipeline, vertices, indices);
+    request.resource_authority = IndexedResourceAuthority::explicit_bindings;
+    request.sampled_binding = {&diffuse, &diffuse_sampler};
+    request.frame_binding = {&frame, 0U, portable_frame_buffer_view_bytes};
+    request.directional_shadow_binding = {
+        {&shadow0, &shadow1, &shadow2}, &shadow_sampler, &shadow_constants,
+        0U, portable_directional_shadow_buffer_view_bytes};
+    Diagnostic diagnostic;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            "complete three-map directional-shadow receiver accepted");
+
+    request.directional_shadow_binding.maps[2] = nullptr;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_directional_shadow_binding_missing",
+            "truncated three-map receiver rejected before execution");
+    request.directional_shadow_binding.maps[2] = &shadow2;
+
+    request.directional_shadow_binding.maps[2] = &shadow1;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_directional_shadow_map_duplicate",
+            "duplicate receiver map rejected");
+    request.directional_shadow_binding.maps[2] = &shadow2;
+
+    FakeDepthAttachment non_sampled(
+        Backend::Vulkan,
+        {32U, 32U, 1U, DepthAttachmentFormat::d32_float, false});
+    request.directional_shadow_binding.maps[2] = &non_sampled;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_directional_shadow_description_unsupported",
+            "non-sampled depth attachment rejected as a receiver map");
+    request.directional_shadow_binding.maps[2] = &shadow2;
+
+    FakeDepthAttachment wrong_size(
+        Backend::Vulkan,
+        {16U, 32U, 1U, DepthAttachmentFormat::d32_float, true});
+    request.directional_shadow_binding.maps[2] = &wrong_size;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_directional_shadow_dimensions_mismatch",
+            "mismatched receiver-map dimensions rejected");
+    request.directional_shadow_binding.maps[2] = &shadow2;
+
+    FakeSampler comparison_sampler(Backend::Vulkan, [&] {
+        SamplerDescription description = shadow_sampler_description;
+        description.compare = SamplerCompare::less_equal;
+        return description;
+    }());
+    request.directional_shadow_binding.sampler = &comparison_sampler;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_directional_shadow_sampler_contract_invalid",
+            "hardware comparison sampler rejected by explicit-PCF contract");
+    request.directional_shadow_binding.sampler = &shadow_sampler;
+
+    request.directional_shadow_binding.constants_range_bytes = 128U;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_directional_shadow_constants_alignment_invalid",
+            "truncated receiver constants rejected");
+
+    pipeline.resources.pop_back();
+    require(!pipeline_declares_directional_shadow_receiver(pipeline) &&
+                classify_indexed_portable_resource_layout(pipeline) ==
+                    IndexedPortableResourceLayout::unsupported,
+            "partial receiver declaration is unsupported");
+}
+
 void validates_portable_normal_map_contract() {
     PipelineProgram pipeline = pipeline_fixture();
     pipeline.resources = {
@@ -1363,6 +1487,12 @@ void rejects_invalid_depth_attachment_descriptions() {
                 DepthAttachmentStatus::ready,
             "four-sample depth attachment accepted");
 
+    description.shader_readable = true;
+    require(validate_depth_attachment_description(description, diagnostic) ==
+                DepthAttachmentStatus::unsupported &&
+                diagnostic.code == "depth_attachment_sampled_multisample_unsupported",
+            "shader-readable multisample depth attachment rejected explicitly");
+
     description.samples = 1U;
     description.format = static_cast<DepthAttachmentFormat>(99);
     require(validate_depth_attachment_description(description, diagnostic) ==
@@ -1817,6 +1947,7 @@ int main() {
         validates_portable_diffuse_resource_contract();
         validates_portable_material_buffer_contract();
         validates_portable_frame_buffer_contract();
+        validates_directional_shadow_receiver_contract();
         validates_portable_normal_map_contract();
         validates_portable_maps_contract();
         validates_portable_detail_stack_contract();

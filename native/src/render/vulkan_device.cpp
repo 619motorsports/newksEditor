@@ -996,7 +996,10 @@ bool create_raw_depth_attachment(const std::shared_ptr<VulkanContext>& context,
     // Keep the persistent attachment readable without creating a second
     // depth image. Readback transitions the image to TRANSFER_SRC and then
     // restores the tracked depth-attachment layout synchronously.
-    image_info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    image_info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                       VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (description.shader_readable)
+        image_info.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
     image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
@@ -1087,6 +1090,9 @@ public:
         raw_.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         raw_.initialized = raw_.initialized || initialized;
     }
+    void mark_sampled() noexcept {
+        raw_.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    }
     void mark_invalid() noexcept {
         raw_.layout = VK_IMAGE_LAYOUT_UNDEFINED;
         raw_.initialized = false;
@@ -1095,7 +1101,9 @@ public:
     bool readback(const DepthAttachmentReadbackRequest& request,
                   std::vector<float>& output,
                   Diagnostic& diagnostic) {
-        if (!raw_.initialized || raw_.layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+        if (!raw_.initialized ||
+            (raw_.layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL &&
+             raw_.layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL)) {
             diagnostic = {"depth_attachment_uninitialized",
                           "D32 depth readback requires an initialized depth attachment"};
             return false;
@@ -1114,6 +1122,7 @@ public:
             return false;
         }
 
+        const VkImageLayout restored_layout = raw_.layout;
         std::lock_guard command_guard(context_->command_mutex);
         VkCommandBufferAllocateInfo allocation{};
         allocation.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -1134,8 +1143,11 @@ public:
                 barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
                 barrier.oldLayout = raw_.layout;
                 barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-                barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                barrier.srcAccessMask =
+                    restored_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                        ? VK_ACCESS_SHADER_READ_BIT
+                        : VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                              VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
                 barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
                 barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1144,8 +1156,11 @@ public:
                 barrier.subresourceRange.levelCount = 1U;
                 barrier.subresourceRange.layerCount = 1U;
                 vkCmdPipelineBarrier(command,
-                                     VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
-                                         VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                                     restored_layout ==
+                                             VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                                         ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                                         : VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                                               VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                                      VK_PIPELINE_STAGE_TRANSFER_BIT, 0U, 0U, nullptr, 0U, nullptr,
                                      1U, &barrier);
 
@@ -1159,13 +1174,19 @@ public:
                                        staging.buffer, 1U, &copy);
 
                 barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-                barrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                barrier.newLayout = restored_layout;
                 barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-                barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                barrier.dstAccessMask =
+                    restored_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                        ? VK_ACCESS_SHADER_READ_BIT
+                        : VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                              VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
                 vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                     VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
-                                         VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                                     restored_layout ==
+                                             VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                                         ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                                         : VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                                               VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                                      0U, 0U, nullptr, 0U, nullptr, 1U, &barrier);
                 result = vkEndCommandBuffer(command);
             }
@@ -1703,6 +1724,14 @@ struct VulkanIndexedBatchDraw {
     VkBuffer frame_buffer = VK_NULL_HANDLE;
     VkDeviceSize frame_offset = 0U;
     VkDeviceSize frame_range = 0U;
+    bool has_directional_shadow_binding = false;
+    std::array<VulkanDepthAttachment*, indexed_directional_shadow_cascade_count>
+        shadow_attachments{};
+    std::array<VkImageView, indexed_directional_shadow_cascade_count> shadow_views{};
+    VkSampler shadow_sampler = VK_NULL_HANDLE;
+    VkBuffer shadow_constants_buffer = VK_NULL_HANDLE;
+    VkDeviceSize shadow_constants_offset = 0U;
+    VkDeviceSize shadow_constants_range = 0U;
 };
 
 // The portable resource ABI uses one sampled image, one sampler, and an
@@ -1721,6 +1750,7 @@ struct VulkanTransientSampledDescriptors {
     bool includes_normal_detail_binding = false;
     bool includes_damage_binding = false;
     bool includes_damage_mask_binding = false;
+    bool includes_directional_shadow_binding = false;
 
     VulkanTransientSampledDescriptors() = default;
     VulkanTransientSampledDescriptors(const VulkanTransientSampledDescriptors&) = delete;
@@ -1735,7 +1765,9 @@ struct VulkanTransientSampledDescriptors {
           includes_detail_binding(std::exchange(other.includes_detail_binding, false)),
           includes_normal_detail_binding(std::exchange(other.includes_normal_detail_binding, false)),
           includes_damage_binding(std::exchange(other.includes_damage_binding, false)),
-          includes_damage_mask_binding(std::exchange(other.includes_damage_mask_binding, false)) {}
+          includes_damage_mask_binding(std::exchange(other.includes_damage_mask_binding, false)),
+          includes_directional_shadow_binding(
+              std::exchange(other.includes_directional_shadow_binding, false)) {}
     VulkanTransientSampledDescriptors& operator=(VulkanTransientSampledDescriptors&& other) noexcept {
         if (this == &other) return *this;
         reset();
@@ -1750,6 +1782,8 @@ struct VulkanTransientSampledDescriptors {
         includes_normal_detail_binding = std::exchange(other.includes_normal_detail_binding, false);
         includes_damage_binding = std::exchange(other.includes_damage_binding, false);
         includes_damage_mask_binding = std::exchange(other.includes_damage_mask_binding, false);
+        includes_directional_shadow_binding =
+            std::exchange(other.includes_directional_shadow_binding, false);
         return *this;
     }
     ~VulkanTransientSampledDescriptors() { reset(); }
@@ -1769,6 +1803,7 @@ struct VulkanTransientSampledDescriptors {
         includes_normal_detail_binding = false;
         includes_damage_binding = false;
         includes_damage_mask_binding = false;
+        includes_directional_shadow_binding = false;
         context.reset();
     }
 };
@@ -1989,6 +2024,7 @@ bool create_sampled_descriptor_layout(const std::shared_ptr<VulkanContext>& cont
                                       bool includes_normal_detail_binding,
                                       bool includes_damage_binding,
                                       bool includes_damage_mask_binding,
+                                      bool includes_directional_shadow_binding,
                                       Diagnostic& diagnostic) {
     descriptors.reset();
     descriptors.context = context;
@@ -2010,7 +2046,9 @@ bool create_sampled_descriptor_layout(const std::shared_ptr<VulkanContext>& cont
     descriptors.includes_normal_detail_binding = includes_normal_detail_binding;
     descriptors.includes_damage_binding = includes_damage_binding;
     descriptors.includes_damage_mask_binding = includes_damage_mask_binding;
-    std::array<VkDescriptorSetLayoutBinding, 16> bindings{};
+    descriptors.includes_directional_shadow_binding =
+        includes_directional_shadow_binding;
+    std::array<VkDescriptorSetLayoutBinding, 21> bindings{};
     bindings[0].binding = 0U;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     bindings[0].descriptorCount = 1U;
@@ -2067,22 +2105,44 @@ bool create_sampled_descriptor_layout(const std::shared_ptr<VulkanContext>& cont
     bindings[14].binding = 14U;
     bindings[15] = bindings[11];
     bindings[15].binding = 15U;
+    bindings[16] = bindings[0];
+    bindings[16].binding = 16U;
+    bindings[17] = bindings[16];
+    bindings[17].binding = 17U;
+    bindings[18] = bindings[16];
+    bindings[18].binding = 18U;
+    bindings[19] = bindings[1];
+    bindings[19].binding = 19U;
+    bindings[20] = bindings[3];
+    bindings[20].binding = 20U;
     if (includes_damage_stack && !includes_detail_stack)
-        std::copy(bindings.begin() + 12, bindings.end(), bindings.begin() + 8);
+        std::copy(bindings.begin() + 12, bindings.begin() + 16,
+                  bindings.begin() + 8);
     VkPhysicalDeviceProperties properties{};
     vkGetPhysicalDeviceProperties(context->physical_device, &properties);
-    const std::uint32_t sampled_descriptor_count =
+    const std::uint32_t material_sampled_descriptor_count =
         (includes_damage_stack && includes_detail_stack) ? 7U
         : includes_damage_stack ? 5U : includes_normal_detail_binding ? 5U
         : includes_detail_stack ? 5U : includes_maps_binding ? 3U : includes_normal_binding ? 2U : 1U;
+    const std::uint32_t sampled_image_descriptor_count =
+        includes_directional_shadow_binding
+            ? 10U
+            : material_sampled_descriptor_count;
+    const std::uint32_t sampler_descriptor_count =
+        includes_directional_shadow_binding
+            ? 8U
+            : material_sampled_descriptor_count;
     const std::uint32_t uniform_descriptor_count =
         (includes_frame_buffer || includes_normal_binding || includes_maps_binding ||
          includes_detail_stack || includes_damage_stack)
-            ? 2U : includes_material_buffer ? 1U : 0U;
-    if (sampled_descriptor_count > properties.limits.maxPerStageDescriptorSampledImages ||
-        sampled_descriptor_count > properties.limits.maxDescriptorSetSampledImages ||
-        sampled_descriptor_count > properties.limits.maxPerStageDescriptorSamplers ||
-        sampled_descriptor_count > properties.limits.maxDescriptorSetSamplers ||
+            ? (includes_directional_shadow_binding ? 3U : 2U)
+            : includes_directional_shadow_binding
+                  ? 3U
+                  : includes_material_buffer ? 1U : 0U;
+    if (sampled_image_descriptor_count > properties.limits.maxPerStageDescriptorSampledImages ||
+        sampled_image_descriptor_count > properties.limits.maxDescriptorSetSampledImages ||
+        sampler_descriptor_count > properties.limits.maxPerStageDescriptorSamplers ||
+        sampler_descriptor_count > properties.limits.maxDescriptorSetSamplers ||
         uniform_descriptor_count > properties.limits.maxPerStageDescriptorUniformBuffers ||
         uniform_descriptor_count > properties.limits.maxDescriptorSetUniformBuffers) {
         diagnostic = {"vulkan_descriptor_layout_limit",
@@ -2092,8 +2152,10 @@ bool create_sampled_descriptor_layout(const std::shared_ptr<VulkanContext>& cont
     }
     VkDescriptorSetLayoutCreateInfo layout_info{};
     layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layout_info.bindingCount = (includes_detail_stack && includes_damage_stack)
-                                   ? static_cast<std::uint32_t>(bindings.size())
+    layout_info.bindingCount = includes_directional_shadow_binding
+                               ? static_cast<std::uint32_t>(bindings.size())
+                               : (includes_detail_stack && includes_damage_stack)
+                                   ? 16U
                                    : (includes_detail_stack || includes_damage_stack) ? 12U
                                    : includes_maps_binding ? 8U
                                    : includes_normal_binding ? 6U
@@ -2122,7 +2184,8 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
         if (draw.has_sampled_binding || draw.has_normal_binding || draw.has_maps_binding ||
             draw.has_detail_binding || draw.has_normal_detail_binding ||
             draw.has_damage_binding || draw.has_damage_mask_binding ||
-            draw.has_material_binding || draw.has_frame_binding)
+            draw.has_material_binding || draw.has_frame_binding ||
+            draw.has_directional_shadow_binding)
             ++descriptor_count;
     }
     if (descriptor_count == 0U) return true;
@@ -2140,7 +2203,7 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
                                              descriptors.includes_damage_mask_binding;
     const bool includes_detail_descriptors = descriptors.includes_detail_binding ||
                                              descriptors.includes_normal_detail_binding;
-    const std::size_t sampled_descriptors_per_set =
+    const std::size_t material_sampled_descriptors_per_set =
         (includes_damage_descriptors && includes_detail_descriptors) ? 7U
                                                         : descriptors.includes_damage_mask_binding
                                                         ? 5U
@@ -2150,28 +2213,46 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
                                                         : descriptors.includes_detail_binding ? 5U
                                                         : descriptors.includes_maps_binding ? 3U
                                                         : descriptors.includes_normal_binding ? 2U : 1U;
-    if (descriptor_count > std::numeric_limits<std::size_t>::max() / sampled_descriptors_per_set) {
+    const std::size_t sampled_images_per_set =
+        descriptors.includes_directional_shadow_binding
+            ? 10U
+            : material_sampled_descriptors_per_set;
+    const std::size_t samplers_per_set =
+        descriptors.includes_directional_shadow_binding
+            ? 8U
+            : material_sampled_descriptors_per_set;
+    if (descriptor_count > std::numeric_limits<std::size_t>::max() / sampled_images_per_set ||
+        descriptor_count > std::numeric_limits<std::size_t>::max() / samplers_per_set) {
         diagnostic = {"vulkan_descriptor_count_limit",
                       "The indexed sampled-image descriptor count overflows host arithmetic"};
         return false;
     }
-    const std::size_t sampled_descriptor_count = descriptor_count * sampled_descriptors_per_set;
-    if (sampled_descriptor_count > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+    const std::size_t sampled_image_descriptor_count =
+        descriptor_count * sampled_images_per_set;
+    const std::size_t sampler_descriptor_count = descriptor_count * samplers_per_set;
+    if (sampled_image_descriptor_count >
+            static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+        sampler_descriptor_count >
+            static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
         diagnostic = {"vulkan_descriptor_count_limit",
                       "The indexed sampled-image descriptor count exceeds Vulkan's bounded descriptor limit"};
         return false;
     }
     pool_sizes[0].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    pool_sizes[0].descriptorCount = static_cast<std::uint32_t>(sampled_descriptor_count);
+    pool_sizes[0].descriptorCount =
+        static_cast<std::uint32_t>(sampled_image_descriptor_count);
     pool_sizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLER;
-    pool_sizes[1].descriptorCount = static_cast<std::uint32_t>(sampled_descriptor_count);
+    pool_sizes[1].descriptorCount = static_cast<std::uint32_t>(sampler_descriptor_count);
     pool_sizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     // A binding-3 layout includes binding 2 as well, so frame-only batches
     // still consume two uniform descriptors per allocated set even though the
     // frame-only shader writes only binding 3.
-    const std::size_t uniform_bindings_per_set = descriptors.includes_frame_buffer
-                                                      ? 2U
-                                                      : descriptors.includes_material_buffer ? 1U : 0U;
+    const std::size_t uniform_bindings_per_set =
+        descriptors.includes_directional_shadow_binding
+            ? 3U
+            : descriptors.includes_frame_buffer
+                  ? 2U
+                  : descriptors.includes_material_buffer ? 1U : 0U;
     if (uniform_bindings_per_set != 0U &&
         descriptor_count > std::numeric_limits<std::size_t>::max() / uniform_bindings_per_set) {
         diagnostic = {"vulkan_descriptor_count_limit",
@@ -2188,7 +2269,10 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
     VkDescriptorPoolCreateInfo pool_info{};
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pool_info.maxSets = static_cast<std::uint32_t>(descriptor_count);
-    pool_info.poolSizeCount = (descriptors.includes_material_buffer || descriptors.includes_frame_buffer) ? 3U : 2U;
+    pool_info.poolSizeCount =
+        (descriptors.includes_material_buffer || descriptors.includes_frame_buffer ||
+         descriptors.includes_directional_shadow_binding)
+            ? 3U : 2U;
     pool_info.pPoolSizes = pool_sizes;
     VkResult result = vkCreateDescriptorPool(context->device, &pool_info, nullptr, &descriptors.pool);
     if (result != VK_SUCCESS) {
@@ -2218,7 +2302,8 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
         if (!draw.has_sampled_binding && !draw.has_normal_binding && !draw.has_maps_binding &&
             !draw.has_detail_binding && !draw.has_normal_detail_binding &&
             !draw.has_damage_binding && !draw.has_damage_mask_binding &&
-            !draw.has_material_binding && !draw.has_frame_binding)
+            !draw.has_material_binding && !draw.has_frame_binding &&
+            !draw.has_directional_shadow_binding)
             continue;
         const VkDescriptorSet set = allocated[next++];
         VkDescriptorImageInfo image_info{};
@@ -2264,7 +2349,21 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
         frame_info.buffer = draw.frame_buffer;
         frame_info.offset = draw.frame_offset;
         frame_info.range = draw.frame_range;
-        std::array<VkWriteDescriptorSet, 16> writes{};
+        std::array<VkDescriptorImageInfo,
+                   indexed_directional_shadow_cascade_count> shadow_image_infos{};
+        for (std::size_t cascade = 0U;
+             cascade < indexed_directional_shadow_cascade_count; ++cascade) {
+            shadow_image_infos[cascade].imageView = draw.shadow_views[cascade];
+            shadow_image_infos[cascade].imageLayout =
+                VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        }
+        VkDescriptorImageInfo shadow_sampler_info{};
+        shadow_sampler_info.sampler = draw.shadow_sampler;
+        VkDescriptorBufferInfo shadow_constants_info{};
+        shadow_constants_info.buffer = draw.shadow_constants_buffer;
+        shadow_constants_info.offset = draw.shadow_constants_offset;
+        shadow_constants_info.range = draw.shadow_constants_range;
+        std::array<VkWriteDescriptorSet, 21> writes{};
         std::uint32_t write_count = 0U;
         if (draw.has_sampled_binding) {
             writes[write_count].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -2394,6 +2493,34 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
             writes[write_count].descriptorCount = 1U;
             writes[write_count].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
             writes[write_count].pBufferInfo = &frame_info;
+            ++write_count;
+        }
+        if (draw.has_directional_shadow_binding) {
+            for (std::uint32_t cascade = 0U;
+                 cascade < indexed_directional_shadow_cascade_count; ++cascade) {
+                writes[write_count].sType =
+                    VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                writes[write_count].dstSet = set;
+                writes[write_count].dstBinding = 16U + cascade;
+                writes[write_count].descriptorCount = 1U;
+                writes[write_count].descriptorType =
+                    VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+                writes[write_count].pImageInfo = &shadow_image_infos[cascade];
+                ++write_count;
+            }
+            writes[write_count].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[write_count].dstSet = set;
+            writes[write_count].dstBinding = 19U;
+            writes[write_count].descriptorCount = 1U;
+            writes[write_count].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+            writes[write_count].pImageInfo = &shadow_sampler_info;
+            ++write_count;
+            writes[write_count].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[write_count].dstSet = set;
+            writes[write_count].dstBinding = 20U;
+            writes[write_count].descriptorCount = 1U;
+            writes[write_count].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            writes[write_count].pBufferInfo = &shadow_constants_info;
             ++write_count;
         }
         vkUpdateDescriptorSets(context->device, write_count, writes.data(), 0U, nullptr);
@@ -3021,6 +3148,7 @@ bool draw_indexed_batch_and_readback(
     bool has_normal_detail_binding = false;
     bool has_damage_binding = false;
     bool has_damage_mask_binding = false;
+    bool has_directional_shadow_binding = false;
     for (const VulkanIndexedBatchDraw& draw : draws) {
         has_sampled_binding = has_sampled_binding || draw.has_sampled_binding;
         has_material_binding = has_material_binding || draw.has_material_binding;
@@ -3031,15 +3159,34 @@ bool draw_indexed_batch_and_readback(
         has_normal_detail_binding = has_normal_detail_binding || draw.has_normal_detail_binding;
         has_damage_binding = has_damage_binding || draw.has_damage_binding;
         has_damage_mask_binding = has_damage_mask_binding || draw.has_damage_mask_binding;
+        has_directional_shadow_binding = has_directional_shadow_binding ||
+                                         draw.has_directional_shadow_binding;
+    }
+    std::vector<VulkanDepthAttachment*> sampled_shadow_attachments;
+    if (has_directional_shadow_binding) {
+        sampled_shadow_attachments.reserve(
+            draws.size() * indexed_directional_shadow_cascade_count);
+        for (const VulkanIndexedBatchDraw& draw : draws) {
+            if (!draw.has_directional_shadow_binding) continue;
+            for (VulkanDepthAttachment* attachment : draw.shadow_attachments) {
+                if (attachment != nullptr &&
+                    std::find(sampled_shadow_attachments.begin(),
+                              sampled_shadow_attachments.end(), attachment) ==
+                        sampled_shadow_attachments.end())
+                    sampled_shadow_attachments.push_back(attachment);
+            }
+        }
     }
     VulkanTransientSampledDescriptors descriptors;
     if ((has_sampled_binding || has_normal_binding || has_maps_binding || has_detail_binding ||
          has_normal_detail_binding || has_damage_binding || has_damage_mask_binding ||
-         has_material_binding || has_frame_binding) &&
+         has_material_binding || has_frame_binding ||
+         has_directional_shadow_binding) &&
         !create_sampled_descriptor_layout(context, descriptors, has_material_binding, has_frame_binding,
                                           has_normal_binding, has_maps_binding, has_detail_binding,
                                           has_normal_detail_binding, has_damage_binding,
-                                          has_damage_mask_binding, diagnostic))
+                                          has_damage_mask_binding,
+                                          has_directional_shadow_binding, diagnostic))
         return false;
 
     VkAttachmentDescription color_attachment{};
@@ -3148,7 +3295,8 @@ bool draw_indexed_batch_and_readback(
     std::vector<VkDescriptorSet> descriptor_sets;
     if ((has_sampled_binding || has_normal_binding || has_maps_binding || has_detail_binding ||
          has_normal_detail_binding || has_damage_binding || has_damage_mask_binding ||
-         has_material_binding || has_frame_binding) &&
+         has_material_binding || has_frame_binding ||
+         has_directional_shadow_binding) &&
         !allocate_sampled_descriptor_sets(
                                   context, descriptors, draws, descriptor_sets, diagnostic)) {
         pipelines.clear();
@@ -3218,6 +3366,32 @@ bool draw_indexed_batch_and_readback(
                                  VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
                                      VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                                  0U, 0U, nullptr, 0U, nullptr, 1U, &barrier);
+        }
+        for (VulkanDepthAttachment* shadow : sampled_shadow_attachments) {
+            if (shadow->layout() ==
+                VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL)
+                continue;
+            VkImageMemoryBarrier barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.oldLayout = shadow->layout();
+            barrier.newLayout =
+                VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = shadow->image();
+            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+            barrier.subresourceRange.levelCount = 1U;
+            barrier.subresourceRange.layerCount = 1U;
+            barrier.srcAccessMask =
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(
+                command,
+                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                    VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0U, 0U, nullptr,
+                0U, nullptr, 1U, &barrier);
         }
         if (description.samples != 1U) {
             VkImageMemoryBarrier resolve_barrier{};
@@ -3319,14 +3493,20 @@ bool draw_indexed_batch_and_readback(
         if (drain == VK_SUCCESS) {
             current_layout = texture_final_layout(description.usage);
             if (depth_attachment != nullptr) depth_attachment->mark_rendered(clear_depth);
+            for (VulkanDepthAttachment* shadow : sampled_shadow_attachments)
+                shadow->mark_sampled();
         } else {
             current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
             if (depth_attachment != nullptr) depth_attachment->mark_invalid();
+            for (VulkanDepthAttachment* shadow : sampled_shadow_attachments)
+                shadow->mark_invalid();
             result = drain;
         }
     } else if (completed) {
         current_layout = texture_final_layout(description.usage);
         if (depth_attachment != nullptr) depth_attachment->mark_rendered(clear_depth);
+        for (VulkanDepthAttachment* shadow : sampled_shadow_attachments)
+            shadow->mark_sampled();
     }
     if (command != VK_NULL_HANDLE) vkFreeCommandBuffers(context->device, context->command_pool, 1U, &command);
     vkDestroyFramebuffer(context->device, framebuffer, nullptr);
@@ -3496,6 +3676,9 @@ bool draw_depth_only_indexed_batch(
         barrier.subresourceRange.layerCount = 1U;
         barrier.srcAccessMask = depth_attachment.layout() == VK_IMAGE_LAYOUT_UNDEFINED
                                     ? 0U
+                                : depth_attachment.layout() ==
+                                      VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                                    ? VK_ACCESS_SHADER_READ_BIT
                                     : VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
                                           VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
@@ -3503,6 +3686,9 @@ bool draw_depth_only_indexed_batch(
         vkCmdPipelineBarrier(command,
                              depth_attachment.layout() == VK_IMAGE_LAYOUT_UNDEFINED
                                  ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                             : depth_attachment.layout() ==
+                                   VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                                 ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
                                  : VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
                                        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
@@ -4404,6 +4590,66 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
         draw.frame_buffer = frame_buffer->raw().buffer;
         draw.frame_offset = static_cast<VkDeviceSize>(offset);
         draw.frame_range = static_cast<VkDeviceSize>(range);
+    }
+    if (pipeline_declares_directional_shadow_receiver(*request.pipeline)) {
+        const auto* shadow_sampler =
+            dynamic_cast<const VulkanSampler*>(
+                request.directional_shadow_binding.sampler);
+        const auto* shadow_constants =
+            dynamic_cast<const VulkanBuffer*>(
+                request.directional_shadow_binding.constants);
+        if (shadow_sampler == nullptr || shadow_constants == nullptr) {
+            diagnostic = {"vulkan_indexed_directional_shadow_resource_type_unsupported",
+                          "Vulkan directional shadows require Vulkan depth, sampler, and uniform-buffer handles"};
+            return false;
+        }
+        if (shadow_sampler->context() != context ||
+            shadow_constants->context() != context) {
+            diagnostic = {"vulkan_indexed_directional_shadow_resource_context_mismatch",
+                          "Vulkan directional-shadow resources must belong to the draw device"};
+            return false;
+        }
+        for (std::size_t cascade = 0U;
+             cascade < indexed_directional_shadow_cascade_count; ++cascade) {
+            auto* attachment = dynamic_cast<VulkanDepthAttachment*>(
+                const_cast<DepthAttachment*>(
+                    request.directional_shadow_binding.maps[cascade]));
+            if (attachment == nullptr || attachment->context().get() != context.get()) {
+                diagnostic = {"vulkan_indexed_directional_shadow_map_context_mismatch",
+                              "Vulkan directional-shadow maps must belong to the draw device"};
+                return false;
+            }
+            if (!attachment->initialized() ||
+                attachment->layout() == VK_IMAGE_LAYOUT_UNDEFINED ||
+                attachment->image() == VK_NULL_HANDLE ||
+                attachment->view() == VK_NULL_HANDLE) {
+                diagnostic = {"vulkan_indexed_directional_shadow_map_uninitialized",
+                              "Vulkan directional-shadow maps must be initialized before sampling"};
+                return false;
+            }
+            draw.shadow_attachments[cascade] = attachment;
+            draw.shadow_views[cascade] = attachment->view();
+        }
+        const std::uint64_t offset =
+            request.directional_shadow_binding.constants_offset_bytes;
+        const std::uint64_t range =
+            request.directional_shadow_binding.constants_range_bytes;
+        if (range > context->max_uniform_buffer_range ||
+            offset % context->min_uniform_buffer_offset_alignment != 0U ||
+            offset > shadow_constants->info().description.size_bytes ||
+            range > shadow_constants->info().description.size_bytes - offset ||
+            offset > std::numeric_limits<VkDeviceSize>::max() ||
+            shadow_constants->raw().buffer == VK_NULL_HANDLE ||
+            shadow_sampler->sampler() == VK_NULL_HANDLE) {
+            diagnostic = {"vulkan_indexed_directional_shadow_resource_invalid",
+                          "Vulkan directional-shadow sampler or constants are invalid"};
+            return false;
+        }
+        draw.has_directional_shadow_binding = true;
+        draw.shadow_sampler = shadow_sampler->sampler();
+        draw.shadow_constants_buffer = shadow_constants->raw().buffer;
+        draw.shadow_constants_offset = static_cast<VkDeviceSize>(offset);
+        draw.shadow_constants_range = static_cast<VkDeviceSize>(range);
     }
     return true;
 }

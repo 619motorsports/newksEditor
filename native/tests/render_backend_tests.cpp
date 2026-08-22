@@ -170,6 +170,24 @@ std::vector<std::uint8_t> executable_sampled_fragment_shader() {
     return result;
 }
 
+std::vector<std::uint8_t> executable_directional_shadow_receiver_fragment_shader() {
+    // Generated from tests/shaders/indexed_directional_shadow_receiver.frag
+    // with glslang 16.4.0. This proves the portable sampled-D32 ABI; it is
+    // not recovered stock native bytecode.
+    // Source SHA-256: 4afd61bca504d2f8c737eaed1ab0c764d722a4b009c108a18159e719110e79f5
+    // SPIR-V SHA-256: c843769ef1e690fe70ad85e7941fc0339a113589b5e9b498f7e543f56ed54657
+    constexpr std::string_view hex =
+        "03022307000001000b000800490000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00070004000000040000006d61696e000000000b00000042000000100003000400000007000000470004000b0000001e000000000000004700040016000000210000001000000047000400160000002200000000000000470004001a0000002100000013000000470004001a00000022000000000000004700040025000000210000001100000047000400250000002200000000000000470004002d0000002100000012000000470004002d000000220000000000000047000400420000001e00000000000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000002000000200004000a00000001000000070000003b0004000a0000000b000000010000002b000400060000000d000000000000002c000500070000000e0000000d0000000d0000002b000400060000000f0000000000803f2c00050007000000100000000f0000000f000000190009001400000006000000010000000000000000000000000000000100000000000000200004001500000000000000140000003b0004001500000016000000000000001a00020018000000200004001900000000000000180000003b000400190000001a000000000000001b0003001c00000014000000170004001f00000006000000040000003b0004001500000025000000000000003b000400150000002d000000000000002000040041000000030000001f0000003b0004004100000042000000030000003600050002000000040000000000000003000000f8000200050000003d000400070000000c0000000b0000000c0008000700000011000000010000002b0000000c0000000e000000100000003d0004001400000017000000160000003d000400180000001b0000001a000000560005001c0000001d000000170000001b000000570005001f000000200000001d0000001100000051000500060000002300000020000000000000003d0004001400000026000000250000003d00040018000000270000001a000000560005001c000000280000002600000027000000570005001f0000002a000000280000001100000051000500060000002b0000002a000000000000003d000400140000002e0000002d0000003d000400180000002f0000001a000000560005001c000000300000002e0000002f000000570005001f0000003200000030000000110000005100050006000000330000003200000000000000500007001f00000048000000230000002b000000330000000f0000003e0003004200000048000000fd00010038000100";
+    require(hex.size() % 2U == 0U,
+            "embedded directional-shadow receiver shader hex alignment");
+    std::vector<std::uint8_t> result(hex.size() / 2U);
+    for (std::size_t index = 0U; index < result.size(); ++index)
+        result[index] = static_cast<std::uint8_t>(
+            (hex_digit(hex[index * 2U]) << 4U) |
+            hex_digit(hex[index * 2U + 1U]));
+    return result;
+}
+
 std::vector<std::uint8_t> executable_material_fragment_shader() {
     // Generated from tests/shaders/indexed_static_mesh_material.frag. This
     // proves the portable constants ABI, not a complete stock material.
@@ -1977,6 +1995,109 @@ bool contract_backend(apex::render::Backend backend) {
                 sampled_result.rgba8[2] == std::byte{0} &&
                 sampled_result.rgba8[3] == std::byte{255},
             "portable diffuse outside pixel retains clear color");
+
+    if (backend == Backend::Vulkan) {
+        constexpr std::array<float, directional_shadow_cascade_count>
+            receiver_depths = {0.2F, 0.5F, 0.8F};
+        for (std::size_t cascade = 0U;
+             cascade < directional_shadow_cascade_count; ++cascade) {
+            const DepthOnlyIndexedStaticMeshBatchResult cleared =
+                device.device->draw_depth_only_indexed_static_mesh_batch(
+                    {{}, &three_maps.resources->attachment(cascade), true,
+                     receiver_depths[cascade]});
+            require(cleared.ok(),
+                    "directional receiver fixture clears cascade " +
+                        std::to_string(cascade));
+        }
+
+        SamplerDescription shadow_sampler_description;
+        shadow_sampler_description.min_filter = SamplerFilter::nearest;
+        shadow_sampler_description.mag_filter = SamplerFilter::nearest;
+        shadow_sampler_description.mip_filter = SamplerFilter::nearest;
+        shadow_sampler_description.address_u = SamplerAddressMode::clamp_to_edge;
+        shadow_sampler_description.address_v = SamplerAddressMode::clamp_to_edge;
+        shadow_sampler_description.address_w = SamplerAddressMode::clamp_to_edge;
+        shadow_sampler_description.compare = SamplerCompare::disabled;
+        SamplerResult shadow_sampler =
+            device.device->create_sampler(shadow_sampler_description);
+        require(shadow_sampler.ok(),
+                "directional receiver nearest depth sampler creation");
+
+        DirectionalShadowReceiverConstants receiver_constants;
+        for (std::size_t cascade = 0U;
+             cascade < directional_shadow_cascade_count; ++cascade)
+            receiver_constants.shadow_matrices[cascade] =
+                three_maps.resources->camera(cascade).view_projection;
+        const auto receiver_constant_bytes = std::as_bytes(
+            std::span<const DirectionalShadowReceiverConstants>(
+                &receiver_constants, 1U));
+        BufferResult receiver_buffer = device.device->create_buffer(
+            {portable_directional_shadow_buffer_view_bytes,
+             BufferUsage::uniform, BufferMemory::host_visible,
+             BufferMutability::mutable_data},
+            receiver_constant_bytes);
+        require(receiver_buffer.ok(),
+                "directional receiver constants buffer upload");
+
+        PipelineProgram receiver_pipeline = sampled_pipeline;
+        receiver_pipeline.name = "portable-directional-shadow-receiver";
+        receiver_pipeline.resources.insert(
+            receiver_pipeline.resources.end(),
+            {{PipelineResourceKind::sampled_texture, 0U, 16U, "txShadow0"},
+             {PipelineResourceKind::sampled_texture, 0U, 17U, "txShadow1"},
+             {PipelineResourceKind::sampled_texture, 0U, 18U, "txShadow2"},
+             {PipelineResourceKind::sampler, 0U, 19U, "shadowSampler"},
+             {PipelineResourceKind::uniform_buffer, 0U, 20U,
+              "shadowReceiver"}});
+        receiver_pipeline.shaders[1].bytes =
+            executable_directional_shadow_receiver_fragment_shader();
+        IndexedStaticMeshDrawRequest receiver_request =
+            sampled_upload.upload->make_request(receiver_pipeline,
+                                                *indexed_camera.frame);
+        receiver_request.resource_authority =
+            IndexedResourceAuthority::explicit_bindings;
+        receiver_request.sampled_binding = {
+            diffuse_texture.texture.get(), sampler.sampler.get()};
+        receiver_request.directional_shadow_binding = {
+            {&three_maps.resources->attachment(0U),
+             &three_maps.resources->attachment(1U),
+             &three_maps.resources->attachment(2U)},
+            shadow_sampler.sampler.get(), receiver_buffer.buffer.get(), 0U,
+            portable_directional_shadow_buffer_view_bytes};
+        const IndexedStaticMeshDrawResult receiver_result =
+            device.device->draw_indexed_static_mesh_and_readback(
+                *triangle_texture.texture, receiver_request);
+        require(receiver_result.ok(),
+                "Vulkan retained D32 maps execute as sampled receiver resources: " +
+                    receiver_result.diagnostic.code + ": " +
+                    receiver_result.diagnostic.message);
+        const auto close_channel = [&](std::size_t channel, float expected) {
+            const auto actual = static_cast<unsigned>(
+                std::to_integer<std::uint8_t>(
+                    receiver_result.rgba8[center + channel]));
+            const auto encoded = static_cast<unsigned>(expected * 255.0F + 0.5F);
+            return actual + 1U >= encoded && actual <= encoded + 1U;
+        };
+        require(close_channel(0U, receiver_depths[0U]) &&
+                    close_channel(1U, receiver_depths[1U]) &&
+                    close_channel(2U, receiver_depths[2U]) &&
+                    receiver_result.rgba8[center + 3U] == std::byte{255},
+                "receiver center pixel samples cascades 0/1/2 into RGB");
+
+        const auto sampled_map_readback = device.device->read_depth_attachment(
+            three_maps.resources->attachment(1U), {512U, 512U});
+        require(sampled_map_readback.ok() &&
+                    std::abs(sampled_map_readback.depth.front() -
+                             receiver_depths[1U]) < 0.0001F,
+                "sampled D32 map restores its shader-readable layout after readback");
+        const auto rerendered_shadow =
+            retained_shadow.resources->draw_opaque_directional_shadows(
+                *device.device, retained_shadow_frame);
+        require(rerendered_shadow.ok() &&
+                    rerendered_shadow.cascades_completed ==
+                        directional_shadow_cascade_count,
+                "next caster pass transitions sampled maps back to depth-write");
+    }
 
     // Exercise the real backend sampled path with direct BC1/BC3 block
     // uploads. The one-block fixtures are uniform, so filtering cannot alter
