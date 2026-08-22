@@ -70,7 +70,7 @@ void roundTripsModeledFields() {
         SetMaterialResourceEdit{"Body", "txDiffuse", MaterialResource{false, std::string("textures/body.dds"), {}, {}}},
         SetSurfaceEdit{0, [] { apex::authoring::SurfaceEdit value; value.key = "TARMAC"; value.friction = 1.05F; return value; }()},
         SetColliderAsset{colliderAsset},
-        SetColliderEdit{0, collider},
+        SetColliderEdit{"0", collider},
         SetDamageAsset{damageAsset},
         SetBottomColliderAsset{bottomColliderAsset},
         SetBottomColliderEdit{0, bottomCollider},
@@ -274,7 +274,7 @@ void handlesUntrustedSecondaryIdentities() {
     const auto malformed = apex::authoring::parseProject(
         prefix + "\"colliderAsset\":{\"name\":\"collider.kn5\",\"size\":128,\"sha256\":\"short\"}," +
         colliderEdits + "}", identity());
-    require(malformed.project.has_value() && malformed.project->colliders.contains(0) &&
+    require(malformed.project.has_value() && malformed.project->colliders.contains("0") &&
                 !malformed.project->colliderAsset && !malformed.diagnostics.empty(),
             "malformed secondary identity is diagnosed while edits remain stale");
 
@@ -293,7 +293,7 @@ void handlesUntrustedSecondaryIdentities() {
             "unsafe secondary identity size is diagnosed");
 
     const auto missing = apex::authoring::parseProject(prefix + colliderEdits + "}", identity());
-    require(missing.project.has_value() && missing.project->colliders.contains(0) &&
+    require(missing.project.has_value() && missing.project->colliders.contains("0") &&
                 !missing.project->colliderAsset && missing.diagnostics.empty(),
             "legacy edits without identity remain loaded but unbound");
 
@@ -313,6 +313,41 @@ void handlesUntrustedSecondaryIdentities() {
     }, "JSON_TRUNCATED");
 }
 
+void preservesStableColliderPathsAndRejectsMalformedEdits() {
+    const std::string prefix =
+        "{\"format\":\"apex-editor-project\",\"version\":1,"
+        "\"asset\":{\"name\":\"car.kn5\",\"size\":42,"
+        "\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},";
+    const auto nested = apex::authoring::parseProject(
+        prefix + "\"colliderEdits\":{\"0/1\":{\"reverseWinding\":true}}}", identity());
+    require(nested.project.has_value() && nested.project->colliders.contains("0/1") &&
+                nested.diagnostics.empty(),
+            "collider edit retains its stable nested hierarchy path");
+    const auto nestedJson = apex::authoring::serializeProject(*nested.project);
+    require(nestedJson.find("\"0/1\": {") != std::string::npos,
+            "nested collider path survives project serialization");
+
+    const auto malformedPath = apex::authoring::parseProject(
+        prefix + "\"colliderEdits\":{\"0//1\":{\"reverseWinding\":true}}}", identity());
+    require(malformedPath.project.has_value() && malformedPath.project->colliders.empty() &&
+                !malformedPath.diagnostics.empty() && malformedPath.diagnostics.front().code == "EDIT_INVALID",
+            "non-canonical collider path is rejected without a partial edit");
+    const auto whitespacePath = apex::authoring::parseProject(
+        prefix + "\"colliderEdits\":{\" 0\":{\"reverseWinding\":true}}}", identity());
+    require(whitespacePath.project.has_value() && whitespacePath.project->colliders.empty() &&
+                !whitespacePath.diagnostics.empty() && whitespacePath.diagnostics.front().code == "EDIT_INVALID",
+            "collider path whitespace is rejected instead of retargeting an edit");
+    const auto falseOnly = apex::authoring::parseProject(
+        prefix + "\"colliderEdits\":{\"0\":{\"reverseWinding\":false}}}", identity());
+    require(falseOnly.project.has_value() && falseOnly.project->colliders.empty() &&
+                !falseOnly.diagnostics.empty() && falseOnly.diagnostics.front().code == "EDIT_INVALID",
+            "false-only collider topology edit normalizes to an empty rejected edit");
+    expectsIoError([&] {
+        (void)apex::authoring::parseProject(
+            prefix + "\"colliderEdits\":{\"0/1\":{\"transform\":[1,0", identity());
+    }, "JSON_TRUNCATED");
+}
+
 } // namespace
 
 int main() {
@@ -324,6 +359,7 @@ int main() {
         rejectsDirectInvalidStateAndPreservesJsonUnicodeRules();
         enforcesFieldSchemasNullsAndSafeIntegers();
         handlesUntrustedSecondaryIdentities();
+        preservesStableColliderPathsAndRejectsMalformedEdits();
         std::cout << "project IO tests passed\n";
         return 0;
     } catch (const std::exception& error) {

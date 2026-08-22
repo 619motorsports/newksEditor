@@ -112,6 +112,11 @@ void appliesDamageEditsFromStableBaseline() {
     catch (const apex::domain::CarDamageError& error) { rejected = error.code() == "EDIT_INVALID"; }
     require(rejected && config.visual_objects.front().static_rotation_axis == apex::domain::Vector3{0.0F, 0.0F, 0.0F},
             "four-component vector edit is rejected atomically");
+    CarDamageEdits paddedAlias;
+    paddedAlias.values["VISUAL_OBJECT_00"]["damageZone"] = "front";
+    require(apex::domain::apply_car_damage_edits(config, paddedAlias, baseline) == 0U &&
+                config.visual_objects.front().damage_zone == "FRONT",
+            "visual-object edits match the exact parsed section identity");
 }
 
 void rejectsUntrustedDamageAtomically() {
@@ -179,7 +184,7 @@ void rejectsUntrustedDamageAtomically() {
 
 void appliesBottomColliderEditsAndRebuildsBounds() {
     BottomColliderConfig config;
-    config.colliders.push_back(BottomCollider{{0, 1, 0}, {2, 4, 6}, true, std::nullopt, std::nullopt});
+    config.colliders.push_back(BottomCollider{{0, 1, 0}, {2, 4, 6}, true, std::nullopt, std::nullopt, std::nullopt});
     const auto baseline = apex::domain::capture_bottom_collider_baseline(config);
     BottomColliderEdits edits;
     edits[0].centre = apex::domain::Vector3{2, 3, 4};
@@ -203,6 +208,46 @@ void appliesBottomColliderEditsAndRebuildsBounds() {
             "invalid collider edit is atomic");
 }
 
+void parsesAndSerializesBoundedBottomColliders() {
+    const auto parsed = apex::domain::parse_bottom_colliders_ini(
+        "[COLLIDER_2]\nCENTRE=2, 3, 4\nSIZE=1, 2, 3\nGROUND_ENABLE=0\n"
+        "[COLLIDER_0]\nCENTRE=0, 0, 0\nSIZE=4, 5, 6\n");
+    require(parsed.config.has_value() && parsed.config->colliders.size() == 2U &&
+                parsed.config->colliders[0].source_index == 0U &&
+                parsed.config->colliders[1].source_index == 2U &&
+                !parsed.config->colliders[1].ground_enabled,
+            "bottom-collider parser sorts sections and retains sparse source ids");
+    require(!parsed.diagnostics.empty() && parsed.diagnostics.back().code == "COLLIDER_GAP",
+            "bottom-collider parser diagnoses a sparse section gap");
+    const auto text = apex::domain::serialize_bottom_colliders_ini(*parsed.config);
+    require(text.find("[COLLIDER_0]") != std::string::npos &&
+                text.find("[COLLIDER_2]") != std::string::npos,
+            "bottom-collider serializer retains parsed section ids");
+
+    const auto malformed = apex::domain::parse_bottom_colliders_ini(
+        "[COLLIDER_0]\nCENTRE=0,0,0\nSIZE=1,0,1\n"
+        "[COLLIDER_0]\nCENTRE=0,0,0\nSIZE=1,1,1\n");
+    require(malformed.config.has_value() && malformed.config->colliders.empty() &&
+                malformed.config->rejected_sections == 2U && malformed.diagnostics.size() == 2U,
+            "malformed and duplicate bottom-collider sections are rejected");
+    bool exportRejected = false;
+    try { (void)apex::domain::serialize_bottom_colliders_ini(*malformed.config); }
+    catch (const apex::domain::CarDamageError& error) { exportRejected = error.code() == "COLLIDER_REJECTED"; }
+    require(exportRejected, "rejected bottom-collider source sections block export");
+
+    const auto truncated = apex::domain::parse_bottom_colliders_ini(
+        "[COLLIDER_0]\nCENTRE=0,0,0\\", "truncated.ini");
+    require(!truncated.config.has_value() && !truncated.diagnostics.empty() &&
+                truncated.diagnostics.front().code == "TRUNCATED_CONTINUATION",
+            "truncated bottom-collider continuation fails atomically");
+    apex::domain::BottomColliderLimits inputLimits;
+    inputLimits.max_input_bytes = 8U;
+    const auto limited = apex::domain::parse_bottom_colliders_ini(
+        "[COLLIDER_0]\nCENTRE=0,0,0\nSIZE=1,1,1\n", "large.ini", inputLimits);
+    require(!limited.config.has_value() && limited.limit_exceeded,
+            "bottom-collider parser enforces its input limit");
+}
+
 void rejectsBottomColliderLimitsAndNonFiniteValues() {
     BottomColliderConfig config;
     config.colliders.resize(2);
@@ -212,6 +257,14 @@ void rejectsBottomColliderLimitsAndNonFiniteValues() {
     try { (void)apex::domain::capture_bottom_collider_baseline(config, limits); }
     catch (const apex::domain::CarDamageError& error) { rejected = error.code() == "COLLIDER_LIMIT"; }
     require(rejected, "collider count limit is enforced");
+    BottomColliderConfig duplicated;
+    duplicated.colliders.resize(2);
+    duplicated.colliders[0].source_index = 4U;
+    duplicated.colliders[1].source_index = 4U;
+    rejected = false;
+    try { (void)apex::domain::capture_bottom_collider_baseline(duplicated); }
+    catch (const apex::domain::CarDamageError& error) { rejected = error.code() == "COLLIDER_DUPLICATE"; }
+    require(rejected, "duplicate bottom-collider source ids are rejected at baseline capture");
     config.colliders.resize(1);
     config.colliders[0].size[0] = std::numeric_limits<float>::quiet_NaN();
     rejected = false;
@@ -225,7 +278,7 @@ void rejectsBottomColliderLimitsAndNonFiniteValues() {
     catch (const apex::domain::CarDamageError& error) { rejected = error.code() == "COLLIDER_INVALID"; }
     require(rejected, "collider bounds overflow is rejected atomically");
     BottomColliderConfig retained;
-    retained.colliders.push_back(BottomCollider{{0, 0, 0}, {1, 1, 1}, true, std::nullopt, std::nullopt});
+    retained.colliders.push_back(BottomCollider{{0, 0, 0}, {1, 1, 1}, true, std::nullopt, std::nullopt, std::nullopt});
     retained.colliders.front().bounds_min = apex::domain::Vector3{-9.0F, -8.0F, -7.0F};
     retained.colliders.front().bounds_max = apex::domain::Vector3{9.0F, 8.0F, 7.0F};
     const auto retainedBaseline = apex::domain::capture_bottom_collider_baseline(retained);
@@ -250,6 +303,7 @@ int main() {
         appliesDamageEditsFromStableBaseline();
         rejectsUntrustedDamageAtomically();
         appliesBottomColliderEditsAndRebuildsBounds();
+        parsesAndSerializesBoundedBottomColliders();
         rejectsBottomColliderLimitsAndNonFiniteValues();
         std::cout << "car damage tests passed\n";
         return 0;

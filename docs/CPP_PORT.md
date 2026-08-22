@@ -313,7 +313,14 @@ remains unchanged and feature-complete.
   material, node, mesh, geometry, collider, damage, and bottom-collider edits.
   It retains bounded identities for the three secondary asset types. Legacy
   edits without an identity remain unbound. The native identity gate rejects a
-  missing or mismatched identity when related edits exist. A bounded adapter
+  missing or mismatched identity when related edits exist. Collider geometry
+  edits now use the stable hierarchy paths from the JavaScript project model.
+  Separate bounded adapters apply and export collider, damage, and
+  bottom-collider edits from immutable baselines. They return no candidate
+  asset after a stale identity or malformed edit. Bottom-collider export keeps
+  sparse source section numbers and rejects a baseline with rejected sections.
+  A bounded native parser supplies this bottom-collider source metadata.
+  A bounded adapter
   sends KN5 edits to the bake path. It retains diagnostics for CSP-only
   material modes, properties, and resources. Material number strings follow
   JavaScript syntax. Decimal underflow becomes signed zero. Overflow and

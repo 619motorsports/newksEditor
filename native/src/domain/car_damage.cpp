@@ -1,5 +1,7 @@
 #include "apex/domain/car_damage.hpp"
 
+#include "apex/formats/ini.hpp"
+
 #include <algorithm>
 #include <charconv>
 #include <cctype>
@@ -507,7 +509,13 @@ std::size_t apply_car_damage_edits(CarDamageConfig& config, const CarDamageEdits
         else if (section.rfind("VISUAL_OBJECT_", 0) == 0) {
             const auto suffix = section.substr(14); std::uint64_t index = 0; const auto parsed = std::from_chars(suffix.data(), suffix.data() + suffix.size(), index);
             if (parsed.ec != std::errc{} || parsed.ptr != suffix.data() + suffix.size()) throw CarDamageError("EDIT_INVALID", "visual-object section is invalid");
-            const auto found = std::find_if(candidate.visual_objects.begin(), candidate.visual_objects.end(), [&](const auto& object) { return object.index == index; });
+            (void)index;
+            const auto found = std::find_if(candidate.visual_objects.begin(), candidate.visual_objects.end(), [&](const auto& object) {
+                const auto target = object.name.empty()
+                    ? "VISUAL_OBJECT_" + std::to_string(object.index)
+                    : upper(object.name);
+                return target == section;
+            });
             if (found == candidate.visual_objects.end()) continue;
             for (const auto& [key, value] : values) apply(*found, key, value);
         } else throw CarDamageError("EDIT_INVALID", "unsupported damage section");
@@ -553,11 +561,165 @@ void fill_missing_bounds(BottomCollider& collider) {
     if (!collider.bounds_min) collider.bounds_min = calculated.bounds_min;
     if (!collider.bounds_max) collider.bounds_max = calculated.bounds_max;
 }
+
+[[nodiscard]] bool collider_section_index(std::string_view name, std::uint32_t& index) {
+    const auto normalized = upper(name);
+    constexpr std::string_view prefix = "COLLIDER_";
+    if (!normalized.starts_with(prefix) || normalized.size() == prefix.size()) return false;
+    const auto suffix = std::string_view(normalized).substr(prefix.size());
+    std::uint64_t parsed = 0;
+    const auto result = std::from_chars(suffix.data(), suffix.data() + suffix.size(), parsed);
+    if (result.ec != std::errc{} || result.ptr != suffix.data() + suffix.size() ||
+        parsed > std::numeric_limits<std::uint32_t>::max()) return false;
+    index = static_cast<std::uint32_t>(parsed);
+    return true;
+}
+
+[[nodiscard]] std::optional<Vector3> collider_vector(std::string_view raw, bool size) {
+    Vector3 value{};
+    std::size_t start = 0;
+    for (std::size_t axis = 0; axis < 3U; ++axis) {
+        const auto comma = raw.find(',', start);
+        const auto part = trim(raw.substr(start, comma == std::string_view::npos
+                                                    ? raw.size() - start
+                                                    : comma - start));
+        if (part.empty()) return std::nullopt;
+        char* end = nullptr;
+        const double parsed = std::strtod(part.c_str(), &end);
+        if (end == part.c_str() || *end != '\0' || !std::isfinite(parsed) ||
+            std::abs(parsed) > static_cast<double>(kFloatMaximum)) return std::nullopt;
+        value[axis] = static_cast<float>(parsed);
+        if (!std::isfinite(value[axis]) || (size && value[axis] <= 0.0F)) return std::nullopt;
+        if (comma == std::string_view::npos) {
+            if (axis != 2U) return std::nullopt;
+            break;
+        }
+        if (axis == 2U) return std::nullopt;
+        start = comma + 1U;
+    }
+    return value;
+}
+}
+
+BottomColliderParseResult parse_bottom_colliders_ini(
+    std::string_view text, std::string source, BottomColliderLimits limits) {
+    BottomColliderParseResult result;
+    if (limits.max_sections == 0U || limits.max_entries_per_section == 0U ||
+        limits.max_entries_per_section == std::numeric_limits<std::size_t>::max() ||
+        limits.max_sections > std::numeric_limits<std::size_t>::max() /
+                                  (limits.max_entries_per_section + 1U)) {
+        result.limit_exceeded = true;
+        result.diagnostics.push_back({"LIMIT_INVALID", 0, "bottom-collider parse limits are invalid"});
+        return result;
+    }
+    apex::formats::IniParseLimits iniLimits;
+    iniLimits.maxInputBytes = limits.max_input_bytes;
+    iniLimits.maxLineBytes = limits.max_input_bytes;
+    iniLimits.maxLines = limits.max_sections * (limits.max_entries_per_section + 1U);
+    iniLimits.maxSections = limits.max_sections;
+    iniLimits.maxEntries = limits.max_sections * limits.max_entries_per_section;
+    iniLimits.maxEntriesPerSection = limits.max_entries_per_section;
+    iniLimits.maxComments = limits.max_sections * 2U;
+    iniLimits.maxSectionNameBytes = 128U;
+    iniLimits.maxKeyBytes = 128U;
+    iniLimits.maxValueBytes = 4096U;
+    iniLimits.maxContinuationLines = 16U;
+    apex::formats::IniDocument document;
+    try {
+        document = apex::formats::parse_ini(text, std::move(source), iniLimits);
+    } catch (const apex::core::ParseError& error) {
+        result.limit_exceeded = error.code().find("LIMIT") != std::string::npos;
+        result.diagnostics.push_back({error.code(), 0, error.what()});
+        return result;
+    }
+    const auto add = [&](std::string code, std::size_t line, std::string message) {
+        if (result.diagnostics.size() < limits.max_diagnostics)
+            result.diagnostics.push_back({std::move(code), line, std::move(message)});
+    };
+    for (const auto& warning : document.warnings)
+        add("INI_WARNING", warning.line, warning.message);
+    BottomColliderConfig config;
+    std::set<std::uint32_t> seen;
+    std::size_t colliderSections = 0;
+    for (const auto& section : document.sections) {
+        std::uint32_t index = 0;
+        if (!collider_section_index(section.name, index)) continue;
+        ++colliderSections;
+        if (!seen.insert(index).second) {
+            add("COLLIDER_DUPLICATE", section.line, section.name + " is duplicated");
+            continue;
+        }
+        const auto centre = collider_vector(section.last_value("CENTRE"), false);
+        const auto size = collider_vector(section.last_value("SIZE"), true);
+        if (!centre || !size) {
+            add("COLLIDER_VECTOR", section.line,
+                section.name + " needs valid CENTRE and positive SIZE vectors");
+            continue;
+        }
+        const auto groundText = trim(section.last_value("GROUND_ENABLE", "1"));
+        char* end = nullptr;
+        const double ground = std::strtod(groundText.c_str(), &end);
+        if (groundText.empty() || end == groundText.c_str() || *end != '\0' || !std::isfinite(ground)) {
+            add("COLLIDER_GROUND", section.line,
+                section.name + " GROUND_ENABLE must be numeric");
+            continue;
+        }
+        BottomCollider collider;
+        collider.centre = *centre;
+        collider.size = *size;
+        collider.ground_enabled = ground != 0.0;
+        collider.source_index = index;
+        try {
+            update_bounds(collider);
+        } catch (const CarDamageError& error) {
+            add(error.code(), section.line, error.what());
+            continue;
+        }
+        config.colliders.push_back(std::move(collider));
+    }
+    std::sort(config.colliders.begin(), config.colliders.end(), [](const auto& left, const auto& right) {
+        return left.source_index < right.source_index;
+    });
+    if (config.colliders.size() > limits.max_colliders) {
+        result.limit_exceeded = true;
+        add("COLLIDER_LIMIT", 0, "valid collider count exceeds its limit");
+        return result;
+    }
+    config.rejected_sections = colliderSections - config.colliders.size();
+    if (!config.colliders.empty()) {
+        std::uint32_t expected = 0;
+        for (const auto& collider : config.colliders) {
+            const auto index = *collider.source_index;
+            if (index > expected) {
+                const auto lastMissing = index - 1U;
+                add("COLLIDER_GAP", 0,
+                    expected == lastMissing
+                        ? "COLLIDER_" + std::to_string(expected) + " is missing"
+                        : "COLLIDER_" + std::to_string(expected) + " through COLLIDER_" +
+                              std::to_string(lastMissing) + " are missing");
+            }
+            if (index == std::numeric_limits<std::uint32_t>::max()) break;
+            expected = index + 1U;
+        }
+    }
+    result.config = std::move(config);
+    return result;
 }
 
 BottomColliderBaseline capture_bottom_collider_baseline(const BottomColliderConfig& config, BottomColliderLimits limits) {
     if (config.colliders.size() > limits.max_colliders) throw CarDamageError("COLLIDER_LIMIT", "collider count exceeds its limit");
-    BottomColliderBaseline result{config}; for (auto& collider : result.config.colliders) fill_missing_bounds(collider); return result;
+    std::set<std::uint32_t> sourceIndices;
+    BottomColliderBaseline result{config};
+    for (std::size_t position = 0; position < result.config.colliders.size(); ++position) {
+        auto& collider = result.config.colliders[position];
+        if (position > std::numeric_limits<std::uint32_t>::max())
+            throw CarDamageError("COLLIDER_LIMIT", "bottom-collider source index exceeds uint32");
+        const auto effectiveIndex = collider.source_index.value_or(static_cast<std::uint32_t>(position));
+        if (!sourceIndices.insert(effectiveIndex).second)
+            throw CarDamageError("COLLIDER_DUPLICATE", "bottom-collider source index is duplicated");
+        fill_missing_bounds(collider);
+    }
+    return result;
 }
 
 std::size_t bottom_collider_edit_count(const BottomColliderEdits& edits) { std::size_t count = 0; for (const auto& [index, edit] : edits) { (void)index; count += static_cast<std::size_t>(edit.centre.has_value()) + static_cast<std::size_t>(edit.size.has_value()) + static_cast<std::size_t>(edit.ground_enabled.has_value()); } return count; }
@@ -578,6 +740,39 @@ BottomColliderApplyResult apply_bottom_collider_edits(BottomColliderConfig& conf
     }
     config = std::move(candidate);
     return result;
+}
+
+std::string serialize_bottom_colliders_ini(const BottomColliderConfig& config,
+                                           BottomColliderLimits limits) {
+    if (config.rejected_sections != 0U)
+        throw CarDamageError("COLLIDER_REJECTED", "cannot export bottom colliders because source sections were rejected");
+    if (config.colliders.empty())
+        throw CarDamageError("COLLIDER_EMPTY", "a bottom-collider manifest needs at least one collider");
+    if (config.colliders.size() > limits.max_colliders)
+        throw CarDamageError("COLLIDER_LIMIT", "collider count exceeds its limit");
+    std::set<std::uint32_t> used;
+    std::string output;
+    const auto append = [&](std::string_view value) {
+        if (value.size() > limits.max_output_bytes - std::min(limits.max_output_bytes, output.size()))
+            throw CarDamageError("OUTPUT_LIMIT", "bottom-collider output exceeds its limit");
+        output.append(value);
+    };
+    for (std::size_t position = 0; position < config.colliders.size(); ++position) {
+        const auto& collider = config.colliders[position];
+        validate_collider_vector(collider.centre, false, "centre");
+        validate_collider_vector(collider.size, true, "size");
+        if (position > std::numeric_limits<std::uint32_t>::max())
+            throw CarDamageError("COLLIDER_LIMIT", "bottom-collider source index exceeds uint32");
+        const auto index = collider.source_index.value_or(static_cast<std::uint32_t>(position));
+        if (!used.insert(index).second)
+            throw CarDamageError("COLLIDER_DUPLICATE", "bottom-collider section index is duplicated");
+        if (position != 0U) append("\n");
+        append("[COLLIDER_" + std::to_string(index) + "]\n");
+        append("CENTRE=" + number(collider.centre[0]) + ", " + number(collider.centre[1]) + ", " + number(collider.centre[2]) + "\n");
+        append("SIZE=" + number(collider.size[0]) + ", " + number(collider.size[1]) + ", " + number(collider.size[2]) + "\n");
+        append(std::string("GROUND_ENABLE=") + (collider.ground_enabled ? "1\n" : "0\n"));
+    }
+    return output;
 }
 
 } // namespace apex::domain

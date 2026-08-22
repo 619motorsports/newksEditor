@@ -39,6 +39,14 @@ values. Material number strings use JavaScript number syntax. Empty strings and
 decimal underflow become zero. Overflow and boolean material properties are not
 stored.
 
+Collider geometry keys are stable hierarchy paths. Examples are `root`, `0`,
+and `0/1`. Bottom-collider keys are positions in the parsed collider list.
+Secondary-asset adapters apply collider, damage, and bottom-collider edits from
+immutable baselines. The adapters return no candidate asset after an identity
+or edit error. Export uses the bounded KN5 and INI writers. A bounded
+`colliders.ini` parser retains sparse source section numbers. It records
+rejected sections, and export rejects this incomplete source data.
+
 The render library includes DDS upload, recovered lighting math, shadow math,
 reflection math, camera matrices, and frame-pass plans. The camera code uses
 the `perspective`, `lookAt`, and `multiply` formulas from `public/app.js`.

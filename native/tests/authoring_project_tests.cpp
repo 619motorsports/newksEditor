@@ -230,7 +230,7 @@ void secondaryAssetBindingsAreAtomicAndFailClosed() {
     apex::authoring::DamageEdit damageEdit;
     damageEdit.minSpeed = 5.0F;
     session.commit({"bind secondary assets", {
-        SetColliderAsset{collider}, SetColliderEdit{0, colliderEdit},
+        SetColliderAsset{collider}, SetColliderEdit{"0", colliderEdit},
         SetDamageAsset{damage}, SetDamageEdit{"SCRATCHES", damageEdit},
         SetBottomColliderAsset{bottom}, SetBottomColliderEdit{0, bottomEdit}}});
 
@@ -260,7 +260,7 @@ void secondaryAssetBindingsAreAtomicAndFailClosed() {
                 session.state().bottomColliderAsset,
             "redo restores secondary identities");
     session.commit({"clear bound edits", {
-        ClearColliderEdit{0}, ClearDamageEdit{"SCRATCHES"}, ClearBottomColliderEdit{0}}});
+        ClearColliderEdit{"0"}, ClearDamageEdit{"SCRATCHES"}, ClearBottomColliderEdit{0}}});
     require(!session.state().colliderAsset && !session.state().damageAsset &&
                 !session.state().bottomColliderAsset,
             "clearing the last edit clears its secondary identity");
@@ -276,7 +276,7 @@ void secondaryAssetBindingsAreAtomicAndFailClosed() {
 
     ProjectSession recoverySession(identity());
     recoverySession.commit({"bound collider", {
-        SetColliderAsset{collider}, SetColliderEdit{0, colliderEdit}}});
+        SetColliderAsset{collider}, SetColliderEdit{"0", colliderEdit}}});
     const auto snapshot = recoverySession.recoverySnapshot();
     recoverySession.restoreBaseline();
     require(recoverySession.recover(snapshot, identity()).restored &&
@@ -317,7 +317,7 @@ void appliesTypedTransactionWithoutMutatingSource() {
                                                        .groundEnabled = true}},
         SetDamageEdit{"visual_object_0", [] {
             apex::authoring::DamageEdit output;
-            output.initialLevel = 20.0F;
+            output.minSpeed = 20.0F;
             output.name = "HOOD";
             output.damageZone = "front";
             return output;
@@ -349,6 +349,11 @@ void transactionsAreAtomicAndUndoable() {
     }, "EDIT_INVALID");
     require(session.state().revision == initialRevision && session.state().nodes.empty() && !session.canUndo(),
             "invalid transaction is atomic");
+    expectsError([&] {
+        session.commit({"empty damage", {SetDamageEdit{"SCRATCHES", {}}}});
+    }, "EDIT_INVALID");
+    require(session.state().revision == initialRevision && session.state().damage.empty(),
+            "empty damage transaction is rejected atomically");
 
     session.commit({"one", {SetNodeEdit{"0", nodeEdit(false)}}});
     const auto firstRevision = session.state().revision;

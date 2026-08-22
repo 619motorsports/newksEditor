@@ -547,24 +547,6 @@ constexpr double kJsSafeIntegerMaximum = 9007199254740991.0;
     }
 }
 
-[[nodiscard]] bool damageFieldAllowed(std::string_view section, std::string_view field) {
-    std::string upper(section);
-    std::transform(upper.begin(), upper.end(), upper.begin(), [](char c) {
-        return static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-    });
-    if (upper == "SCRATCHES") return field == "minSpeed" || field == "maxSpeed";
-    if (upper == "OSCILLATIONS") return field == "enabled";
-    if (upper == "DAMAGE") return field == "initialLevel";
-    if (upper.rfind("VISUAL_OBJECT_", 0) == 0) {
-        static constexpr std::array<std::string_view, 11> fields = {
-            "name", "staticRotationAxis", "staticRotationAngle", "multG", "damageZone",
-            "minSpeed", "fullSpeed", "oscillationAxis", "oscillationMinAngle",
-            "oscillationMaxAngle", "allowedG"};
-        return std::find(fields.begin(), fields.end(), field) != fields.end();
-    }
-    return false;
-}
-
 template <typename T>
 [[nodiscard]] bool hasValue(const std::optional<T>& value) { return value.has_value(); }
 
@@ -1176,7 +1158,7 @@ void parseColliderEdits(const JsonValue& value, ProjectSession& session,
     if (!isObject(&value)) { addDiagnostic(diagnostics, "FIELD_TYPE", prefix, "collider edits must be an object"); return; }
     for (const auto& [key, raw] : value.object) {
         std::uint32_t index = 0;
-        if (!indexKey(key, index) || !isObject(&raw)) { addDiagnostic(diagnostics, "FIELD_TYPE", std::string(prefix) + "." + key, "collider index or object is invalid"); continue; }
+        if ((bottom && !indexKey(key, index)) || !isObject(&raw)) { addDiagnostic(diagnostics, "FIELD_TYPE", std::string(prefix) + "." + key, bottom ? "collider index or object is invalid" : "collider path or object is invalid"); continue; }
         if (bottom) {
             BottomColliderEdit edit;
             for (const auto& [fieldName, field] : raw.object) {
@@ -1194,7 +1176,7 @@ void parseColliderEdits(const JsonValue& value, ProjectSession& session,
                 else if (fieldName == "removeDegenerate" || fieldName == "reverseWinding" || fieldName == "recalculateNormals") { if (field.kind == JsonValue::Kind::boolean) { if (fieldName == "removeDegenerate") edit.removeDegenerate = field.boolean; else if (fieldName == "reverseWinding") edit.reverseWinding = field.boolean; else edit.recalculateNormals = field.boolean; } else addDiagnostic(diagnostics, "FIELD_TYPE", path, "collider flag must be boolean"); }
                 else addDiagnostic(diagnostics, "UNSUPPORTED_FIELD", path, "collider field is not modeled");
             }
-            appendOperation(session, SetColliderEdit{index, std::move(edit)}, std::string(prefix) + "." + key, diagnostics);
+            appendOperation(session, SetColliderEdit{key, std::move(edit)}, std::string(prefix) + "." + key, diagnostics);
         }
     }
 }
@@ -1301,6 +1283,17 @@ void writeIndexedMap(JsonWriter& writer, const auto& map, std::size_t depth, Edi
     for (const auto& [key, edit] : map) {
         if (!first) writer.raw(",");
         writer.raw("\n"); writer.indent(depth + 1); writer.string(std::to_string(key)); writer.raw(": "); writeEdit(writer, edit, depth + 1); first = false;
+    }
+    if (!first) { writer.raw("\n"); writer.indent(depth); }
+    writer.raw("}");
+}
+
+template <typename EditWriter>
+void writePathMap(JsonWriter& writer, const auto& map, std::size_t depth, EditWriter writeEdit) {
+    writer.raw("{"); bool first = true;
+    for (const auto& [key, edit] : map) {
+        if (!first) writer.raw(",");
+        writer.raw("\n"); writer.indent(depth + 1); writer.string(key); writer.raw(": "); writeEdit(writer, edit, depth + 1); first = false;
     }
     if (!first) { writer.raw("\n"); writer.indent(depth); }
     writer.raw("}");
@@ -1415,7 +1408,7 @@ void writeProjectMap(JsonWriter& writer, const ProjectState& project, std::size_
     writer.indent(depth); writer.string("meshEdits"); writer.raw(": {"); first = true; for (const auto& [key, edit] : project.meshes) { if (!first) writer.raw(","); writer.raw("\n"); writer.indent(depth + 1); writer.string(key); writer.raw(": "); writeMesh(writer, edit, depth + 1); first = false; } if (!first) { writer.raw("\n"); writer.indent(depth); } writer.raw("},\n");
     writer.indent(depth); writer.string("nodeEdits"); writer.raw(": {"); first = true; for (const auto& [key, edit] : project.nodes) { if (!first) writer.raw(","); writer.raw("\n"); writer.indent(depth + 1); writer.string(key); writer.raw(": "); writeNodeEdit(writer, edit, depth + 1); first = false; } if (!first) { writer.raw("\n"); writer.indent(depth); } writer.raw("},\n");
     writer.indent(depth); writer.string("geometryEdits"); writer.raw(": {"); first = true; for (const auto& [key, edit] : project.geometry) { if (!first) writer.raw(","); writer.raw("\n"); writer.indent(depth + 1); writer.string(key); writer.raw(": "); writeGeometry(writer, edit, depth + 1); first = false; } if (!first) { writer.raw("\n"); writer.indent(depth); } writer.raw("},\n");
-    writer.indent(depth); writer.string("colliderEdits"); writer.raw(": "); writeIndexedMap(writer, project.colliders, depth, [](JsonWriter& w, const ColliderEdit& edit, std::size_t d) { w.raw("{"); bool firstField = true; const auto emit = [&](std::string_view key, const auto& value, auto callback) { if (!value) return; if (!firstField) w.raw(","); w.raw("\n"); w.indent(d + 1); w.string(key); w.raw(": "); callback(*value); firstField = false; }; emit("transform", edit.transform, [&](const Matrix4& value) { writeArray(w, value, d + 1); }); emit("removeDegenerate", edit.removeDegenerate, [&](bool value) { w.raw(value ? "true" : "false"); }); emit("reverseWinding", edit.reverseWinding, [&](bool value) { w.raw(value ? "true" : "false"); }); emit("recalculateNormals", edit.recalculateNormals, [&](bool value) { w.raw(value ? "true" : "false"); }); if (!firstField) { w.raw("\n"); w.indent(d); } w.raw("}"); }); writer.raw(",\n");
+    writer.indent(depth); writer.string("colliderEdits"); writer.raw(": "); writePathMap(writer, project.colliders, depth, [](JsonWriter& w, const ColliderEdit& edit, std::size_t d) { w.raw("{"); bool firstField = true; const auto emit = [&](std::string_view key, const auto& value, auto callback) { if (!value) return; if (!firstField) w.raw(","); w.raw("\n"); w.indent(d + 1); w.string(key); w.raw(": "); callback(*value); firstField = false; }; emit("transform", edit.transform, [&](const Matrix4& value) { writeArray(w, value, d + 1); }); emit("removeDegenerate", edit.removeDegenerate, [&](bool value) { w.raw(value ? "true" : "false"); }); emit("reverseWinding", edit.reverseWinding, [&](bool value) { w.raw(value ? "true" : "false"); }); emit("recalculateNormals", edit.recalculateNormals, [&](bool value) { w.raw(value ? "true" : "false"); }); if (!firstField) { w.raw("\n"); w.indent(d); } w.raw("}"); }); writer.raw(",\n");
     writer.indent(depth); writer.string("damageEdits"); writer.raw(": {"); first = true; for (const auto& [key, edit] : project.damage) { if (!first) writer.raw(","); writer.raw("\n"); writer.indent(depth + 1); writer.string(key); writer.raw(": "); writeDamage(writer, edit, depth + 1); first = false; } if (!first) { writer.raw("\n"); writer.indent(depth); } writer.raw("},\n");
     writer.indent(depth); writer.string("bottomColliderEdits"); writer.raw(": "); writeIndexedMap(writer, project.bottomColliders, depth, [](JsonWriter& w, const BottomColliderEdit& edit, std::size_t d) { w.raw("{"); bool firstField = true; const auto emitVector = [&](std::string_view key, const std::optional<Vector3>& value) { if (!value) return; if (!firstField) w.raw(","); w.raw("\n"); w.indent(d + 1); w.string(key); w.raw(": "); writeArray(w, *value, d + 1); firstField = false; }; emitVector("centre", edit.centre); emitVector("size", edit.size); if (edit.groundEnabled) { if (!firstField) w.raw(","); w.raw("\n"); w.indent(d + 1); w.string("groundEnabled"); w.raw(": "); w.raw(*edit.groundEnabled ? "true" : "false"); firstField = false; } if (!firstField) { w.raw("\n"); w.indent(d); } w.raw("}"); }); writer.raw(",\n");
     writer.indent(depth); writer.string("workspaceEdits"); writer.raw(": {\n"); writer.indent(depth + 1); writer.string("files"); writer.raw(": "); writeIndexedMap(writer, project.workspaceFiles, depth + 1, [](JsonWriter& w, const WorkspaceFileEdit& edit, std::size_t d) { writeWorkspaceFile(w, edit, d); }); if (project.workspace.cockpitHrDistance || project.workspace.driverHrDistance) writer.raw(",\n"); else writer.raw("\n"); if (project.workspace.cockpitHrDistance) { writer.indent(depth + 1); writer.string("cockpitHrDistance"); writer.raw(": "); writer.raw(formatNumber(*project.workspace.cockpitHrDistance)); if (project.workspace.driverHrDistance) writer.raw(",\n"); else writer.raw("\n"); } if (project.workspace.driverHrDistance) { writer.indent(depth + 1); writer.string("driverHrDistance"); writer.raw(": "); writer.raw(formatNumber(*project.workspace.driverHrDistance)); writer.raw("\n"); } writer.indent(depth); writer.raw("},\n");

@@ -112,6 +112,14 @@ add_library(apex_domain STATIC
 add_library(ApexEditor::Domain ALIAS apex_domain)
 target_link_libraries(apex_domain PUBLIC ApexEditor::Formats)
 
+add_library(apex_secondary_assets STATIC
+  src/authoring/secondary_assets.cpp
+)
+add_library(ApexEditor::SecondaryAssets ALIAS apex_secondary_assets)
+target_link_libraries(apex_secondary_assets
+  PUBLIC ApexEditor::Authoring ApexEditor::Domain
+)
+
 add_library(apex_scene STATIC
   src/scene/scene.cpp
   src/scene/kn5_scene.cpp
@@ -225,6 +233,7 @@ apex_add_native_test(asset_source_tests.cpp asset_source_tests ApexEditor::Asset
 apex_add_native_test(csp_config_model_tests.cpp csp_config_model_tests ApexEditor::Csp)
 apex_add_native_test(csp_material_evaluator_tests.cpp csp_material_evaluator_tests ApexEditor::Csp)
 apex_add_native_test(car_damage_tests.cpp car_damage_tests ApexEditor::Domain)
+apex_add_native_test(secondary_asset_tests.cpp secondary_asset_tests ApexEditor::SecondaryAssets)
 apex_add_native_test(car_validation_tests.cpp car_validation_tests ApexEditor::Domain)
 apex_add_native_test(driver_tests.cpp driver_tests ApexEditor::Domain)
 apex_add_native_test(skin_metadata_tests.cpp skin_metadata_tests ApexEditor::Domain)
@@ -276,7 +285,7 @@ foreach(parser_test IN ITEMS kn5_tests kn5_write_tests dds_tests bc7_tests png_t
 endforeach()
 foreach(boundary_test IN ITEMS authoring_project_tests project_bake_tests geometry_bake_tests project_io_tests
                                asset_index_tests asset_source_tests csp_config_model_tests
-                               csp_material_evaluator_tests car_damage_tests car_validation_tests
+                               csp_material_evaluator_tests car_damage_tests secondary_asset_tests car_validation_tests
                                driver_tests skin_metadata_tests
                                track_data_tests kn5_scene_tests workspace_tests workspace_scene_tests)
   if(TEST ${boundary_test})

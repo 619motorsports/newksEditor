@@ -194,6 +194,11 @@ void validateSurface(SurfaceEdit& edit, const AuthoringLimits& limits) {
 
 void validateCollider(ColliderEdit& edit) {
     if (edit.transform) validateMatrix(*edit.transform, "collider transform");
+    // JavaScript project normalization keeps topology operations only when
+    // they are true. Normalize explicit false values to the same no-op state.
+    if (edit.removeDegenerate == false) edit.removeDegenerate.reset();
+    if (edit.reverseWinding == false) edit.reverseWinding.reset();
+    if (edit.recalculateNormals == false) edit.recalculateNormals.reset();
 }
 
 void validateBottomCollider(BottomColliderEdit& edit) {
@@ -222,7 +227,7 @@ void validateDamage(DamageEdit& edit, const AuthoringLimits& limits) {
     if (edit.staticRotationAxis) validateVector(*edit.staticRotationAxis, "damage rotation axis");
     if (edit.oscillationAxis) validateVector(*edit.oscillationAxis, "damage oscillation axis");
     if (edit.allowedG) validateVector(*edit.allowedG, "damage allowed G");
-    if (edit.name) *edit.name = safeText(std::move(*edit.name), limits.maxStringBytes, "damage name");
+    if (edit.name) *edit.name = safeText(std::move(*edit.name), std::min<std::size_t>(1024U, limits.maxStringBytes), "damage name");
     if (edit.damageZone) {
         *edit.damageZone = upperAscii(safeText(std::move(*edit.damageZone), limits.maxStringBytes, "damage zone"));
         if (edit.damageZone->size() > 64 ||
@@ -231,6 +236,38 @@ void validateDamage(DamageEdit& edit, const AuthoringLimits& limits) {
             }))
             throw error("EDIT_INVALID", "damage zone is not a safe token");
     }
+}
+
+void validateDamageForSection(std::string_view section, DamageEdit& edit,
+                              const AuthoringLimits& limits) {
+    if (!damageSectionValid(section))
+        throw error("EDIT_INVALID", "damage section is not modeled");
+    validateDamage(edit, limits);
+    const auto check = [&](std::string_view field, bool present) {
+        if (present && !damageFieldAllowed(section, field))
+            throw error("EDIT_INVALID", "damage field is not valid for its section");
+    };
+    check("minSpeed", edit.minSpeed.has_value());
+    check("maxSpeed", edit.maxSpeed.has_value());
+    check("initialLevel", edit.initialLevel.has_value());
+    check("staticRotationAngle", edit.staticRotationAngle.has_value());
+    check("multG", edit.multG.has_value());
+    check("fullSpeed", edit.fullSpeed.has_value());
+    check("oscillationMinAngle", edit.oscillationMinAngle.has_value());
+    check("oscillationMaxAngle", edit.oscillationMaxAngle.has_value());
+    check("staticRotationAxis", edit.staticRotationAxis.has_value());
+    check("oscillationAxis", edit.oscillationAxis.has_value());
+    check("allowedG", edit.allowedG.has_value());
+    check("enabled", edit.enabled.has_value());
+    check("name", edit.name.has_value());
+    check("damageZone", edit.damageZone.has_value());
+}
+
+[[nodiscard]] bool damageHasFields(const DamageEdit& edit) {
+    return edit.minSpeed || edit.maxSpeed || edit.initialLevel || edit.staticRotationAngle ||
+           edit.multG || edit.fullSpeed || edit.oscillationMinAngle || edit.oscillationMaxAngle ||
+           edit.staticRotationAxis || edit.oscillationAxis || edit.allowedG || edit.enabled ||
+           edit.name || edit.damageZone;
 }
 
 template <typename T>
@@ -447,9 +484,12 @@ void validateState(ProjectState& state, const AuthoringLimits& limits) {
         (void)index;
         validateSurface(edit, limits);
     }
-    for (auto& [index, edit] : state.colliders) {
-        (void)index;
+    for (auto& [path, edit] : state.colliders) {
+        if (nodePath(path, limits.maxStringBytes) != path)
+            throw error("RECOVERY_INVALID", "recovery collider path is not canonical");
         validateCollider(edit);
+        if (!edit.transform && !edit.removeDegenerate && !edit.reverseWinding && !edit.recalculateNormals)
+            throw error("RECOVERY_INVALID", "recovery collider edit has no fields");
     }
     for (auto& [index, edit] : state.bottomColliders) {
         (void)index;
@@ -458,7 +498,9 @@ void validateState(ProjectState& state, const AuthoringLimits& limits) {
     for (auto& [section, edit] : state.damage) {
         if (upperAscii(safeKey(section, limits.maxStringBytes, "damage section")) != section)
             throw error("RECOVERY_INVALID", "recovery damage section is not canonical");
-        validateDamage(edit, limits);
+        validateDamageForSection(section, edit, limits);
+        if (!damageHasFields(edit))
+            throw error("RECOVERY_INVALID", "recovery damage edit has no fields");
     }
 }
 
@@ -517,6 +559,34 @@ bool secondaryAssetIdentityMatches(bool hasEdits,
     } catch (const AuthoringError&) {
         return false;
     }
+}
+
+bool damageSectionValid(std::string_view section) {
+    const auto upper = upperAscii(section);
+    if (upper == "SCRATCHES" || upper == "OSCILLATIONS" || upper == "DAMAGE") return true;
+    constexpr std::string_view prefix = "VISUAL_OBJECT_";
+    if (!upper.starts_with(prefix) || upper.size() == prefix.size()) return false;
+    std::uint64_t index = 0;
+    for (const char character : std::string_view(upper).substr(prefix.size())) {
+        if (character < '0' || character > '9') return false;
+        const auto digit = static_cast<std::uint64_t>(character - '0');
+        if (index > (1023U - digit) / 10U) return false;
+        index = index * 10U + digit;
+    }
+    return index < 1024U;
+}
+
+bool damageFieldAllowed(std::string_view section, std::string_view field) {
+    const auto upper = upperAscii(section);
+    if (upper == "SCRATCHES") return field == "minSpeed" || field == "maxSpeed";
+    if (upper == "OSCILLATIONS") return field == "enabled";
+    if (upper == "DAMAGE") return field == "initialLevel";
+    if (!damageSectionValid(upper) || !upper.starts_with("VISUAL_OBJECT_")) return false;
+    static constexpr std::array<std::string_view, 11> fields = {
+        "name", "staticRotationAxis", "staticRotationAngle", "multG", "damageZone",
+        "minSpeed", "fullSpeed", "oscillationAxis", "oscillationMinAngle",
+        "oscillationMaxAngle", "allowedG"};
+    return std::find(fields.begin(), fields.end(), field) != fields.end();
 }
 
 ProjectSession::ProjectSession(SourceIdentity source, AuthoringLimits limits)
@@ -597,13 +667,21 @@ ProjectState ProjectSession::applyTransaction(const AuthoringTransaction& transa
             } else if constexpr (std::is_same_v<Operation, ClearSurfaceEdit>) {
                 candidate.surfaces.erase(operationValue.index);
             } else if constexpr (std::is_same_v<Operation, SetColliderEdit>) {
+                const auto rawPath = std::move(operationValue.path);
+                const auto path = nodePath(rawPath, limits_.maxStringBytes);
+                if (path != rawPath)
+                    throw error("EDIT_INVALID", "collider path is not canonical");
                 validateCollider(operationValue.edit);
                 if (!operationValue.edit.transform && !operationValue.edit.removeDegenerate &&
                     !operationValue.edit.reverseWinding && !operationValue.edit.recalculateNormals)
                     throw error("EDIT_INVALID", "collider edit has no fields");
-                mergeCollider(candidate.colliders[operationValue.index], operationValue.edit);
+                mergeCollider(candidate.colliders[path], operationValue.edit);
             } else if constexpr (std::is_same_v<Operation, ClearColliderEdit>) {
-                candidate.colliders.erase(operationValue.index);
+                const auto rawPath = std::move(operationValue.path);
+                const auto path = nodePath(rawPath, limits_.maxStringBytes);
+                if (path != rawPath)
+                    throw error("EDIT_INVALID", "collider path is not canonical");
+                candidate.colliders.erase(path);
             } else if constexpr (std::is_same_v<Operation, SetColliderAsset>) {
                 candidate.colliderAsset = normalizeSecondaryAssetIdentity(std::move(operationValue.identity));
             } else if constexpr (std::is_same_v<Operation, ClearColliderAsset>) {
@@ -621,10 +699,15 @@ ProjectState ProjectSession::applyTransaction(const AuthoringTransaction& transa
                 candidate.bottomColliderAsset.reset();
             } else if constexpr (std::is_same_v<Operation, SetDamageEdit>) {
                 const auto section = upperAscii(safeKey(std::move(operationValue.section), limits_.maxStringBytes, "damage section"));
-                validateDamage(operationValue.edit, limits_);
+                validateDamageForSection(section, operationValue.edit, limits_);
+                if (!damageHasFields(operationValue.edit))
+                    throw error("EDIT_INVALID", "damage edit has no fields");
                 mergeDamage(candidate.damage[section], operationValue.edit);
             } else if constexpr (std::is_same_v<Operation, ClearDamageEdit>) {
-                candidate.damage.erase(upperAscii(safeKey(std::move(operationValue.section), limits_.maxStringBytes, "damage section")));
+                const auto section = upperAscii(safeKey(std::move(operationValue.section), limits_.maxStringBytes, "damage section"));
+                if (!damageSectionValid(section))
+                    throw error("EDIT_INVALID", "damage section is not modeled");
+                candidate.damage.erase(section);
             } else if constexpr (std::is_same_v<Operation, SetDamageAsset>) {
                 candidate.damageAsset = normalizeSecondaryAssetIdentity(std::move(operationValue.identity));
             } else if constexpr (std::is_same_v<Operation, ClearDamageAsset>) {

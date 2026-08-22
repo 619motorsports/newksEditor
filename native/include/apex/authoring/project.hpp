@@ -11,6 +11,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -34,6 +35,8 @@ struct SourceIdentity {
 [[nodiscard]] bool secondaryAssetIdentityMatches(
     bool hasEdits, const std::optional<SourceIdentity>& expected,
     const std::optional<SourceIdentity>& actual);
+[[nodiscard]] bool damageSectionValid(std::string_view section);
+[[nodiscard]] bool damageFieldAllowed(std::string_view section, std::string_view field);
 
 struct AuthoringLimits {
     std::size_t maxHistory = 128;
@@ -165,8 +168,8 @@ struct SetMaterialResourceEdit { std::string material; std::string slot; Materia
 struct ClearMaterialEdit { std::string material; };
 struct SetSurfaceEdit { std::uint32_t index = 0; SurfaceEdit edit; };
 struct ClearSurfaceEdit { std::uint32_t index = 0; };
-struct SetColliderEdit { std::uint32_t index = 0; ColliderEdit edit; };
-struct ClearColliderEdit { std::uint32_t index = 0; };
+struct SetColliderEdit { std::string path; ColliderEdit edit; };
+struct ClearColliderEdit { std::string path; };
 struct SetColliderAsset { SourceIdentity identity; };
 struct ClearColliderAsset {};
 struct SetBottomColliderEdit { std::uint32_t index = 0; BottomColliderEdit edit; };
@@ -209,7 +212,10 @@ struct ProjectState {
     std::map<std::string, MeshEdit> meshes;
     std::map<std::string, GeometryEdit> geometry;
     std::map<std::uint32_t, SurfaceEdit> surfaces;
-    std::map<std::uint32_t, ColliderEdit> colliders;
+    // Collider geometry uses the same stable root-relative hierarchy paths as
+    // geometryEdits ("root", "0", "0/1"). Bottom-collider INI edits remain
+    // positional integer keys because they address the parsed collider list.
+    std::map<std::string, ColliderEdit> colliders;
     std::map<std::uint32_t, BottomColliderEdit> bottomColliders;
     std::map<std::string, DamageEdit> damage;
 };

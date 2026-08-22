@@ -110,9 +110,15 @@ struct BottomCollider {
     // valid supplied bounds, while edits recompute both values.
     std::optional<Vector3> bounds_min;
     std::optional<Vector3> bounds_max;
+    // Parsed colliders.ini sections can be sparse. Edits address vector
+    // positions, while serialization retains this source section number.
+    std::optional<std::uint32_t> source_index;
 };
 
-struct BottomColliderConfig { std::vector<BottomCollider> colliders; };
+struct BottomColliderConfig {
+    std::vector<BottomCollider> colliders;
+    std::size_t rejected_sections = 0;
+};
 struct BottomColliderEdit {
     std::optional<Vector3> centre;
     std::optional<Vector3> size;
@@ -122,21 +128,41 @@ using BottomColliderEdits = std::map<std::uint32_t, BottomColliderEdit>;
 struct BottomColliderBaseline { BottomColliderConfig config; };
 
 struct BottomColliderLimits {
+    std::size_t max_input_bytes = 1U << 20;
     std::size_t max_colliders = 1'024;
     std::size_t max_edits = 1'024;
+    std::size_t max_sections = 2'048;
+    std::size_t max_entries_per_section = 64;
+    std::size_t max_diagnostics = 10'000;
+    std::size_t max_output_bytes = 1U << 20;
 };
 
 struct BottomColliderDiagnostic { std::string code; std::uint32_t index = 0; std::string message; };
+struct BottomColliderParseDiagnostic {
+    std::string code;
+    std::size_t line = 0;
+    std::string message;
+};
+struct BottomColliderParseResult {
+    std::optional<BottomColliderConfig> config;
+    std::vector<BottomColliderParseDiagnostic> diagnostics;
+    bool limit_exceeded = false;
+};
 struct BottomColliderApplyResult {
     std::size_t applied = 0;
     std::vector<BottomColliderDiagnostic> diagnostics;
 };
 
+[[nodiscard]] BottomColliderParseResult parse_bottom_colliders_ini(
+    std::string_view text, std::string source = "data/colliders.ini",
+    BottomColliderLimits limits = {});
 [[nodiscard]] BottomColliderBaseline capture_bottom_collider_baseline(
     const BottomColliderConfig& config, BottomColliderLimits limits = {});
 [[nodiscard]] BottomColliderApplyResult apply_bottom_collider_edits(
     BottomColliderConfig& config, const BottomColliderEdits& edits,
     const BottomColliderBaseline& baseline, BottomColliderLimits limits = {});
 [[nodiscard]] std::size_t bottom_collider_edit_count(const BottomColliderEdits& edits);
+[[nodiscard]] std::string serialize_bottom_colliders_ini(
+    const BottomColliderConfig& config, BottomColliderLimits limits = {});
 
 } // namespace apex::domain
