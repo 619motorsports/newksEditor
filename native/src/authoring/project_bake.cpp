@@ -1,10 +1,9 @@
 #include "apex/authoring/project_bake.hpp"
 
-#include <array>
-#include <charconv>
+#include "apex/core/javascript_number.hpp"
+
 #include <cmath>
 #include <cstddef>
-#include <cstdint>
 #include <limits>
 #include <map>
 #include <optional>
@@ -92,130 +91,9 @@ void rejectKeyCollisions(const std::map<std::string, T>& entries,
     }
 }
 
-std::string_view trimNumber(std::string_view value) {
-    static constexpr std::array<std::string_view, 25> whitespace = {
-        "\x09",       "\x0a",       "\x0b",       "\x0c",       "\x0d",
-        "\x20",       "\xc2\xa0",   "\xe1\x9a\x80", "\xe2\x80\x80", "\xe2\x80\x81",
-        "\xe2\x80\x82", "\xe2\x80\x83", "\xe2\x80\x84", "\xe2\x80\x85", "\xe2\x80\x86",
-        "\xe2\x80\x87", "\xe2\x80\x88", "\xe2\x80\x89", "\xe2\x80\x8a", "\xe2\x80\xa8",
-        "\xe2\x80\xa9", "\xe2\x80\xaf", "\xe2\x81\x9f", "\xe3\x80\x80", "\xef\xbb\xbf"};
-    const auto trimFront = [&value](const auto& values) {
-        for (const auto item : values) {
-            if (value.starts_with(item)) {
-                value.remove_prefix(item.size());
-                return true;
-            }
-        }
-        return false;
-    };
-    const auto trimBack = [&value](const auto& values) {
-        for (const auto item : values) {
-            if (value.ends_with(item)) {
-                value.remove_suffix(item.size());
-                return true;
-            }
-        }
-        return false;
-    };
-    while (trimFront(whitespace)) {}
-    while (trimBack(whitespace)) {}
-    return value;
-}
-
-struct DecimalOrder {
-    bool zero = false;
-    std::int64_t value = 0;
-};
-
-[[nodiscard]] std::optional<DecimalOrder> decimalOrder(std::string_view value) {
-    if (!value.empty() && value.front() == '-') value.remove_prefix(1u);
-    const auto exponentMarker = value.find_first_of("eE");
-    const auto mantissa = value.substr(0u, exponentMarker);
-    std::int64_t explicitExponent = 0;
-    if (exponentMarker != std::string_view::npos) {
-        auto exponent = value.substr(exponentMarker + 1u);
-        bool negative = false;
-        if (!exponent.empty() && (exponent.front() == '+' || exponent.front() == '-')) {
-            negative = exponent.front() == '-';
-            exponent.remove_prefix(1u);
-        }
-        if (exponent.empty()) return std::nullopt;
-        constexpr std::int64_t saturation = 1'000'000;
-        for (const auto character : exponent) {
-            if (character < '0' || character > '9') return std::nullopt;
-            const auto digit = static_cast<std::int64_t>(character - '0');
-            explicitExponent = explicitExponent > (saturation - digit) / 10
-                                   ? saturation
-                                   : explicitExponent * 10 + digit;
-        }
-        if (negative) explicitExponent = -explicitExponent;
-    }
-
-    const auto point = mantissa.find('.');
-    const auto digitsBeforePoint = static_cast<std::int64_t>(
-        point == std::string_view::npos ? mantissa.size() : point);
-    std::int64_t digitIndex = 0;
-    std::optional<std::int64_t> firstNonzero;
-    for (const auto character : mantissa) {
-        if (character == '.') continue;
-        if (character < '0' || character > '9') return std::nullopt;
-        if (!firstNonzero && character != '0') firstNonzero = digitIndex;
-        ++digitIndex;
-    }
-    if (!firstNonzero) return DecimalOrder{true, 0};
-    return DecimalOrder{false, explicitExponent + digitsBeforePoint - *firstNonzero - 1};
-}
-
-std::optional<double> jsNumber(std::string_view source) {
-    auto value = trimNumber(source);
-    if (value.empty()) return 0.0;
-    if (value.size() > 2u && value.front() == '0' &&
-        (value[1] == 'x' || value[1] == 'X' || value[1] == 'b' || value[1] == 'B' ||
-         value[1] == 'o' || value[1] == 'O')) {
-        const auto base = value[1] == 'x' || value[1] == 'X'
-                              ? 16u
-                              : value[1] == 'b' || value[1] == 'B' ? 2u : 8u;
-        double result = 0.0;
-        for (std::size_t index = 2u; index < value.size(); ++index) {
-            const auto character = value[index];
-            unsigned digit = 0u;
-            if (character >= '0' && character <= '9')
-                digit = static_cast<unsigned>(character - '0');
-            else if (character >= 'a' && character <= 'f')
-                digit = 10u + static_cast<unsigned>(character - 'a');
-            else if (character >= 'A' && character <= 'F')
-                digit = 10u + static_cast<unsigned>(character - 'A');
-            else
-                return std::nullopt;
-            if (digit >= base) return std::nullopt;
-            result = result * static_cast<double>(base) + static_cast<double>(digit);
-            if (!std::isfinite(result)) return std::nullopt;
-        }
-        return result;
-    }
-
-    if (value.front() == '+') {
-        value.remove_prefix(1u);
-        if (value.empty()) return std::nullopt;
-    }
-    double result = 0.0;
-    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result,
-                                        std::chars_format::general);
-    if (parsed.ec == std::errc::result_out_of_range &&
-        parsed.ptr == value.data() + value.size()) {
-        const auto order = decimalOrder(value);
-        if (order && (order->zero || order->value <= -324))
-            return std::copysign(0.0, !value.empty() && value.front() == '-' ? -1.0 : 1.0);
-    }
-    if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() ||
-        !std::isfinite(result))
-        return std::nullopt;
-    return result;
-}
-
 std::optional<std::uint32_t> unsignedMode(std::string_view value,
                                           std::uint32_t maximum) {
-    const auto number = jsNumber(value);
+    const auto number = core::parse_finite_javascript_number(value);
     if (!number || *number < 0.0 || *number > static_cast<double>(maximum) ||
         std::floor(*number) != *number)
         return std::nullopt;
@@ -244,7 +122,8 @@ std::vector<float> propertyScalar(const MaterialScalar& value) {
     }
     if (std::holds_alternative<bool>(value))
         fail("field_type", "boolean material properties are not modeled");
-    const auto number = jsNumber(std::get<std::string>(value));
+    const auto number = core::parse_finite_javascript_number(
+        std::get<std::string>(value));
     if (!number) return {};
     const auto converted = static_cast<float>(*number);
     if (!std::isfinite(converted)) return {};

@@ -288,7 +288,9 @@ remains unchanged and feature-complete.
   Real backend tests execute ACD DDS and PNG payloads through the stock-scene facade. The
   renderer receives no `AssetSource`, grant, or external path. A staged CSP
   configuration model is implemented. A bounded
-  binary/ASCII FBX DOM parser is implemented. A bounded FBX conversion subset
+  binary/ASCII FBX DOM parser is implemented. ASCII numeric arrays become typed
+  FBX arrays after declared-count, finite-value, and allocation-budget checks.
+  A bounded FBX conversion subset
   supports static positions, polygon triangulation, hierarchy, local/world
   transforms, and first material assignment. It rejects or diagnoses skinning,
   animation, embedded images, layer mappings, and advanced transform semantics.
@@ -315,8 +317,8 @@ remains unchanged and feature-complete.
   edits without an identity remain unbound. The native identity gate rejects a
   missing or mismatched identity when related edits exist. Collider geometry
   edits now use the stable hierarchy paths from the JavaScript project model.
-  Separate bounded adapters apply and export collider, damage, and
-  bottom-collider edits from immutable baselines. They return no candidate
+  Separate bounded adapters apply and export collider, damage, bottom-collider,
+  and surface edits from immutable baselines. They return no candidate
   asset after a stale identity or malformed edit. Bottom-collider export keeps
   sparse source section numbers and rejects a baseline with rejected sections.
   A bounded native parser supplies this bottom-collider source metadata.
@@ -324,8 +326,9 @@ remains unchanged and feature-complete.
   session, and all secondary baselines. It calculates SHA-256 identities and
   returns owned output without giving filesystem access to the renderer.
   Project load, transactions, undo, redo, and export use this service. A
-  one-shot native command exports KN5, CSP, collider KN5, `damage.ini`, or
-  `colliders.ini` output. The command refuses to replace an existing file.
+  one-shot native command exports KN5, CSP, collider KN5, `damage.ini`,
+  `colliders.ini`, or `surfaces.ini` output. The command refuses to replace an
+  existing file.
   The service accepts current JavaScript projects that omit the primary hash.
   This compatibility requires matching normalized file name, stored nonzero
   size and KN5 version, and observed primary KN5 bytes. Explicit hashes and

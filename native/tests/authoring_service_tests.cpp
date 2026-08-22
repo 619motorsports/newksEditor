@@ -24,6 +24,7 @@ using apex::authoring::SetBottomColliderEdit;
 using apex::authoring::SetMeshEdit;
 using apex::authoring::SetMaterialScalarEdit;
 using apex::authoring::SetNodeEdit;
+using apex::authoring::SetSurfaceEdit;
 
 void require(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
@@ -125,6 +126,14 @@ void projectRoundTripUndoRedoAndExports() {
     nodeEdit.active = false;
     nodeTransaction.operations = {SetNodeEdit{"0", nodeEdit}};
     require(service.commit(nodeTransaction).ok(), "node transaction commits");
+    const auto mixedCsp = service.exportCsp();
+    require(mixedCsp.ok() && mixedCsp.text == firstCsp.text &&
+                std::any_of(mixedCsp.diagnostics.begin(), mixedCsp.diagnostics.end(),
+                            [](const auto& item) {
+                                return item.code == "UNSUPPORTED_FIELD" &&
+                                       item.path == "nodeEdits.0";
+                            }),
+            "CSP export retains supported output and reports excluded categories");
     const auto saved = service.saveProject();
     require(saved.ok() && saved.text.find("apex-editor-project") != std::string::npos,
             "project saves as owned JSON text");
@@ -271,6 +280,73 @@ void secondaryAssetsBindAndFailClosed() {
             "changed secondary bytes fail closed as stale");
 }
 
+void surfacesBindApplyAndFailAtomically() {
+    const auto primary = modelBytes();
+    const std::string surfaceText =
+        "[SURFACE_4]\nKEY=ROAD\nFRICTION=0.98\nCUSTOM_ALPHA=one\n"
+        "[SURFACE_9]\nKEY=KERB\nWAV=kerb.wav\n";
+    const std::vector<std::uint8_t> surfaces(surfaceText.begin(), surfaceText.end());
+
+    AuthoringService service;
+    require(service.openPrimary("track.kn5", primary).ok(),
+            "service opens for surface authoring");
+    require(service.exportSurfacesIni().status == AuthoringServiceStatus::unbound,
+            "surface export requires a bound baseline");
+    const auto opened = service.openSurfaces("data/surfaces.ini", surfaces);
+    require(opened.ok(), "surface baseline binds from caller-owned bytes");
+
+    apex::authoring::SurfaceEdit edit;
+    edit.key = "ROAD_EDITED";
+    edit.friction = 0.75F;
+    edit.isValidTrack = true;
+    AuthoringTransaction transaction;
+    transaction.label = "author surface";
+    transaction.operations = {SetSurfaceEdit{0U, edit}};
+    require(service.commit(transaction).ok(), "surface transaction commits");
+
+    const auto first = service.exportSurfacesIni();
+    const auto second = service.exportSurfacesIni();
+    require(first.ok() && first.text == second.text &&
+                first.suggested_name == "surfaces.ini" &&
+                first.text.find("[SURFACE_4]") != std::string::npos &&
+                first.text.find("KEY=ROAD_EDITED") != std::string::npos &&
+                first.text.find("FRICTION=0.75") != std::string::npos &&
+                first.text.find("CUSTOM_ALPHA=one") != std::string::npos &&
+                first.text.find("[SURFACE_9]") != std::string::npos,
+            "surface edits export deterministically with sparse IDs and unknown fields");
+    const auto kn5 = service.exportPrimaryKn5();
+    require(kn5.ok() &&
+                std::any_of(kn5.diagnostics.begin(), kn5.diagnostics.end(),
+                            [](const auto& item) {
+                                return item.code == "CATEGORY_NOT_IN_KN5" &&
+                                       item.path == "surfaceEdits";
+                            }),
+            "primary export reports surface edits instead of silently dropping them");
+
+    const std::string truncatedText = "[SURFACE_0]\nKEY=ROAD\\";
+    const std::vector<std::uint8_t> truncated(
+        truncatedText.begin(), truncatedText.end());
+    const auto failed = service.openSurfaces("data/surfaces.ini", truncated);
+    require(failed.status == AuthoringServiceStatus::invalid &&
+                !failed.diagnostics.empty() &&
+                failed.diagnostics.back().code == "TRUNCATED_CONTINUATION" &&
+                service.exportSurfacesIni().text == first.text,
+            "truncated surface input cannot replace the bound baseline");
+
+    apex::authoring::SurfaceEdit missingEdit;
+    missingEdit.key = "MISSING";
+    AuthoringTransaction missing;
+    missing.label = "missing surface position";
+    missing.operations = {SetSurfaceEdit{2U, missingEdit}};
+    require(service.commit(missing).ok(), "bounded missing-position edit commits to project state");
+    const auto invalid = service.exportSurfacesIni();
+    require(invalid.status == AuthoringServiceStatus::invalid && invalid.text.empty() &&
+                invalid.diagnostics.back().code == "MISSING_SURFACE_POSITION",
+            "missing surface position fails without partial output");
+    require(service.undo().ok() && service.exportSurfacesIni().text == first.text,
+            "undo restores the last valid surface export");
+}
+
 }  // namespace
 
 int main() {
@@ -278,6 +354,7 @@ int main() {
         opensPrimaryAndKeepsStateAtomic();
         projectRoundTripUndoRedoAndExports();
         secondaryAssetsBindAndFailClosed();
+        surfacesBindApplyAndFailAtomically();
         std::cout << "authoring_service_tests: ok\n";
         return 0;
     } catch (const std::exception& error) {

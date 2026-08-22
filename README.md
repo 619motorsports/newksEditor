@@ -73,7 +73,9 @@ Windows Direct3D 12 implementations. See [the native build guide](native/README.
 and [the feature-parity roadmap](docs/CPP_PORT.md). The WebGL path remains the
 reference until every documented parity and production-rendering gate passes.
 The native command can now load current project files and export primary or
-secondary authoring output through an in-memory C++ application service.
+secondary authoring output through an in-memory C++ application service. The
+secondary exports include collider KN5, `damage.ini`, `colliders.ini`, and
+`surfaces.ini` output.
 
 ## Current scope
 

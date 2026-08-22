@@ -1,12 +1,13 @@
 #include "apex/workspace/workspace.hpp"
 
+#include "apex/core/javascript_number.hpp"
+
 #include <algorithm>
 #include <charconv>
 #include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <limits>
 #include <map>
 #include <set>
@@ -88,19 +89,12 @@ void appendDocumentWarnings(const IniDocument& document, std::vector<std::string
 }
 
 [[nodiscard]] bool parseFiniteFloat(std::string_view raw, float fallback, float& output) {
-    const auto value = trim(raw);
-    if (value.empty()) {
+    const auto parsed = apex::core::parse_finite_javascript_number(raw);
+    if (!parsed || !std::isfinite(*parsed) || !std::isfinite(static_cast<float>(*parsed))) {
         output = fallback;
         return false;
     }
-    char* end = nullptr;
-    const auto parsed = std::strtod(value.c_str(), &end);
-    if (end == value.c_str() || *end != '\0' || !std::isfinite(parsed) ||
-        !std::isfinite(static_cast<float>(parsed))) {
-        output = fallback;
-        return false;
-    }
-    output = static_cast<float>(parsed);
+    output = static_cast<float>(*parsed);
     return true;
 }
 
@@ -883,21 +877,23 @@ WorkspaceAssembly mergeKn5Models(std::span<const WorkspaceModelInput> entries,
     if (entries.empty()) throw error(options.manifest, 0, "EMPTY_WORKSPACE", "a KN5 workspace needs at least one model");
     if (entries.size() > options.limits.maxFiles)
         throw error(options.manifest, 0, "COUNT_LIMIT", "workspace file count exceeds configured limit");
+    const auto workspaceName = options.name.empty() ? std::string("KN5 workspace") : options.name;
+    const auto workspaceKind = options.kind.empty() ? std::string("track") : options.kind;
     WorkspaceAssembly output;
     output.model.magic = "sc6969";
     output.model.source = options.manifest.empty() ? "workspace" : options.manifest;
     output.model.root.kind = "node";
     output.model.root.type = 1;
-    output.model.root.name = options.name;
+    output.model.root.name = workspaceName;
     output.model.root.active = true;
     output.model.root.transform = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-    output.workspace.name = options.name;
-    output.workspace.kind = options.kind;
+    output.workspace.name = workspaceName;
+    output.workspace.kind = workspaceKind;
     output.workspace.manifest = options.manifest;
     output.workspace.warnings = std::move(options.warnings);
     output.workspace.cockpitHrDistance = options.cockpitHrDistance;
     output.workspace.driverHrDistance = options.driverHrDistance;
-    output.workspace.scopeResources = options.kind == "carLods" ||
+    output.workspace.scopeResources = workspaceKind == "carLods" ||
                                      std::any_of(entries.begin(), entries.end(), [](const auto& entry) {
                                          return entry.auxiliary == "reflectionEnvironment";
                                      });

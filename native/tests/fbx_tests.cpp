@@ -66,6 +66,16 @@ std::string asciiMinimal() {
     return "; FBX 7.5.0 project file\nFBXVersion: 7400\nObjects: {\n Model: 1, \"Model::Cube\", \"Mesh\" {\n  Version: 232\n }\n}\n";
 }
 
+std::string asciiArrayTriangle(std::string_view vertexCount = "9",
+                               std::string_view vertices = "0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0,0.0",
+                               std::string_view indexCount = "3",
+                               std::string_view indices = "0,1,-3") {
+    return "FBXVersion: 7400\nObjects: {\n Geometry: 100, \"Geometry::Triangle\", \"Mesh\" {\n  Vertices: *" +
+        std::string(vertexCount) + " {\n   a: " + std::string(vertices) +
+        "\n  }\n  PolygonVertexIndex: *" + std::string(indexCount) + " {\n   a: " +
+        std::string(indices) + "\n  }\n }\n}\n";
+}
+
 template <typename Function>
 void expectsFbxError(Function&& function, std::string_view code, FbxStage stage) {
     try { function(); }
@@ -117,6 +127,79 @@ void parsesBinaryAndAsciiDom() {
     require(document.roots[1].name == "Objects" && document.roots[1].children[0].name == "Model" &&
                 std::get<std::int64_t>(document.roots[1].children[0].children[0].properties[0].values[0]) == 232,
             "ASCII FBX nested typed values");
+}
+
+void parsesBoundedAsciiNumericArrays() {
+    const auto text = asciiArrayTriangle();
+    const auto document = apex::formats::parseFbx({reinterpret_cast<const std::uint8_t*>(text.data()), text.size()});
+    const auto& geometry = document.roots[1].children[0];
+    require(geometry.name == "Geometry" && geometry.properties.size() == 1u && geometry.properties[0].values.size() == 3u &&
+                geometry.children.size() == 2u,
+            "ASCII geometry properties are retained");
+    const auto* vertices = std::get_if<apex::formats::FbxArray>(&geometry.children[0].properties[0].values[0]);
+    require(vertices != nullptr && std::holds_alternative<std::vector<double>>(*vertices),
+            "ASCII floating array is represented as FbxArray");
+    require(std::get<std::vector<double>>(*vertices) == std::vector<double>{0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0},
+            "ASCII vertex array values");
+    const auto* indices = std::get_if<apex::formats::FbxArray>(&geometry.children[1].properties[0].values[0]);
+    require(indices != nullptr && std::holds_alternative<std::vector<std::int64_t>>(*indices),
+            "ASCII integral array is represented as FbxArray");
+    require(std::get<std::vector<std::int64_t>>(*indices) == std::vector<std::int64_t>{0, 1, -3},
+            "ASCII index array values");
+}
+
+void rejectsMalformedAsciiNumericArrays() {
+    const auto truncated = asciiArrayTriangle().substr(0, asciiArrayTriangle().find("\n  }\n  PolygonVertexIndex"));
+    expectsFbxError([&] {
+        (void)apex::formats::parseFbx({reinterpret_cast<const std::uint8_t*>(truncated.data()), truncated.size()});
+    }, "truncated", FbxStage::ascii_dom);
+
+    const auto countMismatch = asciiArrayTriangle("4");
+    expectsFbxError([&] {
+        (void)apex::formats::parseFbx({reinterpret_cast<const std::uint8_t*>(countMismatch.data()), countMismatch.size()});
+    }, "array_size", FbxStage::ascii_dom);
+
+    const auto tooMany = asciiArrayTriangle("8");
+    expectsFbxError([&] {
+        (void)apex::formats::parseFbx({reinterpret_cast<const std::uint8_t*>(tooMany.data()), tooMany.size()});
+    }, "array_size", FbxStage::ascii_dom);
+
+    const auto nonFinite = asciiArrayTriangle("9", "0,0,NaN,1,0,0,0,1,0");
+    expectsFbxError([&] {
+        (void)apex::formats::parseFbx({reinterpret_cast<const std::uint8_t*>(nonFinite.data()), nonFinite.size()});
+    }, "non_finite", FbxStage::ascii_dom);
+
+    const auto signedNonFinite = asciiArrayTriangle("9", "0,0,+inf,1,0,0,0,1,0");
+    expectsFbxError([&] {
+        (void)apex::formats::parseFbx({reinterpret_cast<const std::uint8_t*>(signedNonFinite.data()), signedNonFinite.size()});
+    }, "non_finite", FbxStage::ascii_dom);
+
+    const auto nonNumeric = asciiArrayTriangle("9", "0,0,not-a-number,1,0,0,0,1,0");
+    expectsFbxError([&] {
+        (void)apex::formats::parseFbx({reinterpret_cast<const std::uint8_t*>(nonNumeric.data()), nonNumeric.size()});
+    }, "array_type", FbxStage::ascii_dom);
+
+    auto elementLimits = apex::formats::FbxLimits{};
+    elementLimits.maxArrayElements = 8u;
+    const auto valid = asciiArrayTriangle();
+    expectsFbxError([&] {
+        (void)apex::formats::parseFbx({reinterpret_cast<const std::uint8_t*>(valid.data()), valid.size()},
+                                      "ascii-array.fbx", elementLimits);
+    }, "array_limit", FbxStage::ascii_dom);
+
+    auto byteLimits = apex::formats::FbxLimits{};
+    byteLimits.maxArrayBytes = 64u;
+    expectsFbxError([&] {
+        (void)apex::formats::parseFbx({reinterpret_cast<const std::uint8_t*>(valid.data()), valid.size()},
+                                      "ascii-array.fbx", byteLimits);
+    }, "array_limit", FbxStage::ascii_dom);
+
+    auto aggregateArrayLimits = apex::formats::FbxLimits{};
+    aggregateArrayLimits.maxArrayBytes = 80u;
+    expectsFbxError([&] {
+        (void)apex::formats::parseFbx({reinterpret_cast<const std::uint8_t*>(valid.data()), valid.size()},
+                                      "ascii-array.fbx", aggregateArrayLimits);
+    }, "array_limit", FbxStage::ascii_dom);
 }
 
 void validatesBinaryBoundaryAndFooterRules() {
@@ -219,6 +302,17 @@ void rejectsEveryAsciiPrefix() {
     }
 }
 
+void rejectsEveryAsciiArrayPrefix() {
+    const auto text = asciiArrayTriangle();
+    const auto bytes = std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(text.data()), text.size());
+    for (std::size_t length = 0; length + 1u < bytes.size(); ++length) {
+        bool rejected = false;
+        try { (void)apex::formats::parseFbx(bytes.first(length)); }
+        catch (const FbxError&) { rejected = true; }
+        require(rejected, "ASCII array prefix truncation accepted");
+    }
+}
+
 void rejectsMaliciousStructureAndLimits() {
     auto offset = binaryMinimal();
     offset[27] = 0xffu; offset[28] = 0xffu; offset[29] = 0xffu; offset[30] = 0x7fu;
@@ -245,12 +339,15 @@ int main() {
     try {
         inspectsHeadersExactly();
         parsesBinaryAndAsciiDom();
+        parsesBoundedAsciiNumericArrays();
+        rejectsMalformedAsciiNumericArrays();
         validatesBinaryBoundaryAndFooterRules();
         rejectsNonFiniteAndPreservesSignedBits();
         validatesAsciiLexicalSemanticsAndConversionStage();
         validatesWrappedDeflateIntegrity();
         rejectsEveryBinaryPrefix();
         rejectsEveryAsciiPrefix();
+        rejectsEveryAsciiArrayPrefix();
         rejectsMaliciousStructureAndLimits();
         std::cout << "fbx tests passed\n";
         return 0;

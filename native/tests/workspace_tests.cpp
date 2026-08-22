@@ -120,6 +120,32 @@ void parsesTrackAndContiguousDynamicObjects() {
     require(unsafe.models.empty() && unsafe.warnings.size() >= 2, "unsafe manifest references rejected");
 }
 
+void matchesJavaScriptNumberManifestValues() {
+    const std::string nbsp = "\xc2\xa0";
+    const std::string ogham = "\xe1\x9a\x80";
+    const std::string bom = "\xef\xbb\xbf";
+    const auto parsed = parseModelsIni(
+        "[DYNAMIC_OBJECT_0]\nFILE=shared.kn5\nPROBABILITY=" + nbsp + "0x10" + nbsp +
+        "\nMULT=" + ogham + "0b10" + ogham + "," + bom + "0o3" + bom +
+        "\nRND_POS_CENTER=" + nbsp + "1" + nbsp + ",2,3\n");
+    require(parsed.dynamicObjects.size() == 1U &&
+                parsed.dynamicObjects[0].probability == 16.0F &&
+                parsed.dynamicObjects[0].multiplicity == std::array<float, 2>{2.0F, 3.0F} &&
+                parsed.dynamicObjects[0].positionCenter == apex::workspace::Vector3{1.0F, 2.0F, 3.0F} &&
+                parsed.warnings.empty(),
+            "manifest values follow JavaScript Number radix and Unicode whitespace conversion");
+
+    const auto malformed = parseModelsIni(
+        "[DYNAMIC_OBJECT_0]\nFILE=shared.kn5\nPROBABILITY=0x\nMULT=0b2,0o8\n"
+        "RND_POS_CENTER=1e9999,2,3\n");
+    require(malformed.dynamicObjects.size() == 1U &&
+                malformed.dynamicObjects[0].probability == 100.0F &&
+                malformed.dynamicObjects[0].multiplicity == std::array<float, 2>{1.0F, 1.0F} &&
+                malformed.dynamicObjects[0].positionCenter == apex::workspace::Vector3{} &&
+                malformed.warnings.size() >= 3U,
+            "manifest rejects prefix-only radix, invalid radix digits, and overflow values");
+}
+
 void parsesCarLodsAndHalfOpenRanges() {
     const auto parsed = parseCarLodsIni(
         "[COCKPIT_HR]\nDISTANCE_SWITCH=25\n[DRIVER_HR]\nDISTANCE_SWITCH=25\n"
@@ -184,6 +210,19 @@ void mergesScenesWithTransformsAndResourceRemapping() {
             "car texture scoping preserves shader bind points");
     require(car.workspace.materialRecords.size() == 2 && car.workspace.textureRecords.size() == 2,
             "scoped resource metadata");
+}
+
+void normalizesEmptyWorkspaceOptions() {
+    const auto source = model("empty-options.kn5", "body", "body.dds");
+    const std::array<WorkspaceModelInput, 1> entries = {input("empty-options.kn5", &source)};
+    WorkspaceOptions options;
+    options.name.clear();
+    options.kind.clear();
+    const auto merged = mergeKn5Models(entries, options);
+    require(merged.model.root.name == "KN5 workspace" &&
+                merged.workspace.name == "KN5 workspace" && merged.workspace.kind == "track" &&
+                !merged.workspace.scopeResources,
+            "empty workspace option name and kind use JavaScript fallbacks");
 }
 
 void assemblesManifestInputsAndRejectsInvalidReferences() {
@@ -396,8 +435,10 @@ void rejectsUnsafeAmbiguousAndUnboundedManifestOutput() {
 int main() {
     try {
         parsesTrackAndContiguousDynamicObjects();
+        matchesJavaScriptNumberManifestValues();
         parsesCarLodsAndHalfOpenRanges();
         mergesScenesWithTransformsAndResourceRemapping();
+        normalizesEmptyWorkspaceOptions();
         assemblesManifestInputsAndRejectsInvalidReferences();
         reusesManifestInputsAndAppliesDynamicCenters();
         serializesTrackManifestWithSparseAndDynamicEntries();

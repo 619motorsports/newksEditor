@@ -74,6 +74,15 @@ void addBottomDiagnostics(Result& result,
             diagnostic(item.code, source, item.message, item.line));
 }
 
+template <typename Result>
+void addSurfaceDiagnostics(
+    Result& result,
+    const std::vector<authoring::ProjectSurfacesDiagnostic>& diagnostics) {
+    for (const auto& item : diagnostics)
+        result.diagnostics.push_back(
+            diagnostic(item.code, item.path, item.message, item.line));
+}
+
 [[nodiscard]] SourceIdentity identityFor(std::string name,
                                          std::span<const std::uint8_t> bytes,
                                          std::optional<std::uint32_t> kn5Version = std::nullopt) {
@@ -117,6 +126,13 @@ void addBottomDiagnostics(Result& result,
     return name;
 }
 
+[[nodiscard]] std::string fileName(std::string_view source,
+                                   std::string_view fallback) {
+    const auto slash = source.find_last_of("/\\");
+    std::string name(source.substr(slash == std::string_view::npos ? 0U : slash + 1U));
+    return name.empty() ? std::string(fallback) : name;
+}
+
 [[nodiscard]] AuthoringServiceStatus secondaryStatus(
     authoring::SecondaryAssetStatus status) noexcept {
     switch (status) {
@@ -129,6 +145,19 @@ void addBottomDiagnostics(Result& result,
         return AuthoringServiceStatus::stale;
     case authoring::SecondaryAssetStatus::invalid:
         return AuthoringServiceStatus::invalid;
+    }
+    return AuthoringServiceStatus::failed;
+}
+
+[[nodiscard]] AuthoringServiceStatus surfacesStatus(
+    authoring::ProjectSurfacesStatus status) noexcept {
+    switch (status) {
+    case authoring::ProjectSurfacesStatus::ok:
+        return AuthoringServiceStatus::ok;
+    case authoring::ProjectSurfacesStatus::invalid:
+        return AuthoringServiceStatus::invalid;
+    case authoring::ProjectSurfacesStatus::failed:
+        return AuthoringServiceStatus::failed;
     }
     return AuthoringServiceStatus::failed;
 }
@@ -179,6 +208,7 @@ AuthoringServiceOpenResult AuthoringService::openPrimary(
         collider_.reset();
         damage_.reset();
         bottom_colliders_.reset();
+        surfaces_.reset();
         result.status = AuthoringServiceStatus::ok;
         result.identity = std::move(identity);
         setRevision(result, session_);
@@ -327,12 +357,8 @@ AuthoringServiceTextResult AuthoringService::exportCsp() const {
     try {
         auto text = authoring::serializeEditorCsp(
             session_->state(), limits_.project_io, &diagnostics);
-        if (!diagnostics.empty()) {
-            result.status = AuthoringServiceStatus::unsupported;
-            addProjectDiagnostics(result, diagnostics);
-            return result;
-        }
         result.text = std::move(text);
+        addProjectDiagnostics(result, diagnostics);
         result.status = AuthoringServiceStatus::ok;
     } catch (const core::ParseError& error) {
         result.status = AuthoringServiceStatus::invalid;
@@ -372,6 +398,28 @@ AuthoringServiceBytesResult AuthoringService::exportPrimaryKn5() const {
         for (const auto& warning : baked.warnings)
             result.diagnostics.push_back(
                 diagnostic("BAKE_WARNING", "asset", warning));
+        const auto& state = session_->state();
+        if (!state.workspaceFiles.empty() || state.workspace.cockpitHrDistance ||
+            state.workspace.driverHrDistance) {
+            result.diagnostics.push_back(diagnostic(
+                "CATEGORY_NOT_IN_KN5", "workspaceEdits",
+                "workspace edits require a models.ini or lods.ini export"));
+        }
+        if (!state.surfaces.empty()) {
+            result.diagnostics.push_back(diagnostic(
+                "CATEGORY_NOT_IN_KN5", "surfaceEdits",
+                "surface edits require a surfaces.ini export"));
+        }
+        if (!state.colliders.empty() || !state.bottomColliders.empty()) {
+            result.diagnostics.push_back(diagnostic(
+                "CATEGORY_NOT_IN_KN5", "colliderEdits",
+                "collider edits require their secondary asset export"));
+        }
+        if (!state.damage.empty()) {
+            result.diagnostics.push_back(diagnostic(
+                "CATEGORY_NOT_IN_KN5", "damageEdits",
+                "damage edits require a damage.ini export"));
+        }
         result.status = AuthoringServiceStatus::ok;
     } catch (const core::ParseError& error) {
         result.status = AuthoringServiceStatus::invalid;
@@ -492,6 +540,25 @@ AuthoringServiceOpenResult AuthoringService::openBottomColliders(
     return result;
 }
 
+AuthoringServiceResult AuthoringService::openSurfaces(
+    std::string name, std::span<const std::uint8_t> bytes) {
+    if (!isOpen()) {
+        return failure(AuthoringServiceStatus::not_open, "NOT_OPEN", "surfaceEdits",
+                       "a primary KN5 is not open");
+    }
+    AuthoringServiceResult result;
+    auto captured = authoring::captureProjectSurfacesBaseline(
+        name, bytes, limits_.surfaces);
+    result.status = surfacesStatus(captured.status);
+    addSurfaceDiagnostics(result, captured.diagnostics);
+    if (captured.ok() && captured.baseline) {
+        surfaces_ = std::move(*captured.baseline);
+        result.status = AuthoringServiceStatus::ok;
+    }
+    setRevision(result, session_);
+    return result;
+}
+
 AuthoringServiceBytesResult AuthoringService::exportColliderKn5() const {
     AuthoringServiceBytesResult result;
     if (!isOpen()) {
@@ -565,6 +632,31 @@ AuthoringServiceTextResult AuthoringService::exportBottomCollidersIni() const {
     result.status = secondaryStatus(exported.status);
     result.text = exported.text;
     addSecondaryDiagnostics(result, exported.diagnostics);
+    if (!result.ok()) result.text.clear();
+    return result;
+}
+
+AuthoringServiceTextResult AuthoringService::exportSurfacesIni() const {
+    AuthoringServiceTextResult result;
+    if (!isOpen()) {
+        result.status = AuthoringServiceStatus::not_open;
+        result.diagnostics.push_back(diagnostic(
+            "NOT_OPEN", "surfaceEdits", "a primary KN5 is not open"));
+        return result;
+    }
+    if (!surfaces_) {
+        result.status = AuthoringServiceStatus::unbound;
+        result.diagnostics.push_back(diagnostic(
+            "SECONDARY_NOT_OPEN", "surfaceEdits", "no surfaces.ini asset is bound"));
+        return result;
+    }
+    result.suggested_name = fileName(surfaces_->value().source, "surfaces.ini");
+    result.revision = session_->state().revision;
+    const auto exported = authoring::exportProjectSurfaces(
+        session_->state(), *surfaces_, limits_.surfaces);
+    result.status = surfacesStatus(exported.status);
+    result.text = exported.text;
+    addSurfaceDiagnostics(result, exported.diagnostics);
     if (!result.ok()) result.text.clear();
     return result;
 }

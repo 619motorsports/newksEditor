@@ -42,7 +42,7 @@ void usage(std::ostream& output) {
            << "  apex-native --inspect-vao <file>\n"
            << "  apex-native --inspect-ksanim <file>\n"
            << "  apex-native --export-project kn5|csp <source.kn5> <project.apex.json> <output>\n"
-           << "  apex-native --export-project collider|damage|bottom-colliders <source.kn5> "
+           << "  apex-native --export-project collider|damage|bottom-colliders|surfaces <source.kn5> "
               "<project.apex.json> <secondary-input> <output>\n";
 }
 
@@ -230,7 +230,7 @@ int export_project(int argc, char** argv) {
     const std::string_view kind = argv[2];
     const bool primaryOutput = kind == "kn5" || kind == "csp";
     const bool secondaryOutput = kind == "collider" || kind == "damage" ||
-                                 kind == "bottom-colliders";
+                                 kind == "bottom-colliders" || kind == "surfaces";
     if ((!primaryOutput && !secondaryOutput) ||
         (primaryOutput && argc != 6) || (secondaryOutput && argc != 7)) {
         throw std::runtime_error("invalid --export-project arguments");
@@ -292,13 +292,24 @@ int export_project(int argc, char** argv) {
         write_file_exclusive(outputPath, std::string_view(exported.text));
         std::cout << outputPath.string() << ": " << exported.text.size()
                   << " bytes, revision " << exported.revision << '\n';
-    } else {
+    } else if (kind == "bottom-colliders") {
         const auto bound = service.openBottomColliders(logicalName, secondaryBytes);
         if (!bound.ok()) return report_authoring_failure("open colliders.ini", bound);
         report_authoring_diagnostics(bound);
         const auto exported = service.exportBottomCollidersIni();
         if (!exported.ok())
             return report_authoring_failure("export colliders.ini", exported);
+        report_authoring_diagnostics(exported);
+        write_file_exclusive(outputPath, std::string_view(exported.text));
+        std::cout << outputPath.string() << ": " << exported.text.size()
+                  << " bytes, revision " << exported.revision << '\n';
+    } else {
+        const auto bound = service.openSurfaces(logicalName, secondaryBytes);
+        if (!bound.ok()) return report_authoring_failure("open surfaces.ini", bound);
+        report_authoring_diagnostics(bound);
+        const auto exported = service.exportSurfacesIni();
+        if (!exported.ok())
+            return report_authoring_failure("export surfaces.ini", exported);
         report_authoring_diagnostics(exported);
         write_file_exclusive(outputPath, std::string_view(exported.text));
         std::cout << outputPath.string() << ": " << exported.text.size()

@@ -5,6 +5,7 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -57,6 +58,31 @@ FbxDocument fixture() {
     document.roots = {objects, connections};
     document.header.version = 7400;
     return document;
+}
+
+std::string asciiTriangle() {
+    return "FBXVersion: 7400\nObjects: {\n"
+           " Model: 200, \"Model::Triangle\", \"Mesh\" { }\n"
+           " Geometry: 100, \"Geometry::Triangle\", \"Mesh\" {\n"
+           "  Vertices: *9 {\n"
+           "   a: 0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0,0.0\n"
+           "  }\n"
+           "  PolygonVertexIndex: *3 {\n"
+           "   a: 0,1,-3\n"
+           "  }\n"
+           " }\n"
+           "}\nConnections: {\n C: \"OO\", 100, 200\n}\n";
+}
+
+void convertsParsedAsciiTriangle() {
+    const auto text = asciiTriangle();
+    const auto bytes = std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(text.data()), text.size());
+    const auto document = apex::formats::parseFbx(bytes, "ascii-triangle.fbx");
+    const auto result = apex::formats::convertFbxScene(document);
+    require(result.meshes.size() == 1u && result.meshes[0].positions ==
+                std::vector<float>{0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F} &&
+                result.meshes[0].triangle_indices == std::vector<std::uint32_t>{0u, 1u, 2u},
+            "parsed ASCII triangle converts to static geometry");
 }
 
 void convertsStaticGeometryTransformsAndMaterials() {
@@ -241,6 +267,7 @@ void boundsTemporaryContainersBeforeConversion() {
 
 int main() {
     try {
+        convertsParsedAsciiTriangle();
         convertsStaticGeometryTransformsAndMaterials();
         rejectsInvalidReferencesIndicesAndNonFiniteValues();
         enforcesLimitsAndUnsupportedCapability();

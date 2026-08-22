@@ -266,6 +266,16 @@ FbxNode binaryNode(BinaryReader& reader, std::size_t depth, BinaryState& state) 
 enum class TokenKind { word, string, number, colon, comma, open, close, line_end, end };
 struct Token { TokenKind kind = TokenKind::end; std::string text; std::size_t offset = 0; };
 
+struct AsciiArrayValue {
+    union {
+        std::int64_t integer;
+        double real;
+    } value;
+    bool is_real = false;
+
+    AsciiArrayValue() : value{0} {}
+};
+
 int hexDigit(char value) {
     if (value >= '0' && value <= '9') return value - '0';
     if (value >= 'a' && value <= 'f') return value - 'a' + 10;
@@ -367,7 +377,19 @@ std::vector<Token> tokenizeAscii(std::span<const std::uint8_t> bytes, const FbxL
     tokens.push_back({TokenKind::end, {}, bytes.size()}); return tokens;
 }
 
+bool asciiNonFinite(std::string_view text) {
+    std::string lower(text);
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](char value) {
+        return static_cast<char>(std::tolower(static_cast<unsigned char>(value)));
+    });
+    return lower == "nan" || lower == "+nan" || lower == "-nan" || lower == "inf" ||
+           lower == "+inf" || lower == "-inf" || lower == "infinity" ||
+           lower == "+infinity" || lower == "-infinity";
+}
+
 FbxValue asciiValue(const Token& token) {
+    if ((token.kind == TokenKind::word || token.kind == TokenKind::number) && asciiNonFinite(token.text))
+        fail(FbxStage::ascii_dom, "non_finite", "non-finite FBX ASCII number", token.offset);
     if (token.kind == TokenKind::string) return token.text;
     if (token.kind == TokenKind::word && (token.text == "T" || token.text == "true" || token.text == "True")) return true;
     if (token.kind == TokenKind::word && (token.text == "F" || token.text == "false" || token.text == "False")) return false;
@@ -380,16 +402,6 @@ FbxValue asciiValue(const Token& token) {
             return real;
         }
         fail(FbxStage::ascii_dom, "numeric", "invalid FBX ASCII numeric token", token.offset);
-    }
-    if (token.kind == TokenKind::word) {
-        std::string lower = token.text;
-        std::transform(lower.begin(), lower.end(), lower.begin(), [](char value) {
-            return static_cast<char>(std::tolower(static_cast<unsigned char>(value)));
-        });
-        if (lower == "nan" || lower == "+nan" || lower == "-nan" || lower == "inf" ||
-            lower == "+inf" || lower == "-inf" || lower == "infinity" ||
-            lower == "+infinity" || lower == "-infinity")
-            fail(FbxStage::ascii_dom, "non_finite", "non-finite FBX ASCII number", token.offset);
     }
     return token.text;
 }
@@ -412,6 +424,97 @@ private:
         if (aggregateBytes_ > limits_.maxAggregateBytes)
             fail(FbxStage::ascii_dom, "allocation_limit", "aggregate FBX allocation budget exceeds its limit", offset);
     }
+
+    [[nodiscard]] std::size_t arrayCount(const Token& marker) const {
+        if (marker.text.size() <= 1u || marker.text.front() != '*')
+            fail(FbxStage::ascii_dom, "array_syntax", "FBX ASCII array is missing its element count", marker.offset);
+        std::size_t count = 0u;
+        const auto result = std::from_chars(marker.text.data() + 1u,
+                                            marker.text.data() + marker.text.size(), count);
+        if (result.ec != std::errc{} || result.ptr != marker.text.data() + marker.text.size())
+            fail(FbxStage::ascii_dom, "array_count", "FBX ASCII array element count is invalid", marker.offset);
+        if (count > limits_.maxArrayElements)
+            fail(FbxStage::ascii_dom, "array_limit", "FBX ASCII array element count exceeds its limit", marker.offset);
+        return count;
+    }
+
+    [[nodiscard]] FbxValue asciiArray() {
+        const auto marker = take();
+        const auto count = arrayCount(marker);
+        if (peek().kind != TokenKind::open)
+            fail(FbxStage::ascii_dom, "array_syntax", "FBX ASCII array is missing its value block", marker.offset);
+
+        const auto outputBytes = mulSize(count, sizeof(double), marker.offset, FbxStage::ascii_dom);
+        if (outputBytes > limits_.maxArrayBytes)
+            fail(FbxStage::ascii_dom, "array_limit", "FBX ASCII array byte count exceeds its limit", marker.offset);
+        const auto nextElements = addSize(arrayElements_, count, marker.offset, FbxStage::ascii_dom);
+        const auto nextBytes = addSize(arrayBytes_, outputBytes, marker.offset, FbxStage::ascii_dom);
+        if (nextElements > limits_.maxArrayElements || nextBytes > limits_.maxArrayBytes)
+            fail(FbxStage::ascii_dom, "array_limit", "aggregate FBX ASCII array budget exceeds its limit", marker.offset);
+        // Keep a compact temporary value for each element while determining
+        // whether the array is integral or floating point. The final vector
+        // uses the same conservative double-sized accounting as binary arrays.
+        account(mulSize(count, sizeof(AsciiArrayValue), marker.offset, FbxStage::ascii_dom), marker.offset);
+        account(outputBytes, marker.offset);
+        account(sizeof(FbxArray), marker.offset);
+        arrayElements_ = nextElements;
+        arrayBytes_ = nextBytes;
+
+        take();
+        skipLines();
+        if (peek().kind != TokenKind::word || peek().text != "a")
+            fail(FbxStage::ascii_dom, "array_syntax", "FBX ASCII array value block must start with 'a:'", marker.offset);
+        take();
+        if (peek().kind != TokenKind::colon)
+            fail(FbxStage::ascii_dom, "array_syntax", "FBX ASCII array value block is missing ':'", marker.offset);
+        take();
+
+        std::vector<AsciiArrayValue> values;
+        values.reserve(count);
+        bool hasReal = false;
+        while (true) {
+            if (peek().kind == TokenKind::line_end || peek().kind == TokenKind::comma) {
+                take();
+                continue;
+            }
+            if (peek().kind == TokenKind::close) {
+                take();
+                break;
+            }
+            if (peek().kind == TokenKind::end)
+                fail(FbxStage::ascii_dom, "truncated", "truncated FBX ASCII array value block", marker.offset);
+            if (values.size() >= count)
+                fail(FbxStage::ascii_dom, "array_size", "FBX ASCII array contains more values than declared", marker.offset);
+
+            const auto token = take();
+            const auto scalar = asciiValue(token);
+            AsciiArrayValue value;
+            if (const auto integer = std::get_if<std::int64_t>(&scalar)) {
+                value.value.integer = *integer;
+            } else if (const auto real = std::get_if<double>(&scalar)) {
+                value.value.real = *real;
+                value.is_real = true;
+                hasReal = true;
+            } else {
+                fail(FbxStage::ascii_dom, "array_type", "FBX ASCII arrays contain only numeric values", token.offset);
+            }
+            values.push_back(value);
+        }
+        if (values.size() != count)
+            fail(FbxStage::ascii_dom, "array_size", "FBX ASCII array value count does not match its declaration", marker.offset);
+        if (!hasReal) {
+            std::vector<std::int64_t> output;
+            output.reserve(count);
+            for (const auto& value : values) output.push_back(value.value.integer);
+            return FbxArray{std::move(output)};
+        }
+        std::vector<double> output;
+        output.reserve(count);
+        for (const auto& value : values)
+            output.push_back(value.is_real ? value.value.real : static_cast<double>(value.value.integer));
+        return FbxArray{std::move(output)};
+    }
+
     FbxNode node(std::size_t depth) {
         if (depth >= limits_.maxDepth) fail(FbxStage::ascii_dom, "depth_limit", "FBX ASCII nesting exceeds its limit", peek().offset);
         if (++nodes_ > limits_.maxNodes) fail(FbxStage::ascii_dom, "node_limit", "FBX ASCII node count exceeds its limit", peek().offset);
@@ -421,11 +524,21 @@ private:
         FbxNode result; result.name=nameToken.text;
         if (peek().kind == TokenKind::colon) take(); else if (peek().kind != TokenKind::open) fail(FbxStage::ascii_dom, "syntax", "expected FBX ASCII colon", peek().offset);
         FbxProperty property; property.code=0;
-        while (peek().kind != TokenKind::open && peek().kind != TokenKind::line_end && peek().kind != TokenKind::end && peek().kind != TokenKind::close) {
-            const auto token=take(); if (token.kind == TokenKind::comma) continue;
-            account(sizeof(FbxValue), token.offset);
-            property.values.push_back(asciiValue(token));
-            if (++properties_ > limits_.maxProperties) fail(FbxStage::ascii_dom, "property_limit", "FBX ASCII property count exceeds its limit", token.offset);
+        if (peek().kind == TokenKind::word && !peek().text.empty() && peek().text.front() == '*') {
+            const auto marker = peek();
+            if (peek(1u).kind != TokenKind::open)
+                fail(FbxStage::ascii_dom, "array_syntax", "FBX ASCII array is missing its value block", marker.offset);
+            account(sizeof(FbxValue), marker.offset);
+            property.values.push_back(asciiArray());
+            if (++properties_ > limits_.maxProperties)
+                fail(FbxStage::ascii_dom, "property_limit", "FBX ASCII property count exceeds its limit", marker.offset);
+        } else {
+            while (peek().kind != TokenKind::open && peek().kind != TokenKind::line_end && peek().kind != TokenKind::end && peek().kind != TokenKind::close) {
+                const auto token=take(); if (token.kind == TokenKind::comma) continue;
+                account(sizeof(FbxValue), token.offset);
+                property.values.push_back(asciiValue(token));
+                if (++properties_ > limits_.maxProperties) fail(FbxStage::ascii_dom, "property_limit", "FBX ASCII property count exceeds its limit", token.offset);
+            }
         }
         if (!property.values.empty()) { account(sizeof(FbxProperty), nameToken.offset); result.properties.push_back(std::move(property)); }
         if (peek().kind == TokenKind::line_end) take();
@@ -435,7 +548,7 @@ private:
         if (peek().kind != TokenKind::close) fail(FbxStage::ascii_dom, "truncated", "unterminated FBX ASCII node block", nameToken.offset);
         take(); if (peek().kind == TokenKind::line_end) take(); return result;
     }
-    std::vector<Token> tokens_; const FbxLimits& limits_; std::size_t position_=0; std::size_t nodes_=0; std::size_t properties_=0; std::size_t aggregateBytes_=0;
+    std::vector<Token> tokens_; const FbxLimits& limits_; std::size_t position_=0; std::size_t nodes_=0; std::size_t properties_=0; std::size_t aggregateBytes_=0; std::size_t arrayElements_=0; std::size_t arrayBytes_=0;
 };
 
 } // namespace

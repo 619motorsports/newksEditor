@@ -14,7 +14,9 @@ aggregate native-object budget. Counts, strings, texture payloads, and
 encryption records consume this budget before allocation. DDS includes bounded
 BC7 CPU decode. Its upload planner supports DX10 2D arrays, cubemaps, and exact
 RGB24 to RGBA8 conversion. FBX support includes a bounded binary/ASCII DOM and
-a static-geometry conversion subset.
+a static-geometry conversion subset. The ASCII parser converts declared
+numeric arrays to typed FBX arrays. It rejects count mismatches, non-finite
+values, truncated blocks, and input that exceeds the array budgets.
 
 The VAO core binds decoded records to non-owning mesh views. It uses the exact
 name, vertex count, and first-position gate from `src/vao-patch.js`. It binds
@@ -32,12 +34,12 @@ reference skinning. The authoring model includes transactions, bounded
 project/CSP serialization, geometry edits, KN5 baking, car damage data, bottom
 colliders, and initial car validation. Project persistence includes material,
 node, mesh, geometry, collider, damage, and bottom-collider edits. It also
-retains the source identity for each secondary asset. Missing or mismatched
-identities do not match when related edits exist. A bounded adapter sends KN5
-edits to the bake path. The adapter retains diagnostics for CSP-only material
-values. Material number strings use JavaScript number syntax. Empty strings and
-decimal underflow become zero. Overflow and boolean material properties are not
-stored.
+retains the source identity for each identity-bound secondary asset. Missing or
+mismatched identities do not match when related edits exist. A bounded adapter
+sends KN5 edits to the bake path. The adapter retains diagnostics for CSP-only
+material values. Material number strings use JavaScript number syntax. Empty
+strings and decimal underflow become zero. Overflow and boolean material
+properties are not stored.
 
 Collider geometry keys are stable hierarchy paths. Examples are `root`, `0`,
 and `0/1`. Bottom-collider keys are positions in the parsed collider list.
@@ -46,14 +48,17 @@ immutable baselines. The adapters return no candidate asset after an identity
 or edit error. Export uses the bounded KN5 and INI writers. A bounded
 `colliders.ini` parser retains sparse source section numbers. It records
 rejected sections, and export rejects this incomplete source data.
+The surfaces adapter also uses an immutable baseline. It applies positional
+project edits and retains sparse section numbers and unknown fields.
 
 The application library now owns the native authoring session and its source
 baselines. It accepts caller-owned bytes and returns owned export data. It does
 not open files or give paths to the renderer. The service calculates SHA-256
-identities for all opened assets. It accepts a current JavaScript project that
-omits the primary hash only when the caller supplies the matching source. The
-normalized file name, stored nonzero size and KN5 version, and observed bytes
-must agree. An explicit stored hash must also agree.
+identities for the primary asset and each identity-bound secondary asset. It
+accepts a current JavaScript project that omits the primary hash only when the
+caller supplies the matching source. The normalized file name, stored nonzero
+size and KN5 version, and observed bytes must agree. An explicit stored hash
+must also agree.
 Failed loads and exports do not replace the committed session or a bound
 secondary baseline.
 
@@ -112,6 +117,7 @@ out/native/dev/native/apex-native --export-project csp car.kn5 car.apex.json car
 out/native/dev/native/apex-native --export-project collider car.kn5 car.apex.json collider.kn5 collider_apex.kn5
 out/native/dev/native/apex-native --export-project damage car.kn5 car.apex.json damage.ini damage_apex.ini
 out/native/dev/native/apex-native --export-project bottom-colliders car.kn5 car.apex.json colliders.ini colliders_apex.ini
+out/native/dev/native/apex-native --export-project surfaces track.kn5 track.apex.json surfaces.ini surfaces_apex.ini
 ```
 
 The command reads all input before it writes output. The output path must not
