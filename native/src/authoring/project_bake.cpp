@@ -381,6 +381,7 @@ formats::Kn5BakeProject buildKn5BakeProject(const ProjectState& state,
         fail("baseline_limit", "geometry baseline count exceeds the project bake limit");
 
     rejectKeyCollisions(state.materials, "material edits");
+    rejectKeyCollisions(state.meshes, "mesh edits");
     formats::Kn5BakeProject result;
     std::size_t stringBytes = 0u;
     std::size_t materialFields = 0u;

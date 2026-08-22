@@ -283,6 +283,8 @@ remains unchanged and feature-complete.
   and over-budget input. It retains source identity and returns no partial
   table after an error. It creates an owned effective model with opaque image
   names. It rewrites exact material slots and preserves serialized bind points.
+  The KN5 baker requires an explicit bind point before it adds a new resource
+  slot. It reports and skips a new slot when that value is not known.
   Real backend tests execute ACD DDS and PNG payloads through the stock-scene facade. The
   renderer receives no `AssetSource`, grant, or external path. A staged CSP
   configuration model is implemented. A bounded

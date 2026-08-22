@@ -388,8 +388,20 @@ Kn5BakeResult bakeKn5(const Kn5File& source, const Kn5BakeProject& project, apex
             if (actualTexture.empty()) { appendWarning(result.warnings, editName + "." + slot + ": embedded texture " + resourceEdit.texture + " was not found and was not baked", limits, warningBytes); continue; }
             Kn5MaterialResource* resource = nullptr; const auto wantedSlot = canonical(slot);
             for (auto& candidate : material->resources) if (canonical(candidate.slot) == wantedSlot) { resource = &candidate; break; }
-            if (!resource) { material->resources.push_back({slot, resourceEdit.bind_point.value_or(0u), actualTexture}); resource = &material->resources.back(); }
-            else { if (resourceEdit.bind_point) resource->textureId = *resourceEdit.bind_point; resource->texture = actualTexture; }
+            if (!resource) {
+                if (!resourceEdit.bind_point) {
+                    appendWarning(result.warnings, editName + "." + slot +
+                                      ": a new KN5 resource requires an explicit bind point and was not baked",
+                                  limits, warningBytes);
+                    continue;
+                }
+                material->resources.push_back({slot, *resourceEdit.bind_point, actualTexture});
+                resource = &material->resources.back();
+            } else {
+                // The serialized integer is the shader bind point. Texture
+                // replacement must not rewrite it as a texture-table index.
+                resource->texture = actualTexture;
+            }
             ++result.applied.resources; changed = true;
         }
         if (changed) ++result.applied.materials;

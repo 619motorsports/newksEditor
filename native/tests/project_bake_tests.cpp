@@ -202,6 +202,11 @@ void rejectsMalformedStateBeforeCopy() {
     expectsError([&] { (void)buildKn5BakeProject(state, {}); }, "empty_edit");
 
     state = {};
+    state.meshes["BODY"].layer = 1u;
+    state.meshes["body"].layer = 2u;
+    expectsError([&] { (void)buildKn5BakeProject(state, {}); }, "ambiguous_key");
+
+    state = {};
     state.meshes[""].layer = 1u;
     expectsError([&] { (void)buildKn5BakeProject(state, {}); }, "empty_string");
 

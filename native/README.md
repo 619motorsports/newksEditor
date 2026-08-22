@@ -170,8 +170,11 @@ requires the caller to label the matching shader module set as `damage_dust`.
 It retains the 12-resource path for legacy packets without `txDust`. Stock detail,
 sun-specular, Fresnel, and reflection remain staged.
 The serialized KN5 resource ID remains a shader bind point, not a
-texture-table index. A bounded static-scene adapter maps the final KN5 tree to
-dense scene IDs. It validates all packets and pipelines before buffer creation.
+texture-table index. A texture replacement preserves the source bind point.
+A new resource slot requires an explicit bind point. The baker reports and
+skips a new slot when the bind point is not known. A bounded static-scene
+adapter maps the final KN5 tree to dense scene IDs. It validates all packets
+and pipelines before buffer creation.
 The adapter uploads each referenced node once. It retains duplicate packets as
 ordered draw instances. It submits one batch with caller-supplied SPIR-V or
 DXIL pipelines. A constants-enabled pipeline requires an explicit table in

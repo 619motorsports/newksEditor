@@ -152,6 +152,7 @@ void geometryWarningsAndBakeCopy() {
     project.materials["body"].blend_mode = 1u;
     project.materials["body"].properties["ksDiffuse"] = {0.25F};
     project.materials["body"].resources["txDiffuse"].texture = "BODY.DDS";
+    project.materials["body"].resources["txDiffuse"].bind_point = 0u;
     project.materials["body"].resources["txDiffuse"].file = "external.dds";
     project.materials["body"].cull_mode = "NONE";
     project.meshes["body"].transparent = true;
@@ -168,7 +169,21 @@ void geometryWarningsAndBakeCopy() {
     require(!baked.warnings.empty(), "unsupported CSP edit diagnostic");
     require(baked.model.materials[0].resources[0].texture == "body.dds" &&
                 baked.model.materials[0].resources[0].textureId == 21u,
-            "embedded texture takes precedence over CSP-only resource metadata");
+            "embedded texture replacement preserves the recovered KN5 bind point");
+
+    Kn5BakeProject unknownBindPoint;
+    unknownBindPoint.materials["body"].resources["txNormal"].texture = "body.dds";
+    const auto stagedResource = bakeKn5(source, unknownBindPoint);
+    require(stagedResource.model.materials[0].resources.size() == 1u &&
+                stagedResource.applied.resources == 0u && !stagedResource.warnings.empty(),
+            "new resource without an explicit bind point remains staged");
+    unknownBindPoint.materials["body"].resources["txNormal"].bind_point = 4u;
+    const auto addedResource = bakeKn5(source, unknownBindPoint);
+    require(addedResource.model.materials[0].resources.size() == 2u &&
+                addedResource.model.materials[0].resources[1].slot == "txNormal" &&
+                addedResource.model.materials[0].resources[1].textureId == 4u &&
+                addedResource.applied.resources == 1u,
+            "new resource uses its explicit recovered bind point");
 
     auto protectedModel = source; protectedModel.encryption = Kn5EncryptionInspection{};
     threw = false;
