@@ -34,6 +34,36 @@ void validateString(std::string_view value, const ProjectBakeLimits& limits,
     addBounded(stringBytes, value.size(), limits.maxTotalStringBytes, "project bake strings");
 }
 
+void validateText(std::string_view value, const ProjectBakeLimits& limits,
+                  std::string_view label, std::size_t& stringBytes) {
+    validateString(value, limits, label, stringBytes);
+    if (value.empty()) fail("empty_string", std::string(label) + " must not be empty");
+    for (const auto character : value) {
+        const auto byte = static_cast<unsigned char>(character);
+        if (byte < 0x20u || byte == 0x7fu)
+            fail("unsafe_string", std::string(label) + " contains an unsafe character");
+    }
+}
+
+void validatePath(std::string_view path, std::string_view label) {
+    if (path == "root") return;
+    if (path.empty()) fail("invalid_path", std::string(label) + " is not canonical");
+    std::size_t start = 0u;
+    while (start < path.size()) {
+        const auto slash = path.find('/', start);
+        const auto part = path.substr(
+            start, slash == std::string_view::npos ? path.size() - start : slash - start);
+        if (part.empty() || (part.size() > 1u && part.front() == '0'))
+            fail("invalid_path", std::string(label) + " is not canonical");
+        for (const auto character : part) {
+            if (character < '0' || character > '9')
+                fail("invalid_path", std::string(label) + " is not canonical");
+        }
+        if (slash == std::string_view::npos) break;
+        start = slash + 1u;
+    }
+}
+
 void validateFinite(float value, std::string_view label) {
     if (!std::isfinite(value)) fail("non_finite", std::string(label) + " must be finite");
 }
@@ -44,6 +74,16 @@ void validateGeometryEdit(const GeometryEdit& edit) {
         fail("empty_edit", "geometry edit has no fields");
     if (!edit.transform) return;
     for (const auto value : *edit.transform) validateFinite(value, "geometry transform");
+}
+
+void validateNodeEdit(const NodeEdit& edit, const ProjectBakeLimits& limits,
+                      std::size_t& stringBytes) {
+    if (!edit.name && !edit.active && !edit.transform)
+        fail("empty_edit", "node edit has no fields");
+    if (edit.name) validateText(*edit.name, limits, "node edit name", stringBytes);
+    if (edit.transform) {
+        for (const auto value : *edit.transform) validateFinite(value, "node transform");
+    }
 }
 
 void validateMeshEdit(const MeshEdit& edit) {
@@ -86,6 +126,8 @@ void validateBaseline(const GeometryBaseline& baseline, std::string_view path,
 formats::Kn5BakeProject buildKn5BakeProject(const ProjectState& state,
                                              const GeometryBaselines& baselines,
                                              ProjectBakeLimits limits) {
+    if (state.nodes.size() > limits.maxNodeEdits)
+        fail("node_limit", "project node edit count exceeds the project bake limit");
     if (state.meshes.size() > limits.maxMeshEdits)
         fail("mesh_limit", "project mesh edit count exceeds the project bake limit");
     if (state.geometry.size() > limits.maxGeometryEdits)
@@ -94,21 +136,35 @@ formats::Kn5BakeProject buildKn5BakeProject(const ProjectState& state,
         fail("baseline_limit", "geometry baseline count exceeds the project bake limit");
 
     std::size_t stringBytes = 0u;
+    for (const auto& [path, edit] : state.nodes) {
+        validateString(path, limits, "node edit path", stringBytes);
+        validatePath(path, "node edit path");
+        validateNodeEdit(edit, limits, stringBytes);
+    }
     for (const auto& [name, edit] : state.meshes) {
         validateString(name, limits, "mesh edit name", stringBytes);
         validateMeshEdit(edit);
     }
     for (const auto& [path, edit] : state.geometry) {
         validateString(path, limits, "geometry edit path", stringBytes);
+        validatePath(path, "geometry edit path");
         validateGeometryEdit(edit);
     }
     std::size_t baselineBytes = 0u;
     for (const auto& [path, baseline] : baselines) {
         validateString(path, limits, "geometry baseline path", stringBytes);
+        validatePath(path, "geometry baseline path");
         validateBaseline(baseline, path, limits, baselineBytes);
     }
 
     formats::Kn5BakeProject result;
+    for (const auto& [path, edit] : state.nodes) {
+        formats::Kn5BakeNodeEdit mapped;
+        mapped.name = edit.name;
+        mapped.active = edit.active;
+        mapped.transform = edit.transform;
+        result.nodes.emplace(path, std::move(mapped));
+    }
     for (const auto& [name, edit] : state.meshes) {
         formats::Kn5BakeMeshEdit mapped;
         mapped.transparent = edit.transparent;

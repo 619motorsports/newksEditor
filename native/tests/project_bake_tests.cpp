@@ -15,6 +15,7 @@ using apex::authoring::GeometryBaseline;
 using apex::authoring::GeometryEdit;
 using apex::authoring::GeometryBaselines;
 using apex::authoring::MeshEdit;
+using apex::authoring::NodeEdit;
 using apex::authoring::ProjectBakeError;
 using apex::authoring::ProjectBakeLimits;
 using apex::authoring::ProjectState;
@@ -51,6 +52,12 @@ GeometryBaseline baseline() {
 
 void mapsOnlySupportedStateExactly() {
     ProjectState state;
+    NodeEdit node;
+    node.name = "CHASSIS";
+    node.active = false;
+    node.transform = apex::authoring::Matrix4{1, 0, 0, 0, 0, 1, 0, 0,
+                                              0, 0, 1, 0, 4, 5, 6, 1};
+    state.nodes.emplace("root", node);
     MeshEdit mesh;
     mesh.transparent = false;
     mesh.castShadows = false;
@@ -65,13 +72,16 @@ void mapsOnlySupportedStateExactly() {
     geometry.transform = apex::authoring::Matrix4{1, 0, 0, 0, 0, 1, 0, 0,
                                                   0, 0, 1, 0, 2, 3, 4, 1};
     state.geometry.emplace("0", geometry);
-    state.nodes.emplace("ignored", apex::authoring::NodeEdit{});
     GeometryBaselines baselines;
     baselines.emplace("0", baseline());
 
     const auto result = buildKn5BakeProject(state, baselines);
-    require(result.meshes.size() == 1u && result.geometry.size() == 1u &&
+    require(result.nodes.size() == 1u && result.meshes.size() == 1u && result.geometry.size() == 1u &&
                 result.baselines.size() == 1u, "project bake output counts");
+    const auto& mappedNode = result.nodes.at("root");
+    require(mappedNode.name == "CHASSIS" && mappedNode.active.has_value() &&
+                !*mappedNode.active && mappedNode.transform->at(12) == 4.0F,
+            "project bake preserves node edit optionals");
     const auto& mappedMesh = result.meshes.at("BODY");
     require(mappedMesh.transparent.has_value() && !*mappedMesh.transparent &&
                 mappedMesh.cast_shadows.has_value() && !*mappedMesh.cast_shadows &&
@@ -88,13 +98,33 @@ void mapsOnlySupportedStateExactly() {
             "project bake copies caller-owned baselines");
 
     state.meshes.at("BODY").layer = 99u;
+    state.nodes.at("root").name = "MUTATED";
     baselines.at("0").vertices[0] = 99.0F;
-    require(*result.meshes.at("BODY").layer == 0u && result.baselines.at("0").vertices[0] == 0.0F,
+    require(result.nodes.at("root").name == "CHASSIS" &&
+                *result.meshes.at("BODY").layer == 0u &&
+                result.baselines.at("0").vertices[0] == 0.0F,
             "project bake output does not alias caller state");
 }
 
 void rejectsMalformedStateBeforeCopy() {
     ProjectState state;
+    state.nodes["root"] = {};
+    expectsError([&] { (void)buildKn5BakeProject(state, {}); }, "empty_edit");
+
+    state = {};
+    state.nodes["01"].active = true;
+    expectsError([&] { (void)buildKn5BakeProject(state, {}); }, "invalid_path");
+
+    state = {};
+    state.nodes["root"].name = "";
+    expectsError([&] { (void)buildKn5BakeProject(state, {}); }, "empty_string");
+
+    state = {};
+    state.nodes["root"].transform = apex::authoring::Matrix4{};
+    (*state.nodes["root"].transform)[0] = std::numeric_limits<float>::quiet_NaN();
+    expectsError([&] { (void)buildKn5BakeProject(state, {}); }, "non_finite");
+
+    state = {};
     state.meshes["BODY"].lodIn = std::numeric_limits<float>::quiet_NaN();
     expectsError([&] { (void)buildKn5BakeProject(state, {}); }, "non_finite");
 
@@ -127,6 +157,11 @@ void enforcesCopyLimits() {
     ProjectState state;
     state.meshes["BODY"].layer = 1u;
     ProjectBakeLimits limits;
+    limits.maxNodeEdits = 0u;
+    ProjectState nodeState;
+    nodeState.nodes["root"].active = false;
+    expectsError([&] { (void)buildKn5BakeProject(nodeState, {}, limits); }, "node_limit");
+    limits = {};
     limits.maxMeshEdits = 0u;
     expectsError([&] { (void)buildKn5BakeProject(state, {}, limits); }, "mesh_limit");
     limits = {};
@@ -178,6 +213,10 @@ apex::formats::Kn5File bakeFixture() {
 
 void adapterFeedsProductionBakeAuthority() {
     ProjectState state;
+    state.nodes["root"].name = "CHASSIS";
+    state.nodes["root"].active = false;
+    state.nodes["root"].transform = apex::authoring::Matrix4{1, 0, 0, 0, 0, 1, 0, 0,
+                                                             0, 0, 1, 0, 2, 3, 4, 1};
     state.meshes["body"].transparent = true;
     state.meshes["body"].layer = 7u;
     state.geometry["0"].reverse_winding = true;
@@ -186,11 +225,13 @@ void adapterFeedsProductionBakeAuthority() {
 
     const auto project = buildKn5BakeProject(state, baselines);
     const auto baked = apex::formats::bakeKn5(bakeFixture(), project);
-    require(baked.applied.meshes == 1u && baked.applied.geometry == 1u &&
+    require(baked.applied.nodes == 1u && baked.applied.meshes == 1u &&
+                baked.applied.geometry == 1u && !baked.model.root.active &&
+                baked.model.root.name == "CHASSIS" && baked.model.root.transform[12] == 2.0F &&
                 baked.model.root.children[0].transparent &&
                 baked.model.root.children[0].layer == 7u &&
                 baked.model.root.children[0].indices == std::vector<std::uint16_t>({0u, 0u, 1u}),
-            "project-state adapter feeds mesh and geometry edits into the production KN5 bake");
+            "project-state adapter feeds node, mesh, and geometry edits into the production KN5 bake");
 }
 
 } // namespace
