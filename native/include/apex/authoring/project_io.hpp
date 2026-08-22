@@ -41,9 +41,9 @@ struct ProjectIoResult {
                                            const SourceIdentity& expectedSource,
                                            ProjectIoLimits limits = {});
 
-// Exports the modeled material edits in the same deterministic CSP section
-// shape as serializeEditorCsp. Unmodeled project categories are reported in
-// diagnostics and are not silently represented as CSP edits.
+// Exports the modeled material and mesh edits in the same deterministic CSP
+// section shape as serializeEditorCsp. Unmodeled project categories are
+// reported in diagnostics and are not silently represented as CSP edits.
 [[nodiscard]] std::string serializeEditorCsp(const ProjectState& project,
                                              ProjectIoLimits limits = {},
                                              std::vector<ProjectIoDiagnostic>* diagnostics = nullptr);

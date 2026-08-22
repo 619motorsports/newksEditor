@@ -1,5 +1,6 @@
 #pragma once
 
+#include "apex/authoring/geometry.hpp"
 #include "apex/core/parse_error.hpp"
 #include "apex/formats/kn5.hpp"
 
@@ -42,6 +43,17 @@ struct NodeEdit {
     std::optional<std::string> name;
     std::optional<bool> active;
     std::optional<Matrix4> transform;
+};
+
+// Mesh edits follow the JavaScript project schema.  `transparent` is emitted
+// as `isTransparent` by project IO and `castShadows` retains the KN5 field
+// spelling.  GeometryEdit is shared with the bounded KN5 authoring path below.
+struct MeshEdit {
+    std::optional<bool> transparent;
+    std::optional<bool> castShadows;
+    std::optional<std::uint32_t> layer;
+    std::optional<float> lodIn;
+    std::optional<float> lodOut;
 };
 
 struct WorkspaceFileEdit {
@@ -135,6 +147,10 @@ struct DamageEdit {
 
 struct SetNodeEdit { std::string path; NodeEdit edit; };
 struct ClearNodeEdit { std::string path; };
+struct SetMeshEdit { std::string name; MeshEdit edit; };
+struct ClearMeshEdit { std::string name; };
+struct SetGeometryEdit { std::string path; GeometryEdit edit; };
+struct ClearGeometryEdit { std::string path; };
 struct SetWorkspaceFileEdit { std::uint32_t index = 0; WorkspaceFileEdit edit; };
 struct ClearWorkspaceFileEdit { std::uint32_t index = 0; };
 struct SetWorkspaceSettingsEdit { WorkspaceSettingsEdit edit; };
@@ -154,6 +170,8 @@ struct ClearDamageEdit { std::string section; };
 
 using EditOperation = std::variant<
     SetNodeEdit, ClearNodeEdit,
+    SetMeshEdit, ClearMeshEdit,
+    SetGeometryEdit, ClearGeometryEdit,
     SetWorkspaceFileEdit, ClearWorkspaceFileEdit,
     SetWorkspaceSettingsEdit, ClearWorkspaceSettingsEdit,
     SetMaterialScalarEdit, SetMaterialVectorEdit, SetMaterialResourceEdit, ClearMaterialEdit,
@@ -174,6 +192,8 @@ struct ProjectState {
     std::map<std::uint32_t, WorkspaceFileEdit> workspaceFiles;
     std::map<std::string, MaterialEdit> materials;
     std::map<std::string, NodeEdit> nodes;
+    std::map<std::string, MeshEdit> meshes;
+    std::map<std::string, GeometryEdit> geometry;
     std::map<std::uint32_t, SurfaceEdit> surfaces;
     std::map<std::uint32_t, ColliderEdit> colliders;
     std::map<std::uint32_t, BottomColliderEdit> bottomColliders;

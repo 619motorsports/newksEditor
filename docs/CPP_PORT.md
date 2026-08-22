@@ -307,9 +307,10 @@ remains unchanged and feature-complete.
   snapshot. Track/car workspace manifests assemble
   deterministically. Driver rigs assemble. Bounded project transactions,
   undo/redo/recovery, geometry authoring, KN5 baking, and render/frame-plan
-  selection are implemented. Bounded `.apex.json` persistence is implemented.
-  The port deterministically exports modeled material edits to CSP. It reports
-  unsupported project categories instead of approximating them. Car damage and
+  selection are implemented. Bounded `.apex.json` persistence includes mesh
+  and geometry edits. A bounded adapter sends these edits to the KN5 bake path.
+  The port deterministically exports modeled material and mesh edits to CSP.
+  It reports unsupported project categories instead of approximating them. Car damage and
   bottom-collider authoring have bounded schemas and deterministic output. A
   single-hierarchy car validator checks required nodes, wheels, pivots,
   colliders, and visual-model bounds. Multi-LOD validation is still staged.

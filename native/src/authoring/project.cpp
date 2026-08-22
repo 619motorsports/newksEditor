@@ -105,6 +105,21 @@ void validateNodeEdit(NodeEdit& edit, const AuthoringLimits& limits) {
     if (edit.transform) validateMatrix(*edit.transform, "node transform");
 }
 
+void validateMeshEdit(MeshEdit& edit) {
+    if (!edit.transparent && !edit.castShadows && !edit.layer && !edit.lodIn && !edit.lodOut)
+        throw error("EDIT_INVALID", "mesh edit has no fields");
+    if (edit.lodIn && !std::isfinite(*edit.lodIn))
+        throw error("EDIT_INVALID", "mesh LOD in must be finite");
+    if (edit.lodOut && !std::isfinite(*edit.lodOut))
+        throw error("EDIT_INVALID", "mesh LOD out must be finite");
+}
+
+void validateGeometryEdit(GeometryEdit& edit) {
+    if (!edit.remove_degenerate && !edit.reverse_winding && !edit.recalculate_normals && !edit.transform)
+        throw error("EDIT_INVALID", "geometry edit has no fields");
+    if (edit.transform) validateMatrix(*edit.transform, "geometry transform");
+}
+
 void validateWorkspaceEdit(WorkspaceFileEdit& edit, const AuthoringLimits& limits) {
     if (edit.name) *edit.name = safePath(std::move(*edit.name), limits.maxStringBytes, "workspace file name");
     if (edit.position) validateVector(*edit.position, "workspace position");
@@ -218,6 +233,21 @@ void mergeNode(NodeEdit& destination, const NodeEdit& source) {
     mergeOptional(destination.transform, source.transform);
 }
 
+void mergeMesh(MeshEdit& destination, const MeshEdit& source) {
+    mergeOptional(destination.transparent, source.transparent);
+    mergeOptional(destination.castShadows, source.castShadows);
+    mergeOptional(destination.layer, source.layer);
+    mergeOptional(destination.lodIn, source.lodIn);
+    mergeOptional(destination.lodOut, source.lodOut);
+}
+
+void mergeGeometry(GeometryEdit& destination, const GeometryEdit& source) {
+    destination.remove_degenerate = destination.remove_degenerate || source.remove_degenerate;
+    destination.reverse_winding = destination.reverse_winding || source.reverse_winding;
+    destination.recalculate_normals = destination.recalculate_normals || source.recalculate_normals;
+    mergeOptional(destination.transform, source.transform);
+}
+
 void mergeWorkspace(WorkspaceFileEdit& destination, const WorkspaceFileEdit& source) {
     mergeOptional(destination.name, source.name);
     mergeOptional(destination.position, source.position);
@@ -310,6 +340,16 @@ void validateState(ProjectState& state, const AuthoringLimits& limits) {
         if (nodePath(path, limits.maxStringBytes) != path)
             throw error("RECOVERY_INVALID", "recovery node path is not canonical");
         validateNodeEdit(edit, limits);
+    }
+    for (auto& [name, edit] : state.meshes) {
+        if (safeKey(name, limits.maxStringBytes, "mesh name") != name)
+            throw error("RECOVERY_INVALID", "recovery mesh name is not canonical");
+        validateMeshEdit(edit);
+    }
+    for (auto& [path, edit] : state.geometry) {
+        if (nodePath(path, limits.maxStringBytes) != path)
+            throw error("RECOVERY_INVALID", "recovery geometry path is not canonical");
+        validateGeometryEdit(edit);
     }
     for (auto& [index, edit] : state.workspaceFiles) {
         (void)index;
@@ -411,6 +451,18 @@ ProjectState ProjectSession::applyTransaction(const AuthoringTransaction& transa
                 mergeNode(candidate.nodes[operationValue.path], operationValue.edit);
             } else if constexpr (std::is_same_v<Operation, ClearNodeEdit>) {
                 candidate.nodes.erase(nodePath(std::move(operationValue.path), limits_.maxStringBytes));
+            } else if constexpr (std::is_same_v<Operation, SetMeshEdit>) {
+                const auto name = safeKey(std::move(operationValue.name), limits_.maxStringBytes, "mesh name");
+                validateMeshEdit(operationValue.edit);
+                mergeMesh(candidate.meshes[name], operationValue.edit);
+            } else if constexpr (std::is_same_v<Operation, ClearMeshEdit>) {
+                candidate.meshes.erase(safeKey(std::move(operationValue.name), limits_.maxStringBytes, "mesh name"));
+            } else if constexpr (std::is_same_v<Operation, SetGeometryEdit>) {
+                operationValue.path = nodePath(std::move(operationValue.path), limits_.maxStringBytes);
+                validateGeometryEdit(operationValue.edit);
+                mergeGeometry(candidate.geometry[operationValue.path], operationValue.edit);
+            } else if constexpr (std::is_same_v<Operation, ClearGeometryEdit>) {
+                candidate.geometry.erase(nodePath(std::move(operationValue.path), limits_.maxStringBytes));
             } else if constexpr (std::is_same_v<Operation, SetWorkspaceFileEdit>) {
                 validateWorkspaceEdit(operationValue.edit, limits_);
                 mergeWorkspace(candidate.workspaceFiles[operationValue.index], operationValue.edit);
@@ -489,6 +541,17 @@ std::size_t ProjectSession::editCount(const ProjectState& state) const {
                  optionalCount(edit.velocityRange) + optionalCount(edit.playWav);
     }
     for (const auto& [key, edit] : state.nodes) count += 1 + optionalCount(edit.name) + optionalCount(edit.active) + optionalCount(edit.transform);
+    for (const auto& [key, edit] : state.meshes) {
+        (void)key;
+        count += 1 + optionalCount(edit.transparent) + optionalCount(edit.castShadows) +
+                 optionalCount(edit.layer) + optionalCount(edit.lodIn) + optionalCount(edit.lodOut);
+    }
+    for (const auto& [key, edit] : state.geometry) {
+        (void)key;
+        count += 1 + static_cast<std::size_t>(edit.remove_degenerate) +
+                 static_cast<std::size_t>(edit.reverse_winding) +
+                 static_cast<std::size_t>(edit.recalculate_normals) + optionalCount(edit.transform);
+    }
     for (const auto& [key, edit] : state.materials) {
         (void)key;
         count += 1 + edit.scalars.size() + edit.vectors.size() + edit.resources.size();

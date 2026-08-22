@@ -81,6 +81,7 @@ target_link_libraries(apex_formats PUBLIC ApexEditor::Core)
 add_library(apex_authoring STATIC
   src/authoring/geometry.cpp
   src/authoring/project.cpp
+  src/authoring/project_bake.cpp
   src/authoring/project_io.cpp
   src/formats/kn5_bake.cpp
 )
@@ -216,6 +217,7 @@ apex_add_native_test(acd_tests.cpp acd_tests ApexEditor::Formats)
 apex_add_native_test(ini_tests.cpp ini_tests ApexEditor::Formats)
 apex_add_native_test(vao_tests.cpp vao_tests ApexEditor::Formats)
 apex_add_native_test(authoring_project_tests.cpp authoring_project_tests ApexEditor::Authoring)
+apex_add_native_test(project_bake_tests.cpp project_bake_tests ApexEditor::Authoring)
 apex_add_native_test(geometry_bake_tests.cpp geometry_bake_tests ApexEditor::Authoring)
 apex_add_native_test(project_io_tests.cpp project_io_tests ApexEditor::Authoring)
 apex_add_native_test(asset_index_tests.cpp asset_index_tests ApexEditor::Assets)
@@ -272,7 +274,7 @@ foreach(parser_test IN ITEMS kn5_tests kn5_write_tests dds_tests bc7_tests png_t
     set_tests_properties(${parser_test} PROPERTIES LABELS "unit;malformed")
   endif()
 endforeach()
-foreach(boundary_test IN ITEMS authoring_project_tests geometry_bake_tests project_io_tests
+foreach(boundary_test IN ITEMS authoring_project_tests project_bake_tests geometry_bake_tests project_io_tests
                                asset_index_tests asset_source_tests csp_config_model_tests
                                csp_material_evaluator_tests car_damage_tests car_validation_tests
                                driver_tests skin_metadata_tests

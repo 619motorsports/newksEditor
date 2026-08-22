@@ -482,6 +482,8 @@ void writeWorkspaceFile(JsonWriter& writer, const WorkspaceFileEdit& edit, std::
 }
 
 void parseNodeEdits(const JsonValue&, ProjectSession&, std::vector<ProjectIoDiagnostic>&, const ProjectIoLimits&);
+void parseMeshEdits(const JsonValue&, ProjectSession&, std::vector<ProjectIoDiagnostic>&, const ProjectIoLimits&);
+void parseGeometryEdits(const JsonValue&, ProjectSession&, std::vector<ProjectIoDiagnostic>&, const ProjectIoLimits&);
 void parseWorkspaceEdits(const JsonValue&, ProjectSession&, std::vector<ProjectIoDiagnostic>&, const ProjectIoLimits&);
 void parseMaterialEdits(const JsonValue&, ProjectSession&, std::vector<ProjectIoDiagnostic>&, const ProjectIoLimits&);
 void parseSurfaceEdits(const JsonValue&, ProjectSession&, std::vector<ProjectIoDiagnostic>&);
@@ -513,6 +515,12 @@ template <typename T>
 [[nodiscard]] bool hasValue(const std::optional<T>& value) { return value.has_value(); }
 
 [[nodiscard]] bool hasEdit(const NodeEdit& edit) { return edit.name || edit.active || edit.transform; }
+[[nodiscard]] bool hasEdit(const MeshEdit& edit) {
+    return edit.transparent || edit.castShadows || edit.layer || edit.lodIn || edit.lodOut;
+}
+[[nodiscard]] bool hasEdit(const GeometryEdit& edit) {
+    return edit.transform || edit.remove_degenerate || edit.reverse_winding || edit.recalculate_normals;
+}
 [[nodiscard]] bool hasEdit(const WorkspaceFileEdit& edit) {
     return edit.name || edit.position || edit.rotation || edit.lodIn || edit.lodOut || edit.probability ||
            edit.multiplicity || edit.posMode || edit.positionCenter || edit.positionRange || edit.velMode ||
@@ -561,6 +569,14 @@ void validateDirectProject(const ProjectState& project, const ProjectIoLimits& l
         checkIoText(path, "nodeEdits key", limits);
         if (!hasEdit(edit)) throw ioError("EDIT_INVALID", 0, "node edit has no fields");
         if (edit.name) checkIoText(*edit.name, path, limits);
+    }
+    for (const auto& [name, edit] : project.meshes) {
+        checkIoText(name, "meshEdits key", limits);
+        if (!hasEdit(edit)) throw ioError("EDIT_INVALID", 0, "mesh edit has no fields");
+    }
+    for (const auto& [path, edit] : project.geometry) {
+        checkIoText(path, "geometryEdits key", limits);
+        if (!hasEdit(edit)) throw ioError("EDIT_INVALID", 0, "geometry edit has no fields");
     }
     for (const auto& [index, edit] : project.workspaceFiles) {
         (void)index;
@@ -670,13 +686,15 @@ ProjectIoResult parseProjectInternal(std::string_view text, const SourceIdentity
     }
     ProjectSession session(source, AuthoringLimits{0, limits.maxEdits == 0 ? 1 : limits.maxEdits, limits.maxEdits, limits.maxStringBytes, limits.maxEdits});
     if (const auto value = member(root, "materialEdits"); value != nullptr) parseMaterialEdits(*value, session, diagnostics, limits);
+    if (const auto value = member(root, "meshEdits"); value != nullptr) parseMeshEdits(*value, session, diagnostics, limits);
     if (const auto value = member(root, "nodeEdits"); value != nullptr) parseNodeEdits(*value, session, diagnostics, limits);
+    if (const auto value = member(root, "geometryEdits"); value != nullptr) parseGeometryEdits(*value, session, diagnostics, limits);
     if (const auto value = member(root, "workspaceEdits"); value != nullptr) parseWorkspaceEdits(*value, session, diagnostics, limits);
     if (const auto value = member(root, "surfaceEdits"); value != nullptr) parseSurfaceEdits(*value, session, diagnostics);
     if (const auto value = member(root, "colliderEdits"); value != nullptr) parseColliderEdits(*value, session, diagnostics, false);
     if (const auto value = member(root, "bottomColliderEdits"); value != nullptr) parseColliderEdits(*value, session, diagnostics, true);
     if (const auto value = member(root, "damageEdits"); value != nullptr) parseDamageEdits(*value, session, diagnostics);
-    for (const auto& key : {"meshEdits", "geometryEdits", "skinEdits", "colliderAsset", "damageAsset", "bottomColliderAsset"})
+    for (const auto& key : {"skinEdits", "colliderAsset", "damageAsset", "bottomColliderAsset"})
         if (const auto value = member(root, key); value != nullptr && value->kind != JsonValue::Kind::nullValue && ((isObject(value) && !value->object.empty()) || value->kind != JsonValue::Kind::object))
             addDiagnostic(diagnostics, "UNSUPPORTED_FIELD", key, "project field is not modeled by the native authoring state");
     for (const auto& [key, value] : root.object)
@@ -722,13 +740,14 @@ std::string serializeEditorCspInternal(const ProjectState& project, ProjectIoLim
     std::vector<ProjectIoDiagnostic> local;
     auto& messages = diagnostics == nullptr ? local : *diagnostics;
     for (const auto& [key, value] : project.nodes) { (void)value; addDiagnostic(messages, "UNSUPPORTED_FIELD", "nodeEdits." + key, "node edits have no CSP export in this slice"); }
+    for (const auto& [key, value] : project.geometry) { (void)value; addDiagnostic(messages, "UNSUPPORTED_FIELD", "geometryEdits." + key, "geometry edits are baked into KN5 and have no CSP export"); }
     if (!project.workspaceFiles.empty() || project.workspace.cockpitHrDistance || project.workspace.driverHrDistance) addDiagnostic(messages, "UNSUPPORTED_FIELD", "workspaceEdits", "workspace edits have no CSP export in this slice");
     if (!project.surfaces.empty()) addDiagnostic(messages, "UNSUPPORTED_FIELD", "surfaceEdits", "surface edits have no CSP export in this slice");
     if (!project.colliders.empty() || !project.bottomColliders.empty()) addDiagnostic(messages, "UNSUPPORTED_FIELD", "colliderEdits", "collider edits have no CSP export in this slice");
     if (!project.damage.empty()) addDiagnostic(messages, "UNSUPPORTED_FIELD", "damageEdits", "damage edits have no CSP export in this slice");
     std::string output;
     appendBounded(output, "; Generated by Apex Editor. Source KN5 is not modified.\n", limits.maxOutputBytes);
-    if (!project.materials.empty()) appendBounded(output, "\n", limits.maxOutputBytes);
+    if (!project.materials.empty() || !project.meshes.empty()) appendBounded(output, "\n", limits.maxOutputBytes);
     std::size_t sectionIndex = 0;
     for (const auto& [material, edit] : project.materials) {
         std::vector<std::string> lines;
@@ -766,6 +785,19 @@ std::string serializeEditorCspInternal(const ProjectState& project, ProjectIoLim
         }
         if (sectionIndex > 1) appendBounded(output, "\n", limits.maxOutputBytes);
         for (const auto& line : lines) { appendBounded(output, line, limits.maxOutputBytes); appendBounded(output, "\n", limits.maxOutputBytes); }
+    }
+    std::size_t meshIndex = 0;
+    for (const auto& [mesh, edit] : project.meshes) {
+        if (sectionIndex > 0 || meshIndex > 0) appendBounded(output, "\n", limits.maxOutputBytes);
+        std::ostringstream sectionName; sectionName << "[MESH_ADJUSTMENT_APEX_EDITOR_" << std::setw(3) << std::setfill('0') << meshIndex++ << "]";
+        const auto line = [&](std::string value) { appendBounded(output, value, limits.maxOutputBytes); appendBounded(output, "\n", limits.maxOutputBytes); };
+        line(sectionName.str());
+        line("MESHES = " + cspQuote(mesh));
+        if (edit.transparent) line(std::string("IS_TRANSPARENT = ") + (*edit.transparent ? "1" : "0"));
+        if (edit.layer) line("LAYER = " + std::to_string(*edit.layer));
+        if (edit.lodIn) line("LOD_IN = " + formatEditorNumber(*edit.lodIn));
+        if (edit.lodOut) line("LOD_OUT = " + formatEditorNumber(*edit.lodOut));
+        if (edit.castShadows) line(std::string("CAST_SHADOWS = ") + (*edit.castShadows ? "1" : "0"));
     }
     return output;
 }
@@ -817,6 +849,143 @@ void parseNodeEdits(const JsonValue& value, ProjectSession& session,
         if (any && session.state().nodes.size() < limits.maxEdits)
             appendOperation(session, SetNodeEdit{path, std::move(edit)}, "nodeEdits." + path, diagnostics);
         else if (any) addDiagnostic(diagnostics, "EDIT_LIMIT", "nodeEdits", "project edit limit exceeded");
+    }
+}
+
+void parseMeshEdits(const JsonValue& value, ProjectSession& session,
+                    std::vector<ProjectIoDiagnostic>& diagnostics, const ProjectIoLimits& limits) {
+    if (!isObject(&value)) {
+        addDiagnostic(diagnostics, "FIELD_TYPE", "meshEdits", "meshEdits must be an object");
+        return;
+    }
+    for (const auto& [name, raw] : value.object) {
+        const auto editPath = "meshEdits." + name;
+        if (!isObject(&raw)) {
+            addDiagnostic(diagnostics, "FIELD_TYPE", editPath, "mesh edit must be an object");
+            continue;
+        }
+        MeshEdit edit;
+        bool any = false;
+        for (const auto& [key, field] : raw.object) {
+            const auto path = editPath + "." + key;
+            if (key == "isTransparent" || key == "castShadows") {
+                if (field.kind != JsonValue::Kind::boolean) {
+                    addDiagnostic(diagnostics, "FIELD_TYPE", path, "mesh flag must be boolean");
+                    continue;
+                }
+                if (key == "isTransparent")
+                    edit.transparent = field.boolean;
+                else
+                    edit.castShadows = field.boolean;
+                any = true;
+            } else if (key == "layer") {
+                if (field.kind != JsonValue::Kind::number || field.number < 0.0 ||
+                    std::trunc(field.number) != field.number ||
+                    static_cast<long double>(field.number) >
+                        static_cast<long double>(std::numeric_limits<std::uint32_t>::max())) {
+                    addDiagnostic(diagnostics, "FIELD_VALUE", path,
+                                  "mesh layer must be an unsigned 32-bit integer");
+                    continue;
+                }
+                edit.layer = static_cast<std::uint32_t>(field.number);
+                any = true;
+            } else if (key == "lodIn" || key == "lodOut") {
+                if (field.kind != JsonValue::Kind::number ||
+                    !std::isfinite(static_cast<float>(field.number))) {
+                    addDiagnostic(diagnostics, "FIELD_VALUE", path,
+                                  "mesh LOD must be a finite float");
+                    continue;
+                }
+                if (key == "lodIn")
+                    edit.lodIn = static_cast<float>(field.number);
+                else
+                    edit.lodOut = static_cast<float>(field.number);
+                any = true;
+            } else {
+                addDiagnostic(diagnostics, "UNSUPPORTED_FIELD", path, "mesh field is not modeled");
+            }
+        }
+        if (any && session.state().meshes.size() < limits.maxEdits)
+            appendOperation(session, SetMeshEdit{name, std::move(edit)}, editPath, diagnostics);
+        else if (any)
+            addDiagnostic(diagnostics, "EDIT_LIMIT", "meshEdits", "project edit limit exceeded");
+        else
+            addDiagnostic(diagnostics, "EDIT_EMPTY", editPath,
+                          "mesh edit has no valid modeled fields");
+    }
+}
+
+void parseGeometryEdits(const JsonValue& value, ProjectSession& session,
+                        std::vector<ProjectIoDiagnostic>& diagnostics,
+                        const ProjectIoLimits& limits) {
+    if (!isObject(&value)) {
+        addDiagnostic(diagnostics, "FIELD_TYPE", "geometryEdits",
+                      "geometryEdits must be an object");
+        return;
+    }
+    for (const auto& [nodePath, raw] : value.object) {
+        const auto editPath = "geometryEdits." + nodePath;
+        if (!isObject(&raw)) {
+            addDiagnostic(diagnostics, "FIELD_TYPE", editPath, "geometry edit must be an object");
+            continue;
+        }
+        GeometryEdit edit;
+        bool any = false;
+        for (const auto& [key, field] : raw.object) {
+            const auto path = editPath + "." + key;
+            if (key == "transform") {
+                Matrix4 transform{};
+                if (field.kind != JsonValue::Kind::array ||
+                    field.array.size() != transform.size()) {
+                    addDiagnostic(diagnostics, "FIELD_TYPE", path,
+                                  "geometry transform must contain 16 numbers");
+                    continue;
+                }
+                bool valid = true;
+                for (std::size_t index = 0; index < transform.size(); ++index) {
+                    if (field.array[index].kind != JsonValue::Kind::number ||
+                        !std::isfinite(static_cast<float>(field.array[index].number))) {
+                        valid = false;
+                        break;
+                    }
+                    transform[index] = static_cast<float>(field.array[index].number);
+                }
+                if (!valid) {
+                    addDiagnostic(diagnostics, "FIELD_VALUE", path,
+                                  "geometry transform must contain finite float values");
+                    continue;
+                }
+                edit.transform = transform;
+                any = true;
+            } else if (key == "removeDegenerate" || key == "reverseWinding" ||
+                       key == "recalculateNormals") {
+                if (field.kind != JsonValue::Kind::boolean) {
+                    addDiagnostic(diagnostics, "FIELD_TYPE", path, "geometry flag must be boolean");
+                    continue;
+                }
+                if (!field.boolean)
+                    continue;
+                if (key == "removeDegenerate")
+                    edit.remove_degenerate = true;
+                else if (key == "reverseWinding")
+                    edit.reverse_winding = true;
+                else
+                    edit.recalculate_normals = true;
+                any = true;
+            } else {
+                addDiagnostic(diagnostics, "UNSUPPORTED_FIELD", path,
+                              "geometry field is not modeled");
+            }
+        }
+        if (any && session.state().geometry.size() < limits.maxEdits)
+            appendOperation(session, SetGeometryEdit{nodePath, std::move(edit)}, editPath,
+                            diagnostics);
+        else if (any)
+            addDiagnostic(diagnostics, "EDIT_LIMIT", "geometryEdits",
+                          "project edit limit exceeded");
+        else
+            addDiagnostic(diagnostics, "EDIT_EMPTY", editPath,
+                          "geometry edit has no valid modeled fields");
     }
 }
 
@@ -1086,6 +1255,63 @@ void writeDamage(JsonWriter& writer, const DamageEdit& edit, std::size_t depth) 
     writer.raw("}");
 }
 
+void writeMesh(JsonWriter& writer, const MeshEdit& edit, std::size_t depth) {
+    writer.raw("{");
+    bool first = true;
+    const auto field = [&](std::string_view key, const auto& value, auto writeValue) {
+        if (!value)
+            return;
+        if (!first)
+            writer.raw(",");
+        writer.raw("\n");
+        writer.indent(depth + 1);
+        writer.string(key);
+        writer.raw(": ");
+        writeValue(*value);
+        first = false;
+    };
+    field("isTransparent", edit.transparent,
+          [&](bool value) { writer.raw(value ? "true" : "false"); });
+    field("castShadows", edit.castShadows,
+          [&](bool value) { writer.raw(value ? "true" : "false"); });
+    field("layer", edit.layer, [&](std::uint32_t value) { writer.raw(std::to_string(value)); });
+    field("lodIn", edit.lodIn, [&](float value) { writer.raw(formatNumber(value)); });
+    field("lodOut", edit.lodOut, [&](float value) { writer.raw(formatNumber(value)); });
+    if (!first) {
+        writer.raw("\n");
+        writer.indent(depth);
+    }
+    writer.raw("}");
+}
+
+void writeGeometry(JsonWriter& writer, const GeometryEdit& edit, std::size_t depth) {
+    writer.raw("{");
+    bool first = true;
+    const auto field = [&](std::string_view key, auto writeValue) {
+        if (!first)
+            writer.raw(",");
+        writer.raw("\n");
+        writer.indent(depth + 1);
+        writer.string(key);
+        writer.raw(": ");
+        writeValue();
+        first = false;
+    };
+    if (edit.transform)
+        field("transform", [&] { writeArray(writer, *edit.transform, depth + 1); });
+    if (edit.remove_degenerate)
+        field("removeDegenerate", [&] { writer.raw("true"); });
+    if (edit.reverse_winding)
+        field("reverseWinding", [&] { writer.raw("true"); });
+    if (edit.recalculate_normals)
+        field("recalculateNormals", [&] { writer.raw("true"); });
+    if (!first) {
+        writer.raw("\n");
+        writer.indent(depth);
+    }
+    writer.raw("}");
+}
+
 void writeProjectMap(JsonWriter& writer, const ProjectState& project, std::size_t depth) {
     writer.raw("{\n"); writer.indent(depth); writer.string("format"); writer.raw(": "); writer.string(kProjectFormat); writer.raw(",\n");
     writer.indent(depth); writer.string("version"); writer.raw(": 1,\n");
@@ -1093,9 +1319,9 @@ void writeProjectMap(JsonWriter& writer, const ProjectState& project, std::size_
     writer.indent(depth); writer.string("asset"); writer.raw(": {\n"); writer.indent(depth + 1); writer.string("name"); writer.raw(": "); writer.string(project.source.name); writer.raw(",\n"); writer.indent(depth + 1); writer.string("size"); writer.raw(": "); writer.raw(std::to_string(project.source.size)); writer.raw(",\n"); writer.indent(depth + 1); writer.string("sha256"); writer.raw(": "); writer.string(project.source.sha256); if (project.source.kn5Version) { writer.raw(",\n"); writer.indent(depth + 1); writer.string("kn5Version"); writer.raw(": "); writer.raw(std::to_string(*project.source.kn5Version)); } writer.raw("\n"); writer.indent(depth); writer.raw("},\n");
 
     writer.indent(depth); writer.string("materialEdits"); writer.raw(": {"); bool first = true; for (const auto& [key, edit] : project.materials) { if (!first) writer.raw(","); writer.raw("\n"); writer.indent(depth + 1); writer.string(key); writer.raw(": "); writeMaterial(writer, edit, depth + 1); first = false; } if (!first) { writer.raw("\n"); writer.indent(depth); } writer.raw("},\n");
-    writer.indent(depth); writer.string("meshEdits"); writer.raw(": {},\n");
+    writer.indent(depth); writer.string("meshEdits"); writer.raw(": {"); first = true; for (const auto& [key, edit] : project.meshes) { if (!first) writer.raw(","); writer.raw("\n"); writer.indent(depth + 1); writer.string(key); writer.raw(": "); writeMesh(writer, edit, depth + 1); first = false; } if (!first) { writer.raw("\n"); writer.indent(depth); } writer.raw("},\n");
     writer.indent(depth); writer.string("nodeEdits"); writer.raw(": {"); first = true; for (const auto& [key, edit] : project.nodes) { if (!first) writer.raw(","); writer.raw("\n"); writer.indent(depth + 1); writer.string(key); writer.raw(": "); writeNodeEdit(writer, edit, depth + 1); first = false; } if (!first) { writer.raw("\n"); writer.indent(depth); } writer.raw("},\n");
-    writer.indent(depth); writer.string("geometryEdits"); writer.raw(": {},\n");
+    writer.indent(depth); writer.string("geometryEdits"); writer.raw(": {"); first = true; for (const auto& [key, edit] : project.geometry) { if (!first) writer.raw(","); writer.raw("\n"); writer.indent(depth + 1); writer.string(key); writer.raw(": "); writeGeometry(writer, edit, depth + 1); first = false; } if (!first) { writer.raw("\n"); writer.indent(depth); } writer.raw("},\n");
     writer.indent(depth); writer.string("colliderEdits"); writer.raw(": "); writeIndexedMap(writer, project.colliders, depth, [](JsonWriter& w, const ColliderEdit& edit, std::size_t d) { w.raw("{"); bool firstField = true; const auto emit = [&](std::string_view key, const auto& value, auto callback) { if (!value) return; if (!firstField) w.raw(","); w.raw("\n"); w.indent(d + 1); w.string(key); w.raw(": "); callback(*value); firstField = false; }; emit("transform", edit.transform, [&](const Matrix4& value) { writeArray(w, value, d + 1); }); emit("removeDegenerate", edit.removeDegenerate, [&](bool value) { w.raw(value ? "true" : "false"); }); emit("reverseWinding", edit.reverseWinding, [&](bool value) { w.raw(value ? "true" : "false"); }); emit("recalculateNormals", edit.recalculateNormals, [&](bool value) { w.raw(value ? "true" : "false"); }); if (!firstField) { w.raw("\n"); w.indent(d); } w.raw("}"); }); writer.raw(",\n");
     writer.indent(depth); writer.string("damageEdits"); writer.raw(": {"); first = true; for (const auto& [key, edit] : project.damage) { if (!first) writer.raw(","); writer.raw("\n"); writer.indent(depth + 1); writer.string(key); writer.raw(": "); writeDamage(writer, edit, depth + 1); first = false; } if (!first) { writer.raw("\n"); writer.indent(depth); } writer.raw("},\n");
     writer.indent(depth); writer.string("bottomColliderEdits"); writer.raw(": "); writeIndexedMap(writer, project.bottomColliders, depth, [](JsonWriter& w, const BottomColliderEdit& edit, std::size_t d) { w.raw("{"); bool firstField = true; const auto emitVector = [&](std::string_view key, const std::optional<Vector3>& value) { if (!value) return; if (!firstField) w.raw(","); w.raw("\n"); w.indent(d + 1); w.string(key); w.raw(": "); writeArray(w, *value, d + 1); firstField = false; }; emitVector("centre", edit.centre); emitVector("size", edit.size); if (edit.groundEnabled) { if (!firstField) w.raw(","); w.raw("\n"); w.indent(d + 1); w.string("groundEnabled"); w.raw(": "); w.raw(*edit.groundEnabled ? "true" : "false"); firstField = false; } if (!firstField) { w.raw("\n"); w.indent(d); } w.raw("}"); }); writer.raw(",\n");

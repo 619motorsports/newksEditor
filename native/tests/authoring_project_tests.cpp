@@ -16,17 +16,23 @@ using apex::authoring::AuthoringError;
 using apex::authoring::AuthoringLimits;
 using apex::authoring::AuthoringTransaction;
 using apex::authoring::BottomColliderEdit;
+using apex::authoring::ClearGeometryEdit;
+using apex::authoring::ClearMeshEdit;
 using apex::authoring::ClearNodeEdit;
 using apex::authoring::EditOperation;
+using apex::authoring::GeometryEdit;
 using apex::authoring::MaterialResource;
 using apex::authoring::MaterialVector;
+using apex::authoring::MeshEdit;
 using apex::authoring::ProjectSession;
 using apex::authoring::RecoverySnapshot;
 using apex::authoring::SetBottomColliderEdit;
 using apex::authoring::SetDamageEdit;
+using apex::authoring::SetGeometryEdit;
 using apex::authoring::SetMaterialResourceEdit;
 using apex::authoring::SetMaterialScalarEdit;
 using apex::authoring::SetMaterialVectorEdit;
+using apex::authoring::SetMeshEdit;
 using apex::authoring::SetNodeEdit;
 using apex::authoring::SetSurfaceEdit;
 using apex::authoring::SetWorkspaceFileEdit;
@@ -46,6 +52,12 @@ apex::authoring::NodeEdit nodeEdit(std::optional<bool> active = std::nullopt,
     apex::authoring::NodeEdit output;
     output.active = active;
     output.name = std::move(name);
+    return output;
+}
+
+MeshEdit meshLayer(std::uint32_t layer) {
+    MeshEdit output;
+    output.layer = layer;
     return output;
 }
 
@@ -76,6 +88,105 @@ void validatesIdentityAndStablePaths() {
     expectsError([&] {
         session.commit({"noncanonical", {SetNodeEdit{"01", nodeEdit(true)}}});
     }, "EDIT_INVALID");
+    GeometryEdit geometry;
+    geometry.reverse_winding = true;
+    expectsError([&] {
+        session.commit({"geometry alias", {SetGeometryEdit{"01", geometry}}});
+    }, "EDIT_INVALID");
+    expectsError([&] {
+        session.commit({"geometry traversal", {SetGeometryEdit{"../0", geometry}}});
+    }, "EDIT_INVALID");
+    expectsError([&] {
+        session.commit({"empty mesh name", {SetMeshEdit{"", meshLayer(1)}}});
+    }, "EDIT_INVALID");
+    MeshEdit nonFinite;
+    nonFinite.lodIn = std::numeric_limits<float>::quiet_NaN();
+    expectsError([&] {
+        session.commit({"nonfinite mesh", {SetMeshEdit{"BODY", nonFinite}}});
+    }, "EDIT_INVALID");
+    GeometryEdit nonFiniteGeometry;
+    nonFiniteGeometry.transform = apex::authoring::Matrix4{};
+    (*nonFiniteGeometry.transform)[0] = std::numeric_limits<float>::quiet_NaN();
+    expectsError([&] {
+        session.commit({"nonfinite geometry", {SetGeometryEdit{"0", nonFiniteGeometry}}});
+    }, "EDIT_INVALID");
+}
+
+void meshAndGeometryEditsAreAtomicAndUndoable() {
+    ProjectSession session(identity());
+    MeshEdit mesh;
+    mesh.transparent = false;
+    mesh.castShadows = true;
+    mesh.layer = 3;
+    mesh.lodIn = 15.0F;
+    GeometryEdit geometry;
+    geometry.reverse_winding = true;
+    geometry.recalculate_normals = true;
+    geometry.transform = apex::authoring::Matrix4{1, 0, 0, 0, 0, 1, 0, 0,
+                                                   0, 0, 1, 0, 2, 3, 4, 1};
+    session.commit({"mesh and geometry", {
+        SetMeshEdit{"BODY", mesh}, SetGeometryEdit{"0", geometry}}});
+    require(session.state().meshes.at("BODY").transparent == false &&
+                session.state().meshes.at("BODY").layer == 3 &&
+                session.state().geometry.at("0").reverse_winding &&
+                session.state().geometry.at("0").transform->at(12) == 2.0F,
+            "mesh and geometry transaction");
+
+    MeshEdit lod;
+    lod.lodOut = 45.0F;
+    session.commit({"merge mesh", {SetMeshEdit{"BODY", lod}}});
+    require(session.state().meshes.at("BODY").lodIn == 15.0F &&
+                session.state().meshes.at("BODY").lodOut == 45.0F,
+            "mesh fields merge without losing prior values");
+
+    const auto beforeAtomicRevision = session.state().revision;
+    const auto beforeAtomicHistory = session.undoCount();
+    GeometryEdit invalid;
+    invalid.transform = apex::authoring::Matrix4{1, 0, 0, 0, 0, 1, 0, 0,
+                                                  0, 0, 1, 0, 0, 0, 0, 1};
+    (*invalid.transform)[5] = std::numeric_limits<float>::infinity();
+    expectsError([&] {
+        session.commit({"atomic failure", {SetMeshEdit{"OTHER", meshLayer(7)},
+                                             SetGeometryEdit{"1", invalid}}});
+    }, "EDIT_INVALID");
+    require(session.state().revision == beforeAtomicRevision &&
+                session.undoCount() == beforeAtomicHistory &&
+                !session.state().meshes.contains("OTHER") &&
+                !session.state().geometry.contains("1"),
+            "mesh and geometry transaction is atomic");
+
+    const auto mergedRevision = session.state().revision;
+    session.undo();
+    require(session.state().meshes.at("BODY").lodIn == 15.0F &&
+                !session.state().meshes.at("BODY").lodOut.has_value() &&
+                session.state().geometry.at("0").reverse_winding,
+            "undo restores mesh and geometry state");
+    const auto undoRevision = session.state().revision;
+    require(undoRevision > mergedRevision, "mesh undo revision is monotonic");
+    session.redo();
+    require(session.state().meshes.at("BODY").lodOut == 45.0F,
+            "redo restores mesh state");
+
+    session.commit({"clear mesh and geometry", {
+        ClearMeshEdit{"BODY"}, ClearGeometryEdit{"0"}}});
+    require(session.state().meshes.empty() && session.state().geometry.empty(),
+            "mesh and geometry clear operations");
+    session.restoreBaseline();
+    require(session.state().meshes.empty() && session.state().geometry.empty() &&
+                !session.canRedo(),
+            "baseline restore clears mesh and geometry history");
+}
+
+void meshAndGeometryEditsHonorTotalLimits() {
+    AuthoringLimits limits;
+    limits.maxTotalEdits = 1;
+    ProjectSession session(identity(), limits);
+    expectsError([&] {
+        session.commit({"over budget", {SetMeshEdit{"BODY", meshLayer(1)}}});
+    }, "EDIT_LIMIT");
+    require(session.state().meshes.empty() && session.state().revision == 0 &&
+                !session.canUndo(),
+            "mesh edit limit is atomic");
 }
 
 void appliesTypedTransactionWithoutMutatingSource() {
@@ -203,6 +314,22 @@ void recoveryValidatesSourceAndLimits() {
     require(recovery.restored && recoverySession.state().source.name == "CAR/BODY.KN5" &&
                 recoverySession.state().revision > beforeRecovery,
             "recovery normalizes and advances revision");
+
+    ProjectSession meshRecovery(identity());
+    MeshEdit mesh;
+    mesh.castShadows = false;
+    GeometryEdit geometry;
+    geometry.remove_degenerate = true;
+    meshRecovery.commit({"mesh recovery", {
+        SetMeshEdit{"BODY", mesh}, SetGeometryEdit{"0", geometry}}});
+    const auto meshSnapshot = meshRecovery.recoverySnapshot();
+    meshRecovery.commit({"clear recovered edits", {
+        ClearMeshEdit{"BODY"}, ClearGeometryEdit{"0"}}});
+    const auto meshRestored = meshRecovery.recover(meshSnapshot, identity());
+    require(meshRestored.restored &&
+                meshRecovery.state().meshes.at("BODY").castShadows == false &&
+                meshRecovery.state().geometry.at("0").remove_degenerate,
+            "mesh and geometry recovery");
 }
 
 } // namespace
@@ -210,6 +337,8 @@ void recoveryValidatesSourceAndLimits() {
 int main() {
     try {
         validatesIdentityAndStablePaths();
+        meshAndGeometryEditsAreAtomicAndUndoable();
+        meshAndGeometryEditsHonorTotalLimits();
         appliesTypedTransactionWithoutMutatingSource();
         transactionsAreAtomicAndUndoable();
         recoveryValidatesSourceAndLimits();
