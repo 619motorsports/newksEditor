@@ -251,7 +251,12 @@ FbxNode binaryNode(BinaryReader& reader, std::size_t depth, BinaryState& state) 
         node.properties.push_back(std::move(property));
     }
     if (reader.offset() != propertyEnd) fail(FbxStage::binary_dom, "property_size", "FBX property list length does not match its properties", propertyEnd);
-    bool terminated = false;
+    // Some 7.3-era Autodesk writers omit the null record for a leaf node:
+    // the node end offset is exactly the end of its property list.  A null
+    // record is still required for nodes that contain children.  Accepting
+    // this narrow leaf form is safe because the enclosing end offset and the
+    // document root terminator remain mandatory.
+    bool terminated = reader.offset() == endOffset;
     while (reader.offset() < endOffset) {
         const auto remaining = endOffset - reader.offset(); const auto nullSize = binaryNullSize(reader.version());
         if (remaining >= nullSize && allZero(reader.all(), reader.offset(), nullSize)) { reader.bytesSpan(nullSize, "node terminator"); terminated = true; break; }

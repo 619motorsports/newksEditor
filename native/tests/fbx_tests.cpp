@@ -47,6 +47,21 @@ std::vector<std::uint8_t> binaryMinimal(std::uint32_t version = 7400u, bool prop
     return bytes;
 }
 
+std::vector<std::uint8_t> binaryLeafWithoutNodeTerminator() {
+    auto bytes = binaryMinimal(7400u, true);
+    // The fixture has a 13-byte node terminator immediately before its
+    // 13-byte root terminator.  GT40 uses the legal leaf form with only the
+    // root terminator after the property list.
+    const auto oldEnd = static_cast<std::uint32_t>(bytes[27u]) |
+                        (static_cast<std::uint32_t>(bytes[28u]) << 8u) |
+                        (static_cast<std::uint32_t>(bytes[29u]) << 16u) |
+                        (static_cast<std::uint32_t>(bytes[30u]) << 24u);
+    const auto nodeEnd = oldEnd - 13u;
+    for (unsigned index = 0; index < 4u; ++index) bytes[27u + index] = static_cast<std::uint8_t>(nodeEnd >> (index * 8u));
+    bytes.erase(bytes.end() - 26, bytes.end() - 13);
+    return bytes;
+}
+
 std::vector<std::uint8_t> binaryFloatArray(bool compressed) {
     std::vector<std::uint8_t> bytes{'K','a','y','d','a','r','a',' ','F','B','X',' ','B','i','n','a','r','y',' ',' ',0x1a,0x00,0x00};
     put32(bytes, 7400u);
@@ -203,6 +218,18 @@ void rejectsMalformedAsciiNumericArrays() {
 }
 
 void validatesBinaryBoundaryAndFooterRules() {
+    const auto leaf = binaryLeafWithoutNodeTerminator();
+    const auto leafDocument = apex::formats::parseFbx(leaf, "leaf.fbx");
+    require(leafDocument.roots.size() == 1u && leafDocument.roots[0].name == "Root" &&
+                std::get<std::int64_t>(leafDocument.roots[0].properties[0].values[0]) == 42,
+            "32-bit binary leaf nodes may omit their node terminator");
+    for (std::size_t length = 0; length < leaf.size(); ++length) {
+        const auto prefix = std::span<const std::uint8_t>(leaf.data(), length);
+        bool rejected = false;
+        try { (void)apex::formats::parseFbx(prefix, "leaf-prefix.fbx"); }
+        catch (const FbxError&) { rejected = true; }
+        require(rejected, "every truncated leaf-node prefix is rejected");
+    }
     auto missing = binaryMinimal();
     missing.resize(missing.size() - 13u);
     expectsFbxError([&] { (void)apex::formats::parseFbx(missing); }, "root_terminator", FbxStage::binary_dom);

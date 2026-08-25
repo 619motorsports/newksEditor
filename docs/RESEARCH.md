@@ -2619,9 +2619,12 @@ times using the recovered one-percent, end-exclusive schedule. Curves without an
 explicit linear flag, unsupported properties, missing links, and non-finite or
 non-monotonic key data are diagnosed; they are not silently treated as linear.
 Native pivot evaluation, non-linear interpolation, skinning, and the full SDK object
-selection rule remain outside this C++ slice. The installed GT40 fixture was also
-checked: the current native FBX DOM parser rejects it at offset 92 with a missing
-node terminator, so no native conversion count is claimed from that fixture.
+selection rule remain outside this C++ slice. The installed GT40 fixture uses the
+32-bit FBX 7.3 leaf-record form with no per-leaf null record; the native DOM parser
+now accepts that form and still requires the enclosing end offsets and root
+terminator. Full native scene conversion remains separately blocked by an existing
+unsupported parent-connection diagnostic, so no native conversion count is claimed
+from that fixture.
 
 Apex uses the [Three.js FBXLoader](https://threejs.org/docs/pages/FBXLoader.html) for
 portable FBX decoding. The adapter applies the recovered ksEditor rules after the
