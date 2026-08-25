@@ -2037,6 +2037,84 @@ void validates_ordered_indexed_batch_contract() {
                                                            diagnostic) ==
                 IndexedStaticMeshBatchStatus::ready,
             "four-sample indexed batch accepted");
+    FakeTexture resolve_target(Backend::Vulkan, target_description());
+    multisample_description.resolve_target = &resolve_target;
+    multisample_description.capture_rgba8 = false;
+    require(validate_indexed_static_mesh_batch_description(
+                multisample_target, multisample_description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::ready,
+            "four-sample batch accepts a retained matching resolve target without CPU capture");
+    multisample_description.resolve_target = nullptr;
+    require(validate_indexed_static_mesh_batch_description(
+                multisample_target, multisample_description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_static_mesh_batch_resolve_target_missing",
+            "four-sample batch without capture rejects a missing resolve target");
+    multisample_description.resolve_target = &multisample_target;
+    require(validate_indexed_static_mesh_batch_description(
+                multisample_target, multisample_description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "indexed_static_mesh_batch_resolve_alias",
+            "batch resolve rejects source aliasing before execution");
+    multisample_description.resolve_target = &resolve_target;
+    TextureDescription malformed_resolve_description = target_description();
+    malformed_resolve_description.width = 15U;
+    FakeTexture malformed_resolve(Backend::Vulkan,
+                                  malformed_resolve_description);
+    multisample_description.resolve_target = &malformed_resolve;
+    require(validate_indexed_static_mesh_batch_description(
+                multisample_target, multisample_description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_static_mesh_batch_resolve_description_mismatch",
+            "batch resolve rejects mismatched retained dimensions");
+    malformed_resolve_description = target_description();
+    malformed_resolve_description.usage = TextureUsage::color_attachment;
+    FakeTexture malformed_usage(Backend::Vulkan,
+                                malformed_resolve_description);
+    multisample_description.resolve_target = &malformed_usage;
+    require(validate_indexed_static_mesh_batch_description(
+                multisample_target, multisample_description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_static_mesh_batch_resolve_usage_invalid",
+            "batch resolve rejects a destination that cannot be presented");
+    FakeTexture foreign_resolve(Backend::D3D12, target_description());
+    multisample_description.resolve_target = &foreign_resolve;
+    require(validate_indexed_static_mesh_batch_description(
+                multisample_target, multisample_description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::unsupported &&
+                diagnostic.code ==
+                    "indexed_static_mesh_batch_resolve_backend_mismatch",
+            "batch resolve rejects a foreign backend before execution");
+    IndexedStaticMeshBatchDescription one_sample_resolve = description;
+    one_sample_resolve.resolve_target = &resolve_target;
+    require(validate_indexed_static_mesh_batch_description(
+                target, one_sample_resolve, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_static_mesh_batch_resolve_source_samples_invalid",
+            "one-sample source rejects an unexpected resolve target");
+    TextureDescription unsupported_source_description = target_description();
+    unsupported_source_description.samples = 4U;
+    unsupported_source_description.format = TextureFormat::r32_sfloat;
+    FakeTexture unsupported_source(Backend::Vulkan,
+                                   unsupported_source_description);
+    TextureDescription unsupported_destination_description =
+        unsupported_source_description;
+    unsupported_destination_description.samples = 1U;
+    FakeTexture unsupported_destination(
+        Backend::Vulkan, unsupported_destination_description);
+    multisample_description.resolve_target = &unsupported_destination;
+    require(validate_indexed_static_mesh_batch_description(
+                unsupported_source, multisample_description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::unsupported &&
+                diagnostic.code ==
+                    "indexed_static_mesh_batch_resolve_format_unsupported",
+            "batch resolve rejects a non-color source before backend work");
+    multisample_description.resolve_target = &resolve_target;
+    multisample_description.capture_rgba8 = true;
     FakeDepthAttachment mismatched_depth(Backend::Vulkan,
                                          {16U, 16U, 1U, DepthAttachmentFormat::d32_float});
     multisample_description.depth_attachment = &mismatched_depth;

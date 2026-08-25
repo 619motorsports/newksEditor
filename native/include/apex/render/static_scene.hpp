@@ -99,6 +99,10 @@ struct StaticSceneFrameDescription {
     std::array<float, 4> clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
     bool clear_depth = false;
     float depth_clear_value = 1.0F;
+    // Optional retained single-sample output for a four-sample target.
+    Texture* resolve_target = nullptr;
+    // Disable the synchronous CPU copy when only the retained image is used.
+    bool capture_rgba8 = true;
     // Optional current packet states for animated scenes. The span must have
     // exactly the prepared packet count when supplied. Node/material,
     // primitive, ranges, pipeline flags, and resources must remain stable;

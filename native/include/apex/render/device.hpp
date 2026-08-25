@@ -751,6 +751,13 @@ struct IndexedStaticMeshBatchDescription {
     std::array<float, 4> clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
     bool clear_depth = false;
     float depth_clear_value = 1.0F;
+    // Optional single-sample destination for a four-sample color target.
+    // The pointer is non-owning and remains valid through this synchronous
+    // call. A backend resolves it in the same submission as the batch.
+    Texture* resolve_target = nullptr;
+    // Disable CPU readback when the caller only needs the retained GPU image.
+    // A four-sample batch then requires resolve_target.
+    bool capture_rgba8 = true;
 };
 
 enum class IndexedStaticMeshBatchStatus {

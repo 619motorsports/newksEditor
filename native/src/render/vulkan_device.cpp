@@ -3294,6 +3294,10 @@ bool draw_indexed_batch_and_readback(
     float depth_clear_value,
     const std::array<float, 4>& clear_color,
     VkImageLayout& current_layout,
+    RawVulkanImage* retained_resolve_image,
+    VkImageLayout* retained_resolve_layout,
+    bool* retained_resolve_initialized,
+    bool capture_rgba8,
     std::vector<std::byte>& output,
     Diagnostic& diagnostic) {
     std::lock_guard command_guard(context->command_mutex);
@@ -3329,7 +3333,8 @@ bool draw_indexed_batch_and_readback(
     }
     const std::uint64_t output_size_u64 = static_cast<std::uint64_t>(description.width) *
                                           static_cast<std::uint64_t>(description.height) * 4U;
-    if (output_size_u64 > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+    if (capture_rgba8 &&
+        output_size_u64 > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
         diagnostic = {"vulkan_draw_output_size_limit", "Vulkan draw readback size exceeds host addressability"};
         return false;
     }
@@ -3338,13 +3343,15 @@ bool draw_indexed_batch_and_readback(
     readback_description.usage = BufferUsage::transfer_destination;
     readback_description.memory = BufferMemory::host_visible;
     RawVulkanBuffer readback;
-    if (!create_raw_buffer(context, readback_description, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+    if (capture_rgba8 &&
+        !create_raw_buffer(context, readback_description, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                            BufferMemory::host_visible, readback, diagnostic)) {
         diagnostic.code = "vulkan_draw_execution_failed";
         return false;
     }
     RawVulkanImage resolve_image;
-    if (description.samples != 1U) {
+    RawVulkanImage* resolved_image = retained_resolve_image;
+    if (description.samples != 1U && resolved_image == nullptr) {
         TextureDescription resolve_description = description;
         resolve_description.samples = 1U;
         resolve_description.usage = TextureUsage::color_attachment | TextureUsage::transfer_source;
@@ -3352,6 +3359,7 @@ bool draw_indexed_batch_and_readback(
             diagnostic.code = diagnostic.code.empty() ? "vulkan_resolve_attachment_failed" : diagnostic.code;
             return false;
         }
+        resolved_image = &resolve_image;
     }
 
     bool has_sampled_binding = false;
@@ -3438,7 +3446,7 @@ bool draw_indexed_batch_and_readback(
         resolve_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         resolve_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         resolve_attachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        resolve_attachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        resolve_attachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     }
     std::array<VkAttachmentDescription, 3> attachments{};
     attachments[0] = color_attachment;
@@ -3472,7 +3480,8 @@ bool draw_indexed_batch_and_readback(
     std::array<VkImageView, 3> framebuffer_attachments{};
     framebuffer_attachments[0] = image.view;
     if (depth_attachment != nullptr) framebuffer_attachments[1] = depth_attachment->view();
-    if (description.samples != 1U) framebuffer_attachments[resolve_attachment_index] = resolve_image.view;
+    if (description.samples != 1U)
+        framebuffer_attachments[resolve_attachment_index] = resolved_image->view;
     VkFramebufferCreateInfo framebuffer_info{};
     framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     framebuffer_info.renderPass = render_pass;
@@ -3616,16 +3625,25 @@ bool draw_indexed_batch_and_readback(
         if (description.samples != 1U) {
             VkImageMemoryBarrier resolve_barrier{};
             resolve_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            resolve_barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            resolve_barrier.oldLayout = retained_resolve_layout != nullptr
+                                            ? *retained_resolve_layout
+                                            : VK_IMAGE_LAYOUT_UNDEFINED;
             resolve_barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             resolve_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             resolve_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            resolve_barrier.image = resolve_image.image;
+            resolve_barrier.image = resolved_image->image;
             resolve_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             resolve_barrier.subresourceRange.levelCount = 1U;
             resolve_barrier.subresourceRange.layerCount = 1U;
+            resolve_barrier.srcAccessMask = resolve_barrier.oldLayout == VK_IMAGE_LAYOUT_UNDEFINED
+                                                ? 0U
+                                                : VK_ACCESS_MEMORY_READ_BIT |
+                                                      VK_ACCESS_MEMORY_WRITE_BIT;
             resolve_barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-            vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            vkCmdPipelineBarrier(command,
+                                 resolve_barrier.oldLayout == VK_IMAGE_LAYOUT_UNDEFINED
+                                     ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                                     : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0U, 0U, nullptr,
                                  0U, nullptr, 1U, &resolve_barrier);
         }
@@ -3684,35 +3702,40 @@ bool draw_indexed_batch_and_readback(
                     VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                 0U, 0U, nullptr, 0U, nullptr, 1U, &shadow_barrier);
         }
-        VkImageMemoryBarrier barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrier.oldLayout = description.samples == 1U ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-                                                       : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image = description.samples == 1U ? image.image : resolve_image.image;
-        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        barrier.subresourceRange.levelCount = description.samples == 1U ? description.mip_levels : 1U;
-        barrier.subresourceRange.layerCount = description.samples == 1U ? description.array_layers : 1U;
-        barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0U, 0U, nullptr, 0U, nullptr, 1U, &barrier);
-        VkBufferImageCopy copy{};
-        copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        copy.imageSubresource.layerCount = 1U;
-        copy.imageExtent = {description.width, description.height, 1U};
-        vkCmdCopyImageToBuffer(command, description.samples == 1U ? image.image : resolve_image.image,
-                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                               readback.buffer, 1U, &copy);
-        if (description.samples == 1U) {
-            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            barrier.newLayout = texture_final_layout(description.usage);
-            barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-            vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                                 0U, 0U, nullptr, 0U, nullptr, 1U, &barrier);
+        if (capture_rgba8) {
+            VkImageMemoryBarrier barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = description.samples == 1U ? image.image : resolved_image->image;
+            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            barrier.subresourceRange.levelCount = description.samples == 1U ? description.mip_levels : 1U;
+            barrier.subresourceRange.layerCount = description.samples == 1U ? description.array_layers : 1U;
+            barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0U, 0U, nullptr, 0U, nullptr, 1U, &barrier);
+            VkBufferImageCopy copy{};
+            copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            copy.imageSubresource.layerCount = 1U;
+            copy.imageExtent = {description.width, description.height, 1U};
+            vkCmdCopyImageToBuffer(command,
+                                   description.samples == 1U ? image.image : resolved_image->image,
+                                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                   readback.buffer, 1U, &copy);
+            if (description.samples == 1U || retained_resolve_image != nullptr) {
+                barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                barrier.newLayout = description.samples == 1U
+                                        ? texture_final_layout(description.usage)
+                                        : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+                vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                     VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0U, 0U, nullptr,
+                                     0U, nullptr, 1U, &barrier);
+            }
         }
         result = vkEndCommandBuffer(command);
     }
@@ -3739,6 +3762,10 @@ bool draw_indexed_batch_and_readback(
         const VkResult drain = vkDeviceWaitIdle(context->device);
         if (drain == VK_SUCCESS) {
             current_layout = texture_final_layout(description.usage);
+            if (retained_resolve_layout != nullptr)
+                *retained_resolve_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            if (retained_resolve_initialized != nullptr)
+                *retained_resolve_initialized = true;
             if (depth_attachment != nullptr) depth_attachment->mark_rendered(clear_depth);
             for (std::size_t index = 0U;
                  index < sampled_shadow_attachments.size(); ++index)
@@ -3746,6 +3773,10 @@ bool draw_indexed_batch_and_readback(
                     sampled_shadow_original_layouts[index]);
         } else {
             current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+            if (retained_resolve_layout != nullptr)
+                *retained_resolve_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+            if (retained_resolve_initialized != nullptr)
+                *retained_resolve_initialized = false;
             if (depth_attachment != nullptr) depth_attachment->mark_invalid();
             for (VulkanDepthAttachment* shadow : sampled_shadow_attachments)
                 shadow->mark_invalid();
@@ -3753,6 +3784,10 @@ bool draw_indexed_batch_and_readback(
         }
     } else if (completed) {
         current_layout = texture_final_layout(description.usage);
+        if (retained_resolve_layout != nullptr)
+            *retained_resolve_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        if (retained_resolve_initialized != nullptr)
+            *retained_resolve_initialized = true;
         if (depth_attachment != nullptr) depth_attachment->mark_rendered(clear_depth);
         for (std::size_t index = 0U;
              index < sampled_shadow_attachments.size(); ++index)
@@ -3767,6 +3802,11 @@ bool draw_indexed_batch_and_readback(
         diagnostic = vk_error("Vulkan indexed batch execution", result);
         diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "vulkan_draw_execution_failed";
         return false;
+    }
+    if (!capture_rgba8) {
+        output.clear();
+        diagnostic = {};
+        return true;
     }
     void* mapped = nullptr;
     result = vkMapMemory(context->device, readback.memory, 0U, VK_WHOLE_SIZE, 0U, &mapped);
@@ -4238,8 +4278,8 @@ public:
             const std::array<VulkanIndexedBatchDraw, 1> draws = {draw};
             const bool drawn = draw_indexed_batch_and_readback(
                 context_, raw_, info_.description, draws, depth_attachment, request.load_color,
-                request.clear_depth, request.depth_clear_value, request.clear_color, layout_, output,
-                diagnostic);
+                request.clear_depth, request.depth_clear_value, request.clear_color, layout_,
+                nullptr, nullptr, nullptr, true, output, diagnostic);
             initialized_ = initialized_ || drawn;
             return drawn;
         }
@@ -4253,6 +4293,7 @@ public:
 
     bool draw_indexed_static_mesh_batch(const IndexedStaticMeshBatchDescription& description,
                                         VulkanDepthAttachment* depth_attachment,
+                                        VulkanTexture* resolve_target,
                                         std::vector<std::byte>& output,
                                         Diagnostic& diagnostic) {
         if (description.load_color && !initialized_) {
@@ -4300,7 +4341,10 @@ public:
         const bool drawn = draw_indexed_batch_and_readback(
             context_, raw_, info_.description, draws, depth_attachment, description.load_color,
             description.clear_depth, description.depth_clear_value, description.clear_color,
-            layout_, output, diagnostic);
+            layout_, resolve_target != nullptr ? &resolve_target->raw_ : nullptr,
+            resolve_target != nullptr ? &resolve_target->layout_ : nullptr,
+            resolve_target != nullptr ? &resolve_target->initialized_ : nullptr,
+            description.capture_rgba8, output, diagnostic);
         initialized_ = initialized_ || drawn;
         return drawn;
     }
@@ -6016,8 +6060,21 @@ public:
                 return result;
             }
         }
+        VulkanTexture* resolve_target = nullptr;
+        if (description.resolve_target != nullptr) {
+            resolve_target = dynamic_cast<VulkanTexture*>(description.resolve_target);
+            if (resolve_target == nullptr || resolve_target->context() != context_) {
+                IndexedStaticMeshBatchResult result;
+                result.status = IndexedStaticMeshBatchStatus::unsupported;
+                result.diagnostic = {
+                    "indexed_static_mesh_batch_resolve_context_mismatch",
+                    "The resolve target does not belong to this Vulkan device"};
+                return result;
+            }
+        }
         std::vector<std::byte> output;
-        if (!vulkan_texture->draw_indexed_static_mesh_batch(description, depth_attachment, output, diagnostic)) {
+        if (!vulkan_texture->draw_indexed_static_mesh_batch(
+                description, depth_attachment, resolve_target, output, diagnostic)) {
             IndexedStaticMeshBatchResult result;
             result.status = IndexedStaticMeshBatchStatus::execution_failed;
             result.diagnostic = std::move(diagnostic);

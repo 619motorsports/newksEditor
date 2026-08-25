@@ -2039,6 +2039,33 @@ bool contract_backend(apex::render::Backend backend) {
         device.device->draw_indexed_static_mesh_and_readback(*msaa_a2c_texture.texture, msaa_a2c_request);
     require(msaa_a2c_result.ok() && msaa_a2c_result.rgba8.size() == 32U * 32U * 4U,
             "four-sample indexed draw resolves and reads back");
+    TextureDescription retained_resolve_description = triangle_description;
+    retained_resolve_description.samples = 1U;
+    TextureResult retained_resolve_texture =
+        device.device->create_texture(retained_resolve_description);
+    require(retained_resolve_texture.ok(),
+            "persistent single-sample resolve target creation");
+    const std::array<IndexedStaticMeshDrawRequest, 1U> retained_resolve_draws = {
+        msaa_a2c_request};
+    IndexedStaticMeshBatchDescription retained_resolve_batch;
+    retained_resolve_batch.draws = retained_resolve_draws;
+    retained_resolve_batch.resolve_target = retained_resolve_texture.texture.get();
+    retained_resolve_batch.capture_rgba8 = false;
+    const auto first_retained_resolve =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *msaa_a2c_texture.texture, retained_resolve_batch);
+    const auto second_retained_resolve =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *msaa_a2c_texture.texture, retained_resolve_batch);
+    require(first_retained_resolve.ok() && first_retained_resolve.rgba8.empty() &&
+                second_retained_resolve.ok() && second_retained_resolve.rgba8.empty(),
+            "four-sample batch reuses a retained resolve target without CPU readback");
+    IndexedStaticMeshDrawRequest retained_load_request = indexed_request;
+    retained_load_request.load_color = true;
+    const auto retained_load = device.device->draw_indexed_static_mesh_and_readback(
+        *retained_resolve_texture.texture, retained_load_request);
+    require(retained_load.ok() && retained_load.rgba8.size() == 32U * 32U * 4U,
+            "resolved texture remains initialized in its normal backend state");
 
     // Exercise the CPU-skinned mutable-vertex contract. The source stream is
     // the KN5 19-float layout; skin_vertices_reference produces the local
@@ -2411,8 +2438,10 @@ bool contract_backend(apex::render::Backend backend) {
         alpha_scene_packet.node = alpha_scene_mesh_id;
         alpha_scene_packet.material = 0U;
         alpha_scene_packet.flags.cast_shadows = true;
-        alpha_scene_packet.flags.depth_test = true;
-        alpha_scene_packet.flags.depth_write = true;
+        // The prepared color packet must match sampled_pipeline. The explicit
+        // alpha caster pipeline supplies its separate depth-only state later.
+        alpha_scene_packet.flags.depth_test = false;
+        alpha_scene_packet.flags.depth_write = false;
         alpha_scene_packet.material_profile.shadow_alpha_tested = true;
         alpha_scene_packet.resources = {{"txDiffuse", 0U, 0U, "alpha.dds"}};
         const std::array<DrawPacket, 1U> alpha_scene_packets = {alpha_scene_packet};

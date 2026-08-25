@@ -453,12 +453,14 @@ WorkspaceViewport::WorkspaceViewport(
     render::Backend backend,
     render::PresentationTargetDescription presentation,
     std::unique_ptr<render::Texture> color,
+    std::unique_ptr<render::Texture> resolved_color,
     std::unique_ptr<render::DepthAttachment> depth,
     std::unique_ptr<render::StockSceneExecutionResult> execution,
     std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps,
     std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows,
     std::optional<LodCatalog> lod_catalog)
     : backend_(backend), presentation_(presentation), color_(std::move(color)),
+      resolved_color_(std::move(resolved_color)),
       depth_(std::move(depth)), execution_(std::move(execution)),
       shadow_maps_(std::move(shadow_maps)),
       directional_shadows_(std::move(directional_shadows)),
@@ -537,6 +539,8 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
     frame.clear_color = request.clear_color;
     frame.clear_depth = request.clear_depth;
     frame.depth_clear_value = request.depth_clear_value;
+    frame.resolve_target = resolved_color_.get();
+    frame.capture_rgba8 = false;
     frame.refreshed_packets = request.refreshed_packets;
     frame.packet_visibility = packet_visibility;
     frame.apply_skinning = request.apply_skinning;
@@ -632,7 +636,10 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
         output_diagnostic = drawn.diagnostic;
         return drawStatus(drawn.status);
     }
-    const auto presented = device.present_texture(target, *color_);
+    render::Texture& presentation_color = resolved_color_ != nullptr
+                                              ? *resolved_color_
+                                              : *color_;
+    const auto presented = device.present_texture(target, presentation_color);
     output_diagnostic = presented.ok() && !shadow_diagnostic.code.empty()
                             ? std::move(shadow_diagnostic)
                             : presented.diagnostic;
@@ -644,11 +651,11 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
     const WorkspaceViewportPrepareRequest& request) {
     WorkspaceViewportPrepareResult result;
     try {
-        if (request.color_samples != 1U) {
+        if (request.color_samples != 1U && request.color_samples != 4U) {
             result.status = WorkspaceViewportStatus::unsupported;
             result.diagnostic = diagnostic(
                 "workspace_viewport_multisample_unsupported",
-                "workspace presentation currently requires a single-sample color target");
+                "workspace presentation supports one-sample or four-sample color rendering");
             return result;
         }
         if (request.directional_shadow_receiver !=
@@ -752,7 +759,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         color_description.usage = render::TextureUsage::color_attachment |
                                    render::TextureUsage::transfer_source;
         color_description.mutability = render::TextureMutability::mutable_data;
-        color_description.samples = 1U;
+        color_description.samples = request.color_samples;
         auto color = device.create_texture(color_description);
         if (!color.ok()) {
             result.status = color.status == render::TextureStatus::allocation_failed
@@ -762,10 +769,25 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             return result;
         }
 
+        std::unique_ptr<render::Texture> resolved_color;
+        if (request.color_samples == 4U) {
+            render::TextureDescription resolve_description = color_description;
+            resolve_description.samples = 1U;
+            auto resolved = device.create_texture(resolve_description);
+            if (!resolved.ok()) {
+                result.status = resolved.status == render::TextureStatus::allocation_failed
+                                    ? WorkspaceViewportStatus::allocation_failed
+                                    : WorkspaceViewportStatus::unsupported;
+                result.diagnostic = resolved.diagnostic;
+                return result;
+            }
+            resolved_color = std::move(resolved.texture);
+        }
+
         render::DepthAttachmentDescription depth_description;
         depth_description.width = request.presentation.width;
         depth_description.height = request.presentation.height;
-        depth_description.samples = 1U;
+        depth_description.samples = request.color_samples;
         auto depth = device.create_depth_attachment(depth_description);
         if (!depth.ok()) {
             result.status = depth.status == render::DepthAttachmentStatus::allocation_failed
@@ -796,9 +818,11 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         scene_request.overrides_by_material = request.overrides_by_material;
         scene_request.evaluate_damage_preview = request.evaluate_damage_preview;
         scene_request.damage_broken_visible = request.damage_broken_visible;
-        scene_request.targets.colors = {PipelineRenderTarget{*color_format, 1U}};
+        scene_request.targets.colors = {
+            PipelineRenderTarget{*color_format, request.color_samples}};
         scene_request.targets.has_depth = true;
-        scene_request.targets.depth = {PipelineRenderTargetFormat::depth32_float, 1U};
+        scene_request.targets.depth = {
+            PipelineRenderTargetFormat::depth32_float, request.color_samples};
         scene_request.wireframe = request.wireframe;
         scene_request.directional_shadow_receiver = request.directional_shadow_receiver;
         scene_request.texture_authority = render::StaticSceneTextureAuthority::embedded_kn5;
@@ -870,7 +894,8 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
 
         result.viewport = std::unique_ptr<WorkspaceViewport>(new WorkspaceViewport(
             device.info().backend, request.presentation, std::move(color.texture),
-            std::move(depth.attachment), std::move(execution),
+            std::move(resolved_color), std::move(depth.attachment),
+            std::move(execution),
             std::move(shadow_maps), request.directional_shadows,
             std::move(lod_catalog)));
         result.status = WorkspaceViewportStatus::ready;

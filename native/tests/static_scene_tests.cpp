@@ -187,6 +187,8 @@ public:
         ++batch_calls;
         captured_load_color = batch.load_color;
         captured_clear_color = batch.clear_color;
+        captured_resolve_target = batch.resolve_target;
+        captured_capture_rgba8 = batch.capture_rgba8;
         nodes.clear();
         pipeline_names.clear();
         blend_states.clear();
@@ -319,6 +321,8 @@ public:
     std::size_t fail_depth_batch_call = 0U;
     bool captured_load_color = false;
     std::array<float, 4> captured_clear_color{};
+    Texture* captured_resolve_target = nullptr;
+    bool captured_capture_rgba8 = true;
     std::vector<std::vector<std::byte>> uploaded_bytes;
     std::vector<std::uint64_t> update_offsets;
     std::vector<std::vector<std::byte>> updated_bytes;
@@ -929,9 +933,14 @@ void validates_alpha_to_coverage_sample_contract_before_allocation() {
                         TextureMemory::device_local, TextureMutability::mutable_data, 4U});
     StaticSceneFrameDescription frame;
     frame.camera.clip_space = CameraClipSpace::vulkan;
+    FakeTexture resolve_target;
+    frame.resolve_target = &resolve_target;
+    frame.capture_rgba8 = false;
     const auto drawn = prepared.resources->draw_and_readback(valid_device, target, frame);
-    require(drawn.ok() && valid_device.batch_calls == 1U,
-            "four-sample alpha-to-coverage scene reaches the ordered batch");
+    require(drawn.ok() && valid_device.batch_calls == 1U &&
+                valid_device.captured_resolve_target == &resolve_target &&
+                !valid_device.captured_capture_rgba8,
+            "four-sample scene forwards its retained resolve and CPU capture policy");
 
     Fixture shared_msaa = fixture();
     shared_msaa.first_pipeline.targets.colors.front().samples = 4U;

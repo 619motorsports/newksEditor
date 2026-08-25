@@ -93,8 +93,8 @@ struct WorkspaceViewportLightingResult {
 
 struct WorkspaceViewportPrepareRequest {
     render::PresentationTargetDescription presentation{};
-    // A presentation target is single-sample. This field is explicit so a
-    // caller cannot accidentally request an unresolved multisample scene.
+    // A presentation target is single-sample. Four-sample scenes resolve to
+    // an owned single-sample texture before presentation.
     std::uint32_t color_samples = 1U;
     std::span<const render::StockMaterialShaderModules> shader_modules{};
     std::span<const render::MaterialBindingOverrides> overrides_by_material{};
@@ -217,6 +217,7 @@ private:
         render::Backend backend,
         render::PresentationTargetDescription presentation,
         std::unique_ptr<render::Texture> color,
+        std::unique_ptr<render::Texture> resolved_color,
         std::unique_ptr<render::DepthAttachment> depth,
         std::unique_ptr<render::StockSceneExecutionResult> execution,
         std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps,
@@ -226,6 +227,7 @@ private:
     render::Backend backend_ = render::Backend::Vulkan;
     render::PresentationTargetDescription presentation_{};
     std::unique_ptr<render::Texture> color_;
+    std::unique_ptr<render::Texture> resolved_color_;
     std::unique_ptr<render::DepthAttachment> depth_;
     std::unique_ptr<render::StockSceneExecutionResult> execution_;
     std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps_;

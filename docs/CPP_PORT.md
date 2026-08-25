@@ -167,7 +167,8 @@ remains unchanged and feature-complete.
   ordinary alpha, multiply, and transparent-as-black factors match
   `applyItemRenderState` in `public/app.js`. The indexed path supports 4x
   multisample targets and alpha-to-coverage. Each backend resolves the final
-  color to one sample before readback. Indexed wireframe uses
+  color to one sample before readback. A batch can also resolve into a retained
+  single-sample texture without a CPU copy. Indexed wireframe uses
   line-list topology over the source index stream. This matches the production
   `GL_LINES` selection in `public/app.js`. It does not use polygon-line
   rasterization. Both native backends execute this topology in single draws and
@@ -418,14 +419,15 @@ remains unchanged and feature-complete.
   The native INI parser rejects a dangling continuation marker. The reference
   JavaScript parser only reports missing fields for this malformed input.
   A separate renderer-facing workspace viewport bridge now prepares this
-  document through the bounded stock-scene facade, owns neutral single-sample
-  color and D32 targets, and presents the completed color attachment through
-  the backend-neutral device API. It accepts caller-supplied SPIR-V or DXIL
-  modules and embedded KN5 textures. The bridge prepares all car LOD packets
-  once. It selects them with a frame mask and does not change the session.
-  The bridge resolves cockpit and rim preview state during preparation. The
-  bridge rejects unresolved multisample presentation and never presents after
-  a failed draw. The native shell maps bounded SDL mouse gestures and
+  document through the bounded stock-scene facade. It owns one-sample or
+  four-sample color and D32 targets. A four-sample viewport also owns one
+  single-sample resolve texture. Vulkan and D3D12 resolve into this texture in
+  the color submission. The viewport skips the unused CPU readback and presents
+  only the resolved texture. It accepts caller-supplied SPIR-V or DXIL modules
+  and embedded KN5 textures. The bridge prepares all car LOD packets once. It
+  selects them with a frame mask and does not change the session. The bridge
+  resolves cockpit and rim preview state during preparation. It never presents
+  after a failed draw. The native shell maps bounded SDL mouse gestures and
   portable WASD/QE keycodes to an application-owned camera controller. Motion
   translates the orbit target without exposing platform or backend types.
   The shell also evaluates one of the seven stock weather presets with bounded

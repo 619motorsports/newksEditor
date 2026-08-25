@@ -97,7 +97,10 @@ public:
     TextureResult create_texture(const TextureDescription& description,
                                  const TextureUploadPlan&) override {
         ++texture_calls;
-        return {TextureStatus::ready, {}, std::make_unique<FakeTexture>(description)};
+        auto texture = std::make_unique<FakeTexture>(description);
+        created_texture_descriptions.push_back(description);
+        created_textures.push_back(texture.get());
+        return {TextureStatus::ready, {}, std::move(texture)};
     }
 
     TextureUpdateResult update_texture(Texture&, const TextureUploadPlan&) override {
@@ -107,6 +110,7 @@ public:
     DepthAttachmentResult create_depth_attachment(
         const DepthAttachmentDescription& description) override {
         ++depth_calls;
+        created_depth_descriptions.push_back(description);
         return {DepthAttachmentStatus::ready, {}, std::make_unique<FakeDepth>(description)};
     }
 
@@ -121,9 +125,12 @@ public:
     }
 
     IndexedStaticMeshBatchResult draw_indexed_static_mesh_batch_and_readback(
-        Texture&, const IndexedStaticMeshBatchDescription& batch) override {
+        Texture& texture, const IndexedStaticMeshBatchDescription& batch) override {
         ++draw_calls;
         events.push_back("color");
+        draw_targets.push_back(&texture);
+        resolve_targets.push_back(batch.resolve_target);
+        capture_requests.push_back(batch.capture_rgba8);
         draw_counts.push_back(batch.draws.size());
         std::vector<apex::scene::NodeId> nodes;
         nodes.reserve(batch.draws.size());
@@ -178,9 +185,10 @@ public:
     }
 
     PresentationFrameResult present_texture(
-        PresentationTarget&, Texture&) override {
+        PresentationTarget&, Texture& texture) override {
         ++present_calls;
         events.push_back("present");
+        presented_textures.push_back(&texture);
         if (fail_present)
             return {PresentationFrameStatus::execution_failed,
                     {"fake_present_failed", "injected present failure"}};
@@ -211,6 +219,13 @@ public:
     std::vector<BufferUpdate> buffer_updates;
     std::vector<std::array<const DepthAttachment*,
                            indexed_directional_shadow_cascade_count>> receiver_maps;
+    std::vector<TextureDescription> created_texture_descriptions;
+    std::vector<Texture*> created_textures;
+    std::vector<DepthAttachmentDescription> created_depth_descriptions;
+    std::vector<Texture*> resolve_targets;
+    std::vector<bool> capture_requests;
+    std::vector<Texture*> presented_textures;
+    std::vector<Texture*> draw_targets;
 
 private:
     DeviceInfo info_{Backend::Vulkan, "viewport fake", "unit", 1U, 0U, 0U,
@@ -627,6 +642,48 @@ void opens_and_draws() {
             "all-hidden viewport frame clears and presents without rebuilding resources");
 }
 
+void draws_four_sample_viewport_through_retained_resolve() {
+    auto value = fixture();
+    auto request = request_for(value);
+    request.color_samples = 4U;
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok() && device.created_texture_descriptions.size() >= 2U &&
+                device.created_texture_descriptions[0].samples == 4U &&
+                device.created_texture_descriptions[1].samples == 1U &&
+                !device.created_depth_descriptions.empty() &&
+                device.created_depth_descriptions.front().samples == 4U,
+            "four-sample preparation owns matching color and depth plus a one-sample resolve target");
+
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    Diagnostic diagnostic;
+    const auto first_status = prepared.viewport->drawAndPresent(
+        device, target, frame, diagnostic);
+    if (first_status != WorkspaceViewportFrameStatus::ready)
+        throw std::runtime_error("first four-sample frame: " + diagnostic.code);
+    const auto second_status = prepared.viewport->drawAndPresent(
+        device, target, frame, diagnostic);
+    if (second_status != WorkspaceViewportFrameStatus::ready)
+        throw std::runtime_error("second four-sample frame: " + diagnostic.code);
+    require(device.draw_targets ==
+                    std::vector<Texture*>({device.created_textures[0],
+                                           device.created_textures[0]}) &&
+                device.resolve_targets ==
+                    std::vector<Texture*>({device.created_textures[1],
+                                           device.created_textures[1]}) &&
+                device.presented_textures ==
+                    std::vector<Texture*>({device.created_textures[1],
+                                           device.created_textures[1]}) &&
+                device.capture_requests == std::vector<bool>({false, false}) &&
+                device.events == std::vector<std::string>(
+                    {"color", "present", "color", "present"}),
+            "four-sample frames reuse one resolve image and present only its single-sample output");
+}
+
 void schedules_directional_shadows_before_color_and_reuses_maps() {
     auto value = fixture();
     value.module_set.directional_shadow_receiver = true;
@@ -1001,12 +1058,15 @@ void rejects_invalid_inputs() {
             "malformed document fails before rendering");
 
     request = request_for(value);
-    request.color_samples = 4U;
-    auto multisample = apex::app::prepareWorkspaceViewport(device, value.document, request);
-    require(!multisample.ok() &&
-                multisample.status == apex::app::WorkspaceViewportStatus::unsupported &&
-                multisample.diagnostic.code == "workspace_viewport_multisample_unsupported",
-            "multisample presentation is rejected explicitly");
+    request.color_samples = 2U;
+    auto unsupported_samples = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(!unsupported_samples.ok() &&
+                unsupported_samples.status ==
+                    apex::app::WorkspaceViewportStatus::unsupported &&
+                unsupported_samples.diagnostic.code ==
+                    "workspace_viewport_multisample_unsupported",
+            "unsupported multisample count is rejected before allocation");
 
     request = request_for(value);
     request.limits.max_scene_nodes = 0U;
@@ -1082,6 +1142,7 @@ int main() {
     try {
         evaluates_bounded_workspace_lighting();
         opens_and_draws();
+        draws_four_sample_viewport_through_retained_resolve();
         accepts_track_and_car_lod_documents();
         selects_car_lod_roots_at_viewport_boundary();
         resolves_preview_state_without_mutating_document();

@@ -2042,6 +2042,68 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
                       "A batch depth clear requires a persistent depth attachment"};
         return IndexedStaticMeshBatchStatus::invalid_request;
     }
+    const TextureDescription& target = texture.info().description;
+    if (description.resolve_target != nullptr) {
+        if (description.resolve_target == &texture) {
+            diagnostic = {"indexed_static_mesh_batch_resolve_alias",
+                          "Batch color and resolve targets must be different textures"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        if (target.samples != 4U) {
+            diagnostic = {"indexed_static_mesh_batch_resolve_source_samples_invalid",
+                          "A retained batch resolve requires a four-sample color target"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        const auto target_usage = static_cast<std::uint32_t>(target.usage);
+        const auto required_target_usage =
+            static_cast<std::uint32_t>(TextureUsage::color_attachment) |
+            static_cast<std::uint32_t>(TextureUsage::transfer_source);
+        const bool supported_format =
+            target.format == TextureFormat::rgba8_unorm ||
+            target.format == TextureFormat::rgba8_srgb ||
+            target.format == TextureFormat::bgra8_unorm ||
+            target.format == TextureFormat::bgra8_srgb;
+        if (target.width == 0U || target.height == 0U ||
+            target.mip_levels != 1U || target.array_layers != 1U ||
+            (target_usage & required_target_usage) != required_target_usage) {
+            diagnostic = {"indexed_static_mesh_batch_resolve_source_invalid",
+                          "Batch resolve source must be a bounded color attachment and transfer source"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        if (!supported_format) {
+            diagnostic = {"indexed_static_mesh_batch_resolve_format_unsupported",
+                          "Batch resolve supports only RGBA8 and BGRA8 color formats"};
+            return IndexedStaticMeshBatchStatus::unsupported;
+        }
+        if (description.resolve_target->backend() != texture.backend()) {
+            diagnostic = {"indexed_static_mesh_batch_resolve_backend_mismatch",
+                          "Batch color and resolve targets must use the same backend"};
+            return IndexedStaticMeshBatchStatus::unsupported;
+        }
+        const TextureDescription& resolved =
+            description.resolve_target->info().description;
+        const auto resolve_usage = static_cast<std::uint32_t>(resolved.usage);
+        const auto color_usage = static_cast<std::uint32_t>(TextureUsage::color_attachment);
+        const auto source_usage = static_cast<std::uint32_t>(TextureUsage::transfer_source);
+        if (resolved.width != target.width || resolved.height != target.height ||
+            resolved.format != target.format || resolved.mip_levels != 1U ||
+            resolved.array_layers != 1U || resolved.samples != 1U) {
+            diagnostic = {"indexed_static_mesh_batch_resolve_description_mismatch",
+                          "Batch resolve target must be a matching single-sample 2D texture"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        if ((resolve_usage & color_usage) == 0U ||
+            (resolve_usage & source_usage) == 0U ||
+            resolved.mutability != TextureMutability::mutable_data) {
+            diagnostic = {"indexed_static_mesh_batch_resolve_usage_invalid",
+                          "Batch resolve target must be a mutable color attachment and transfer source"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+    } else if (!description.capture_rgba8 && target.samples == 4U) {
+        diagnostic = {"indexed_static_mesh_batch_resolve_target_missing",
+                      "A four-sample batch without CPU capture requires a resolve target"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
     if (description.depth_attachment != nullptr) {
         const DepthAttachment& depth = *description.depth_attachment;
         if (depth.backend() != texture.backend()) {
@@ -2060,7 +2122,6 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
                        ? IndexedStaticMeshBatchStatus::unsupported
                        : IndexedStaticMeshBatchStatus::invalid_request;
         }
-        const TextureDescription& target = texture.info().description;
         const DepthAttachmentDescription& depth_description = depth.info().description;
         if (depth_description.width != target.width || depth_description.height != target.height ||
             depth_description.samples != target.samples) {

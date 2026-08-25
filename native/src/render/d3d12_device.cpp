@@ -2401,6 +2401,9 @@ bool draw_indexed_static_mesh_batch_and_readback(
     D3D12DepthAttachment* depth_attachment,
     bool color_initialized,
     D3D12_RESOURCE_STATES& destination_state,
+    ID3D12Resource* retained_resolve_resource,
+    D3D12_RESOURCE_STATES* retained_resolve_state,
+    bool* retained_resolve_initialized,
     std::vector<std::byte>& output,
     Diagnostic& diagnostic) {
     if (destination == nullptr) {
@@ -2930,41 +2933,59 @@ bool draw_indexed_static_mesh_batch_and_readback(
         D3D12_RESOURCE_DESC resolve_description = resource_description;
         resolve_description.SampleDesc.Count = 1U;
         resolve_description.SampleDesc.Quality = 0U;
-        D3D12_HEAP_PROPERTIES resolve_heap{};
-        resolve_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
-        result = context->device->CreateCommittedResource(
-            &resolve_heap, D3D12_HEAP_FLAG_NONE, &resolve_description,
-            D3D12_RESOURCE_STATE_RESOLVE_DEST, nullptr, IID_PPV_ARGS(&resolve_resource));
-        if (FAILED(result)) {
-            diagnostic = hresult_error("CreateCommittedResource(MSAA resolve batch)", result);
-            diagnostic.code = "indexed_static_mesh_batch_execution_failed";
-            return false;
+        if (retained_resolve_resource == nullptr) {
+            D3D12_HEAP_PROPERTIES resolve_heap{};
+            resolve_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+            result = context->device->CreateCommittedResource(
+                &resolve_heap, D3D12_HEAP_FLAG_NONE, &resolve_description,
+                D3D12_RESOURCE_STATE_RESOLVE_DEST, nullptr, IID_PPV_ARGS(&resolve_resource));
+            if (FAILED(result)) {
+                diagnostic = hresult_error("CreateCommittedResource(MSAA resolve batch)", result);
+                diagnostic.code = "indexed_static_mesh_batch_execution_failed";
+                return false;
+            }
+            readback_source = resolve_resource.Get();
+        } else {
+            readback_source = retained_resolve_resource;
         }
-        readback_source = resolve_resource.Get();
         resource_description = resolve_description;
     }
+    ID3D12Resource* resolve_destination = retained_resolve_resource != nullptr
+                                              ? retained_resolve_resource
+                                              : resolve_resource.Get();
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
     UINT row_count = 0U;
     UINT64 row_size = 0U;
     UINT64 readback_size = 0U;
-    context->device->GetCopyableFootprints(&resource_description, 0U, 1U, 0U, &footprint,
-                                           &row_count, &row_size, &readback_size);
+    if (batch.capture_rgba8)
+        context->device->GetCopyableFootprints(&resource_description, 0U, 1U, 0U,
+                                               &footprint, &row_count, &row_size,
+                                               &readback_size);
     constexpr UINT64 max_size_t = static_cast<UINT64>(std::numeric_limits<std::size_t>::max());
     const UINT64 row_bytes = static_cast<UINT64>(description.width) * 4U;
-    if (description.height == 0U || row_bytes > max_size_t / description.height) {
+    if (batch.capture_rgba8 &&
+        (description.height == 0U || row_bytes > max_size_t / description.height)) {
         diagnostic = {"indexed_static_mesh_batch_readback_size_invalid",
                       "D3D12 indexed static-mesh batch output exceeds platform limits"};
         return false;
     }
     const std::size_t output_size = static_cast<std::size_t>(row_bytes * static_cast<UINT64>(description.height));
-    if (row_count < description.height || row_size < row_bytes || footprint.Footprint.RowPitch < row_bytes ||
-        footprint.Offset > max_size_t || readback_size > max_texture_readback_bytes || readback_size > max_size_t) {
+    if (batch.capture_rgba8 &&
+        (row_count < description.height || row_size < row_bytes ||
+         footprint.Footprint.RowPitch < row_bytes || footprint.Offset > max_size_t ||
+         readback_size > max_texture_readback_bytes || readback_size > max_size_t)) {
         diagnostic = {"indexed_static_mesh_batch_readback_footprint_invalid",
                       "D3D12 indexed static-mesh batch readback footprint is out of bounds"};
         return false;
     }
-    const UINT64 last_row = footprint.Offset + static_cast<UINT64>(description.height - 1U) * footprint.Footprint.RowPitch;
-    if (last_row < footprint.Offset || last_row > readback_size || row_bytes > readback_size - last_row) {
+    const UINT64 last_row = batch.capture_rgba8
+                                ? footprint.Offset +
+                                      static_cast<UINT64>(description.height - 1U) *
+                                          footprint.Footprint.RowPitch
+                                : 0U;
+    if (batch.capture_rgba8 &&
+        (last_row < footprint.Offset || last_row > readback_size ||
+         row_bytes > readback_size - last_row)) {
         diagnostic = {"indexed_static_mesh_batch_readback_footprint_invalid",
                       "D3D12 indexed static-mesh batch rows exceed the bounded footprint"};
         return false;
@@ -2980,10 +3001,11 @@ bool draw_indexed_static_mesh_batch_and_readback(
     D3D12_HEAP_PROPERTIES readback_heap{};
     readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
     ComPtr<ID3D12Resource> readback;
-    result = context->device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE,
-                                                       &readback_description, D3D12_RESOURCE_STATE_COPY_DEST,
-                                                       nullptr, IID_PPV_ARGS(&readback));
-    if (FAILED(result)) {
+    if (batch.capture_rgba8)
+        result = context->device->CreateCommittedResource(
+            &readback_heap, D3D12_HEAP_FLAG_NONE, &readback_description,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback));
+    if (batch.capture_rgba8 && FAILED(result)) {
         diagnostic = hresult_error("CreateCommittedResource(indexed batch readback)", result);
         diagnostic.code = "indexed_static_mesh_batch_execution_failed";
         return false;
@@ -3184,6 +3206,8 @@ bool draw_indexed_static_mesh_batch_and_readback(
         list->ResourceBarrier(1U, &barrier);
     }
     const D3D12_RESOURCE_STATES final_state = texture_state(description.usage);
+    constexpr D3D12_RESOURCE_STATES resolve_final_state =
+        D3D12_RESOURCE_STATE_RENDER_TARGET;
     if (description.samples > 1U) {
         D3D12_RESOURCE_BARRIER resolve_source{};
         resolve_source.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -3192,16 +3216,28 @@ bool draw_indexed_static_mesh_batch_and_readback(
         resolve_source.Transition.StateAfter = D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
         resolve_source.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         list->ResourceBarrier(1U, &resolve_source);
-        list->ResolveSubresource(resolve_resource.Get(), 0U, destination, 0U,
+        if (retained_resolve_state != nullptr &&
+            *retained_resolve_state != D3D12_RESOURCE_STATE_RESOLVE_DEST) {
+            D3D12_RESOURCE_BARRIER resolve_target{};
+            resolve_target.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            resolve_target.Transition.pResource = resolve_destination;
+            resolve_target.Transition.StateBefore = *retained_resolve_state;
+            resolve_target.Transition.StateAfter = D3D12_RESOURCE_STATE_RESOLVE_DEST;
+            resolve_target.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            list->ResourceBarrier(1U, &resolve_target);
+        }
+        list->ResolveSubresource(resolve_destination, 0U, destination, 0U,
                                  dxgi_texture_format(description.format));
-        D3D12_RESOURCE_BARRIER resolve_copy{};
-        resolve_copy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        resolve_copy.Transition.pResource = resolve_resource.Get();
-        resolve_copy.Transition.StateBefore = D3D12_RESOURCE_STATE_RESOLVE_DEST;
-        resolve_copy.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        resolve_copy.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        list->ResourceBarrier(1U, &resolve_copy);
-    } else {
+        D3D12_RESOURCE_BARRIER resolve_after{};
+        resolve_after.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        resolve_after.Transition.pResource = resolve_destination;
+        resolve_after.Transition.StateBefore = D3D12_RESOURCE_STATE_RESOLVE_DEST;
+        resolve_after.Transition.StateAfter = batch.capture_rgba8
+                                                   ? D3D12_RESOURCE_STATE_COPY_SOURCE
+                                                   : resolve_final_state;
+        resolve_after.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &resolve_after);
+    } else if (batch.capture_rgba8) {
         D3D12_RESOURCE_BARRIER to_copy{};
         to_copy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         to_copy.Transition.pResource = destination;
@@ -3210,15 +3246,17 @@ bool draw_indexed_static_mesh_batch_and_readback(
         to_copy.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         list->ResourceBarrier(1U, &to_copy);
     }
-    D3D12_TEXTURE_COPY_LOCATION source{};
-    source.pResource = readback_source;
-    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    source.SubresourceIndex = 0U;
-    D3D12_TEXTURE_COPY_LOCATION target{};
-    target.pResource = readback.Get();
-    target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    target.PlacedFootprint = footprint;
-    list->CopyTextureRegion(&target, 0U, 0U, 0U, &source, nullptr);
+    if (batch.capture_rgba8) {
+        D3D12_TEXTURE_COPY_LOCATION source{};
+        source.pResource = readback_source;
+        source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        source.SubresourceIndex = 0U;
+        D3D12_TEXTURE_COPY_LOCATION target{};
+        target.pResource = readback.Get();
+        target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        target.PlacedFootprint = footprint;
+        list->CopyTextureRegion(&target, 0U, 0U, 0U, &source, nullptr);
+    }
     if (description.samples > 1U) {
         D3D12_RESOURCE_BARRIER destination_final{};
         destination_final.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -3227,7 +3265,17 @@ bool draw_indexed_static_mesh_batch_and_readback(
         destination_final.Transition.StateAfter = final_state;
         destination_final.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         list->ResourceBarrier(1U, &destination_final);
-    } else if (final_state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+        if (batch.capture_rgba8 && retained_resolve_resource != nullptr) {
+            D3D12_RESOURCE_BARRIER resolve_final{};
+            resolve_final.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            resolve_final.Transition.pResource = retained_resolve_resource;
+            resolve_final.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            resolve_final.Transition.StateAfter = resolve_final_state;
+            resolve_final.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            list->ResourceBarrier(1U, &resolve_final);
+        }
+    } else if (batch.capture_rgba8 &&
+               final_state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
         D3D12_RESOURCE_BARRIER barrier{};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barrier.Transition.pResource = destination;
@@ -3263,6 +3311,11 @@ bool draw_indexed_static_mesh_batch_and_readback(
     if (FAILED(result)) {
         const bool drained = context->wait_idle();
         destination_state = drained ? final_state : D3D12_RESOURCE_STATE_COMMON;
+        if (retained_resolve_state != nullptr)
+            *retained_resolve_state = drained ? resolve_final_state
+                                              : D3D12_RESOURCE_STATE_COMMON;
+        if (retained_resolve_initialized != nullptr)
+            *retained_resolve_initialized = drained;
         if (use_depth)
             depth_attachment->set_state(drained ? depth_state : D3D12_RESOURCE_STATE_COMMON);
         for (std::size_t shadow_index = 0U; shadow_index < shadow_attachments.size(); ++shadow_index)
@@ -3274,12 +3327,21 @@ bool draw_indexed_static_mesh_batch_and_readback(
         return false;
     }
     destination_state = final_state;
+    if (retained_resolve_state != nullptr)
+        *retained_resolve_state = resolve_final_state;
+    if (retained_resolve_initialized != nullptr)
+        *retained_resolve_initialized = true;
     if (use_depth) {
         depth_attachment->set_state(depth_state);
         if (batch.clear_depth) depth_attachment->set_cleared();
     }
     for (std::size_t shadow_index = 0U; shadow_index < shadow_attachments.size(); ++shadow_index)
         shadow_attachments[shadow_index]->set_state(shadow_states[shadow_index]);
+    if (!batch.capture_rgba8) {
+        output.clear();
+        diagnostic = {};
+        return true;
+    }
     void* mapped = nullptr;
     D3D12_RANGE read_range{0U, static_cast<SIZE_T>(readback_size)};
     result = readback->Map(0U, &read_range, &mapped);
@@ -3877,6 +3939,7 @@ public:
     bool draw_indexed_static_mesh_batch(const IndexedStaticMeshBatchDescription& batch,
                                         std::span<const D3D12IndexedBatchDraw> draws,
                                         D3D12DepthAttachment* depth_attachment,
+                                        D3D12Texture* resolve_target,
                                         std::vector<std::byte>& output,
                                         Diagnostic& diagnostic) {
         if (batch.load_color && !initialized_) {
@@ -3886,7 +3949,11 @@ public:
         }
         const bool drawn = draw_indexed_static_mesh_batch_and_readback(
             context_, resource_.Get(), info_.description, batch, draws, depth_attachment,
-            initialized_, state_, output, diagnostic);
+            initialized_, state_,
+            resolve_target != nullptr ? resolve_target->resource_.Get() : nullptr,
+            resolve_target != nullptr ? &resolve_target->state_ : nullptr,
+            resolve_target != nullptr ? &resolve_target->initialized_ : nullptr,
+            output, diagnostic);
         initialized_ = initialized_ || drawn;
         return drawn;
     }
@@ -5864,6 +5931,15 @@ public:
                          "The D3D12 device received an unknown batch depth attachment handle"}, {}};
         }
         const D3D12Context* context = context_.get();
+        D3D12Texture* resolve_target = nullptr;
+        if (batch.resolve_target != nullptr) {
+            resolve_target = dynamic_cast<D3D12Texture*>(batch.resolve_target);
+            if (resolve_target == nullptr || resolve_target->context() != context) {
+                return {IndexedStaticMeshBatchStatus::unsupported,
+                        {"indexed_static_mesh_batch_resolve_context_mismatch",
+                         "The resolve target belongs to another D3D12 device"}, {}};
+            }
+        }
         if (d3d_texture->context() != context ||
             (d3d_depth != nullptr && d3d_depth->context() != context)) {
             return {IndexedStaticMeshBatchStatus::unsupported,
@@ -5936,7 +6012,8 @@ public:
             draws.push_back(draw);
         }
         std::vector<std::byte> output;
-        if (!d3d_texture->draw_indexed_static_mesh_batch(batch, draws, d3d_depth, output, diagnostic))
+        if (!d3d_texture->draw_indexed_static_mesh_batch(
+                batch, draws, d3d_depth, resolve_target, output, diagnostic))
             return {IndexedStaticMeshBatchStatus::execution_failed, std::move(diagnostic), {}};
         return {IndexedStaticMeshBatchStatus::ready, {}, std::move(output)};
     }

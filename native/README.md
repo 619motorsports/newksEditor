@@ -263,7 +263,10 @@ match. Ordinary alpha, multiply, and transparent-as-black factors match
 `applyItemRenderState` in the production WebGL renderer. Vulkan and D3D12 apply
 these factors in single draws and ordered batches. The indexed path supports
 4x multisample targets and alpha-to-coverage. Each backend resolves the final
-color to one sample before readback. Indexed wireframe
+color to one sample before readback. A batch can resolve into a retained,
+caller-owned single-sample texture. This path can skip CPU readback.
+The workspace viewport uses this path for 4x rendering. It presents only the
+resolved texture and reuses both color textures across frames. Indexed wireframe
 uses line-list topology over the source index stream. This behavior matches the
 production `GL_LINES` selection in `public/app.js`. It does not use polygon-line
 rasterization. Vulkan and D3D12 apply this topology in single draws and ordered
