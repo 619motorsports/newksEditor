@@ -358,6 +358,36 @@ void camera_controller_matches_bounded_editor_gestures() {
             "non-finite wheel input is rejected atomically");
 }
 
+void camera_controller_supports_keyboard_translation() {
+    apex::app::WorkspaceViewportCameraController controller;
+    const auto before = controller.frame(1.0F, CameraClipSpace::vulkan);
+    require(before.ok(), "keyboard camera starts from a valid frame");
+    const auto before_target = controller.target;
+    require(controller.move(apex::app::WorkspaceViewportCameraMove::forward) &&
+                controller.target != before_target,
+            "forward movement translates the orbit target");
+    const auto after_forward = controller.frame(1.0F, CameraClipSpace::vulkan);
+    require(after_forward.ok() && after_forward.frame->position != before.frame->position,
+            "forward movement changes the camera frame");
+
+    const auto moved_target = controller.target;
+    require(controller.move(apex::app::WorkspaceViewportCameraMove::backward) &&
+                std::abs(controller.target[0] - moved_target[0]) > 0.0F,
+            "backward movement is the inverse translation");
+    require(controller.move(apex::app::WorkspaceViewportCameraMove::left) &&
+                controller.move(apex::app::WorkspaceViewportCameraMove::right),
+            "horizontal movement remains finite");
+    require(controller.move(apex::app::WorkspaceViewportCameraMove::up) &&
+                controller.move(apex::app::WorkspaceViewportCameraMove::down),
+            "world-up movement remains finite");
+
+    const auto stable_target = controller.target;
+    require(!controller.move(apex::app::WorkspaceViewportCameraMove::forward,
+                             std::numeric_limits<float>::quiet_NaN()) &&
+                controller.target == stable_target,
+            "non-finite keyboard distance is rejected atomically");
+}
+
 void opens_and_draws() {
     auto value = fixture();
     auto request = request_for(value);
@@ -517,6 +547,7 @@ int main() {
         accepts_track_and_car_lod_documents();
         resolves_preview_state_without_mutating_document();
         camera_controller_matches_bounded_editor_gestures();
+        camera_controller_supports_keyboard_translation();
         rejects_invalid_inputs();
         rejects_frame_mismatch_and_preserves_present_atomicity();
         std::cout << "workspace_viewport_tests: ok\n";

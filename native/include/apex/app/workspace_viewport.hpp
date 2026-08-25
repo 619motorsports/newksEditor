@@ -93,6 +93,15 @@ struct WorkspaceViewportCameraInput {
     float y_delta = 0.0F;
 };
 
+enum class WorkspaceViewportCameraMove : std::uint8_t {
+    forward,
+    backward,
+    left,
+    right,
+    up,
+    down,
+};
+
 class WorkspaceViewportCameraController final {
 public:
     // These defaults match the browser editor's initial orbit state.
@@ -102,6 +111,11 @@ public:
     float distance = 5.0F;
 
     [[nodiscard]] bool apply(const WorkspaceViewportCameraInput& input) noexcept;
+    // Translate the orbit target and camera together. This keeps keyboard
+    // motion independent of the graphics backend and preserves the current
+    // orbit orientation and distance.
+    [[nodiscard]] bool move(WorkspaceViewportCameraMove direction,
+                            float distance = 0.25F) noexcept;
     [[nodiscard]] render::CameraFrameResult frame(
         float aspect, render::CameraClipSpace clip_space) const;
 

@@ -183,6 +183,49 @@ render::CameraFrameResult WorkspaceViewportCameraController::frame(
     return render::build_camera_frame(request);
 }
 
+bool WorkspaceViewportCameraController::move(
+    const WorkspaceViewportCameraMove direction, const float step) noexcept {
+    if (!finite_input_delta(step) || !finite_vector(target) ||
+        !std::isfinite(yaw) || !std::isfinite(pitch) ||
+        !std::isfinite(this->distance) ||
+        !(this->distance >= 0.02F && this->distance <= 1.0e7F))
+        return false;
+
+    const float forward_x = -std::cos(pitch) * std::sin(yaw);
+    const float forward_y = -std::sin(pitch);
+    const float forward_z = -std::cos(pitch) * std::cos(yaw);
+    const float right_x = std::cos(yaw);
+    const float right_z = -std::sin(yaw);
+    apex::scene::Vector3 delta{};
+    switch (direction) {
+    case WorkspaceViewportCameraMove::forward:
+        delta = {forward_x * step, forward_y * step,
+                 forward_z * step};
+        break;
+    case WorkspaceViewportCameraMove::backward:
+        delta = {-forward_x * step, -forward_y * step,
+                 -forward_z * step};
+        break;
+    case WorkspaceViewportCameraMove::left:
+        delta = {-right_x * step, 0.0F, -right_z * step};
+        break;
+    case WorkspaceViewportCameraMove::right:
+        delta = {right_x * step, 0.0F, right_z * step};
+        break;
+    case WorkspaceViewportCameraMove::up:
+        delta = {0.0F, step, 0.0F};
+        break;
+    case WorkspaceViewportCameraMove::down:
+        delta = {0.0F, -step, 0.0F};
+        break;
+    }
+    const apex::scene::Vector3 next_target = {
+        target[0] + delta[0], target[1] + delta[1], target[2] + delta[2]};
+    if (!finite_vector(next_target)) return false;
+    target = next_target;
+    return true;
+}
+
 const char* workspace_viewport_status_name(WorkspaceViewportStatus status) noexcept {
     switch (status) {
     case WorkspaceViewportStatus::ready: return "ready";

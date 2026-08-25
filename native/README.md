@@ -88,6 +88,8 @@ owns single-sample color and D32 targets, and presents only after a successful
 draw through the neutral device API. It uses embedded KN5 textures and applies
 workspace LOD and preview resolution without changing the document. Multisample
 presentation and stock-container shader translation remain explicit gaps.
+The shell maps left-drag orbit, middle-drag pan, wheel zoom, and WASD/QE
+camera translation through a backend-neutral application controller.
 The application service can bind immutable track-model or car-LOD manifest
 baselines and apply persisted positional workspace edits to deterministic
 exports. Failed capture or export does not replace the bound baseline or emit

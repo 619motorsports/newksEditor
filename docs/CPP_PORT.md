@@ -371,7 +371,9 @@ remains unchanged and feature-complete.
   modules and embedded KN5 textures. Workspace LOD and cockpit/rim preview
   state are resolved into render options without mutating the session. The
   bridge rejects unresolved multisample presentation and never presents after
-  a failed draw. Native window command wiring remains separate.
+  a failed draw. The native shell maps bounded SDL mouse gestures and
+  portable WASD/QE keycodes to an application-owned camera controller. Motion
+  translates the orbit target without exposing platform or backend types.
   Car damage and bottom-collider authoring have bounded schemas and deterministic output. A
   single-hierarchy car validator checks required nodes, wheels, pivots,
   colliders, and visual-model bounds. Multi-LOD validation is still staged.
