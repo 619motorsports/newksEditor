@@ -2785,3 +2785,23 @@ It contains 3,166 points, 3,166 payloads, and a present grid. The installed
 It contains 1,094 points and payloads followed by a zero grid-presence word.
 These fixtures confirm the recovered strides and offsets. Version 2 remains a
 separate legacy layout and is not inferred from the version 7 records.
+
+`AISpline::loadVersion6` also exposes the legacy version-2 layout. After the
+version word, the file contains a 32-bit point count and a 32-bit lap-time
+value. Each of the declared records is exactly 28 bytes: three float32 position
+components, one opaque 32-bit word, then float32 speed, gas, and lateral G.
+There is no payload-count or grid section, so the exact file size is
+`12 + pointCount * 28`. The native loader retains only source indices
+`0, 3, 6, ...` for version 2 and derives forward vectors from positions.
+
+Four installed version-2 fixtures satisfy that size formula exactly. Imola has
+8,533 records and SHA-256
+`df670ef7eee7c6bb5cb4c371e2ce0e33d7851421bafdec1f75df5d833a44f7a2`;
+Magione has 4,506 records and SHA-256
+`210941d094447229652a36d099a64de2a5d0d03906ac9bfc2a48f588c77c4b71`.
+Silverstone GP and its international copy contain 10,433 records and share
+SHA-256 `c76dbef08af93bbd522281a35388ad50ce2d71fd04cc982a7a18bad4744ab935`.
+The opaque word is constant within a fixture but differs across tracks; it must
+not receive an inferred semantic name. Native version-2 parsing remains staged
+until it has independent bounded fixtures for truncation, count overflow, and
+the three-to-one retained-point behavior.

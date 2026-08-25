@@ -67,6 +67,7 @@ add_library(ApexEditor::Core ALIAS apex_core)
 target_link_libraries(apex_core PUBLIC ApexEditor::Native)
 
 add_library(apex_formats STATIC
+  src/formats/ai_spline.cpp
   src/formats/acd.cpp
   src/formats/bc7.cpp
   src/formats/dds.cpp
@@ -253,6 +254,7 @@ function(apex_add_native_test source stem library)
 endfunction()
 
 apex_add_native_test(ksanim_tests.cpp ksanim_tests ApexEditor::Formats)
+apex_add_native_test(ai_spline_tests.cpp ai_spline_tests ApexEditor::Formats)
 apex_add_native_test(javascript_number_tests.cpp javascript_number_tests ApexEditor::Core)
 apex_add_native_test(sha256_tests.cpp sha256_tests ApexEditor::Core)
 apex_add_native_test(knh_tests.cpp knh_tests ApexEditor::Formats)
@@ -329,7 +331,7 @@ endif()
 if(TEST knh_tests)
   set_tests_properties(knh_tests PROPERTIES LABELS "unit;malformed")
 endif()
-foreach(parser_test IN ITEMS kn5_tests kn5_write_tests dds_tests bc7_tests png_tests fbx_tests
+foreach(parser_test IN ITEMS ai_spline_tests kn5_tests kn5_write_tests dds_tests bc7_tests png_tests fbx_tests
                              fbx_conversion_tests acd_tests ini_tests vao_tests)
   if(TEST ${parser_test})
     set_tests_properties(${parser_test} PROPERTIES LABELS "unit;malformed")

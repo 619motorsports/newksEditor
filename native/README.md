@@ -6,7 +6,10 @@ native implementation works through the parity gates in
 [`docs/CPP_PORT.md`](../docs/CPP_PORT.md).
 
 The native port has shared bounded input utilities. It reads KN5 v4/v5/v6,
-DDS, bounded PNG, ACD, VAO, ordered INI/CSP, KSANIM v1/v2, and KNH. PNG
+DDS, bounded PNG, ACD, VAO, ordered INI/CSP, KSANIM v1/v2, KNH, and
+version-7 AI splines. The AI-spline reader retains points, driving payloads,
+and the optional spatial grid. It bounds every nested grid count and aggregate
+allocation; legacy version 2 remains explicitly staged. PNG
 support covers non-interlaced 8-bit grayscale, RGB, indexed,
 grayscale-alpha, and RGBA images. It writes KN5 files
 without byte changes when the model is unchanged. KN5 parsing also has an

@@ -16,7 +16,7 @@ observable behavior described below.
 
 ### Input safety
 
-KN5, KSANIM, KNH, ACD, CSP INI, VAO patches, FBX, DDS, and mod files are
+KN5, KSANIM, KNH, AI splines, ACD, CSP INI, VAO patches, FBX, DDS, and mod files are
 untrusted input. Every reader must:
 
 - use an explicit byte span/reader with checked integer arithmetic;
@@ -61,7 +61,7 @@ The port should be organized as independently testable libraries:
 
 1. `apex-core`: spans, checked readers/writers, math, diagnostics, paths,
    cancellation, and deterministic random/noise utilities.
-2. `apex-formats`: KN5, DDS, FBX, KSANIM, KNH, ACD, INI/CSP, surfaces,
+2. `apex-formats`: KN5, DDS, FBX, KSANIM, KNH, AI splines, ACD, INI/CSP, surfaces,
    cameras, VAO, and asset-folder indexing. No renderer or window dependency.
 3. `apex-scene`: scene graph, materials, meshes, skins, visibility, workspace
    assembly, validation, authoring transactions, undo/recovery, and project
