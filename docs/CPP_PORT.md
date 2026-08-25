@@ -215,6 +215,11 @@ remains unchanged and feature-complete.
   optional cyan width markers. This pass follows the side passes and uses
   normal depth. The CLI exposes one retained-point index. Native
   multi-selection and mutable edit points remain staged.
+  The format library writes the exact `AISpline::save` version-7 record
+  layout. The writer emits zero reserved words and preserves a valid grid.
+  It rejects version 2 because the port has not recovered the conversion of
+  legacy records into version-7 payloads. The filesystem save command and
+  grid rebuild remain staged.
   Another version-7 option adds the recovered vertical camber lines after the
   side passes. Positive values are green. Other values are red.
   The selected pass uses solid fill, front-face culling, opaque blend state,

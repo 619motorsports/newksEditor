@@ -69,6 +69,7 @@ target_link_libraries(apex_core PUBLIC ApexEditor::Native)
 
 add_library(apex_formats STATIC
   src/formats/ai_spline.cpp
+  src/formats/ai_spline_write.cpp
   src/formats/acd.cpp
   src/formats/bc7.cpp
   src/formats/bmp.cpp

@@ -1,10 +1,12 @@
 #include "apex/formats/ai_spline.hpp"
+#include "apex/formats/ai_spline_write.hpp"
 
-#include <bit>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -99,6 +101,20 @@ void expectsError(Function&& function, std::string_view code = {}) {
         return;
     }
     throw std::runtime_error("expected AI spline parse error");
+}
+
+template <typename Function>
+void expectsWriteError(Function&& function, std::string_view code) {
+    try {
+        function();
+    } catch (const AiSplineWriteError& error) {
+        if (error.code() != code)
+            throw std::runtime_error(
+                "unexpected AI spline write error code: " + error.code() +
+                " (expected " + std::string(code) + ")");
+        return;
+    }
+    throw std::runtime_error("expected AI spline write error");
 }
 
 void parsesPointsPayloadsAndGrid() {
@@ -294,6 +310,119 @@ void rejectsNonFiniteAndLimits() {
                  "COUNT_LIMIT");
 }
 
+void serializesRecoveredVersion7Layout() {
+    auto bytes = validSpline();
+    putU32(bytes, 32U, 0U);
+    const auto spline = parseAiSpline(bytes, "writable.ai");
+    const auto serialized = serializeAiSpline(spline);
+    require(serialized == bytes,
+            "version-7 writer must reproduce the recovered binary layout");
+    const auto reparsed = parseAiSpline(serialized, "reparsed.ai");
+    require(reparsed.points.size() == 1U &&
+                reparsed.payloads.size() == 1U &&
+                reparsed.grid.has_value() &&
+                reparsed.grid->rows.size() == 1U,
+            "serialized version-7 spline must parse with its grid");
+
+    auto reserved = spline;
+    reserved.reserved = 0x11223344U;
+    reserved.payloads[0U].reserved = 0x55667788U;
+    const auto normalized = serializeAiSpline(reserved);
+    require(normalized[12U] == 0U && normalized[13U] == 0U &&
+                normalized[14U] == 0U && normalized[15U] == 0U,
+            "native writer must emit a zero header reserved word");
+    constexpr std::size_t payload_reserved_offset =
+        16U + 20U + 4U + 16U * 4U;
+    require(normalized[payload_reserved_offset] == 0U &&
+                normalized[payload_reserved_offset + 1U] == 0U &&
+                normalized[payload_reserved_offset + 2U] == 0U &&
+                normalized[payload_reserved_offset + 3U] == 0U,
+            "native writer must emit a zero payload reserved word");
+
+    AiSpline empty;
+    empty.version = 7U;
+    const auto empty_bytes = serializeAiSpline(empty);
+    require(empty_bytes.size() == 24U,
+            "empty version-7 spline must contain both zero counts and grid flag");
+    const auto empty_reparsed = parseAiSpline(empty_bytes, "empty-v7.ai");
+    require(empty_reparsed.points.empty() &&
+                empty_reparsed.payloads.empty() &&
+                !empty_reparsed.grid.has_value(),
+            "empty serialized version-7 spline must parse");
+}
+
+void rejectsUnsafeVersion7Writes() {
+    AiSpline legacy;
+    legacy.version = 2U;
+    expectsWriteError([&] { (void)serializeAiSpline(legacy); },
+                      "UNSUPPORTED_VERSION");
+
+    auto spline = parseAiSpline(validSpline(), "unsafe-write.ai");
+    spline.points[0U].tag = 0;
+    spline.payloads.clear();
+    expectsWriteError([&] { (void)serializeAiSpline(spline); },
+                      "COUNT_MISMATCH");
+
+    spline = parseAiSpline(validSpline(), "unsafe-write.ai");
+    spline.points[0U].tag = -1;
+    expectsWriteError([&] { (void)serializeAiSpline(spline); },
+                      "PAYLOAD_INDEX_INVALID");
+
+    spline.points[0U].tag = 0;
+    spline.payloads[0U].camber =
+        std::numeric_limits<float>::quiet_NaN();
+    expectsWriteError([&] { (void)serializeAiSpline(spline); },
+                      "NON_FINITE");
+
+    spline = parseAiSpline(validSpline(), "unsafe-write.ai");
+    spline.points[0U].tag = 0;
+    spline.grid->rows[0U].cells[0U].pointIndices[0U] = 1U;
+    expectsWriteError([&] { (void)serializeAiSpline(spline); },
+                      "GRID_INDEX_INVALID");
+
+    spline.grid->rows[0U].cells[0U].pointIndices[0U] = 0U;
+    AiSplineWriteLimits limits;
+    limits.maxPoints = 0U;
+    expectsWriteError([&] { (void)serializeAiSpline(spline, limits); },
+                      "COUNT_LIMIT");
+    limits = {};
+    limits.maxGridRows = 0U;
+    expectsWriteError([&] { (void)serializeAiSpline(spline, limits); },
+                      "COUNT_LIMIT");
+    limits = {};
+    limits.maxGridIndices = 0U;
+    expectsWriteError([&] { (void)serializeAiSpline(spline, limits); },
+                      "COUNT_LIMIT");
+    limits = {};
+    limits.maxOutputBytes = 23U;
+    AiSpline empty;
+    empty.version = 7U;
+    expectsWriteError([&] { (void)serializeAiSpline(empty, limits); },
+                      "OUTPUT_LIMIT");
+}
+
+void roundTripsRepositoryVersion7Splines() {
+    const auto root = std::filesystem::path(__FILE__)
+                          .parent_path()
+                          .parent_path()
+                          .parent_path();
+    const std::array paths = {
+        root / "test/content/tracks/sepang/ai/fast_lane.ai",
+        root / "test/content/tracks/sepang/ai/pit_lane.ai",
+    };
+    for (const auto& path : paths) {
+        std::ifstream input(path, std::ios::binary);
+        require(static_cast<bool>(input),
+                "repository AI spline fixture must be readable");
+        const std::vector<std::uint8_t> bytes{
+            std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>()};
+        const auto parsed = parseAiSpline(bytes, path.generic_string());
+        require(serializeAiSpline(parsed) == bytes,
+                "repository version-7 spline must round-trip byte for byte");
+    }
+}
+
 void parsesInstalledFastLaneWhenAvailable() {
     constexpr const char* path =
         "/mnt/D/SteamLibrary/steamapps/common/assettocorsa/content/tracks/imola/ai/fast_lane.ai";
@@ -305,6 +434,8 @@ void parsesInstalledFastLaneWhenAvailable() {
     require(parsed.points.size() == 3166 && parsed.payloads.size() == 3166,
             "installed fast lane counts");
     require(parsed.grid.has_value(), "installed fast lane grid");
+    require(serializeAiSpline(parsed) == bytes,
+            "installed fast lane must round-trip byte for byte");
 }
 
 void parsesInstalledLegacyIdealLineWhenAvailable() {
@@ -336,6 +467,9 @@ int main() {
         rejectsMalformedHeadersAndCounts();
         rejectsMalformedLegacyVersion2Input();
         rejectsNonFiniteAndLimits();
+        serializesRecoveredVersion7Layout();
+        rejectsUnsafeVersion7Writes();
+        roundTripsRepositoryVersion7Splines();
         parsesInstalledFastLaneWhenAvailable();
         parsesInstalledLegacyIdealLineWhenAvailable();
         return 0;

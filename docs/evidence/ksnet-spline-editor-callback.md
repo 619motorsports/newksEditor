@@ -135,6 +135,17 @@ mutable edit-point lifecycle staged.
 also requires version-7 payloads and starts off. Spline edit controls remain
 staged.
 
+The managed `saveAISpline` wrapper has token `0x060003CC` and RVA `0x25C54`.
+If a spline exists, it calls `AISpline.buildGrid` and then `AISpline.save`.
+`AISpline.save` has token `0x06000227` and RVA `0x6A3B9`. It always writes
+version 7. It writes zero for the header and payload reserved words.
+
+The native save method truncates the destination directly. It does not use a
+temporary file or inspect stream errors. The UI reports success after the
+call. The C++ format writer implements only the recovered byte layout. It
+returns owned bytes and leaves grid rebuild and filesystem policy to a later
+authoring layer.
+
 The production WebGL source has no AI-spline load or render path. A source
 search found no AI-spline or `fast_lane.ai` identifiers. Thus, a direct WebGL
 visual comparison is not possible for this native-only feature. The complete

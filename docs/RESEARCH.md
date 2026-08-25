@@ -2997,6 +2997,19 @@ version-2 data separate from version-7 points and payloads and rejects
 truncated prefixes, oversized counts, non-finite values, aggregate budget
 violations, and trailing bytes.
 
+The C++ format library now implements the recovered `AISpline::save` version-7
+record layout. It emits zero for both reserved words. It preserves the exact
+point, payload, and optional grid order. The writer validates point tags, grid
+indices, finite values, all counts, and the output-byte limit. Repository
+`fast_lane.ai` and `pit_lane.ai` files round-trip byte for byte. The installed
+Imola fast lane also round-trips when that fixture exists.
+
+The original managed save wrapper calls `buildGrid` before `AISpline::save`.
+It writes directly to the destination and ignores stream errors. The C++
+writer returns owned bytes and does not write a file. Grid rebuild and a safe
+filesystem save command remain staged. Version-2 output also remains staged
+because the current model does not invent version-7 payloads.
+
 ## Native ksNet camera pose evidence
 
 The installed `ksNet.dll` (`b38dcb826a3311d7233cf0a6a58e5da16b6c8679f8490091e7b434bf730091ca`) and

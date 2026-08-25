@@ -220,6 +220,12 @@ The authoring-overlay modules use the fixed position-and-color line ABI.
 The module pair requires `--selected-node`, `--grid`, `--view-axis`, or
 `--ai-spline`.
 The AI-spline option loads a bounded version-2 or version-7 file.
+The format library also supplies `serializeAiSpline` for version-7 output.
+This function writes the recovered 20-byte point and 72-byte payload records.
+It writes zero reserved words and preserves a valid optional grid.
+The function rejects version 2 because the port does not invent version-7
+payloads. It also rejects invalid tags, grid indices, non-finite values, and
+output that exceeds the configured limits.
 The default `raw` mode draws the recovered raw magenta spline.
 `--ai-spline-mode interpolated` draws the recovered Catmull-Rom curve.
 This mode recomputes the native arc-length table and ignores stored point
