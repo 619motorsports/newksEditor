@@ -2813,12 +2813,27 @@ bool contract_backend(apex::render::Backend backend) {
     skinned_shadow_request.pipeline = &skinned_shadow_pipeline;
     skinned_shadow_request.vertex_buffer = skinned_upload.upload->vertex_buffer.get();
     skinned_shadow_request.index_buffer = skinned_upload.upload->index_buffer.get();
-    skinned_shadow_request.camera_frame = three_maps.resources->camera(0U);
+    skinned_shadow_request.camera_frame = *indexed_camera.frame;
+    skinned_shadow_request.clear_depth = true;
+    DepthAttachmentResult initial_skinned_shadow_attachment =
+        device.device->create_depth_attachment(depth_readback_description);
+    require(initial_skinned_shadow_attachment.ok(),
+            "initial CPU-skinned shadow attachment creation");
     const DepthOnlyIndexedStaticMeshDrawResult skinned_shadow_result =
         device.device->draw_depth_only_indexed_static_mesh(
-            three_maps.resources->attachment(0U), skinned_shadow_request);
+            *initial_skinned_shadow_attachment.attachment,
+            skinned_shadow_request);
+    const auto initial_skinned_shadow_depth =
+        device.device->read_depth_attachment(
+            *initial_skinned_shadow_attachment.attachment,
+            {depth_readback_description.width,
+             depth_readback_description.height});
     require(skinned_shadow_result.ok(),
             "real backend executes a mutable CPU-skinned directional caster");
+    require(initial_skinned_shadow_depth.ok() &&
+                initial_skinned_shadow_depth.depth[
+                    16U * depth_readback_description.width + 16U] < 0.99F,
+            "bind-pose skinned caster writes center shadow depth");
 
     IndexedStaticMeshDrawRequest skinned_request =
         skinned_upload.upload->make_request(skinned_pipeline, *indexed_camera.frame);
@@ -2841,6 +2856,26 @@ bool contract_backend(apex::render::Backend backend) {
         skinned_upload.upload->update_pose(*device.device, translated_packet);
     require(skinned_update.ok() && skinned_update.skinned_vertices.size() == skinned_source.size(),
             "mutable CPU-skinned vertex update");
+    DepthAttachmentResult translated_skinned_shadow_attachment =
+        device.device->create_depth_attachment(depth_readback_description);
+    require(translated_skinned_shadow_attachment.ok(),
+            "translated CPU-skinned shadow attachment creation");
+    const auto translated_skinned_shadow =
+        device.device->draw_depth_only_indexed_static_mesh(
+            *translated_skinned_shadow_attachment.attachment,
+            skinned_shadow_request);
+    const auto translated_skinned_shadow_depth =
+        device.device->read_depth_attachment(
+            *translated_skinned_shadow_attachment.attachment,
+            {depth_readback_description.width,
+             depth_readback_description.height});
+    require(translated_skinned_shadow.ok() &&
+                translated_skinned_shadow_depth.ok() &&
+                translated_skinned_shadow_depth.depth[
+                    16U * depth_readback_description.width + 16U] > 0.99F &&
+                translated_skinned_shadow_depth.depth[
+                    16U * depth_readback_description.width + 28U] < 0.99F,
+            "translated skinned caster moves shadow depth from center to the right");
     const IndexedStaticMeshDrawResult skinned_translated_result =
         device.device->draw_indexed_static_mesh_and_readback(*triangle_texture.texture,
                                                                skinned_request);

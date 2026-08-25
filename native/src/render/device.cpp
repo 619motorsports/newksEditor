@@ -2663,6 +2663,121 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
     return IndexedStaticMeshBatchStatus::ready;
 }
 
+bool validate_depth_only_indexed_pipeline_contract(
+    const PipelineProgram& pipeline, DepthOnlyIndexedPipelineRole role,
+    Diagnostic& diagnostic) {
+    const PipelineValidationResult pipeline_validation =
+        validate_pipeline(pipeline);
+    if (!pipeline_validation.valid) {
+        if (!pipeline_validation.diagnostics.empty()) {
+            const auto& failure = pipeline_validation.diagnostics.front();
+            diagnostic = {"depth_only_indexed_pipeline_" + failure.code,
+                          failure.message};
+        } else {
+            diagnostic = {"depth_only_indexed_pipeline_invalid",
+                          "Depth-only indexed pipeline validation failed without a diagnostic"};
+        }
+        return false;
+    }
+    if (!pipeline.targets.colors.empty() || !pipeline.targets.has_depth ||
+        pipeline.targets.depth.format !=
+            PipelineRenderTargetFormat::depth32_float ||
+        pipeline.targets.depth.samples != 1U) {
+        diagnostic = {"depth_only_indexed_pipeline_target_invalid",
+                      "Depth-only indexed pipelines require exactly one single-sample D32 depth target and no color targets"};
+        return false;
+    }
+
+    const bool alpha_tested =
+        role == DepthOnlyIndexedPipelineRole::stock_alpha_tested_static;
+    const bool skinned = role == DepthOnlyIndexedPipelineRole::skinned;
+    const bool valid_alpha_resources =
+        pipeline.resources.size() == 3U &&
+        std::all_of(pipeline.resources.begin(), pipeline.resources.end(),
+                    [](const PipelineResourceBinding& resource) {
+                        if (resource.set != 0U) return false;
+                        if (resource.binding == 0U)
+                            return resource.kind ==
+                                   PipelineResourceKind::sampled_texture;
+                        if (resource.binding == 3U)
+                            return resource.kind ==
+                                   PipelineResourceKind::sampler;
+                        if (resource.binding == 4U)
+                            return resource.kind ==
+                                   PipelineResourceKind::uniform_buffer;
+                        return false;
+                    }) &&
+        std::any_of(pipeline.resources.begin(), pipeline.resources.end(),
+                    [](const PipelineResourceBinding& resource) {
+                        return resource.binding == 0U;
+                    }) &&
+        std::any_of(pipeline.resources.begin(), pipeline.resources.end(),
+                    [](const PipelineResourceBinding& resource) {
+                        return resource.binding == 3U;
+                    }) &&
+        std::any_of(pipeline.resources.begin(), pipeline.resources.end(),
+                    [](const PipelineResourceBinding& resource) {
+                        return resource.binding == 4U;
+                    });
+    if ((!alpha_tested && !pipeline.resources.empty()) ||
+        (alpha_tested && !valid_alpha_resources) || pipeline.blend.enabled ||
+        pipeline.blend.alpha_to_coverage ||
+        pipeline.raster.fill != PipelineFillMode::solid ||
+        pipeline.transform_contract !=
+            PipelineTransformContract::draw_matrices ||
+        !pipeline.depth.test_enabled || !pipeline.depth.write_enabled ||
+        pipeline.depth.compare != PipelineCompareOperation::less) {
+        diagnostic = {"depth_only_indexed_pipeline_state_invalid",
+                      alpha_tested
+                          ? "Stock alpha-tested depth-only pipelines require exact t0/s3/b4 resources, solid fill, draw matrices, depth LESS test/write, and no blend"
+                          : "Depth-only indexed pipelines require solid fill, draw matrices, depth LESS test/write, no blend, and no resources"};
+        return false;
+    }
+
+    const auto vertex_shader_count = std::count_if(
+        pipeline.shaders.begin(), pipeline.shaders.end(),
+        [](const PipelineShaderModule& shader) {
+            return shader.stage == PipelineShaderStage::vertex;
+        });
+    const auto fragment_shader_count = std::count_if(
+        pipeline.shaders.begin(), pipeline.shaders.end(),
+        [](const PipelineShaderModule& shader) {
+            return shader.stage == PipelineShaderStage::fragment;
+        });
+    if ((!alpha_tested &&
+         (pipeline.shaders.size() != 1U || vertex_shader_count != 1U)) ||
+        (alpha_tested &&
+         (pipeline.shaders.size() != 2U || vertex_shader_count != 1U ||
+          fragment_shader_count != 1U))) {
+        diagnostic = {"depth_only_indexed_shader_pair_invalid",
+                      alpha_tested
+                          ? "Stock alpha-tested depth-only pipelines require exactly one vertex and one fragment shader"
+                          : "Depth-only indexed pipelines require exactly one vertex shader and no fragment shader"};
+        return false;
+    }
+
+    const std::uint32_t expected_stride =
+        (skinned ? 19U : 11U) * sizeof(float);
+    const bool has_position = std::any_of(
+        pipeline.vertex_layout.attributes.begin(),
+        pipeline.vertex_layout.attributes.end(),
+        [](const PipelineVertexAttribute& attribute) {
+            return attribute.semantic == PipelineVertexSemantic::position &&
+                   attribute.format ==
+                       PipelineVertexAttributeFormat::float32x3 &&
+                   attribute.location == 0U && attribute.offset == 0U;
+        });
+    if (pipeline.vertex_layout.stride != expected_stride || !has_position) {
+        diagnostic = {
+            "depth_only_indexed_pipeline_vertex_layout_invalid",
+            skinned
+                ? "Skinned depth-only pipelines require a 19-float stream with position at location zero"
+                : "Static depth-only pipelines require an 11-float stream with position at location zero"};
+        return false;
+    }
+    return true;
+}
+
 DepthOnlyIndexedStaticMeshDrawStatus
 validate_depth_only_indexed_static_mesh_draw_request(
     const DepthAttachment& depth,
@@ -2778,83 +2893,18 @@ validate_depth_only_indexed_static_mesh_draw_request(
     }
 
     const PipelineProgram& pipeline = *request.pipeline;
-    const PipelineValidationResult pipeline_validation = validate_pipeline(pipeline);
-    if (!pipeline_validation.valid) {
-        if (!pipeline_validation.diagnostics.empty()) {
-            const auto& failure = pipeline_validation.diagnostics.front();
-            diagnostic = {"depth_only_indexed_pipeline_" + failure.code, failure.message};
-        } else {
-            diagnostic = {"depth_only_indexed_pipeline_invalid",
-                          "Depth-only indexed pipeline validation failed without a diagnostic"};
-        }
+    const DepthOnlyIndexedPipelineRole pipeline_role =
+        alpha_tested
+            ? DepthOnlyIndexedPipelineRole::stock_alpha_tested_static
+            : skinned ? DepthOnlyIndexedPipelineRole::skinned
+                      : DepthOnlyIndexedPipelineRole::opaque_static;
+    if (!validate_depth_only_indexed_pipeline_contract(
+            pipeline, pipeline_role, diagnostic))
         return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
-    }
-    if (!pipeline.targets.colors.empty() || !pipeline.targets.has_depth ||
-        pipeline.targets.depth.format != PipelineRenderTargetFormat::depth32_float ||
-        pipeline.targets.depth.samples != 1U) {
-        diagnostic = {"depth_only_indexed_pipeline_target_invalid",
-                      "Depth-only indexed pipelines require exactly one single-sample D32 depth target and no color targets"};
-        return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
-    }
-    const bool valid_alpha_resources =
-        pipeline.resources.size() == 3U &&
-        std::all_of(pipeline.resources.begin(), pipeline.resources.end(),
-                    [](const PipelineResourceBinding& resource) {
-                        if (resource.set != 0U) return false;
-                        if (resource.binding == 0U)
-                            return resource.kind == PipelineResourceKind::sampled_texture;
-                        if (resource.binding == 3U)
-                            return resource.kind == PipelineResourceKind::sampler;
-                        if (resource.binding == 4U)
-                            return resource.kind == PipelineResourceKind::uniform_buffer;
-                        return false;
-                    }) &&
-        std::any_of(pipeline.resources.begin(), pipeline.resources.end(),
-                    [](const PipelineResourceBinding& resource) {
-                        return resource.binding == 0U;
-                    }) &&
-        std::any_of(pipeline.resources.begin(), pipeline.resources.end(),
-                    [](const PipelineResourceBinding& resource) {
-                        return resource.binding == 3U;
-                    }) &&
-        std::any_of(pipeline.resources.begin(), pipeline.resources.end(),
-                    [](const PipelineResourceBinding& resource) {
-                        return resource.binding == 4U;
-                    });
-    if ((!alpha_tested && pipeline.resources.size() != 0U) ||
-        (alpha_tested && !valid_alpha_resources) || pipeline.blend.enabled ||
-        pipeline.blend.alpha_to_coverage ||
-        pipeline.transform_contract != PipelineTransformContract::draw_matrices ||
-        !pipeline.depth.test_enabled || !pipeline.depth.write_enabled ||
-        pipeline.depth.compare != PipelineCompareOperation::less) {
-        diagnostic = {"depth_only_indexed_pipeline_state_invalid",
-                      alpha_tested
-                          ? "Stock alpha-tested depth-only pipelines require exact t0/s3/b4 resources, draw matrices, depth LESS test/write, and no blend"
-                          : "Depth-only indexed pipelines require draw matrices, depth LESS test/write, no blend, and no resources"};
-        return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
-    }
     if (packet.flags.depth_test != pipeline.depth.test_enabled ||
         packet.flags.depth_write != pipeline.depth.write_enabled) {
         diagnostic = {"depth_only_indexed_packet_depth_state_mismatch",
                       "Depth-only packet depth flags must match the executable pipeline"};
-        return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
-    }
-    if ((!alpha_tested && (pipeline.shaders.size() != 1U ||
-                           pipeline.shaders.front().stage != PipelineShaderStage::vertex)) ||
-        (alpha_tested &&
-         (pipeline.shaders.size() != 2U ||
-          std::count_if(pipeline.shaders.begin(), pipeline.shaders.end(),
-                        [](const PipelineShaderModule& shader) {
-                            return shader.stage == PipelineShaderStage::vertex;
-                        }) != 1 ||
-          std::count_if(pipeline.shaders.begin(), pipeline.shaders.end(),
-                        [](const PipelineShaderModule& shader) {
-                            return shader.stage == PipelineShaderStage::fragment;
-                        }) != 1))) {
-        diagnostic = {"depth_only_indexed_shader_pair_invalid",
-                      alpha_tested
-                          ? "Stock alpha-tested depth-only pipelines require exactly one vertex and one fragment shader"
-                          : "Depth-only indexed pipelines require exactly one vertex shader and no fragment shader"};
         return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
     }
     const PipelineShaderFormat expected_shader = depth.backend() == Backend::Vulkan

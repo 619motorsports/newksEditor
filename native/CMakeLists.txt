@@ -218,6 +218,7 @@ target_link_libraries(apex_render
 # Renderer-facing application composition remains separate from apex_app so
 # workspace authoring and asset authority stay independent of GPU backends.
 add_library(apex_app_render STATIC
+  src/app/workspace_shadow_programs.cpp
   src/app/workspace_viewport.cpp
 )
 add_library(ApexEditor::AppRender ALIAS apex_app_render)
@@ -309,6 +310,7 @@ apex_add_native_test(presentation_recreation_tests.cpp presentation_recreation_t
 apex_add_native_test(workspace_selection_tests.cpp workspace_selection_tests ApexEditor::App)
 apex_add_native_test(workspace_session_tests.cpp workspace_session_tests ApexEditor::App)
 apex_add_native_test(workspace_viewport_tests.cpp workspace_viewport_tests ApexEditor::AppRender)
+apex_add_native_test(workspace_shadow_programs_tests.cpp workspace_shadow_programs_tests ApexEditor::AppRender)
 apex_add_native_test(workspace_real_fixture_tests.cpp workspace_real_fixture_tests ApexEditor::AppRender)
 apex_add_native_test(project_workspace_tests.cpp project_workspace_tests ApexEditor::App)
 apex_add_native_test(project_bake_tests.cpp project_bake_tests ApexEditor::Authoring)
@@ -425,7 +427,7 @@ if(TEST render_backend_tests)
       ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")
   endif()
 endif()
-foreach(render_test IN ITEMS authoring_grid_tests camera_tests bmp_texture_tests csp_node_state_tests damage_preview_tests external_texture_authority_tests draw_packet_tests frame_plan_tests indexed_draw_tests selection_axis_tests selected_mesh_tests view_axis_tests static_mesh_upload_tests skinned_mesh_upload_tests static_scene_tests stock_material_execution_tests stock_scene_execution_tests workspace_real_fixture_tests lighting_tests material_binding_tests
+foreach(render_test IN ITEMS authoring_grid_tests camera_tests bmp_texture_tests csp_node_state_tests damage_preview_tests external_texture_authority_tests draw_packet_tests frame_plan_tests indexed_draw_tests selection_axis_tests selected_mesh_tests view_axis_tests static_mesh_upload_tests skinned_mesh_upload_tests static_scene_tests stock_material_execution_tests stock_scene_execution_tests workspace_real_fixture_tests workspace_shadow_programs_tests workspace_viewport_tests lighting_tests material_binding_tests
                              material_profile_tests pipeline_tests render_plan_tests texture_upload_tests)
   if(TEST ${render_test})
     set_tests_properties(${render_test} PROPERTIES LABELS "unit;render")

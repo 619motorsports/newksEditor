@@ -200,3 +200,28 @@ The native evidence does not establish the D3D12 descriptor-heap layout or
 resource-state barriers. It does not provide backend translations of
 `ksShadowGenAT` or `ksShadowGenSKIN`. Those translations remain explicit
 backend contracts. The evidence does not authorize unlabeled approximations.
+
+## Portable CLI mapping
+
+The native shell accepts one explicit module set for each supported caster
+role:
+
+- `--directional-shadow-vertex` supplies the opaque static vertex program.
+- `--directional-shadow-alpha-vertex` and
+  `--directional-shadow-alpha-fragment` supply the alpha-tested static pair.
+- `--directional-shadow-skinned-vertex` supplies the CPU-skinned vertex
+  program.
+
+The alpha-tested pipeline maps material resource slot zero to `txDiffuse` at
+`t0`. It maps the shadow sampler to `s3` and the 32-byte material record to
+`b4`. It keeps `ksAlphaRef` at byte offset 28.
+
+The skinned CLI pipeline does not claim the recovered `cbBones b13` ABI. The
+port updates a retained 19-float vertex stream on the CPU. The explicit vertex
+program consumes that updated stream with the portable draw-matrices contract.
+This is a labeled backend translation.
+
+One shared validator checks the target, shader stages, vertex stride, resource
+bindings, fill mode, blend state, and depth state. The viewport calls this
+validator before it allocates the three maps. Missing role programs keep their
+caster classes staged.

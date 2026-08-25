@@ -1,4 +1,5 @@
 #include "apex/app/workspace_viewport.hpp"
+#include "apex/app/workspace_shadow_programs.hpp"
 #include "apex/render/view_axis.hpp"
 
 #include <algorithm>
@@ -480,6 +481,26 @@ PipelineProgram opaque_shadow_pipeline(const Fixture& fixture_value) {
     pipeline.depth.compare = PipelineCompareOperation::less;
     pipeline.transform_contract = PipelineTransformContract::draw_matrices;
     return pipeline;
+}
+
+PipelineProgram alpha_shadow_pipeline(const Fixture& fixture_value) {
+    auto built = apex::app::buildWorkspaceShadowPipeline(
+        "viewport-alpha-directional-shadow",
+        {fixture_value.modules[0], fixture_value.modules[1]},
+        DepthOnlyIndexedPipelineRole::stock_alpha_tested_static);
+    if (!built.ok())
+        throw std::runtime_error("alpha shadow pipeline fixture failed");
+    return std::move(*built.pipeline);
+}
+
+PipelineProgram skinned_shadow_pipeline(const Fixture& fixture_value) {
+    auto built = apex::app::buildWorkspaceShadowPipeline(
+        "viewport-skinned-directional-shadow",
+        {fixture_value.modules[0]},
+        DepthOnlyIndexedPipelineRole::skinned);
+    if (!built.ok())
+        throw std::runtime_error("skinned shadow pipeline fixture failed");
+    return std::move(*built.pipeline);
 }
 
 PipelineProgram authoring_overlay_pipeline(const Fixture& fixture_value,
@@ -1371,6 +1392,31 @@ void rejects_invalid_inputs() {
                     "workspace_viewport_shadow_pipeline_name_limit" &&
                 device.texture_calls == 0U && device.depth_calls == 0U,
             "over-limit shadow program fails before backend allocation");
+
+    invalid_shadows = {};
+    invalid_shadows.alpha_static_pipeline = alpha_shadow_pipeline(value);
+    invalid_shadows.alpha_static_pipeline->shaders.pop_back();
+    request.directional_shadows = invalid_shadows;
+    auto incomplete_alpha_shadow = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(!incomplete_alpha_shadow.ok() &&
+                incomplete_alpha_shadow.diagnostic.code ==
+                    "workspace_viewport_shadow_depth_only_indexed_shader_pair_invalid" &&
+                device.texture_calls == 0U && device.depth_calls == 0U,
+            "incomplete alpha shadow program fails before map allocation");
+
+    invalid_shadows = {};
+    invalid_shadows.skinned_pipeline = skinned_shadow_pipeline(value);
+    invalid_shadows.skinned_pipeline->vertex_layout.stride = 11U * sizeof(float);
+    invalid_shadows.skinned_pipeline->vertex_layout.attributes.resize(4U);
+    request.directional_shadows = invalid_shadows;
+    auto malformed_skinned_shadow = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(!malformed_skinned_shadow.ok() &&
+                malformed_skinned_shadow.diagnostic.code ==
+                    "workspace_viewport_shadow_depth_only_indexed_pipeline_vertex_layout_invalid" &&
+                device.texture_calls == 0U && device.depth_calls == 0U,
+            "malformed skinned shadow stream fails before map allocation");
     value.module_set.directional_shadow_receiver = false;
 
     request = request_for(value);

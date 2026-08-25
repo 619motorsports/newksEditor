@@ -99,6 +99,81 @@ endif()
 set(model "${APEX_SOURCE_DIR}/test/content/cars/619_gen6_arca_base/619_gen6_fusion13.kn5")
 
 execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --directional-shadow-vertex shadow.spv
+  RESULT_VARIABLE opaque_shadow_without_receivers_result
+  ERROR_VARIABLE opaque_shadow_without_receivers_error
+)
+if(NOT opaque_shadow_without_receivers_result STREQUAL "1")
+  message(FATAL_ERROR
+    "opaque shadow without receivers returned ${opaque_shadow_without_receivers_result}: ${opaque_shadow_without_receivers_error}")
+endif()
+string(FIND "${opaque_shadow_without_receivers_error}"
+  "--directional-shadow-vertex requires receiver-capable material shader modules"
+  opaque_shadow_without_receivers_position)
+if(opaque_shadow_without_receivers_position EQUAL -1)
+  message(FATAL_ERROR
+    "legacy opaque shadow diagnostic changed: ${opaque_shadow_without_receivers_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --shader-family fixture --shader-vertex fixture.vert.spv
+          --shader-fragment fixture.frag.spv
+          --directional-shadow-alpha-vertex alpha.vert.spv
+  RESULT_VARIABLE incomplete_alpha_shadow_result
+  ERROR_VARIABLE incomplete_alpha_shadow_error
+)
+if(NOT incomplete_alpha_shadow_result STREQUAL "1")
+  message(FATAL_ERROR
+    "incomplete alpha shadow returned ${incomplete_alpha_shadow_result}: ${incomplete_alpha_shadow_error}")
+endif()
+string(FIND "${incomplete_alpha_shadow_error}"
+  "directional-shadow alpha vertex and fragment modules must be supplied together"
+  incomplete_alpha_shadow_position)
+if(incomplete_alpha_shadow_position EQUAL -1)
+  message(FATAL_ERROR
+    "incomplete alpha shadow pair was not diagnosed: ${incomplete_alpha_shadow_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --directional-shadow-alpha-vertex alpha.vert.spv
+          --directional-shadow-alpha-fragment alpha.frag.spv
+  RESULT_VARIABLE alpha_shadow_without_receivers_result
+  ERROR_VARIABLE alpha_shadow_without_receivers_error
+)
+if(NOT alpha_shadow_without_receivers_result STREQUAL "1")
+  message(FATAL_ERROR
+    "alpha shadow without receivers returned ${alpha_shadow_without_receivers_result}: ${alpha_shadow_without_receivers_error}")
+endif()
+string(FIND "${alpha_shadow_without_receivers_error}"
+  "directional-shadow modules require receiver-capable material shader modules"
+  alpha_shadow_without_receivers_position)
+if(alpha_shadow_without_receivers_position EQUAL -1)
+  message(FATAL_ERROR
+    "alpha shadow receiver requirement was not diagnosed: ${alpha_shadow_without_receivers_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --directional-shadow-skinned-vertex skinned.vert.spv
+  RESULT_VARIABLE skinned_shadow_without_receivers_result
+  ERROR_VARIABLE skinned_shadow_without_receivers_error
+)
+if(NOT skinned_shadow_without_receivers_result STREQUAL "1")
+  message(FATAL_ERROR
+    "skinned shadow without receivers returned ${skinned_shadow_without_receivers_result}: ${skinned_shadow_without_receivers_error}")
+endif()
+string(FIND "${skinned_shadow_without_receivers_error}"
+  "directional-shadow modules require receiver-capable material shader modules"
+  skinned_shadow_without_receivers_position)
+if(skinned_shadow_without_receivers_position EQUAL -1)
+  message(FATAL_ERROR
+    "skinned shadow receiver requirement was not diagnosed: ${skinned_shadow_without_receivers_error}")
+endif()
+
+execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}" --grid
   RESULT_VARIABLE grid_without_modules_result
   ERROR_VARIABLE grid_without_modules_error

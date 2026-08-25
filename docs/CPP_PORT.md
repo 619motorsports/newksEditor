@@ -156,9 +156,13 @@ remains unchanged and feature-complete.
   It refreshes camera-bound matrices without reallocating the attachments.
   Each frame runs the three caster passes before the receiver color pass.
   Presentation occurs only after both operations succeed. The native shell
-  enables this path only with an explicit opaque depth vertex program and
-  receiver-capable material modules. Missing alpha-tested or skinned programs
-  remain labeled as staged.
+  accepts explicit programs for opaque static, alpha-tested static, and
+  skinned casters. The alpha program uses a vertex and fragment pair with the
+  recovered `t0`, `s3`, and `b4` resource contract. The skinned program uses
+  the retained 19-float CPU-skinned stream. This is a labeled translation of
+  the recovered `b13` bone-buffer path. Missing role programs keep only their
+  caster classes staged. The viewport validates all role contracts before map
+  allocation.
   The D3D12 pixel fixture requires a Windows WARP verification build. Vulkan
   integrates the receiver with the bounded stock `ksPerPixel` facade. Extended
   material variants and recovered DXBC register packing remain staged. The

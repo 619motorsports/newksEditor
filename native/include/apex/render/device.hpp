@@ -871,6 +871,14 @@ enum class DepthOnlyIndexedStaticMeshDrawStatus : std::uint8_t {
     execution_failed,
 };
 
+// Validate the executable shader, resource, target, and vertex-stream shape
+// before a depth-only request owns concrete geometry or backend objects.
+enum class DepthOnlyIndexedPipelineRole : std::uint8_t {
+    opaque_static,
+    stock_alpha_tested_static,
+    skinned,
+};
+
 struct DepthOnlyIndexedStaticMeshDrawResult {
     DepthOnlyIndexedStaticMeshDrawStatus status =
         DepthOnlyIndexedStaticMeshDrawStatus::unsupported;
@@ -1092,6 +1100,10 @@ inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
 validate_depth_only_indexed_static_mesh_draw_request(
     const DepthAttachment& depth,
     const DepthOnlyIndexedStaticMeshDrawRequest& request,
+    Diagnostic& diagnostic);
+
+[[nodiscard]] bool validate_depth_only_indexed_pipeline_contract(
+    const PipelineProgram& pipeline, DepthOnlyIndexedPipelineRole role,
     Diagnostic& diagnostic);
 
 [[nodiscard]] DepthOnlyIndexedStaticMeshBatchStatus

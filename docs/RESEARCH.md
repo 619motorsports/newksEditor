@@ -2309,6 +2309,14 @@ resources with `D32_FLOAT` DSVs and `R32_FLOAT` SRVs. Its receiver descriptor
 execution remains staged until it passes a Windows WARP build. This work does
 not establish native pixel parity.
 
+The native shell now accepts separate opaque static, alpha-tested static, and
+skinned shadow programs. The alpha-tested pair keeps the recovered `t0`, `s3`,
+and `b4` bindings. The skinned program uses the retained 19-float CPU-skinned
+stream. This is a labeled translation of the recovered `cbBones b13` path.
+The viewport validates each role before it allocates the shadow maps. A Vulkan
+pixel test moves a skinned caster and its depth from the center to the expected
+right-hand pixel.
+
 ## ksEditor weather, HDR, and exposure evidence
 
 The installed editor starts with `5_light_clouds` in `sdk/editor/cfg/race.ini`.

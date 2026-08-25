@@ -157,7 +157,10 @@ out/native/dev/native/apex-native --window vulkan --model car.kn5 \
   --shader-fragment receiver.frag.spv \
   --authoring-overlay-vertex overlay.vert.spv \
   --authoring-overlay-fragment overlay.frag.spv \
-  --directional-shadow-vertex shadow.vert.spv
+  --directional-shadow-vertex shadow.vert.spv \
+  --directional-shadow-alpha-vertex shadow-at.vert.spv \
+  --directional-shadow-alpha-fragment shadow-at.frag.spv \
+  --directional-shadow-skinned-vertex shadow-skin.vert.spv
 out/native/dev/native/apex-native --window vulkan \
   --workspace-root content/cars/example --manifest data/lods.ini \
   --kind carLods --lod-index 1 \
@@ -205,15 +208,18 @@ manifest index and disables automatic selection. The stable catalog is a port
 optimization for live distance selection. The recovered editor loads and
 compiles one FBX for each LOD menu selection.
 
-`--directional-shadow-vertex` enables the viewport shadow schedule. The
-material modules must implement the receiver bindings selected by this flag.
+Any directional-shadow module option enables the viewport shadow schedule.
+The material modules must implement the receiver bindings for this schedule.
+`--directional-shadow-vertex` supplies the opaque static vertex program.
+The `--directional-shadow-alpha-*` pair supplies the alpha-tested static
+program. `--directional-shadow-skinned-vertex` supplies the CPU-skinned vertex
+program.
 The viewport owns three fixed D32 maps and reuses them when the camera moves.
 It executes three caster passes before the receiver color pass and present.
 Malformed initial map or lighting state fails before map allocation. Malformed
 per-frame lighting fails before any caster, color, or present work.
-The CLI program covers opaque static casters. Alpha-tested and skinned casters
-stay staged until callers supply their explicit programs through the viewport
-API. The viewport reports staged branches instead of claiming exact output.
+Missing role programs keep only their caster classes staged. The viewport
+validates each role contract before it allocates the shadow maps.
 
 Export a project through the native authoring service:
 
@@ -349,7 +355,8 @@ DXIL pipelines. A constants-enabled pipeline requires an explicit table in
 final material order. The adapter validates this table before allocation. It
 owns one 256-byte buffer per used material and reuses it for duplicate packets.
 The adapter also executes static alpha-tested directional-shadow casters when
-the caller supplies a compatible pipeline. The recovered `ksShadowGenAT`
+the caller supplies a compatible pipeline. The CLI accepts this pipeline as an
+explicit vertex and fragment pair. The recovered `ksShadowGenAT`
 pixel ABI uses diffuse texture `t0`, sampler `s3`, and material buffer `b4`.
 The material record is 32 bytes. It stores `ksAlphaRef` at byte offset 28.
 Preparation owns one aligned record per used alpha-tested material. It rejects
@@ -358,8 +365,10 @@ allocation. The stock-scene facade resolves this record in final material
 order and forwards the complete table. The shadow traversal applies the
 recovered opaque blend and depth-write state without changing the retained
 main-pass packets. Thus, static materials with non-opaque main-pass state use
-the alpha-tested shadow path. Skinned casters remain staged when a compatible
-skinned pipeline is not supplied.
+the alpha-tested shadow path. The CLI accepts one explicit skinned vertex
+program. The native port uses its retained CPU-skinned stream instead of the
+recovered `b13` bone ABI. This difference is a labeled portable translation.
+A missing skinned program keeps those casters staged.
 Each frame can supply a byte visibility mask in stable packet order. An empty
 mask keeps all packets visible. Other masks must match the packet count and use
 only zero or one. Hidden packets do not draw or update skinned geometry. An

@@ -163,6 +163,7 @@ using render::PipelineRenderTargetFormat;
 
 [[nodiscard]] bool validateShadowPrograms(
     const WorkspaceViewportPrepareRequest& request,
+    render::Backend backend,
     render::Diagnostic& output_diagnostic) {
     if (!request.directional_shadows.has_value()) return true;
     const auto layout = request.directional_shadows->constants_layout;
@@ -194,15 +195,28 @@ using render::PipelineRenderTargetFormat;
             return false;
         }
     }
-    const std::array<const std::optional<render::PipelineProgram>*, 3U> programs = {
-        &request.directional_shadows->opaque_pipeline,
-        &request.directional_shadows->alpha_static_pipeline,
-        &request.directional_shadows->skinned_pipeline,
+    struct ProgramRole {
+        const std::optional<render::PipelineProgram>* program = nullptr;
+        render::DepthOnlyIndexedPipelineRole role =
+            render::DepthOnlyIndexedPipelineRole::opaque_static;
     };
-    for (const auto* program : programs) {
-        if (!program->has_value()) continue;
+    const std::array<ProgramRole, 3U> programs = {{
+        {&request.directional_shadows->opaque_pipeline,
+         render::DepthOnlyIndexedPipelineRole::opaque_static},
+        {&request.directional_shadows->alpha_static_pipeline,
+         render::DepthOnlyIndexedPipelineRole::stock_alpha_tested_static},
+        {&request.directional_shadows->skinned_pipeline,
+         render::DepthOnlyIndexedPipelineRole::skinned},
+    }};
+    const render::PipelineShaderFormat expected_format =
+        backend == render::Backend::Vulkan
+            ? render::PipelineShaderFormat::spirv
+            : render::PipelineShaderFormat::dxil;
+    for (const ProgramRole& entry : programs) {
+        if (!entry.program->has_value()) continue;
+        const render::PipelineProgram& program = **entry.program;
         const auto validation = render::validate_pipeline(
-            **program, request.limits.material.scene.pipeline);
+            program, request.limits.material.scene.pipeline);
         if (!validation.valid) {
             if (validation.diagnostics.empty()) {
                 output_diagnostic = diagnostic(
@@ -216,7 +230,25 @@ using render::PipelineRenderTargetFormat;
             }
             return false;
         }
-        if (!add_modules((*program)->shaders)) {
+        render::Diagnostic role_diagnostic;
+        if (!render::validate_depth_only_indexed_pipeline_contract(
+                program, entry.role, role_diagnostic)) {
+            output_diagnostic = {
+                "workspace_viewport_shadow_" + role_diagnostic.code,
+                role_diagnostic.message};
+            return false;
+        }
+        if (!std::all_of(
+                program.shaders.begin(), program.shaders.end(),
+                [&](const render::PipelineShaderModule& shader) {
+                    return shader.format == expected_format;
+                })) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_shadow_shader_format_mismatch",
+                "Directional shadow shader formats must match the backend");
+            return false;
+        }
+        if (!add_modules(program.shaders)) {
             output_diagnostic = diagnostic(
                 "workspace_viewport_shadow_shader_budget",
                 "Material and shadow programs exceed the shared shader byte budget");
@@ -850,7 +882,8 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             return result;
         }
         render::Diagnostic shadow_program_diagnostic;
-        if (!validateShadowPrograms(request, shadow_program_diagnostic)) {
+        if (!validateShadowPrograms(
+                request, device.info().backend, shadow_program_diagnostic)) {
             result.status = WorkspaceViewportStatus::invalid;
             result.diagnostic = std::move(shadow_program_diagnostic);
             return result;

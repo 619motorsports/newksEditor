@@ -1,6 +1,7 @@
 #include "apex/app/authoring_service.hpp"
 #include "apex/app/presentation_recreation.hpp"
 #include "apex/app/workspace_selection.hpp"
+#include "apex/app/workspace_shadow_programs.hpp"
 #include "apex/app/workspace_viewport.hpp"
 #include "apex/assets/asset_source.hpp"
 #include "apex/core/parse_error.hpp"
@@ -62,6 +63,8 @@ void usage(std::ostream& output) {
               "                       [--authoring-overlay-vertex <file> --authoring-overlay-fragment <file>]\n"
               "                       [--selected-mesh-vertex <file> --selected-mesh-fragment <file>]\n"
               "                       [--directional-shadow-vertex <file>]\n"
+              "                       [--directional-shadow-alpha-vertex <file> --directional-shadow-alpha-fragment <file>]\n"
+              "                       [--directional-shadow-skinned-vertex <file>]\n"
            << "  apex-native --inspect-kn5 <file>\n"
            << "  apex-native --inspect-dds <file>\n"
            << "  apex-native --inspect-acd <asset-directory-name> <file>\n"
@@ -545,7 +548,18 @@ struct WindowWorkspaceOptions {
     std::optional<std::filesystem::path> selectedMeshVertex;
     std::optional<std::filesystem::path> selectedMeshFragment;
     std::optional<std::filesystem::path> directionalShadowVertex;
+    std::optional<std::filesystem::path> directionalShadowAlphaVertex;
+    std::optional<std::filesystem::path> directionalShadowAlphaFragment;
+    std::optional<std::filesystem::path> directionalShadowSkinnedVertex;
 };
+
+bool has_directional_shadow_modules(
+    const WindowWorkspaceOptions& options) noexcept {
+    return options.directionalShadowVertex.has_value() ||
+           options.directionalShadowAlphaVertex.has_value() ||
+           options.directionalShadowAlphaFragment.has_value() ||
+           options.directionalShadowSkinnedVertex.has_value();
+}
 
 struct LoadedWindowWorkspace {
     std::optional<apex::app::WorkspaceSessionDocument> document;
@@ -752,6 +766,24 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
                     "duplicate --directional-shadow-vertex option");
             result.directionalShadowVertex = std::filesystem::path(
                 require_value("--directional-shadow-vertex"));
+        } else if (option == "--directional-shadow-alpha-vertex") {
+            if (result.directionalShadowAlphaVertex.has_value())
+                throw std::runtime_error(
+                    "duplicate --directional-shadow-alpha-vertex option");
+            result.directionalShadowAlphaVertex = std::filesystem::path(
+                require_value("--directional-shadow-alpha-vertex"));
+        } else if (option == "--directional-shadow-alpha-fragment") {
+            if (result.directionalShadowAlphaFragment.has_value())
+                throw std::runtime_error(
+                    "duplicate --directional-shadow-alpha-fragment option");
+            result.directionalShadowAlphaFragment = std::filesystem::path(
+                require_value("--directional-shadow-alpha-fragment"));
+        } else if (option == "--directional-shadow-skinned-vertex") {
+            if (result.directionalShadowSkinnedVertex.has_value())
+                throw std::runtime_error(
+                    "duplicate --directional-shadow-skinned-vertex option");
+            result.directionalShadowSkinnedVertex = std::filesystem::path(
+                require_value("--directional-shadow-skinned-vertex"));
         } else if (option == "--selection-axis-vertex" ||
                    option == "--authoring-overlay-vertex") {
             if (result.authoringOverlayVertex.has_value())
@@ -802,7 +834,7 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
         }
     }
     if ((!result.model.has_value() && !result.workspaceRoot.has_value()) &&
-        (!result.shaders.empty() || result.directionalShadowVertex.has_value() ||
+        (!result.shaders.empty() || has_directional_shadow_modules(result) ||
          result.authoringOverlayVertex.has_value() ||
          result.authoringOverlayFragment.has_value() ||
          result.selectedMeshVertex.has_value() ||
@@ -831,9 +863,19 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
         !result.selectedNode.has_value())
         throw std::runtime_error(
             "selected-mesh shader modules require --selected-node");
-    if (result.directionalShadowVertex.has_value() && result.shaders.empty())
+    if (result.directionalShadowAlphaVertex.has_value() !=
+        result.directionalShadowAlphaFragment.has_value())
         throw std::runtime_error(
-            "--directional-shadow-vertex requires receiver-capable material shader modules");
+            "directional-shadow alpha vertex and fragment modules must be supplied together");
+    if (has_directional_shadow_modules(result) && result.shaders.empty()) {
+        if (result.directionalShadowVertex.has_value() &&
+            !result.directionalShadowAlphaVertex.has_value() &&
+            !result.directionalShadowSkinnedVertex.has_value())
+            throw std::runtime_error(
+                "--directional-shadow-vertex requires receiver-capable material shader modules");
+        throw std::runtime_error(
+            "directional-shadow modules require receiver-capable material shader modules");
+    }
     if (result.rpmSpecified && !result.analogInstruments.has_value())
         throw std::runtime_error("--rpm requires --analog-instruments");
     if (result.analogInstruments.has_value() &&
@@ -1070,43 +1112,74 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
         }
         loaded.selectedMeshModules = std::move(modules);
     }
-    if (options.directionalShadowVertex.has_value()) {
-        auto shadow_bytes = read_file(*options.directionalShadowVertex);
-        if (shadow_bytes.size() > apex::render::max_shader_module_bytes)
-            throw std::runtime_error(
-                "the directional shadow module exceeds the native module budget");
-        if (shadow_bytes.size() > max_shader_bytes ||
-            shader_bytes > max_shader_bytes - shadow_bytes.size())
-            throw std::runtime_error(
-                "caller-supplied shader modules exceed the native shader budget");
-        shader_bytes += shadow_bytes.size();
-
-        apex::render::PipelineProgram pipeline;
-        pipeline.name = "workspace-opaque-directional-shadow";
-        pipeline.shaders.push_back({
-            apex::render::PipelineShaderStage::vertex, shader_format,
-            std::move(shadow_bytes)});
-        pipeline.vertex_layout.stride = 11U * sizeof(float);
-        pipeline.vertex_layout.attributes = {
-            {apex::render::PipelineVertexSemantic::position,
-             apex::render::PipelineVertexAttributeFormat::float32x3, 0U, 0U},
-            {apex::render::PipelineVertexSemantic::normal,
-             apex::render::PipelineVertexAttributeFormat::float32x3, 1U, 12U},
-            {apex::render::PipelineVertexSemantic::texcoord0,
-             apex::render::PipelineVertexAttributeFormat::float32x2, 2U, 24U},
-            {apex::render::PipelineVertexSemantic::tangent,
-             apex::render::PipelineVertexAttributeFormat::float32x3, 3U, 32U},
-        };
-        pipeline.targets.has_depth = true;
-        pipeline.targets.depth = {
-            apex::render::PipelineRenderTargetFormat::depth32_float, 1U};
-        pipeline.depth.test_enabled = true;
-        pipeline.depth.write_enabled = true;
-        pipeline.depth.compare = apex::render::PipelineCompareOperation::less;
-        pipeline.transform_contract =
-            apex::render::PipelineTransformContract::draw_matrices;
+    if (has_directional_shadow_modules(options)) {
+        const auto load_shadow_module =
+            [&](const std::filesystem::path& path,
+                apex::render::PipelineShaderStage stage,
+                std::string_view role) {
+                auto bytes = read_file(path);
+                if (bytes.size() > apex::render::max_shader_module_bytes)
+                    throw std::runtime_error(
+                        "the directional-shadow " + std::string(role) +
+                        " module exceeds the native module budget");
+                if (bytes.size() > max_shader_bytes ||
+                    shader_bytes > max_shader_bytes - bytes.size())
+                    throw std::runtime_error(
+                        "caller-supplied shader modules exceed the native shader budget");
+                shader_bytes += bytes.size();
+                return apex::render::PipelineShaderModule{
+                    stage, shader_format, std::move(bytes)};
+            };
+        const auto build_shadow_pipeline =
+            [](std::string name,
+               std::vector<apex::render::PipelineShaderModule> modules,
+               apex::render::DepthOnlyIndexedPipelineRole role) {
+                auto built = apex::app::buildWorkspaceShadowPipeline(
+                    std::move(name), std::move(modules), role);
+                if (!built.ok())
+                    throw std::runtime_error(
+                        "directional-shadow pipeline contract: " +
+                        built.diagnostic.code + ": " +
+                        built.diagnostic.message);
+                return std::move(*built.pipeline);
+            };
         apex::app::WorkspaceViewportDirectionalShadowOptions shadows;
-        shadows.opaque_pipeline = std::move(pipeline);
+        if (options.directionalShadowVertex.has_value()) {
+            std::vector<apex::render::PipelineShaderModule> modules;
+            modules.push_back(load_shadow_module(
+                *options.directionalShadowVertex,
+                apex::render::PipelineShaderStage::vertex,
+                "opaque vertex"));
+            shadows.opaque_pipeline = build_shadow_pipeline(
+                "workspace-opaque-directional-shadow", std::move(modules),
+                apex::render::DepthOnlyIndexedPipelineRole::opaque_static);
+        }
+        if (options.directionalShadowAlphaVertex.has_value()) {
+            std::vector<apex::render::PipelineShaderModule> modules;
+            modules.push_back(load_shadow_module(
+                *options.directionalShadowAlphaVertex,
+                apex::render::PipelineShaderStage::vertex,
+                "alpha-tested vertex"));
+            modules.push_back(load_shadow_module(
+                *options.directionalShadowAlphaFragment,
+                apex::render::PipelineShaderStage::fragment,
+                "alpha-tested fragment"));
+            shadows.alpha_static_pipeline = build_shadow_pipeline(
+                "workspace-alpha-tested-directional-shadow",
+                std::move(modules),
+                apex::render::DepthOnlyIndexedPipelineRole::
+                    stock_alpha_tested_static);
+        }
+        if (options.directionalShadowSkinnedVertex.has_value()) {
+            std::vector<apex::render::PipelineShaderModule> modules;
+            modules.push_back(load_shadow_module(
+                *options.directionalShadowSkinnedVertex,
+                apex::render::PipelineShaderStage::vertex,
+                "skinned vertex"));
+            shadows.skinned_pipeline = build_shadow_pipeline(
+                "workspace-skinned-directional-shadow", std::move(modules),
+                apex::render::DepthOnlyIndexedPipelineRole::skinned);
+        }
         loaded.directionalShadows = std::move(shadows);
     }
     loaded.descriptors.reserve(loaded.shaderSets.size());
