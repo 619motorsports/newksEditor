@@ -763,6 +763,8 @@ private:
         return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
     case TextureFormat::r8_unorm:
         return DXGI_FORMAT_R8_UNORM;
+    case TextureFormat::r32_sfloat:
+        return DXGI_FORMAT_R32_FLOAT;
     case TextureFormat::r5g6b5_unorm:
         return DXGI_FORMAT_B5G6R5_UNORM;
     case TextureFormat::bc1_unorm:
@@ -824,7 +826,7 @@ private:
     if ((support1 & required) != required ||
         (mip_levels > 1U && (support1 & static_cast<UINT>(D3D12_FORMAT_SUPPORT1_MIP)) == 0U)) {
         diagnostic = {"d3d12_texture_format_unsupported",
-                      "The D3D12 adapter does not support the requested BC1, BC2, BC3, BC4, BC5, BC6H, or BC7 sampled texture format"};
+                      "The D3D12 adapter does not support the requested sampled texture format"};
         return false;
     }
     return true;
@@ -5083,6 +5085,10 @@ public:
                     context_, dxgi_texture_format(description.format), description.mip_levels, diagnostic))
                 return {TextureStatus::unsupported, std::move(diagnostic), nullptr};
         }
+        if (description.format == TextureFormat::r32_sfloat &&
+            !validate_d3d12_texture_format_support(
+                context_, dxgi_texture_format(description.format), description.mip_levels, diagnostic))
+            return {TextureStatus::unsupported, std::move(diagnostic), nullptr};
         if (description.samples != 1U) {
             const std::uint32_t usage = static_cast<std::uint32_t>(description.usage);
             const std::uint32_t required_usage =

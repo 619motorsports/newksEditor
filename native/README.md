@@ -199,6 +199,9 @@ RGBA8/BGRA8 texture clears and canonical RGBA8 readback. They also validate a
 pipeline and execute fixed and indexed R16 static-mesh draws with readback.
 The device API uploads immutable, one-layer BC1, BC2, BC3, BC4 UNORM,
 BC5 UNORM, BC5 SNORM, BC6H, and BC7 sampled textures.
+It also uploads legacy D3DFMT_R32F DDS payloads as exact R32_SFLOAT sampled
+textures. This scalar path keeps the source float bits. It does not convert
+them to RGBA8 or expose them through an RGB material binding.
 The owned static-scene path uploads bounded PNG decodes as RGBA8 UNORM.
 It validates each block row before allocation. Vulkan and D3D12 query format
 support before they create a compressed image. BC4 SNORM remains outside this
@@ -361,7 +364,9 @@ does not accept BC5. This ABI needs a three-channel sampled normal. Its shader
 does not reconstruct Z.
 The BC7 pixel test needs a supported Vulkan device or a Windows D3D12 device.
 BC6H requires a capable GPU because no portable CPU decoder is available. The
-upload planner supports DX10 2D arrays, cubemaps, and RGB24 conversion. The
+upload planner supports DX10 2D arrays, cubemaps, RGB24 conversion, and direct
+legacy D3DFMT_R32F upload. R32F remains GPU-only for decode and generic
+sampled-only for resource use. The
 embedded static-scene mode rejects
 arrays, cubemaps, 1D/3D textures, BC6H, and legacy D3D9 float textures.
 The maps path rejects sRGB payloads before backend allocation. Source, decoded,

@@ -18,6 +18,7 @@ constexpr std::uint32_t MAX_DIMENSION = 32768u;
 // into the renderer boundary.
 constexpr std::uint32_t VK_FORMAT_R5G6B5_UNORM_PACK16 = 4u;
 constexpr std::uint32_t VK_FORMAT_R8_UNORM = 9u;
+constexpr std::uint32_t VK_FORMAT_R32_SFLOAT = 100u;
 constexpr std::uint32_t VK_FORMAT_R8G8B8A8_UNORM = 37u;
 constexpr std::uint32_t VK_FORMAT_R8G8B8A8_SRGB = 43u;
 constexpr std::uint32_t VK_FORMAT_B8G8R8A8_UNORM = 44u;
@@ -39,6 +40,7 @@ constexpr std::uint32_t VK_FORMAT_BC7_SRGB_BLOCK = 146u;
 
 // Values from the Windows 10 DXGI_FORMAT enum (dxgiformat.h).
 constexpr std::uint32_t DXGI_FORMAT_R8_UNORM = 61u;
+constexpr std::uint32_t DXGI_FORMAT_R32_FLOAT = 41u;
 constexpr std::uint32_t DXGI_FORMAT_B5G6R5_UNORM = 85u;
 constexpr std::uint32_t DXGI_FORMAT_R8G8B8A8_UNORM = 28u;
 constexpr std::uint32_t DXGI_FORMAT_R8G8B8A8_UNORM_SRGB = 29u;
@@ -158,6 +160,7 @@ constexpr std::uint32_t DXGI_FORMAT_BC7_UNORM_SRGB = 99u;
 [[nodiscard]] std::size_t bytesPerPixel(TextureFormat format) noexcept {
     switch (format) {
     case TextureFormat::r8_unorm: return 1u;
+    case TextureFormat::r32_sfloat: return 4u;
     case TextureFormat::r5g6b5_unorm: return 2u;
     case TextureFormat::rgba8_unorm:
     case TextureFormat::rgba8_srgb:
@@ -184,6 +187,7 @@ constexpr std::uint32_t DXGI_FORMAT_BC7_UNORM_SRGB = 99u;
 const char* textureFormatName(TextureFormat format) noexcept {
     switch (format) {
     case TextureFormat::r8_unorm: return "R8_UNORM";
+    case TextureFormat::r32_sfloat: return "R32_SFLOAT";
     case TextureFormat::r5g6b5_unorm: return "R5G6B5_UNORM";
     case TextureFormat::rgba8_unorm: return "RGBA8_UNORM";
     case TextureFormat::rgba8_srgb: return "RGBA8_SRGB";
@@ -250,6 +254,12 @@ TextureFormatMappingResult mapDdsTextureFormat(const apex::formats::DdsDescripto
         if (descriptor.dxgi == DXGI_FORMAT_R8G8B8A8_UNORM || isRgbaMask(descriptor))
             return mapped(TextureFormat::rgba8_unorm, VK_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, false, false);
         return mappingFailure("unsupported_format", "masked 32-bit DDS is not a canonical RGBA8 or BGRA8 texture");
+    case DdsFormat::LegacyFloat:
+        if (descriptor.legacyFourCC == 114u && descriptor.bitsPerPixel == 32u)
+            return mapped(TextureFormat::r32_sfloat, VK_FORMAT_R32_SFLOAT,
+                          DXGI_FORMAT_R32_FLOAT, false, false, true);
+        return mappingFailure("unsupported_format",
+                              "Only legacy D3DFMT_R32F DDS payloads have an exact native upload path");
     case DdsFormat::BC1:
         if (descriptor.dxgi == 0u || descriptor.dxgi == DXGI_FORMAT_BC1_UNORM)
             return mapped(TextureFormat::bc1_unorm, VK_FORMAT_BC1_RGBA_UNORM_BLOCK, DXGI_FORMAT_BC1_UNORM, true, false);

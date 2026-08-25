@@ -48,6 +48,17 @@ std::vector<std::uint8_t> legacyBc(std::string_view tag, std::uint32_t width,
     return bytes;
 }
 
+std::vector<std::uint8_t> legacyFloat(std::uint32_t fourCC, std::uint32_t width,
+                                      std::uint32_t height, std::size_t payloadBytes,
+                                      std::uint32_t pitch = 0u) {
+    std::vector<std::uint8_t> bytes(128u + payloadBytes, 0);
+    put32(bytes, 0, 0x20534444u); put32(bytes, 4, 124u); put32(bytes, 12, height);
+    put32(bytes, 16, width); put32(bytes, 20, pitch == 0u ? width * 4u : pitch);
+    put32(bytes, 28, 1u); put32(bytes, 76, 32u); put32(bytes, 80, 4u);
+    put32(bytes, 84, fourCC);
+    return bytes;
+}
+
 std::vector<std::uint8_t> raw(std::uint32_t width, std::uint32_t height,
                               std::uint32_t mipCount, std::uint32_t bits,
                               std::array<std::uint32_t, 4> masks, std::size_t payloadBytes,
@@ -147,6 +158,49 @@ void mapsPortableAndSdkFormats() {
                 rgb24Plan.plan->subresources[0].convertedRowPitch == 8u &&
                 rgb24Plan.plan->subresources[0].convertedSize == 8u,
             "exact RGB24-to-RGBA8 conversion");
+}
+
+void plansLegacyR32FWithoutApproximation() {
+    auto r32f = legacyFloat(114u, 5u, 3u, 72u, 24u);
+    // Keep non-finite bit patterns byte-for-byte. The upload planner validates
+    // layout only and must not invent a scalar sanitization policy.
+    r32f[128u] = 0x00u; r32f[129u] = 0x00u;
+    r32f[130u] = 0x80u; r32f[131u] = 0x7fu;
+    const auto descriptor = apex::formats::inspectDds(r32f);
+    require(descriptor.has_value() && descriptor->format == DdsFormat::LegacyFloat &&
+                descriptor->legacyFourCC == 114u && descriptor->bitsPerPixel == 32u &&
+                descriptor->gpuRequired,
+            "legacy R32F inspection");
+    const auto mapping = mapDdsTextureFormat(*descriptor);
+    require(mapping.ok() && mapping.mapping->format == TextureFormat::r32_sfloat &&
+                mapping.mapping->vulkanFormat == 100u &&
+                mapping.mapping->dxgiFormat == 41u &&
+                mapping.mapping->signedChannels && !mapping.mapping->cpuConversion,
+            "legacy R32F exact native mapping");
+    const auto plan = buildDdsUploadPlan(r32f, *descriptor, "legacy-r32f.dds");
+    require(plan.ok() && plan.plan->subresources.size() == 1u &&
+                plan.plan->subresources.front().offset == 128u &&
+                plan.plan->subresources.front().rowPitch == 24u &&
+                plan.plan->subresources.front().rowCount == 3u &&
+                plan.plan->subresources.front().size == 72u &&
+                plan.plan->payloadBytes == 72u && plan.plan->convertedPayload.empty(),
+            "legacy R32F padded-row upload plan");
+
+    const auto truncated = legacyFloat(114u, 5u, 3u, 71u, 24u);
+    const auto truncatedPlan = buildDdsUploadPlan(truncated, "truncated-r32f.dds");
+    require(!truncatedPlan.ok() && !truncatedPlan.plan.has_value() &&
+                truncatedPlan.status == TextureUploadStatus::invalid &&
+                truncatedPlan.diagnostic.code == "truncated_payload" &&
+                truncatedPlan.diagnostic.offset == 128u &&
+                truncatedPlan.diagnostic.source == "truncated-r32f.dds",
+            "truncated legacy R32F payload rejection");
+
+    for (const std::uint32_t unsupportedFourCC : {111u, 112u, 113u, 115u, 116u}) {
+        const auto other = apex::formats::inspectDds(
+            legacyFloat(unsupportedFourCC, 1u, 1u, 16u));
+        require(other.has_value() && !mapDdsTextureFormat(*other).ok(),
+                "neighboring legacy float layout remains unsupported");
+    }
 }
 
 void plansCompressedEdgesAndMips() {
@@ -604,6 +658,7 @@ void rejectsOversizedUploadSubresourceLists() {
 int main() {
     try {
         mapsPortableAndSdkFormats();
+        plansLegacyR32FWithoutApproximation();
         plansCompressedEdgesAndMips();
         plansRawPitches();
         rejectsMalformedPayloadAndLimits();

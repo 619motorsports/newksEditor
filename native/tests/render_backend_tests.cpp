@@ -768,6 +768,19 @@ void contract_texture_limits() {
     require(rgb565_info.classification == TextureFormatClass::uncompressed &&
                 rgb565_info.bytes_per_pixel == 2U && texture_format_bytes_per_pixel(TextureFormat::r5g6b5_unorm) == 2U,
             "RGB565 texture metadata");
+    const auto r32f_info = texture_format_info(TextureFormat::r32_sfloat);
+    require(r32f_info.classification == TextureFormatClass::uncompressed &&
+                r32f_info.bytes_per_pixel == 4U && r32f_info.signed_channels &&
+                texture_format_bytes_per_pixel(TextureFormat::r32_sfloat) == 4U &&
+                !texture_format_is_compressed(TextureFormat::r32_sfloat),
+            "R32_SFLOAT texture metadata");
+    TextureDescription r32f_invalid_usage{
+        1U, 1U, 1U, 1U, TextureFormat::r32_sfloat, TextureUsage::storage,
+        TextureMemory::device_local, TextureMutability::immutable};
+    require(validate_texture_description(r32f_invalid_usage, {}, diagnostic) ==
+                TextureStatus::unsupported &&
+                diagnostic.code == "texture_scalar_float_upload_unsupported",
+            "R32_SFLOAT remains generic sampled-only");
     const auto bc7_info = texture_format_info(TextureFormat::bc7_srgb);
     require(bc7_info.classification == TextureFormatClass::block_compressed && bc7_info.block_width == 4U &&
                 bc7_info.block_height == 4U && bc7_info.block_bytes == 16U && bc7_info.srgb &&
@@ -2470,6 +2483,24 @@ bool contract_backend(apex::render::Backend backend) {
         // BC6H support is adapter-dependent and must remain an explicit result.
     } else {
         require(bc6h_sfloat_texture.ok(), "BC6H SF16 generic sampled texture creation");
+    }
+
+    // R32_SFLOAT is an exact scalar resource. Preserve arbitrary IEEE-754 bit
+    // patterns and make no material-binding or color-conversion claim.
+    const std::array<std::uint32_t, 4> r32f_bits = {
+        0x00000000U, 0x3f800000U, 0x7f800000U, 0x7fc00001U};
+    const TextureDescription r32f_description{
+        2U, 2U, 1U, 1U, TextureFormat::r32_sfloat, TextureUsage::sampled,
+        TextureMemory::device_local, TextureMutability::immutable};
+    const TextureUploadPlan r32f_uploads{{
+        TextureUpload{0U, 0U, 2U, 2U, 8U, std::as_bytes(std::span(r32f_bits))}}};
+    TextureResult r32f_texture = device.device->create_texture(r32f_description, r32f_uploads);
+    if (!r32f_texture.ok() && r32f_texture.status == TextureStatus::unsupported &&
+        (r32f_texture.diagnostic.code == "vulkan_scalar_float_format_unsupported" ||
+         r32f_texture.diagnostic.code == "d3d12_texture_format_unsupported")) {
+        // Scalar sampled-float support is adapter-dependent and remains explicit.
+    } else {
+        require(r32f_texture.ok(), "R32_SFLOAT generic sampled texture creation");
     }
 
     if (backend == Backend::D3D12) {

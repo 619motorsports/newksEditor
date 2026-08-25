@@ -476,6 +476,9 @@ remains unchanged and feature-complete.
   device API directly uploads immutable, one-layer BC1, BC2, BC3, BC4 UNORM,
   BC5 UNORM, BC5 SNORM, BC6H, and BC7 sampled textures. The upload path
   validates compressed block rows before allocation.
+  It maps legacy D3DFMT_R32F DDS data to R32_SFLOAT and keeps the source bits.
+  This exact path is limited to immutable, one-layer sampled resources. It
+  does not add an RGB material binding or a CPU RGBA8 approximation.
   Vulkan and D3D12 query format support before image creation. The generic
   device API accepts BC4 UNORM, BC5 UNORM, and BC5 SNORM uploads. BC4 is scalar
   and remains outside the RGB material bindings. The normal-map ABI remains
@@ -585,7 +588,9 @@ format support. BC5 is also available through the generic device path. The
 normal-map resource ABI remains unchanged. The generic device path uploads
 BC6H UF16 and SF16 blocks on a capable adapter. The checked upload
 planner supports DX10 2D arrays and cubemaps. It also converts legacy RGB24 to
-RGBA8 without a color change. The embedded static-scene path uses the bounded
+RGBA8 without a color change. The generic device path uploads legacy
+D3DFMT_R32F as a scalar R32_SFLOAT texture. Other D3D9 float layouts remain
+unsupported. The embedded static-scene path uses the bounded
 CPU decoder for supported 2D mip chains. Each decode receives the remaining
 aggregate byte budget before it allocates output. Upload plans also reject
 subresource-entry floods before iteration. This path retains the DDS sRGB flag.

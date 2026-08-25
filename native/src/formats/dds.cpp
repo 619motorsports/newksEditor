@@ -541,6 +541,7 @@ std::optional<DdsDescriptor> inspectDds(std::span<const std::uint8_t> bytes, std
             }
         } else {
             const auto legacyFourCcValue = u32(bytes, 84u);
+            descriptor.legacyFourCC = legacyFourCcValue;
             if (legacyFourCcValue >= 111u && legacyFourCcValue <= 116u) {
                 descriptor.format = DdsFormat::LegacyFloat;
                 descriptor.compressed = false;

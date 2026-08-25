@@ -46,6 +46,9 @@ struct DdsDescriptor {
     std::uint32_t bitsPerPixel = 0;
     std::array<std::uint32_t, 4> masks{};
     std::uint32_t dxgi = 0;
+    // Numeric D3D9 FOURCC value from the legacy pixel-format header. This is
+    // required for formats such as D3DFMT_R32F (114), whose tag is not text.
+    std::uint32_t legacyFourCC = 0;
     // DX10 extension metadata. A zero resource dimension means legacy DDS;
     // nonzero values are D3D10_RESOURCE_DIMENSION enum values.
     std::uint32_t resourceDimension = 0;

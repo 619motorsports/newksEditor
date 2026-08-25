@@ -93,6 +93,18 @@ TextureStatus validate_texture_block_upload_contract(const TextureDescription& d
     return TextureStatus::ready;
 }
 
+TextureStatus validate_texture_scalar_float_contract(const TextureDescription& description,
+                                                      Diagnostic& diagnostic) {
+    if (description.format != TextureFormat::r32_sfloat) return TextureStatus::ready;
+    if (description.samples != 1U || description.mutability != TextureMutability::immutable ||
+        description.array_layers != 1U || description.usage != TextureUsage::sampled) {
+        diagnostic = {"texture_scalar_float_upload_unsupported",
+                      "R32_SFLOAT textures require one-layer, one-sample immutable sampled resources"};
+        return TextureStatus::unsupported;
+    }
+    return TextureStatus::ready;
+}
+
 bool texture_upload_layout(TextureFormat format, std::uint32_t width, std::uint32_t height,
                            std::uint64_t& row_bytes, std::uint64_t& row_count,
                            std::uint64_t& level_bytes) noexcept {
@@ -320,6 +332,9 @@ TextureStatus validate_texture_upload_plan(const TextureDescription& description
     }
     const TextureStatus block_status = validate_texture_block_upload_contract(description, diagnostic);
     if (block_status != TextureStatus::ready) return block_status;
+    const TextureStatus scalar_float_status =
+        validate_texture_scalar_float_contract(description, diagnostic);
+    if (scalar_float_status != TextureStatus::ready) return scalar_float_status;
     std::uint32_t largest_dimension = std::max(description.width, description.height);
     std::uint32_t possible_mips = 1U;
     while (largest_dimension > 1U) {
@@ -437,6 +452,9 @@ TextureStatus validate_texture_description(const TextureDescription& description
     }
     const TextureStatus block_status = validate_texture_block_upload_contract(description, diagnostic);
     if (block_status != TextureStatus::ready) return block_status;
+    const TextureStatus scalar_float_status =
+        validate_texture_scalar_float_contract(description, diagnostic);
+    if (scalar_float_status != TextureStatus::ready) return scalar_float_status;
     if (texture_format_is_compressed(description.format) &&
         initial_uploads.subresources.size() !=
             static_cast<std::size_t>(description.mip_levels) * description.array_layers) {

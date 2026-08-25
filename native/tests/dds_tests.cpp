@@ -53,6 +53,16 @@ std::vector<std::uint8_t> legacyBcDds(std::string_view tag, std::vector<std::uin
     return bytes;
 }
 
+std::vector<std::uint8_t> legacyFloatDds(std::uint32_t fourCC,
+                                         std::vector<std::uint8_t> payload) {
+    std::vector<std::uint8_t> bytes(128u + payload.size(), 0);
+    put32(bytes, 0, 0x20534444u); put32(bytes, 4, 124u); put32(bytes, 12, 1u);
+    put32(bytes, 16, 1u); put32(bytes, 20, 4u); put32(bytes, 28, 1u);
+    put32(bytes, 76, 32u); put32(bytes, 80, 4u); put32(bytes, 84, fourCC);
+    std::copy(payload.begin(), payload.end(), bytes.begin() + 128);
+    return bytes;
+}
+
 std::vector<std::uint8_t> dx10Dds(std::uint32_t width, std::uint32_t height,
                                   std::uint32_t dxgi, std::vector<std::uint8_t> payload,
                                   std::uint32_t resourceDimension = 3u,
@@ -204,18 +214,42 @@ void recognizesGpuOnlyFormatsWithoutCpuApproximation() {
     require(bgraDescriptor.has_value() && bgraDescriptor->srgb && bgraDescriptor->dxgi == 91u,
             "DX10 BGRA8 sRGB metadata preserved");
 
-    auto legacyFloat = std::vector<std::uint8_t>(144u, 0u);
-    put32(legacyFloat, 0, 0x20534444u); put32(legacyFloat, 4, 124u); put32(legacyFloat, 12, 1u);
-    put32(legacyFloat, 16, 1u); put32(legacyFloat, 28, 1u); put32(legacyFloat, 76, 32u);
-    put32(legacyFloat, 80, 4u); put32(legacyFloat, 84, 116u);
+    const auto legacyFloat = legacyFloatDds(116u, std::vector<std::uint8_t>(16u));
     const auto legacyFloatDescriptor = inspectDds(legacyFloat);
     require(legacyFloatDescriptor.has_value() && legacyFloatDescriptor->format == DdsFormat::LegacyFloat &&
+                legacyFloatDescriptor->legacyFourCC == 116u &&
                 !legacyFloatDescriptor->compressed && legacyFloatDescriptor->gpuRequired,
             "legacy float DDS remains explicit GPU_REQUIRED metadata");
     expectsParseError([&] { (void)decodeDdsRgba(legacyFloat, *legacyFloatDescriptor); }, "GPU_REQUIRED");
+
+    const auto r32Float = legacyFloatDds(114u, {0u, 0u, 128u, 63u});
+    const auto r32FloatDescriptor = inspectDds(r32Float);
+    require(r32FloatDescriptor.has_value() &&
+                r32FloatDescriptor->format == DdsFormat::LegacyFloat &&
+                r32FloatDescriptor->legacyFourCC == 114u &&
+                r32FloatDescriptor->bitsPerPixel == 32u &&
+                r32FloatDescriptor->gpuRequired,
+            "legacy R32F DDS preserves its numeric FOURCC");
+    expectsParseError([&] { (void)decodeDdsRgba(r32Float, *r32FloatDescriptor); },
+                      "GPU_REQUIRED");
 }
 
 void rejectsMalformedAndTruncatedInputs() {
+    const auto legacyR32F = legacyFloatDds(114u, {0u, 0u, 128u, 63u});
+    for (std::size_t length = 0; length < 128u; ++length) {
+        const std::vector<std::uint8_t> prefix(
+            legacyR32F.begin(), legacyR32F.begin() + static_cast<std::ptrdiff_t>(length));
+        require(!inspectDds(prefix).has_value(), "truncated legacy R32F header accepted");
+    }
+    auto malformedLegacyFloat = legacyR32F;
+    put32(malformedLegacyFloat, 84u, 117u);
+    const auto malformedLegacyDescriptor = inspectDds(malformedLegacyFloat);
+    require(malformedLegacyDescriptor.has_value() &&
+                malformedLegacyDescriptor->format == DdsFormat::Unknown &&
+                malformedLegacyDescriptor->legacyFourCC == 117u &&
+                malformedLegacyDescriptor->gpuRequired,
+            "unknown numeric FOURCC remains explicit unsupported metadata");
+
     const auto valid = legacyBcDds("DXT1", {0, 0xf8u, 0xe0u, 0x07u, 0, 0, 0, 0});
     for (std::size_t length = 0; length < valid.size(); ++length) {
         const std::vector<std::uint8_t> prefix(valid.begin(), valid.begin() + static_cast<std::ptrdiff_t>(length));

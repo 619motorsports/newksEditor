@@ -772,6 +772,8 @@ VkFormat vk_texture_format(TextureFormat format) {
         return VK_FORMAT_B8G8R8A8_SRGB;
     case TextureFormat::r8_unorm:
         return VK_FORMAT_R8_UNORM;
+    case TextureFormat::r32_sfloat:
+        return VK_FORMAT_R32_SFLOAT;
     case TextureFormat::r5g6b5_unorm:
         return VK_FORMAT_R5G6B5_UNORM_PACK16;
     case TextureFormat::bc1_unorm:
@@ -819,10 +821,15 @@ bool validate_vulkan_texture_format_capabilities(const std::shared_ptr<VulkanCon
                                                  const TextureDescription& description,
                                                  VkFormat format,
                                                  Diagnostic& diagnostic) {
-    if (!vk_supported_block_upload_format(description.format)) return true;
+    const bool compressed = vk_supported_block_upload_format(description.format);
+    const bool scalar_float = description.format == TextureFormat::r32_sfloat;
+    if (!compressed && !scalar_float) return true;
     if (description.samples != 1U) {
-        diagnostic = {"vulkan_compressed_samples_unsupported",
-                      "Vulkan BC1, BC2, BC3, BC4, BC5, BC6H, and BC7 uploads require a single-sample texture"};
+        diagnostic = {compressed ? "vulkan_compressed_samples_unsupported"
+                                 : "vulkan_scalar_float_samples_unsupported",
+                      compressed
+                          ? "Vulkan BC1, BC2, BC3, BC4, BC5, BC6H, and BC7 uploads require a single-sample texture"
+                          : "Vulkan R32_SFLOAT uploads require a single-sample texture"};
         return false;
     }
     VkFormatProperties properties{};
@@ -838,8 +845,11 @@ bool validate_vulkan_texture_format_capabilities(const std::shared_ptr<VulkanCon
     if ((usage & static_cast<std::uint32_t>(TextureUsage::storage)) != 0U)
         required |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
     if ((properties.optimalTilingFeatures & required) != required) {
-        diagnostic = {"vulkan_compressed_format_unsupported",
-                      "The Vulkan device does not support the requested BC1, BC2, BC3, BC4, BC5, BC6H, or BC7 texture usage"};
+        diagnostic = {compressed ? "vulkan_compressed_format_unsupported"
+                                 : "vulkan_scalar_float_format_unsupported",
+                      compressed
+                          ? "The Vulkan device does not support the requested BC1, BC2, BC3, BC4, BC5, BC6H, or BC7 texture usage"
+                          : "The Vulkan device does not support the requested R32_SFLOAT texture usage"};
         return false;
     }
     return true;

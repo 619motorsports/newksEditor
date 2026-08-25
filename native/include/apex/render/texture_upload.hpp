@@ -88,7 +88,8 @@ struct DdsUploadPlanResult {
 
 // Map source DDS metadata to portable format and authoritative SDK numeric
 // constants. 24-bit RGB is converted exactly from its source masks to RGBA8
-// in the bounded upload plan; legacy floating-point layouts remain unsupported.
+// in the bounded upload plan. Legacy D3DFMT_R32F payloads map directly to a
+// scalar native texture. Other legacy floating-point layouts remain unsupported.
 // No Vulkan or DirectX headers are required by this function.
 [[nodiscard]] TextureFormatMappingResult mapDdsTextureFormat(
     const apex::formats::DdsDescriptor& descriptor);

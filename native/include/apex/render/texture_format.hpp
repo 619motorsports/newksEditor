@@ -10,6 +10,7 @@ namespace apex::render {
 enum class TextureFormat : std::uint8_t {
     unknown,
     r8_unorm,
+    r32_sfloat,
     r5g6b5_unorm,
     rgba8_unorm,
     rgba8_srgb,
@@ -53,6 +54,7 @@ struct TextureFormatInfo {
 [[nodiscard]] constexpr TextureFormatInfo texture_format_info(TextureFormat format) noexcept {
     switch (format) {
     case TextureFormat::r8_unorm: return {TextureFormatClass::uncompressed, 1, 0, 0, 0, false, false};
+    case TextureFormat::r32_sfloat: return {TextureFormatClass::uncompressed, 4, 0, 0, 0, false, true};
     case TextureFormat::r5g6b5_unorm: return {TextureFormatClass::uncompressed, 2, 0, 0, 0, false, false};
     case TextureFormat::rgba8_unorm: return {TextureFormatClass::uncompressed, 4, 0, 0, 0, false, false};
     case TextureFormat::rgba8_srgb: return {TextureFormatClass::uncompressed, 4, 0, 0, 0, true, false};
