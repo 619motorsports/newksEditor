@@ -319,6 +319,8 @@ void ignoresMissingOptionalAnimationCurveLinks() {
             "missing optional FBX animation curve link is diagnosed");
 
     auto malformed = document;
+    malformed.roots[1].children.back().properties[0].values[1] = std::int64_t(503);
+    malformed.roots[1].children.back().properties[0].values.pop_back();
     malformed.roots[1].children.back().properties[0].values.pop_back();
     expectsError([&] { (void)apex::formats::convertFbxScene(malformed); },
                  "invalid_connection");
