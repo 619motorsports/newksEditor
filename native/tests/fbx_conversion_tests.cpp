@@ -25,6 +25,9 @@ void require(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
 }
 
+template <typename Function>
+void expectsError(Function&& function, std::string_view code);
+
 FbxNode node(std::string name, std::vector<FbxValue> values = {}, std::vector<FbxNode> children = {}) {
     FbxNode result;
     result.name = std::move(name);
@@ -86,6 +89,30 @@ FbxDocument seamFixture() {
         FbxArray{std::vector<double>{0.0, 0.0, 1.0, 0.0, 1.0, 1.0,
                                      0.25, 0.5, 0.5, 1.0, 0.0, 1.0}},
         FbxArray{std::vector<std::int64_t>{0, 1, 2, 3, 4, 5}});
+    return document;
+}
+
+FbxDocument animationFixture() {
+    auto document = fixture();
+    auto& objects = document.roots[0];
+    auto& connections = document.roots[1];
+    objects.children.push_back(node("AnimationStack", {
+        std::int64_t(500), std::string("AnimationStack::Take 001"), std::string("AnimationStack")}, {
+        propertyNode("LocalStart", {std::int64_t(0)}),
+        propertyNode("LocalStop", {std::int64_t(100)})}));
+    objects.children.push_back(node("AnimationLayer", {
+        std::int64_t(501), std::string("AnimationLayer::BaseLayer"), std::string("AnimationLayer")}));
+    objects.children.push_back(node("AnimationCurveNode", {
+        std::int64_t(502), std::string("AnimationCurveNode::T"), std::string("AnimationCurveNode")}));
+    objects.children.push_back(node("AnimationCurve", {
+        std::int64_t(503), std::string("AnimationCurve::TX"), std::string("AnimationCurve")}, {
+        propertyNode("KeyTime", {FbxArray{std::vector<std::int64_t>{0, 100}}}),
+        propertyNode("KeyValueFloat", {FbxArray{std::vector<float>{0.0F, 10.0F}}}),
+        propertyNode("KeyAttrFlags", {FbxArray{std::vector<std::int64_t>{4, 4}}})}));
+    connections.children.push_back(node("C", {std::string("OO"), std::int64_t(501), std::int64_t(500)}));
+    connections.children.push_back(node("C", {std::string("OO"), std::int64_t(502), std::int64_t(501)}));
+    connections.children.push_back(node("C", {std::string("OP"), std::int64_t(502), std::int64_t(200), std::string("Lcl Translation")}));
+    connections.children.push_back(node("C", {std::string("OP"), std::int64_t(503), std::int64_t(502), std::string("d|X")}));
     return document;
 }
 
@@ -157,6 +184,95 @@ void convertsUvSeamsAndFlipsV() {
                 result.meshes[0].positions[2] == result.meshes[0].positions[11] &&
                 result.meshes[0].uvs[0] != result.meshes[0].uvs[6],
             "FBX UV seam duplicates shared position with a distinct UV");
+}
+
+void convertsBoundedLinearAnimationToKsanimV2() {
+    const auto result = apex::formats::convertFbxScene(animationFixture());
+    require(result.animations.size() == 1u, "FBX linear animation stack converts to one clip");
+    const auto& clip = result.animations.front();
+    require(clip.animation.version == 2u && clip.animation.frameCount == 100u &&
+                clip.source_track_count == 1u && clip.animation.tracks.size() == 1u &&
+                clip.animation.tracks.front().frames.size() == 100u,
+            "FBX animation uses native 100-frame KSANIM v2 shape");
+    const auto& frames = clip.animation.tracks.front().frames;
+    require(std::abs(frames.front().position[0] - 0.0F) < 1e-6F &&
+                std::abs(frames[50].position[0] - 5.0F) < 1e-5F &&
+                std::abs(frames[99].position[0] - 9.9F) < 1e-4F &&
+                frames.front().position[1] == 2.0F && frames.front().position[2] == 3.0F,
+            "FBX animation samples local translation before the end of the span");
+    const auto bytes = apex::formats::serializeKsAnimation(clip.animation);
+    const auto parsed = apex::formats::parseKsAnimation(bytes, "linear.ksanim");
+    require(parsed.version == 2u && parsed.tracks.size() == 1u && parsed.frameCount == 100u,
+            "FBX animation exports and parses as KSANIM v2");
+
+    auto negativeTimeline = animationFixture();
+    negativeTimeline.roots[0].children[3].children[0].properties[0].values[0] =
+        FbxValue{std::int64_t(-100)};
+    negativeTimeline.roots[0].children[3].children[1].properties[0].values[0] =
+        FbxValue{std::int64_t(100)};
+    negativeTimeline.roots[0].children[6].children[0].properties[0].values[0] =
+        FbxValue{FbxArray{std::vector<std::int64_t>{-100, 100}}};
+    const auto negativeResult = apex::formats::convertFbxScene(negativeTimeline);
+    require(negativeResult.animations.size() == 1u &&
+                negativeResult.animations.front().animation.tracks.front().frames.size() == 100u,
+            "FBX animation preserves valid signed timeline ticks");
+}
+
+void rejectsMalformedAnimationCurvesAndUnsupportedInterpolation() {
+    auto mismatch = animationFixture();
+    mismatch.roots[0].children[6].children[1].properties[0].values[0] =
+        FbxValue{FbxArray{std::vector<float>{0.0F}}};
+    expectsError([&] { (void)apex::formats::convertFbxScene(mismatch); }, "invalid_animation");
+
+    auto nonFinite = animationFixture();
+    nonFinite.roots[0].children[6].children[1].properties[0].values[0] =
+        FbxValue{FbxArray{std::vector<float>{0.0F, std::numeric_limits<float>::infinity()}}};
+    expectsError([&] { (void)apex::formats::convertFbxScene(nonFinite); }, "non_finite");
+
+    auto unsupported = animationFixture();
+    unsupported.roots[0].children[6].children.pop_back();
+    const auto unsupportedResult = apex::formats::convertFbxScene(unsupported);
+    require(unsupportedResult.animations.empty() && !unsupportedResult.complete &&
+                std::any_of(unsupportedResult.diagnostics.begin(), unsupportedResult.diagnostics.end(),
+                            [](const auto& diagnostic) { return diagnostic.code == "unsupported_animation_interpolation"; }),
+            "FBX curves without explicit linear flags are rejected explicitly");
+
+    auto fractionalFlags = animationFixture();
+    fractionalFlags.roots[0].children[6].children[2].properties[0].values[0] =
+        FbxValue{FbxArray{std::vector<double>{4.5, 4.0}}};
+    const auto fractionalResult = apex::formats::convertFbxScene(fractionalFlags);
+    require(fractionalResult.animations.empty() && !fractionalResult.complete &&
+                std::any_of(fractionalResult.diagnostics.begin(), fractionalResult.diagnostics.end(),
+                            [](const auto& diagnostic) {
+                                return diagnostic.code == "unsupported_animation_interpolation";
+                            }),
+            "fractional interpolation flags are not truncated to linear flags");
+
+    auto missingCurveLink = animationFixture();
+    missingCurveLink.roots[1].children.pop_back();
+    const auto missingCurveResult = apex::formats::convertFbxScene(missingCurveLink);
+    require(missingCurveResult.animations.empty() && !missingCurveResult.complete &&
+                std::any_of(missingCurveResult.diagnostics.begin(),
+                            missingCurveResult.diagnostics.end(), [](const auto& diagnostic) {
+                                return diagnostic.code == "unsupported_animation_channel";
+                            }),
+            "curve nodes without axis links do not produce partial clips");
+
+    auto duplicateCurveLink = animationFixture();
+    duplicateCurveLink.roots[1].children.push_back(
+        duplicateCurveLink.roots[1].children.back());
+    expectsError([&] { (void)apex::formats::convertFbxScene(duplicateCurveLink); },
+                 "invalid_animation");
+
+    auto keyLimited = animationFixture();
+    auto limits = apex::formats::FbxConversionLimits{};
+    limits.max_animation_keys = 1u;
+    expectsError([&] { (void)apex::formats::convertFbxScene(keyLimited, limits); }, "animation_key_limit");
+
+    auto frameLimited = animationFixture();
+    limits = apex::formats::FbxConversionLimits{};
+    limits.max_animation_frames = 99u;
+    expectsError([&] { (void)apex::formats::convertFbxScene(frameLimited, limits); }, "animation_frame_limit");
 }
 
 template <typename Function>
@@ -362,7 +478,7 @@ void enforcesLimitsAndUnsupportedCapability() {
 
     const auto capability = apex::formats::fbxSceneConversionCapability();
     require(capability.static_geometry && capability.node_transforms && capability.material_assignment &&
-                !capability.skinning && !capability.animation && !capability.images && !capability.layer_mappings,
+                !capability.skinning && capability.animation && !capability.images && !capability.layer_mappings,
             "FBX conversion capability detail");
 }
 
@@ -392,6 +508,8 @@ int main() {
         convertsParsedAsciiTriangle();
         convertsStaticGeometryTransformsAndMaterials();
         convertsUvSeamsAndFlipsV();
+        convertsBoundedLinearAnimationToKsanimV2();
+        rejectsMalformedAnimationCurvesAndUnsupportedInterpolation();
         rejectsInvalidReferencesIndicesAndNonFiniteValues();
         rejectsMalformedAndUnsupportedUvLayers();
         enforcesUvExpansionBudgets();

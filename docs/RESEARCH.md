@@ -2612,6 +2612,17 @@ node. It does not create a second local transform for the same-named mesh.
 track name. It then writes the frame count and 40 bytes for each frame. A frame contains
 one quaternion, one position, and one scale.
 
+The native C++ conversion bridge now exposes a bounded KSANIM v2 slice. It accepts
+only `Lcl Translation`, `Lcl Rotation`, and `Lcl Scaling` channels connected through
+an animation stack/layer, and it samples explicit FBX linear key flags at 100 local
+times using the recovered one-percent, end-exclusive schedule. Curves without an
+explicit linear flag, unsupported properties, missing links, and non-finite or
+non-monotonic key data are diagnosed; they are not silently treated as linear.
+Native pivot evaluation, non-linear interpolation, skinning, and the full SDK object
+selection rule remain outside this C++ slice. The installed GT40 fixture was also
+checked: the current native FBX DOM parser rejects it at offset 92 with a missing
+node terminator, so no native conversion count is claimed from that fixture.
+
 Apex uses the [Three.js FBXLoader](https://threejs.org/docs/pages/FBXLoader.html) for
 portable FBX decoding. The adapter applies the recovered ksEditor rules after the
 loader triangulates the scene. It expands triangle corners to preserve UV and normal

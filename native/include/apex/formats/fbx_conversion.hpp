@@ -1,6 +1,7 @@
 #pragma once
 
 #include "apex/formats/fbx.hpp"
+#include "apex/formats/ksanim.hpp"
 #include "apex/scene/scene.hpp"
 
 #include <array>
@@ -34,6 +35,17 @@ struct FbxNodeGeometry {
     std::uint32_t mesh = 0;
 };
 
+// The native animation bridge intentionally exposes only the bounded subset
+// whose FBX evidence is available: local transform channels with explicit
+// linear key interpolation.  Unsupported curve interpolation/channel data is
+// reported in diagnostics and is never silently approximated.
+struct FbxAnimationClip {
+    std::string name;
+    double duration = 0.0;
+    std::size_t source_track_count = 0;
+    KsAnimation animation;
+};
+
 enum class FbxConversionSeverity { warning, error };
 
 struct FbxConversionDiagnostic {
@@ -48,6 +60,7 @@ struct FbxSceneConversion {
     std::vector<FbxStaticMesh> meshes;
     std::vector<FbxNodeTransform> transforms;
     std::vector<FbxNodeGeometry> node_geometry;
+    std::vector<FbxAnimationClip> animations;
     std::vector<FbxConversionDiagnostic> diagnostics;
     bool complete = true;
 };
@@ -67,6 +80,13 @@ struct FbxConversionLimits {
     std::size_t max_diagnostic_bytes = 16u * 1024u * 1024u;
     std::size_t max_diagnostic_path_bytes = 1u * 1024u * 1024u;
     std::size_t max_output_bytes = 512u * 1024u * 1024u;
+    std::size_t max_animation_stacks = 64u;
+    std::size_t max_animation_layers = 256u;
+    std::size_t max_animation_curves = 1'000'000u;
+    std::size_t max_animation_tracks = 100'000u;
+    std::size_t max_animation_keys = 10'000'000u;
+    std::size_t max_animation_clips = 64u;
+    std::size_t max_animation_frames = 100u;
 };
 
 class FbxConversionError final : public std::runtime_error {

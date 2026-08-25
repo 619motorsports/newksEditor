@@ -8,6 +8,7 @@
 #include <map>
 #include <set>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 namespace apex::formats {
@@ -159,6 +160,27 @@ void reserveForAppend(std::vector<T>& values, std::size_t required, Budget& budg
     if (next < required) next = required;
     budget.add(checkedMultiply(next - current, sizeof(T), path), path);
     values.reserve(next);
+}
+
+template <typename Key, typename Value>
+void appendMappedVector(std::map<Key, std::vector<Value>>& values, const Key& key,
+                        Value value, Budget& budget, std::string_view path) {
+    auto [iterator, inserted] = values.try_emplace(key);
+    if (inserted) {
+        chargeAssociativeNode(
+            budget, sizeof(std::pair<const Key, std::vector<Value>>), path);
+    }
+    reserveForAppend(iterator->second, iterator->second.size() + 1u, budget, path);
+    iterator->second.push_back(std::move(value));
+}
+
+template <typename Value>
+bool insertSet(std::set<Value>& values, const Value& value, Budget& budget,
+               std::string_view path) {
+    const auto [iterator, inserted] = values.insert(value);
+    (void)iterator;
+    if (inserted) chargeAssociativeNode(budget, sizeof(Value), path);
+    return inserted;
 }
 
 struct DiagnosticBudget {
@@ -600,7 +622,6 @@ void unsupportedFeatureScan(const FbxDocument& document, FbxSceneConversion& res
                 addDiagnostic(result, diagnostics, FbxConversionSeverity::warning, code, message, frame.path);
             };
             const auto& node = *frame.node;
-            if (node.name == "AnimationStack" || node.name == "AnimationLayer" || node.name == "AnimationCurve" || node.name == "AnimationCurveNode") add("unsupported_animation", "FBX animation records are not converted");
             if (node.name == "Texture" || node.name == "Video" || node.name == "Image") add("unsupported_images", "FBX image and texture records are not converted");
             if (node.name == "LayerElementNormal" || node.name == "LayerElementMaterial" ||
                 (node.name == "LayerElementUV" && !supportedUvLayer(node)))
@@ -662,14 +683,495 @@ void validateDomShape(const FbxDocument& document, const FbxConversionLimits& li
     }
 }
 
+struct AnimationCurveData {
+    std::vector<std::int64_t> times;
+    std::vector<float> values;
+};
+
+const FbxNode* objectNode(const std::vector<ObjectRecord>& records,
+                          const std::map<std::int64_t, std::size_t>& byId,
+                          std::int64_t id, std::string_view path) {
+    const auto found = byId.find(id);
+    if (found == byId.end()) fail("invalid_reference", "FBX animation references an unknown object", std::string(path));
+    return records[found->second].node;
+}
+
+const FbxArray* childArray(const FbxNode& node, std::string_view name, std::string_view path) {
+    const FbxArray* foundArray = nullptr;
+    for (const auto& child : node.children) {
+        if (child.name != name) continue;
+        const auto flattened = values(child, nullptr, path);
+        if (flattened.size() != 1u || std::get_if<FbxArray>(flattened.front()) == nullptr)
+            fail("invalid_animation", "FBX animation array is malformed", std::string(path));
+        if (foundArray != nullptr) fail("invalid_animation", "FBX animation contains duplicate arrays", std::string(path));
+        foundArray = std::get_if<FbxArray>(flattened.front());
+    }
+    return foundArray;
+}
+
+std::size_t arraySize(const FbxArray& array) noexcept {
+    return std::visit([](const auto& valuesIn) { return valuesIn.size(); }, array);
+}
+
+bool arrayNumber(const FbxArray& array, std::size_t index, double& output) noexcept {
+    return std::visit([&](const auto& valuesIn) {
+        if (index >= valuesIn.size()) return false;
+        output = static_cast<double>(valuesIn[index]);
+        return std::isfinite(output);
+    }, array);
+}
+
+bool arrayInteger(const FbxArray& array, std::size_t index,
+                  std::int64_t& output) noexcept {
+    return std::visit([&](const auto& valuesIn) {
+        if (index >= valuesIn.size()) return false;
+        using Value = typename std::decay_t<decltype(valuesIn)>::value_type;
+        if constexpr (std::is_same_v<Value, std::int64_t>) {
+            output = valuesIn[index];
+            return true;
+        } else if constexpr (std::is_same_v<Value, std::uint8_t>) {
+            output = valuesIn[index];
+            return true;
+        } else {
+            const double value = static_cast<double>(valuesIn[index]);
+            constexpr double int64ExclusiveUpper = 9223372036854775808.0;
+            if (!std::isfinite(value) || std::floor(value) != value ||
+                value < static_cast<double>(std::numeric_limits<std::int64_t>::min()) ||
+                value >= int64ExclusiveUpper)
+                return false;
+            output = static_cast<std::int64_t>(value);
+            return true;
+        }
+    }, array);
+}
+
+bool childInteger(const FbxNode& node, std::string_view name,
+                  std::int64_t& output, std::string_view path) {
+    bool found = false;
+    for (const auto& child : node.children) {
+        if (child.name != name) continue;
+        if (found) fail("invalid_animation", "FBX animation contains duplicate range values", std::string(path));
+        const auto flattened = values(child, nullptr, path);
+        if (flattened.size() == 1u && integerValue(flattened.front(), output)) {
+            found = true;
+            continue;
+        }
+        if (flattened.size() == 1u) {
+            if (const auto* array = std::get_if<FbxArray>(flattened.front())) {
+                if (arraySize(*array) == 1u && arrayInteger(*array, 0u, output)) {
+                    found = true;
+                    continue;
+                }
+            }
+        }
+        fail("invalid_animation", "FBX animation range value is malformed", std::string(path));
+    }
+    return found;
+}
+
+AnimationCurveData parseAnimationCurve(const FbxNode& curve, const FbxConversionLimits& limits,
+                                       Budget& budget, std::string_view path) {
+    const auto* timeArray = childArray(curve, "KeyTime", path);
+    const auto* valueArray = childArray(curve, "KeyValueFloat", path);
+    if (timeArray == nullptr || valueArray == nullptr)
+        fail("invalid_animation", "FBX animation curve has no KeyTime or KeyValueFloat array", std::string(path));
+    const auto* timeInts = std::get_if<std::vector<std::int64_t>>(timeArray);
+    if (timeInts == nullptr) fail("invalid_animation", "FBX KeyTime must be an integer array", std::string(path));
+    const auto& times = *timeInts;
+    const auto valueCount = arraySize(*valueArray);
+    if (times.empty() || times.size() != valueCount)
+        fail("invalid_animation", "FBX animation curve key time/value counts differ", std::string(path));
+    if (times.size() > limits.max_animation_keys)
+        fail("animation_key_limit", "FBX animation key count exceeds its limit", std::string(path));
+    budget.add(checkedMultiply(times.size(), sizeof(std::int64_t), path), path);
+    budget.add(checkedMultiply(valueCount, sizeof(float), path), path);
+    AnimationCurveData result;
+    result.times.reserve(times.size()); result.values.reserve(valueCount);
+    std::int64_t previous = 0;
+    for (std::size_t index = 0; index < times.size(); ++index) {
+        const std::int64_t time = times[index];
+        if (index != 0u && time <= previous)
+            fail("invalid_animation", "FBX animation key times are not strictly increasing", std::string(path));
+        double value = 0.0;
+        if (!arrayNumber(*valueArray, index, value))
+            fail("non_finite", "FBX animation array contains a non-finite value", std::string(path));
+        if (value < -static_cast<double>(std::numeric_limits<float>::max()) ||
+            value > static_cast<double>(std::numeric_limits<float>::max()))
+            fail("non_finite", "FBX animation value is outside float range", std::string(path));
+        result.times.push_back(time); result.values.push_back(static_cast<float>(value)); previous = time;
+    }
+    return result;
+}
+
+bool explicitlyLinear(const FbxNode& curve, std::size_t keyCount, std::string_view path) {
+    if (keyCount < 2u) return true;
+    const auto* flags = childArray(curve, "KeyAttrFlags", path);
+    if (flags == nullptr) return false;
+    if (arraySize(*flags) != keyCount) return false;
+    for (std::size_t index = 0; index < keyCount; ++index) {
+        std::int64_t signedFlag = 0;
+        if (!arrayInteger(*flags, index, signedFlag) || signedFlag < 0) return false;
+        const auto flag = static_cast<std::uint64_t>(signedFlag);
+        if ((flag & 0x4u) == 0u || (flag & 0x8u) != 0u) return false;
+    }
+    return true;
+}
+
+float sampleAnimationCurve(const AnimationCurveData& curve, std::int64_t time) {
+    if (curve.times.size() == 1u || time <= curve.times.front()) return curve.values.front();
+    if (time >= curve.times.back()) return curve.values.back();
+    const auto upper = std::upper_bound(curve.times.begin(), curve.times.end(), time);
+    const auto index = static_cast<std::size_t>(upper - curve.times.begin());
+    const auto left = curve.times[index - 1u], right = curve.times[index];
+    const auto amount = static_cast<float>(static_cast<double>(time - left) / static_cast<double>(right - left));
+    return curve.values[index - 1u] + (curve.values[index] - curve.values[index - 1u]) * amount;
+}
+
+struct AnimationBinding {
+    std::int64_t model = 0;
+    std::string_view property;
+    std::array<std::int64_t, 3> curves{0, 0, 0};
+};
+
+struct AnimationBase {
+    std::array<float, 3> translation{0.0F, 0.0F, 0.0F};
+    std::array<float, 3> rotation{0.0F, 0.0F, 0.0F};
+    std::array<float, 3> scale{1.0F, 1.0F, 1.0F};
+};
+
+AnimationBase animationBase(const FbxNode& model, std::string_view path) {
+    AnimationBase base;
+    for (const auto& group : model.children) {
+        if (group.name != "Properties70" && group.name != "Properties60") continue;
+        for (const auto& property : group.children) {
+            const auto flattened = values(property, nullptr, path);
+            if (flattened.empty() || stringValue(flattened.front()) == nullptr) continue;
+            const auto name = *stringValue(flattened.front());
+            std::array<float, 3>* target = name == "Lcl Translation" ? &base.translation :
+                                            name == "Lcl Rotation" ? &base.rotation :
+                                            name == "Lcl Scaling" ? &base.scale : nullptr;
+            if (target == nullptr) continue;
+            std::size_t found = 0u;
+            for (std::size_t index = 1u; index < flattened.size() && found < 3u; ++index) {
+                double number = 0.0;
+                if (!finiteNumber(flattened[index], number) || number < -static_cast<double>(std::numeric_limits<float>::max()) ||
+                    number > static_cast<double>(std::numeric_limits<float>::max()))
+                    continue;
+                (*target)[found++] = static_cast<float>(number);
+            }
+            if (found != 3u) fail("invalid_transform", "FBX animated transform has fewer than three values", std::string(path));
+        }
+    }
+    return base;
+}
+
+KsAnimationFrame animationFrame(const std::array<float, 3>& translation,
+                                const std::array<float, 3>& rotation, const std::array<float, 3>& scale,
+                                std::string_view path) {
+    const auto radians = [](float degrees) { return degrees * 0.017453292519943295769F; };
+    const float x = radians(rotation[0]), y = radians(rotation[1]), z = radians(rotation[2]);
+    Matrix4 rx = scene::identity_matrix, ry = scene::identity_matrix, rz = scene::identity_matrix;
+    rx[5] = std::cos(x); rx[9] = -std::sin(x); rx[6] = std::sin(x); rx[10] = std::cos(x);
+    ry[0] = std::cos(y); ry[8] = std::sin(y); ry[2] = -std::sin(y); ry[10] = std::cos(y);
+    rz[0] = std::cos(z); rz[4] = -std::sin(z); rz[1] = std::sin(z); rz[5] = std::cos(z);
+    const auto matrix = multiply(multiply(multiply(rz, ry), rx), scene::identity_matrix);
+    Matrix4 transformed = matrix;
+    transformed[0] *= scale[0]; transformed[1] *= scale[0]; transformed[2] *= scale[0];
+    transformed[4] *= scale[1]; transformed[5] *= scale[1]; transformed[6] *= scale[1];
+    transformed[8] *= scale[2]; transformed[9] *= scale[2]; transformed[10] *= scale[2];
+    transformed[12] = translation[0]; transformed[13] = translation[1]; transformed[14] = translation[2];
+    for (const auto value : transformed)
+        if (!std::isfinite(value)) fail("non_finite", "FBX animation frame is not finite", std::string(path));
+    return decomposeKsAnimationMatrix(transformed);
+}
+
+void extractAnimations(const std::vector<ObjectRecord>& records,
+                       const std::map<std::int64_t, std::size_t>& byId,
+                       const std::vector<Link>& links, const FbxConversionLimits& limits,
+                       FbxSceneConversion& result, Budget& budget, DiagnosticBudget& diagnostics) {
+    if (limits.max_animation_frames < 100u)
+        fail("animation_frame_limit", "FBX animation conversion requires 100 output frames", "animation");
+    std::vector<std::int64_t> stacks, layers, curves;
+    for (const auto& record : records) {
+        std::vector<std::int64_t>* target = nullptr;
+        std::size_t limit = 0u;
+        const char* code = nullptr;
+        const char* message = nullptr;
+        if (record.node->name == "AnimationStack") {
+            target = &stacks;
+            limit = limits.max_animation_stacks;
+            code = "animation_stack_limit";
+            message = "FBX animation stack count exceeds its limit";
+        } else if (record.node->name == "AnimationLayer") {
+            target = &layers;
+            limit = limits.max_animation_layers;
+            code = "animation_layer_limit";
+            message = "FBX animation layer count exceeds its limit";
+        } else if (record.node->name == "AnimationCurve") {
+            target = &curves;
+            limit = limits.max_animation_curves;
+            code = "animation_curve_limit";
+            message = "FBX animation curve count exceeds its limit";
+        }
+        if (target == nullptr) continue;
+        if (target->size() >= limit) fail(code, message, "animation");
+        reserveForAppend(*target, target->size() + 1u, budget, "animation objects");
+        target->push_back(record.id);
+    }
+    if (stacks.empty()) return;
+    const auto clipCapacity = std::min(stacks.size(), limits.max_animation_clips);
+    budget.add(checkedMultiply(clipCapacity, sizeof(FbxAnimationClip), "animation clips"), "animation clips");
+    result.animations.reserve(clipCapacity);
+
+    std::map<std::int64_t, std::vector<std::int64_t>> stackLayers;
+    std::map<std::int64_t, std::int64_t> layerForNode;
+    std::map<std::int64_t, std::vector<std::pair<std::int64_t, std::string>>> modelForNode;
+    std::map<std::int64_t, std::vector<std::pair<std::int64_t, char>>> curveForNode;
+    for (const auto& link : links) {
+        const std::string_view source = records[byId.at(link.source)].node->name;
+        const std::string_view target = link.target == 0
+                                            ? std::string_view{}
+                                            : std::string_view{
+                                                  records[byId.at(link.target)].node->name};
+        if (link.kind == "OO" && source == "AnimationLayer" && target == "AnimationStack") {
+            const auto existing = stackLayers.find(link.target);
+            if (existing != stackLayers.end() &&
+                std::find(existing->second.begin(), existing->second.end(), link.source) !=
+                    existing->second.end())
+                fail("invalid_animation", "FBX animation contains a duplicate layer link",
+                     "Connections");
+            appendMappedVector(stackLayers, link.target, link.source, budget,
+                               "animation stack layers");
+        } else if (link.kind == "OO" && source == "AnimationCurveNode" && target == "AnimationLayer") {
+            if (layerForNode.contains(link.source))
+                fail("invalid_animation",
+                     layerForNode.at(link.source) == link.target
+                         ? "FBX animation contains a duplicate curve-node layer link"
+                         : "FBX animation curve node has multiple layers",
+                     "Connections");
+            const auto [iterator, inserted] = layerForNode.try_emplace(link.source, link.target);
+            (void)iterator;
+            if (inserted)
+                chargeAssociativeNode(
+                    budget,
+                    sizeof(std::pair<const std::int64_t, std::int64_t>),
+                    "animation layer bindings");
+        } else if (link.kind == "OP" && source == "AnimationCurveNode" && target == "Model") {
+            if (link.property != "Lcl Translation" && link.property != "Lcl Rotation" && link.property != "Lcl Scaling") {
+                addDiagnostic(result, diagnostics, FbxConversionSeverity::warning, "unsupported_animation_channel",
+                              "FBX animation property is outside the supported local transform channels", "Connections");
+                continue;
+            }
+            const auto existing = modelForNode.find(link.source);
+            if (existing != modelForNode.end() &&
+                std::any_of(existing->second.begin(), existing->second.end(),
+                            [&](const auto& value) {
+                                return value.first == link.target &&
+                                       value.second == link.property;
+                            }))
+                fail("invalid_animation", "FBX animation contains a duplicate model link",
+                     "Connections");
+            budget.add(link.property.size(), "animation model properties");
+            appendMappedVector(modelForNode, link.source,
+                               std::pair<std::int64_t, std::string>{link.target,
+                                                                    link.property},
+                               budget, "animation model bindings");
+        } else if (link.kind == "OP" && source == "AnimationCurve" && target == "AnimationCurveNode") {
+            const char axis = link.property.size() == 3u && link.property[0] == 'd' && link.property[1] == '|' ? link.property[2] : '\0';
+            if (axis != 'X' && axis != 'Y' && axis != 'Z') {
+                addDiagnostic(result, diagnostics, FbxConversionSeverity::warning, "unsupported_animation_channel",
+                              "FBX animation curve axis is not X, Y, or Z", "Connections");
+                continue;
+            }
+            const auto existing = curveForNode.find(link.target);
+            if (existing != curveForNode.end() &&
+                std::find(existing->second.begin(), existing->second.end(),
+                          std::pair<std::int64_t, char>{link.source, axis}) !=
+                    existing->second.end())
+                fail("invalid_animation", "FBX animation contains a duplicate axis link",
+                     "Connections");
+            appendMappedVector(curveForNode, link.target,
+                               std::pair<std::int64_t, char>{link.source, axis},
+                               budget, "animation curve bindings");
+        }
+    }
+
+    std::size_t totalKeys = 0u;
+    for (const auto stackId : stacks) {
+        if (result.animations.size() >= limits.max_animation_clips)
+            fail("animation_clip_limit", "FBX animation clip count exceeds its limit", "animation");
+        const auto stackPath = "Objects/AnimationStack/" + std::to_string(stackId);
+        const auto stackRecord = records[byId.at(stackId)];
+        std::set<std::int64_t> selectedNodes;
+        const auto stackLayer = stackLayers.find(stackId);
+        if (stackLayer != stackLayers.end()) {
+            for (const auto layerId : stackLayer->second) {
+                for (const auto& [nodeId, owningLayer] : layerForNode) {
+                    if (owningLayer == layerId)
+                        (void)insertSet(selectedNodes, nodeId, budget,
+                                        "animation selected nodes");
+                }
+            }
+        }
+        if (selectedNodes.empty()) {
+            addDiagnostic(result, diagnostics, FbxConversionSeverity::warning, "unsupported_animation",
+                          "FBX animation stack has no connected curve nodes", stackPath);
+            continue;
+        }
+        std::map<std::pair<std::int64_t, std::string_view>, AnimationBinding> bindings;
+        std::map<std::int64_t, AnimationCurveData> curveData;
+        std::int64_t minimumTime = std::numeric_limits<std::int64_t>::max();
+        std::int64_t maximumTime = std::numeric_limits<std::int64_t>::min();
+        bool unsupportedCurve = false;
+        std::size_t sourceTrackCount = 0u;
+        for (const auto nodeId : selectedNodes) {
+            ++sourceTrackCount;
+            const auto modelBinding = modelForNode.find(nodeId);
+            if (modelBinding == modelForNode.end() || modelBinding->second.empty()) {
+                addDiagnostic(result, diagnostics, FbxConversionSeverity::warning, "unsupported_animation_channel",
+                              "FBX curve node is not connected to a Model", stackPath);
+                unsupportedCurve = true;
+                continue;
+            }
+            const auto curveBinding = curveForNode.find(nodeId);
+            if (curveBinding == curveForNode.end() || curveBinding->second.empty()) {
+                addDiagnostic(result, diagnostics, FbxConversionSeverity::warning,
+                              "unsupported_animation_channel",
+                              "FBX curve node has no connected axis curves", stackPath);
+                unsupportedCurve = true;
+                continue;
+            }
+            for (const auto& [modelId, property] : modelBinding->second) {
+                const auto bindingKey =
+                    std::pair<std::int64_t, std::string_view>{modelId, property};
+                auto [bindingIterator, inserted] = bindings.try_emplace(bindingKey);
+                if (inserted) {
+                    chargeAssociativeNode(
+                        budget,
+                        sizeof(std::pair<const std::pair<std::int64_t, std::string_view>,
+                                         AnimationBinding>),
+                        "animation property bindings");
+                }
+                auto& binding = bindingIterator->second;
+                binding.model = modelId; binding.property = property;
+                for (const auto& [curveId, axis] : curveBinding->second) {
+                    const std::size_t axisIndex = axis == 'X' ? 0u : axis == 'Y' ? 1u : 2u;
+                    if (binding.curves[axisIndex] != 0 && binding.curves[axisIndex] != curveId)
+                        fail("invalid_animation", "FBX animation property has duplicate axis curves", stackPath);
+                    binding.curves[axisIndex] = curveId;
+                    if (!curveData.contains(curveId)) {
+                        const auto curvePath = stackPath + "/Curve/" + std::to_string(curveId);
+                        const auto* curve = objectNode(records, byId, curveId, curvePath);
+                        auto parsed = parseAnimationCurve(*curve, limits, budget, curvePath);
+                        if (parsed.times.size() > limits.max_animation_keys - std::min(totalKeys, limits.max_animation_keys))
+                            fail("animation_key_limit", "FBX aggregate animation key count exceeds its limit", curvePath);
+                        totalKeys += parsed.times.size();
+                        if (!explicitlyLinear(*curve, parsed.times.size(), curvePath)) {
+                            addDiagnostic(result, diagnostics, FbxConversionSeverity::warning, "unsupported_animation_interpolation",
+                                          "FBX animation curve is not explicitly linear; native evaluator behavior is not reproduced", curvePath);
+                            unsupportedCurve = true;
+                            continue;
+                        }
+                        minimumTime = std::min(minimumTime, parsed.times.front());
+                        maximumTime = std::max(maximumTime, parsed.times.back());
+                        chargeAssociativeNode(
+                            budget,
+                            sizeof(std::pair<const std::int64_t,
+                                             AnimationCurveData>),
+                            "animation curve data");
+                        curveData.emplace(curveId, std::move(parsed));
+                    }
+                }
+            }
+        }
+        std::int64_t startNumber = 0, stopNumber = 0;
+        const bool hasStart = childInteger(*stackRecord.node, "LocalStart", startNumber, stackPath);
+        const bool hasStop = childInteger(*stackRecord.node, "LocalStop", stopNumber, stackPath);
+        std::int64_t start = minimumTime, stop = maximumTime;
+        if (hasStart || hasStop) {
+            if (!hasStart || !hasStop)
+                fail("invalid_animation", "FBX animation stack range is invalid", stackPath);
+            start = startNumber;
+            stop = stopNumber;
+        }
+        if (start >= stop || minimumTime == std::numeric_limits<std::int64_t>::max()) {
+            addDiagnostic(result, diagnostics, FbxConversionSeverity::warning, "unsupported_animation",
+                          "FBX animation stack has no positive supported time span", stackPath);
+            continue;
+        }
+        if (unsupportedCurve) {
+            // A partially sampled clip would silently replace an unsupported
+            // channel with its static value, so do not export it.
+            result.complete = false;
+            continue;
+        }
+        if (bindings.empty()) continue;
+        std::set<std::int64_t> modelIds;
+        for (const auto& [key, binding] : bindings) {
+            (void)key;
+            (void)insertSet(modelIds, binding.model, budget,
+                            "animation output model IDs");
+        }
+        if (modelIds.size() > limits.max_animation_tracks)
+            fail("animation_track_limit", "FBX animation output track count exceeds its limit", stackPath);
+        FbxAnimationClip clip;
+        budget.add(checkedMultiply(2u, stackRecord.name.size(), stackPath), stackPath);
+        clip.name = stackRecord.name;
+        const long double span = static_cast<long double>(stop) -
+                                 static_cast<long double>(start);
+        clip.duration = static_cast<double>(span / 46186158000.0L);
+        clip.source_track_count = sourceTrackCount;
+        clip.animation.source = clip.name;
+        clip.animation.version = 2;
+        clip.animation.frameCount = 100u;
+        budget.add(checkedMultiply(modelIds.size(), sizeof(KsAnimationTrack), stackPath), stackPath);
+        clip.animation.tracks.reserve(modelIds.size());
+        for (const auto modelId : modelIds) {
+            const auto modelPath = stackPath + "/Model/" + std::to_string(modelId);
+            const auto* model = objectNode(records, byId, modelId, modelPath);
+            const auto base = animationBase(*model, modelPath);
+            KsAnimationTrack track;
+            const auto& trackName = records[byId.at(modelId)].name;
+            budget.add(trackName.size(), modelPath);
+            track.name = trackName;
+            budget.add(checkedAdd(8u, checkedMultiply(100u, sizeof(KsAnimationFrame), modelPath), modelPath), modelPath);
+            track.frames.reserve(100u);
+            for (std::size_t frameIndex = 0; frameIndex < 100u; ++frameIndex) {
+                const auto time = static_cast<std::int64_t>(
+                    static_cast<long double>(start) + span * frameIndex / 100.0L);
+                std::array<float, 3> translation = base.translation, rotation = base.rotation, scale = base.scale;
+                for (const auto& [key, binding] : bindings) {
+                    (void)key;
+                    if (binding.model != modelId) continue;
+                    auto* target = binding.property == "Lcl Translation" ? &translation : binding.property == "Lcl Rotation" ? &rotation : &scale;
+                    for (std::size_t axis = 0; axis < 3u; ++axis) {
+                        const auto curveId = binding.curves[axis];
+                        const auto found = curveData.find(curveId);
+                        if (curveId != 0 && found != curveData.end()) (*target)[axis] = sampleAnimationCurve(found->second, time);
+                    }
+                }
+                track.frames.push_back(animationFrame(translation, rotation, scale, modelPath));
+            }
+            track.animated = false;
+            if (track.frames.size() > 1u)
+                for (std::size_t frame = 1u; frame < track.frames.size() && !track.animated; ++frame)
+                    track.animated = track.frames[frame].quaternion != track.frames.front().quaternion ||
+                                     track.frames[frame].position != track.frames.front().position ||
+                                     track.frames[frame].scale != track.frames.front().scale;
+            clip.animation.tracks.push_back(std::move(track));
+        }
+        if (!clip.animation.tracks.empty()) result.animations.push_back(std::move(clip));
+    }
+}
+
 }  // namespace
 
 FbxConversionError::FbxConversionError(FbxConversionDiagnostic diagnostic)
     : std::runtime_error(diagnostic.message), diagnostic_(std::move(diagnostic)) {}
 
 FbxConversionCapabilityDetail fbxSceneConversionCapability() {
-    return {true, true, true, false, false, false, false,
-            "Static FBX geometry, transforms, material assignments, and one bounded UV mapping are converted; normals, material layers, skinning, animation, and images remain unsupported"};
+    return {true, true, true, false, true, false, false,
+            "Static FBX geometry, transforms, material assignments, one bounded UV mapping, and an explicit-linear local-transform KSANIM bridge are converted; native-pivot evaluation, non-linear animation, skinning, and images remain unsupported"};
 }
 
 FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLimits limits) {
@@ -960,6 +1462,21 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
         append(append, records[modelIndex].id, 0u, scene::identity_matrix, 0u, modelPath);
     }
     for (const auto modelIndex : modelIndexes) if (!emitted.contains(records[modelIndex].id)) fail("invalid_hierarchy", "FBX model hierarchy has an unreachable cycle", "Models");
+    extractAnimations(records, byId, links, limits, result, budget, diagnostics);
+    if (result.animations.empty()) {
+        bool hasAnimationRecord = false;
+        std::vector<const FbxNode*> pending;
+        for (const auto& root : document.roots) pending.push_back(&root);
+        while (!pending.empty()) {
+            const auto* node = pending.back(); pending.pop_back();
+            if (node->name == "AnimationStack" || node->name == "AnimationLayer" ||
+                node->name == "AnimationCurve" || node->name == "AnimationCurveNode") hasAnimationRecord = true;
+            for (const auto& child : node->children) pending.push_back(&child);
+        }
+        if (hasAnimationRecord)
+            addDiagnostic(result, diagnostics, FbxConversionSeverity::warning, "unsupported_animation",
+                          "FBX animation records did not produce a supported KSANIM clip", "animation");
+    }
     double sceneRadius = 0.0;
     for (const auto& node : result.snapshot.nodes) {
         const auto centerDistance = std::hypot(std::hypot(static_cast<double>(node.bounds_center[0]), static_cast<double>(node.bounds_center[1])), static_cast<double>(node.bounds_center[2]));
