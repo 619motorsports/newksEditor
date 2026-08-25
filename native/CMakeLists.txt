@@ -1,4 +1,5 @@
 find_package(Vulkan QUIET)
+find_package(JPEG QUIET)
 if(APEX_ENABLE_NATIVE_WINDOW)
   find_package(SDL3 CONFIG QUIET)
 endif()
@@ -74,6 +75,7 @@ add_library(apex_formats STATIC
   src/formats/fbx.cpp
   src/formats/fbx_conversion.cpp
   src/formats/ini.cpp
+  src/formats/jpeg.cpp
   src/formats/kn5.cpp
   src/formats/kn5_write.cpp
   src/formats/knh.cpp
