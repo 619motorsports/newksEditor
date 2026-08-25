@@ -99,7 +99,11 @@ remains unchanged and feature-complete.
   extensions without leaking Vulkan types into the public platform contract.
   Vulkan can create the same presentation target for this native surface.
   D3D12 reports the DXGI factory, device, queue, and borrowed Win32 window
-  prerequisite, but D3D12 swapchain creation remains staged.
+  prerequisite. The Windows-only path creates a bounded DXGI flip-model swapchain,
+  clears and presents synchronously, and copies completed same-format color
+  attachments into the swapchain. Resize and device-removal diagnostics remain
+  explicit; Linux builds retain the unavailable D3D12 path. A Windows SDK build
+  and WARP runtime check remain required before this path is considered verified.
   Both backends implement bounded synchronous RGBA8/BGRA8 texture
   clear/readback. Each
   backend validates a pipeline and executes fixed and indexed R16 mesh draws
@@ -439,8 +443,8 @@ remains unchanged and feature-complete.
   It does not execute stock KN5 shader containers. Vulkan can create a
   headless or SDL3-backed native surface and swapchain. Vulkan can present a
   completed offscreen color attachment with the same size and format. The
-  port does not create D3D12 swapchains and does not provide full golden-image
-  parity.
+  port contains a bounded Windows D3D12 swapchain path pending its Windows/WARP
+  verification gate, but does not provide full stock-shader golden-image parity.
 
 The production WebGL material gate uses the synthetic `BC7_PLANE` scene. The
 baseline screenshot SHA-256 is

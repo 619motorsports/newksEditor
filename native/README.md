@@ -106,7 +106,11 @@ framebuffers, commands, and synchronization objects. It can also copy a
 completed, same-format color attachment into a swapchain image. Headless
 `VK_EXT_headless_surface` presentation remains available when the driver
 supports it. D3D12 reports its DXGI factory, device, queue, and borrowed Win32
-window prerequisite, but native D3D12 swapchain creation remains staged.
+window prerequisite. The Windows-only path creates a bounded DXGI flip-model swapchain,
+clears and presents synchronously, and copies completed same-format color
+attachments into the swapchain. Resize and device-removal diagnostics remain
+explicit; Linux builds retain the unavailable D3D12 path. A Windows SDK build
+and WARP runtime check remain required before this path is considered verified.
 The application keeps presentation recovery backend-neutral: Vulkan and D3D12
 out-of-date statuses can rebuild a target at most eight times until a frame
 succeeds. Zero-sized pixel surfaces pause rendering, and a failed target
@@ -262,7 +266,9 @@ supply explicit SPIR-V or DXIL modules. Production packets remain marked as
 staged. The handoff does not translate stock shader containers. Vulkan can
 create a headless surface and swapchain. It can present a completed offscreen
 color attachment with the same size and format. Native window surfaces,
-D3D12 swapchains, and complete stock execution remain roadmap work.
+D3D12 swapchains, and complete stock execution remain roadmap work on
+non-Windows builds; the Windows D3D12 presentation path above remains gated on
+a Windows SDK/WARP verification run.
 A bounded stock-scene facade composes the render plan, draw packets, material
 handoff, and static-scene preparation. It uses linear topology preflight and
 rejects malformed edges, cycles, and over-budget plans before backend

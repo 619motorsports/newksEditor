@@ -2844,13 +2844,13 @@ AdapterResult enumerate_adapters(Backend backend, const DeviceOptions& options) 
             return invalid_options("native_surface_required",
                                    "Non-headless initialization requires a native presentation source");
         }
-        if (backend == Backend::D3D12) {
-            return unavailable("d3d12_native_presentation_unsupported",
-                               "Direct3D 12 native presentation is not enabled by this renderer contract");
-        }
         Diagnostic diagnostic;
-        if (!valid_native_surface_source(*options.native_surface, diagnostic))
+        if (backend == Backend::D3D12) {
+            if (!valid_d3d12_native_window(*options.native_surface, diagnostic))
+                return invalid_options(diagnostic.code.c_str(), std::move(diagnostic.message));
+        } else if (!valid_native_surface_source(*options.native_surface, diagnostic)) {
             return invalid_options(diagnostic.code.c_str(), std::move(diagnostic.message));
+        }
     }
     if (options.prefer_software && !options.allow_software) {
         return invalid_options("software_adapter_disallowed",
@@ -2877,13 +2877,13 @@ DeviceResult create_device(Backend backend, const DeviceOptions& options) {
             return invalid_device_options("native_surface_required",
                                           "Non-headless initialization requires a native presentation source");
         }
-        if (backend == Backend::D3D12) {
-            return unavailable_device("d3d12_native_presentation_unsupported",
-                                      "Direct3D 12 native presentation is not enabled by this renderer contract");
-        }
         Diagnostic diagnostic;
-        if (!valid_native_surface_source(*options.native_surface, diagnostic))
+        if (backend == Backend::D3D12) {
+            if (!valid_d3d12_native_window(*options.native_surface, diagnostic))
+                return invalid_device_options(diagnostic.code.c_str(), std::move(diagnostic.message));
+        } else if (!valid_native_surface_source(*options.native_surface, diagnostic)) {
             return invalid_device_options(diagnostic.code.c_str(), std::move(diagnostic.message));
+        }
     }
     if (options.prefer_software && !options.allow_software) {
         return invalid_device_options("software_adapter_disallowed",

@@ -21,6 +21,23 @@
 
 namespace apex::render {
 
+bool valid_d3d12_native_window(const apex::platform::NativeSurfaceSource& source,
+                               Diagnostic& diagnostic) {
+    if (source.win32Window == nullptr) {
+        diagnostic = {"d3d12_native_window_required",
+                      "D3D12 native presentation requires a Win32 window handle"};
+        return false;
+    }
+#if defined(APEX_HAS_D3D12) && APEX_HAS_D3D12 && defined(_WIN32)
+    if (!IsWindow(static_cast<HWND>(source.win32Window))) {
+        diagnostic = {"d3d12_native_window_invalid",
+                      "D3D12 native presentation requires a live Win32 window handle"};
+        return false;
+    }
+#endif
+    return true;
+}
+
 #if defined(APEX_HAS_D3D12) && APEX_HAS_D3D12 && defined(_WIN32)
 
 namespace {
@@ -121,6 +138,9 @@ struct D3D12Context {
     UINT sampler_descriptor_size = 0;
     UINT next_sampler = 0;
     std::mutex sampler_mutex;
+    std::mutex command_mutex;
+    void* native_window = nullptr;
+    bool presentation_target_active = false;
     DeviceInfo info;
 
     ~D3D12Context() { (void)wait_idle(); }
@@ -3453,6 +3473,308 @@ private:
     bool initialized_ = false;
 };
 
+class D3D12PresentationTarget final : public PresentationTarget {
+public:
+    D3D12PresentationTarget(std::shared_ptr<D3D12Context> context,
+                            const PresentationTargetDescription& description,
+                            Diagnostic& diagnostic)
+        : context_(std::move(context)), info_({description}) {
+        valid_ = create(diagnostic);
+        if (!valid_) reset();
+    }
+
+    ~D3D12PresentationTarget() override { reset(); }
+
+    Backend backend() const noexcept override { return Backend::D3D12; }
+    const PresentationTargetInfo& info() const noexcept override { return info_; }
+    [[nodiscard]] bool valid() const noexcept { return valid_; }
+    [[nodiscard]] const std::shared_ptr<D3D12Context>& context() const noexcept { return context_; }
+
+    PresentationFrameResult clear_and_present(const std::array<float, 4>& clear_color) {
+        for (const float value : clear_color) {
+            if (!std::isfinite(value)) {
+                return {PresentationFrameStatus::invalid_request,
+                        {"presentation_clear_color_non_finite",
+                         "Presentation clear colors must contain finite values"}};
+            }
+        }
+        if (!begin_frame()) return frame_failure("d3d12_presentation_target_invalid",
+                                                 "The D3D12 presentation target is not initialized");
+        ID3D12Resource* back_buffer = back_buffers_[frame_index_].Get();
+        transition(back_buffer, D3D12_RESOURCE_STATE_PRESENT,
+                   D3D12_RESOURCE_STATE_RENDER_TARGET);
+        const D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtv_handle(frame_index_);
+        list_->OMSetRenderTargets(1U, &rtv, FALSE, nullptr);
+        const float color[4] = {clear_color[0], clear_color[1], clear_color[2], clear_color[3]};
+        list_->ClearRenderTargetView(rtv, color, 0U, nullptr);
+        transition(back_buffer, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                   D3D12_RESOURCE_STATE_PRESENT);
+        return finish_frame();
+    }
+
+    PresentationFrameResult present_texture(D3D12Texture& source) {
+        if (!source.initialized()) {
+            return {PresentationFrameStatus::invalid_request,
+                    {"presentation_texture_uninitialized",
+                     "The presentation source must be rendered or initialized before use"}};
+        }
+        const TextureDescription& source_description = source.info().description;
+        if (source_description.width != info_.description.width ||
+            source_description.height != info_.description.height) {
+            return {PresentationFrameStatus::invalid_request,
+                    {"presentation_texture_dimensions_mismatch",
+                     "The presentation source dimensions must match the target exactly"}};
+        }
+        if (source_description.format != info_.description.format) {
+            return {PresentationFrameStatus::invalid_request,
+                    {"presentation_texture_format_mismatch",
+                     "The presentation source format must match the target exactly"}};
+        }
+        if (source_description.samples != 1U || source_description.mip_levels != 1U ||
+            source_description.array_layers != 1U) {
+            return {PresentationFrameStatus::invalid_request,
+                    {"presentation_texture_shape_unsupported",
+                     "The presentation source must have one mip, one layer, and one sample"}};
+        }
+        const auto usage = static_cast<std::uint32_t>(source_description.usage);
+        if ((usage & static_cast<std::uint32_t>(TextureUsage::transfer_source)) == 0U ||
+            (usage & static_cast<std::uint32_t>(TextureUsage::color_attachment)) == 0U) {
+            return {PresentationFrameStatus::invalid_request,
+                    {"presentation_texture_usage_invalid",
+                     "The presentation source must support color attachment and transfer source usage"}};
+        }
+        if (!begin_frame()) return frame_failure("d3d12_presentation_target_invalid",
+                                                 "The D3D12 presentation target is not initialized");
+        ID3D12Resource* back_buffer = back_buffers_[frame_index_].Get();
+        const D3D12_RESOURCE_STATES source_state = source.state();
+        if (source_state != D3D12_RESOURCE_STATE_COPY_SOURCE)
+            transition(source.resource(), source_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        transition(back_buffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
+        list_->CopyResource(back_buffer, source.resource());
+        transition(back_buffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
+        if (source_state != D3D12_RESOURCE_STATE_COPY_SOURCE)
+            transition(source.resource(), D3D12_RESOURCE_STATE_COPY_SOURCE, source_state);
+        return finish_frame();
+    }
+
+private:
+    static void record_transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
+                                  D3D12_RESOURCE_STATES after,
+                                  ID3D12GraphicsCommandList* list) noexcept {
+        if (before == after || resource == nullptr || list == nullptr) return;
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = resource;
+        barrier.Transition.StateBefore = before;
+        barrier.Transition.StateAfter = after;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
+    }
+
+    void transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
+                    D3D12_RESOURCE_STATES after) noexcept {
+        record_transition(resource, before, after, list_.Get());
+    }
+
+    [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle(std::size_t index) const noexcept {
+        auto result = rtv_heap_->GetCPUDescriptorHandleForHeapStart();
+        result.ptr += static_cast<SIZE_T>(index) * rtv_stride_;
+        return result;
+    }
+
+    [[nodiscard]] bool wait_fence() noexcept {
+        if (fence_ == nullptr || fence_value_ == 0U ||
+            fence_->GetCompletedValue() >= fence_value_)
+            return true;
+        if (FAILED(fence_->SetEventOnCompletion(fence_value_, fence_event_))) return false;
+        return WaitForSingleObject(fence_event_, INFINITE) == WAIT_OBJECT_0;
+    }
+
+    [[nodiscard]] bool begin_frame() noexcept {
+        if (!valid_ || context_ == nullptr || swapchain_ == nullptr || allocator_ == nullptr ||
+            list_ == nullptr || !wait_fence())
+            return false;
+        frame_index_ = swapchain_->GetCurrentBackBufferIndex();
+        if (frame_index_ >= back_buffers_.size()) return false;
+        if (FAILED(allocator_->Reset())) return false;
+        return SUCCEEDED(list_->Reset(allocator_.Get(), nullptr));
+    }
+
+    PresentationFrameResult finish_frame() {
+        if (fence_value_ == std::numeric_limits<UINT64>::max())
+            return frame_failure("d3d12_presentation_execution_failed",
+                                 "D3D12 presentation fence value exhausted");
+        HRESULT result = list_->Close();
+        if (FAILED(result)) return failure("ID3D12GraphicsCommandList::Close", result);
+        ID3D12CommandList* command_lists[] = {list_.Get()};
+        context_->queue->ExecuteCommandLists(1U, command_lists);
+
+        const UINT sync_interval = info_.description.vsync ? 1U : 0U;
+        const HRESULT present_result = swapchain_->Present(sync_interval, 0U);
+        const UINT64 submitted_value = fence_value_ + 1U;
+        result = context_->queue->Signal(fence_.Get(), submitted_value);
+        if (FAILED(result)) {
+            (void)context_->wait_idle();
+            if (present_result == DXGI_ERROR_DEVICE_REMOVED ||
+                present_result == DXGI_ERROR_DEVICE_RESET)
+                return frame_failure("d3d12_device_removed",
+                                     "The D3D12 device was removed or reset");
+            return failure("ID3D12CommandQueue::Signal(presentation)", result);
+        }
+        fence_value_ = submitted_value;
+        const bool waited = wait_fence();
+        if (!waited) return frame_failure("d3d12_presentation_execution_failed",
+                                          "D3D12 presentation fence wait failed");
+        if (present_result == DXGI_ERROR_INVALID_CALL ||
+            present_result == DXGI_STATUS_MODE_CHANGE_IN_PROGRESS)
+            return frame_failure("d3d12_presentation_target_out_of_date",
+                                 "The D3D12 presentation target requires recreation");
+        if (present_result == DXGI_ERROR_DEVICE_REMOVED ||
+            present_result == DXGI_ERROR_DEVICE_RESET)
+            return frame_failure("d3d12_device_removed", "The D3D12 device was removed or reset");
+        if (FAILED(present_result)) return failure("IDXGISwapChain::Present", present_result);
+        return {PresentationFrameStatus::ready, {}};
+    }
+
+    static PresentationFrameResult frame_failure(const char* code, const char* message) {
+        return {PresentationFrameStatus::execution_failed, {code, message}};
+    }
+
+    static PresentationFrameResult failure(const char* operation, HRESULT result) {
+        Diagnostic diagnostic = hresult_error(operation, result);
+        diagnostic.code = result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET
+                              ? "d3d12_device_removed"
+                              : "d3d12_presentation_execution_failed";
+        return {PresentationFrameStatus::execution_failed, std::move(diagnostic)};
+    }
+
+    bool create(Diagnostic& diagnostic) {
+        if (context_ == nullptr || context_->factory == nullptr || context_->device == nullptr ||
+            context_->queue == nullptr || context_->native_window == nullptr) {
+            diagnostic = {"d3d12_native_window_required",
+                          "D3D12 presentation requires an initialized Win32 window"};
+            return false;
+        }
+        const HWND window = static_cast<HWND>(context_->native_window);
+        if (!IsWindow(window)) {
+            diagnostic = {"d3d12_native_window_invalid",
+                          "D3D12 native presentation requires a live Win32 window handle"};
+            return false;
+        }
+        DXGI_SWAP_CHAIN_DESC1 description{};
+        description.Width = info_.description.width;
+        description.Height = info_.description.height;
+        description.Format = dxgi_texture_format(info_.description.format);
+        description.Stereo = FALSE;
+        description.SampleDesc.Count = 1U;
+        description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        description.BufferCount = info_.description.image_count;
+        description.Scaling = DXGI_SCALING_STRETCH;
+        description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        description.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+        ComPtr<IDXGISwapChain1> swapchain;
+        HRESULT result = context_->factory->CreateSwapChainForHwnd(
+            context_->queue.Get(), window, &description, nullptr, nullptr, &swapchain);
+        if (FAILED(result)) {
+            diagnostic = hresult_error("IDXGIFactory2::CreateSwapChainForHwnd", result);
+            diagnostic.code = "d3d12_presentation_target_allocation_failed";
+            return false;
+        }
+        (void)context_->factory->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER);
+        result = swapchain.As(&swapchain_);
+        if (FAILED(result)) {
+            diagnostic = hresult_error("IDXGISwapChain1::QueryInterface", result);
+            diagnostic.code = "d3d12_presentation_target_allocation_failed";
+            return false;
+        }
+        DXGI_SWAP_CHAIN_DESC1 actual{};
+        result = swapchain_->GetDesc1(&actual);
+        if (FAILED(result) || actual.BufferCount == 0U || actual.BufferCount > max_presentation_image_count) {
+            diagnostic = {"d3d12_presentation_images_unavailable",
+                          "The D3D12 swapchain returned an invalid bounded image count"};
+            return false;
+        }
+        info_.description.width = actual.Width;
+        info_.description.height = actual.Height;
+        info_.description.image_count = actual.BufferCount;
+        rtv_stride_ = context_->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        D3D12_DESCRIPTOR_HEAP_DESC rtv_description{};
+        rtv_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        rtv_description.NumDescriptors = actual.BufferCount;
+        result = context_->device->CreateDescriptorHeap(&rtv_description, IID_PPV_ARGS(&rtv_heap_));
+        if (FAILED(result)) {
+            diagnostic = hresult_error("ID3D12Device::CreateDescriptorHeap(presentation RTV)", result);
+            diagnostic.code = "d3d12_presentation_target_allocation_failed";
+            return false;
+        }
+        back_buffers_.resize(actual.BufferCount);
+        for (UINT index = 0U; index < actual.BufferCount; ++index) {
+            result = swapchain_->GetBuffer(index, IID_PPV_ARGS(&back_buffers_[index]));
+            if (FAILED(result)) {
+                diagnostic = hresult_error("IDXGISwapChain::GetBuffer(presentation)", result);
+                diagnostic.code = "d3d12_presentation_target_allocation_failed";
+                return false;
+            }
+            context_->device->CreateRenderTargetView(back_buffers_[index].Get(), nullptr,
+                                                      rtv_handle(index));
+        }
+        result = context_->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                           IID_PPV_ARGS(&allocator_));
+        if (SUCCEEDED(result))
+            result = context_->device->CreateCommandList(0U, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                         allocator_.Get(), nullptr,
+                                                         IID_PPV_ARGS(&list_));
+        if (SUCCEEDED(result)) result = list_->Close();
+        if (FAILED(result)) {
+            diagnostic = hresult_error("D3D12 presentation command setup", result);
+            diagnostic.code = "d3d12_presentation_target_allocation_failed";
+            return false;
+        }
+        result = context_->device->CreateFence(0U, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_));
+        fence_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (FAILED(result) || fence_event_ == nullptr) {
+            diagnostic = {"d3d12_presentation_target_allocation_failed",
+                          "D3D12 presentation synchronization setup failed"};
+            return false;
+        }
+        return true;
+    }
+
+    void reset() noexcept {
+        std::unique_lock<std::mutex> command_guard;
+        if (context_ != nullptr) {
+            command_guard = std::unique_lock<std::mutex>(context_->command_mutex);
+            (void)wait_fence();
+        }
+        if (fence_event_ != nullptr) {
+            CloseHandle(fence_event_);
+            fence_event_ = nullptr;
+        }
+        fence_.Reset();
+        list_.Reset();
+        allocator_.Reset();
+        back_buffers_.clear();
+        rtv_heap_.Reset();
+        swapchain_.Reset();
+        if (context_ != nullptr) context_->presentation_target_active = false;
+        valid_ = false;
+    }
+
+    std::shared_ptr<D3D12Context> context_;
+    PresentationTargetInfo info_;
+    ComPtr<IDXGISwapChain3> swapchain_;
+    std::vector<ComPtr<ID3D12Resource>> back_buffers_;
+    ComPtr<ID3D12DescriptorHeap> rtv_heap_;
+    ComPtr<ID3D12CommandAllocator> allocator_;
+    ComPtr<ID3D12GraphicsCommandList> list_;
+    ComPtr<ID3D12Fence> fence_;
+    HANDLE fence_event_ = nullptr;
+    UINT rtv_stride_ = 0U;
+    UINT frame_index_ = 0U;
+    UINT64 fence_value_ = 0U;
+    bool valid_ = false;
+};
+
 class D3D12Sampler final : public Sampler {
 public:
     D3D12Sampler(std::shared_ptr<D3D12Context> context,
@@ -4424,6 +4746,73 @@ public:
         return result;
     }
 
+    PresentationTargetResult create_presentation_target(
+        const PresentationTargetDescription& description) override {
+        Diagnostic diagnostic;
+        const PresentationTargetStatus validation =
+            validate_presentation_target_description(description, diagnostic);
+        if (validation != PresentationTargetStatus::ready)
+            return {validation, std::move(diagnostic), nullptr};
+        if (context_ == nullptr || context_->native_window == nullptr)
+            return {PresentationTargetStatus::unsupported,
+                    {"d3d12_native_window_required",
+                     "D3D12 presentation requires an initialized Win32 window"}, nullptr};
+        if (!IsWindow(static_cast<HWND>(context_->native_window)))
+            return {PresentationTargetStatus::unsupported,
+                    {"d3d12_native_window_invalid",
+                     "D3D12 native presentation requires a live Win32 window handle"}, nullptr};
+        if (context_->presentation_target_active)
+            return {PresentationTargetStatus::unsupported,
+                    {"d3d12_presentation_target_active",
+                     "This D3D12 device already owns a presentation target"}, nullptr};
+        try {
+            auto target = std::make_unique<D3D12PresentationTarget>(
+                context_, description, diagnostic);
+            if (!target->valid())
+                return {PresentationTargetStatus::allocation_failed,
+                        std::move(diagnostic), nullptr};
+            context_->presentation_target_active = true;
+            return {PresentationTargetStatus::ready, {}, std::move(target)};
+        } catch (const std::bad_alloc&) {
+            return {PresentationTargetStatus::allocation_failed,
+                    {"d3d12_presentation_target_allocation_failed",
+                     "D3D12 presentation target allocation exhausted host memory"},
+                    nullptr};
+        }
+    }
+
+    PresentationFrameResult clear_and_present(
+        PresentationTarget& target, const std::array<float, 4>& clear_color) override {
+        auto* d3d_target = dynamic_cast<D3D12PresentationTarget*>(&target);
+        if (d3d_target == nullptr || target.backend() != Backend::D3D12)
+            return {PresentationFrameStatus::unsupported,
+                    {"presentation_target_backend_mismatch",
+                     "The D3D12 device received a presentation target from another backend"}};
+        if (d3d_target->context().get() != context_.get())
+            return {PresentationFrameStatus::unsupported,
+                    {"presentation_target_device_mismatch",
+                     "The presentation target belongs to another D3D12 device"}};
+        std::lock_guard command_guard(context_->command_mutex);
+        return d3d_target->clear_and_present(clear_color);
+    }
+
+    PresentationFrameResult present_texture(
+        PresentationTarget& target, Texture& source) override {
+        auto* d3d_target = dynamic_cast<D3D12PresentationTarget*>(&target);
+        auto* d3d_source = dynamic_cast<D3D12Texture*>(&source);
+        if (d3d_target == nullptr || d3d_source == nullptr || target.backend() != Backend::D3D12 ||
+            source.backend() != Backend::D3D12)
+            return {PresentationFrameStatus::unsupported,
+                    {"presentation_texture_backend_mismatch",
+                     "The D3D12 presentation target and source must use D3D12"}};
+        if (d3d_target->context().get() != context_.get() || d3d_source->context() != context_.get())
+            return {PresentationFrameStatus::unsupported,
+                    {"presentation_texture_device_mismatch",
+                     "The presentation target and source must belong to this D3D12 device"}};
+        std::lock_guard command_guard(context_->command_mutex);
+        return d3d_target->present_texture(*d3d_source);
+    }
+
     BufferResult create_buffer(const BufferDescription& description,
                                std::span<const std::byte> initial_data) override {
         Diagnostic diagnostic;
@@ -5211,6 +5600,8 @@ DeviceResult create_d3d12_device(const DeviceOptions& options) {
     context->adapter = selected.handle;
     context->device = std::move(device);
     context->queue = std::move(queue);
+    if (!options.headless && options.native_surface.has_value())
+        context->native_window = options.native_surface->win32Window;
     context->info = info_from(selected.description);
     D3D12_DESCRIPTOR_HEAP_DESC sampler_heap_description{};
     sampler_heap_description.NumDescriptors = kD3d12SamplerDescriptorCapacity;

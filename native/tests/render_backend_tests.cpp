@@ -537,14 +537,27 @@ void contract_options() {
 
     options.headless = false;
     options.native_surface = source;
-    require(enumerate_adapters(Backend::D3D12, options).status == DeviceStatus::unavailable &&
+    require(enumerate_adapters(Backend::D3D12, options).status == DeviceStatus::invalid_options &&
                 enumerate_adapters(Backend::D3D12, options).diagnostic.code ==
-                    "d3d12_native_presentation_unsupported",
-            "D3D12 native presentation is explicitly unsupported");
-    require(create_device(Backend::D3D12, options).status == DeviceStatus::unavailable &&
+                    "d3d12_native_window_required",
+            "D3D12 native presentation requires a Win32 window");
+    require(create_device(Backend::D3D12, options).status == DeviceStatus::invalid_options &&
                 create_device(Backend::D3D12, options).diagnostic.code ==
-                    "d3d12_native_presentation_unsupported",
-            "D3D12 native device creation is explicitly unsupported");
+                    "d3d12_native_window_required",
+            "D3D12 native device creation requires a Win32 window");
+#if defined(_WIN32)
+    source.win32Window = reinterpret_cast<void*>(static_cast<std::uintptr_t>(1U));
+    options.native_surface = source;
+    require(enumerate_adapters(Backend::D3D12, options).status == DeviceStatus::invalid_options &&
+                enumerate_adapters(Backend::D3D12, options).diagnostic.code ==
+                    "d3d12_native_window_invalid",
+            "D3D12 rejects an invalid Win32 window during adapter validation");
+    require(create_device(Backend::D3D12, options).status == DeviceStatus::invalid_options &&
+                create_device(Backend::D3D12, options).diagnostic.code ==
+                    "d3d12_native_window_invalid",
+            "D3D12 rejects an invalid Win32 window during device validation");
+    source.win32Window = nullptr;
+#endif
 
     source.createVulkanSurface = contract_native_surface_create;
     source.destroyVulkanSurface = contract_native_surface_destroy;

@@ -52,7 +52,7 @@ if(APEX_ENABLE_D3D12)
     set(APEX_ENABLE_D3D12 OFF CACHE BOOL "Build D3D12 support on Windows" FORCE)
   else()
     target_compile_definitions(apex_native INTERFACE APEX_HAS_D3D12=1)
-    target_link_libraries(apex_native INTERFACE d3d12 dxgi)
+    target_link_libraries(apex_native INTERFACE d3d12 dxgi user32)
   endif()
 endif()
 

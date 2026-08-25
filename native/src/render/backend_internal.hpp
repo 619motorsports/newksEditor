@@ -13,6 +13,9 @@ namespace apex::render {
 [[nodiscard]] AdapterResult enumerate_d3d12_adapters(const DeviceOptions& options);
 [[nodiscard]] DeviceResult create_d3d12_device(const DeviceOptions& options);
 
+[[nodiscard]] bool valid_d3d12_native_window(
+    const apex::platform::NativeSurfaceSource& source, Diagnostic& diagnostic);
+
 [[nodiscard]] bool valid_buffer_usage(BufferUsage usage) noexcept;
 [[nodiscard]] bool valid_buffer_description(const BufferDescription& description,
                                              std::size_t initial_data_size,
