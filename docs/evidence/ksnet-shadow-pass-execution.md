@@ -75,15 +75,73 @@ levels before a shadow-enabled receiver draw.
 
 ## Caster material contract
 
-`MaterialFilterSM::apply` is at `0x100650c7`. It selects the skinned shadow
-shader when the material shader variable at native offset `+0x50` is `1`.
-Otherwise, it selects the normal shadow shader. It selects the alpha-tested
-shadow shader when the material field at `+0x5c` is nonzero.
+`MaterialFilterSM::MaterialFilterSM` is at `0x10064fc4`. It resolves the
+`ksShadowGen`, `ksShadowGenAT`, and `ksShadowGenSKIN` shader identifiers
+through `GraphicsManager::getShader`. It sets `useNullPS = true` on the normal
+and skinned shader objects. It does not set this value on the alpha-tested
+object. `MaterialFilterSM::apply` is at `0x100650c7`.
 
-For alpha-tested materials, it binds the first texture record whose texture
-slot is zero. It commits the material constant buffer whose slot is `4`. It
-always forces opaque blending. It sets back-face culling unless the material
-byte at `+0x64` is nonzero. If this byte is nonzero, it uses no culling.
+The PDB `Material` layout gives the relevant fields exactly:
+
+| field | native offset | type/meaning |
+| --- | ---: | --- |
+| `blendMode` | `+0x5c` | `BlendMode`: `eOpaque=0`, `eAlphaBlend=1`, `eAlphaToCoverage=2` |
+| `cBuffers` | `+0x3c` | vector of material constant buffers |
+| `resources` | `+0x30` | vector of `{slot, texture}` records |
+| `doubleFaceShadow` | `+0x64` | bool |
+
+`apply` first selects `smSkinned` when the material shader variable at `+0x50`
+is `1`. Otherwise, it selects `smAlphaTested` when `blendMode != eOpaque`.
+It selects `smNormal` for the remaining materials.
+
+The alpha-tested branch scans the resource vector in order. It finds the
+first record with texture slot `0`. Then it calls
+`GraphicsManager::setTexture(0, texture)`. It scans the material constant
+buffers and commits each buffer that uses slot `4`.
+
+The operation order is shader selection, opaque blend state, texture binding,
+slot-4 buffer commit, and cull state. `GraphicsManager::setTexture` is at
+`0x10046927`. This function forwards the material resource slot to the
+matching native texture stage. It also updates the cached texture pointer.
+`CBuffer::commit` is at `0x1004ab88`. After it maps a modified buffer, it
+binds the buffer to the recorded slot.
+
+The ordinary opaque path uses the null-pixel path of the normal shader. It
+does not enter the texture and slot-4 buffer branch. The skinned shader also
+has `useNullPS = true`. However, `blendMode != eOpaque` independently controls
+the resource and buffer branch. This evidence does not include that case in
+the static alpha-tested path.
+
+The PDB names `Material::doubleFaceShadow`. Thus, the final cull test is not an
+inferred alias for the ordinary `doubleFace` field at `+0x1c`.
+`doubleFaceShadow == false` selects `eCullBack`. A true value selects
+`eCullNone`.
+
+When `isAlphaTested` is true, `Material::initShaderVars` sets
+`blendMode = eAlphaToCoverage`. This function is at `0x10040420`. The
+constructor at `0x1003fcc7` initializes new materials to `eOpaque` and
+`doubleFaceShadow = false`. It does not write a default `ksAlphaRef` value.
+Thus, an alpha-tested static material reaches the `ksShadowGenAT` branch. The
+alpha threshold comes from the shader-variable data of the material.
+
+The installed alpha-tested shader binaries provide the register and field
+layout. `ksShadowGenAT_ps.fxo` SHA-256 is
+`6782f08729c2dcd68254553f08ce6ad682e28f00fc9f493c48cd8c027ffc21f2`. Its
+DXBC RDEF declares `cbMaterial` at `b4`, `txDiffuse` at `t0`, and
+`samLinearShadow` at `s1`. `cbMaterial` is 32 bytes:
+`ksAmbient` offset `0`, `ksDiffuse` `4`, `ksSpecular` `8`, `ksSpecularEXP`
+`12`, `ksEmissive` `16` (three floats), and `ksAlphaRef` offset `28`
+(`cb4[1].w`). The shader token stream contains a `discard` instruction after
+the diffuse-texture sample and alpha comparison. `ksShadowGenAT_vs.fxo`
+SHA-256 is
+`8558a417dead16385fc9565c4882da6a8771f39b2ba4e1af47badb55284d1c85`. Its
+RDEF binds `cbCamera` at `b0` and `cbPerObject` at `b1`. It places `ksWorld`
+at byte offset `0` in `b1`. These shader binaries establish the exact texture,
+sampler, buffer, and alpha-reference locations. They do not establish a
+default `ksAlphaRef` value for a material that omits this variable.
+`MaterialFilterSM::apply` does not call a sampler-state setter. Thus, the `s1`
+sampler setup occurs outside this per-material binding function. The port must
+not create a texture-slot alias for this sampler.
 
 This rule is the exact bounded caster-side behavior for the current staged
 `doubleFaceShadow` and alpha-tested casters. It does not prove that the port
