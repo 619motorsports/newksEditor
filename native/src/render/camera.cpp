@@ -15,6 +15,7 @@ using Vector3 = apex::scene::Vector3;
 
 constexpr float pi = 3.14159265358979323846F;
 constexpr float minimum_basis_length = 1.0e-6F;
+constexpr float native_degrees_to_radians = 0.01745299994945526F;
 
 [[nodiscard]] bool finite_vector(const Vector3& value) noexcept {
     return std::all_of(value.begin(), value.end(), [](float component) {
@@ -24,6 +25,14 @@ constexpr float minimum_basis_length = 1.0e-6F;
 
 [[nodiscard]] Vector3 subtract(const Vector3& left, const Vector3& right) noexcept {
     return {left[0] - right[0], left[1] - right[1], left[2] - right[2]};
+}
+
+[[nodiscard]] Vector3 add(const Vector3& left, const Vector3& right) noexcept {
+    return {left[0] + right[0], left[1] + right[1], left[2] + right[2]};
+}
+
+[[nodiscard]] Vector3 scale(const Vector3& value, float factor) noexcept {
+    return {value[0] * factor, value[1] * factor, value[2] * factor};
 }
 
 [[nodiscard]] float dot(const Vector3& left, const Vector3& right) noexcept {
@@ -44,6 +53,37 @@ constexpr float minimum_basis_length = 1.0e-6F;
 
 [[nodiscard]] Vector3 normalize(const Vector3& value, float value_length) noexcept {
     return {value[0] / value_length, value[1] / value_length, value[2] / value_length};
+}
+
+[[nodiscard]] bool finite_scalar(float value) noexcept { return std::isfinite(value); }
+
+[[nodiscard]] bool valid_native_basis(const NativeCameraPose& pose) noexcept {
+    if (!finite_vector(pose.right) || !finite_vector(pose.up) ||
+        !finite_vector(pose.backward) || !finite_vector(pose.position))
+        return false;
+    const float right_length = length(pose.right);
+    const float up_length = length(pose.up);
+    const float backward_length = length(pose.backward);
+    if (!(right_length > minimum_basis_length && up_length > minimum_basis_length &&
+          backward_length > minimum_basis_length))
+        return false;
+    constexpr float orthogonality_tolerance = 1.0e-3F;
+    return std::abs(right_length - 1.0F) <= orthogonality_tolerance &&
+           std::abs(up_length - 1.0F) <= orthogonality_tolerance &&
+           std::abs(backward_length - 1.0F) <= orthogonality_tolerance &&
+           std::abs(dot(pose.right, pose.up)) <= orthogonality_tolerance &&
+           std::abs(dot(pose.right, pose.backward)) <= orthogonality_tolerance &&
+           std::abs(dot(pose.up, pose.backward)) <= orthogonality_tolerance;
+}
+
+[[nodiscard]] Vector3 rotate_vector(const Vector3& value, const Vector3& unit_axis,
+                                    float radians) noexcept {
+    const float cosine = std::cos(radians);
+    const float sine = std::sin(radians);
+    const Vector3 cross_axis = cross(unit_axis, value);
+    const float axis_dot = dot(unit_axis, value);
+    return add(add(scale(value, cosine), scale(cross_axis, sine)),
+               scale(unit_axis, axis_dot * (1.0F - cosine)));
 }
 
 [[nodiscard]] bool finite_matrix(const Matrix4& value) noexcept {
@@ -100,6 +140,55 @@ constexpr float minimum_basis_length = 1.0e-6F;
 }
 
 } // namespace
+
+bool NativeCameraPose::move_forward(float distance) noexcept {
+    if (!finite_scalar(distance) || !valid_native_basis(*this)) return false;
+    const Vector3 next = add(position, scale(backward, -distance));
+    if (!finite_vector(next)) return false;
+    position = next;
+    return true;
+}
+
+bool NativeCameraPose::move_right(float distance) noexcept {
+    if (!finite_scalar(distance) || !valid_native_basis(*this)) return false;
+    const Vector3 next = add(position, scale(right, distance));
+    if (!finite_vector(next)) return false;
+    position = next;
+    return true;
+}
+
+bool NativeCameraPose::move_up_world(float distance) noexcept {
+    if (!finite_scalar(distance) || !valid_native_basis(*this)) return false;
+    Vector3 next = position;
+    next[1] += distance;
+    if (!finite_vector(next)) return false;
+    position = next;
+    return true;
+}
+
+bool NativeCameraPose::rotate_on_axis(const Vector3& axis, float radians) noexcept {
+    if (!finite_vector(axis) || !finite_scalar(radians) || !valid_native_basis(*this))
+        return false;
+    const float axis_length = length(axis);
+    if (!(axis_length > minimum_basis_length)) return false;
+    const Vector3 unit_axis = normalize(axis, axis_length);
+    const Vector3 next_right = rotate_vector(right, unit_axis, radians);
+    const Vector3 next_up = rotate_vector(up, unit_axis, radians);
+    const Vector3 next_backward = rotate_vector(backward, unit_axis, radians);
+    NativeCameraPose next = *this;
+    next.right = next_right;
+    next.up = next_up;
+    next.backward = next_backward;
+    if (!valid_native_basis(next)) return false;
+    right = next_right;
+    up = next_up;
+    backward = next_backward;
+    return true;
+}
+
+bool NativeCameraPose::rotate_pitch(float radians) noexcept {
+    return rotate_on_axis({1.0F, 0.0F, 0.0F}, radians);
+}
 
 Matrix4 multiply_camera_matrices(const Matrix4& left, const Matrix4& right) noexcept {
     Matrix4 output{};
@@ -170,6 +259,34 @@ CameraFrameResult build_camera_frame(const CameraFrameRequest& request) {
         return failure("camera_result_non_finite", "Camera matrix construction exceeded finite float range");
     }
     return {frame, {}, {}};
+}
+
+CameraFrameResult build_native_camera_frame(const NativeCameraPose& pose,
+                                             float viewport_aspect,
+                                             CameraClipSpace clip_space) {
+    if (!valid_native_basis(pose) || !finite_scalar(pose.fov_degrees) ||
+        !finite_scalar(pose.aspect_ratio) || !finite_scalar(pose.near_plane) ||
+        !finite_scalar(pose.far_plane)) {
+        return failure("camera_pose_invalid", "Native camera pose must contain finite orthonormal data");
+    }
+    if (!(pose.fov_degrees > 0.0F && pose.fov_degrees < 180.0F)) {
+        return failure("camera_fov_invalid", "Native camera field of view must be between zero and 180 degrees");
+    }
+    float aspect = pose.aspect_ratio;
+    if (aspect == -1.0F) aspect = viewport_aspect;
+    if (!(aspect > 0.0F) || !finite_scalar(aspect)) {
+        return failure("camera_aspect_invalid", "Native camera aspect ratio must be positive or -1");
+    }
+    CameraFrameRequest request;
+    request.eye = pose.position;
+    request.target = add(pose.position, scale(pose.backward, -1.0F));
+    request.up = pose.up;
+    request.fov_radians = pose.fov_degrees * native_degrees_to_radians;
+    request.aspect = aspect;
+    request.near_plane = pose.near_plane;
+    request.far_plane = pose.far_plane;
+    request.clip_space = clip_space;
+    return build_camera_frame(request);
 }
 
 const char* camera_clip_space_name(CameraClipSpace clip_space) noexcept {

@@ -49,6 +49,33 @@ struct CameraFrameResult {
     [[nodiscard]] bool ok() const noexcept { return frame.has_value(); }
 };
 
+// The native ksNet Camera stores an orthonormal pose as right, up, backward,
+// and position vectors.  This semantic representation avoids coupling the
+// controller to the field ordering of the original mat44f implementation.
+// `backward` points away from the view direction, as it does in the native
+// Camera::getViewMatrix path.
+struct NativeCameraPose {
+    apex::scene::Vector3 right = {1.0F, 0.0F, 0.0F};
+    apex::scene::Vector3 up = {0.0F, 1.0F, 0.0F};
+    apex::scene::Vector3 backward = {0.0F, 0.0F, 1.0F};
+    apex::scene::Vector3 position = {0.0F, 0.0F, 0.0F};
+    // ksNet stores FOV in degrees and uses -1 as an aspect-ratio sentinel.
+    float fov_degrees = 45.0F;
+    float aspect_ratio = -1.0F;
+    float near_plane = 0.01F;
+    float far_plane = 100.0F;
+
+    // These operations match Camera::moveForward, moveRight, moveUpWorld,
+    // rotateOnAxis, and rotatePitch. False means the finite/basis guard
+    // rejected the request without mutating the pose.
+    [[nodiscard]] bool move_forward(float distance) noexcept;
+    [[nodiscard]] bool move_right(float distance) noexcept;
+    [[nodiscard]] bool move_up_world(float distance) noexcept;
+    [[nodiscard]] bool rotate_on_axis(const apex::scene::Vector3& axis,
+                                      float radians) noexcept;
+    [[nodiscard]] bool rotate_pitch(float radians) noexcept;
+};
+
 // Matrices use the same 16-float column-major layout as public/app.js and
 // SceneNode::transform. multiply_camera_matrices(a, b) returns a * b.
 [[nodiscard]] apex::scene::Matrix4 multiply_camera_matrices(
@@ -58,6 +85,14 @@ struct CameraFrameResult {
 // Builds the source-evidenced WebGL look-at/perspective camera. Vulkan and
 // D3D12 variants retain the same view math and explicitly remap clip space.
 [[nodiscard]] CameraFrameResult build_camera_frame(const CameraFrameRequest& request);
+
+// Builds an existing native pose for one backend. If aspect_ratio is -1, the
+// supplied viewport aspect is used, matching ksNet's video-size fallback.
+// Projection uses the existing explicit backend clip remapping; the native
+// createPerspective internals are not claimed as fully recovered here.
+[[nodiscard]] CameraFrameResult build_native_camera_frame(
+    const NativeCameraPose& pose, float viewport_aspect,
+    CameraClipSpace clip_space = CameraClipSpace::webgl);
 
 [[nodiscard]] const char* camera_clip_space_name(CameraClipSpace clip_space) noexcept;
 

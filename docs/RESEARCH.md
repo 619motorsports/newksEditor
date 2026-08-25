@@ -2805,3 +2805,20 @@ The opaque word is constant within a fixture but differs across tracks; it must
 not receive an inferred semantic name. Native version-2 parsing remains staged
 until it has independent bounded fixtures for truncation, count overflow, and
 the three-to-one retained-point behavior.
+
+## Native ksNet camera pose evidence
+
+The installed `ksNet.dll` (`b38dcb826a3311d7233cf0a6a58e5da16b6c8679f8490091e7b434bf730091ca`) and
+matching PDB were inspected with Ghidra. `Camera::moveForward` (`0x1006459b`) moves
+position along the negative backward basis, `moveRight` (`0x100645ee`) moves along
+the first basis, and `moveUpWorld` (`0x10064630`) changes only world Y.
+`rotateOnAxis` (`0x10064a60`) pre-multiplies an axis-angle matrix; `rotatePitch`
+(`0x10064aa9`) uses axis `(1, 0, 0)`. `getViewMatrix` (`0x100644e7`) builds a
+look-at from position, position minus backward, and the up basis. `getPerspectiveMatrix`
+(`0x10064474`) converts stored degree FOV with `0.01745299994945526` and uses
+the video aspect when the authored aspect is `-1`.
+
+The bounded C++ `NativeCameraPose` preserves these movement and rotation semantics
+without depending on the original matrix field ordering. It converts to the existing
+backend-specific frame builder. The projection keeps explicit WebGL/Vulkan/D3D12
+clip remapping; native `mat44f::createPerspective` internals remain unrecovered.

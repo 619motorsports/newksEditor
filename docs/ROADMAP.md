@@ -281,8 +281,11 @@ vertical slice is only the foundation.
   drive the viewport with their configured basis, FOV, and clip planes. Referenced
   spline CSVs resolve and use the game's world-Y rotation and normalized sampling for
   manual path-position preview and configured-duration playback; live focused-car
-  targeting remains. Static layout positions and rotations now support live editing,
-  project persistence, validation, and `models.ini` export. The inspector now computes
+  targeting remains. The backend-neutral C++ camera pose now matches the recovered
+  native movement and axis-rotation semantics; exact native projection helper
+  internals remain a separate fidelity gate. Static layout positions and rotations
+  now support live editing, project persistence, validation, and `models.ini` export.
+  The inspector now computes
   exact parsed hierarchy, mesh, vertex, triangle, material, texture, and payload totals.
   It reports transformed scene bounds, each source-file hotspot, and the largest meshes,
   including repeated placements as separate layout entries. These measurements do not

@@ -92,6 +92,66 @@ void composes_world_after_view_projection() {
     require_close(clip[3], 1.0F, "affine transform preserves homogeneous W");
 }
 
+void matches_native_pose_motion_and_rotation() {
+    NativeCameraPose pose;
+    require(pose.move_forward(2.0F), "native forward movement accepted");
+    require_close(pose.position[2], -2.0F, "native forward uses negative backward basis");
+    require(pose.move_right(3.0F), "native right movement accepted");
+    require_close(pose.position[0], 3.0F, "native right uses first basis");
+    require(pose.move_up_world(4.0F), "native world-up movement accepted");
+    require_close(pose.position[1], 4.0F, "native world-up changes only Y");
+
+    require(pose.rotate_pitch(1.5707963267948966F), "native pitch rotation accepted");
+    require_close(pose.backward[1], -1.0F, "native pitch rotates backward basis");
+    require_close(pose.up[2], 1.0F, "native pitch rotates up basis");
+    require_close(pose.right[0], 1.0F, "native pitch preserves right basis");
+
+    const CameraFrameResult result = build_native_camera_frame(pose, 2.0F);
+    require(result.ok(), "native pose converts to a camera frame");
+    require_close(result.frame->position[0], 3.0F, "native frame keeps pose X");
+    require_close(result.frame->position[1], 4.0F, "native frame keeps pose Y");
+    require_close(result.frame->position[2], -2.0F, "native frame keeps pose Z");
+    require_close(result.frame->forward[1], 1.0F, "native frame forward is negative backward");
+    require_close(result.frame->up[2], 1.0F, "native frame keeps rotated up basis");
+}
+
+void matches_native_fov_and_aspect_fallback() {
+    NativeCameraPose pose;
+    pose.fov_degrees = 90.0F;
+    pose.aspect_ratio = -1.0F;
+    const auto fallback_result = build_native_camera_frame(pose, 2.0F);
+    require(fallback_result.ok(), "native viewport aspect fallback accepted");
+    const CameraFrame fallback = *fallback_result.frame;
+    require_close(fallback.aspect, 2.0F, "native -1 aspect uses viewport aspect");
+    require_close(fallback.fov_radians, 1.570769995F, "native FOV converts degrees to radians");
+
+    pose.aspect_ratio = 1.25F;
+    const auto authored_result = build_native_camera_frame(pose, 4.0F);
+    require(authored_result.ok(), "native authored aspect accepted");
+    const CameraFrame authored = *authored_result.frame;
+    require_close(authored.aspect, 1.25F, "native authored aspect overrides viewport");
+}
+
+void rejects_invalid_native_pose_operations() {
+    NativeCameraPose pose;
+    const auto original = pose.position;
+    require(!pose.move_forward(std::numeric_limits<float>::quiet_NaN()),
+            "native non-finite movement is rejected");
+    require(pose.position == original, "rejected movement does not mutate pose");
+    require(!pose.rotate_on_axis({0.0F, 0.0F, 0.0F}, 1.0F),
+            "native zero rotation axis is rejected");
+    require(!pose.rotate_pitch(std::numeric_limits<float>::infinity()),
+            "native non-finite rotation is rejected");
+
+    pose.aspect_ratio = 0.0F;
+    require(build_native_camera_frame(pose, 1.0F).code == "camera_aspect_invalid",
+            "native invalid aspect is rejected");
+    pose = {};
+    pose.fov_degrees = 180.0F;
+    require(build_native_camera_frame(pose, 1.0F).code == "camera_fov_invalid",
+            "native 180-degree FOV is rejected");
+}
+
 void rejects_malformed_camera_inputs() {
     CameraFrameRequest request;
     request.eye[0] = std::numeric_limits<float>::quiet_NaN();
@@ -129,6 +189,9 @@ int main() {
         matches_webgl_reference_formulas();
         maps_native_clip_depth_and_vulkan_y_explicitly();
         composes_world_after_view_projection();
+        matches_native_pose_motion_and_rotation();
+        matches_native_fov_and_aspect_fallback();
+        rejects_invalid_native_pose_operations();
         rejects_malformed_camera_inputs();
         std::cout << "camera tests passed\n";
         return 0;
