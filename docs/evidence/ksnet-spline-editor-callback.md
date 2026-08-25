@@ -153,9 +153,22 @@ replaces its payload field. The second object adds all fields after replacement.
 The C++ `--edit-ai-spline` command ports this order. It adds strict bounds,
 finite-value validation, complete writer validation, and exclusive output.
 
+The payload session keeps a separate load-time backup. Save and refresh do not
+replace this backup. The session supplies bounded undo and redo history.
+The history byte limit counts canonical writer bytes. Writer limits bound each
+parsed model. A separate limit bounds hostile raw selection input.
+
+The selected reset copies complete points and tagged payloads from the backup.
+The payload-only session keeps point positions fixed. Thus, its grid remains
+valid after a selected reset.
+
+The recovered camber command negates stored radians in raw selection order.
+The low-level API keeps duplicate entries. The CLI removes duplicates in
+insertion order, as `SplineEditor.addIndex` does.
+
 `--ai-spline-show-camber` enables the independent camber pass. This option
-also requires version-7 payloads and starts off. Spline edit controls remain
-staged.
+also requires version-7 payloads and starts off. The viewport rebuilds this
+geometry from the current session state after an edit.
 
 The managed `saveAISpline` wrapper has token `0x060003CC` and RVA `0x25C54`.
 If a spline exists, it calls `AISpline.buildGrid` and then `AISpline.save`.
@@ -165,8 +178,8 @@ version 7. It writes zero for the header and payload reserved words.
 The native save method truncates the destination directly. It does not use a
 temporary file or inspect stream errors. The UI reports success after the
 call. The C++ format writer implements the recovered byte layout. The CLI uses
-a temporary file and does not replace an existing destination. Payload-only
-edits preserve the parsed grid. Point edits still require a grid rebuild.
+a temporary file and does not replace an existing destination. Payload edits
+preserve the parsed grid. Point edits require the recovered grid-builder port.
 
 The production WebGL source has no AI-spline load or render path. A source
 search found no AI-spline or `fast_lane.ai` identifiers. Thus, a direct WebGL
@@ -176,8 +189,7 @@ production WebGL suite passed 380 tests. It skipped 34 installed-fixture tests.
 SwiftShader executes the native line passes at 1x and 4x MSAA. The pixel test
 checks magenta and cyan depth rejection. It also checks blue depth-off output.
 The test checks red and green camber lines with normal depth.
-The previous sanitizer-enabled suite passed 75 tests with SwiftShader. This
-increment passed 76 sanitizer tests. The explicit Vulkan target skipped because
-this preset found no physical device.
+The sanitizer-enabled suite passed 75 runnable tests. It skipped three
+environment-specific tests. The explicit Vulkan target found no physical device.
 The D3D12 code uses the same batch contract. A Windows WARP test remains
 necessary for D3D12 execution evidence.

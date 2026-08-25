@@ -3,6 +3,7 @@
 #include "apex/formats/ai_spline.hpp"
 #include "apex/formats/ai_spline_write.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -66,8 +67,16 @@ struct AiSplineWaypointApplyResult : AiSplineWaypointResult {
     bool changed = false;
 };
 
+struct AiSplineSelectedApplyResult : AiSplineWaypointResult {
+    std::optional<formats::AiSpline> candidate;
+    std::vector<std::uint8_t> bytes;
+    std::size_t applied = 0U;
+    bool changed = false;
+};
+
 inline constexpr float aiSplineRadiansToDegrees = 57.295780181884766F;
 inline constexpr float aiSplineDegreesToRadians = 0.01745299994945526F;
+inline constexpr std::size_t aiSplineMaxSelectionEntries = 1'000'000U;
 
 // Native access is enabled only when exactly one point is selected. This safe
 // adapter reports an explicit error instead of returning the native zero/-1
@@ -83,5 +92,15 @@ applyAiSplineWaypointEdit(const formats::AiSpline& spline,
                           std::span<const std::uint32_t> selectedPointIndices,
                           const AiSplineWaypointEdit& edit,
                           formats::AiSplineWriteLimits limits = {});
+
+// Invert the stored-radian camber value for each selected point in raw vector
+// order. Repeated indices are significant: selecting the same point twice
+// restores its original camber, matching the recovered native method. The safe
+// adapter validates all entries before it creates a complete candidate.
+[[nodiscard]] AiSplineSelectedApplyResult applyAiSplineCamberInversion(
+    const formats::AiSpline& spline,
+    std::span<const std::uint32_t> selectedPointIndices,
+    formats::AiSplineWriteLimits limits = {},
+    std::size_t maxSelectionEntries = aiSplineMaxSelectionEntries);
 
 } // namespace apex::authoring

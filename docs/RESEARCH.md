@@ -3040,6 +3040,36 @@ The `--edit-ai-spline` command exposes the recovered replacement and additive
 objects for one point. It accepts camber in degrees and writes radians. It
 preserves the parsed grid and refuses to replace an existing output file.
 
+## ksEditor AI spline edit lifecycle evidence
+
+`ksNet.loadAISpline` has token `0x060003cb` and RVA `0x25cf8`. It loads the
+file twice. The first spline becomes the active spline. The second spline
+becomes `SplineEditor.backupSpline` at field offset 8.
+
+`SplineEditor.startEditing` at `0x1002f2d8` clears the selection. It does not
+replace the backup. Refresh, resample, finish, cancel, and save also keep the
+load-time backup. Thus, a save does not establish a new reset point.
+
+`SplineEditor.setSelectedIndicesToDefault` has token `0x06000113` and RVA
+`0x30c14`. It copies each selected point and tagged payload from the backup.
+It uses raw selection order and keeps the selection. An empty selection does
+nothing. A point-count mismatch replaces the complete active spline.
+
+`SplineEditor.invertCamberOnSelectedIndices` has token `0x0600002d` and RVA
+`0x1ee60`. It negates the stored-radian camber for each raw selection entry.
+Thus, a repeated point index changes camber twice. The native method does not
+validate indices, tags, or finite values.
+
+The C++ payload session owns immutable baseline and current snapshots. Each
+snapshot has a parsed model and canonical writer bytes. Count and serialized
+byte limits bound history. Writer limits bound the parsed model. A separate
+limit bounds raw selection entries. Invalid edits report zero applied entries.
+They do not change state, history, or revision.
+
+The low-level inversion API preserves raw duplicate behavior. The CLI removes
+duplicate indices in insertion order. This step matches `SplineEditor.addIndex`.
+The CLI writes a new file and does not replace an existing path.
+
 ## ksEditor AI spline selection evidence
 
 The PDB places `SplineEditor.selectedIndices` at offset 52 as a

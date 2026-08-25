@@ -1,5 +1,6 @@
 #include "apex/authoring/ai_spline.hpp"
 
+#include <bit>
 #include <cmath>
 #include <exception>
 #include <string>
@@ -78,10 +79,71 @@ void replaceNonzero(float& target, float value) noexcept {
 
 [[nodiscard]] bool sameInfo(const AiSplineWaypointInfo& left,
                             const AiSplineWaypointInfo& right) noexcept {
-    return left.radius == right.radius && left.side0 == right.side0 &&
-           left.side1 == right.side1 &&
-           left.camberDegrees == right.camberDegrees &&
-           left.length == right.length && left.grade == right.grade;
+    return std::bit_cast<std::uint32_t>(left.radius) ==
+               std::bit_cast<std::uint32_t>(right.radius) &&
+           std::bit_cast<std::uint32_t>(left.side0) ==
+               std::bit_cast<std::uint32_t>(right.side0) &&
+           std::bit_cast<std::uint32_t>(left.side1) ==
+               std::bit_cast<std::uint32_t>(right.side1) &&
+           std::bit_cast<std::uint32_t>(left.camberDegrees) ==
+               std::bit_cast<std::uint32_t>(right.camberDegrees) &&
+           std::bit_cast<std::uint32_t>(left.length) ==
+               std::bit_cast<std::uint32_t>(right.length) &&
+           std::bit_cast<std::uint32_t>(left.grade) ==
+               std::bit_cast<std::uint32_t>(right.grade);
+}
+
+[[nodiscard]] bool
+validateSelectedPayloads(const formats::AiSpline& spline,
+                         std::span<const std::uint32_t> selectedPointIndices,
+                         AiSplineWaypointResult& result,
+                         std::vector<std::uint32_t>& payloadIndices,
+                         std::size_t maxSelectionEntries) {
+    if (spline.version != 7U) {
+        fail(result, AiSplineWaypointStatus::unsupported, "UNSUPPORTED_VERSION",
+             spline.source,
+             "AI spline camber inversion supports version 7 only");
+        return false;
+    }
+    if (spline.points.size() != spline.payloads.size()) {
+        fail(result, AiSplineWaypointStatus::invalid, "COUNT_MISMATCH",
+             spline.source, "AI spline payload count must equal point count");
+        return false;
+    }
+    if (selectedPointIndices.size() > maxSelectionEntries) {
+        fail(result, AiSplineWaypointStatus::invalid, "SELECTION_LIMIT",
+             spline.source,
+             "AI spline selection count exceeds its entry limit");
+        return false;
+    }
+
+    payloadIndices.reserve(selectedPointIndices.size());
+    for (const auto pointIndex : selectedPointIndices) {
+        if (static_cast<std::size_t>(pointIndex) >= spline.points.size()) {
+            fail(result, AiSplineWaypointStatus::invalid, "POINT_INDEX_INVALID",
+                 spline.source,
+                 "selected AI spline point is outside the point array");
+            return false;
+        }
+        const std::int32_t tag = spline.points[pointIndex].tag;
+        if (tag < 0 ||
+            static_cast<std::size_t>(tag) >= spline.payloads.size()) {
+            fail(result, AiSplineWaypointStatus::invalid,
+                 "PAYLOAD_INDEX_INVALID", spline.source,
+                 "selected AI spline point tag is outside the payload array");
+            return false;
+        }
+        const auto payloadIndex = static_cast<std::uint32_t>(tag);
+        if (!std::isfinite(spline.payloads[payloadIndex].camber)) {
+            fail(result, AiSplineWaypointStatus::invalid, "NON_FINITE_VALUE",
+                 spline.source,
+                 "selected AI spline waypoint contains a non-finite camber "
+                 "value");
+            return false;
+        }
+        payloadIndices.push_back(payloadIndex);
+    }
+    return true;
 }
 
 } // namespace
@@ -171,6 +233,50 @@ applyAiSplineWaypointEdit(const formats::AiSpline& spline,
         result.candidate.reset();
     } catch (const std::exception& error) {
         fail(result, AiSplineWaypointStatus::failed, "WAYPOINT_EDIT_FAILED",
+             spline.source, error.what());
+        result.bytes.clear();
+        result.candidate.reset();
+    }
+    return result;
+}
+
+AiSplineSelectedApplyResult applyAiSplineCamberInversion(
+    const formats::AiSpline& spline,
+    std::span<const std::uint32_t> selectedPointIndices,
+    formats::AiSplineWriteLimits limits, std::size_t maxSelectionEntries) {
+    AiSplineSelectedApplyResult result;
+    std::vector<std::uint32_t> payloadIndices;
+    try {
+        if (!validateSelectedPayloads(spline, selectedPointIndices, result,
+                                      payloadIndices, maxSelectionEntries))
+            return result;
+
+        auto candidate = spline;
+        for (const auto payloadIndex : payloadIndices)
+            candidate.payloads[payloadIndex].camber =
+                -candidate.payloads[payloadIndex].camber;
+
+        bool changed = false;
+        for (const auto payloadIndex : payloadIndices) {
+            changed = changed || std::bit_cast<std::uint32_t>(
+                                     candidate.payloads[payloadIndex].camber) !=
+                                     std::bit_cast<std::uint32_t>(
+                                         spline.payloads[payloadIndex].camber);
+        }
+        result.bytes = formats::serializeAiSpline(candidate, limits);
+        result.applied = selectedPointIndices.size();
+        result.changed = changed;
+        result.candidate = std::move(candidate);
+        result.status = AiSplineWaypointStatus::ok;
+    } catch (const formats::AiSplineWriteError& error) {
+        const auto status = error.code() == "UNSUPPORTED_VERSION"
+                                ? AiSplineWaypointStatus::unsupported
+                                : AiSplineWaypointStatus::invalid;
+        fail(result, status, error.code(), spline.source, error.what());
+        result.bytes.clear();
+        result.candidate.reset();
+    } catch (const std::exception& error) {
+        fail(result, AiSplineWaypointStatus::failed, "CAMBER_INVERSION_FAILED",
              spline.source, error.what());
         result.bytes.clear();
         result.candidate.reset();

@@ -154,6 +154,8 @@ out/native/dev/native/apex-native --inspect-vao car.vao-patch
 out/native/dev/native/apex-native --inspect-ksanim animation.ksanim
 out/native/dev/native/apex-native --edit-ai-spline fast_lane.ai edited.ai \
   --index 42 --set-radius 20 --add-camber-degrees -0.5
+out/native/dev/native/apex-native --invert-ai-spline fast_lane.ai inverted.ai \
+  --index 42 --index 84
 out/native/dev/native/apex-native --window vulkan --frames 300
 out/native/dev/native/apex-native --window vulkan --model car.kn5 \
   --analog-instruments data/analog_instruments.ini --rpm 6000 \
@@ -243,7 +245,14 @@ Camber option values use degrees. The file stores camber in radians.
 A zero `--set-*` value means unchanged. This native sentinel cannot set a
 field to zero. An additive value can make the result zero.
 The command preserves the spatial grid because payload edits do not move points.
-Point-position edits remain staged until the port can rebuild the grid.
+`--invert-ai-spline` negates camber for each unique selected point.
+The payload lookup uses each point tag. The command keeps selection order.
+The authoring library also provides an AI-spline payload session.
+The session keeps an immutable backup from load time and bounded undo history.
+It can undo, redo, restore selected records, or restore the complete backup.
+The history byte limit counts canonical serialized bytes. Writer limits bound
+the additional parsed models. A separate limit bounds raw selection entries.
+Point-position edits remain staged until the recovered grid builder is ported.
 The default `raw` mode draws the recovered raw magenta spline.
 `--ai-spline-mode interpolated` draws the recovered Catmull-Rom curve.
 This mode recomputes the native arc-length table and ignores stored point

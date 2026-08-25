@@ -94,6 +94,7 @@ endif()
 
 add_library(apex_authoring STATIC
   src/authoring/ai_spline.cpp
+  src/authoring/ai_spline_session.cpp
   src/authoring/geometry.cpp
   src/authoring/project.cpp
   src/authoring/project_bake.cpp
@@ -321,6 +322,7 @@ apex_add_native_test(ini_tests.cpp ini_tests ApexEditor::Formats)
 apex_add_native_test(vao_tests.cpp vao_tests ApexEditor::Formats)
 apex_add_native_test(authoring_project_tests.cpp authoring_project_tests ApexEditor::Authoring)
 apex_add_native_test(ai_spline_authoring_tests.cpp ai_spline_authoring_tests ApexEditor::Authoring)
+apex_add_native_test(ai_spline_session_tests.cpp ai_spline_session_tests ApexEditor::Authoring)
 apex_add_native_test(authoring_service_tests.cpp authoring_service_tests ApexEditor::App)
 apex_add_native_test(presentation_recreation_tests.cpp presentation_recreation_tests ApexEditor::App)
 apex_add_native_test(workspace_selection_tests.cpp workspace_selection_tests ApexEditor::App)

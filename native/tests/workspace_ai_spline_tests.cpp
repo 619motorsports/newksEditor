@@ -1,4 +1,5 @@
 #include "apex/app/workspace_ai_spline.hpp"
+#include "apex/authoring/ai_spline_session.hpp"
 
 #include <array>
 #include <cmath>
@@ -637,6 +638,41 @@ void buildsRecoveredCamberGeometry() {
             "one point must emit one immediate camber line");
 }
 
+void rebuildsCamberGeometryFromEditedSessionState() {
+    apex::formats::AiSpline spline;
+    spline.source = "camber-session.ai";
+    spline.version = 7U;
+    spline.points = {point(0.0F, 10.0F, 1.0F),
+                     point(2.0F, 20.0F, 3.0F)};
+    spline.points[0U].tag = 1;
+    spline.points[1U].tag = 0;
+    spline.payloads.resize(2U);
+    spline.payloads[0U].camber = -0.25F;
+    spline.payloads[1U].camber = 0.5F;
+    apex::authoring::AiSplineSession session(std::move(spline));
+
+    const auto before =
+        apex::app::buildWorkspaceAiSplineCamberGeometry(session.current());
+    const std::array<std::uint32_t, 1U> selection{0U};
+    const auto edited = session.invertSelectedCamber(selection);
+    const auto after =
+        apex::app::buildWorkspaceAiSplineCamberGeometry(session.current());
+    require(before.ok() && edited.ok() && edited.changed && after.ok(),
+            "session camber edit rebuilds valid visible geometry");
+    require(before.geometry.vertices[0U].color ==
+                    apex::app::workspace_ai_spline_camber_positive_color &&
+                after.geometry.vertices[0U].color ==
+                    apex::app::workspace_ai_spline_camber_nonpositive_color &&
+                before.geometry.vertices[1U].position ==
+                    after.geometry.vertices[1U].position,
+            "selected tagged camber changes sign color but preserves height");
+    require(before.geometry.vertices[2U].color ==
+                    after.geometry.vertices[2U].color &&
+                before.geometry.vertices[3U].position ==
+                    after.geometry.vertices[3U].position,
+            "unselected camber geometry remains unchanged");
+}
+
 void buildsRecoveredCurrentIndexMarker() {
     apex::formats::AiSpline spline;
     spline.version = 7U;
@@ -998,6 +1034,7 @@ int main() {
         buildsRecoveredSideSplineGeometry();
         rejectsUnsafeSideSplineSources();
         buildsRecoveredCamberGeometry();
+        rebuildsCamberGeometryFromEditedSessionState();
         rejectsUnsafeCamberSources();
         buildsRecoveredCurrentIndexMarker();
         buildsRecoveredSelectedIndexMarkers();

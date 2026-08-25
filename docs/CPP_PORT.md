@@ -223,8 +223,15 @@ remains unchanged and feature-complete.
   the payload through the point tag. It applies each nonzero replacement, then
   each additive value. Camber values use degrees at this boundary and radians
   in the file. The adapter returns a validated candidate and owned bytes.
-  The CLI writes these bytes without replacing an existing file. Payload-only
-  edits preserve the valid grid. Point edits and grid rebuild remain staged.
+  A separate payload session owns an immutable load-time backup and the current
+  state. It provides bounded undo and redo history. The byte limit counts each
+  canonical serialization. Writer limits bound each parsed snapshot model.
+  A separate limit bounds raw selection entries. The session restores selected
+  records from the backup. Camber inversion uses raw selection order in the library.
+  The CLI ignores duplicate indices, as the native selection method does.
+  The CLI writes validated session bytes without replacing an existing file.
+  Payload edits preserve the valid grid. The recovered grid builder remains
+  staged for point edits.
   Another version-7 option adds the recovered vertical camber lines after the
   side passes. Positive values are green. Other values are red.
   The selected pass uses solid fill, front-face culling, opaque blend state,

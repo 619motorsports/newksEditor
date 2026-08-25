@@ -7,6 +7,7 @@
 #include "apex/app/workspace_viewport.hpp"
 #include "apex/assets/asset_source.hpp"
 #include "apex/authoring/ai_spline.hpp"
+#include "apex/authoring/ai_spline_session.hpp"
 #include "apex/core/parse_error.hpp"
 #include "apex/core/parse_limits.hpp"
 #include "apex/domain/analog_instruments.hpp"
@@ -41,6 +42,7 @@
 #include <system_error>
 #include <thread>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #if defined(_WIN32)
@@ -87,6 +89,7 @@ void usage(std::ostream& output) {
               "                       [--set-camber-degrees <value>] [--set-length <value>] [--set-grade <value>]\n"
               "                       [--add-radius <value>] [--add-side0 <value>] [--add-side1 <value>]\n"
               "                       [--add-camber-degrees <value>] [--add-length <value>] [--add-grade <value>]\n"
+           << "  apex-native --invert-ai-spline <input.ai> <output.ai> --index <point-index> [--index <point-index> ...]\n"
            << "  apex-native --export-project kn5|csp <source.kn5> <project.apex.json> <output>\n"
            << "  apex-native --export-project collider|damage|bottom-colliders|surfaces|models|lods <source.kn5> "
               "<project.apex.json> <secondary-input> <output>\n";
@@ -745,10 +748,9 @@ int edit_ai_spline(int argc, char** argv) {
         throw std::runtime_error("--edit-ai-spline requires at least one edit field");
 
     const auto input_bytes = read_file(input_path);
-    const auto spline = apex::formats::parseAiSpline(input_bytes, input_path.string());
-    const std::array<std::uint32_t, 1> selection{*point_index};
-    const auto result = apex::authoring::applyAiSplineWaypointEdit(
-        spline, selection, edit);
+    auto spline = apex::formats::parseAiSpline(input_bytes, input_path.string());
+    apex::authoring::AiSplineSession session(std::move(spline));
+    const auto result = session.commitWaypointEdit(*point_index, edit);
     if (!result.ok()) {
         if (result.diagnostics.empty())
             throw std::runtime_error("AI spline waypoint edit failed");
@@ -756,9 +758,58 @@ int edit_ai_spline(int argc, char** argv) {
         throw std::runtime_error(diagnostic.code + ": " + diagnostic.message);
     }
 
-    write_file_exclusive(output_path, result.bytes);
-    std::cout << "AI spline waypoint edited: point=" << result.pointIndex
-              << ", payload=" << result.payloadIndex
+    write_file_exclusive(output_path, session.currentBytes());
+    std::cout << "AI spline waypoint edited: point=" << *result.pointIndex
+              << ", payload=" << *result.payloadIndex
+              << ", changed=" << (result.changed ? "yes" : "no")
+              << ", output=";
+    write_cli_text(std::cout, output_path.string());
+    std::cout << '\n';
+    return 0;
+}
+
+int invert_ai_spline(int argc, char** argv) {
+    if (argc < 6)
+        throw std::runtime_error("invalid --invert-ai-spline arguments");
+
+    const std::filesystem::path input_path = argv[2];
+    const std::filesystem::path output_path = argv[3];
+    std::vector<std::uint32_t> selection;
+    std::unordered_set<std::uint32_t> membership;
+    std::size_t selection_entry_count = 0U;
+    for (int argument = 4; argument < argc; ++argument) {
+        const std::string_view option = argv[argument];
+        if (option != "--index")
+            throw std::runtime_error("unknown --invert-ai-spline option: " +
+                                     std::string(option));
+        if (argument + 1 >= argc)
+            throw std::runtime_error("--index requires a value");
+        if (selection_entry_count >=
+            apex::authoring::aiSplineMaxSelectionEntries)
+            throw std::runtime_error(
+                "AI spline selection exceeds its entry limit");
+        ++selection_entry_count;
+        const auto point_index = parse_unsigned_index(
+            argv[++argument], "AI spline point index");
+        if (membership.insert(point_index).second)
+            selection.push_back(point_index);
+    }
+    if (selection.empty())
+        throw std::runtime_error("--invert-ai-spline requires --index");
+
+    const auto input_bytes = read_file(input_path);
+    auto spline = apex::formats::parseAiSpline(input_bytes, input_path.string());
+    apex::authoring::AiSplineSession session(std::move(spline));
+    const auto result = session.invertSelectedCamber(selection);
+    if (!result.ok()) {
+        if (result.diagnostics.empty())
+            throw std::runtime_error("AI spline camber inversion failed");
+        const auto& diagnostic = result.diagnostics.back();
+        throw std::runtime_error(diagnostic.code + ": " + diagnostic.message);
+    }
+
+    write_file_exclusive(output_path, session.currentBytes());
+    std::cout << "AI spline camber inverted: selected=" << selection.size()
               << ", changed=" << (result.changed ? "yes" : "no")
               << ", output=";
     write_cli_text(std::cout, output_path.string());
@@ -2147,6 +2198,13 @@ int main(int argc, char** argv) {
                 return 2;
             }
             return edit_ai_spline(argc, argv);
+        }
+        if (argc >= 2 && std::string_view(argv[1]) == "--invert-ai-spline") {
+            if (argc < 6) {
+                usage(std::cerr);
+                return 2;
+            }
+            return invert_ai_spline(argc, argv);
         }
         if (argc >= 2 && std::string_view(argv[1]) == "--export-project") {
             if (argc < 3) {
