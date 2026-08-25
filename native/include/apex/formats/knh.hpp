@@ -1,5 +1,7 @@
 #pragma once
 
+#include "apex/core/parse_limits.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -29,6 +31,19 @@ struct KnhFile {
   std::size_t byte_length = 0;
 };
 
+inline constexpr std::size_t default_knh_native_object_bytes =
+    256U * 1024U * 1024U;
+inline constexpr std::size_t default_knh_max_nodes = 1'000'000U;
+
+struct KnhParseOptions {
+  apex::core::ParseLimits limits{};
+  std::size_t maxNodes = default_knh_max_nodes;
+  // Bounds allocations made while materializing the recursive KNH object
+  // graph. This is separate from maxInputBytes because a child count can
+  // reserve many C++ node objects before all child records are read.
+  std::size_t maxNativeObjectBytes = default_knh_native_object_bytes;
+};
+
 class KnhError final : public std::runtime_error {
  public:
   KnhError(std::string message, std::size_t offset);
@@ -48,8 +63,14 @@ struct KnhWalkEntry {
 KnhFile parse_knh(std::span<const std::byte> bytes,
                   std::string_view source = "driver_base_pos.knh");
 
+KnhFile parse_knh(std::span<const std::byte> bytes,
+                  std::string_view source, KnhParseOptions options);
+
 KnhFile parse_knh(std::span<const std::uint8_t> bytes,
                   std::string_view source = "driver_base_pos.knh");
+
+KnhFile parse_knh(std::span<const std::uint8_t> bytes,
+                  std::string_view source, KnhParseOptions options);
 
 std::vector<KnhWalkEntry> walk_knh(const KnhNode& root);
 

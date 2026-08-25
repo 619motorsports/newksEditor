@@ -15,6 +15,7 @@
 namespace {
 
 using apex::formats::KnhError;
+using apex::formats::KnhParseOptions;
 
 void require(bool condition, std::string_view message) {
   if (!condition) throw std::runtime_error(std::string(message));
@@ -71,6 +72,21 @@ void require_knh_error(Function&& function, std::string_view context) {
   throw std::runtime_error(std::string(context) + ": parser accepted malformed input");
 }
 
+template <typename Function>
+void require_knh_error_message(Function&& function, std::string_view expected,
+                               std::string_view context) {
+  try {
+    function();
+  } catch (const KnhError& error) {
+    require(std::string_view(error.what()).find(expected) != std::string_view::npos,
+            context);
+    return;
+  } catch (const std::exception& error) {
+    throw std::runtime_error(std::string(context) + ": wrong exception: " + error.what());
+  }
+  throw std::runtime_error(std::string(context) + ": parser accepted malformed input");
+}
+
 void test_recursive_names_and_transforms() {
   const auto bytes = recursive_fixture();
   const auto parsed = apex::formats::parse_knh(bytes);
@@ -110,6 +126,28 @@ void test_malformed_values() {
   }
   append_u32(non_finite, 0);
   require_knh_error([&] { apex::formats::parse_knh(non_finite); }, "non-finite transform");
+}
+
+void test_configurable_limits_and_budget() {
+  const auto bytes = recursive_fixture();
+
+  KnhParseOptions count_options;
+  count_options.maxNodes = 1U;
+  require_knh_error_message(
+      [&] { (void)apex::formats::parse_knh(bytes, "count-limit.knh", count_options); },
+      "Too many KNH nodes", "configured node count limit");
+
+  KnhParseOptions budget_options;
+  budget_options.maxNativeObjectBytes = sizeof(apex::formats::KnhNode);
+  require_knh_error_message(
+      [&] { (void)apex::formats::parse_knh(bytes, "budget.knh", budget_options); },
+      "native allocation budget", "configured native allocation budget");
+
+  KnhParseOptions zero_budget_options;
+  zero_budget_options.maxNativeObjectBytes = 0U;
+  require_knh_error_message(
+      [&] { (void)apex::formats::parse_knh(bytes, "zero-budget.knh", zero_budget_options); },
+      "native allocation budget is zero", "zero native allocation budget");
 }
 
 void test_depth_limit() {
@@ -156,6 +194,7 @@ int main() {
     test_recursive_names_and_transforms();
     test_every_truncated_prefix();
     test_malformed_values();
+    test_configurable_limits_and_budget();
     test_depth_limit();
     test_direct_walk_is_bounded_and_iterative();
     std::cout << "KNH tests passed\n";
