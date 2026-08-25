@@ -73,9 +73,13 @@ std::vector<std::uint8_t> validLegacyV2Spline() {
     u32(bytes, 4);       // source records
     u32(bytes, 98765);   // lap time
     for (std::uint32_t index = 0; index < 4U; ++index) {
-        f32(bytes, static_cast<float>(index));
-        f32(bytes, static_cast<float>(index) + 0.25F);
-        f32(bytes, static_cast<float>(index) + 0.5F);
+        const std::array<std::array<float, 3>, 4> positions = {
+            std::array<float, 3>{0.0F, 0.0F, 0.0F},
+            std::array<float, 3>{10.0F, 0.0F, 0.0F},
+            std::array<float, 3>{10.0F, 10.0F, 0.0F},
+            std::array<float, 3>{10.0F, 10.0F, 10.0F},
+        };
+        for (const auto value : positions[index]) f32(bytes, value);
         u32(bytes, 0x11000000U + index); // opaque legacy word
         f32(bytes, 40.0F + static_cast<float>(index)); // speed
         f32(bytes, 0.5F);                                // gas
@@ -123,7 +127,7 @@ void parsesLegacyVersion2WithoutInventingV7Fields() {
             "legacy version-2 does not invent version-7 fields");
     require(parsed.legacyV2Records.size() == 4U,
             "legacy version-2 raw record count");
-    require(parsed.legacyV2Records[2].position == std::array<float, 3>{2.0F, 2.25F, 2.5F} &&
+    require(parsed.legacyV2Records[2].position == std::array<float, 3>{10.0F, 10.0F, 0.0F} &&
                 parsed.legacyV2Records[2].legacyWord == 0x11000002U &&
                 parsed.legacyV2Records[2].speed == 42.0F &&
                 parsed.legacyV2Records[2].gas == 0.5F &&
@@ -131,8 +135,49 @@ void parsesLegacyVersion2WithoutInventingV7Fields() {
             "legacy version-2 raw fields");
     require(parsed.nativeRetainedIndices == std::vector<std::uint32_t>{0U, 3U},
             "native version-2 retained indices");
+    require(parsed.nativeRetainedForwards.size() == 2U,
+            "native version-2 retained forward count");
+    const auto inverseRootThree = -1.0F / std::sqrt(3.0F);
+    require(std::abs(parsed.nativeRetainedForwards[0][0] - inverseRootThree) < 1.0e-6F &&
+                std::abs(parsed.nativeRetainedForwards[0][1] - inverseRootThree) < 1.0e-6F &&
+                std::abs(parsed.nativeRetainedForwards[0][2] - inverseRootThree) < 1.0e-6F,
+            "native version-2 first forward uses retained wraparound");
+    require(parsed.nativeRetainedForwards[1] == std::array<float, 3>{0.0F, 0.0F, 1.0F},
+            "native version-2 retained forward uses previous raw point");
     require(parsed.bytesRead == bytes.size() && parsed.byteLength == bytes.size(),
             "legacy version-2 byte accounting");
+}
+
+void handlesLegacyVersion2EmptyAndSinglePointForwardEdges() {
+    std::vector<std::uint8_t> empty;
+    u32(empty, 2U);
+    u32(empty, 0U);
+    u32(empty, 11U);
+    const auto parsedEmpty = parseAiSpline(empty, "legacy-empty.ai");
+    require(parsedEmpty.legacyV2Records.empty() &&
+                parsedEmpty.nativeRetainedIndices.empty() &&
+                parsedEmpty.nativeRetainedForwards.empty(),
+            "empty legacy version-2 spline has no retained points");
+
+    std::vector<std::uint8_t> single;
+    u32(single, 2U);
+    u32(single, 1U);
+    u32(single, 12U);
+    f32(single, 0.0F); f32(single, 0.0F); f32(single, 0.0F);
+    u32(single, 0U);
+    f32(single, 1.0F); f32(single, 0.5F); f32(single, 0.25F);
+    const auto parsedSingle = parseAiSpline(single, "legacy-single.ai");
+    require(parsedSingle.nativeRetainedIndices == std::vector<std::uint32_t>{0U} &&
+                parsedSingle.nativeRetainedForwards.size() == 1U &&
+                parsedSingle.nativeRetainedForwards[0] == std::array<float, 3>{0.0F, 0.0F, 0.0F},
+            "single origin legacy point keeps native zero forward");
+
+    putU32(single, 16U, std::bit_cast<std::uint32_t>(3.0F));
+    putU32(single, 20U, std::bit_cast<std::uint32_t>(4.0F));
+    const auto parsedNonzero = parseAiSpline(single, "legacy-single-nonzero.ai");
+    require(parsedNonzero.nativeRetainedForwards.size() == 1U &&
+                parsedNonzero.nativeRetainedForwards[0] == std::array<float, 3>{0.0F, 0.6F, 0.8F},
+            "single nonzero legacy point keeps normalized initial displacement");
 }
 
 void rejectsEveryTruncatedPrefix() {
@@ -286,6 +331,7 @@ int main() {
     try {
         parsesPointsPayloadsAndGrid();
         parsesLegacyVersion2WithoutInventingV7Fields();
+        handlesLegacyVersion2EmptyAndSinglePointForwardEdges();
         rejectsEveryTruncatedPrefix();
         rejectsMalformedHeadersAndCounts();
         rejectsMalformedLegacyVersion2Input();

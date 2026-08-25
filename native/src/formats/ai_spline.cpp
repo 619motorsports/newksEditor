@@ -17,6 +17,19 @@ constexpr std::size_t kPointBytes = 20;
 constexpr std::size_t kPayloadBytes = 72;
 constexpr std::size_t kLegacyV2RecordBytes = 28;
 
+[[nodiscard]] std::array<float, 3> normalizedDifference(
+    const std::array<float, 3>& current,
+    const std::array<float, 3>& previous) noexcept {
+    const float x = current[0] - previous[0];
+    const float y = current[1] - previous[1];
+    const float z = current[2] - previous[2];
+    const float length = std::sqrt(x * x + y * y + z * z);
+    if (length == 0.0F)
+        return {x, y, z};
+    const float scale = 1.0F / length;
+    return {scale * x, scale * y, scale * z};
+}
+
 [[nodiscard]] AiSplineError error(const std::string& source, std::size_t offset,
                                   const char* code, const char* message) {
     return AiSplineError("AI_SPLINE", source, offset, code, message);
@@ -93,6 +106,11 @@ AiSpline parseAiSplineImpl(std::span<const std::uint8_t> bytes,
                                    "AI spline version-2 retained-index storage"),
                       pointCountOffset,
                       "AI spline version-2 retained-index storage exceeds aggregate limit");
+        budget.charge(storageBytes(retainedCount, sizeof(std::array<float, 3>),
+                                   pointCountOffset, source,
+                                   "AI spline version-2 retained-forward storage"),
+                      pointCountOffset,
+                      "AI spline version-2 retained-forward storage exceeds aggregate limit");
 
         AiSpline result;
         result.source = source;
@@ -100,6 +118,8 @@ AiSpline parseAiSplineImpl(std::span<const std::uint8_t> bytes,
         result.lapTime = lapTime;
         result.legacyV2Records.reserve(pointCount);
         result.nativeRetainedIndices.reserve(retainedCount);
+        result.nativeRetainedForwards.reserve(retainedCount);
+        std::array<float, 3> previousPosition{};
         for (std::uint32_t index = 0; index < pointCount; ++index) {
             AiSplineLegacyV2Record record;
             for (auto& value : record.position)
@@ -108,8 +128,18 @@ AiSpline parseAiSplineImpl(std::span<const std::uint8_t> bytes,
             record.speed = reader.f32("version-2 speed");
             record.gas = reader.f32("version-2 gas");
             record.lateralG = reader.f32("version-2 lateral G");
+            const auto forward = normalizedDifference(record.position, previousPosition);
             result.legacyV2Records.push_back(record);
-            if (index % 3U == 0U) result.nativeRetainedIndices.push_back(index);
+            if (index % 3U == 0U) {
+                result.nativeRetainedIndices.push_back(index);
+                result.nativeRetainedForwards.push_back(forward);
+            }
+            previousPosition = record.position;
+        }
+        if (result.nativeRetainedForwards.size() > 1U) {
+            const auto first = result.legacyV2Records[result.nativeRetainedIndices.front()].position;
+            const auto last = result.legacyV2Records[result.nativeRetainedIndices.back()].position;
+            result.nativeRetainedForwards.front() = normalizedDifference(first, last);
         }
         if (reader.remaining() != 0U)
             throw error(source, reader.offset(), "TRAILING_DATA",

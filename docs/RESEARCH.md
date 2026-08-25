@@ -2832,9 +2832,17 @@ SHA-256 `c76dbef08af93bbd522281a35388ad50ce2d71fd04cc982a7a18bad4744ab935`.
 The opaque word is constant within a fixture but differs across tracks; it must
 not receive an inferred semantic name. The bounded native parser now retains
 every raw version-2 record and exposes the source indices `0, 3, 6, ...` used by
-the editor. It keeps version-2 data separate from version-7 points and payloads
-and rejects truncated prefixes, oversized counts, non-finite values, aggregate
-budget violations, and trailing bytes.
+the editor. It also exposes a forward vector parallel to those retained
+indices. The vector is normalized from the current raw position minus the
+immediately previous raw position before retention; therefore retained index
+`3k` preserves raw segment `3k-1 -> 3k`. The decompile initializes the prior
+position to `(0, 0, 0)`, leaves a zero-length vector as zero, and only replaces
+the first retained forward with retained-point wraparound when more than one
+point was retained. This leaves zero-point input empty and a one-point input
+with its initial raw displacement (zero for an origin point). It keeps
+version-2 data separate from version-7 points and payloads and rejects
+truncated prefixes, oversized counts, non-finite values, aggregate budget
+violations, and trailing bytes.
 
 ## Native ksNet camera pose evidence
 

@@ -93,6 +93,12 @@ struct AiSpline {
     std::vector<AiSplineLegacyV2Record> legacyV2Records;
     // Native version-2 loading retains source indices 0, 3, 6, ... .
     std::vector<std::uint32_t> nativeRetainedIndices;
+    // Forward vectors for nativeRetainedIndices, in the same order. These
+    // are derived from each retained record's immediately previous raw
+    // record, before the three-to-one retention gate. The first vector is
+    // replaced by retained-point wraparound when there are at least two
+    // retained points.
+    std::vector<std::array<float, 3>> nativeRetainedForwards;
     std::optional<AiSplineGrid> grid;
     std::size_t bytesRead = 0;
     std::size_t byteLength = 0;
