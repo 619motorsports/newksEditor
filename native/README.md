@@ -308,11 +308,16 @@ final material order. The adapter validates this table before allocation. It
 owns one 256-byte buffer per used material and reuses it for duplicate packets.
 The adapter also executes static alpha-tested directional-shadow casters when
 the caller supplies a compatible pipeline. The recovered `ksShadowGenAT`
-pixel ABI uses diffuse texture `t0`, sampler `s1`, and material buffer `b4`.
+pixel ABI uses diffuse texture `t0`, sampler `s3`, and material buffer `b4`.
 The material record is 32 bytes. It stores `ksAlphaRef` at byte offset 28.
 Preparation owns one aligned record per used alpha-tested material. It rejects
 short tables, invalid alpha values, and insufficient byte budgets before
-allocation. Alpha-tested skinned casters remain staged.
+allocation. The stock-scene facade resolves this record in final material
+order and forwards the complete table. The shadow traversal applies the
+recovered opaque blend and depth-write state without changing the retained
+main-pass packets. Thus, static materials with non-opaque main-pass state use
+the alpha-tested shadow path. Skinned casters remain staged when a compatible
+skinned pipeline is not supplied.
 Each frame can supply a byte visibility mask in stable packet order. An empty
 mask keeps all packets visible. Other masks must match the packet count and use
 only zero or one. Hidden packets do not draw or update skinned geometry. An

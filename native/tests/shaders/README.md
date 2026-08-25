@@ -83,6 +83,15 @@ sha256sum native/tests/shaders/indexed_static_mesh_material.frag \
   /tmp/apex_indexed_material_frag.spv
 ```
 
+`indexed_shadow_alpha.frag` is the translated alpha-caster fixture. It uses
+the recovered `ksShadowGenAT` resource locations: `t0`, `s3`, and `b4`.
+Its identities are:
+
+- Source SHA-256: `176fe3a0f177286217b3086b29a990c5f6a7a8a99faa33829b984b2bf20ced51`
+- SPIR-V SHA-256: `773822db22976b4b20ecba311025e48407064460e596741d0b25a1f1e3e890ec`
+- Compiler: glslang `16.4.0`
+- Target: SPIR-V 1.0 for Vulkan 1.0
+
 `render_backend_tests.cpp` contains the embedded SPIR-V bytes. Windows uses
 equivalent HLSL and compiles it to DXBC with `D3DCompile` for the WARP test.
 

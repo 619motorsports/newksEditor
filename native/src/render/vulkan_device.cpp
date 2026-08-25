@@ -1188,8 +1188,8 @@ public:
         raw_.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         raw_.initialized = raw_.initialized || initialized;
     }
-    void mark_sampled() noexcept {
-        raw_.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    void mark_layout(VkImageLayout layout) noexcept {
+        raw_.layout = layout;
     }
     void mark_invalid() noexcept {
         raw_.layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -2169,7 +2169,7 @@ bool create_sampled_descriptor_layout(const std::shared_ptr<VulkanContext>& cont
         std::array<VkDescriptorSetLayoutBinding, 3> alpha_bindings{};
         alpha_bindings[0] = {0U, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1U,
                              VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-        alpha_bindings[1] = {1U, VK_DESCRIPTOR_TYPE_SAMPLER, 1U,
+        alpha_bindings[1] = {3U, VK_DESCRIPTOR_TYPE_SAMPLER, 1U,
                              VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
         alpha_bindings[2] = {4U, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1U,
                              VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
@@ -2737,7 +2737,7 @@ bool allocate_depth_alpha_descriptor_sets(
         std::array<VkWriteDescriptorSet, 3> writes{};
         writes[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 0U, 0U, 1U,
                      VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &image, nullptr, nullptr};
-        writes[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 1U, 0U, 1U,
+        writes[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 3U, 0U, 1U,
                      VK_DESCRIPTOR_TYPE_SAMPLER, &sampler, nullptr, nullptr};
         writes[2] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 4U, 0U, 1U,
                      VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &material, nullptr};
@@ -3392,6 +3392,10 @@ bool draw_indexed_batch_and_readback(
             }
         }
     }
+    std::vector<VkImageLayout> sampled_shadow_original_layouts;
+    sampled_shadow_original_layouts.reserve(sampled_shadow_attachments.size());
+    for (const VulkanDepthAttachment* attachment : sampled_shadow_attachments)
+        sampled_shadow_original_layouts.push_back(attachment->layout());
     VulkanTransientSampledDescriptors descriptors;
     if ((has_sampled_binding || has_normal_binding || has_maps_binding || has_detail_binding ||
          has_normal_detail_binding || has_damage_binding || has_damage_mask_binding ||
@@ -3653,6 +3657,33 @@ bool draw_indexed_batch_and_readback(
             vkCmdDrawIndexed(command, draw.index_count, 1U, 0U, 0, 0U);
         }
         vkCmdEndRenderPass(command);
+        for (std::size_t index = 0U;
+             index < sampled_shadow_attachments.size(); ++index) {
+            const VkImageLayout original =
+                sampled_shadow_original_layouts[index];
+            if (original == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL)
+                continue;
+            VkImageMemoryBarrier shadow_barrier{};
+            shadow_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            shadow_barrier.oldLayout =
+                VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+            shadow_barrier.newLayout = original;
+            shadow_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            shadow_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            shadow_barrier.image = sampled_shadow_attachments[index]->image();
+            shadow_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+            shadow_barrier.subresourceRange.levelCount = 1U;
+            shadow_barrier.subresourceRange.layerCount = 1U;
+            shadow_barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            shadow_barrier.dstAccessMask =
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            vkCmdPipelineBarrier(
+                command, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                    VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                0U, 0U, nullptr, 0U, nullptr, 1U, &shadow_barrier);
+        }
         VkImageMemoryBarrier barrier{};
         barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         barrier.oldLayout = description.samples == 1U ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
@@ -3709,8 +3740,10 @@ bool draw_indexed_batch_and_readback(
         if (drain == VK_SUCCESS) {
             current_layout = texture_final_layout(description.usage);
             if (depth_attachment != nullptr) depth_attachment->mark_rendered(clear_depth);
-            for (VulkanDepthAttachment* shadow : sampled_shadow_attachments)
-                shadow->mark_sampled();
+            for (std::size_t index = 0U;
+                 index < sampled_shadow_attachments.size(); ++index)
+                sampled_shadow_attachments[index]->mark_layout(
+                    sampled_shadow_original_layouts[index]);
         } else {
             current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
             if (depth_attachment != nullptr) depth_attachment->mark_invalid();
@@ -3721,8 +3754,10 @@ bool draw_indexed_batch_and_readback(
     } else if (completed) {
         current_layout = texture_final_layout(description.usage);
         if (depth_attachment != nullptr) depth_attachment->mark_rendered(clear_depth);
-        for (VulkanDepthAttachment* shadow : sampled_shadow_attachments)
-            shadow->mark_sampled();
+        for (std::size_t index = 0U;
+             index < sampled_shadow_attachments.size(); ++index)
+            sampled_shadow_attachments[index]->mark_layout(
+                sampled_shadow_original_layouts[index]);
     }
     if (command != VK_NULL_HANDLE) vkFreeCommandBuffers(context->device, context->command_pool, 1U, &command);
     vkDestroyFramebuffer(context->device, framebuffer, nullptr);

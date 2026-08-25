@@ -161,6 +161,9 @@ public:
     [[nodiscard]] std::size_t owned_material_constant_count() const noexcept {
         return owned_material_constants_.size();
     }
+    [[nodiscard]] std::size_t owned_stock_shadow_constant_count() const noexcept {
+        return owned_stock_shadow_constants_.size();
+    }
     [[nodiscard]] bool owns_frame_constants() const noexcept {
         return owned_frame_constants_ != nullptr;
     }

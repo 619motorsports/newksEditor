@@ -276,6 +276,12 @@ public:
             depth_camera_matrices.push_back(draw.camera_frame->view_projection);
             depth_culls.push_back(draw.pipeline->raster.cull);
             depth_material_modes.push_back(draw.material_mode);
+            depth_transparent_flags.push_back(draw.packet->flags.transparent);
+            depth_blend_flags.push_back(draw.packet->flags.blend_enabled);
+            depth_alpha_to_coverage_flags.push_back(
+                draw.packet->flags.alpha_to_coverage);
+            depth_test_flags.push_back(draw.packet->flags.depth_test);
+            depth_write_flags.push_back(draw.packet->flags.depth_write);
             depth_alpha_textures.push_back(draw.alpha_tested_diffuse_binding.texture);
             depth_alpha_samplers.push_back(draw.alpha_tested_diffuse_binding.sampler);
             depth_alpha_material_buffers.push_back(
@@ -358,6 +364,11 @@ public:
     std::vector<PipelineCullMode> depth_culls;
     std::vector<DepthOnlyIndexedStaticMeshDrawRequest::MaterialMode>
         depth_material_modes;
+    std::vector<bool> depth_transparent_flags;
+    std::vector<bool> depth_blend_flags;
+    std::vector<bool> depth_alpha_to_coverage_flags;
+    std::vector<bool> depth_test_flags;
+    std::vector<bool> depth_write_flags;
     std::vector<const Texture*> depth_alpha_textures;
     std::vector<const Sampler*> depth_alpha_samplers;
     std::vector<const Buffer*> depth_alpha_material_buffers;
@@ -2751,6 +2762,7 @@ void retains_three_directional_maps_and_executes_only_opaque_static_casters() {
         packet.flags.depth_test = true;
         packet.flags.depth_write = true;
     }
+    mixed.packets[1].material_profile.shadow_alpha_tested = true;
     for (PipelineProgram* pipeline :
          std::array<PipelineProgram*, 2U>{&mixed.first_pipeline,
                                           &mixed.second_pipeline}) {
@@ -2777,7 +2789,7 @@ void retains_three_directional_maps_and_executes_only_opaque_static_casters() {
                 mixed_drawn.opaque_casters == 2U &&
                 mixed_drawn.staged_skinned == 1U &&
                 mixed_drawn.cascades_completed == directional_shadow_cascade_count,
-            "skinned casters remain staged while opaque static casters execute");
+            "non-opaque skinned casters use the skinned staging branch while static casters execute");
 
     PipelineProgram mixed_skinned_depth_pipeline = mixed.second_pipeline;
     mixed_skinned_depth_pipeline.name = "portable-skinned-directional-caster";
@@ -2797,7 +2809,7 @@ void retains_three_directional_maps_and_executes_only_opaque_static_casters() {
                 mixed_device.update_calls == skin_updates_before_shadow + 1U &&
                 mixed_device.depth_nodes.back() ==
                     std::vector<apex::scene::NodeId>({1U, 2U, 1U}),
-            "explicit skinned shadow pipeline executes CPU-skinned casters in all cascades");
+            "explicit skinned shadow pipeline takes precedence over non-opaque material state");
 
     const std::array<std::uint8_t, 3U> hide_shadow_skin = {1U, 0U, 1U};
     mixed_frame.packet_visibility = hide_shadow_skin;
@@ -2907,6 +2919,9 @@ void executes_explicit_alpha_directional_casters_with_owned_constants() {
     }
     value.packets[2].flags.cast_shadows = false;
     value.packets[1].material_profile.shadow_alpha_tested = true;
+    value.packets[1].flags.transparent = true;
+    value.packets[1].flags.blend_enabled = true;
+    value.packets[1].flags.depth_write = false;
     value.second_pipeline.resources = {
         {PipelineResourceKind::sampled_texture, 0U, 0U, "txDiffuse"},
         {PipelineResourceKind::sampler, 0U, 1U, "sampDiffuse"}};
@@ -2919,6 +2934,14 @@ void executes_explicit_alpha_directional_casters_with_owned_constants() {
         pipeline->depth.write_enabled = true;
         pipeline->depth.compare = PipelineCompareOperation::less;
     }
+    value.second_pipeline.blend.enabled = true;
+    value.second_pipeline.blend.source_color = PipelineBlendFactor::source_alpha;
+    value.second_pipeline.blend.destination_color =
+        PipelineBlendFactor::one_minus_source_alpha;
+    value.second_pipeline.blend.source_alpha = PipelineBlendFactor::source_alpha;
+    value.second_pipeline.blend.destination_alpha =
+        PipelineBlendFactor::one_minus_source_alpha;
+    value.second_pipeline.depth.write_enabled = false;
     value.model.textures.push_back({true, "alpha.dds", 4U, {}, {}});
     value.packets[1].resources = {{"txDiffuse", 0U, 0U, "alpha.dds"}};
 
@@ -2930,9 +2953,10 @@ void executes_explicit_alpha_directional_casters_with_owned_constants() {
     alpha_pipeline.depth.test_enabled = true;
     alpha_pipeline.depth.write_enabled = true;
     alpha_pipeline.depth.compare = PipelineCompareOperation::less;
+    alpha_pipeline.blend = {};
     alpha_pipeline.resources = {
         {PipelineResourceKind::sampled_texture, 0U, 0U, "txDiffuse"},
-        {PipelineResourceKind::sampler, 0U, 1U, "sampDiffuse"},
+        {PipelineResourceKind::sampler, 0U, 3U, "samLinearShadow"},
         {PipelineResourceKind::uniform_buffer, 0U, 4U, "ksShadowCasterMaterial"},
     };
     std::array<StockShadowCasterMaterialConstants, 2U> shadow_constants{};
@@ -3023,8 +3047,24 @@ void executes_explicit_alpha_directional_casters_with_owned_constants() {
                 device.depth_alpha_textures.front() == &alpha_texture &&
                 device.depth_alpha_samplers.front() == &alpha_sampler &&
                 device.depth_alpha_material_buffers.front() != nullptr &&
-                device.depth_alpha_material_ranges.front() == stock_shadow_caster_material_bytes,
-            "alpha shadow draws retain explicit texture, sampler, and logical 32-byte material view");
+                device.depth_alpha_material_ranges.front() ==
+                    stock_shadow_caster_material_bytes &&
+                std::all_of(device.depth_transparent_flags.begin(),
+                            device.depth_transparent_flags.end(),
+                            [](bool enabled) { return !enabled; }) &&
+                std::all_of(device.depth_blend_flags.begin(),
+                            device.depth_blend_flags.end(),
+                            [](bool enabled) { return !enabled; }) &&
+                std::all_of(device.depth_alpha_to_coverage_flags.begin(),
+                            device.depth_alpha_to_coverage_flags.end(),
+                            [](bool enabled) { return !enabled; }) &&
+                std::all_of(device.depth_test_flags.begin(),
+                            device.depth_test_flags.end(),
+                            [](bool enabled) { return enabled; }) &&
+                std::all_of(device.depth_write_flags.begin(),
+                            device.depth_write_flags.end(),
+                            [](bool enabled) { return enabled; }),
+            "alpha-blended shadow draws use recovered opaque depth-pass state with explicit resources");
 
     frame.alpha_static_pipeline = nullptr;
     const std::size_t calls_before_staged = device.depth_batch_calls;

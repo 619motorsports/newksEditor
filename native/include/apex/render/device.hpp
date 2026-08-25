@@ -785,7 +785,7 @@ struct DepthOnlyIndexedStaticMeshDrawRequest {
     bool clear_depth = false;
     float depth_clear_value = 1.0F;
     // The opaque mode preserves the resource-free vertex-only contract. The
-    // alpha-tested mode requires caller shader authority for t0/s1/b4 and a
+    // alpha-tested mode requires caller shader authority for t0/s3/b4 and a
     // vertex-plus-fragment pipeline. It does not infer stock shader modules.
     enum class MaterialMode : std::uint8_t {
         opaque,

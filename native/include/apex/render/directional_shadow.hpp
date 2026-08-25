@@ -118,7 +118,7 @@ struct StaticSceneDirectionalShadowFrameDescription {
     DirectionalShadowMapResources* maps = nullptr;
     const PipelineProgram* opaque_pipeline = nullptr;
     // Explicit caller-supplied ksShadowGenAT-compatible pipeline. It must
-    // consume t0/s1/b4 as validated by the device depth contract.
+    // consume t0/s3/b4 as validated by the device depth contract.
     const PipelineProgram* alpha_static_pipeline = nullptr;
     std::span<const DrawPacket> refreshed_packets{};
     // Uses the same prepared-packet byte-mask contract as the color frame.

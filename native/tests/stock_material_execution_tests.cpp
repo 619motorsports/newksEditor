@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <span>
 #include <string>
@@ -123,6 +124,8 @@ Fixture fixture(std::string shader) {
             ? 2U
             : 0U;
     material.properties.push_back({"fresnelMaxLevel", 0.0F, {}, {}, {}});
+    if (material.serializedBlendMode != 0U)
+        material.properties.push_back({"ksAlphaRef", 0.5F, {}, {}, {}});
     const std::array<const char*, 5> slots = {"txDiffuse", "txNormal", "txMaps", "txDetail", "txNormalDetail"};
     for (std::size_t index = 0U; index < slots.size(); ++index) {
         material.resources.push_back({slots[index], static_cast<std::uint32_t>(index),
@@ -235,14 +238,29 @@ void test_success_and_a2c() {
     Fixture base_fixture = fixture("ksPerPixelMultiMap");
     const auto base_result =
         prepare_stock_material_execution(device, request_for(base_fixture));
-    require(base_result.ok() && base_result.resources->draw_count() == 1U,
+    require(base_result.ok() && base_result.resources->draw_count() == 1U &&
+                base_result.resources->owned_stock_shadow_constant_count() == 0U,
             "base MultiMap handoff must retain its three-resource packet");
 
     Fixture base_at_fixture = fixture("ksPerPixelMultiMap_AT");
     const auto base_at_result =
         prepare_stock_material_execution(device, request_for(base_at_fixture));
-    require(base_at_result.ok() && base_at_result.resources->draw_count() == 1U,
-            "base AT MultiMap handoff must retain A2C on a four-sample target");
+    require(base_at_result.ok() && base_at_result.resources->draw_count() == 1U &&
+                base_at_result.resources->owned_stock_shadow_constant_count() == 1U,
+            "base AT MultiMap handoff retains A2C and its exact shadow material record");
+    bool found_shadow_alpha = false;
+    for (const auto& bytes : device.initial_buffers) {
+        if (bytes.size() < sizeof(StockShadowCasterMaterialConstants)) continue;
+        StockShadowCasterMaterialConstants constants{};
+        std::memcpy(&constants, bytes.data(), sizeof(constants));
+        found_shadow_alpha = found_shadow_alpha ||
+                             (constants.lighting ==
+                                  std::array<float, 4>{0.35F, 0.8F, 0.2F, 30.0F} &&
+                              std::abs(constants.emissive_and_alpha_ref[3] - 0.5F) <
+                                  0.0001F);
+    }
+    require(found_shadow_alpha,
+            "stock facade uploads ksAlphaRef at byte offset 28 of the shadow record");
 
     Fixture damage = damage_fixture();
     const auto damage_result =
@@ -405,6 +423,27 @@ void test_preflight_failures() {
     require(result.diagnostic.code ==
                 "ks_per_pixel_multimap_detail_unsupported",
             "base MultiMap rejects active generic detail before allocation");
+
+    Fixture invalid_shadow_alpha = fixture("ksPerPixelMultiMap_AT");
+    invalid_shadow_alpha.model.materials.front().properties.back().value = 1.01F;
+    const std::size_t calls_before_invalid_shadow_alpha = device.buffer_calls;
+    result = prepare_stock_material_execution(
+        device, request_for(invalid_shadow_alpha));
+    require(result.status == StaticSceneResourceStatus::invalid_request &&
+                result.diagnostic.code == "ks_alpha_ref_range" &&
+                device.buffer_calls == calls_before_invalid_shadow_alpha,
+            "out-of-range stock shadow alpha fails before backend allocation");
+
+    Fixture non_finite_shadow_alpha = fixture("ksPerPixelMultiMap_AT");
+    non_finite_shadow_alpha.model.materials.front().properties.back().value =
+        std::numeric_limits<float>::quiet_NaN();
+    const std::size_t calls_before_non_finite_shadow_alpha = device.buffer_calls;
+    result = prepare_stock_material_execution(
+        device, request_for(non_finite_shadow_alpha));
+    require(result.status == StaticSceneResourceStatus::invalid_request &&
+                result.diagnostic.code == "non_finite_property" &&
+                device.buffer_calls == calls_before_non_finite_shadow_alpha,
+            "non-finite stock shadow alpha fails before backend allocation");
 
     Fixture unsupported = fixture("ksPerPixelMultiMapSimpleRefl");
     result = prepare_stock_material_execution(device, request_for(unsupported));

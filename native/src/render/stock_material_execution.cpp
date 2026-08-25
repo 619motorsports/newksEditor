@@ -365,6 +365,8 @@ bool estimate_adapter_copy(const StockMaterialExecutionRequest& request,
         !charge_count(request.packets.size(), sizeof(PipelineProgram)) ||
         !charge_count(request.packets.size(), sizeof(MaterialRenderProfile)) ||
         !charge_count(request.model->materials.size(), sizeof(KsPerPixelMaterialConstants)) ||
+        !charge_count(request.model->materials.size(),
+                      sizeof(StockShadowCasterMaterialConstants)) ||
         !charge_count(request.model->materials.size(), sizeof(bool) + sizeof(std::size_t) +
                                                            2U * sizeof(std::size_t)) ||
         !charge_count(request.packets.size(), sizeof(const PipelineProgram*))) {
@@ -471,6 +473,9 @@ StockMaterialExecutionResult prepare_stock_material_execution(
         pipeline_profiles.reserve(packets.size());
         std::vector<const PipelineProgram*> pipeline_ptrs(packets.size(), nullptr);
         std::vector<KsPerPixelMaterialConstants> constants(request.model->materials.size());
+        std::vector<StockShadowCasterMaterialConstants> shadow_constants(
+            request.model->materials.size());
+        bool has_alpha_shadow_constants = false;
         std::vector<bool> used(request.model->materials.size(), false);
         std::vector<std::size_t> first_packet(request.model->materials.size(), 0U);
         std::vector<std::array<std::size_t, 2U>> pipeline_indices(
@@ -534,6 +539,7 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                             "stock_material_constants_invalid",
                             "The bounded material constant resolver produced non-finite values");
             constants[material_index] = resolved.constants;
+            bool material_needs_alpha_shadow = false;
 
             if (source.serializedBlendMode > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
                 source.depthMode > static_cast<std::uint32_t>(std::numeric_limits<int>::max()))
@@ -606,6 +612,8 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                     packet.flags.alpha_to_coverage = profile.alpha_to_coverage;
                     packet.flags.depth_test = profile.depth_test;
                     packet.flags.depth_write = profile.depth_write && !profile.transparent;
+                    material_needs_alpha_shadow =
+                        material_needs_alpha_shadow || profile.shadow_alpha_tested;
                     continue;
                 }
                 StockPipelineRequest pipeline_request;
@@ -648,6 +656,23 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                 packet.flags.alpha_to_coverage = built.profile.alpha_to_coverage;
                 packet.flags.depth_test = built.profile.depth_test;
                 packet.flags.depth_write = built.profile.depth_write && !built.profile.transparent;
+                material_needs_alpha_shadow =
+                    material_needs_alpha_shadow || built.profile.shadow_alpha_tested;
+            }
+            if (material_needs_alpha_shadow) {
+                const StockShadowCasterMaterialResolveResult shadow_resolved =
+                    resolve_stock_shadow_caster_material_constants(binding);
+                if (!shadow_resolved.ok())
+                    return fail(
+                        StaticSceneResourceStatus::invalid_request,
+                        shadow_resolved.diagnostic.code.empty()
+                            ? "stock_shadow_material_constants_invalid"
+                            : shadow_resolved.diagnostic.code,
+                        shadow_resolved.diagnostic.message.empty()
+                            ? "The recovered shadow material resolver rejected the material"
+                            : shadow_resolved.diagnostic.message);
+                shadow_constants[material_index] = shadow_resolved.constants;
+                has_alpha_shadow_constants = true;
             }
         }
 
@@ -657,6 +682,8 @@ StockMaterialExecutionResult prepare_stock_material_execution(
         scene_request.packets = packets;
         scene_request.pipelines_by_packet = pipeline_ptrs;
         scene_request.material_constants_by_material = constants;
+        if (has_alpha_shadow_constants)
+            scene_request.stock_shadow_constants_by_material = shadow_constants;
         scene_request.texture_authority = request.texture_authority;
         scene_request.limits = request.limits.scene;
         StaticSceneResourceResult prepared = prepare_static_scene_resources(device, scene_request);

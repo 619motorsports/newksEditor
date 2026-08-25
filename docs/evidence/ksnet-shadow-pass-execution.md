@@ -94,23 +94,27 @@ The PDB `Material` layout gives the relevant fields exactly:
 is `1`. Otherwise, it selects `smAlphaTested` when `blendMode != eOpaque`.
 It selects `smNormal` for the remaining materials.
 
-The alpha-tested branch scans the resource vector in order. It finds the
-first record with texture slot `0`. Then it calls
-`GraphicsManager::setTexture(0, texture)`. It scans the material constant
-buffers and commits each buffer that uses slot `4`.
+The non-skinned, non-opaque branch scans the resource vector in order. It
+finds the first record with texture slot `0`. Then it calls
+`GraphicsManager::setTexture(0, texture)`.
 
-The operation order is shader selection, opaque blend state, texture binding,
-slot-4 buffer commit, and cull state. `GraphicsManager::setTexture` is at
+Every non-opaque material scans the material constant buffers and commits each
+buffer that uses slot `4`. This buffer rule also applies when the earlier
+skinned branch selected `smSkinned`. The skinned branch does not scan or bind
+the diffuse texture.
+
+The common order is shader selection, opaque blend state, optional texture
+binding, optional slot-4 buffer commit, and cull state.
+`GraphicsManager::setTexture` is at
 `0x10046927`. This function forwards the material resource slot to the
 matching native texture stage. It also updates the cached texture pointer.
 `CBuffer::commit` is at `0x1004ab88`. After it maps a modified buffer, it
 binds the buffer to the recorded slot.
 
 The ordinary opaque path uses the null-pixel path of the normal shader. It
-does not enter the texture and slot-4 buffer branch. The skinned shader also
-has `useNullPS = true`. However, `blendMode != eOpaque` independently controls
-the resource and buffer branch. This evidence does not include that case in
-the static alpha-tested path.
+does not enter the texture or slot-4 buffer branch. The skinned shader also
+has `useNullPS = true`. A non-opaque skinned material still commits its slot-4
+buffers, but it keeps the skinned shader and binds no diffuse texture.
 
 The PDB names `Material::doubleFaceShadow`. Thus, the final cull test is not an
 inferred alias for the ordinary `doubleFace` field at `+0x1c`.
@@ -128,7 +132,7 @@ The installed alpha-tested shader binaries provide the register and field
 layout. `ksShadowGenAT_ps.fxo` SHA-256 is
 `6782f08729c2dcd68254553f08ce6ad682e28f00fc9f493c48cd8c027ffc21f2`. Its
 DXBC RDEF declares `cbMaterial` at `b4`, `txDiffuse` at `t0`, and
-`samLinearShadow` at `s1`. `cbMaterial` is 32 bytes:
+`samLinearShadow` at `s3`. `cbMaterial` is 32 bytes:
 `ksAmbient` offset `0`, `ksDiffuse` `4`, `ksSpecular` `8`, `ksSpecularEXP`
 `12`, `ksEmissive` `16` (three floats), and `ksAlphaRef` offset `28`
 (`cb4[1].w`). The shader token stream contains a `discard` instruction after
@@ -139,14 +143,24 @@ RDEF binds `cbCamera` at `b0` and `cbPerObject` at `b1`. It places `ksWorld`
 at byte offset `0` in `b1`. These shader binaries establish the exact texture,
 sampler, buffer, and alpha-reference locations. They do not establish a
 default `ksAlphaRef` value for a material that omits this variable.
-`MaterialFilterSM::apply` does not call a sampler-state setter. Thus, the `s1`
+`MaterialFilterSM::apply` does not call a sampler-state setter. Thus, the `s3`
 sampler setup occurs outside this per-material binding function. The port must
 not create a texture-slot alias for this sampler.
 
-This rule is the exact bounded caster-side behavior for the current staged
-`doubleFaceShadow` and alpha-tested casters. It does not prove that the port
-can translate arbitrary unknown shaders. The selected native shader and its
-material resources remain a separate backend contract.
+`ksShadowGenSKIN_ps.fxo` SHA-256 is
+`78bc800223f4fc2a4c75616ee454a25e4b5c05a6e150d2514fb573b9d48873d4`.
+It is byte-identical to the null `ksShadowGen` pixel shader.
+`ksShadowGenSKIN_vs.fxo` SHA-256 is
+`e2e7a6f2a18814832b2cc13271d4872c713fbbbbadf266d9cb24a5ffe4437fab`.
+Its RDEF declares a 224-byte `cbCamera` at `b0` and a 3,520-byte `cbBones` at
+`b13`. The bone buffer contains 55 matrices. The shader reads four weights and
+four indices for each vertex. These bindings do not authorize the static
+alpha-tested path for skinned materials.
+
+This rule is the exact bounded caster-side behavior for `doubleFaceShadow`,
+static alpha-tested casters, and skinned shader selection. It does not prove
+that the port can translate arbitrary unknown shaders. The selected native
+shader and its material resources remain a separate backend contract.
 
 ## Safe implementation contract and boundaries
 
@@ -162,7 +176,6 @@ A native backend integration can use this recovered boundary as follows:
 - Apply shadow attenuation only in the receiver shader's direct-light branch.
 
 The native evidence does not establish the D3D12 descriptor-heap layout or
-resource-state barriers. It does not establish a complete translation of
-`ksShadowGenAT` or `ksShadowGenSKIN`. These items remain backend and shader
-translation gates. The evidence does not authorize opaque approximations for
-alpha-tested or skinned casters.
+resource-state barriers. It does not provide backend translations of
+`ksShadowGenAT` or `ksShadowGenSKIN`. Those translations remain explicit
+backend contracts. The evidence does not authorize unlabeled approximations.

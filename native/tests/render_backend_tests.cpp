@@ -181,11 +181,11 @@ std::vector<std::uint8_t> executable_sampled_fragment_shader() {
 std::vector<std::uint8_t> executable_shadow_alpha_fragment_shader() {
     // Generated from tests/shaders/indexed_shadow_alpha.frag with glslang
     // 16.4.0. The bindings and 32-byte record match the recovered stock
-    // t0/s1/b4 contract. This fixture is not stock shader bytecode.
-    // Source SHA-256: cf8aefec8e4fcf1190b6c0dc29a83e04fd2c6c280cf139f192c9babdb1ee69be
-    // SPIR-V SHA-256: 75da36a968d5f8fede40947b5d7f24598d95bbb56069588874b1eeac1a072c06
+    // t0/s3/b4 contract. This fixture is not stock shader bytecode.
+    // Source SHA-256: 176fe3a0f177286217b3086b29a990c5f6a7a8a99faa33829b984b2bf20ced51
+    // SPIR-V SHA-256: 773822db22976b4b20ecba311025e48407064460e596741d0b25a1f1e3e890ec
     constexpr std::string_view hex =
-        "03022307000001000b000800260000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00060004000000040000006d61696e00000000130000001000030004000000070000004700040009000000210000000000000047000400090000002200000000000000470004000d0000002100000001000000470004000d000000220000000000000047000400130000001e00000000000000470003001a00000002000000480005001a000000000000002300000000000000480005001a000000010000002300000010000000470004001c0000002100000004000000470004001c00000022000000000000001300020002000000210003000300000002000000160003000600000020000000190009000700000006000000010000000000000000000000000000000100000000000000200004000800000000000000070000003b0004000800000009000000000000001a0002000b000000200004000c000000000000000b0000003b0004000c0000000d000000000000001b0003000f0000000700000017000400110000000600000002000000200004001200000001000000110000003b00040012000000130000000100000017000400150000000600000004000000150004001700000020000000000000002b0004001700000018000000030000001e0004001a0000001500000015000000200004001b000000020000001a0000003b0004001b0000001c00000002000000150004001d00000020000000010000002b0004001d0000001e00000001000000200004001f000000020000000600000014000200220000003600050002000000040000000000000003000000f8000200050000003d000400070000000a000000090000003d0004000b0000000e0000000d000000560005000f000000100000000a0000000e0000003d00040011000000140000001300000057000500150000001600000010000000140000005100050006000000190000001600000003000000410006001f000000200000001c0000001e000000180000003d000400060000002100000020000000b800050022000000230000001900000021000000f70003002500000000000000fa000400230000002400000025000000f800020024000000fc000100f800020025000000fd00010038000100";
+        "03022307000001000b000800260000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00060004000000040000006d61696e00000000130000001000030004000000070000004700040009000000210000000000000047000400090000002200000000000000470004000d0000002100000003000000470004000d000000220000000000000047000400130000001e00000000000000470003001a00000002000000480005001a000000000000002300000000000000480005001a000000010000002300000010000000470004001c0000002100000004000000470004001c00000022000000000000001300020002000000210003000300000002000000160003000600000020000000190009000700000006000000010000000000000000000000000000000100000000000000200004000800000000000000070000003b0004000800000009000000000000001a0002000b000000200004000c000000000000000b0000003b0004000c0000000d000000000000001b0003000f0000000700000017000400110000000600000002000000200004001200000001000000110000003b00040012000000130000000100000017000400150000000600000004000000150004001700000020000000000000002b0004001700000018000000030000001e0004001a0000001500000015000000200004001b000000020000001a0000003b0004001b0000001c00000002000000150004001d00000020000000010000002b0004001d0000001e00000001000000200004001f000000020000000600000014000200220000003600050002000000040000000000000003000000f8000200050000003d000400070000000a000000090000003d0004000b0000000e0000000d000000560005000f000000100000000a0000000e0000003d00040011000000140000001300000057000500150000001600000010000000140000005100050006000000190000001600000003000000410006001f000000200000001c0000001e000000180000003d000400060000002100000020000000b800050022000000230000001900000021000000f70003002500000000000000fa000400230000002400000025000000f800020024000000fc000100f800020025000000fd00010038000100";
     require(hex.size() % 2U == 0U,
             "embedded alpha shadow shader hex alignment");
     std::vector<std::uint8_t> result(hex.size() / 2U);
@@ -2265,7 +2265,7 @@ bool contract_backend(apex::render::Backend backend) {
             "portable diffuse outside pixel retains clear color");
 
     // Execute the recovered alpha-shadow resource contract with explicit
-    // translated shaders. The stock locations are t0, s1, and a 32-byte b4
+    // translated shaders. The stock locations are t0, s3, and a 32-byte b4
     // material record whose final float is ksAlphaRef.
     const std::array<std::byte, 4U> transparent_shadow_pixel = {
         std::byte{255}, std::byte{255}, std::byte{255}, std::byte{0}};
@@ -2298,6 +2298,8 @@ bool contract_backend(apex::render::Backend backend) {
     alpha_shadow_pipeline.depth.test_enabled = true;
     alpha_shadow_pipeline.depth.write_enabled = true;
     alpha_shadow_pipeline.depth.compare = PipelineCompareOperation::less;
+    alpha_shadow_pipeline.resources[1].binding = 3U;
+    alpha_shadow_pipeline.resources[1].name = "samLinearShadow";
     alpha_shadow_pipeline.resources.push_back(
         {PipelineResourceKind::uniform_buffer, 0U, 4U, "cbMaterial"});
     if (backend == Backend::Vulkan) {
@@ -2307,7 +2309,7 @@ bool contract_backend(apex::render::Backend backend) {
 #if defined(_WIN32)
         constexpr std::string_view alpha_shadow_fragment_source =
             "Texture2D txDiffuse : register(t0);"
-            "SamplerState samLinearShadow : register(s1);"
+            "SamplerState samLinearShadow : register(s3);"
             "cbuffer cbMaterial : register(b4) {"
             "float4 lighting; float4 emissiveAndAlphaRef; };"
             "void main(float4 position : SV_Position, float2 texcoord : TEXCOORD0) {"
@@ -2372,23 +2374,135 @@ bool contract_backend(apex::render::Backend backend) {
         *accepted_shadow_attachment.attachment,
         {depth_readback_description.width, depth_readback_description.height});
     require(accepted_shadow_depth.ok() &&
-                accepted_shadow_depth.depth[16U *
-                                                  depth_readback_description.width +
-                                              16U] < 0.99F,
+                accepted_shadow_depth.depth[16U * depth_readback_description.width + 16U] < 0.99F,
             "alpha at or above ksAlphaRef writes caster depth");
 
+    {
+        // Exercise the complete static-scene handoff for the recovered alpha
+        // shadow ABI. The direct draw above proves the backend bindings. This
+        // second fixture proves that scene preparation retains the texture index
+        // and 256-byte material allocation, then submits all three real maps with
+        // the explicit frame texture and sampler authority.
+        apex::formats::Kn5File alpha_scene_model;
+        alpha_scene_model.source = "static-alpha-shadow-runtime.kn5";
+        alpha_scene_model.materials.resize(1U);
+        alpha_scene_model.root.type = 1U;
+        alpha_scene_model.root.kind = "node";
+        alpha_scene_model.root.name = "ROOT";
+        apex::formats::Kn5Node alpha_scene_mesh = indexed_mesh;
+        alpha_scene_mesh.name = "ALPHA_CASTER";
+        alpha_scene_mesh.materialId = 0U;
+        alpha_scene_model.root.children.push_back(std::move(alpha_scene_mesh));
+        alpha_scene_model.textures.push_back({true, "alpha.dds", 4U, {}, {}});
+
+        apex::scene::SceneSnapshot alpha_scene;
+        (void)alpha_scene.add_material({"alpha-caster", "fixture", apex::scene::BlendMode::opaque});
+        apex::scene::SceneNode alpha_scene_root;
+        alpha_scene_root.name = "ROOT";
+        const auto alpha_scene_root_id = alpha_scene.add_node(std::move(alpha_scene_root));
+        apex::scene::SceneNode alpha_scene_mesh_node;
+        alpha_scene_mesh_node.name = "ALPHA_CASTER";
+        alpha_scene_mesh_node.kind = apex::scene::NodeKind::mesh;
+        alpha_scene_mesh_node.material = 0U;
+        const auto alpha_scene_mesh_id =
+            alpha_scene.add_node(std::move(alpha_scene_mesh_node), alpha_scene_root_id);
+
+        DrawPacket alpha_scene_packet = sampled_packet;
+        alpha_scene_packet.node = alpha_scene_mesh_id;
+        alpha_scene_packet.material = 0U;
+        alpha_scene_packet.flags.cast_shadows = true;
+        alpha_scene_packet.flags.depth_test = true;
+        alpha_scene_packet.flags.depth_write = true;
+        alpha_scene_packet.material_profile.shadow_alpha_tested = true;
+        alpha_scene_packet.resources = {{"txDiffuse", 0U, 0U, "alpha.dds"}};
+        const std::array<DrawPacket, 1U> alpha_scene_packets = {alpha_scene_packet};
+        const std::array<const PipelineProgram*, 1U> alpha_scene_pipelines = {&sampled_pipeline};
+        StockShadowCasterMaterialConstants alpha_scene_constants;
+        alpha_scene_constants.emissive_and_alpha_ref[3] = 0.5F;
+        const std::array<StockShadowCasterMaterialConstants, 1U> alpha_scene_constant_table = {
+            alpha_scene_constants};
+        StaticScenePrepareRequest alpha_scene_request;
+        alpha_scene_request.model = &alpha_scene_model;
+        alpha_scene_request.scene = &alpha_scene;
+        alpha_scene_request.packets = alpha_scene_packets;
+        alpha_scene_request.pipelines_by_material = alpha_scene_pipelines;
+        alpha_scene_request.stock_shadow_constants_by_material = alpha_scene_constant_table;
+        alpha_scene_request.texture_authority = StaticSceneTextureAuthority::caller_tables;
+        const StaticSceneResourceResult alpha_scene_resources =
+            prepare_static_scene_resources(*device.device, alpha_scene_request);
+        require(alpha_scene_resources.ok() &&
+                    alpha_scene_resources.resources->owned_stock_shadow_constant_count() == 1U,
+                std::string(backend_name(backend)) + " prepares the static alpha shadow scene: " +
+                    alpha_scene_resources.diagnostic.code + " " +
+                    alpha_scene_resources.diagnostic.message);
+
+        const std::array<const Texture*, 1U> transparent_alpha_textures = {
+            transparent_shadow_texture.texture.get()};
+        const std::array<const Sampler*, 1U> alpha_scene_samplers = {sampler.sampler.get()};
+        StaticSceneDirectionalShadowFrameDescription alpha_scene_frame;
+        alpha_scene_frame.maps = three_maps.resources.get();
+        alpha_scene_frame.alpha_static_pipeline = &alpha_shadow_pipeline;
+        alpha_scene_frame.textures_by_global_index = transparent_alpha_textures;
+        alpha_scene_frame.samplers_by_global_index = alpha_scene_samplers;
+        const auto transparent_alpha_scene_draw =
+            alpha_scene_resources.resources->draw_opaque_directional_shadows(*device.device,
+                                                                             alpha_scene_frame);
+        require(transparent_alpha_scene_draw.ok() &&
+                    transparent_alpha_scene_draw.alpha_tested_casters == 1U &&
+                    transparent_alpha_scene_draw.staged_alpha_tested == 0U &&
+                    transparent_alpha_scene_draw.cascades_completed ==
+                        directional_shadow_cascade_count,
+                std::string(backend_name(backend)) +
+                    " static alpha scene executes the transparent caster");
+        for (std::size_t cascade = 0U; cascade < directional_shadow_cascade_count; ++cascade) {
+            const auto transparent_depth = device.device->read_depth_attachment(
+                three_maps.resources->attachment(cascade), {512U, 512U});
+            require(transparent_depth.ok() && !transparent_depth.depth.empty() &&
+                        *std::min_element(transparent_depth.depth.begin(),
+                                          transparent_depth.depth.end()) > 0.99F,
+                    std::string(backend_name(backend)) +
+                        " static alpha transparent cascade remains clear " +
+                        std::to_string(cascade));
+        }
+
+        const std::array<const Texture*, 1U> accepted_alpha_textures = {
+            diffuse_texture.texture.get()};
+        alpha_scene_frame.textures_by_global_index = accepted_alpha_textures;
+        const auto accepted_alpha_scene_draw =
+            alpha_scene_resources.resources->draw_opaque_directional_shadows(*device.device,
+                                                                             alpha_scene_frame);
+        require(accepted_alpha_scene_draw.ok() &&
+                    accepted_alpha_scene_draw.alpha_tested_casters == 1U &&
+                    accepted_alpha_scene_draw.staged_alpha_tested == 0U &&
+                    accepted_alpha_scene_draw.cascades_completed ==
+                        directional_shadow_cascade_count,
+                std::string(backend_name(backend)) +
+                    " static alpha scene executes the accepted caster");
+        for (std::size_t cascade = 0U; cascade < directional_shadow_cascade_count; ++cascade) {
+            const auto accepted_depth = device.device->read_depth_attachment(
+                three_maps.resources->attachment(cascade), {512U, 512U});
+            const float minimum =
+                accepted_depth.ok() && !accepted_depth.depth.empty()
+                    ? *std::min_element(accepted_depth.depth.begin(), accepted_depth.depth.end())
+                    : 1.0F;
+            require(accepted_depth.ok() && minimum < 0.99F,
+                    std::string(backend_name(backend)) +
+                        " static alpha accepted cascade writes depth " + std::to_string(cascade));
+        }
+    }
+
     if (backend == Backend::Vulkan || backend == Backend::D3D12) {
-        constexpr std::array<float, directional_shadow_cascade_count>
-            receiver_depths = {0.2F, 0.5F, 0.8F};
-        for (std::size_t cascade = 0U;
-             cascade < directional_shadow_cascade_count; ++cascade) {
+        constexpr std::array<float, directional_shadow_cascade_count> receiver_depths = {0.2F, 0.5F,
+                                                                                         0.8F};
+        for (std::size_t cascade = 0U; cascade < directional_shadow_cascade_count; ++cascade) {
             const DepthOnlyIndexedStaticMeshBatchResult cleared =
                 device.device->draw_depth_only_indexed_static_mesh_batch(
-                    {{}, &three_maps.resources->attachment(cascade), true,
+                    {{},
+                     &three_maps.resources->attachment(cascade),
+                     true,
                      receiver_depths[cascade]});
             require(cleared.ok(),
-                    "directional receiver fixture clears cascade " +
-                        std::to_string(cascade));
+                    "directional receiver fixture clears cascade " + std::to_string(cascade));
         }
 
         SamplerDescription shadow_sampler_description;
@@ -2399,29 +2513,23 @@ bool contract_backend(apex::render::Backend backend) {
         shadow_sampler_description.address_v = SamplerAddressMode::clamp_to_edge;
         shadow_sampler_description.address_w = SamplerAddressMode::clamp_to_edge;
         shadow_sampler_description.compare = SamplerCompare::disabled;
-        SamplerResult shadow_sampler =
-            device.device->create_sampler(shadow_sampler_description);
-        require(shadow_sampler.ok(),
-                "directional receiver nearest depth sampler creation");
+        SamplerResult shadow_sampler = device.device->create_sampler(shadow_sampler_description);
+        require(shadow_sampler.ok(), "directional receiver nearest depth sampler creation");
 
         DirectionalShadowReceiverConstants receiver_constants;
-        for (std::size_t cascade = 0U;
-             cascade < directional_shadow_cascade_count; ++cascade)
+        for (std::size_t cascade = 0U; cascade < directional_shadow_cascade_count; ++cascade)
             receiver_constants.shadow_matrices[cascade] =
                 three_maps.resources->camera(cascade).view_projection;
         const auto receiver_constant_bytes = std::as_bytes(
-            std::span<const DirectionalShadowReceiverConstants>(
-                &receiver_constants, 1U));
+            std::span<const DirectionalShadowReceiverConstants>(&receiver_constants, 1U));
         // Keep the logical receiver view at one portable 256-byte CBV. The
         // D3D12 backend may round its native allocation for alignment, but
         // this request must never expand the caller-visible ABI range.
         BufferResult receiver_buffer = device.device->create_buffer(
-            {portable_directional_shadow_buffer_view_bytes,
-             BufferUsage::uniform, BufferMemory::host_visible,
-             BufferMutability::mutable_data},
+            {portable_directional_shadow_buffer_view_bytes, BufferUsage::uniform,
+             BufferMemory::host_visible, BufferMutability::mutable_data},
             receiver_constant_bytes);
-        require(receiver_buffer.ok(),
-                "directional receiver constants buffer upload");
+        require(receiver_buffer.ok(), "directional receiver constants buffer upload");
 
         PipelineProgram receiver_pipeline = sampled_pipeline;
         receiver_pipeline.name = "portable-directional-shadow-receiver";
@@ -2431,8 +2539,7 @@ bool contract_backend(apex::render::Backend backend) {
              {PipelineResourceKind::sampled_texture, 0U, 17U, "txShadow1"},
              {PipelineResourceKind::sampled_texture, 0U, 18U, "txShadow2"},
              {PipelineResourceKind::sampler, 0U, 19U, "shadowSampler"},
-             {PipelineResourceKind::uniform_buffer, 0U, 20U,
-              "shadowReceiver"}});
+             {PipelineResourceKind::uniform_buffer, 0U, 20U, "shadowReceiver"}});
         if (backend == Backend::Vulkan) {
             receiver_pipeline.shaders[1].bytes =
                 executable_directional_shadow_receiver_fragment_shader();

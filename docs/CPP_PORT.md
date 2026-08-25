@@ -132,21 +132,27 @@ remains unchanged and feature-complete.
   cascade matrices and converts them from WebGL clip space for each backend.
   The static-scene adapter selects `cast_shadows` packets from its retained
   geometry. It executes opaque and alpha-tested static casters, in packet
-  order, for all three cascades. Alpha-tested execution requires an explicit
-  caller shader and the recovered `ksShadowGenAT` bindings. The pixel ABI uses
-  diffuse texture `t0`, sampler `s1`, and a 32-byte material record at `b4`.
+  order, for all three cascades. The shadow traversal gives each caster the
+  recovered pass-local opaque blend and depth-write state. Thus, a static
+  material with a non-opaque main pass can use `ksShadowGenAT`. Alpha-tested
+  execution requires an explicit caller shader and the recovered bindings.
+  The pixel ABI uses diffuse texture `t0`, sampler `s3`, and a 32-byte material
+  record at `b4`.
   The record stores `ksAlphaRef` at byte offset 28. The adapter owns one
-  aligned record for each used alpha-tested material. It rejects malformed
-  resource tables, material values, and buffer budgets before drawing.
-  Alpha-tested skinned casters remain staged. The adapter applies the
-  recovered `doubleFaceShadow` cull rule. A real SwiftShader
+  aligned record for each used alpha-tested material. The stock-scene facade
+  resolves and forwards the complete material-order record table. It rejects
+  malformed resource tables, material values, and buffer budgets before drawing.
+  The recovered skinned branch takes precedence over non-opaque material
+  state. It uses the explicit skinned pipeline when present and otherwise
+  remains staged. The adapter applies the recovered `doubleFaceShadow` cull
+  rule. A real SwiftShader
   test reads all three maps and finds caster depth and clear depth in each map.
   The SwiftShader fixture also executes the portable receiver ABI and samples
   all three retained maps. Bounded reference tests cover the source-evidenced
   2/12/50 cascade boundaries and explicit 3x3 PCF. Both backends bind the three
-  sampled-depth views, the nearest sampler, and the receiver constants. D3D12
-  restores each retained map to its prior tracked state after the draw. Its
-  executable pixel fixture requires a Windows WARP verification build. Vulkan
+  sampled-depth views, the nearest sampler, and the receiver constants. Both
+  backends restore each retained map to its prior tracked state after the draw.
+  The D3D12 pixel fixture requires a Windows WARP verification build. Vulkan
   integrates the receiver with the bounded stock `ksPerPixel` facade. Extended
   material variants and recovered DXBC register packing remain staged. The
   executable main-pass subset uses the source-evidenced
@@ -482,14 +488,15 @@ remains unchanged and feature-complete.
   same batch boundary can submit resource-free vertex-only draws to a
   persistent single-sample D32 target without a color allocation or readback.
   The retained static-scene path filters the equivalent
-  `DrawPacket::flags.cast_shadows` state. It submits the supported opaque
-  static subset to exactly three owned shader-readable D32 maps. Vulkan binds
-  these maps through the portable receiver ABI. Callers can instead select the
-  recovered 208-byte stock `cbShadowMaps` layout for matching shader modules.
+  `DrawPacket::flags.cast_shadows` state. It submits the supported opaque and
+  non-opaque static subset to exactly three owned shader-readable D32 maps.
+  Vulkan binds these maps through the portable receiver ABI. Callers can
+  instead select the recovered 208-byte stock `cbShadowMaps` layout for
+  matching shader modules.
   This choice is explicit and does not infer an ABI from shader bytecode.
-  D3D12 creates typeless depth
-  resources and sampled views, but descriptor execution remains staged pending
-  WARP verification. The
+  D3D12 creates typeless depth resources and sampled views. Its descriptor
+  execution is implemented. The executable fixture still needs a Windows WARP
+  verification build. The
   device API directly uploads immutable, one-layer BC1, BC2, BC3, BC4 UNORM,
   BC5 UNORM, BC5 SNORM, BC6H, and BC7 sampled textures. The upload path
   validates compressed block rows before allocation.

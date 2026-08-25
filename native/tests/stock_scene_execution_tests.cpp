@@ -242,6 +242,38 @@ void test_directional_shadow_receiver_reaches_material_handoff() {
             "stock-scene receiver selection must reach the material handoff");
 }
 
+void test_alpha_shadow_constants_reach_static_scene_handoff() {
+    Fixture fixture_value = fixture();
+    auto& material = fixture_value.model.materials.front();
+    material.shader = "ksPerPixelMultiMap_AT";
+    material.serializedBlendMode = 2U;
+    material.properties = {
+        {"fresnelMaxLevel", 0.0F, {}, {}, {}},
+        {"ksAlphaRef", 0.42F, {}, {}, {}},
+    };
+    material.resources = {
+        {"txDiffuse", 0U, "diffuse"},
+        {"txNormal", 1U, "normal"},
+        {"txMaps", 2U, "maps"},
+    };
+    fixture_value.model.textures = {
+        {true, "diffuse", 4U, {}, std::nullopt},
+        {true, "normal", 4U, {}, std::nullopt},
+        {true, "maps", 4U, {}, std::nullopt},
+    };
+    fixture_value.scene.materials.front().shader = material.shader;
+    fixture_value.module_set.key = material.shader;
+
+    FakeDevice device;
+    auto request = request_for(fixture_value);
+    request.targets.colors.front().samples = 4U;
+    request.targets.depth.samples = 4U;
+    const auto result = prepare_stock_scene_execution(device, request);
+    require(result.ok() &&
+                result.resources->owned_stock_shadow_constant_count() == 1U,
+            "stock-scene facade must retain one exact alpha-shadow record for a used AT material");
+}
+
 void test_resolved_subtree_filter_and_isolation_reach_facade() {
     Fixture fixture_value = fixture();
     FakeDevice device;
@@ -555,6 +587,7 @@ int main() {
     try {
         test_success_and_plan_evidence();
         test_directional_shadow_receiver_reaches_material_handoff();
+        test_alpha_shadow_constants_reach_static_scene_handoff();
         test_resolved_subtree_filter_and_isolation_reach_facade();
         test_csp_node_state_reaches_per_packet_pipelines();
         test_damage_preview_reaches_scene_and_material_handoff();

@@ -2243,7 +2243,7 @@ validate_depth_only_indexed_static_mesh_draw_request(
                         if (resource.set != 0U) return false;
                         if (resource.binding == 0U)
                             return resource.kind == PipelineResourceKind::sampled_texture;
-                        if (resource.binding == 1U)
+                        if (resource.binding == 3U)
                             return resource.kind == PipelineResourceKind::sampler;
                         if (resource.binding == 4U)
                             return resource.kind == PipelineResourceKind::uniform_buffer;
@@ -2255,7 +2255,7 @@ validate_depth_only_indexed_static_mesh_draw_request(
                     }) &&
         std::any_of(pipeline.resources.begin(), pipeline.resources.end(),
                     [](const PipelineResourceBinding& resource) {
-                        return resource.binding == 1U;
+                        return resource.binding == 3U;
                     }) &&
         std::any_of(pipeline.resources.begin(), pipeline.resources.end(),
                     [](const PipelineResourceBinding& resource) {
@@ -2269,7 +2269,7 @@ validate_depth_only_indexed_static_mesh_draw_request(
         pipeline.depth.compare != PipelineCompareOperation::less) {
         diagnostic = {"depth_only_indexed_pipeline_state_invalid",
                       alpha_tested
-                          ? "Stock alpha-tested depth-only pipelines require exact t0/s1/b4 resources, draw matrices, depth LESS test/write, and no blend"
+                          ? "Stock alpha-tested depth-only pipelines require exact t0/s3/b4 resources, draw matrices, depth LESS test/write, and no blend"
                           : "Depth-only indexed pipelines require draw matrices, depth LESS test/write, no blend, and no resources"};
         return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
     }

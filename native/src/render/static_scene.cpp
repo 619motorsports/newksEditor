@@ -1859,6 +1859,24 @@ StaticSceneResources::draw_opaque_directional_shadows(
                         "A refreshed shadow packet changed its prepared contract or transform");
     }
 
+    // MaterialFilterSM executes after the shadow pass establishes opaque
+    // blending and normal depth state. Keep the retained color-pass packets
+    // unchanged, but give every executable caster a shadow-local packet with
+    // that recovered state. This is required for ordinary alpha-blended
+    // materials, whose main pass disables depth writes before the shadow
+    // filter selects ksShadowGenAT.
+    std::vector<DrawPacket> shadow_packets;
+    shadow_packets.reserve(packets_.size());
+    for (std::size_t index = 0U; index < packets_.size(); ++index) {
+        shadow_packets.push_back(packet_for_frame(index));
+        DrawPacket& shadow_packet = shadow_packets.back();
+        shadow_packet.flags.transparent = false;
+        shadow_packet.flags.blend_enabled = false;
+        shadow_packet.flags.alpha_to_coverage = false;
+        shadow_packet.flags.depth_test = true;
+        shadow_packet.flags.depth_write = true;
+    }
+
     StaticSceneDirectionalShadowResult result;
     std::vector<std::size_t> executable_indices;
     std::vector<std::uint8_t> alpha_shadow_packets(packets_.size(), 0U);
@@ -1870,13 +1888,9 @@ StaticSceneResources::draw_opaque_directional_shadows(
         if (!packet.flags.cast_shadows) continue;
         ++result.selected_casters;
         if (packet.primitive == DrawPrimitiveKind::skinned_mesh) {
-            if (packet.material_profile.shadow_alpha_tested) {
-                ++result.staged_alpha_tested;
-                result.staged_casters.push_back({
-                    "directional_shadow_caster_alpha_skinning_staged", packet.node,
-                    packet.material});
-                continue;
-            }
+            // MaterialFilterSM selects ksShadowGenSKIN before it tests the
+            // material blend mode. A non-opaque skinned caster therefore
+            // stays on the null-pixel skinned path and does not sample alpha.
             if (frame.skinned_pipeline == nullptr) {
                 ++result.staged_skinned;
                 result.staged_casters.push_back({
@@ -1895,13 +1909,7 @@ StaticSceneResources::draw_opaque_directional_shadows(
             continue;
         }
         if (packet.material_profile.shadow_alpha_tested) {
-            // The recovered stock host forces opaque blending for alpha
-            // shadow casters. Serialized A2C is therefore not a reason to
-            // stage an otherwise explicit alpha-tested shadow contract;
-            // transparent/blended packets remain staged.
-            if (packet.flags.transparent || packet.flags.blend_enabled ||
-                !packet.flags.depth_test || !packet.flags.depth_write ||
-                frame.alpha_static_pipeline == nullptr ||
+            if (frame.alpha_static_pipeline == nullptr ||
                 alpha_material_buffer(static_cast<std::size_t>(packet.material)) == nullptr ||
                 alpha_diffuse_binding(index).texture == nullptr ||
                 alpha_diffuse_binding(index).sampler == nullptr) {
@@ -1922,21 +1930,7 @@ StaticSceneResources::draw_opaque_directional_shadows(
             ++result.alpha_tested_casters;
             continue;
         }
-        if (packet.flags.transparent || packet.flags.blend_enabled ||
-            packet.flags.alpha_to_coverage) {
-            ++result.staged_alpha_tested;
-            result.staged_casters.push_back({
-                "directional_shadow_caster_alpha_test_staged", packet.node,
-                packet.material});
-            continue;
-        }
         if (frame.opaque_pipeline == nullptr) {
-            result.staged_casters.push_back({
-                "directional_shadow_caster_shader_staged", packet.node,
-                packet.material});
-            continue;
-        }
-        if (!packet.flags.depth_test || !packet.flags.depth_write) {
             result.staged_casters.push_back({
                 "directional_shadow_caster_shader_staged", packet.node,
                 packet.material});
@@ -2065,7 +2059,7 @@ StaticSceneResources::draw_opaque_directional_shadows(
         auto& draws = cascade_draws[cascade];
         draws.reserve(executable_indices.size());
         for (const std::size_t index : executable_indices) {
-            const DrawPacket& packet = packet_for_frame(index);
+            const DrawPacket& packet = shadow_packets[index];
             DepthOnlyIndexedStaticMeshDrawRequest draw;
             draw.packet = &packet;
             if (packet.primitive == DrawPrimitiveKind::skinned_mesh) {

@@ -3552,7 +3552,7 @@ bool execute_d3d12_depth_only_indexed_static_mesh_batch(
             root_parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
             alpha_sampler_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
             alpha_sampler_range.NumDescriptors = 1U;
-            alpha_sampler_range.BaseShaderRegister = 1U;
+            alpha_sampler_range.BaseShaderRegister = 3U;
             alpha_sampler_range.RegisterSpace = 0U;
             alpha_sampler_range.OffsetInDescriptorsFromTableStart = 0U;
             root_parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;

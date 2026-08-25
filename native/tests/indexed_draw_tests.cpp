@@ -182,7 +182,7 @@ PipelineProgram alpha_tested_depth_only_pipeline_fixture() {
     pipeline.name = "indexed-alpha-tested-depth-contract";
     pipeline.resources = {
         {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
-        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+        {PipelineResourceKind::sampler, 0U, 3U, "samLinearShadow"},
         {PipelineResourceKind::uniform_buffer, 0U, 4U, "shadowMaterial"},
     };
     pipeline.shaders.push_back({PipelineShaderStage::fragment,
@@ -1868,6 +1868,14 @@ void validates_alpha_tested_depth_only_contract() {
                 DepthOnlyIndexedStaticMeshDrawStatus::invalid_request &&
                 diagnostic.code == "depth_only_indexed_pipeline_state_invalid",
             "incomplete alpha-tested resource declaration rejected");
+    pipeline = alpha_tested_depth_only_pipeline_fixture();
+    request.pipeline = &pipeline;
+
+    pipeline.resources[1].binding = 1U;
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "depth_only_indexed_pipeline_state_invalid",
+            "obsolete s1 alpha-shadow sampler binding rejected");
     pipeline = alpha_tested_depth_only_pipeline_fixture();
     request.pipeline = &pipeline;
 
