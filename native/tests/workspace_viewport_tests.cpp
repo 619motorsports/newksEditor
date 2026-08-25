@@ -286,6 +286,55 @@ Fixture fixture() {
     return result;
 }
 
+Fixture car_lod_fixture() {
+    auto result = fixture();
+    auto& model = result.document.assembly.model;
+    apex::formats::Kn5Node lod1_mesh = model.root.children.front();
+    lod1_mesh.name = "BODY_LOD1";
+    lod1_mesh.children.front().name = "HIDDEN_LOD1";
+    model.root.children.push_back(std::move(lod1_mesh));
+
+    auto& scene = result.document.scene.snapshot;
+    const auto root_id = scene.root;
+    auto& lod0_scene_mesh = scene.nodes[1U];
+    lod0_scene_mesh.workspace_file = "lod0.kn5";
+
+    apex::scene::SceneNode lod1_scene_mesh;
+    lod1_scene_mesh.name = "BODY_LOD1";
+    lod1_scene_mesh.kind = apex::scene::NodeKind::mesh;
+    lod1_scene_mesh.material = 0U;
+    lod1_scene_mesh.renderable = true;
+    lod1_scene_mesh.visible = true;
+    lod1_scene_mesh.active = true;
+    lod1_scene_mesh.cast_shadows = true;
+    lod1_scene_mesh.workspace_file = "lod1.kn5";
+    lod1_scene_mesh.parent = root_id;
+    const auto lod1_id = scene.add_node(std::move(lod1_scene_mesh), root_id);
+    apex::scene::SceneNode lod1_hidden;
+    lod1_hidden.name = "HIDDEN_LOD1";
+    lod1_hidden.workspace_auxiliary = "driver";
+    (void)scene.add_node(std::move(lod1_hidden), lod1_id);
+
+    auto& workspace = result.document.assembly.workspace;
+    workspace.kind = "carLods";
+    workspace.files.clear();
+    apex::workspace::WorkspaceFile lod0_file;
+    lod0_file.name = "lod0.kn5";
+    lod0_file.size = 1U;
+    lod0_file.lod = apex::workspace::CarLodManifest{
+        0U, "lod0.kn5", 0.0F, 15.0F, "LOD_0", 1U};
+    workspace.files.push_back(std::move(lod0_file));
+    apex::workspace::WorkspaceFile lod1_file;
+    lod1_file.name = "lod1.kn5";
+    lod1_file.size = 1U;
+    lod1_file.lod = apex::workspace::CarLodManifest{
+        1U, "lod1.kn5", 15.0F, 1'000'000.0F, "LOD_1", 2U};
+    workspace.files.push_back(std::move(lod1_file));
+    scene.workspace_kind = "carLods";
+    result.document.sceneBinding.file_root_nodes = {1U, lod1_id};
+    return result;
+}
+
 WorkspaceViewportPrepareRequest request_for(const Fixture& fixture_value) {
     WorkspaceViewportPrepareRequest request;
     request.presentation.width = 32U;
@@ -424,6 +473,53 @@ void accepts_track_and_car_lod_documents() {
     }
 }
 
+void selects_car_lod_roots_at_viewport_boundary() {
+    auto value = car_lod_fixture();
+    const auto authored_root_children =
+        value.document.scene.snapshot.nodes[value.document.scene.snapshot.root].children;
+    const auto authored_workspace_files = value.document.assembly.workspace.files.size();
+    const bool authored_lod0_active = value.document.scene.snapshot.nodes[1U].active;
+
+    const auto prepare_at = [&](float distance,
+                                std::optional<std::uint32_t> selected_index = std::nullopt) {
+        auto request = request_for(value);
+        request.render.camera_position = {0.0F, 0.0F, distance};
+        request.workspace.lod_bounds_center = apex::scene::Vector3{0.0F, 0.0F, 0.0F};
+        request.workspace.lod_fov_degrees = 60.0F;
+        request.workspace.lod_index = selected_index;
+        FakeDevice device;
+        return apex::app::prepareWorkspaceViewport(device, value.document, request);
+    };
+
+    for (const auto& [distance, expected_file] :
+         std::array<std::pair<float, const char*>, 3U>{
+             std::pair{14.999F, "lod0.kn5"},
+             std::pair{15.0F, "lod1.kn5"},
+             std::pair{15.001F, "lod1.kn5"}}) {
+        auto prepared = prepare_at(distance);
+        require(prepared.ok() && prepared.viewport->renderPlan().items.size() == 1U &&
+                    prepared.viewport->renderPlan().items.front().workspace_file == expected_file,
+                "viewport uses the half-open car LOD boundary");
+    }
+
+    auto forced = prepare_at(30.0F, 0U);
+    require(forced.ok() && forced.viewport->renderPlan().items.size() == 1U &&
+                forced.viewport->renderPlan().items.front().workspace_file == "lod0.kn5",
+            "explicit viewport LOD index overrides camera distance");
+
+    auto unknown = prepare_at(30.0F, 99U);
+    require(!unknown.ok() && !unknown.viewport &&
+                unknown.status == apex::app::WorkspaceViewportStatus::invalid &&
+                unknown.diagnostic.code == "INVALID_LOD_SELECTION",
+            "unknown viewport LOD index fails without a partial viewport");
+
+    require(value.document.scene.snapshot.nodes[value.document.scene.snapshot.root].children ==
+                authored_root_children &&
+                value.document.assembly.workspace.files.size() == authored_workspace_files &&
+                value.document.scene.snapshot.nodes[1U].active == authored_lod0_active,
+            "car LOD viewport preparation does not mutate the source document");
+}
+
 void resolves_preview_state_without_mutating_document() {
     auto value = fixture();
     const auto body_id = value.document.scene.snapshot.nodes[1U].id;
@@ -545,6 +641,7 @@ int main() {
     try {
         opens_and_draws();
         accepts_track_and_car_lod_documents();
+        selects_car_lod_roots_at_viewport_boundary();
         resolves_preview_state_without_mutating_document();
         camera_controller_matches_bounded_editor_gestures();
         camera_controller_supports_keyboard_translation();

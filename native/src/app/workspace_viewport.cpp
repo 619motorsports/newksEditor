@@ -460,6 +460,10 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             std::move(depth.attachment), std::move(execution)));
         result.status = WorkspaceViewportStatus::ready;
         return result;
+    } catch (const workspace::WorkspaceError& error) {
+        result.status = WorkspaceViewportStatus::invalid;
+        result.diagnostic = {error.code(), error.what()};
+        return result;
     } catch (const std::bad_alloc&) {
         result.status = WorkspaceViewportStatus::allocation_failed;
         result.diagnostic = diagnostic(
