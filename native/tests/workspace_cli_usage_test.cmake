@@ -192,6 +192,42 @@ if(NOT camera_play_only_result STREQUAL "1")
   message(FATAL_ERROR
     "camera playback without set returned ${camera_play_only_result}: ${camera_play_only_error}")
 endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --track-camera-mode installed-editor
+  RESULT_VARIABLE camera_mode_only_result
+  ERROR_VARIABLE camera_mode_only_error
+)
+if(NOT camera_mode_only_result STREQUAL "1")
+  message(FATAL_ERROR
+    "track-camera mode without set returned ${camera_mode_only_result}: ${camera_mode_only_error}")
+endif()
+string(FIND "${camera_mode_only_error}"
+  "--track-camera-mode requires --track-camera-set"
+  camera_mode_only_position)
+if(camera_mode_only_position EQUAL -1)
+  message(FATAL_ERROR
+    "track-camera mode without set was not diagnosed: ${camera_mode_only_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --track-camera-mode approximate
+  RESULT_VARIABLE invalid_camera_mode_result
+  ERROR_VARIABLE invalid_camera_mode_error
+)
+if(NOT invalid_camera_mode_result STREQUAL "1")
+  message(FATAL_ERROR
+    "invalid track-camera mode returned ${invalid_camera_mode_result}: ${invalid_camera_mode_error}")
+endif()
+string(FIND "${invalid_camera_mode_error}"
+  "track-camera mode must be webgl or installed-editor"
+  invalid_camera_mode_position)
+if(invalid_camera_mode_position EQUAL -1)
+  message(FATAL_ERROR
+    "invalid track-camera mode was not diagnosed: ${invalid_camera_mode_error}")
+endif()
 string(FIND "${camera_play_only_error}"
   "track-camera position and playback require --track-camera-set"
   camera_play_only_position)
@@ -258,6 +294,18 @@ endif()
 set(model "${APEX_SOURCE_DIR}/test/content/cars/619_gen6_arca_base/619_gen6_fusion13.kn5")
 set(track_cameras "${APEX_SOURCE_DIR}/test/content/tracks/sepang/data/cameras.ini")
 set(ai_spline "${APEX_SOURCE_DIR}/test/content/tracks/sepang/ai/fast_lane.ai")
+set(installed_camera_dir
+  "${CMAKE_CURRENT_BINARY_DIR}/apex-installed-editor-camera")
+file(MAKE_DIRECTORY "${installed_camera_dir}")
+file(WRITE "${installed_camera_dir}/camera.csv"
+  "0,0,0\n100,0,0\n200,0,0\n300,0,0\n")
+file(WRITE "${installed_camera_dir}/cameras.ini"
+  "[HEADER]\nVERSION=3\nCAMERA_COUNT=1\nSET_NAME=Installed\n\n"
+  "[CAMERA_0]\nNAME=catmull\nPOSITION=900,900,900\n"
+  "FORWARD=0,0,-1\nUP=0,1,0\nMIN_FOV=20\nMAX_FOV=120\n"
+  "IN_POINT=-1\nOUT_POINT=-1\nNEAR_PLANE=0.1\nFAR_PLANE=5000\n"
+  "SPLINE=camera.csv\nSPLINE_ROTATION=90\n"
+  "SPLINE_ANIMATION_LENGTH=4\nIS_FIXED=0\n")
 
 execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
@@ -330,6 +378,33 @@ string(FIND "${track_camera_error}"
 if(track_camera_modules_position EQUAL -1)
   message(FATAL_ERROR
     "track-camera workspace did not reach shader validation: ${track_camera_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --track-camera-set "${installed_camera_dir}/cameras.ini"
+          --track-camera-index 0 --track-camera-position 0.5
+          --track-camera-mode installed-editor
+  RESULT_VARIABLE installed_camera_result
+  OUTPUT_VARIABLE installed_camera_output
+  ERROR_VARIABLE installed_camera_error
+)
+if(NOT installed_camera_result STREQUAL "1")
+  message(FATAL_ERROR
+    "installed-editor camera returned ${installed_camera_result}: ${installed_camera_error}")
+endif()
+string(FIND "${installed_camera_output}"
+  "track camera: index=0, name=\"catmull\", spline-points=4, position=0.5, mode=installed-editor"
+  installed_camera_position)
+if(installed_camera_position EQUAL -1)
+  message(FATAL_ERROR
+    "installed-editor camera did not load before renderer setup: ${installed_camera_output}${installed_camera_error}")
+endif()
+string(FIND "${installed_camera_error}"
+  "caller-supplied shader modules" installed_camera_modules_position)
+if(installed_camera_modules_position EQUAL -1)
+  message(FATAL_ERROR
+    "installed-editor camera did not reach shader validation: ${installed_camera_error}")
 endif()
 
 execute_process(

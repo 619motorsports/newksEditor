@@ -477,8 +477,11 @@ remains unchanged and feature-complete.
   The shell can also select a bounded track-camera record and its relative
   spline. Fixed positions and one-shot playback use the production WebGL
   saved-basis mapping. Spline motion changes the eye position and uses
-  `MIN_FOV`. This mapping does not claim the installed editor's Catmull-Rom
-  preview or the game's focused-car target.
+  `MIN_FOV`. This mapping does not claim the game's focused-car target.
+  An explicit installed-editor mode uses recovered Catmull-Rom interpolation.
+  It uses raw spline points, arc-length mapping, and a target-facing camera.
+  It does not apply the production spline rotation or saved-position offset.
+  The default mode remains the production WebGL mapping.
   Pointer, wheel, and WASD/QE input return control to the orbit camera.
   The shell also evaluates one of the seven stock weather presets with bounded
   sun angles. It uploads sun, sky, horizon, and fog values through the 128-byte

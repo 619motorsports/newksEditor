@@ -62,6 +62,7 @@ void usage(std::ostream& output) {
            "                       [--lod-index <index>]\n"
               "                       [--track-camera-set <file> --track-camera-index <index>]\n"
               "                       [--track-camera-position <value>] [--track-camera-play]\n"
+              "                       [--track-camera-mode webgl|installed-editor]\n"
            "                       [--ai-spline <file>]\n"
               "                       [--node-search <query>] [--selected-node <id> [--isolate-selected]]\n"
               "                       [--show-hidden] [--wireframe] [--grid] [--view-axis]\n"
@@ -548,6 +549,9 @@ struct WindowWorkspaceOptions {
     double trackCameraPosition = 0.0;
     bool trackCameraPositionSpecified = false;
     bool trackCameraPlay = false;
+    apex::app::TrackCameraPreviewMode trackCameraMode =
+        apex::app::TrackCameraPreviewMode::webgl;
+    bool trackCameraModeSpecified = false;
     std::optional<std::filesystem::path> aiSpline;
     std::optional<std::string> nodeSearch;
     std::optional<apex::scene::NodeId> selectedNode;
@@ -597,7 +601,10 @@ struct LoadedWindowWorkspace {
         directionalShadows;
     struct TrackCamera {
         apex::domain::CameraData camera;
+        std::vector<std::array<double, 3U>> rawSplinePoints;
         std::vector<std::array<double, 3U>> splinePoints;
+        std::optional<apex::app::InstalledEditorTrackCameraSpline>
+            installedEditorSpline;
     };
     std::optional<TrackCamera> trackCamera;
     std::optional<apex::app::WorkspaceAiSplineGeometry> aiSpline;
@@ -610,6 +617,16 @@ apex::app::WorkspaceSessionKind parse_workspace_kind(std::string_view value) {
     if (value == "carLods" || value == "car-lods")
         return apex::app::WorkspaceSessionKind::carLods;
     throw std::runtime_error("workspace kind must be track or carLods");
+}
+
+apex::app::TrackCameraPreviewMode parse_track_camera_mode(
+    std::string_view value) {
+    if (value == "webgl")
+        return apex::app::TrackCameraPreviewMode::webgl;
+    if (value == "installed-editor")
+        return apex::app::TrackCameraPreviewMode::installed_editor;
+    throw std::runtime_error(
+        "track-camera mode must be webgl or installed-editor");
 }
 
 double parse_finite_number(std::string_view value, std::string_view label) {
@@ -754,6 +771,13 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
                 throw std::runtime_error(
                     "duplicate --track-camera-play option");
             result.trackCameraPlay = true;
+        } else if (option == "--track-camera-mode") {
+            if (result.trackCameraModeSpecified)
+                throw std::runtime_error(
+                    "duplicate --track-camera-mode option");
+            result.trackCameraMode = parse_track_camera_mode(
+                require_value("--track-camera-mode"));
+            result.trackCameraModeSpecified = true;
         } else if (option == "--ai-spline") {
             if (result.aiSpline.has_value())
                 throw std::runtime_error("duplicate --ai-spline option");
@@ -956,6 +980,10 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
         !result.trackCameraSet.has_value())
         throw std::runtime_error(
             "track-camera position and playback require --track-camera-set");
+    if (result.trackCameraModeSpecified &&
+        !result.trackCameraSet.has_value())
+        throw std::runtime_error(
+            "--track-camera-mode requires --track-camera-set");
     if (result.trackCameraPosition < 0.0 ||
         result.trackCameraPosition > 1.0)
         throw std::runtime_error(
@@ -1128,17 +1156,39 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
             if (spline.points.empty())
                 throw std::runtime_error(
                     "selected track-camera spline has no valid points");
-            preview.splinePoints = apex::domain::rotate_camera_spline(
-                spline.points, preview.camera.spline_rotation);
+            preview.rawSplinePoints = spline.points;
+            if (options.trackCameraMode ==
+                apex::app::TrackCameraPreviewMode::installed_editor) {
+                auto installed =
+                    apex::app::buildInstalledEditorTrackCameraSpline(
+                        preview.rawSplinePoints);
+                if (!installed.ok())
+                    throw std::runtime_error(
+                        installed.code + ": " + installed.message);
+                preview.installedEditorSpline =
+                    std::move(*installed.spline);
+            } else {
+                preview.splinePoints = apex::domain::rotate_camera_spline(
+                    preview.rawSplinePoints,
+                    preview.camera.spline_rotation);
+            }
         } else if (options.trackCameraPlay) {
             throw std::runtime_error(
                 "--track-camera-play requires a camera with a resolved spline");
+        } else if (options.trackCameraMode ==
+                   apex::app::TrackCameraPreviewMode::installed_editor) {
+            throw std::runtime_error(
+                "installed-editor track-camera mode requires a resolved spline");
         }
         std::cout << "track camera: index=" << preview.camera.index
                   << ", name=";
         write_cli_text(std::cout, preview.camera.name);
-        std::cout << ", spline-points=" << preview.splinePoints.size()
-                  << ", position=" << options.trackCameraPosition << '\n';
+        std::cout << ", spline-points=" << preview.rawSplinePoints.size()
+                  << ", position=" << options.trackCameraPosition
+                  << ", mode="
+                  << apex::app::track_camera_preview_mode_name(
+                         options.trackCameraMode)
+                  << '\n';
         loaded.trackCamera = std::move(preview);
     }
     if (options.aiSpline.has_value()) {
@@ -1424,6 +1474,13 @@ int run_window(int argc, char** argv) {
             return camera_controller.frame(aspect, clip_space);
 
         const auto& preview = *loaded_workspace.trackCamera;
+        if (workspace_options.trackCameraMode ==
+                apex::app::TrackCameraPreviewMode::installed_editor &&
+            !preview.installedEditorSpline.has_value()) {
+            return {std::nullopt,
+                    "installed_editor_track_camera_spline_missing",
+                    "Installed-editor preview requires a camera spline"};
+        }
         double spline_position = workspace_options.trackCameraPosition;
         if (workspace_options.trackCameraPlay) {
             const double elapsed = track_camera_playback_started.has_value()
@@ -1431,15 +1488,36 @@ int run_window(int argc, char** argv) {
                       std::chrono::steady_clock::now() -
                       *track_camera_playback_started).count()
                 : 0.0;
-            const auto playback =
-                apex::app::evaluateWorkspaceTrackCameraPlayback({
+            apex::app::WorkspaceTrackCameraPlaybackResult playback;
+            if (workspace_options.trackCameraMode ==
+                apex::app::TrackCameraPreviewMode::installed_editor) {
+                playback =
+                    apex::app::evaluateInstalledEditorTrackCameraPlayback({
+                        static_cast<float>(
+                            workspace_options.trackCameraPosition),
+                        elapsed,
+                        apex::app::installed_editor_track_camera_default_speed,
+                        preview.installedEditorSpline->length});
+            } else {
+                playback = apex::app::evaluateWorkspaceTrackCameraPlayback({
                     workspace_options.trackCameraPosition,
                     elapsed,
                     preview.camera.spline_animation_length});
+            }
             if (!playback.ok()) {
                 return {std::nullopt, playback.code, playback.message};
             }
             spline_position = playback.position;
+        }
+        if (workspace_options.trackCameraMode ==
+            apex::app::TrackCameraPreviewMode::installed_editor) {
+            return apex::app::buildInstalledEditorTrackCameraFrame({
+                &preview.camera,
+                &*preview.installedEditorSpline,
+                static_cast<float>(spline_position),
+                apex::app::installed_editor_track_camera_default_lookahead,
+                aspect,
+                clip_space});
         }
         return apex::app::buildWorkspaceTrackCameraFrame({
             &preview.camera,

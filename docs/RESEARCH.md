@@ -2040,7 +2040,11 @@ asset request. Fixed preview uses the midpoint FOV. Spline preview uses
 `MIN_FOV` and changes only the saved eye position. The backend camera builder
 keeps the saved forward and up basis and applies the Vulkan or D3D12 clip space.
 This native path does not claim the game's focused-car target behavior.
-It also does not claim the installed editor's distinct Catmull-Rom preview.
+An explicit `installed-editor` mode now ports the distinct Catmull-Rom preview.
+It uses raw control points as world positions and maps position by spline length.
+It also uses the recovered one-unit look-ahead and target-facing camera basis.
+The mode ignores `SPLINE_ROTATION` and `SPLINE_ANIMATION_LENGTH`.
+The production WebGL mapping remains the default.
 The recovered installed-editor contract is recorded in
 [`docs/evidence/ksnet-track-camera-preview.md`](evidence/ksnet-track-camera-preview.md).
 

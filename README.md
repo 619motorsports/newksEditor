@@ -149,8 +149,10 @@ secondary exports include collider KN5, `damage.ini`, `colliders.ini`, and
   clip-plane diagnostics, plus fixed track-camera preview using the configured
   position, orientation, FOV, and near/far planes. Referenced camera-spline CSVs are
   resolved, rotated around world Y, and sampled with the game's exact normalized
-  interpolation and spline-specific minimum-FOV rule; normalized scrubbing and
-  one-shot playback use `SPLINE_ANIMATION_LENGTH`
+  interpolation and spline-specific minimum-FOV rule. Normalized scrubbing and
+  one-shot playback use `SPLINE_ANIMATION_LENGTH`. An explicit installed-editor
+  mode uses recovered arc-length Catmull-Rom sampling, absolute spline points,
+  target-facing look-ahead, and the editor's distance-based playback.
 - Packed `data.acd` browsing with bounds checks, unsafe-path rejection, duplicate
   diagnostics, and virtual read-only INI files; packed or unpacked car `data/lods.ini`
   workspaces with contiguous `LOD_n` loading, `IN`/`OUT`

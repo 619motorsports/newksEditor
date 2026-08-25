@@ -38,9 +38,36 @@ it reverses that up vector. The helper then writes a target-facing matrix.
 
 The native `InterpolatingSpline` constructor at `0x10034848` selects Catmull-Rom
 by default. `getLastIndexFromNorm` at `0x10036CCA` maps normalized position to
-arc length. `calculateCatmullRom` at `0x1003514E` uses four wrapped points and
+arc length. `calculateCatmullRom` at `0x1003514E` uses four neighbor points.
+Closed splines wrap these indices. Open splines clamp them. The function uses
 the standard cubic basis with a factor of one-half.
 
+`Spline::isClosed` at `0x1003395E` infers the topology from the endpoints. It
+returns false for fewer than two points. Otherwise, it returns true when the
+endpoint distance is not more than `75.0` world units. The constant is at
+`0x10110638`.
+
+`InterpolatingSpline::computeSplineLength` at `0x100365C3` samples each cubic
+segment at `0.001` parameter intervals. It stores the cumulative distance at
+each point. It also includes the final wrapped segment for a closed spline.
+
+`ksGraphics` initializes the spline speed to `0.5` and the look-ahead distance
+to `1.0`. The constructor has managed RVA `0x26824`. Its `render` method has
+managed RVA `0x27388` and advances the position as follows:
+
+`position += deltaSeconds * speed / splineLength`
+
+At position `1.0`, the editor stops playback and resets the position to zero.
+The native path does not guard zero-length splines before division.
+
+The native C++ adapter rejects fewer than four points, more than 65,536 points,
+non-finite coordinates, and nonpositive lengths. These checks are safety
+boundaries for untrusted spline files. They are not recovered native behavior.
+
 The installed editor spline preview is not the game runtime linear sampler.
-The recovered preview methods do not apply `SPLINE_ROTATION` or use the saved
-animation length. No current native implementation claims this exact behavior.
+The preview does not apply `SPLINE_ROTATION`. It does not add the saved camera
+position. It also ignores `SPLINE_ANIMATION_LENGTH`.
+
+The native shell exposes this path only through
+`--track-camera-mode installed-editor`. The default `webgl` mode keeps the
+production WebGL mapping.

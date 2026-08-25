@@ -171,6 +171,7 @@ out/native/dev/native/apex-native --window vulkan \
   --workspace-root content/tracks/example --manifest models.ini --kind track \
   --track-camera-set data/cameras.ini --track-camera-index 0 \
   --track-camera-position 0.5 --track-camera-play \
+  --track-camera-mode installed-editor \
   --shader-family ksPerPixel --shader-vertex stock.vert.spv \
   --shader-fragment stock.frag.spv
 ```
@@ -192,14 +193,23 @@ The shell loads a referenced spline relative to that camera file.
 The asset request rejects absolute paths, traversal, and drive or stream syntax.
 `--track-camera-position` selects a normalized spline position from zero to one.
 `--track-camera-play` starts one-shot playback from that position.
+The default `--track-camera-mode webgl` keeps the production WebGL mapping.
 A start position of one restarts playback at zero.
 A zero animation length uses the production WebGL fallback of 15 seconds.
 A negative animation length uses the minimum duration of 0.001 seconds.
 Spline cameras use `MIN_FOV`. Cameras without a spline use the midpoint FOV.
-Both modes retain the saved forward and up basis from the camera file.
+Both fixed and spline previews retain the saved forward and up basis.
 This mapping matches the production WebGL editor.
-It does not claim the installed editor's Catmull-Rom spline preview.
 It also does not claim the game behavior that targets a focused car.
+
+The `installed-editor` mode selects the recovered Catmull-Rom preview.
+It uses raw spline points as absolute world positions.
+It does not apply `SPLINE_ROTATION` or add the saved camera position.
+It uses arc-length position mapping and a one-world-unit look-ahead target.
+It infers a closed spline when the endpoints are not more than 75 units apart.
+Its playback uses the recovered speed of `0.5` world units per second.
+Playback stops at the endpoint and resets the position to zero.
+The safe adapter rejects short, oversized, non-finite, and zero-length splines.
 The left or middle pointer button returns control to the orbit camera.
 The wheel and WASD/QE keys also return control to the orbit camera.
 The hierarchy options search, select, isolate, show hidden nodes, and enable

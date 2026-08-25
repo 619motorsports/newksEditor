@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
 
@@ -142,6 +143,160 @@ void evaluates_one_shot_playback() {
             "non-finite playback time is rejected");
 }
 
+void builds_recovered_installed_editor_spline() {
+    const std::array<std::array<double, 3U>, 4U> open_points = {{
+        {0.0, 0.0, 0.0},
+        {100.0, 0.0, 0.0},
+        {200.0, 0.0, 0.0},
+        {300.0, 0.0, 0.0},
+    }};
+    auto open = apex::app::buildInstalledEditorTrackCameraSpline(open_points);
+    require(open.ok(), "installed-editor open spline builds");
+    require(!open.spline->closed,
+            "endpoints farther than 75 world units select open topology");
+    require(open.spline->cumulative_lengths.size() == open_points.size(),
+            "installed-editor spline stores one cumulative length per point");
+    require(open.spline->length > 299.0F && open.spline->length < 301.0F,
+            "installed-editor length uses the recovered Catmull-Rom path");
+
+    const std::array<std::array<double, 3U>, 4U> closed_points = {{
+        {0.0, 0.0, 0.0},
+        {100.0, 0.0, 0.0},
+        {100.0, 0.0, 100.0},
+        {0.0, 0.0, 1.0},
+    }};
+    auto closed =
+        apex::app::buildInstalledEditorTrackCameraSpline(closed_points);
+    require(closed.ok() && closed.spline->closed,
+            "endpoints within 75 world units select closed topology");
+    require(closed.spline->length >
+                closed.spline->cumulative_lengths.back(),
+            "closed spline length includes the final wrapped segment");
+}
+
+void builds_installed_editor_target_camera_frame() {
+    auto camera = camera_fixture();
+    camera.position = {900.0, 900.0, 900.0};
+    camera.forward = {0.0, 0.0, -1.0};
+    camera.min_fov = 20.0;
+    camera.max_fov = 120.0;
+    camera.spline_rotation = 90.0;
+    const std::array<std::array<double, 3U>, 4U> points = {{
+        {0.0, 0.0, 0.0},
+        {100.0, 0.0, 0.0},
+        {200.0, 0.0, 0.0},
+        {300.0, 0.0, 0.0},
+    }};
+    auto spline = apex::app::buildInstalledEditorTrackCameraSpline(points);
+    require(spline.ok(), "installed-editor frame spline builds");
+
+    apex::app::InstalledEditorTrackCameraFrameRequest request;
+    request.camera = &camera;
+    request.spline = &*spline.spline;
+    request.spline_position = 0.5F;
+    request.viewport_aspect = 2.0F;
+    request.clip_space = apex::render::CameraClipSpace::d3d12;
+    auto frame = apex::app::buildInstalledEditorTrackCameraFrame(request);
+    require(frame.ok(), "installed-editor target-facing frame builds");
+    require_near(frame.frame->position[0], 149.9987F,
+                 "arc-length Catmull-Rom sampling uses the endpoint factor");
+    require_near(frame.frame->position[1], 0.0F,
+                 "installed-editor spline points are absolute positions");
+    require_near(frame.frame->forward[0], 1.0F,
+                 "installed-editor camera targets the future spline point");
+    require_near(frame.frame->up[1], 1.0F,
+                 "installed-editor target basis keeps upward world orientation");
+    require_near(frame.frame->fov_radians,
+                 20.0F * 3.14159265358979323846F / 180.0F,
+                 "installed-editor spline preview uses MIN_FOV");
+    require(frame.frame->clip_space == apex::render::CameraClipSpace::d3d12,
+            "installed-editor frame keeps backend clip space");
+
+    request.spline_position = 0.0F;
+    auto first = apex::app::buildInstalledEditorTrackCameraFrame(request);
+    require(first.ok(), "installed-editor zero-position frame builds");
+    require_near(first.frame->position[0], 0.0F,
+                 "zero position uses the recovered first-point path");
+}
+
+void rejects_unsafe_installed_editor_splines() {
+    const std::array<std::array<double, 3U>, 3U> short_points = {{
+        {0.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0},
+        {2.0, 0.0, 0.0},
+    }};
+    auto short_spline =
+        apex::app::buildInstalledEditorTrackCameraSpline(short_points);
+    require(!short_spline.ok() &&
+                short_spline.code ==
+                    "installed_editor_track_camera_spline_too_short",
+            "short Catmull-Rom spline is rejected safely");
+
+    std::vector<std::array<double, 3U>> oversized(
+        apex::app::installed_editor_track_camera_max_spline_points + 1U);
+    auto point_limit =
+        apex::app::buildInstalledEditorTrackCameraSpline(oversized);
+    require(!point_limit.ok() &&
+                point_limit.code ==
+                    "installed_editor_track_camera_spline_limit",
+            "installed-editor spline point budget is enforced before work");
+
+    auto nonfinite_points = std::array<std::array<double, 3U>, 4U>{{
+        {0.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0},
+        {2.0, 0.0, 0.0},
+        {3.0, 0.0, 0.0},
+    }};
+    nonfinite_points[2][1] = std::numeric_limits<double>::infinity();
+    auto nonfinite =
+        apex::app::buildInstalledEditorTrackCameraSpline(nonfinite_points);
+    require(!nonfinite.ok() &&
+                nonfinite.code ==
+                    "installed_editor_track_camera_spline_non_finite",
+            "non-finite installed-editor spline point is rejected");
+
+    const std::array<std::array<double, 3U>, 4U> repeated = {{
+        {0.0, 0.0, 0.0},
+        {0.0, 0.0, 0.0},
+        {0.0, 0.0, 0.0},
+        {0.0, 0.0, 0.0},
+    }};
+    auto zero_length =
+        apex::app::buildInstalledEditorTrackCameraSpline(repeated);
+    require(!zero_length.ok() &&
+                zero_length.code ==
+                    "installed_editor_track_camera_spline_length_invalid",
+            "zero-length installed-editor spline is rejected");
+
+    apex::app::InstalledEditorTrackCameraFrameRequest missing;
+    auto missing_frame =
+        apex::app::buildInstalledEditorTrackCameraFrame(missing);
+    require(!missing_frame.ok() &&
+                missing_frame.code ==
+                    "installed_editor_track_camera_missing",
+            "missing installed-editor camera record is rejected");
+}
+
+void evaluates_installed_editor_playback() {
+    auto active = apex::app::evaluateInstalledEditorTrackCameraPlayback(
+        {0.25F, 50.0, 0.5F, 100.0F});
+    require(active.ok() && std::abs(active.position - 0.5) < 0.000001 &&
+                !active.finished,
+            "installed-editor playback advances by speed over spline length");
+
+    auto stopped = apex::app::evaluateInstalledEditorTrackCameraPlayback(
+        {0.25F, 150.0, 0.5F, 100.0F});
+    require(stopped.ok() && stopped.position == 0.0 && stopped.finished,
+            "installed-editor playback resets to zero at the endpoint");
+
+    auto invalid = apex::app::evaluateInstalledEditorTrackCameraPlayback(
+        {0.0F, 1.0, 0.5F, 0.0F});
+    require(!invalid.ok() &&
+                invalid.code ==
+                    "installed_editor_track_camera_playback_length_invalid",
+            "installed-editor playback rejects native divide-by-zero input");
+}
+
 } // namespace
 
 int main() {
@@ -149,6 +304,10 @@ int main() {
         builds_saved_and_spline_camera_frames();
         clamps_production_fov_and_rejects_unsafe_values();
         evaluates_one_shot_playback();
+        builds_recovered_installed_editor_spline();
+        builds_installed_editor_target_camera_frame();
+        rejects_unsafe_installed_editor_splines();
+        evaluates_installed_editor_playback();
         std::cout << "workspace track camera tests passed\n";
         return 0;
     } catch (const std::exception& error) {

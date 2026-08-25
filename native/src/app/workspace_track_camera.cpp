@@ -1,15 +1,20 @@
 #include "apex/app/workspace_track_camera.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
 #include <limits>
 #include <string>
+#include <vector>
 
 namespace apex::app {
 
 namespace {
 
 constexpr double pi = 3.14159265358979323846;
+
+using Point = std::array<float, 3U>;
 
 [[nodiscard]] render::CameraFrameResult failure(std::string code,
                                                 std::string message) {
@@ -25,7 +30,145 @@ constexpr double pi = 3.14159265358979323846;
     return std::isfinite(output);
 }
 
+[[nodiscard]] bool finite_point(const Point& point) noexcept {
+    return std::all_of(point.begin(), point.end(), [](float value) {
+        return std::isfinite(value);
+    });
+}
+
+[[nodiscard]] Point subtract(const Point& left, const Point& right) noexcept {
+    return {left[0] - right[0], left[1] - right[1], left[2] - right[2]};
+}
+
+[[nodiscard]] Point cross(const Point& left, const Point& right) noexcept {
+    return {
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    };
+}
+
+[[nodiscard]] float dot(const Point& left, const Point& right) noexcept {
+    return left[0] * right[0] + left[1] * right[1] +
+           left[2] * right[2];
+}
+
+[[nodiscard]] float point_length(const Point& point) noexcept {
+    const float squared = dot(point, point);
+    return squared == 0.0F ? 0.0F : std::sqrt(squared);
+}
+
+[[nodiscard]] float point_distance(const Point& left,
+                                   const Point& right) noexcept {
+    return point_length(subtract(left, right));
+}
+
+[[nodiscard]] std::size_t spline_index(std::ptrdiff_t index,
+                                       std::size_t count,
+                                       bool closed) noexcept {
+    if (closed) {
+        if (index < 0) index += static_cast<std::ptrdiff_t>(count);
+        else if (index >= static_cast<std::ptrdiff_t>(count))
+            index -= static_cast<std::ptrdiff_t>(count);
+        return static_cast<std::size_t>(index);
+    }
+    if (index < 0) return 0U;
+    const auto converted = static_cast<std::size_t>(index);
+    return std::min(converted, count - 1U);
+}
+
+[[nodiscard]] Point catmull_segment(
+    std::span<const Point> points, std::size_t segment, float value,
+    bool closed) noexcept {
+    const auto count = points.size();
+    const auto base = static_cast<std::ptrdiff_t>(segment);
+    const auto& p0 = points[spline_index(base - 1, count, closed)];
+    const auto& p1 = points[spline_index(base, count, closed)];
+    const auto& p2 = points[spline_index(base + 1, count, closed)];
+    const auto& p3 = points[spline_index(base + 2, count, closed)];
+    const float value2 = value * value;
+    const float value3 = value2 * value;
+    const float c0 = -value3 + 2.0F * value2 - value;
+    const float c1 = 3.0F * value3 - 5.0F * value2 + 2.0F;
+    const float c2 = 4.0F * value2 - 3.0F * value3 + value;
+    const float c3 = value3 - value2;
+    Point result{};
+    for (std::size_t axis = 0U; axis < 3U; ++axis) {
+        result[axis] = 0.5F *
+            (p0[axis] * c0 + p1[axis] * c1 +
+             p2[axis] * c2 + p3[axis] * c3);
+    }
+    return result;
+}
+
+[[nodiscard]] float catmull_segment_length(
+    std::span<const Point> points, std::size_t segment,
+    bool closed) noexcept {
+    Point previous = catmull_segment(points, segment, 0.0F, closed);
+    float length = 0.0F;
+    for (float value = 0.0F; value <= 1.0F;
+         value += installed_editor_track_camera_length_step) {
+        const Point current = catmull_segment(
+            points, segment, value, closed);
+        length += point_distance(current, previous);
+        previous = current;
+    }
+    return length;
+}
+
+[[nodiscard]] Point sample_installed_spline(
+    const InstalledEditorTrackCameraSpline& spline,
+    float normalized_position) noexcept {
+    const float position = std::clamp(normalized_position, 0.0F, 1.0F);
+    if (position == 0.0F) return spline.points.front();
+
+    const float distance = spline.length * position;
+    const std::size_t last = spline.points.size() - 1U;
+    for (std::size_t index = 0U; index < last; ++index) {
+        const float begin = spline.cumulative_lengths[index];
+        const float end = spline.cumulative_lengths[index + 1U];
+        if (begin <= distance && distance < end) {
+            const float local = (distance - begin) / (end - begin);
+            return catmull_segment(spline.points, index, local,
+                                   spline.closed);
+        }
+    }
+    if (spline.closed) {
+        const float begin = spline.cumulative_lengths.back();
+        const float closing_length = spline.length - begin;
+        if (closing_length > 0.0F) {
+            const float local = (distance - begin) / closing_length;
+            return catmull_segment(spline.points, last, local, true);
+        }
+    }
+    return spline.points.back();
+}
+
+[[nodiscard]] bool valid_cumulative_lengths(
+    const InstalledEditorTrackCameraSpline& spline) noexcept {
+    if (spline.cumulative_lengths.empty() ||
+        spline.cumulative_lengths.front() != 0.0F)
+        return false;
+    float previous = 0.0F;
+    for (const float value : spline.cumulative_lengths) {
+        if (!std::isfinite(value) || value < previous ||
+            value > spline.length)
+            return false;
+        previous = value;
+    }
+    return true;
+}
+
 } // namespace
+
+const char* track_camera_preview_mode_name(
+    TrackCameraPreviewMode mode) noexcept {
+    switch (mode) {
+    case TrackCameraPreviewMode::webgl: return "webgl";
+    case TrackCameraPreviewMode::installed_editor: return "installed-editor";
+    }
+    return "unknown";
+}
 
 render::CameraFrameResult buildWorkspaceTrackCameraFrame(
     const WorkspaceTrackCameraFrameRequest& request) {
@@ -76,6 +219,141 @@ render::CameraFrameResult buildWorkspaceTrackCameraFrame(
     return render::build_camera_frame(camera_request);
 }
 
+InstalledEditorTrackCameraSplineResult
+buildInstalledEditorTrackCameraSpline(
+    std::span<const std::array<double, 3U>> points) {
+    if (points.size() < 4U) {
+        return {std::nullopt,
+                "installed_editor_track_camera_spline_too_short",
+                "Installed-editor Catmull-Rom preview requires at least four spline points"};
+    }
+    if (points.size() > installed_editor_track_camera_max_spline_points) {
+        return {std::nullopt,
+                "installed_editor_track_camera_spline_limit",
+                "Installed-editor camera spline exceeds the workspace point limit"};
+    }
+
+    InstalledEditorTrackCameraSpline spline;
+    spline.points.reserve(points.size());
+    for (const auto& point : points) {
+        Point converted{};
+        for (std::size_t axis = 0U; axis < 3U; ++axis) {
+            if (!checked_float(point[axis], converted[axis])) {
+                return {std::nullopt,
+                        "installed_editor_track_camera_spline_non_finite",
+                        "Installed-editor camera spline points must fit finite float values"};
+            }
+        }
+        spline.points.push_back(converted);
+    }
+    spline.closed = point_distance(spline.points.back(),
+                                   spline.points.front()) <=
+                    installed_editor_track_camera_closure_distance;
+    spline.cumulative_lengths.assign(spline.points.size(), 0.0F);
+    float length = 0.0F;
+    for (std::size_t segment = 0U;
+         segment + 1U < spline.points.size(); ++segment) {
+        length += catmull_segment_length(spline.points, segment,
+                                         spline.closed);
+        spline.cumulative_lengths[segment + 1U] = length;
+    }
+    if (spline.closed) {
+        length += catmull_segment_length(
+            spline.points, spline.points.size() - 1U, true);
+    }
+    if (!(length > 0.0F) || !std::isfinite(length)) {
+        return {std::nullopt,
+                "installed_editor_track_camera_spline_length_invalid",
+                "Installed-editor camera spline must have a positive finite length"};
+    }
+    spline.length = length;
+    return {std::move(spline), {}, {}};
+}
+
+render::CameraFrameResult buildInstalledEditorTrackCameraFrame(
+    const InstalledEditorTrackCameraFrameRequest& request) {
+    if (request.camera == nullptr)
+        return failure("installed_editor_track_camera_missing",
+                       "Installed-editor preview requires a camera record");
+    if (request.spline == nullptr)
+        return failure("installed_editor_track_camera_spline_missing",
+                       "Installed-editor preview requires a camera spline");
+    if (!std::isfinite(request.spline_position) ||
+        !std::isfinite(request.lookahead_world_units)) {
+        return failure(
+            "installed_editor_track_camera_value_invalid",
+            "Installed-editor camera position and look-ahead must be finite");
+    }
+    const auto& spline = *request.spline;
+    if (spline.points.size() < 4U ||
+        spline.points.size() != spline.cumulative_lengths.size() ||
+        !(spline.length > 0.0F) || !std::isfinite(spline.length) ||
+        !std::all_of(spline.points.begin(), spline.points.end(), finite_point) ||
+        !valid_cumulative_lengths(spline)) {
+        return failure(
+            "installed_editor_track_camera_spline_invalid",
+            "Installed-editor camera spline data is incomplete or invalid");
+    }
+
+    const float scaled = request.spline_position *
+                         installed_editor_track_camera_endpoint_factor;
+    const float position = std::clamp(scaled, 0.0F, 1.0F);
+    const Point eye = sample_installed_spline(spline, position);
+    const float target_position = std::clamp(
+        position + request.lookahead_world_units / spline.length,
+        0.0F, 1.0F);
+    const Point target = sample_installed_spline(spline, target_position);
+    const Point direction_source = subtract(target, eye);
+    const float direction_length = point_length(direction_source);
+    if (!(direction_length > 1.0e-6F) || !std::isfinite(direction_length)) {
+        return failure(
+            "installed_editor_track_camera_target_degenerate",
+            "Installed-editor camera position and look-ahead target must differ");
+    }
+    const Point direction = {
+        direction_source[0] / direction_length,
+        direction_source[1] / direction_length,
+        direction_source[2] / direction_length,
+    };
+    const Point world_up = {0.0F, 1.0F, 0.0F};
+    const Point right_source = cross(direction, world_up);
+    const float right_length = point_length(right_source);
+    if (!(right_length > 1.0e-6F) || !std::isfinite(right_length)) {
+        return failure(
+            "installed_editor_track_camera_basis_degenerate",
+            "Installed-editor camera direction must not be parallel to world up");
+    }
+    const Point right = {
+        right_source[0] / right_length,
+        right_source[1] / right_length,
+        right_source[2] / right_length,
+    };
+    Point up = cross(right, direction);
+    if (up[1] < 0.0F) {
+        up[0] = -up[0];
+        up[1] = -up[1];
+        up[2] = -up[2];
+    }
+
+    render::CameraFrameRequest camera_request;
+    camera_request.eye = eye;
+    camera_request.target = target;
+    camera_request.up = up;
+    if (!checked_float(request.camera->min_fov * pi / 180.0,
+                       camera_request.fov_radians) ||
+        !checked_float(request.camera->near_plane,
+                       camera_request.near_plane) ||
+        !checked_float(request.camera->far_plane,
+                       camera_request.far_plane)) {
+        return failure(
+            "installed_editor_track_camera_optics_out_of_range",
+            "Installed-editor camera optics must fit finite float values");
+    }
+    camera_request.aspect = request.viewport_aspect;
+    camera_request.clip_space = request.clip_space;
+    return render::build_camera_frame(camera_request);
+}
+
 WorkspaceTrackCameraPlaybackResult evaluateWorkspaceTrackCameraPlayback(
     const WorkspaceTrackCameraPlaybackRequest& request) noexcept {
     if (!std::isfinite(request.start_position) ||
@@ -109,6 +387,46 @@ WorkspaceTrackCameraPlaybackResult evaluateWorkspaceTrackCameraPlayback(
     const double position = std::min(
         1.0, start + request.elapsed_seconds / duration);
     return {position, position >= 1.0, {}, {}};
+}
+
+WorkspaceTrackCameraPlaybackResult
+evaluateInstalledEditorTrackCameraPlayback(
+    const InstalledEditorTrackCameraPlaybackRequest& request) noexcept {
+    if (!std::isfinite(request.start_position) ||
+        request.start_position < 0.0F || request.start_position > 1.0F) {
+        return {0.0, false,
+                "installed_editor_track_camera_playback_position_invalid",
+                "Installed-editor playback position must be from zero to one"};
+    }
+    if (!std::isfinite(request.elapsed_seconds) ||
+        request.elapsed_seconds < 0.0) {
+        return {0.0, false,
+                "installed_editor_track_camera_playback_elapsed_invalid",
+                "Installed-editor playback time must be finite and nonnegative"};
+    }
+    if (!std::isfinite(request.speed_multiplier)) {
+        return {0.0, false,
+                "installed_editor_track_camera_playback_speed_invalid",
+                "Installed-editor playback speed must be finite"};
+    }
+    if (!(request.spline_length > 0.0F) ||
+        !std::isfinite(request.spline_length)) {
+        return {0.0, false,
+                "installed_editor_track_camera_playback_length_invalid",
+                "Installed-editor playback requires a positive finite spline length"};
+    }
+    const double position =
+        static_cast<double>(request.start_position) +
+        request.elapsed_seconds *
+            static_cast<double>(request.speed_multiplier) /
+            static_cast<double>(request.spline_length);
+    if (!std::isfinite(position)) {
+        return {0.0, false,
+                "installed_editor_track_camera_playback_result_invalid",
+                "Installed-editor playback position exceeded the finite range"};
+    }
+    if (position >= 1.0) return {0.0, true, {}, {}};
+    return {position, false, {}, {}};
 }
 
 } // namespace apex::app
