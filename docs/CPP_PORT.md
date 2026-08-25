@@ -357,6 +357,14 @@ remains unchanged and feature-complete.
   and car-LOD workspaces into backend-neutral scene snapshots and workspace
   bindings. Missing/ambiguous references, truncated models, and aggregate
   input or scene limits fail closed. GPU/window wiring remains separate.
+  A separate renderer-facing workspace viewport bridge now prepares this
+  document through the bounded stock-scene facade, owns neutral single-sample
+  color and D32 targets, and presents the completed color attachment through
+  the backend-neutral device API. It accepts caller-supplied SPIR-V or DXIL
+  modules and embedded KN5 textures. Workspace LOD and cockpit/rim preview
+  state are resolved into render options without mutating the session. The
+  bridge rejects unresolved multisample presentation and never presents after
+  a failed draw. Native window command wiring remains separate.
   Car damage and bottom-collider authoring have bounded schemas and deterministic output. A
   single-hierarchy car validator checks required nodes, wheels, pivots,
   colliders, and visual-model bounds. Multi-LOD validation is still staged.
@@ -429,7 +437,7 @@ remains unchanged and feature-complete.
   these maps through the portable receiver ABI. D3D12 creates typeless depth
   resources and sampled views, but descriptor execution remains staged pending
   WARP verification. The
-  device API directly uploads immutable, one-layer BC1 and BC3 sampled
+  device API directly uploads immutable, one-layer BC1, BC3, and BC7 sampled
   textures. The upload path validates compressed block rows before allocation.
   Vulkan and D3D12 query format support before image creation. Direct BC5
   normal uploads remain staged because the bounded shader reads three normal
@@ -499,7 +507,8 @@ were ready. WebGL reported no errors. The capture hash was
 `02f639e082e1e5b2`. The PNG SHA-256 was
 `c64caf51986b652c5cd71e6093e7311a281bdf10924cf7eb05afbe591692497f`.
 This gate proves the production fixture and WebGL path. Native pixel tests
-separately prove direct BC1 and BC3 upload and sampling.
+cover direct BC1, BC3, and BC7 upload and sampling. This host had no usable
+Vulkan device, and the D3D12 test still requires a Windows run.
 
 The production LOD gate uses `data/lods.ini` from the repository car. LOD0
 selected index 0 and produced state hash `6029214d5cdb79d0`. Its screenshot
@@ -529,7 +538,9 @@ WebGL error zero. The repository has no shared driver KN5 fixture. Bounded
 native tests therefore prove driver-name matching and subtree suppression.
 
 DDS BC7 has a bounded CPU decoder with differential fixtures for all eight
-modes. BC6H remains explicit and requires a GPU path. The checked upload
+modes, and both native backends can upload BC7 blocks directly when the adapter
+reports format support. BC6H remains explicit and requires a GPU path. The
+checked upload
 planner supports DX10 2D arrays and cubemaps. It also converts legacy RGB24 to
 RGBA8 without a color change. The embedded static-scene path uses the bounded
 CPU decoder for supported 2D mip chains. Each decode receives the remaining
@@ -537,7 +548,7 @@ aggregate byte budget before it allocates output. Upload plans also reject
 subresource-entry floods before iteration. This path retains the DDS sRGB flag.
 It rejects arrays, cubemaps, BC6H, and legacy D3D9 float data. This portable
 decode is still the embedded static-scene path. The separate device path
-uploads BC1 and BC3 blocks directly. It does not prove stock-shader parity.
+uploads BC1, BC3, and BC7 blocks directly. It does not prove stock-shader parity.
 
 ## Source-module mapping
 

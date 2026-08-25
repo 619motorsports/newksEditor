@@ -82,6 +82,12 @@ independent scene snapshot, and stable workspace bindings. Missing or
 ambiguous references, truncated models, and aggregate input or scene limits
 fail without returning a partial document. The session has no filesystem or
 Vulkan/D3D12 dependency; those capabilities remain above this boundary.
+The separate `ApexEditor::AppRender` target consumes that document and caller-
+supplied executable shader modules. It prepares the bounded stock-scene path,
+owns single-sample color and D32 targets, and presents only after a successful
+draw through the neutral device API. It uses embedded KN5 textures and applies
+workspace LOD and preview resolution without changing the document. Multisample
+presentation and stock-container shader translation remain explicit gaps.
 The application service can bind immutable track-model or car-LOD manifest
 baselines and apply persisted positional workspace edits to deterministic
 exports. Failed capture or export does not replace the bound baseline or emit
@@ -164,10 +170,10 @@ The current backends initialize devices and create/upload buffers and bounded
 2D textures, samplers, and immutable shader modules. They execute bounded
 RGBA8/BGRA8 texture clears and canonical RGBA8 readback. They also validate a
 pipeline and execute fixed and indexed R16 static-mesh draws with readback.
-The device API uploads immutable, one-layer BC1 and BC3 sampled textures.
+The device API uploads immutable, one-layer BC1, BC3, and BC7 sampled textures.
 The owned static-scene path uploads bounded PNG decodes as RGBA8 UNORM.
 It validates each block row before allocation. Vulkan and D3D12 query format
-support before they create a compressed image. Other block formats remain
+support before they create a compressed image. BC2, BC4, BC5, and BC6H remain
 outside this direct-upload path.
 The indexed path validates 11-float KN5 static geometry before allocation.
 It uploads immutable vertex and R16 index buffers. The adapter rejects
@@ -313,8 +319,10 @@ used supported DDS and PNG payloads before backend allocation. It decodes
 supported DDS 2D mip chains and bounded PNG images to RGBA8. DDS retains
 explicit sRGB metadata. PNG retains straight alpha and top-to-bottom rows and
 uses RGBA8 UNORM without implicit color conversion. This portable CPU decode is not a
-direct block-compressed path. The separate device API supports direct BC1 and
-BC3 uploads. BC7 has an exact, bounded CPU fallback.
+direct block-compressed path. The separate device API supports direct BC1,
+BC3, and BC7 uploads. The embedded path retains its exact, bounded BC7 CPU
+fallback. The BC7 pixel test needs a supported Vulkan device or a Windows
+D3D12 device.
 BC6H still requires a capable GPU path. The upload planner supports DX10 2D
 arrays, cubemaps, and RGB24 conversion. The embedded static-scene mode rejects
 arrays, cubemaps, 1D/3D textures, BC6H, and legacy D3D9 float textures.

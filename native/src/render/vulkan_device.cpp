@@ -782,24 +782,29 @@ VkFormat vk_texture_format(TextureFormat format) {
         return VK_FORMAT_BC3_UNORM_BLOCK;
     case TextureFormat::bc3_srgb:
         return VK_FORMAT_BC3_SRGB_BLOCK;
+    case TextureFormat::bc7_unorm:
+        return VK_FORMAT_BC7_UNORM_BLOCK;
+    case TextureFormat::bc7_srgb:
+        return VK_FORMAT_BC7_SRGB_BLOCK;
     default:
         return VK_FORMAT_UNDEFINED;
     }
 }
 
-bool vk_block_upload_format(TextureFormat format) noexcept {
+bool vk_supported_block_upload_format(TextureFormat format) noexcept {
     return format == TextureFormat::bc1_unorm || format == TextureFormat::bc1_srgb ||
-           format == TextureFormat::bc3_unorm || format == TextureFormat::bc3_srgb;
+           format == TextureFormat::bc3_unorm || format == TextureFormat::bc3_srgb ||
+           format == TextureFormat::bc7_unorm || format == TextureFormat::bc7_srgb;
 }
 
 bool validate_vulkan_texture_format_capabilities(const std::shared_ptr<VulkanContext>& context,
                                                  const TextureDescription& description,
                                                  VkFormat format,
                                                  Diagnostic& diagnostic) {
-    if (!vk_block_upload_format(description.format)) return true;
+    if (!vk_supported_block_upload_format(description.format)) return true;
     if (description.samples != 1U) {
         diagnostic = {"vulkan_compressed_samples_unsupported",
-                      "Vulkan BC1/BC3 uploads require a single-sample texture"};
+                      "Vulkan BC1, BC3, and BC7 uploads require a single-sample texture"};
         return false;
     }
     VkFormatProperties properties{};
@@ -816,7 +821,7 @@ bool validate_vulkan_texture_format_capabilities(const std::shared_ptr<VulkanCon
         required |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
     if ((properties.optimalTilingFeatures & required) != required) {
         diagnostic = {"vulkan_compressed_format_unsupported",
-                      "The Vulkan device does not support the requested BC1/BC3 texture usage"};
+                      "The Vulkan device does not support the requested BC1, BC3, or BC7 texture usage"};
         return false;
     }
     return true;
@@ -1348,7 +1353,7 @@ bool copy_texture_uploads(const std::shared_ptr<VulkanContext>& context,
                       "Multisampled Vulkan textures cannot receive transfer uploads"};
         return false;
     }
-    const bool block_compressed = vk_block_upload_format(description.format);
+    const bool block_compressed = vk_supported_block_upload_format(description.format);
     if (!texture_format_cpu_upload_supported(description.format) && !block_compressed) {
         diagnostic = {"texture_compressed_format_unsupported",
                       "Block-compressed texture uploads require a dedicated GPU upload path"};
@@ -4328,9 +4333,10 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
             (maps_description.format != TextureFormat::rgba8_unorm &&
              maps_description.format != TextureFormat::bgra8_unorm &&
              maps_description.format != TextureFormat::bc1_unorm &&
-             maps_description.format != TextureFormat::bc3_unorm)) {
+             maps_description.format != TextureFormat::bc3_unorm &&
+             maps_description.format != TextureFormat::bc7_unorm)) {
             diagnostic = {"vulkan_indexed_maps_resource_format_unsupported",
-                          "Vulkan indexed maps textures require one-layer linear RGBA8, BGRA8, BC1, or BC3 UNORM image data"};
+                          "Vulkan indexed maps textures require one-layer linear RGBA8, BGRA8, BC1, BC3, or BC7 UNORM image data"};
             return false;
         }
         if (!maps_texture->initialized()) {
@@ -4399,9 +4405,11 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
              detail_description.format != TextureFormat::bc1_unorm &&
              detail_description.format != TextureFormat::bc1_srgb &&
              detail_description.format != TextureFormat::bc3_unorm &&
-             detail_description.format != TextureFormat::bc3_srgb)) {
+             detail_description.format != TextureFormat::bc3_srgb &&
+             detail_description.format != TextureFormat::bc7_unorm &&
+             detail_description.format != TextureFormat::bc7_srgb)) {
             diagnostic = {"vulkan_indexed_detail_resource_format_unsupported",
-                          "Vulkan indexed detail textures require one-layer RGBA8, BGRA8, BC1, or BC3 image data"};
+                          "Vulkan indexed detail textures require one-layer RGBA8, BGRA8, BC1, BC3, or BC7 image data"};
             return false;
         }
         if (!detail_texture->initialized()) {
@@ -4526,11 +4534,13 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
                 source.format == TextureFormat::bgra8_unorm ||
                 source.format == TextureFormat::bc1_unorm ||
                 source.format == TextureFormat::bc3_unorm ||
+                source.format == TextureFormat::bc7_unorm ||
                 (allow_srgb &&
                  (source.format == TextureFormat::rgba8_srgb ||
                   source.format == TextureFormat::bgra8_srgb ||
                   source.format == TextureFormat::bc1_srgb ||
-                  source.format == TextureFormat::bc3_srgb));
+                  source.format == TextureFormat::bc3_srgb ||
+                  source.format == TextureFormat::bc7_srgb));
             if (!format_supported) {
                 diagnostic = {prefix + "_resource_format_unsupported",
                               "Vulkan indexed damage resources use unsupported texture data"};

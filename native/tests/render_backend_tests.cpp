@@ -822,6 +822,8 @@ void contract_texture_limits() {
     check_bc_upload(TextureFormat::bc1_srgb, 8U, "BC1 sRGB");
     check_bc_upload(TextureFormat::bc3_unorm, 16U, "BC3");
     check_bc_upload(TextureFormat::bc3_srgb, 16U, "BC3 sRGB");
+    check_bc_upload(TextureFormat::bc7_unorm, 16U, "BC7");
+    check_bc_upload(TextureFormat::bc7_srgb, 16U, "BC7 sRGB");
 
     const TextureDescription incomplete_bc{
         4U, 4U, 2U, 1U, TextureFormat::bc1_unorm, TextureUsage::sampled,
@@ -855,7 +857,7 @@ void contract_texture_limits() {
     require(validate_texture_description(description, empty, diagnostic) == TextureStatus::unsupported,
             "unknown texture format rejected");
     require(diagnostic.code == "texture_format_unknown", "unknown texture format diagnostic");
-    description.format = TextureFormat::bc7_unorm;
+    description.format = TextureFormat::bc6h_ufloat;
     require(validate_texture_description(description, empty, diagnostic) == TextureStatus::unsupported,
             "unsupported compressed texture format rejected explicitly");
     require(diagnostic.code == "texture_compressed_format_unsupported",
@@ -2252,7 +2254,7 @@ bool contract_backend(apex::render::Backend backend) {
                 "next caster pass transitions sampled maps back to depth-write");
     }
 
-    // Exercise the real backend sampled path with direct BC1/BC3 block
+    // Exercise the real backend sampled path with direct BC1/BC3/BC7 block
     // uploads. The one-block fixtures are uniform, so filtering cannot alter
     // the expected center texel.
     const auto draw_compressed_source = [&](std::string_view name,
@@ -2261,7 +2263,8 @@ bool contract_backend(apex::render::Backend backend) {
                                             std::uint32_t row_pitch,
                                             std::array<std::uint8_t, 4> expected) {
         require((format == TextureFormat::bc1_unorm && block.size() == 8U) ||
-                    (format == TextureFormat::bc3_unorm && block.size() == 16U),
+                    (format == TextureFormat::bc3_unorm && block.size() == 16U) ||
+                    (format == TextureFormat::bc7_unorm && block.size() == 16U),
                 std::string(name) + " compressed fixture layout");
         const TextureDescription compressed_description{
             4U, 4U, 1U, 1U, format, TextureUsage::sampled,
@@ -2270,6 +2273,15 @@ bool contract_backend(apex::render::Backend backend) {
             TextureUpload{0U, 0U, 4U, 4U, row_pitch, std::as_bytes(block)}}};
         TextureResult compressed_source = device.device->create_texture(
             compressed_description, compressed_uploads);
+        if (!compressed_source.ok() && format == TextureFormat::bc7_unorm &&
+            compressed_source.status == TextureStatus::unsupported &&
+            (compressed_source.diagnostic.code == "vulkan_compressed_format_unsupported" ||
+             compressed_source.diagnostic.code == "d3d12_texture_format_unsupported")) {
+            // BC7 is optional at the adapter level. The backend must report a
+            // stable unsupported result, while the sampling fixture runs on
+            // adapters that expose the format.
+            return;
+        }
         require(compressed_source.ok(), std::string(name) + " sampled texture creation");
         IndexedStaticMeshDrawRequest compressed_request = sampled_request;
         compressed_request.sampled_binding.texture = compressed_source.texture.get();
@@ -2295,6 +2307,14 @@ bool contract_backend(apex::render::Backend backend) {
         0xE0U, 0x07U, 0xE0U, 0x07U, 0x00U, 0x00U, 0x00U, 0x00U};
     draw_compressed_source("BC3", TextureFormat::bc3_unorm, bc3_block, 16U,
                            {0U, 255U, 0U, 128U});
+
+    // BC7 mode 0 with zero endpoints is a uniform black block with opaque
+    // alpha. The fixture is shared with the bounded BC7 decoder tests.
+    const std::array<std::uint8_t, 16> bc7_block = {
+        0x01U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
+        0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U};
+    draw_compressed_source("BC7", TextureFormat::bc7_unorm, bc7_block, 16U,
+                           {0U, 0U, 0U, 255U});
 
     if (backend == Backend::D3D12) {
         TextureDescription msaa_diffuse_description = triangle_description;

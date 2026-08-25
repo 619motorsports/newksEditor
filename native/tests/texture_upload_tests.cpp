@@ -132,6 +132,19 @@ void plansCompressedEdgesAndMips() {
                 edgePlan.plan->subresources[0].rowCount == 1u && edgePlan.plan->payloadBytes == 16u,
             "BC1 edge pitches");
 
+    // BC7 uses the same 4x4 block footprint with a 16-byte block. Keep a
+    // clipped edge level in the planner contract so its row sizing is not
+    // accidentally coupled to BC1/BC3.
+    const auto bc7Edge = dx10(5, 3, 98, 32);
+    const auto bc7EdgePlan = buildDdsUploadPlan(bc7Edge, "bc7-edge.dds");
+    require(bc7EdgePlan.ok() && bc7EdgePlan.plan->mapping.format == TextureFormat::bc7_unorm &&
+                bc7EdgePlan.plan->subresources.size() == 1U &&
+                bc7EdgePlan.plan->subresources[0].blocksWide == 2U &&
+                bc7EdgePlan.plan->subresources[0].blocksHigh == 1U &&
+                bc7EdgePlan.plan->subresources[0].rowPitch == 32U &&
+                bc7EdgePlan.plan->subresources[0].size == 32U,
+            "BC7 edge pitches");
+
     // 8x8 -> 4x4 -> 2x2 has 4, 1, and 1 compressed blocks respectively.
     const auto chain = legacyBc("ATI2", 8, 8, 3, 64u + 16u + 16u);
     const auto chainPlan = buildDdsUploadPlan(chain);
@@ -185,6 +198,12 @@ void rejectsMalformedPayloadAndLimits() {
     require(!shortPlan.ok() && shortPlan.status == TextureUploadStatus::invalid &&
                 shortPlan.diagnostic.code == "truncated_payload" && shortPlan.diagnostic.offset == 128u,
             "truncated BC edge payload");
+    const auto shortBc7 = dx10(5, 3, 98, 16);
+    const auto shortBc7Plan = buildDdsUploadPlan(shortBc7, "bc7-short.dds");
+    require(!shortBc7Plan.ok() && shortBc7Plan.status == TextureUploadStatus::invalid &&
+                shortBc7Plan.diagnostic.code == "truncated_payload" &&
+                shortBc7Plan.diagnostic.offset == 148U,
+            "truncated BC7 edge payload");
     const auto attributed = buildDdsUploadPlan(shortBc, "cars/body.dds");
     require(attributed.diagnostic.source == "cars/body.dds" && attributed.diagnostic.offset == 128u,
             "upload diagnostic source attribution");

@@ -87,7 +87,7 @@ TextureStatus validate_texture_block_upload_contract(const TextureDescription& d
     if (description.samples != 1U || description.mutability != TextureMutability::immutable ||
         description.array_layers != 1U || description.usage != TextureUsage::sampled) {
         diagnostic = {"texture_compressed_upload_unsupported",
-                      "BC1 and BC3 uploads require one-layer, one-sample immutable sampled texture resources"};
+                      "BC1, BC3, and BC7 uploads require one-layer, one-sample immutable sampled texture resources"};
         return TextureStatus::unsupported;
     }
     return TextureStatus::ready;
@@ -118,11 +118,13 @@ bool texture_upload_layout(TextureFormat format, std::uint32_t width, std::uint3
 
 bool portable_sampled_color_format(TextureFormat format, bool allow_srgb) noexcept {
     if (format == TextureFormat::rgba8_unorm || format == TextureFormat::bgra8_unorm ||
-        format == TextureFormat::bc1_unorm || format == TextureFormat::bc3_unorm)
+        format == TextureFormat::bc1_unorm || format == TextureFormat::bc3_unorm ||
+        format == TextureFormat::bc7_unorm)
         return true;
     return allow_srgb &&
            (format == TextureFormat::rgba8_srgb || format == TextureFormat::bgra8_srgb ||
-            format == TextureFormat::bc1_srgb || format == TextureFormat::bc3_srgb);
+            format == TextureFormat::bc1_srgb || format == TextureFormat::bc3_srgb ||
+            format == TextureFormat::bc7_srgb);
 }
 
 TextureStatus validate_texture_sample_contract(const TextureDescription& description,
@@ -439,7 +441,7 @@ TextureStatus validate_texture_description(const TextureDescription& description
         initial_uploads.subresources.size() !=
             static_cast<std::size_t>(description.mip_levels) * description.array_layers) {
         diagnostic = {"texture_compressed_upload_incomplete",
-                      "Immutable BC1 and BC3 textures require one upload for every subresource"};
+                      "Immutable BC1, BC3, and BC7 textures require one upload for every subresource"};
         return TextureStatus::invalid_description;
     }
     constexpr auto max_size_t = static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max());
@@ -1608,7 +1610,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             (texture_format_is_compressed(sampled.format) &&
              sampled.mutability != TextureMutability::immutable)) {
             diagnostic = {"indexed_resource_texture_description_unsupported",
-                          "The portable diffuse baseline requires one-layer RGBA8, BGRA8, BC1, or BC3 texture data"};
+                          "The portable diffuse baseline requires one-layer RGBA8, BGRA8, BC1, BC3, or BC7 texture data"};
             return IndexedStaticMeshDrawStatus::unsupported;
         }
         Diagnostic sampler_diagnostic;
@@ -1703,7 +1705,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                 (texture_format_is_compressed(maps.format) &&
                  maps.mutability != TextureMutability::immutable)) {
                 diagnostic = {"indexed_maps_texture_description_unsupported",
-                              "The portable maps path requires one-layer linear RGBA8, BGRA8, BC1, or BC3 UNORM texture data"};
+                              "The portable maps path requires one-layer linear RGBA8, BGRA8, BC1, BC3, or BC7 UNORM texture data"};
                 return IndexedStaticMeshDrawStatus::unsupported;
             }
             Diagnostic maps_sampler_diagnostic;
@@ -1751,7 +1753,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                 (texture_format_is_compressed(detail.format) &&
                  detail.mutability != TextureMutability::immutable)) {
                 diagnostic = {"indexed_detail_texture_description_unsupported",
-                              "The portable detail path requires one-layer RGBA8, BGRA8, BC1, or BC3 texture data"};
+                              "The portable detail path requires one-layer RGBA8, BGRA8, BC1, BC3, or BC7 texture data"};
                 return IndexedStaticMeshDrawStatus::unsupported;
             }
             Diagnostic detail_sampler_diagnostic;
@@ -1850,7 +1852,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                     (texture_format_is_compressed(source.format) &&
                      source.mutability != TextureMutability::immutable)) {
                     diagnostic = {code_prefix + "_texture_description_unsupported",
-                                  "The portable damage path requires one-layer RGBA8, BGRA8, BC1, or BC3 texture data"};
+                                  "The portable damage path requires one-layer RGBA8, BGRA8, BC1, BC3, or BC7 texture data"};
                     return IndexedStaticMeshDrawStatus::unsupported;
                 }
                 Diagnostic damage_sampler_diagnostic;
