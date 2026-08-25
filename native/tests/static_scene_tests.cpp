@@ -274,6 +274,7 @@ public:
         for (const auto& draw : batch.draws) {
             captured.push_back(draw.packet->node);
             depth_camera_matrices.push_back(draw.camera_frame->view_projection);
+            depth_culls.push_back(draw.pipeline->raster.cull);
         }
         depth_nodes.push_back(std::move(captured));
         if (fail_depth_batch_call != 0U && depth_batch_calls == fail_depth_batch_call)
@@ -347,6 +348,7 @@ public:
     std::vector<DepthAttachmentDescription> depth_descriptions;
     std::vector<std::vector<apex::scene::NodeId>> depth_nodes;
     std::vector<apex::scene::Matrix4> depth_camera_matrices;
+    std::vector<PipelineCullMode> depth_culls;
 
 private:
     DeviceInfo info_{Backend::Vulkan, "recording", "test", 1U, 0U, 0U, 0U, 0U, true};
@@ -2608,6 +2610,40 @@ void retains_three_directional_maps_and_executes_only_opaque_static_casters() {
                 device.depth_camera_matrices[0] != device.depth_camera_matrices[2],
             "each pair of retained casters receives one converted cascade matrix");
 
+    require(device.depth_culls.size() == 6U &&
+                std::all_of(device.depth_culls.begin(), device.depth_culls.end(),
+                            [](PipelineCullMode cull) {
+                                return cull == PipelineCullMode::back;
+                            }),
+            "stock-default opaque casters use back-face shadow culling");
+
+    value.packets[0].flags.double_face_shadow = true;
+    RecordingDevice double_face_device;
+    auto double_face_prepared =
+        prepare_static_scene_resources(double_face_device, request_for(value));
+    require(double_face_prepared.ok(),
+            "double-face shadow fixture retains its scene geometry");
+    auto double_face_maps =
+        prepare_directional_shadow_maps(double_face_device, map_request);
+    require(double_face_maps.ok(),
+            "double-face shadow fixture retains its three maps");
+    StaticSceneDirectionalShadowFrameDescription double_face_frame{
+        double_face_maps.resources.get(), &depth_pipeline, {}};
+    const auto double_face_drawn =
+        double_face_prepared.resources->draw_opaque_directional_shadows(
+            double_face_device, double_face_frame);
+    require(double_face_drawn.ok() && double_face_device.depth_culls.size() == 6U,
+            "double-face opaque shadow fixture executes all cascades");
+    for (std::size_t index = 0U; index < double_face_device.depth_culls.size();
+         ++index) {
+        const PipelineCullMode expected = index % 2U == 0U
+                                              ? PipelineCullMode::none
+                                              : PipelineCullMode::back;
+        require(double_face_device.depth_culls[index] == expected,
+                "doubleFaceShadow selects no cull only for the opted-in caster");
+    }
+    value.packets[0].flags.double_face_shadow = false;
+
     Fixture mixed = fixture();
     make_second_mesh_skinned(mixed);
     for (DrawPacket& packet : mixed.packets) {
@@ -2654,6 +2690,18 @@ void retains_three_directional_maps_and_executes_only_opaque_static_casters() {
                     "directional_shadow_packet_contract_invalid" &&
                 device.depth_batch_calls == calls_before_invalid,
             "malformed refreshed shadow input fails before any cascade write");
+
+    malformed = value.packets;
+    malformed[0].flags.double_face_shadow = true;
+    frame.refreshed_packets = malformed;
+    const auto changed_shadow_cull =
+        prepared.resources->draw_opaque_directional_shadows(device, frame);
+    require(changed_shadow_cull.status ==
+                    StaticSceneDirectionalShadowStatus::invalid_request &&
+                changed_shadow_cull.diagnostic.code ==
+                    "directional_shadow_packet_contract_invalid" &&
+                device.depth_batch_calls == calls_before_invalid,
+            "refreshed shadow cull state cannot change after preparation");
 
     DirectionalShadowMapRequest oversized = map_request;
     oversized.lighting.map_size = max_directional_shadow_map_size + 1U;

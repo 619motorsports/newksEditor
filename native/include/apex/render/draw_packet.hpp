@@ -28,6 +28,11 @@ struct DrawPacketFlags {
     bool wireframe = false;
     bool selected = false;
     bool cast_shadows = false;
+    // Stock MaterialFilterSM defaults doubleFaceShadow to false. A parsed
+    // stock path therefore uses back-face culling; explicit callers may set
+    // this to true to request the source-evidenced no-cull shadow pass.
+    // KN5 parsing does not currently populate this field.
+    bool double_face_shadow = false;
 };
 
 struct DrawResourceSlot {

@@ -19,6 +19,16 @@ inline constexpr std::uint32_t max_directional_shadow_map_size = 4096U;
 inline constexpr std::uint64_t max_directional_shadow_map_bytes =
     3ULL * 4096ULL * 4096ULL * sizeof(float);
 
+// Evidence note: the recovered stock MaterialFilterSM::apply path uses
+// back-face culling when doubleFaceShadow is false (the stock default) and
+// disables culling when it is true. This helper is limited to the opaque
+// static-caster path; alpha-tested and skinned casters remain staged until
+// their stock programs are recovered.
+[[nodiscard]] constexpr PipelineCullMode stock_directional_shadow_cull_mode(
+    bool double_face_shadow) noexcept {
+    return double_face_shadow ? PipelineCullMode::none : PipelineCullMode::back;
+}
+
 // Source-evidenced hard cascade selection for the portable receiver. The
 // input is camera-forward depth. A value beyond the third split is fully lit
 // and therefore returns no cascade.

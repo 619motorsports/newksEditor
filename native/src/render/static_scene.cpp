@@ -147,7 +147,8 @@ bool same_draw_flags(const DrawPacketFlags& left, const DrawPacketFlags& right) 
     return left.transparent == right.transparent && left.blend_enabled == right.blend_enabled &&
            left.alpha_to_coverage == right.alpha_to_coverage && left.depth_test == right.depth_test &&
            left.depth_write == right.depth_write && left.wireframe == right.wireframe &&
-           left.selected == right.selected && left.cast_shadows == right.cast_shadows;
+           left.selected == right.selected && left.cast_shadows == right.cast_shadows &&
+           left.double_face_shadow == right.double_face_shadow;
 }
 
 bool same_draw_resources(const DrawPacket& left, const DrawPacket& right) noexcept {
@@ -1777,15 +1778,15 @@ StaticSceneResources::draw_opaque_directional_shadows(
         return result;
     }
 
-    // The recovered doubleFaceShadow field is not yet present in the native
-    // scene ABI. Record that bounded fidelity gap while executing the portable
-    // opaque pass; do not silently substitute main-pass culling as exact.
-    for (const std::size_t index : opaque_indices) {
-        const DrawPacket& packet = packet_for_frame(index);
-        result.staged_casters.push_back({
-            "directional_shadow_caster_shadow_cull_staged", packet.node,
-            packet.material});
-    }
+    // The packet flag is an explicit, bounded handoff for the recovered
+    // doubleFaceShadow rule. KN5 parsing leaves it at the stock default
+    // (false/back cull); callers with source-evidenced overrides may set it.
+    // Alpha-tested and skinned casters remain staged below this seam.
+    PipelineProgram back_cull_pipeline = *frame.opaque_pipeline;
+    back_cull_pipeline.raster.cull =
+        stock_directional_shadow_cull_mode(false);
+    PipelineProgram double_face_pipeline = back_cull_pipeline;
+    double_face_pipeline.raster.cull = stock_directional_shadow_cull_mode(true);
 
     std::array<std::vector<DepthOnlyIndexedStaticMeshDrawRequest>,
                directional_shadow_cascade_count> cascade_draws;
@@ -1798,7 +1799,9 @@ StaticSceneResources::draw_opaque_directional_shadows(
             const StaticMeshUpload& upload = *uploads_[upload_for_packet_[index]];
             DepthOnlyIndexedStaticMeshDrawRequest draw;
             draw.packet = &packet;
-            draw.pipeline = frame.opaque_pipeline;
+            draw.pipeline = packet.flags.double_face_shadow
+                                ? &double_face_pipeline
+                                : &back_cull_pipeline;
             draw.vertex_buffer = upload.vertex_buffer.get();
             draw.index_buffer = upload.index_buffer.get();
             draw.camera_frame = maps.cameras_[cascade];
