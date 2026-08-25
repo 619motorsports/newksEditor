@@ -224,7 +224,7 @@ target_link_libraries(apex_external_texture_authority
 add_executable(apex_native_app src/app/main.cpp)
 set_target_properties(apex_native_app PROPERTIES OUTPUT_NAME apex-native)
 target_link_libraries(apex_native_app
-  PRIVATE ApexEditor::App ApexEditor::Formats ApexEditor::Render ApexEditor::Platform
+  PRIVATE ApexEditor::AppRender ApexEditor::Formats ApexEditor::Platform
 )
 
 if(NOT BUILD_TESTING OR NOT APEX_BUILD_TESTS)
@@ -237,6 +237,14 @@ add_test(NAME apex_native_cli_usage
     -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_usage_test.cmake"
 )
 set_tests_properties(apex_native_cli_usage PROPERTIES LABELS "unit;security")
+
+add_test(NAME apex_native_workspace_cli
+  COMMAND ${CMAKE_COMMAND}
+    "-DAPEX_NATIVE_COMMAND=$<TARGET_FILE:apex_native_app>"
+    "-DAPEX_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/workspace_cli_usage_test.cmake"
+)
+set_tests_properties(apex_native_workspace_cli PROPERTIES LABELS "unit;security")
 
 # Tests are intentionally discovered by filename. This keeps the native build
 # usable while the port is staged and gives each format/backend a separate

@@ -1,5 +1,7 @@
 #include "apex/app/authoring_service.hpp"
 #include "apex/app/presentation_recreation.hpp"
+#include "apex/app/workspace_viewport.hpp"
+#include "apex/assets/asset_source.hpp"
 #include "apex/core/parse_limits.hpp"
 #include "apex/formats/acd.hpp"
 #include "apex/formats/dds.hpp"
@@ -19,6 +21,8 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <optional>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -42,6 +46,8 @@ void usage(std::ostream& output) {
     output << "Usage:\n"
            << "  apex-native --backend vulkan|d3d12 [--validation]\n"
            << "  apex-native --window vulkan|d3d12 [--frames <count>] [--validation]\n"
+           << "  apex-native --window vulkan|d3d12 [--model <file>] [--workspace-root <dir> --manifest <file> --kind track|carLods]\n"
+              "                       [--shader-family <name> --shader-vertex <file> --shader-fragment <file>]\n"
            << "  apex-native --inspect-kn5 <file>\n"
            << "  apex-native --inspect-dds <file>\n"
            << "  apex-native --inspect-acd <asset-directory-name> <file>\n"
@@ -448,23 +454,196 @@ std::uint64_t parse_frame_count(std::string_view value) {
     return result;
 }
 
+struct WindowShaderSpec {
+    std::string family;
+    std::filesystem::path vertex;
+    std::filesystem::path fragment;
+};
+
+struct WindowWorkspaceOptions {
+    std::optional<std::filesystem::path> model;
+    std::optional<std::filesystem::path> workspaceRoot;
+    std::optional<std::filesystem::path> manifest;
+    apex::app::WorkspaceSessionKind kind = apex::app::WorkspaceSessionKind::generic;
+    bool kindSpecified = false;
+    std::vector<WindowShaderSpec> shaders;
+};
+
+struct LoadedWindowWorkspace {
+    std::optional<apex::app::WorkspaceSessionDocument> document;
+    struct ShaderSet {
+        std::vector<apex::render::PipelineShaderModule> modules;
+        apex::render::StockMaterialShaderModules descriptor;
+    };
+    std::vector<ShaderSet> shaderSets;
+    std::vector<apex::render::StockMaterialShaderModules> descriptors;
+};
+
+apex::app::WorkspaceSessionKind parse_workspace_kind(std::string_view value) {
+    if (value == "track") return apex::app::WorkspaceSessionKind::track;
+    if (value == "carLods" || value == "car-lods")
+        return apex::app::WorkspaceSessionKind::carLods;
+    throw std::runtime_error("workspace kind must be track or carLods");
+}
+
+std::string workspace_kind_name(apex::app::WorkspaceSessionKind kind) {
+    switch (kind) {
+    case apex::app::WorkspaceSessionKind::generic: return "generic";
+    case apex::app::WorkspaceSessionKind::track: return "track";
+    case apex::app::WorkspaceSessionKind::carLods: return "carLods";
+    }
+    return "generic";
+}
+
+WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
+                                                       int first_option,
+                                                       bool& validation,
+                                                       std::uint64_t& frame_limit) {
+    WindowWorkspaceOptions result;
+    for (int index = first_option; index < argc; ++index) {
+        const std::string_view option = argv[index];
+        auto require_value = [&](std::string_view name) -> std::string_view {
+            if (index + 1 >= argc) throw std::runtime_error(std::string(name) + " requires a value");
+            return argv[++index];
+        };
+        if (option == "--validation") {
+            if (validation) throw std::runtime_error("duplicate --validation option");
+            validation = true;
+        } else if (option == "--frames") {
+            frame_limit = parse_frame_count(require_value("--frames"));
+        } else if (option == "--model") {
+            if (result.model.has_value()) throw std::runtime_error("duplicate --model option");
+            result.model = std::filesystem::path(require_value("--model"));
+        } else if (option == "--workspace-root") {
+            if (result.workspaceRoot.has_value())
+                throw std::runtime_error("duplicate --workspace-root option");
+            result.workspaceRoot = std::filesystem::path(require_value("--workspace-root"));
+        } else if (option == "--manifest") {
+            if (result.manifest.has_value()) throw std::runtime_error("duplicate --manifest option");
+            result.manifest = std::filesystem::path(require_value("--manifest"));
+        } else if (option == "--kind") {
+            if (result.kindSpecified) throw std::runtime_error("duplicate --kind option");
+            result.kind = parse_workspace_kind(require_value("--kind"));
+            result.kindSpecified = true;
+        } else if (option == "--shader-family") {
+            const auto family = std::string(require_value("--shader-family"));
+            if (family.empty()) throw std::runtime_error("shader family cannot be empty");
+            result.shaders.push_back({std::move(family), {}, {}});
+        } else if (option == "--shader-vertex") {
+            if (result.shaders.empty() || !result.shaders.back().vertex.empty())
+                throw std::runtime_error("--shader-vertex must follow one shader family once");
+            result.shaders.back().vertex = require_value("--shader-vertex");
+        } else if (option == "--shader-fragment") {
+            if (result.shaders.empty() || !result.shaders.back().fragment.empty())
+                throw std::runtime_error("--shader-fragment must follow one shader family once");
+            result.shaders.back().fragment = require_value("--shader-fragment");
+        } else {
+            throw std::runtime_error("unknown window option");
+        }
+    }
+    if (result.model.has_value() && result.workspaceRoot.has_value())
+        throw std::runtime_error("--model and --workspace-root are mutually exclusive");
+    if (result.model.has_value() && result.kind != apex::app::WorkspaceSessionKind::generic)
+        throw std::runtime_error("--model accepts only the generic workspace kind");
+    if (result.manifest.has_value() != result.workspaceRoot.has_value())
+        throw std::runtime_error("--workspace-root and --manifest must be supplied together");
+    if (result.kindSpecified && !result.workspaceRoot.has_value())
+        throw std::runtime_error("--kind requires --workspace-root");
+    if (result.workspaceRoot.has_value() && result.kind == apex::app::WorkspaceSessionKind::generic)
+        throw std::runtime_error("workspace roots require --kind track or carLods");
+    if (!result.shaders.empty()) {
+        std::set<std::string> families;
+        for (const auto& shader : result.shaders) {
+            if (shader.vertex.empty() || shader.fragment.empty())
+                throw std::runtime_error("each shader family requires vertex and fragment modules");
+            if (!families.insert(shader.family).second)
+                throw std::runtime_error("duplicate shader family: " + shader.family);
+        }
+    }
+    if ((!result.model.has_value() && !result.workspaceRoot.has_value()) &&
+        (!result.shaders.empty()))
+        throw std::runtime_error("shader modules require a workspace model");
+    return result;
+}
+
+void report_workspace_diagnostics(const apex::app::WorkspaceSessionResult& result) {
+    for (const auto& item : result.diagnostics)
+        std::cerr << item.code << " [" << item.path << "]: " << item.message << '\n';
+}
+
+void load_window_workspace(const WindowWorkspaceOptions& options,
+                           apex::render::Backend backend,
+                           LoadedWindowWorkspace& loaded) {
+    if (!options.model.has_value() && !options.workspaceRoot.has_value()) return;
+
+    apex::app::WorkspaceSessionResult opened;
+    if (options.model.has_value()) {
+        const auto bytes = read_file(*options.model);
+        apex::app::WorkspaceSessionFile file;
+        file.name = options.model->filename().generic_string();
+        file.bytes = bytes;
+        apex::app::WorkspaceSessionOpenRequest request;
+        request.kind = apex::app::WorkspaceSessionKind::generic;
+        request.name = file.name;
+        request.modelFiles = std::span<const apex::app::WorkspaceSessionFile>(&file, 1U);
+        opened = apex::app::WorkspaceSession{}.open(request);
+    } else {
+        apex::assets::AssetSource source;
+        source.addDirectory(*options.workspaceRoot);
+        const auto manifestName = options.manifest->generic_string();
+        opened = apex::app::WorkspaceSession{}.openAssetSource(
+            options.kind, options.workspaceRoot->filename().generic_string(),
+            manifestName, source);
+    }
+    if (!opened.ok()) {
+        report_workspace_diagnostics(opened);
+        throw std::runtime_error("workspace open failed");
+    }
+    loaded.document = std::move(opened.document);
+    if (options.shaders.empty())
+        throw std::runtime_error("workspace rendering requires caller-supplied shader modules");
+
+    const auto shader_format = backend == apex::render::Backend::Vulkan
+                                   ? apex::render::PipelineShaderFormat::spirv
+                                   : apex::render::PipelineShaderFormat::dxil;
+    constexpr std::uint64_t max_shader_bytes =
+        apex::render::StaticSceneResourceLimits{}.max_total_shader_bytes;
+    std::uint64_t shader_bytes = 0U;
+    loaded.shaderSets.reserve(options.shaders.size());
+    for (const auto& shader : options.shaders) {
+        LoadedWindowWorkspace::ShaderSet set;
+        set.modules.push_back({apex::render::PipelineShaderStage::vertex, shader_format,
+                               read_file(shader.vertex)});
+        set.modules.push_back({apex::render::PipelineShaderStage::fragment, shader_format,
+                               read_file(shader.fragment)});
+        for (const auto& module : set.modules) {
+            if (module.bytes.size() > apex::render::max_shader_module_bytes)
+                throw std::runtime_error("a caller-supplied shader module exceeds the native module budget");
+            if (module.bytes.size() > max_shader_bytes ||
+                shader_bytes > max_shader_bytes - module.bytes.size())
+                throw std::runtime_error("caller-supplied shader modules exceed the native shader budget");
+            shader_bytes += module.bytes.size();
+        }
+        loaded.shaderSets.push_back(std::move(set));
+    }
+    loaded.descriptors.reserve(loaded.shaderSets.size());
+    for (std::size_t index = 0; index < loaded.shaderSets.size(); ++index) {
+        loaded.shaderSets[index].descriptor = {
+            apex::render::StockMaterialShaderKeyKind::shader_family,
+            options.shaders[index].family, loaded.shaderSets[index].modules};
+        loaded.descriptors.push_back(loaded.shaderSets[index].descriptor);
+    }
+}
+
 int run_window(int argc, char** argv) {
     if (argc < 3) throw std::runtime_error("invalid --window arguments");
     const auto backend = parse_backend(argv[2]);
     bool validation = false;
     std::uint64_t frame_limit = 0U;
-    for (int index = 3; index < argc; ++index) {
-        const std::string_view option = argv[index];
-        if (option == "--validation") {
-            if (validation) throw std::runtime_error("duplicate --validation option");
-            validation = true;
-        } else if (option == "--frames") {
-            if (index + 1 >= argc) throw std::runtime_error("--frames requires a count");
-            frame_limit = parse_frame_count(argv[++index]);
-        } else {
-            throw std::runtime_error("unknown window option");
-        }
-    }
+    const auto workspace_options = parse_window_workspace_options(
+        argc, argv, 3, validation, frame_limit);
+    LoadedWindowWorkspace loaded_workspace;
+    load_window_workspace(workspace_options, backend, loaded_workspace);
 
     apex::platform::WindowDescription window_description;
     window_description.title = "Apex Editor native shell";
@@ -501,6 +680,50 @@ int run_window(int argc, char** argv) {
         return target_result.status == apex::render::PresentationTargetStatus::unsupported ? 77 : 1;
     }
 
+    std::unique_ptr<apex::app::WorkspaceViewport> viewport;
+    auto prepare_viewport = [&]() {
+        if (!loaded_workspace.document.has_value()) {
+            viewport.reset();
+            return true;
+        }
+        apex::app::WorkspaceViewportPrepareRequest request;
+        request.presentation = target_result.target->info().description;
+        request.shader_modules = loaded_workspace.descriptors;
+        request.render.camera_position = {0.0F, 0.0F, 5.0F};
+        std::vector<apex::scene::NodeId> fixed_lod_exclusions;
+        if (loaded_workspace.document->assembly.workspace.kind == "carLods") {
+            // This shell has no interactive orbit state. Select the first
+            // manifest LOD explicitly instead of drawing all LODs together.
+            const auto& files = loaded_workspace.document->assembly.workspace.files;
+            const auto& roots = loaded_workspace.document->sceneBinding.file_root_nodes;
+            const auto selected = std::find_if(
+                files.begin(), files.end(), [](const auto& file) {
+                    return file.lod.has_value();
+                });
+            if (selected != files.end()) {
+                const auto selected_index = selected->lod->index;
+                for (std::size_t index = 0U;
+                     index < files.size() && index < roots.size(); ++index) {
+                    if (files[index].lod.has_value() &&
+                        files[index].lod->index != selected_index)
+                        fixed_lod_exclusions.push_back(roots[index]);
+                }
+                request.render.excluded_subtree_roots = fixed_lod_exclusions;
+            }
+        }
+        auto prepared = apex::app::prepareWorkspaceViewport(
+            *device_result.device, *loaded_workspace.document, request);
+        if (!prepared.ok()) {
+            std::cerr << "workspace render: " << prepared.diagnostic.code << ": "
+                      << prepared.diagnostic.message << '\n';
+            viewport.reset();
+            return false;
+        }
+        viewport = std::move(prepared.viewport);
+        return true;
+    };
+    if (!prepare_viewport()) return 1;
+
     std::array<apex::platform::WindowEvent, 64U> events{};
     std::uint64_t frames = 0U;
     apex::app::PresentationRecreationController recreation;
@@ -528,10 +751,42 @@ int run_window(int argc, char** argv) {
                           << target_result.diagnostic.message << '\n';
                 return 1;
             }
+            if (!prepare_viewport()) return 1;
         }
-        const auto frame = device_result.device->clear_and_present(
-            *target_result.target, {0.035F, 0.055F, 0.085F, 1.0F});
-        if (!frame.ok() && recreation.begin_out_of_date_recreation(frame.diagnostic.code)) {
+        apex::render::PresentationFrameResult blank_frame;
+        apex::app::WorkspaceViewportFrameStatus viewport_status =
+            apex::app::WorkspaceViewportFrameStatus::ready;
+        apex::render::Diagnostic viewport_diagnostic;
+        if (viewport != nullptr) {
+            apex::render::CameraFrameRequest camera_request;
+            camera_request.aspect = static_cast<float>(pixel_width) /
+                                     static_cast<float>(pixel_height);
+            camera_request.clip_space = backend == apex::render::Backend::Vulkan
+                                             ? apex::render::CameraClipSpace::vulkan
+                                             : apex::render::CameraClipSpace::d3d12;
+            const auto camera = apex::render::build_camera_frame(camera_request);
+            if (!camera.ok()) {
+                std::cerr << "workspace camera: " << camera.code << ": "
+                          << camera.message << '\n';
+                return 1;
+            }
+            apex::app::WorkspaceViewportFrameRequest frame_request;
+            frame_request.camera = *camera.frame;
+            frame_request.frame_constants = apex::render::KsPerPixelFrameConstants{};
+            viewport_status = viewport->drawAndPresent(
+                *device_result.device, *target_result.target, frame_request,
+                viewport_diagnostic);
+        } else {
+            blank_frame = device_result.device->clear_and_present(
+                *target_result.target, {0.035F, 0.055F, 0.085F, 1.0F});
+        }
+        const bool frame_ok = viewport != nullptr
+                                  ? viewport_status == apex::app::WorkspaceViewportFrameStatus::ready
+                                  : blank_frame.ok();
+        const auto& frame_diagnostic = viewport != nullptr
+                                           ? viewport_diagnostic
+                                           : blank_frame.diagnostic;
+        if (!frame_ok && recreation.begin_out_of_date_recreation(frame_diagnostic.code)) {
             target_result.target.reset();
             target_result = create_target();
             if (!target_result.ok()) {
@@ -539,11 +794,12 @@ int run_window(int argc, char** argv) {
                           << target_result.diagnostic.message << '\n';
                 return 1;
             }
+            if (!prepare_viewport()) return 1;
             continue;
         }
-        if (!frame.ok()) {
-            std::cerr << "presentation frame: " << frame.diagnostic.code << ": "
-                      << frame.diagnostic.message << '\n';
+        if (!frame_ok) {
+            std::cerr << (viewport != nullptr ? "workspace frame: " : "presentation frame: ")
+                      << frame_diagnostic.code << ": " << frame_diagnostic.message << '\n';
             return 1;
         }
         recreation.record_successful_frame();
@@ -553,7 +809,11 @@ int run_window(int argc, char** argv) {
     std::cout << apex::render::backend_name(backend) << ": "
               << device_result.device->info().name << ", window="
               << window_result.window->pixel_width() << 'x'
-              << window_result.window->pixel_height() << ", frames=" << frames << '\n';
+              << window_result.window->pixel_height() << ", frames=" << frames;
+    if (loaded_workspace.document.has_value())
+        std::cout << ", workspace=" << workspace_kind_name(
+            workspace_options.kind);
+    std::cout << '\n';
     return 0;
 }
 
