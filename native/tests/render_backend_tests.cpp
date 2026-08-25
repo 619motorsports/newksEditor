@@ -773,6 +773,12 @@ void contract_texture_limits() {
                 bc7_info.block_height == 4U && bc7_info.block_bytes == 16U && bc7_info.srgb &&
                 texture_format_is_compressed(TextureFormat::bc7_srgb),
             "BC7 texture metadata");
+    const auto bc5_info = texture_format_info(TextureFormat::bc5_unorm);
+    require(bc5_info.classification == TextureFormatClass::block_compressed &&
+                bc5_info.block_width == 4U && bc5_info.block_height == 4U &&
+                bc5_info.block_bytes == 16U && !bc5_info.srgb &&
+                texture_format_is_compressed(TextureFormat::bc5_unorm),
+            "BC5 texture metadata");
 
     // BC uploads use logical texture dimensions but a block-row footprint.
     // A 5x3 image has two 4x4 blocks across and one block row. Keep these
@@ -822,6 +828,7 @@ void contract_texture_limits() {
     check_bc_upload(TextureFormat::bc1_srgb, 8U, "BC1 sRGB");
     check_bc_upload(TextureFormat::bc3_unorm, 16U, "BC3");
     check_bc_upload(TextureFormat::bc3_srgb, 16U, "BC3 sRGB");
+    check_bc_upload(TextureFormat::bc5_unorm, 16U, "BC5");
     check_bc_upload(TextureFormat::bc7_unorm, 16U, "BC7");
     check_bc_upload(TextureFormat::bc7_srgb, 16U, "BC7 sRGB");
 
@@ -2315,6 +2322,27 @@ bool contract_backend(apex::render::Backend backend) {
         0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U};
     draw_compressed_source("BC7", TextureFormat::bc7_unorm, bc7_block, 16U,
                            {0U, 0U, 0U, 255U});
+
+    // BC5 is admitted to the generic block upload API, but the bounded
+    // normal-map ABI intentionally rejects it: its shaders read RGB and do
+    // not reconstruct the missing Z channel. Verify only the exact upload
+    // and capability boundary here, without inventing a normal approximation.
+    const std::array<std::uint8_t, 16> bc5_block = {
+        0x80U, 0x80U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
+        0x40U, 0x40U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U};
+    const TextureDescription bc5_description{
+        4U, 4U, 1U, 1U, TextureFormat::bc5_unorm, TextureUsage::sampled,
+        TextureMemory::device_local, TextureMutability::immutable};
+    const TextureUploadPlan bc5_uploads{{
+        TextureUpload{0U, 0U, 4U, 4U, 16U, std::as_bytes(std::span(bc5_block))}}};
+    TextureResult bc5_texture = device.device->create_texture(bc5_description, bc5_uploads);
+    if (!bc5_texture.ok() && bc5_texture.status == TextureStatus::unsupported &&
+        (bc5_texture.diagnostic.code == "vulkan_compressed_format_unsupported" ||
+         bc5_texture.diagnostic.code == "d3d12_texture_format_unsupported")) {
+        // BC5 support is adapter-dependent, like BC7.
+    } else {
+        require(bc5_texture.ok(), "BC5 generic sampled texture creation");
+    }
 
     if (backend == Backend::D3D12) {
         TextureDescription msaa_diffuse_description = triangle_description;

@@ -773,6 +773,8 @@ private:
         return DXGI_FORMAT_BC3_UNORM;
     case TextureFormat::bc3_srgb:
         return DXGI_FORMAT_BC3_UNORM_SRGB;
+    case TextureFormat::bc5_unorm:
+        return DXGI_FORMAT_BC5_UNORM;
     case TextureFormat::bc7_unorm:
         return DXGI_FORMAT_BC7_UNORM;
     case TextureFormat::bc7_srgb:
@@ -785,6 +787,7 @@ private:
 [[nodiscard]] bool is_d3d12_supported_block_format(TextureFormat format) noexcept {
     return format == TextureFormat::bc1_unorm || format == TextureFormat::bc1_srgb ||
            format == TextureFormat::bc3_unorm || format == TextureFormat::bc3_srgb ||
+           format == TextureFormat::bc5_unorm ||
            format == TextureFormat::bc7_unorm || format == TextureFormat::bc7_srgb;
 }
 
@@ -806,7 +809,7 @@ private:
     if ((support1 & required) != required ||
         (mip_levels > 1U && (support1 & static_cast<UINT>(D3D12_FORMAT_SUPPORT1_MIP)) == 0U)) {
         diagnostic = {"d3d12_texture_format_unsupported",
-                      "The D3D12 adapter does not support the requested BC1, BC3, or BC7 sampled texture format"};
+                      "The D3D12 adapter does not support the requested BC1, BC3, BC5, or BC7 sampled texture format"};
         return false;
     }
     return true;
@@ -909,7 +912,7 @@ bool execute_texture_upload(const std::shared_ptr<D3D12Context>& context,
     const bool compressed = texture_format_is_compressed(description.format);
     if (compressed && !is_d3d12_supported_block_format(description.format)) {
         diagnostic = {"texture_compressed_format_unsupported",
-                      "D3D12 texture uploads support only BC1, BC3, and BC7 block-compressed formats"};
+                      "D3D12 texture uploads support only BC1, BC3, BC5, and BC7 block-compressed formats"};
         return false;
     }
     if (!compressed && !texture_format_cpu_upload_supported(description.format)) {
@@ -5050,7 +5053,7 @@ public:
             if (!is_d3d12_supported_block_format(description.format)) {
                 return {TextureStatus::unsupported,
                         {"d3d12_compressed_format_unsupported",
-                         "D3D12 supports only BC1, BC3, and BC7 compressed sampled textures"},
+                         "D3D12 supports only BC1, BC3, BC5, and BC7 compressed sampled textures"},
                         nullptr};
             }
             if (description.usage != TextureUsage::sampled ||
@@ -5058,7 +5061,7 @@ public:
                 description.samples != 1U || description.array_layers != 1U) {
                 return {TextureStatus::unsupported,
                         {"d3d12_compressed_texture_unsupported",
-                         "D3D12 BC1, BC3, and BC7 textures require immutable sampled one-layer, single-sample resources"},
+                         "D3D12 BC1, BC3, BC5, and BC7 textures require immutable sampled one-layer, single-sample resources"},
                         nullptr};
             }
             if (!validate_d3d12_texture_format_support(

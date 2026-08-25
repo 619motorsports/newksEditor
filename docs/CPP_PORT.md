@@ -437,11 +437,12 @@ remains unchanged and feature-complete.
   these maps through the portable receiver ABI. D3D12 creates typeless depth
   resources and sampled views, but descriptor execution remains staged pending
   WARP verification. The
-  device API directly uploads immutable, one-layer BC1, BC3, and BC7 sampled
+  device API directly uploads immutable, one-layer BC1, BC3, BC5, and BC7 sampled
   textures. The upload path validates compressed block rows before allocation.
-  Vulkan and D3D12 query format support before image creation. Direct BC5
-  normal uploads remain staged because the bounded shader reads three normal
-  channels. The embedded static-scene path still uses its exact CPU decode.
+  Vulkan and D3D12 query format support before image creation. The generic
+  device API accepts BC5 uploads. The normal-map ABI remains RGBA8/BGRA8 because
+  its shader reads RGB and does not reconstruct BC5 Z.
+  The embedded static-scene path still uses its exact CPU decode.
   The static-scene path requires explicit backend shader bytecode. The bounded
   material handoff selects modules by material or shader family. It derives
   the eight-binding or 12-binding layout, material constants, A2C state,
@@ -507,8 +508,9 @@ were ready. WebGL reported no errors. The capture hash was
 `02f639e082e1e5b2`. The PNG SHA-256 was
 `c64caf51986b652c5cd71e6093e7311a281bdf10924cf7eb05afbe591692497f`.
 This gate proves the production fixture and WebGL path. Native pixel tests
-cover direct BC1, BC3, and BC7 upload and sampling. This host had no usable
-Vulkan device, and the D3D12 test still requires a Windows run.
+cover direct BC1, BC3, and BC7 upload and sampling, plus the BC5 upload and
+capability boundary. This host had no usable Vulkan device, and the D3D12 test
+still requires a Windows run.
 
 The production LOD gate uses `data/lods.ini` from the repository car. LOD0
 selected index 0 and produced state hash `6029214d5cdb79d0`. Its screenshot
@@ -539,8 +541,9 @@ native tests therefore prove driver-name matching and subtree suppression.
 
 DDS BC7 has a bounded CPU decoder with differential fixtures for all eight
 modes, and both native backends can upload BC7 blocks directly when the adapter
-reports format support. BC6H remains explicit and requires a GPU path. The
-checked upload
+reports format support. BC5 is also available through the generic device path;
+the normal-map resource ABI remains unchanged. BC6H remains explicit and
+requires a GPU path. The checked upload
 planner supports DX10 2D arrays and cubemaps. It also converts legacy RGB24 to
 RGBA8 without a color change. The embedded static-scene path uses the bounded
 CPU decoder for supported 2D mip chains. Each decode receives the remaining
@@ -548,7 +551,7 @@ aggregate byte budget before it allocates output. Upload plans also reject
 subresource-entry floods before iteration. This path retains the DDS sRGB flag.
 It rejects arrays, cubemaps, BC6H, and legacy D3D9 float data. This portable
 decode is still the embedded static-scene path. The separate device path
-uploads BC1, BC3, and BC7 blocks directly. It does not prove stock-shader parity.
+uploads BC1, BC3, BC5, and BC7 blocks directly. It does not prove stock-shader parity.
 
 ## Source-module mapping
 

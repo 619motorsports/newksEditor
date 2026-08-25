@@ -999,6 +999,17 @@ void validates_portable_normal_map_contract() {
                 IndexedStaticMeshDrawStatus::ready,
             "portable tangent-space normal-map contract accepted");
 
+    FakeTexture bc5_normal(
+        Backend::Vulkan,
+        {4U, 4U, 1U, 1U, TextureFormat::bc5_unorm, TextureUsage::sampled,
+         TextureMemory::device_local, TextureMutability::immutable});
+    request.normal_binding = {&bc5_normal, &normal_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_normal_texture_description_unsupported",
+            "BC5 normal texture rejected because the normal ABI has no Z reconstruction");
+    request.normal_binding = {&normal, &normal_sampler};
+
     request.normal_binding = {};
     require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
                 IndexedStaticMeshDrawStatus::invalid_request &&

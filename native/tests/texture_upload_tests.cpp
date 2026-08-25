@@ -204,6 +204,12 @@ void rejectsMalformedPayloadAndLimits() {
                 shortBc7Plan.diagnostic.code == "truncated_payload" &&
                 shortBc7Plan.diagnostic.offset == 148U,
             "truncated BC7 edge payload");
+    const auto shortBc5 = dx10(5, 3, 83, 16);
+    const auto shortBc5Plan = buildDdsUploadPlan(shortBc5, "bc5-short.dds");
+    require(!shortBc5Plan.ok() && shortBc5Plan.status == TextureUploadStatus::invalid &&
+                shortBc5Plan.diagnostic.code == "truncated_payload" &&
+                shortBc5Plan.diagnostic.offset == 148U,
+            "truncated BC5 edge payload");
     const auto attributed = buildDdsUploadPlan(shortBc, "cars/body.dds");
     require(attributed.diagnostic.source == "cars/body.dds" && attributed.diagnostic.offset == 128u,
             "upload diagnostic source attribution");
