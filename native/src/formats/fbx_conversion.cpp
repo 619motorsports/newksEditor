@@ -268,7 +268,9 @@ Matrix4 localTransform(const FbxNode& model, std::string_view path,
             if (flattened.empty() || stringValue(flattened[0]) == nullptr) continue;
             const auto& name = *stringValue(flattened[0]);
             const bool supported = name == "Lcl Translation" || name == "Lcl Rotation" ||
-                                   name == "Lcl Scaling" || name == "Visibility";
+                                   name == "Lcl Scaling" || name == "GeometricTranslation" ||
+                                   name == "GeometricRotation" || name == "GeometricScaling" ||
+                                   name == "Visibility";
             if (!supported) {
                 addDiagnostic(result, diagnostics, FbxConversionSeverity::warning,
                               "unsupported_transform_property",
@@ -313,6 +315,50 @@ Matrix4 localTransform(const FbxNode& model, std::string_view path,
     }
     (void)visible;
     const auto matrix = multiply(multiply(translation, rotation), scale);
+    finiteMatrix(matrix, path);
+    return matrix;
+}
+
+Matrix4 geometricTransform(const FbxNode& model, std::string_view path) {
+    std::array<float, 3> translation{0.0F, 0.0F, 0.0F};
+    std::array<float, 3> rotation{0.0F, 0.0F, 0.0F};
+    std::array<float, 3> scale{1.0F, 1.0F, 1.0F};
+    for (const auto& group : model.children) {
+        if (group.name != "Properties70" && group.name != "Properties60") continue;
+        for (const auto& property : group.children) {
+            const auto flattened = values(property, nullptr, path);
+            if (flattened.empty() || stringValue(flattened.front()) == nullptr) continue;
+            const auto name = *stringValue(flattened.front());
+            std::array<float, 3>* target = name == "GeometricTranslation" ? &translation :
+                                            name == "GeometricRotation" ? &rotation :
+                                            name == "GeometricScaling" ? &scale : nullptr;
+            if (target == nullptr) continue;
+            std::size_t found = 0u;
+            for (std::size_t index = 1u; index < flattened.size() && found < 3u; ++index) {
+                double number = 0.0;
+                if (!finiteNumber(flattened[index], number)) continue;
+                if (number < -static_cast<double>(std::numeric_limits<float>::max()) ||
+                    number > static_cast<double>(std::numeric_limits<float>::max()))
+                    fail("invalid_transform", "FBX geometric transform contains an invalid component", std::string(path));
+                (*target)[found++] = static_cast<float>(number);
+            }
+            if (found != 3u)
+                fail("invalid_transform", "FBX geometric transform has fewer than three values", std::string(path));
+        }
+    }
+    const auto radians = [](float degrees) { return degrees * 0.017453292519943295769F; };
+    const float x = radians(rotation[0]), y = radians(rotation[1]), z = radians(rotation[2]);
+    Matrix4 translationMatrix = scene::identity_matrix;
+    Matrix4 rx = scene::identity_matrix, ry = scene::identity_matrix, rz = scene::identity_matrix;
+    Matrix4 scaleMatrix = scene::identity_matrix;
+    translationMatrix[12] = translation[0];
+    translationMatrix[13] = translation[1];
+    translationMatrix[14] = translation[2];
+    rx[5] = std::cos(x); rx[9] = -std::sin(x); rx[6] = std::sin(x); rx[10] = std::cos(x);
+    ry[0] = std::cos(y); ry[8] = std::sin(y); ry[2] = -std::sin(y); ry[10] = std::cos(y);
+    rz[0] = std::cos(z); rz[4] = -std::sin(z); rz[1] = std::sin(z); rz[5] = std::cos(z);
+    scaleMatrix[0] = scale[0]; scaleMatrix[5] = scale[1]; scaleMatrix[10] = scale[2];
+    const auto matrix = multiply(multiply(translationMatrix, multiply(rz, multiply(ry, rx))), scaleMatrix);
     finiteMatrix(matrix, path);
     return matrix;
 }
@@ -1391,7 +1437,25 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
             const auto propertyBytes = propertyValue == nullptr ? std::size_t{0u} : propertyValue->size();
             budget.add(checkedAdd(kindBytes, propertyBytes, path), path);
             Link link{*kindValue, sourceId, targetId, propertyValue == nullptr ? std::string() : *propertyValue};
-            if (byId.find(link.source) == byId.end() || (link.target != 0 && byId.find(link.target) == byId.end()))
+            const auto sourceRecord = byId.find(link.source);
+            const auto targetRecord = link.target == 0 ? byId.end() : byId.find(link.target);
+            const bool missingAnimationCurve =
+                *kindValue == "OP" && sourceRecord == byId.end() &&
+                targetRecord != byId.end() &&
+                records[targetRecord->second].node->name == "AnimationCurveNode" &&
+                propertyValue != nullptr && propertyValue->size() == 3u &&
+                (*propertyValue)[0] == 'd' && (*propertyValue)[1] == '|' &&
+                ((*propertyValue)[2] == 'X' || (*propertyValue)[2] == 'Y' ||
+                 (*propertyValue)[2] == 'Z');
+            if (missingAnimationCurve) {
+                addDiagnostic(result, diagnostics, FbxConversionSeverity::warning,
+                              "missing_animation_curve",
+                              "FBX animation curve link references a missing optional curve; connection ignored",
+                              path);
+                continue;
+            }
+            if (sourceRecord == byId.end() ||
+                (link.target != 0 && targetRecord == byId.end()))
                 fail("invalid_reference", "FBX connection references an unknown object", path);
             links.push_back(std::move(link));
         }
@@ -1532,14 +1596,18 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
                 material = materialIndex->second;
             }
         }
+        const auto meshWorld = kind == scene::NodeKind::mesh
+                                   ? multiply(world, geometricTransform(*record.node, path))
+                                   : world;
+        finiteMatrix(meshWorld, path);
         budget.add(record.name.size(), path);
-        scene::SceneNode node{id, parentId, record.name, kind, modelVisible(*record.node, &budget), modelVisible(*record.node, &budget), kind == scene::NodeKind::mesh, false, true, 0u, 0.0F, 0.0F, material, {0.0F, 0.0F, 0.0F}, 0.0F, world, {}, {}, {}};
+        scene::SceneNode node{id, parentId, record.name, kind, modelVisible(*record.node, &budget), modelVisible(*record.node, &budget), kind == scene::NodeKind::mesh, false, true, 0u, 0.0F, 0.0F, material, {0.0F, 0.0F, 0.0F}, 0.0F, meshWorld, {}, {}, {}};
         if (kind == scene::NodeKind::mesh) {
             const auto& mesh = result.meshes[meshIndex];
             std::array<double, 3> minimum = {std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity()};
             std::array<double, 3> maximum = {-std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()};
             const auto transformedPoint = [&](std::size_t index) {
-                return std::array<double, 3>{static_cast<double>(world[0]) * mesh.positions[index] + static_cast<double>(world[4]) * mesh.positions[index + 1u] + static_cast<double>(world[8]) * mesh.positions[index + 2u] + static_cast<double>(world[12]), static_cast<double>(world[1]) * mesh.positions[index] + static_cast<double>(world[5]) * mesh.positions[index + 1u] + static_cast<double>(world[9]) * mesh.positions[index + 2u] + static_cast<double>(world[13]), static_cast<double>(world[2]) * mesh.positions[index] + static_cast<double>(world[6]) * mesh.positions[index + 1u] + static_cast<double>(world[10]) * mesh.positions[index + 2u] + static_cast<double>(world[14])};
+                return std::array<double, 3>{static_cast<double>(meshWorld[0]) * mesh.positions[index] + static_cast<double>(meshWorld[4]) * mesh.positions[index + 1u] + static_cast<double>(meshWorld[8]) * mesh.positions[index + 2u] + static_cast<double>(meshWorld[12]), static_cast<double>(meshWorld[1]) * mesh.positions[index] + static_cast<double>(meshWorld[5]) * mesh.positions[index + 1u] + static_cast<double>(meshWorld[9]) * mesh.positions[index + 2u] + static_cast<double>(meshWorld[13]), static_cast<double>(meshWorld[2]) * mesh.positions[index] + static_cast<double>(meshWorld[6]) * mesh.positions[index + 1u] + static_cast<double>(meshWorld[10]) * mesh.positions[index + 2u] + static_cast<double>(meshWorld[14])};
             };
             for (std::size_t index = 0; index < mesh.positions.size(); index += 3u) {
                 const auto transformed = transformedPoint(index);

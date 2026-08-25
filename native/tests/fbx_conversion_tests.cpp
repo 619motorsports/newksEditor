@@ -92,6 +92,18 @@ FbxDocument seamFixture() {
     return document;
 }
 
+FbxDocument geometricTransformFixture() {
+    auto document = fixture();
+    auto& properties = document.roots[0].children[0].children[0];
+    properties.children.push_back(propertyNode("P", {
+        std::string("GeometricTranslation"), std::string("GeometricTranslation"),
+        std::string(""), std::string("A"), 10.0, 0.0, 0.0}));
+    properties.children.push_back(propertyNode("P", {
+        std::string("GeometricScaling"), std::string("GeometricScaling"),
+        std::string(""), std::string("A"), 2.0, 2.0, 2.0}));
+    return document;
+}
+
 FbxDocument animationFixture() {
     auto document = fixture();
     auto& objects = document.roots[0];
@@ -211,6 +223,24 @@ void convertsStaticGeometryTransformsAndMaterials() {
             "FBX material metadata");
 }
 
+void appliesNativeGeometricMeshTransform() {
+    const auto result = apex::formats::convertFbxScene(geometricTransformFixture());
+    require(result.snapshot.nodes.size() == 2u && result.snapshot.nodes[1].kind == apex::scene::NodeKind::mesh,
+            "FBX geometric transform retains mesh node output");
+    require(std::abs(result.snapshot.nodes[1].transform[12] - 1.0F) < 1e-6F &&
+                std::abs(result.snapshot.nodes[1].transform[13] - 12.0F) < 1e-6F &&
+                std::abs(result.snapshot.nodes[1].transform[14] - 3.0F) < 1e-6F,
+            "FBX geometric translation and scale compose after the local transform");
+    require(std::abs(result.snapshot.nodes[1].bounds_center[0] - 0.0F) < 1e-6F &&
+                std::abs(result.snapshot.nodes[1].bounds_center[1] - 13.0F) < 1e-6F &&
+                std::abs(result.snapshot.nodes[1].bounds_center[2] - 3.0F) < 1e-6F,
+            "FBX bounds include the native geometric mesh transform");
+
+    auto malformed = geometricTransformFixture();
+    malformed.roots[0].children[0].children[0].children.back().properties[0].values.pop_back();
+    expectsError([&] { (void)apex::formats::convertFbxScene(malformed); }, "invalid_transform");
+}
+
 void ignoresDisplayLayerMembershipEdges() {
     auto document = fixture();
     document.roots[0].children.push_back(node("CollectionExclusive", {
@@ -275,6 +305,28 @@ void handlesConstraintPoConnectionsStrictly() {
     auto wrongProperty = valid;
     wrongProperty.roots[1].children.back().properties[0].values[2] = std::string("Other");
     expectsError([&] { (void)apex::formats::convertFbxScene(wrongProperty); }, "unsupported_connection");
+}
+
+void ignoresMissingOptionalAnimationCurveLinks() {
+    auto document = animationFixture();
+    document.roots[1].children.push_back(node("C", {
+        std::string("OP"), std::int64_t(999), std::int64_t(502), std::string("d|X")}));
+    const auto result = apex::formats::convertFbxScene(document);
+    require(std::any_of(result.diagnostics.begin(), result.diagnostics.end(),
+                         [](const auto& diagnostic) {
+                             return diagnostic.code == "missing_animation_curve";
+                         }),
+            "missing optional FBX animation curve link is diagnosed");
+
+    auto malformed = document;
+    malformed.roots[1].children.back().properties[0].values.pop_back();
+    expectsError([&] { (void)apex::formats::convertFbxScene(malformed); },
+                 "invalid_connection");
+
+    auto wrongTarget = document;
+    wrongTarget.roots[1].children.back().properties[0].values[2] = std::int64_t(200);
+    expectsError([&] { (void)apex::formats::convertFbxScene(wrongTarget); },
+                 "invalid_reference");
 }
 
 void convertsUvSeamsAndFlipsV() {
@@ -689,8 +741,10 @@ int main() {
     try {
         convertsParsedAsciiTriangle();
         convertsStaticGeometryTransformsAndMaterials();
+        appliesNativeGeometricMeshTransform();
         ignoresDisplayLayerMembershipEdges();
         handlesConstraintPoConnectionsStrictly();
+        ignoresMissingOptionalAnimationCurveLinks();
         convertsUvSeamsAndFlipsV();
         convertsBoundedLinearAnimationToKsanimV2();
         selectsNativeAnimationModelsInHierarchyOrder();
