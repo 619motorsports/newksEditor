@@ -2131,15 +2131,21 @@ validate_depth_only_indexed_static_mesh_draw_request(
     }
 
     const DrawPacket& packet = *request.packet;
-    if (packet.primitive != DrawPrimitiveKind::static_mesh) {
+    const bool skinned = packet.primitive == DrawPrimitiveKind::skinned_mesh;
+    if (!skinned && packet.primitive != DrawPrimitiveKind::static_mesh) {
         diagnostic = {"depth_only_indexed_static_mesh_primitive_unsupported",
-                      "Depth-only indexed drawing accepts static mesh packets only"};
+                      "Depth-only indexed drawing accepts static or skinned mesh packets only"};
         return DepthOnlyIndexedStaticMeshDrawStatus::unsupported;
     }
-    if (!packet.bone_palette.empty()) {
+    if (!skinned && !packet.bone_palette.empty()) {
         diagnostic = {"depth_only_indexed_static_mesh_skinning_unsupported",
                       "Depth-only indexed static meshes must not carry a bone palette"};
         return DepthOnlyIndexedStaticMeshDrawStatus::unsupported;
+    }
+    if (skinned && packet.bone_palette.empty()) {
+        diagnostic = {"depth_only_indexed_skinned_mesh_palette_missing",
+                      "Depth-only indexed skinned meshes require a bone palette"};
+        return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
     }
     if (packet.vertex_count == 0U || packet.vertex_count > max_indexed_static_mesh_vertices ||
         packet.index_count == 0U || packet.index_count > max_indexed_static_mesh_indices ||
@@ -2240,11 +2246,15 @@ validate_depth_only_indexed_static_mesh_draw_request(
                    ? DepthOnlyIndexedStaticMeshDrawStatus::unsupported
                    : DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
     }
-    if (packet.vertex_stride_floats != 11U ||
+    const std::uint32_t expected_stride_floats = skinned ? 19U : 11U;
+    if (packet.vertex_stride_floats != expected_stride_floats ||
         static_cast<std::uint64_t>(packet.vertex_stride_floats) * sizeof(float) !=
             pipeline.vertex_layout.stride) {
-        diagnostic = {"depth_only_indexed_static_mesh_stride_mismatch",
-                      "Depth-only indexed static mesh requires an 11-float stride matching the pipeline"};
+        diagnostic = {skinned ? "depth_only_indexed_skinned_mesh_stride_mismatch"
+                              : "depth_only_indexed_static_mesh_stride_mismatch",
+                      skinned
+                          ? "Depth-only indexed skinned meshes require a 19-float stride matching the pipeline"
+                          : "Depth-only indexed static mesh requires an 11-float stride matching the pipeline"};
         return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
     }
 
@@ -2270,10 +2280,13 @@ validate_depth_only_indexed_static_mesh_draw_request(
     }
     if (vertex_description.memory != BufferMemory::device_local ||
         index_description.memory != BufferMemory::device_local ||
-        vertex_description.mutability != BufferMutability::immutable ||
+        (skinned ? vertex_description.mutability != BufferMutability::mutable_data
+                  : vertex_description.mutability != BufferMutability::immutable) ||
         index_description.mutability != BufferMutability::immutable) {
         diagnostic = {"depth_only_indexed_buffer_ownership_invalid",
-                      "Depth-only indexed buffers require immutable device-local ownership"};
+                      skinned
+                          ? "Depth-only indexed skinned meshes require a mutable device-local vertex buffer and immutable device-local indices"
+                          : "Depth-only indexed buffers require immutable device-local ownership"};
         return DepthOnlyIndexedStaticMeshDrawStatus::unsupported;
     }
     const std::uint64_t stride = pipeline.vertex_layout.stride;

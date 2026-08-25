@@ -1709,18 +1709,29 @@ StaticSceneResources::draw_opaque_directional_shadows(
     }
 
     StaticSceneDirectionalShadowResult result;
-    std::vector<std::size_t> opaque_indices;
-    opaque_indices.reserve(packets_.size());
+    std::vector<std::size_t> executable_indices;
+    executable_indices.reserve(packets_.size());
     result.staged_casters.reserve(packets_.size());
     for (std::size_t index = 0U; index < packets_.size(); ++index) {
         const DrawPacket& packet = packet_for_frame(index);
         if (!packet.flags.cast_shadows) continue;
         ++result.selected_casters;
         if (packet.primitive == DrawPrimitiveKind::skinned_mesh) {
-            ++result.staged_skinned;
-            result.staged_casters.push_back({
-                "directional_shadow_caster_skinning_staged", packet.node,
-                packet.material});
+            if (frame.skinned_pipeline == nullptr) {
+                ++result.staged_skinned;
+                result.staged_casters.push_back({
+                    "directional_shadow_caster_skinning_staged", packet.node,
+                    packet.material});
+                continue;
+            }
+            if (index >= skinned_upload_for_packet_.size() ||
+                skinned_upload_for_packet_[index] >= skinned_uploads_.size() ||
+                skinned_uploads_[skinned_upload_for_packet_[index]] == nullptr)
+                return fail(StaticSceneDirectionalShadowStatus::invalid_request,
+                            "directional_shadow_caster_geometry_invalid",
+                            "A skinned shadow caster has no retained skinned geometry");
+            executable_indices.push_back(index);
+            ++result.skinned_casters;
             continue;
         }
         if (packet.material_profile.shadow_alpha_tested ||
@@ -1744,7 +1755,7 @@ StaticSceneResources::draw_opaque_directional_shadows(
             return fail(StaticSceneDirectionalShadowStatus::invalid_request,
                         "directional_shadow_caster_geometry_invalid",
                         "An opaque shadow caster has no retained static geometry");
-        opaque_indices.push_back(index);
+        executable_indices.push_back(index);
         ++result.opaque_casters;
     }
     if (result.selected_casters == 0U) {
@@ -1771,7 +1782,7 @@ StaticSceneResources::draw_opaque_directional_shadows(
                              "The scene selected no casters; all three maps contain clear depth"};
         return result;
     }
-    if (opaque_indices.empty()) {
+    if (executable_indices.empty()) {
         result.status = StaticSceneDirectionalShadowStatus::unsupported;
         result.diagnostic = {"directional_shadow_all_casters_staged",
                              "All selected directional shadow casters require staged programs"};
@@ -1781,29 +1792,76 @@ StaticSceneResources::draw_opaque_directional_shadows(
     // The packet flag is an explicit, bounded handoff for the recovered
     // doubleFaceShadow rule. KN5 parsing leaves it at the stock default
     // (false/back cull); callers with source-evidenced overrides may set it.
-    // Alpha-tested and skinned casters remain staged below this seam.
     PipelineProgram back_cull_pipeline = *frame.opaque_pipeline;
     back_cull_pipeline.raster.cull =
         stock_directional_shadow_cull_mode(false);
     PipelineProgram double_face_pipeline = back_cull_pipeline;
     double_face_pipeline.raster.cull = stock_directional_shadow_cull_mode(true);
+    PipelineProgram skinned_back_cull_pipeline;
+    PipelineProgram skinned_double_face_pipeline;
+    if (result.skinned_casters != 0U) {
+        if (frame.skinned_pipeline->vertex_layout.stride != 19U * sizeof(float))
+            return fail(StaticSceneDirectionalShadowStatus::invalid_request,
+                        "directional_shadow_skinned_pipeline_stride_invalid",
+                        "Skinned directional-shadow pipelines require the retained 19-float vertex stream");
+        skinned_back_cull_pipeline = *frame.skinned_pipeline;
+        skinned_back_cull_pipeline.raster.cull =
+            stock_directional_shadow_cull_mode(false);
+        skinned_double_face_pipeline = skinned_back_cull_pipeline;
+        skinned_double_face_pipeline.raster.cull =
+            stock_directional_shadow_cull_mode(true);
+    }
+
+    struct PendingSkinUpdate {
+        std::size_t upload_index = invalid_resource_index;
+        const DrawPacket* packet = nullptr;
+        std::vector<float> vertices;
+    };
+    std::vector<PendingSkinUpdate> pending_skin_updates;
+    pending_skin_updates.reserve(result.skinned_casters);
+    for (const std::size_t index : executable_indices) {
+        const DrawPacket& packet = packet_for_frame(index);
+        if (packet.primitive != DrawPrimitiveKind::skinned_mesh) continue;
+        PendingSkinUpdate pending;
+        pending.upload_index = skinned_upload_for_packet_[index];
+        pending.packet = &packet;
+        SkinnedMeshPoseUpdateResult prepared =
+            skinned_uploads_[pending.upload_index]->prepare_pose(packet);
+        if (!prepared.ok())
+            return fail(prepared.status == SkinnedMeshUploadStatus::unsupported
+                            ? StaticSceneDirectionalShadowStatus::unsupported
+                            : StaticSceneDirectionalShadowStatus::invalid_request,
+                        prepared.diagnostic.code, prepared.diagnostic.message);
+        pending.vertices = std::move(prepared.skinned_vertices);
+        pending_skin_updates.push_back(std::move(pending));
+    }
 
     std::array<std::vector<DepthOnlyIndexedStaticMeshDrawRequest>,
                directional_shadow_cascade_count> cascade_draws;
     for (std::size_t cascade = 0U; cascade < directional_shadow_cascade_count;
          ++cascade) {
         auto& draws = cascade_draws[cascade];
-        draws.reserve(opaque_indices.size());
-        for (const std::size_t index : opaque_indices) {
+        draws.reserve(executable_indices.size());
+        for (const std::size_t index : executable_indices) {
             const DrawPacket& packet = packet_for_frame(index);
-            const StaticMeshUpload& upload = *uploads_[upload_for_packet_[index]];
             DepthOnlyIndexedStaticMeshDrawRequest draw;
             draw.packet = &packet;
-            draw.pipeline = packet.flags.double_face_shadow
-                                ? &double_face_pipeline
-                                : &back_cull_pipeline;
-            draw.vertex_buffer = upload.vertex_buffer.get();
-            draw.index_buffer = upload.index_buffer.get();
+            if (packet.primitive == DrawPrimitiveKind::skinned_mesh) {
+                const SkinnedMeshUpload& upload =
+                    *skinned_uploads_[skinned_upload_for_packet_[index]];
+                draw.pipeline = packet.flags.double_face_shadow
+                                    ? &skinned_double_face_pipeline
+                                    : &skinned_back_cull_pipeline;
+                draw.vertex_buffer = upload.vertex_buffer.get();
+                draw.index_buffer = upload.index_buffer.get();
+            } else {
+                const StaticMeshUpload& upload = *uploads_[upload_for_packet_[index]];
+                draw.pipeline = packet.flags.double_face_shadow
+                                    ? &double_face_pipeline
+                                    : &back_cull_pipeline;
+                draw.vertex_buffer = upload.vertex_buffer.get();
+                draw.index_buffer = upload.index_buffer.get();
+            }
             draw.camera_frame = maps.cameras_[cascade];
             draws.push_back(std::move(draw));
         }
@@ -1818,6 +1876,20 @@ StaticSceneResources::draw_opaque_directional_shadows(
                             ? StaticSceneDirectionalShadowStatus::unsupported
                             : StaticSceneDirectionalShadowStatus::invalid_request,
                         diagnostic.code, diagnostic.message);
+    }
+
+    // Skinning output is prepared above and committed only after every
+    // cascade has passed validation, preserving the scene's failure-atomic
+    // preflight boundary before the first depth write.
+    for (PendingSkinUpdate& pending : pending_skin_updates) {
+        SkinnedMeshPoseUpdateResult committed =
+            skinned_uploads_[pending.upload_index]->commit_pose(
+                device, *pending.packet, pending.vertices);
+        if (!committed.ok())
+            return fail(committed.status == SkinnedMeshUploadStatus::unsupported
+                            ? StaticSceneDirectionalShadowStatus::unsupported
+                            : StaticSceneDirectionalShadowStatus::execution_failed,
+                        committed.diagnostic.code, committed.diagnostic.message);
     }
 
     // All packets, all three matrices, and all backend resource ranges have

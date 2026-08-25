@@ -2679,6 +2679,26 @@ void retains_three_directional_maps_and_executes_only_opaque_static_casters() {
                 mixed_drawn.cascades_completed == directional_shadow_cascade_count,
             "skinned casters remain staged while opaque static casters execute");
 
+    PipelineProgram mixed_skinned_depth_pipeline = mixed.second_pipeline;
+    mixed_skinned_depth_pipeline.name = "portable-skinned-directional-caster";
+    mixed_skinned_depth_pipeline.targets.colors.clear();
+    mixed_skinned_depth_pipeline.shaders.resize(1U);
+    mixed_frame.skinned_pipeline = &mixed_skinned_depth_pipeline;
+    const std::size_t skin_updates_before_shadow = mixed_device.update_calls;
+    const auto skinned_drawn =
+        mixed_prepared.resources->draw_opaque_directional_shadows(
+            mixed_device, mixed_frame);
+    require(skinned_drawn.ok() &&
+                skinned_drawn.status == StaticSceneDirectionalShadowStatus::ready &&
+                skinned_drawn.opaque_casters == 2U &&
+                skinned_drawn.skinned_casters == 1U &&
+                skinned_drawn.staged_skinned == 0U &&
+                skinned_drawn.cascades_completed == directional_shadow_cascade_count &&
+                mixed_device.update_calls == skin_updates_before_shadow + 1U &&
+                mixed_device.depth_nodes.back() ==
+                    std::vector<apex::scene::NodeId>({1U, 2U, 1U}),
+            "explicit skinned shadow pipeline executes CPU-skinned casters in all cascades");
+
     std::vector<DrawPacket> malformed = value.packets;
     malformed.back().world_matrix[0] = std::numeric_limits<float>::quiet_NaN();
     frame.refreshed_packets = malformed;

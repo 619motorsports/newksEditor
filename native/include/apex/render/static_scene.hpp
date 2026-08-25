@@ -158,10 +158,10 @@ public:
         Device& device, Texture& target,
         const StaticSceneFrameDescription& frame);
 
-    // Execute the retained opaque static casters into the fixed three-map
-    // directional-shadow set. Alpha-tested and skinned casters are reported
-    // as staged. The portable pass is not a claim of recovered ksShadowGen
-    // shader or doubleFaceShadow parity.
+    // Execute retained opaque static casters and, when an explicit skinned
+    // depth pipeline is supplied, CPU-skinned casters into the fixed
+    // three-map directional-shadow set. Alpha-tested casters remain staged.
+    // The pass does not infer a stock ksShadowGen shader.
     [[nodiscard]] StaticSceneDirectionalShadowResult
     draw_opaque_directional_shadows(
         Device& device,

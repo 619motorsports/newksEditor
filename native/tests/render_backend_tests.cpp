@@ -2012,6 +2012,25 @@ bool contract_backend(apex::render::Backend backend) {
     require(initial_skinned == std::vector<float>(skinned_source.begin(), skinned_source.end()) &&
                 skinned_upload.upload->bind_vertices().size() == skinned_source.size(),
             "identity CPU skin preserves the bind-pose stream");
+
+    DrawPacket shadow_skinned_packet = skinned_packet;
+    shadow_skinned_packet.flags.depth_test = true;
+    shadow_skinned_packet.flags.depth_write = true;
+    PipelineProgram skinned_shadow_pipeline = depth_only_pipeline;
+    skinned_shadow_pipeline.name = "skinned-directional-caster-depth";
+    skinned_shadow_pipeline.vertex_layout.stride = 19U * sizeof(float);
+    DepthOnlyIndexedStaticMeshDrawRequest skinned_shadow_request;
+    skinned_shadow_request.packet = &shadow_skinned_packet;
+    skinned_shadow_request.pipeline = &skinned_shadow_pipeline;
+    skinned_shadow_request.vertex_buffer = skinned_upload.upload->vertex_buffer.get();
+    skinned_shadow_request.index_buffer = skinned_upload.upload->index_buffer.get();
+    skinned_shadow_request.camera_frame = three_maps.resources->camera(0U);
+    const DepthOnlyIndexedStaticMeshDrawResult skinned_shadow_result =
+        device.device->draw_depth_only_indexed_static_mesh(
+            three_maps.resources->attachment(0U), skinned_shadow_request);
+    require(skinned_shadow_result.ok(),
+            "real backend executes a mutable CPU-skinned directional caster");
+
     IndexedStaticMeshDrawRequest skinned_request =
         skinned_upload.upload->make_request(skinned_pipeline, *indexed_camera.frame);
     skinned_request.clear_color = {0.0F, 0.0F, 0.0F, 1.0F};

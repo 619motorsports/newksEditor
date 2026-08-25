@@ -118,6 +118,10 @@ struct StaticSceneDirectionalShadowFrameDescription {
     DirectionalShadowMapResources* maps = nullptr;
     const PipelineProgram* opaque_pipeline = nullptr;
     std::span<const DrawPacket> refreshed_packets{};
+    // Optional caller-supplied depth-only pipeline for already-retained CPU
+    // skinned geometry. A missing pipeline keeps skinned casters staged; this
+    // seam does not infer or synthesize a stock ksShadowGen shader.
+    const PipelineProgram* skinned_pipeline = nullptr;
 };
 
 enum class StaticSceneDirectionalShadowStatus : std::uint8_t {
@@ -134,6 +138,7 @@ struct StaticSceneDirectionalShadowResult {
     Diagnostic diagnostic;
     std::size_t selected_casters = 0U;
     std::size_t opaque_casters = 0U;
+    std::size_t skinned_casters = 0U;
     std::size_t staged_alpha_tested = 0U;
     std::size_t staged_skinned = 0U;
     std::size_t cascades_completed = 0U;
