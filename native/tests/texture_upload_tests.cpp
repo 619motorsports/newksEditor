@@ -107,6 +107,16 @@ void mapsPortableAndSdkFormats() {
                 bc2SrgbMapping.mapping->dxgiFormat == 75u && bc2SrgbMapping.mapping->srgb,
             "BC2 sRGB mapping");
 
+    const auto bc5Snorm = apex::formats::inspectDds(dx10(4, 4, 84, 16));
+    require(bc5Snorm.has_value(), "DX10 BC5 SNORM descriptor");
+    const auto bc5SnormMapping = mapDdsTextureFormat(*bc5Snorm);
+    require(bc5SnormMapping.ok() &&
+                bc5SnormMapping.mapping->format == TextureFormat::bc5_snorm &&
+                bc5SnormMapping.mapping->vulkanFormat == 142U &&
+                bc5SnormMapping.mapping->dxgiFormat == 84U &&
+                bc5SnormMapping.mapping->signedChannels,
+            "BC5 SNORM mapping");
+
     const auto bc6 = apex::formats::inspectDds(dx10(4, 4, 96, 16));
     require(bc6.has_value(), "DX10 BC6H descriptor");
     const auto bc6Mapping = mapDdsTextureFormat(*bc6);
@@ -192,6 +202,18 @@ void plansCompressedEdgesAndMips() {
                 bc4EdgePlan.plan->subresources[0].size == 16U,
             "BC4 edge pitches");
 
+    const auto bc5SnormEdge = dx10(5, 3, 84, 32);
+    const auto bc5SnormEdgePlan =
+        buildDdsUploadPlan(bc5SnormEdge, "bc5-snorm-edge.dds");
+    require(bc5SnormEdgePlan.ok() &&
+                bc5SnormEdgePlan.plan->mapping.format == TextureFormat::bc5_snorm &&
+                bc5SnormEdgePlan.plan->subresources.size() == 1U &&
+                bc5SnormEdgePlan.plan->subresources[0].blocksWide == 2U &&
+                bc5SnormEdgePlan.plan->subresources[0].blocksHigh == 1U &&
+                bc5SnormEdgePlan.plan->subresources[0].rowPitch == 32U &&
+                bc5SnormEdgePlan.plan->subresources[0].size == 32U,
+            "BC5 SNORM edge pitches");
+
     const auto bc6Edge = dx10(5, 3, 95, 32);
     const auto bc6EdgePlan = buildDdsUploadPlan(bc6Edge, "bc6h-edge.dds");
     require(bc6EdgePlan.ok() && bc6EdgePlan.plan->mapping.format == TextureFormat::bc6h_ufloat &&
@@ -263,6 +285,14 @@ void rejectsMalformedPayloadAndLimits() {
                 shortBc5Plan.diagnostic.code == "truncated_payload" &&
                 shortBc5Plan.diagnostic.offset == 148U,
             "truncated BC5 edge payload");
+    const auto shortBc5Snorm = dx10(5, 3, 84, 16);
+    const auto shortBc5SnormPlan =
+        buildDdsUploadPlan(shortBc5Snorm, "bc5-snorm-short.dds");
+    require(!shortBc5SnormPlan.ok() &&
+                shortBc5SnormPlan.status == TextureUploadStatus::invalid &&
+                shortBc5SnormPlan.diagnostic.code == "truncated_payload" &&
+                shortBc5SnormPlan.diagnostic.offset == 148U,
+            "truncated BC5 SNORM edge payload");
     const auto shortBc4 = dx10(5, 3, 80, 8);
     const auto shortBc4Plan = buildDdsUploadPlan(shortBc4, "bc4-short.dds");
     require(!shortBc4Plan.ok() && shortBc4Plan.status == TextureUploadStatus::invalid &&

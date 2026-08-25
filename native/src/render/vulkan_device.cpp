@@ -790,6 +790,8 @@ VkFormat vk_texture_format(TextureFormat format) {
         return VK_FORMAT_BC4_UNORM_BLOCK;
     case TextureFormat::bc5_unorm:
         return VK_FORMAT_BC5_UNORM_BLOCK;
+    case TextureFormat::bc5_snorm:
+        return VK_FORMAT_BC5_SNORM_BLOCK;
     case TextureFormat::bc6h_ufloat:
         return VK_FORMAT_BC6H_UFLOAT_BLOCK;
     case TextureFormat::bc6h_sfloat:
@@ -808,7 +810,7 @@ bool vk_supported_block_upload_format(TextureFormat format) noexcept {
            format == TextureFormat::bc2_unorm || format == TextureFormat::bc2_srgb ||
            format == TextureFormat::bc3_unorm || format == TextureFormat::bc3_srgb ||
            format == TextureFormat::bc4_unorm ||
-           format == TextureFormat::bc5_unorm ||
+           format == TextureFormat::bc5_unorm || format == TextureFormat::bc5_snorm ||
            format == TextureFormat::bc6h_ufloat || format == TextureFormat::bc6h_sfloat ||
            format == TextureFormat::bc7_unorm || format == TextureFormat::bc7_srgb;
 }

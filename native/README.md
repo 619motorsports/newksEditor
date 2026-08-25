@@ -188,8 +188,8 @@ The current backends initialize devices and create/upload buffers and bounded
 2D textures, samplers, and immutable shader modules. They execute bounded
 RGBA8/BGRA8 texture clears and canonical RGBA8 readback. They also validate a
 pipeline and execute fixed and indexed R16 static-mesh draws with readback.
-The device API uploads immutable, one-layer BC1, BC2, BC3, BC4, BC5, BC6H, and BC7
-sampled textures.
+The device API uploads immutable, one-layer BC1, BC2, BC3, BC4 UNORM,
+BC5 UNORM, BC5 SNORM, BC6H, and BC7 sampled textures.
 The owned static-scene path uploads bounded PNG decodes as RGBA8 UNORM.
 It validates each block row before allocation. Vulkan and D3D12 query format
 support before they create a compressed image. BC4 SNORM remains outside this
@@ -342,9 +342,10 @@ supported DDS 2D mip chains and bounded PNG images to RGBA8. DDS retains
 explicit sRGB metadata. PNG retains straight alpha and top-to-bottom rows and
 uses RGBA8 UNORM without implicit color conversion. This portable CPU decode is not a
 direct block-compressed path. The separate device API supports direct BC1,
-BC2, BC3, BC4, BC5, BC6H, and BC7 uploads. The embedded path retains its exact,
-bounded BC7 CPU fallback. The bounded normal-map ABI does not accept BC5. This ABI needs
-a three-channel sampled normal. Its shader does not reconstruct Z.
+BC2, BC3, BC4 UNORM, BC5 UNORM, BC5 SNORM, BC6H, and BC7 uploads. The embedded
+path retains its exact, bounded BC7 CPU fallback. The bounded normal-map ABI
+does not accept BC5. This ABI needs a three-channel sampled normal. Its shader
+does not reconstruct Z.
 The BC7 pixel test needs a supported Vulkan device or a Windows D3D12 device.
 BC6H requires a capable GPU because no portable CPU decoder is available. The
 upload planner supports DX10 2D arrays, cubemaps, and RGB24 conversion. The

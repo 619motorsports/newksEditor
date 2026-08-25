@@ -781,6 +781,8 @@ private:
         return DXGI_FORMAT_BC4_UNORM;
     case TextureFormat::bc5_unorm:
         return DXGI_FORMAT_BC5_UNORM;
+    case TextureFormat::bc5_snorm:
+        return DXGI_FORMAT_BC5_SNORM;
     case TextureFormat::bc6h_ufloat:
         return DXGI_FORMAT_BC6H_UF16;
     case TextureFormat::bc6h_sfloat:
@@ -799,7 +801,7 @@ private:
            format == TextureFormat::bc2_unorm || format == TextureFormat::bc2_srgb ||
            format == TextureFormat::bc3_unorm || format == TextureFormat::bc3_srgb ||
            format == TextureFormat::bc4_unorm ||
-           format == TextureFormat::bc5_unorm ||
+           format == TextureFormat::bc5_unorm || format == TextureFormat::bc5_snorm ||
            format == TextureFormat::bc6h_ufloat || format == TextureFormat::bc6h_sfloat ||
            format == TextureFormat::bc7_unorm || format == TextureFormat::bc7_srgb;
 }

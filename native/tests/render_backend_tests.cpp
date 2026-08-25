@@ -785,6 +785,14 @@ void contract_texture_limits() {
                 bc5_info.block_bytes == 16U && !bc5_info.srgb &&
                 texture_format_is_compressed(TextureFormat::bc5_unorm),
             "BC5 texture metadata");
+    const auto bc5_snorm_info = texture_format_info(TextureFormat::bc5_snorm);
+    require(bc5_snorm_info.classification == TextureFormatClass::block_compressed &&
+                bc5_snorm_info.block_width == 4U &&
+                bc5_snorm_info.block_height == 4U &&
+                bc5_snorm_info.block_bytes == 16U &&
+                bc5_snorm_info.signed_channels &&
+                texture_format_is_compressed(TextureFormat::bc5_snorm),
+            "BC5 SNORM texture metadata");
     const auto bc4_info = texture_format_info(TextureFormat::bc4_unorm);
     require(bc4_info.classification == TextureFormatClass::block_compressed &&
                 bc4_info.block_width == 4U && bc4_info.block_height == 4U &&
@@ -850,6 +858,7 @@ void contract_texture_limits() {
     check_bc_upload(TextureFormat::bc3_srgb, 16U, "BC3 sRGB");
     check_bc_upload(TextureFormat::bc4_unorm, 8U, "BC4");
     check_bc_upload(TextureFormat::bc5_unorm, 16U, "BC5");
+    check_bc_upload(TextureFormat::bc5_snorm, 16U, "BC5 SNORM");
     check_bc_upload(TextureFormat::bc6h_ufloat, 16U, "BC6H UF16");
     check_bc_upload(TextureFormat::bc6h_sfloat, 16U, "BC6H SF16");
     check_bc_upload(TextureFormat::bc7_unorm, 16U, "BC7");
@@ -2372,19 +2381,23 @@ bool contract_backend(apex::render::Backend backend) {
     const std::array<std::uint8_t, 16> bc5_block = {
         0x80U, 0x80U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
         0x40U, 0x40U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U};
-    const TextureDescription bc5_description{
-        4U, 4U, 1U, 1U, TextureFormat::bc5_unorm, TextureUsage::sampled,
-        TextureMemory::device_local, TextureMutability::immutable};
     const TextureUploadPlan bc5_uploads{{
         TextureUpload{0U, 0U, 4U, 4U, 16U, std::as_bytes(std::span(bc5_block))}}};
-    TextureResult bc5_texture = device.device->create_texture(bc5_description, bc5_uploads);
-    if (!bc5_texture.ok() && bc5_texture.status == TextureStatus::unsupported &&
-        (bc5_texture.diagnostic.code == "vulkan_compressed_format_unsupported" ||
-         bc5_texture.diagnostic.code == "d3d12_texture_format_unsupported")) {
-        // BC5 support is adapter-dependent, like BC7.
-    } else {
-        require(bc5_texture.ok(), "BC5 generic sampled texture creation");
-    }
+    const auto create_bc5_texture = [&](TextureFormat format,
+                                        std::string_view name) {
+        const TextureDescription description{
+            4U, 4U, 1U, 1U, format, TextureUsage::sampled,
+            TextureMemory::device_local, TextureMutability::immutable};
+        TextureResult texture = device.device->create_texture(description, bc5_uploads);
+        if (!texture.ok() && texture.status == TextureStatus::unsupported &&
+            (texture.diagnostic.code == "vulkan_compressed_format_unsupported" ||
+             texture.diagnostic.code == "d3d12_texture_format_unsupported")) {
+            return;
+        }
+        require(texture.ok(), std::string(name) + " generic sampled texture creation");
+    };
+    create_bc5_texture(TextureFormat::bc5_unorm, "BC5");
+    create_bc5_texture(TextureFormat::bc5_snorm, "BC5 SNORM");
 
     // BC2 is an exact RGBA block resource. It has no material-binding claim
     // in this fixture, but both native backends must admit the raw upload or
