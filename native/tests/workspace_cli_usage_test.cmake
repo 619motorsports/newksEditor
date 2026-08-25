@@ -96,7 +96,179 @@ if(kind_position EQUAL -1)
   message(FATAL_ERROR "detached workspace kind was not diagnosed: ${kind_error}")
 endif()
 
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --track-camera-set cameras.ini
+  RESULT_VARIABLE camera_set_only_result
+  ERROR_VARIABLE camera_set_only_error
+)
+if(NOT camera_set_only_result STREQUAL "1")
+  message(FATAL_ERROR
+    "camera set without index returned ${camera_set_only_result}: ${camera_set_only_error}")
+endif()
+string(FIND "${camera_set_only_error}"
+  "--track-camera-set and --track-camera-index must be supplied together"
+  camera_set_only_position)
+if(camera_set_only_position EQUAL -1)
+  message(FATAL_ERROR
+    "camera set without index was not diagnosed: ${camera_set_only_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --track-camera-index 0
+  RESULT_VARIABLE camera_index_only_result
+  ERROR_VARIABLE camera_index_only_error
+)
+if(NOT camera_index_only_result STREQUAL "1")
+  message(FATAL_ERROR
+    "camera index without set returned ${camera_index_only_result}: ${camera_index_only_error}")
+endif()
+string(FIND "${camera_index_only_error}"
+  "--track-camera-set and --track-camera-index must be supplied together"
+  camera_index_only_position)
+if(camera_index_only_position EQUAL -1)
+  message(FATAL_ERROR
+    "camera index without set was not diagnosed: ${camera_index_only_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --track-camera-position 0.5
+  RESULT_VARIABLE camera_position_only_result
+  ERROR_VARIABLE camera_position_only_error
+)
+if(NOT camera_position_only_result STREQUAL "1")
+  message(FATAL_ERROR
+    "camera position without set returned ${camera_position_only_result}: ${camera_position_only_error}")
+endif()
+string(FIND "${camera_position_only_error}"
+  "track-camera position and playback require --track-camera-set"
+  camera_position_only_position)
+if(camera_position_only_position EQUAL -1)
+  message(FATAL_ERROR
+    "camera position without set was not diagnosed: ${camera_position_only_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --track-camera-play
+  RESULT_VARIABLE camera_play_only_result
+  ERROR_VARIABLE camera_play_only_error
+)
+if(NOT camera_play_only_result STREQUAL "1")
+  message(FATAL_ERROR
+    "camera playback without set returned ${camera_play_only_result}: ${camera_play_only_error}")
+endif()
+string(FIND "${camera_play_only_error}"
+  "track-camera position and playback require --track-camera-set"
+  camera_play_only_position)
+if(camera_play_only_position EQUAL -1)
+  message(FATAL_ERROR
+    "camera playback without set was not diagnosed: ${camera_play_only_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --track-camera-set cameras.ini --track-camera-index 0
+          --track-camera-position 1.1
+  RESULT_VARIABLE camera_position_range_result
+  ERROR_VARIABLE camera_position_range_error
+)
+if(NOT camera_position_range_result STREQUAL "1")
+  message(FATAL_ERROR
+    "out-of-range camera position returned ${camera_position_range_result}: ${camera_position_range_error}")
+endif()
+string(FIND "${camera_position_range_error}"
+  "track-camera position must be from zero to one"
+  camera_position_range_position)
+if(camera_position_range_position EQUAL -1)
+  message(FATAL_ERROR
+    "out-of-range camera position was not diagnosed: ${camera_position_range_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --track-camera-set cameras.ini --track-camera-index 0
+  RESULT_VARIABLE detached_camera_result
+  ERROR_VARIABLE detached_camera_error
+)
+if(NOT detached_camera_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached track camera returned ${detached_camera_result}: ${detached_camera_error}")
+endif()
+string(FIND "${detached_camera_error}"
+  "track-camera options require a workspace model"
+  detached_camera_position)
+if(detached_camera_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached track camera was not diagnosed: ${detached_camera_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --track-camera-index invalid
+  RESULT_VARIABLE malformed_camera_index_result
+  ERROR_VARIABLE malformed_camera_index_error
+)
+if(NOT malformed_camera_index_result STREQUAL "1")
+  message(FATAL_ERROR
+    "malformed camera index returned ${malformed_camera_index_result}: ${malformed_camera_index_error}")
+endif()
+string(FIND "${malformed_camera_index_error}"
+  "track-camera index must be a valid unsigned 32-bit integer"
+  malformed_camera_index_position)
+if(malformed_camera_index_position EQUAL -1)
+  message(FATAL_ERROR
+    "malformed camera index was not diagnosed: ${malformed_camera_index_error}")
+endif()
+
 set(model "${APEX_SOURCE_DIR}/test/content/cars/619_gen6_arca_base/619_gen6_fusion13.kn5")
+set(track_cameras "${APEX_SOURCE_DIR}/test/content/tracks/sepang/data/cameras.ini")
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --track-camera-set "${track_cameras}" --track-camera-index 0
+          --track-camera-position 0.5
+  RESULT_VARIABLE track_camera_result
+  OUTPUT_VARIABLE track_camera_output
+  ERROR_VARIABLE track_camera_error
+)
+if(NOT track_camera_result STREQUAL "1")
+  message(FATAL_ERROR
+    "track-camera workspace returned ${track_camera_result}: ${track_camera_error}")
+endif()
+string(FIND "${track_camera_output}"
+  "track camera: index=0, name=\"cam01\", spline-points=0, position=0.5"
+  track_camera_position)
+if(track_camera_position EQUAL -1)
+  message(FATAL_ERROR
+    "track-camera selection did not load before renderer setup: ${track_camera_output}${track_camera_error}")
+endif()
+string(FIND "${track_camera_error}"
+  "caller-supplied shader modules" track_camera_modules_position)
+if(track_camera_modules_position EQUAL -1)
+  message(FATAL_ERROR
+    "track-camera workspace did not reach shader validation: ${track_camera_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --track-camera-set "${track_cameras}" --track-camera-index 0
+          --track-camera-play
+  RESULT_VARIABLE fixed_camera_play_result
+  ERROR_VARIABLE fixed_camera_play_error
+)
+if(NOT fixed_camera_play_result STREQUAL "1")
+  message(FATAL_ERROR
+    "fixed-camera playback returned ${fixed_camera_play_result}: ${fixed_camera_play_error}")
+endif()
+string(FIND "${fixed_camera_play_error}"
+  "--track-camera-play requires a camera with a resolved spline"
+  fixed_camera_play_position)
+if(fixed_camera_play_position EQUAL -1)
+  message(FATAL_ERROR
+    "fixed-camera playback was not diagnosed: ${fixed_camera_play_error}")
+endif()
 
 execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"

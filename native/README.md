@@ -166,6 +166,12 @@ out/native/dev/native/apex-native --window vulkan \
   --kind carLods --lod-index 1 \
   --shader-family ksPerPixel --shader-vertex stock.vert.spv \
   --shader-fragment stock.frag.spv
+out/native/dev/native/apex-native --window vulkan \
+  --workspace-root content/tracks/example --manifest models.ini --kind track \
+  --track-camera-set data/cameras.ini --track-camera-index 0 \
+  --track-camera-position 0.5 --track-camera-play \
+  --shader-family ksPerPixel --shader-vertex stock.vert.spv \
+  --shader-fragment stock.frag.spv
 ```
 
 The analog RPM options apply the recovered linear needle transform before scene
@@ -180,6 +186,21 @@ The adapter also exposes the same bounded sampling operation without changing
 a model. If a matched animation changes a model with skinned geometry, the
 window enables CPU skinning for each color frame. When a skinned shadow
 pipeline is available, both passes use the same prepared pose.
+The track-camera options select one record from a bounded camera file.
+The shell loads a referenced spline relative to that camera file.
+The asset request rejects absolute paths, traversal, and drive or stream syntax.
+`--track-camera-position` selects a normalized spline position from zero to one.
+`--track-camera-play` starts one-shot playback from that position.
+A start position of one restarts playback at zero.
+A zero animation length uses the production WebGL fallback of 15 seconds.
+A negative animation length uses the minimum duration of 0.001 seconds.
+Spline cameras use `MIN_FOV`. Cameras without a spline use the midpoint FOV.
+Both modes retain the saved forward and up basis from the camera file.
+This mapping matches the production WebGL editor.
+It does not claim the installed editor's Catmull-Rom spline preview.
+It also does not claim the game behavior that targets a focused car.
+The left or middle pointer button returns control to the orbit camera.
+The wheel and WASD/QE keys also return control to the orbit camera.
 The hierarchy options search, select, isolate, show hidden nodes, and enable
 wireframe through the backend-neutral viewport request. Search uses bounded
 ASCII case-insensitive matching. It retains duplicate node names.

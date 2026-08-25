@@ -2,12 +2,14 @@
 #include "apex/app/presentation_recreation.hpp"
 #include "apex/app/workspace_selection.hpp"
 #include "apex/app/workspace_shadow_programs.hpp"
+#include "apex/app/workspace_track_camera.hpp"
 #include "apex/app/workspace_viewport.hpp"
 #include "apex/assets/asset_source.hpp"
 #include "apex/core/parse_error.hpp"
 #include "apex/core/parse_limits.hpp"
 #include "apex/domain/analog_instruments.hpp"
 #include "apex/domain/animation_preview.hpp"
+#include "apex/domain/track_data.hpp"
 #include "apex/formats/acd.hpp"
 #include "apex/formats/dds.hpp"
 #include "apex/formats/ini.hpp"
@@ -56,6 +58,8 @@ void usage(std::ostream& output) {
               "                       [--analog-instruments <file> [--rpm <value>]]\n"
               "                       [--animation <file> [--animation-position <value>]]\n"
               "                       [--lod-index <index>]\n"
+              "                       [--track-camera-set <file> --track-camera-index <index>]\n"
+              "                       [--track-camera-position <value>] [--track-camera-play]\n"
               "                       [--node-search <query>] [--selected-node <id> [--isolate-selected]]\n"
               "                       [--show-hidden] [--wireframe] [--grid] [--view-axis]\n"
               "                       [--weather <stock-id>] [--sun-heading <degrees>] [--sun-height <degrees>]\n"
@@ -499,15 +503,22 @@ apex::scene::NodeId parse_scene_node_id(std::string_view value) {
     return static_cast<apex::scene::NodeId>(result);
 }
 
-std::uint32_t parse_lod_index(std::string_view value) {
+std::uint32_t parse_unsigned_index(std::string_view value,
+                                   std::string_view label) {
     std::uint64_t result = 0U;
     const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result);
     if (value.empty() || parsed.ec != std::errc{} ||
         parsed.ptr != value.data() + value.size() ||
         result > std::numeric_limits<std::uint32_t>::max()) {
-        throw std::runtime_error("LOD index must be a valid unsigned 32-bit integer");
+        throw std::runtime_error(
+            std::string(label) +
+            " must be a valid unsigned 32-bit integer");
     }
     return static_cast<std::uint32_t>(result);
+}
+
+std::uint32_t parse_lod_index(std::string_view value) {
+    return parse_unsigned_index(value, "LOD index");
 }
 
 struct WindowShaderSpec {
@@ -529,6 +540,11 @@ struct WindowWorkspaceOptions {
     double animationPosition = 0.0;
     bool animationPositionSpecified = false;
     std::optional<std::uint32_t> lodIndex;
+    std::optional<std::filesystem::path> trackCameraSet;
+    std::optional<std::uint32_t> trackCameraIndex;
+    double trackCameraPosition = 0.0;
+    bool trackCameraPositionSpecified = false;
+    bool trackCameraPlay = false;
     std::optional<std::string> nodeSearch;
     std::optional<apex::scene::NodeId> selectedNode;
     bool isolateSelected = false;
@@ -575,6 +591,11 @@ struct LoadedWindowWorkspace {
         selectedMeshModules;
     std::optional<apex::app::WorkspaceViewportDirectionalShadowOptions>
         directionalShadows;
+    struct TrackCamera {
+        apex::domain::CameraData camera;
+        std::vector<std::array<double, 3U>> splinePoints;
+    };
+    std::optional<TrackCamera> trackCamera;
     apex::app::WorkspaceSelectionState selection;
     bool animationSkinningRequired = false;
 };
@@ -702,6 +723,32 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             if (result.lodIndex.has_value())
                 throw std::runtime_error("duplicate --lod-index option");
             result.lodIndex = parse_lod_index(require_value("--lod-index"));
+        } else if (option == "--track-camera-set") {
+            if (result.trackCameraSet.has_value())
+                throw std::runtime_error(
+                    "duplicate --track-camera-set option");
+            result.trackCameraSet = std::filesystem::path(
+                require_value("--track-camera-set"));
+        } else if (option == "--track-camera-index") {
+            if (result.trackCameraIndex.has_value())
+                throw std::runtime_error(
+                    "duplicate --track-camera-index option");
+            result.trackCameraIndex = parse_unsigned_index(
+                require_value("--track-camera-index"),
+                "track-camera index");
+        } else if (option == "--track-camera-position") {
+            if (result.trackCameraPositionSpecified)
+                throw std::runtime_error(
+                    "duplicate --track-camera-position option");
+            result.trackCameraPosition = parse_finite_number(
+                require_value("--track-camera-position"),
+                "track-camera position");
+            result.trackCameraPositionSpecified = true;
+        } else if (option == "--track-camera-play") {
+            if (result.trackCameraPlay)
+                throw std::runtime_error(
+                    "duplicate --track-camera-play option");
+            result.trackCameraPlay = true;
         } else if (option == "--node-search") {
             if (result.nodeSearch.has_value())
                 throw std::runtime_error("duplicate --node-search option");
@@ -891,6 +938,22 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
          result.kind != apex::app::WorkspaceSessionKind::carLods)) {
         throw std::runtime_error("--lod-index requires a carLods workspace");
     }
+    if (result.trackCameraSet.has_value() !=
+        result.trackCameraIndex.has_value())
+        throw std::runtime_error(
+            "--track-camera-set and --track-camera-index must be supplied together");
+    if ((result.trackCameraPositionSpecified || result.trackCameraPlay) &&
+        !result.trackCameraSet.has_value())
+        throw std::runtime_error(
+            "track-camera position and playback require --track-camera-set");
+    if (result.trackCameraPosition < 0.0 ||
+        result.trackCameraPosition > 1.0)
+        throw std::runtime_error(
+            "track-camera position must be from zero to one");
+    if (result.trackCameraSet.has_value() && !result.model.has_value() &&
+        !result.workspaceRoot.has_value())
+        throw std::runtime_error(
+            "track-camera options require a workspace model");
     if (result.isolateSelected && !result.selectedNode.has_value())
         throw std::runtime_error("--isolate-selected requires --selected-node");
     const bool selection_options = result.nodeSearch.has_value() ||
@@ -1006,6 +1069,60 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
         loaded.document->sceneBinding = apex::workspace::bindWorkspaceScene(
             loaded.document->scene.snapshot,
             loaded.document->assembly.workspace);
+    }
+    if (options.trackCameraSet.has_value()) {
+        const auto camera_bytes = read_file(*options.trackCameraSet);
+        const auto camera_set = apex::domain::parse_track_cameras(
+            bytes_as_text(camera_bytes),
+            options.trackCameraSet->generic_string());
+        for (const auto& item : camera_set.diagnostics) {
+            std::cerr << item.code << " [" << item.source << ':'
+                      << item.line << "]: " << item.message << '\n';
+        }
+        const auto camera = std::find_if(
+            camera_set.cameras.begin(), camera_set.cameras.end(),
+            [&](const apex::domain::CameraData& candidate) {
+                return candidate.index == *options.trackCameraIndex;
+            });
+        if (camera == camera_set.cameras.end())
+            throw std::runtime_error(
+                "selected track-camera index is not present");
+
+        LoadedWindowWorkspace::TrackCamera preview;
+        preview.camera = *camera;
+        if (!preview.camera.spline.empty()) {
+            const auto spline_request = apex::domain::request_camera_spline(
+                preview.camera, options.trackCameraSet->generic_string());
+            if (!spline_request.accepted)
+                throw std::runtime_error(
+                    spline_request.code + ": " + spline_request.message);
+            std::string portable_relative = spline_request.relative_path;
+            std::replace(portable_relative.begin(), portable_relative.end(),
+                         '\\', '/');
+            const auto spline_path = options.trackCameraSet->parent_path() /
+                                     std::filesystem::path(portable_relative);
+            const auto spline_bytes = read_file(spline_path);
+            const auto spline = apex::domain::parse_camera_spline(
+                bytes_as_text(spline_bytes), spline_path.generic_string());
+            for (const auto& item : spline.diagnostics) {
+                std::cerr << item.code << " [" << item.source << ':'
+                          << item.line << "]: " << item.message << '\n';
+            }
+            if (spline.points.empty())
+                throw std::runtime_error(
+                    "selected track-camera spline has no valid points");
+            preview.splinePoints = apex::domain::rotate_camera_spline(
+                spline.points, preview.camera.spline_rotation);
+        } else if (options.trackCameraPlay) {
+            throw std::runtime_error(
+                "--track-camera-play requires a camera with a resolved spline");
+        }
+        std::cout << "track camera: index=" << preview.camera.index
+                  << ", name=";
+        write_cli_text(std::cout, preview.camera.name);
+        std::cout << ", spline-points=" << preview.splinePoints.size()
+                  << ", position=" << options.trackCameraPosition << '\n';
+        loaded.trackCamera = std::move(preview);
     }
     const bool selection_options = options.nodeSearch.has_value() ||
                                    options.selectedNode.has_value() ||
@@ -1264,12 +1381,41 @@ int run_window(int argc, char** argv) {
         camera_controller.distance = static_cast<float>(distance);
     }
 
-    auto current_camera = [&]() {
-        const auto description = target_result.target->info().description;
-        return camera_controller.frame(
-            static_cast<float>(description.width) /
-                static_cast<float>(description.height),
-            clip_space);
+    bool track_camera_active = loaded_workspace.trackCamera.has_value();
+    std::optional<std::chrono::steady_clock::time_point>
+        track_camera_playback_started;
+    auto current_camera = [&](std::uint32_t width,
+                              std::uint32_t height)
+        -> apex::render::CameraFrameResult {
+        const float aspect = static_cast<float>(width) /
+                             static_cast<float>(height);
+        if (!track_camera_active)
+            return camera_controller.frame(aspect, clip_space);
+
+        const auto& preview = *loaded_workspace.trackCamera;
+        double spline_position = workspace_options.trackCameraPosition;
+        if (workspace_options.trackCameraPlay) {
+            const double elapsed = track_camera_playback_started.has_value()
+                ? std::chrono::duration<double>(
+                      std::chrono::steady_clock::now() -
+                      *track_camera_playback_started).count()
+                : 0.0;
+            const auto playback =
+                apex::app::evaluateWorkspaceTrackCameraPlayback({
+                    workspace_options.trackCameraPosition,
+                    elapsed,
+                    preview.camera.spline_animation_length});
+            if (!playback.ok()) {
+                return {std::nullopt, playback.code, playback.message};
+            }
+            spline_position = playback.position;
+        }
+        return apex::app::buildWorkspaceTrackCameraFrame({
+            &preview.camera,
+            preview.splinePoints,
+            spline_position,
+            aspect,
+            clip_space});
     };
     std::unique_ptr<apex::app::WorkspaceViewport> viewport;
     auto prepare_viewport = [&]() {
@@ -1277,7 +1423,9 @@ int run_window(int argc, char** argv) {
             viewport.reset();
             return true;
         }
-        const auto camera = current_camera();
+        const auto description = target_result.target->info().description;
+        const auto camera = current_camera(description.width,
+                                           description.height);
         if (!camera.ok()) {
             std::cerr << "workspace camera: " << camera.code << ": "
                       << camera.message << '\n';
@@ -1363,6 +1511,7 @@ int run_window(int argc, char** argv) {
             request.workspace.lod_bounds_center =
                 loaded_workspace.document->scene.preview_bounds->center;
             request.workspace.lod_index = workspace_options.lodIndex;
+            request.workspace.lod_track_camera = track_camera_active;
         }
         auto prepared = apex::app::prepareWorkspaceViewport(
             *device_result.device, *loaded_workspace.document, request);
@@ -1375,6 +1524,8 @@ int run_window(int argc, char** argv) {
         return true;
     };
     if (!prepare_viewport()) return 1;
+    if (workspace_options.trackCameraPlay)
+        track_camera_playback_started = std::chrono::steady_clock::now();
 
     std::array<apex::platform::WindowEvent, 64U> events{};
     std::uint64_t frames = 0U;
@@ -1383,6 +1534,7 @@ int run_window(int argc, char** argv) {
     while (!window_result.window->close_requested() &&
            (frame_limit == 0U || frames < frame_limit)) {
         bool resized = false;
+        bool camera_mode_changed = false;
         const auto event_count = window_result.window->poll_events(events);
         for (std::size_t index = 0U; index < event_count; ++index) {
             if (events[index].type == apex::platform::WindowEventType::pixel_size_changed)
@@ -1391,15 +1543,27 @@ int run_window(int argc, char** argv) {
             case apex::platform::WindowEventType::key_down:
                 if (const auto movement = workspace_camera_move_for_key(
                         events[index].key); movement.has_value()) {
+                    if (track_camera_active) {
+                        track_camera_active = false;
+                        camera_mode_changed = true;
+                    }
                     (void)camera_controller.move(*movement);
                 }
                 break;
             case apex::platform::WindowEventType::mouse_button_down:
                 if (events[index].button == 1U) {
+                    if (track_camera_active) {
+                        track_camera_active = false;
+                        camera_mode_changed = true;
+                    }
                     (void)camera_controller.apply({
                         apex::app::WorkspaceViewportCameraGesture::begin_orbit,
                         0.0F, 0.0F});
                 } else if (events[index].button == 2U) {
+                    if (track_camera_active) {
+                        track_camera_active = false;
+                        camera_mode_changed = true;
+                    }
                     (void)camera_controller.apply({
                         apex::app::WorkspaceViewportCameraGesture::begin_pan,
                         0.0F, 0.0F});
@@ -1416,6 +1580,10 @@ int run_window(int argc, char** argv) {
                     events[index].x_relative, events[index].y_relative});
                 break;
             case apex::platform::WindowEventType::mouse_wheel:
+                if (track_camera_active) {
+                    track_camera_active = false;
+                    camera_mode_changed = true;
+                }
                 (void)camera_controller.apply({
                     apex::app::WorkspaceViewportCameraGesture::wheel,
                     events[index].x_relative, events[index].y_relative});
@@ -1431,6 +1599,7 @@ int run_window(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(16));
             continue;
         }
+        bool viewport_prepared = false;
         if (apex::app::presentation_resize_requires_recreation(
                 resized, pixel_width, pixel_height)) {
             target_result.target.reset();
@@ -1441,15 +1610,16 @@ int run_window(int argc, char** argv) {
                 return 1;
             }
             if (!prepare_viewport()) return 1;
+            viewport_prepared = true;
         }
+        if (camera_mode_changed && !viewport_prepared &&
+            !prepare_viewport()) return 1;
         apex::render::PresentationFrameResult blank_frame;
         apex::app::WorkspaceViewportFrameStatus viewport_status =
             apex::app::WorkspaceViewportFrameStatus::ready;
         apex::render::Diagnostic viewport_diagnostic;
         if (viewport != nullptr) {
-            const auto camera = camera_controller.frame(
-                static_cast<float>(pixel_width) / static_cast<float>(pixel_height),
-                clip_space);
+            const auto camera = current_camera(pixel_width, pixel_height);
             if (!camera.ok()) {
                 std::cerr << "workspace camera: " << camera.code << ": "
                           << camera.message << '\n';

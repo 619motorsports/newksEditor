@@ -260,6 +260,13 @@ The port draws the selected mesh once at the opaque-to-transparent boundary.
 This is a labeled portable mapping, not a claim that native shadow-mapped
 transparent participation has been recovered.
 
+The recovered `SplineEditor` listener also runs from `SCENE_FINISHED`.
+It rejects non-opaque passes and draws after the model and selected mesh.
+Its exact colors, depth changes, interpolation step, and line-strip helper are
+recorded in
+[`docs/evidence/ksnet-spline-editor-callback.md`](evidence/ksnet-spline-editor-callback.md).
+The native viewport does not implement this AI spline pass yet.
+
 ### Native blurred-rim switch
 
 The supporting IL opcodes, metadata tokens, string RVAs, and installed-binary hash
@@ -2023,6 +2030,16 @@ forward/up basis while moving along the exact position path; focused-car targeti
 remains an explicit limitation. A browser playback check advanced the same 12-second
 spline to normalized `0.153733`, produced the sampled `+0.151475 m` Y offset,
 kept FOV at 4°, loaded all 122 textures, and reported no JavaScript or WebGL errors.
+
+The native shell now uses this production WebGL mapping for track-camera preview.
+It selects a bounded camera record and resolves its spline through the safe
+asset request. Fixed preview uses the midpoint FOV. Spline preview uses
+`MIN_FOV` and changes only the saved eye position. The backend camera builder
+keeps the saved forward and up basis and applies the Vulkan or D3D12 clip space.
+This native path does not claim the game's focused-car target behavior.
+It also does not claim the installed editor's distinct Catmull-Rom preview.
+The recovered installed-editor contract is recorded in
+[`docs/evidence/ksnet-track-camera-preview.md`](evidence/ksnet-track-camera-preview.md).
 
 ## Track surface physics evidence
 

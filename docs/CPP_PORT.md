@@ -469,6 +469,12 @@ remains unchanged and feature-complete.
   after a failed draw. The native shell maps bounded SDL mouse gestures and
   portable WASD/QE keycodes to an application-owned camera controller. Motion
   translates the orbit target without exposing platform or backend types.
+  The shell can also select a bounded track-camera record and its relative
+  spline. Fixed positions and one-shot playback use the production WebGL
+  saved-basis mapping. Spline motion changes the eye position and uses
+  `MIN_FOV`. This mapping does not claim the installed editor's Catmull-Rom
+  preview or the game's focused-car target.
+  Pointer, wheel, and WASD/QE input return control to the orbit camera.
   The shell also evaluates one of the seven stock weather presets with bounded
   sun angles. It uploads sun, sky, horizon, and fog values through the 128-byte
   portable frame record. Its first 64 bytes keep the earlier lighting layout.
