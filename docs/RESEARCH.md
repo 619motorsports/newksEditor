@@ -2183,6 +2183,27 @@ generator confirms that its pixel stage samples `txDiffuse` with `ksAlphaRef`.
 `ksNet.kMesh` and `kSkinnedMesh` each expose a `CastShadow` property, while
 `ksGraphics` exposes `setShadowMapBias` and `setSunDirection`.
 
+Reflection and disassembly of the installed stock shader binaries make the receiver
+ABI exact. `ksPerPixel_ps.fxo` (SHA-256
+`cd75bdaa71b68536a6f0879bebbd8c79234e374e2bdd24a268a8663d1a0732ad`) binds a
+208-byte `cbShadowMaps` at pixel register `b3`: three 64-byte matrices at offsets
+0, 64, and 128, three float32 bias values at offset 192, and one float32
+`textureSize` value at offset 204. The shadow textures occupy `t6`, `t7`, and `t8`,
+and the comparison sampler occupies `s1`. Its vertex shader (SHA-256
+`4a446d5c1fd0325ae5b4882d8105796ef1e72e18740a8e35e1280216fe30c7b1`) also
+declares `cbShadowMaps` at `b3` and produces the three projected coordinates with
+dot products against its twelve matrix rows. The pixel program reads the three
+biases from `cb3[12].xyz`, uses `cb3[12].w` in texture-size arithmetic, and performs
+3x3 PCF with comparison-sampling instructions. The shadow-enabled `ksPerPixel*`
+variants inspected retain these bindings; `ksPerPixel_nosdw_ps.fxo` omits them.
+
+The matching PDB identifies the host update paths as
+`GraphicsManager::setShadowMapBias` at segment offset `0001:284723`,
+`setShadowMapMatrix` at `0001:284787`, and `setShadowMapTexture` at
+`0001:284871`. Trustworthy setter decompilation is not yet available, so the exact
+host value assigned to `textureSize` remains unresolved. It must not be inferred
+from the shader arithmetic alone.
+
 Apex implements this as three portable WebGL depth targets. Each projection is fitted
 to its camera-frustum slice and snapped to shadow texels, then sampled with 3×3 PCF.
 Only direct sun diffuse/specular is attenuated; ambient, environment, emissive, and CSP
@@ -2202,14 +2223,16 @@ remains a lighting acceptance gate.
 
 The native port now owns three shader-readable single-sample D32 attachments.
 Its portable receiver contract uses bindings 16-20 for three maps, one
-nearest clamp-to-edge sampler, and one 256-byte constants record. Vulkan
+nearest clamp-to-edge sampler, and one 256-byte constants record. This is an
+explicit-PCF cross-backend contract, not the recovered 208-byte `b3` ABI or its
+comparison-sampler binding. Vulkan
 executes the three sampled maps on SwiftShader and preserves the required
 depth-write, shader-read, and readback transitions. A bounded reference test
 checks the hard 2/12/50 split selection, out-of-map lit result, per-cascade
 bias, and all nine explicit PCF comparisons. D3D12 allocates `R32_TYPELESS`
 resources with `D32_FLOAT` DSVs and `R32_FLOAT` SRVs. Its receiver descriptor
 execution remains staged until it passes a Windows WARP build. This work does
-not establish the recovered DXBC register packing or native pixel parity.
+not establish native pixel parity.
 
 ## ksEditor weather, HDR, and exposure evidence
 
