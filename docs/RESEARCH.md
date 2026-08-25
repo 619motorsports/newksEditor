@@ -238,10 +238,15 @@ The selected material uses opaque blending, front-face culling, and solid fill.
 The selected draw disables depth tests and depth writes. Its changing alpha is
 written to the target, but it does not blend the magenta RGB value.
 
-The selected object draws at its child position during the normal scene
-traversal. The grid and selected-node axis draw after that traversal. The exact
-child position remains unresolved. Therefore, a port must not describe a
-fixed scene-then-selection order as exact.
+`SceneGraph.{ctor}` adds `SCENE_ROOT`, `SelectedMesh`, and `SCENE_FINISHED` to
+the root in that order. `loadKN5` adds the model below `SCENE_ROOT`.
+Therefore, all model geometry draws before the selected mesh. The grid and
+selected-node axis draw after the scene traversal.
+
+The C++ viewport now executes this ordered pass on Vulkan and D3D12. Vulkan
+uses a fragment uniform at set zero, binding zero. D3D12 uses the recovered
+pixel constant-buffer register `b5`. Both backends keep the pass in one batch.
+They resolve 4x color after the line overlays.
 
 ### Native blurred-rim switch
 

@@ -134,6 +134,10 @@ struct PipelineDepthState {
 enum class PipelineTransformContract : std::uint8_t {
     none,
     draw_matrices,
+    // Draw matrices use the vertex constant path. The fragment color uses a
+    // separate uniform/constant-buffer binding so the two values never share
+    // storage on backends with a 128-byte push-constant minimum.
+    selected_mesh,
 };
 
 enum class PipelineResourceKind : std::uint8_t { uniform_buffer, sampled_texture, sampler, storage_buffer };

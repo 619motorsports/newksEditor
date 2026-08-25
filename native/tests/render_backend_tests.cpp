@@ -4,6 +4,7 @@
 #include "apex/render/device.hpp"
 #include "apex/render/draw_packet.hpp"
 #include "apex/render/external_texture_authority.hpp"
+#include "apex/render/selected_mesh.hpp"
 #include "apex/render/skinned_mesh_upload.hpp"
 #include "apex/render/static_scene.hpp"
 #include "apex/render/static_mesh_upload.hpp"
@@ -1009,6 +1010,23 @@ std::vector<std::uint8_t> executable_fragment_shader() {
     for (std::size_t index = 0U; index < result.size(); ++index)
         result[index] = static_cast<std::uint8_t>((hex_digit(hex[index * 2U]) << 4U) |
                                                    hex_digit(hex[index * 2U + 1U]));
+    return result;
+}
+
+std::vector<std::uint8_t> executable_selected_mesh_fragment_shader() {
+    // Generated from tests/shaders/selected_mesh.frag with glslang 16.4.0.
+    // This is the portable selected-color ABI, not recovered stock bytecode.
+    // Source SHA-256: 55721172b8484cfe279fbeb9442c319c4a792808e8153cc21975cf90c17231f8
+    // SPIR-V SHA-256: 4343fe40bd1add7687d114c66dc9c7c419fa74b420e89629ffe07223576c6213
+    constexpr std::string_view hex =
+        "03022307000001000b000800120000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00060004000000040000006d61696e000000000900000010000300040000000700000047000400090000001e00000000000000470003000a00000002000000480005000a000000000000002300000000000000470004000c0000002100000000000000470004000c0000002200000000000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000004000000200004000800000003000000070000003b0004000800000009000000030000001e0003000a00000007000000200004000b000000020000000a0000003b0004000b0000000c00000002000000150004000d00000020000000010000002b0004000d0000000e00000000000000200004000f00000002000000070000003600050002000000040000000000000003000000f800020005000000410005000f000000100000000c0000000e0000003d0004000700000011000000100000003e0003000900000011000000fd00010038000100";
+    require(hex.size() % 2U == 0U,
+            "embedded selected-mesh fragment shader hex alignment");
+    std::vector<std::uint8_t> result(hex.size() / 2U);
+    for (std::size_t index = 0U; index < result.size(); ++index)
+        result[index] = static_cast<std::uint8_t>(
+            (hex_digit(hex[index * 2U]) << 4U) |
+            hex_digit(hex[index * 2U + 1U]));
     return result;
 }
 
@@ -2325,6 +2343,114 @@ bool contract_backend(apex::render::Backend backend) {
     require(indexed_result.rgba8[0] == std::byte{0} && indexed_result.rgba8[1] == std::byte{0} &&
                 indexed_result.rgba8[2] == std::byte{0} && indexed_result.rgba8[3] == std::byte{255},
             "indexed static-mesh outside pixel retains clear color");
+
+    // Draw a red scene triangle followed by the recovered opaque magenta
+    // selected-mesh pass. Both windings are present so front-face culling
+    // removes one triangle while leaving the coincident back face visible.
+    apex::formats::Kn5Node selected_mesh = indexed_mesh;
+    selected_mesh.indices = {0U, 1U, 2U, 0U, 2U, 1U};
+    DrawPacket selected_packet = indexed_packet;
+    selected_packet.world_matrix = apex::scene::identity_matrix;
+    selected_packet.index_count = 6U;
+    selected_packet.flags.selected = true;
+    StaticMeshUploadResult selected_upload =
+        upload_static_mesh(*device.device, selected_mesh, selected_packet);
+    require(selected_upload.ok(), "selected-mesh static upload");
+    std::array<std::byte, selected_mesh_color_view_bytes> selected_color_bytes{};
+    const std::array<float, 4> selected_color = {1.0F, 0.0F, 1.0F, 0.25F};
+    std::memcpy(selected_color_bytes.data(), selected_color.data(),
+                sizeof(selected_color));
+    const BufferDescription selected_color_description{
+        selected_mesh_color_view_bytes, BufferUsage::uniform,
+        BufferMemory::host_visible, BufferMutability::mutable_data};
+    BufferResult selected_color_buffer = device.device->create_buffer(
+        selected_color_description, selected_color_bytes);
+    require(selected_color_buffer.ok(), "selected-mesh color buffer creation");
+    const auto render_selected_mesh = [&](std::uint32_t samples) {
+        TextureDescription target_description = triangle_description;
+        target_description.samples = samples;
+        TextureResult target = device.device->create_texture(target_description);
+        require(target.ok(), "selected-mesh target creation");
+        PipelineProgram scene_pipeline = indexed_pipeline;
+        scene_pipeline.name = "selected-mesh-scene";
+        scene_pipeline.targets.colors[0].samples = samples;
+        PipelineProgram selected_pipeline = scene_pipeline;
+        selected_pipeline.name = "selected-mesh-highlight";
+        selected_pipeline.transform_contract =
+            PipelineTransformContract::selected_mesh;
+        selected_pipeline.raster.fill = PipelineFillMode::solid;
+        selected_pipeline.raster.cull = PipelineCullMode::front;
+        selected_pipeline.depth.test_enabled = false;
+        selected_pipeline.depth.write_enabled = false;
+        selected_pipeline.blend = {};
+        selected_pipeline.resources.clear();
+        if (backend == Backend::Vulkan) {
+            selected_pipeline.shaders[1].bytes =
+                executable_selected_mesh_fragment_shader();
+        } else {
+#if defined(_WIN32)
+            constexpr std::string_view selected_fragment_source =
+                "cbuffer SelectedMeshColor : register(b5) { float4 selectedColor; };"
+                "float4 main(float4 position : SV_Position) : SV_Target { return selectedColor; }";
+            selected_pipeline.shaders[1].bytes = executable_d3d_shader(
+                selected_fragment_source, "ps_5_0");
+#endif
+        }
+        DrawPacket scene_packet = selected_packet;
+        scene_packet.flags.selected = false;
+        Diagnostic request_diagnostic;
+        const auto scene_request = selected_upload.upload->make_request(
+            scene_packet, scene_pipeline, *indexed_camera.frame, 0U, 0U,
+            {0.0F, 0.0F, 0.0F, 1.0F}, request_diagnostic);
+        require(scene_request.has_value(), "selected-mesh scene request");
+        SelectedMeshDrawRequest selected_request;
+        selected_request.packet = &selected_upload.upload->packet;
+        selected_request.pipeline = &selected_pipeline;
+        selected_request.vertex_buffer =
+            selected_upload.upload->vertex_buffer.get();
+        selected_request.index_buffer =
+            selected_upload.upload->index_buffer.get();
+        selected_request.color_buffer = selected_color_buffer.buffer.get();
+        selected_request.color_range_bytes = selected_mesh_color_view_bytes;
+        selected_request.matrices = {apex::scene::identity_matrix,
+                                     indexed_camera.frame->view_projection};
+        const std::array<IndexedStaticMeshDrawRequest, 1U> scene_draws = {
+            *scene_request};
+        const std::array<SelectedMeshDrawRequest, 1U> selected_draws = {
+            selected_request};
+        IndexedStaticMeshBatchDescription selected_batch;
+        selected_batch.draws = scene_draws;
+        selected_batch.selected_mesh_draws = selected_draws;
+        const IndexedStaticMeshBatchResult selected_result =
+            device.device->draw_indexed_static_mesh_batch_and_readback(
+                *target.texture, selected_batch);
+        require(selected_result.ok() &&
+                    selected_result.rgba8.size() == 32U * 32U * 4U,
+                "selected-mesh ordered batch execution");
+        require(selected_result.rgba8[center] == std::byte{255} &&
+                    selected_result.rgba8[center + 1U] == std::byte{0} &&
+                    selected_result.rgba8[center + 2U] == std::byte{255} &&
+                    selected_result.rgba8[center + 3U] == std::byte{64},
+                "selected-mesh pass overwrites scene color with magenta RGBA");
+
+        selected_request.scene_position = 0U;
+        const std::array<SelectedMeshDrawRequest, 1U> selected_first_draws = {
+            selected_request};
+        selected_batch.selected_mesh_draws = selected_first_draws;
+        const IndexedStaticMeshBatchResult selected_first_result =
+            device.device->draw_indexed_static_mesh_batch_and_readback(
+                *target.texture, selected_batch);
+        require(selected_first_result.ok() &&
+                    selected_first_result.rgba8.size() == 32U * 32U * 4U,
+                "selected-mesh position-zero batch execution");
+        require(selected_first_result.rgba8[center] == std::byte{255} &&
+                    selected_first_result.rgba8[center + 1U] == std::byte{0} &&
+                    selected_first_result.rgba8[center + 2U] == std::byte{0} &&
+                    selected_first_result.rgba8[center + 3U] == std::byte{255},
+                "scene draw overwrites selected mesh inserted at position zero");
+    };
+    render_selected_mesh(1U);
+    render_selected_mesh(4U);
 
     // Read back the persistent D32 attachment after a real indexed draw.
     // This covers the complete depth-resource lifecycle: clear, depth test /

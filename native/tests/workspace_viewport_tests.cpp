@@ -133,6 +133,7 @@ public:
         capture_requests.push_back(batch.capture_rgba8);
         draw_counts.push_back(batch.draws.size());
         overlay_counts.push_back(batch.overlay_draws.size());
+        selected_mesh_counts.push_back(batch.selected_mesh_draws.size());
         for (const auto& overlay : batch.overlay_draws) {
             overlay_matrices.push_back(overlay.matrices);
             overlay_buffers.push_back(overlay.vertex_buffer);
@@ -216,6 +217,7 @@ public:
     std::size_t present_calls = 0U;
     std::vector<std::size_t> draw_counts;
     std::vector<std::size_t> overlay_counts;
+    std::vector<std::size_t> selected_mesh_counts;
     std::vector<DrawMatrices> overlay_matrices;
     std::vector<const Buffer*> overlay_buffers;
     std::vector<std::vector<apex::scene::NodeId>> draw_nodes;
@@ -499,6 +501,29 @@ PipelineProgram authoring_overlay_pipeline(const Fixture& fixture_value,
     pipeline.depth.test_enabled = false;
     pipeline.depth.write_enabled = false;
     pipeline.transform_contract = PipelineTransformContract::draw_matrices;
+    return pipeline;
+}
+
+PipelineProgram selected_mesh_pipeline(const Fixture& fixture_value,
+                                       std::uint32_t samples = 1U) {
+    PipelineProgram pipeline;
+    pipeline.name = "viewport-selected-mesh";
+    pipeline.shaders = fixture_value.modules;
+    pipeline.vertex_layout.stride = 11U * sizeof(float);
+    pipeline.vertex_layout.attributes = {
+        {PipelineVertexSemantic::position,
+         PipelineVertexAttributeFormat::float32x3, 0U, 0U},
+    };
+    pipeline.targets.colors = {
+        {PipelineRenderTargetFormat::rgba8_unorm, samples}};
+    pipeline.targets.has_depth = true;
+    pipeline.targets.depth = {
+        PipelineRenderTargetFormat::depth32_float, samples};
+    pipeline.raster.fill = PipelineFillMode::solid;
+    pipeline.raster.cull = PipelineCullMode::front;
+    pipeline.depth.test_enabled = false;
+    pipeline.depth.write_enabled = false;
+    pipeline.transform_contract = PipelineTransformContract::selected_mesh;
     return pipeline;
 }
 
@@ -787,6 +812,50 @@ void draws_selected_axis_inside_the_scene_batch() {
                 vertices[1].position[0] == 4.0F &&
                 vertices[5].position[2] == -1.0F,
             "animated frame override rebuilds normalized RGB axis geometry");
+}
+
+void draws_selected_mesh_with_recovered_fade_boundary() {
+    auto value = fixture();
+    auto request = request_for(value);
+    request.packets.selected_node = 1U;
+    request.selected_mesh_pipeline = selected_mesh_pipeline(value);
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok(), "selected-mesh viewport preparation succeeds");
+
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    Diagnostic diagnostic;
+    frame.selected_mesh_elapsed_ms = 0U;
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready,
+            "selected-mesh initial frame draws");
+    frame.selected_mesh_elapsed_ms = 2000U;
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready,
+            "selected-mesh zero-alpha boundary frame draws");
+    frame.selected_mesh_elapsed_ms = 2001U;
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready,
+            "selected-mesh expired frame draws scene only");
+    require(device.selected_mesh_counts ==
+                std::vector<std::size_t>({1U, 1U, 0U}),
+            "selected mesh remains scheduled at 2000 ms and expires after it");
+
+    std::vector<std::array<float, 4U>> colors;
+    for (const auto& update : device.buffer_updates) {
+        if (update.bytes.size() != sizeof(std::array<float, 4U>)) continue;
+        std::array<float, 4U> color{};
+        std::memcpy(color.data(), update.bytes.data(), update.bytes.size());
+        colors.push_back(color);
+    }
+    require(colors.size() == 2U &&
+                colors[0] == std::array<float, 4U>{1.0F, 0.0F, 1.0F, 0.5F} &&
+                colors[1] == std::array<float, 4U>{1.0F, 0.0F, 1.0F, 0.0F},
+            "viewport uploads exact magenta fade colors before the selected pass");
 }
 
 void toggles_prepared_authoring_grid_per_frame() {
@@ -1343,6 +1412,7 @@ int main() {
         opens_and_draws();
         draws_four_sample_viewport_through_retained_resolve();
         draws_selected_axis_inside_the_scene_batch();
+        draws_selected_mesh_with_recovered_fade_boundary();
         toggles_prepared_authoring_grid_per_frame();
         rejects_unbound_selection_axis_requests();
         accepts_track_and_car_lod_documents();

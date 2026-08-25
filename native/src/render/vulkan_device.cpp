@@ -1790,6 +1790,10 @@ struct VulkanIndexedBatchDraw {
     std::uint32_t index_count = 0U;
     bool indexed = true;
     DrawMatrices matrices{};
+    bool has_selected_color = false;
+    VkBuffer selected_color_buffer = VK_NULL_HANDLE;
+    VkDeviceSize selected_color_offset = 0U;
+    VkDeviceSize selected_color_range = 0U;
     bool has_sampled_binding = false;
     VkImage sampled_image = VK_NULL_HANDLE;
     VkImageView sampled_view = VK_NULL_HANDLE;
@@ -1921,6 +1925,34 @@ struct VulkanTransientSampledDescriptors {
         includes_damage_mask_binding = false;
         includes_directional_shadow_binding = false;
         includes_alpha_tested_binding = false;
+        context.reset();
+    }
+};
+
+// The selected pass has one fragment uniform at set 0/binding 0. Keep this
+// layout separate from the stock material set, whose binding zero is a sampled
+// image. Both descriptor lifetimes end after the synchronous batch fence.
+struct VulkanTransientSelectedDescriptors {
+    std::shared_ptr<VulkanContext> context;
+    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+
+    VulkanTransientSelectedDescriptors() = default;
+    VulkanTransientSelectedDescriptors(
+        const VulkanTransientSelectedDescriptors&) = delete;
+    VulkanTransientSelectedDescriptors& operator=(
+        const VulkanTransientSelectedDescriptors&) = delete;
+    ~VulkanTransientSelectedDescriptors() { reset(); }
+
+    void reset() noexcept {
+        if (context && context->device != VK_NULL_HANDLE) {
+            if (pool != VK_NULL_HANDLE)
+                vkDestroyDescriptorPool(context->device, pool, nullptr);
+            if (layout != VK_NULL_HANDLE)
+                vkDestroyDescriptorSetLayout(context->device, layout, nullptr);
+        }
+        pool = VK_NULL_HANDLE;
+        layout = VK_NULL_HANDLE;
         context.reset();
     }
 };
@@ -2313,6 +2345,109 @@ bool create_sampled_descriptor_layout(const std::shared_ptr<VulkanContext>& cont
                                                           : "vulkan_descriptor_layout_failed";
         descriptors.reset();
         return false;
+    }
+    return true;
+}
+
+bool create_selected_descriptor_layout(
+    const std::shared_ptr<VulkanContext>& context,
+    VulkanTransientSelectedDescriptors& descriptors,
+    Diagnostic& diagnostic) {
+    descriptors.reset();
+    descriptors.context = context;
+    VkDescriptorSetLayoutBinding binding{};
+    binding.binding = 0U;
+    binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    binding.descriptorCount = 1U;
+    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo layout_info{};
+    layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layout_info.bindingCount = 1U;
+    layout_info.pBindings = &binding;
+    const VkResult result = vkCreateDescriptorSetLayout(
+        context->device, &layout_info, nullptr, &descriptors.layout);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkCreateDescriptorSetLayout(selected mesh)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST
+                              ? "vulkan_device_lost"
+                              : "vulkan_selected_descriptor_layout_failed";
+        descriptors.reset();
+        return false;
+    }
+    return true;
+}
+
+bool allocate_selected_descriptor_sets(
+    const std::shared_ptr<VulkanContext>& context,
+    VulkanTransientSelectedDescriptors& descriptors,
+    std::span<const VulkanIndexedBatchDraw> draws,
+    std::vector<VkDescriptorSet>& sets,
+    Diagnostic& diagnostic) {
+    const std::size_t descriptor_count = static_cast<std::size_t>(
+        std::count_if(draws.begin(), draws.end(),
+                      [](const VulkanIndexedBatchDraw& draw) {
+                          return draw.has_selected_color;
+                      }));
+    if (descriptor_count == 0U) return true;
+    VkDescriptorPoolSize pool_size{};
+    pool_size.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    pool_size.descriptorCount = static_cast<std::uint32_t>(descriptor_count);
+    VkDescriptorPoolCreateInfo pool_info{};
+    pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool_info.maxSets = static_cast<std::uint32_t>(descriptor_count);
+    pool_info.poolSizeCount = 1U;
+    pool_info.pPoolSizes = &pool_size;
+    VkResult result = vkCreateDescriptorPool(
+        context->device, &pool_info, nullptr, &descriptors.pool);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkCreateDescriptorPool(selected mesh)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST
+                              ? "vulkan_device_lost"
+                              : "vulkan_selected_descriptor_pool_failed";
+        return false;
+    }
+    std::vector<VkDescriptorSetLayout> layouts(descriptor_count,
+                                                descriptors.layout);
+    std::vector<VkDescriptorSet> allocated(descriptor_count, VK_NULL_HANDLE);
+    VkDescriptorSetAllocateInfo allocation{};
+    allocation.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocation.descriptorPool = descriptors.pool;
+    allocation.descriptorSetCount = static_cast<std::uint32_t>(descriptor_count);
+    allocation.pSetLayouts = layouts.data();
+    result = vkAllocateDescriptorSets(context->device, &allocation,
+                                      allocated.data());
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkAllocateDescriptorSets(selected mesh)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST
+                              ? "vulkan_device_lost"
+                              : "vulkan_selected_descriptor_allocation_failed";
+        return false;
+    }
+    if (sets.empty()) {
+        sets.assign(draws.size(), VK_NULL_HANDLE);
+    } else if (sets.size() != draws.size()) {
+        diagnostic = {"vulkan_selected_descriptor_index_invalid",
+                      "Selected-mesh descriptor slots do not match the merged draw count"};
+        return false;
+    }
+    std::size_t next = 0U;
+    for (std::size_t index = 0U; index < draws.size(); ++index) {
+        const VulkanIndexedBatchDraw& draw = draws[index];
+        if (!draw.has_selected_color) continue;
+        const VkDescriptorSet set = allocated[next++];
+        VkDescriptorBufferInfo buffer_info{};
+        buffer_info.buffer = draw.selected_color_buffer;
+        buffer_info.offset = draw.selected_color_offset;
+        buffer_info.range = draw.selected_color_range;
+        VkWriteDescriptorSet write{};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = set;
+        write.dstBinding = 0U;
+        write.descriptorCount = 1U;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        write.pBufferInfo = &buffer_info;
+        vkUpdateDescriptorSets(context->device, 1U, &write, 0U, nullptr);
+        sets[index] = set;
     }
     return true;
 }
@@ -3374,6 +3509,7 @@ bool draw_indexed_batch_and_readback(
     bool has_damage_binding = false;
     bool has_damage_mask_binding = false;
     bool has_directional_shadow_binding = false;
+    bool has_selected_color = false;
     for (const VulkanIndexedBatchDraw& draw : draws) {
         has_sampled_binding = has_sampled_binding || draw.has_sampled_binding;
         has_material_binding = has_material_binding || draw.has_material_binding;
@@ -3386,6 +3522,7 @@ bool draw_indexed_batch_and_readback(
         has_damage_mask_binding = has_damage_mask_binding || draw.has_damage_mask_binding;
         has_directional_shadow_binding = has_directional_shadow_binding ||
                                          draw.has_directional_shadow_binding;
+        has_selected_color = has_selected_color || draw.has_selected_color;
     }
     std::vector<VulkanDepthAttachment*> sampled_shadow_attachments;
     if (has_directional_shadow_binding) {
@@ -3417,6 +3554,11 @@ bool draw_indexed_batch_and_readback(
                                           has_damage_mask_binding,
                                           has_directional_shadow_binding,
                                           false, diagnostic))
+        return false;
+    VulkanTransientSelectedDescriptors selected_descriptors;
+    if (has_selected_color &&
+        !create_selected_descriptor_layout(context, selected_descriptors,
+                                           diagnostic))
         return false;
 
     VkAttachmentDescription color_attachment{};
@@ -3513,9 +3655,12 @@ bool draw_indexed_batch_and_readback(
             return false;
         }
         pipelines.emplace_back();
+        const VkDescriptorSetLayout draw_descriptor_layout =
+            draw.has_selected_color ? selected_descriptors.layout
+                                    : descriptors.layout;
         if (!create_batch_pipeline(context, render_pass, description.width, description.height,
                                    description.samples, *draw.program, true,
-                                   depth_attachment != nullptr, descriptors.layout,
+                                   depth_attachment != nullptr, draw_descriptor_layout,
                                    pipelines.back(), diagnostic)) {
             pipelines.clear();
             vkDestroyFramebuffer(context->device, framebuffer, nullptr);
@@ -3531,6 +3676,15 @@ bool draw_indexed_batch_and_readback(
          has_directional_shadow_binding) &&
         !allocate_sampled_descriptor_sets(
                                   context, descriptors, draws, descriptor_sets, diagnostic)) {
+        pipelines.clear();
+        vkDestroyFramebuffer(context->device, framebuffer, nullptr);
+        vkDestroyRenderPass(context->device, render_pass, nullptr);
+        return false;
+    }
+    if (has_selected_color &&
+        !allocate_selected_descriptor_sets(context, selected_descriptors,
+                                           draws, descriptor_sets,
+                                           diagnostic)) {
         pipelines.clear();
         vkDestroyFramebuffer(context->device, framebuffer, nullptr);
         vkDestroyRenderPass(context->device, render_pass, nullptr);
@@ -4310,8 +4464,10 @@ public:
             return false;
         }
         std::vector<VulkanIndexedBatchDraw> draws;
-        draws.reserve(description.draws.size() + description.overlay_draws.size());
-        for (const IndexedStaticMeshDrawRequest& request : description.draws) {
+        draws.reserve(description.draws.size() +
+                      description.selected_mesh_draws.size() +
+                      description.overlay_draws.size());
+        const auto append_scene_draw = [&](const IndexedStaticMeshDrawRequest& request) {
             auto* vertices = dynamic_cast<const VulkanBuffer*>(request.vertex_buffer);
             auto* indices = dynamic_cast<const VulkanBuffer*>(request.index_buffer);
             if (vertices == nullptr || indices == nullptr || request.packet == nullptr || request.pipeline == nullptr ||
@@ -4345,6 +4501,84 @@ public:
             draw.matrices = {packet.world_matrix, request.camera_frame->view_projection};
             if (!prepare_vulkan_sampled_binding(request, context_, draw, diagnostic)) return false;
             draws.push_back(draw);
+            return true;
+        };
+        const auto append_selected_draw = [&](const SelectedMeshDrawRequest& request) {
+            auto* vertices = dynamic_cast<const VulkanBuffer*>(request.vertex_buffer);
+            auto* indices = dynamic_cast<const VulkanBuffer*>(request.index_buffer);
+            auto* color = dynamic_cast<const VulkanBuffer*>(request.color_buffer);
+            if (vertices == nullptr || indices == nullptr || request.packet == nullptr ||
+                request.pipeline == nullptr || color == nullptr) {
+                diagnostic = {"selected_mesh_resource_invalid",
+                              "The Vulkan selected-mesh draw contains an unknown or incomplete resource"};
+                return false;
+            }
+            if (vertices->context() != context_ || indices->context() != context_ ||
+                color->context() != context_) {
+                diagnostic = {"selected_mesh_context_mismatch",
+                              "Selected-mesh resources must belong to the same Vulkan device"};
+                return false;
+            }
+            const BufferDescription& color_description = color->info().description;
+            if (request.color_offset_bytes %
+                        context_->min_uniform_buffer_offset_alignment !=
+                    0U ||
+                request.color_range_bytes > context_->max_uniform_buffer_range ||
+                request.color_offset_bytes > color_description.size_bytes ||
+                request.color_range_bytes >
+                    color_description.size_bytes - request.color_offset_bytes ||
+                color->raw().buffer == VK_NULL_HANDLE) {
+                diagnostic = {"selected_mesh_uniform_device_limit",
+                              "The selected-mesh color view exceeds Vulkan uniform-buffer limits"};
+                return false;
+            }
+            const std::uint64_t vertex_offset =
+                static_cast<std::uint64_t>(request.packet->vertex_offset) *
+                (11U * sizeof(float));
+            const std::uint64_t index_offset =
+                static_cast<std::uint64_t>(request.packet->index_offset) *
+                sizeof(std::uint16_t);
+            if (vertex_offset > std::numeric_limits<VkDeviceSize>::max() ||
+                index_offset > std::numeric_limits<VkDeviceSize>::max()) {
+                diagnostic = {"selected_mesh_offset_overflow",
+                              "Selected-mesh offsets exceed Vulkan addressability"};
+                return false;
+            }
+            VulkanIndexedBatchDraw draw;
+            draw.program = request.pipeline;
+            draw.vertices = vertices;
+            draw.indices = indices;
+            draw.vertex_offset = static_cast<VkDeviceSize>(vertex_offset);
+            draw.index_offset = static_cast<VkDeviceSize>(index_offset);
+            draw.index_count = request.packet->index_count;
+            draw.matrices = request.matrices;
+            draw.has_selected_color = true;
+            draw.selected_color_buffer = color->raw().buffer;
+            draw.selected_color_offset =
+                static_cast<VkDeviceSize>(request.color_offset_bytes);
+            draw.selected_color_range =
+                static_cast<VkDeviceSize>(request.color_range_bytes);
+            draws.push_back(draw);
+            return true;
+        };
+        std::size_t selected_index = 0U;
+        for (std::size_t scene_index = 0U;
+             scene_index <= description.draws.size(); ++scene_index) {
+            while (selected_index < description.selected_mesh_draws.size()) {
+                const SelectedMeshDrawRequest& selected =
+                    description.selected_mesh_draws[selected_index];
+                const std::size_t position =
+                    selected.scene_position ==
+                            std::numeric_limits<std::uint32_t>::max()
+                        ? description.draws.size()
+                        : static_cast<std::size_t>(selected.scene_position);
+                if (position != scene_index) break;
+                if (!append_selected_draw(selected)) return false;
+                ++selected_index;
+            }
+            if (scene_index < description.draws.size() &&
+                !append_scene_draw(description.draws[scene_index]))
+                return false;
         }
         for (const OverlayLineDrawRequest& request : description.overlay_draws) {
             auto* vertices = dynamic_cast<const VulkanBuffer*>(request.vertex_buffer);

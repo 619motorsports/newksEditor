@@ -178,7 +178,8 @@ void validate_spirv(std::span<const std::uint8_t> bytes, DiagnosticSink& diagnos
 
 [[nodiscard]] bool valid_transform_contract(PipelineTransformContract contract) noexcept {
     return contract == PipelineTransformContract::none ||
-           contract == PipelineTransformContract::draw_matrices;
+           contract == PipelineTransformContract::draw_matrices ||
+           contract == PipelineTransformContract::selected_mesh;
 }
 
 [[nodiscard]] bool valid_resource_kind(PipelineResourceKind kind) noexcept {

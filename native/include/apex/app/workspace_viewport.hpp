@@ -7,6 +7,7 @@
 #include "apex/render/stock_scene_execution.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -107,6 +108,9 @@ struct WorkspaceViewportPrepareRequest {
     // Grid and selected-node markers share this fixed position/color line
     // contract. A selected node can still drive filtering without a marker.
     std::optional<render::PipelineProgram> authoring_overlay_pipeline;
+    // Optional recovered magenta selected-mesh pass. The selected packet must
+    // be static. This pipeline is independent of the line-overlay pipeline.
+    std::optional<render::PipelineProgram> selected_mesh_pipeline;
     // Prepare and show the recovered 10 m authoring grid. The native default
     // is false. A true value requires authoring_overlay_pipeline.
     bool grid_visible = false;
@@ -140,6 +144,9 @@ struct WorkspaceViewportFrameRequest {
     // Override the prepared selected-node world transform for an animated
     // frame. Supplying this without a prepared selection axis is invalid.
     std::optional<apex::scene::Matrix4> selection_axis_world;
+    // Override the elapsed selection time for deterministic playback/tests.
+    // When absent, the viewport uses time since its preparation completed.
+    std::optional<std::uint32_t> selected_mesh_elapsed_ms;
 };
 
 // The editor's browser viewport uses an orbit target, yaw/pitch, and distance
@@ -238,6 +245,8 @@ private:
         bool grid_visible,
         std::unique_ptr<render::Buffer> selection_axis_buffer,
         std::optional<apex::scene::Matrix4> selection_axis_world,
+        std::optional<render::PipelineProgram> selected_mesh_pipeline,
+        std::unique_ptr<render::Buffer> selected_mesh_color_buffer,
         std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps,
         std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows,
         std::optional<LodCatalog> lod_catalog);
@@ -253,6 +262,10 @@ private:
     bool grid_visible_ = false;
     std::unique_ptr<render::Buffer> selection_axis_buffer_;
     std::optional<apex::scene::Matrix4> selection_axis_world_;
+    std::optional<render::PipelineProgram> selected_mesh_pipeline_;
+    std::unique_ptr<render::Buffer> selected_mesh_color_buffer_;
+    std::chrono::steady_clock::time_point selected_mesh_touch_time_ =
+        std::chrono::steady_clock::now();
     std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps_;
     std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows_;
     std::optional<LodCatalog> lod_catalog_;

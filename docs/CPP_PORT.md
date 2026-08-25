@@ -186,6 +186,13 @@ remains unchanged and feature-complete.
   supply the explicit SPIR-V or DXIL shader pair. A validated SwiftShader test
   covers 1x and 4x output. The 4x output proves that both overlays reach the
   resolved image.
+  The same batch accepts one recovered selected-mesh draw. Scene geometry
+  draws first. The selected mesh draws next, and line overlays draw last.
+  The selected pass uses solid fill, front-face culling, opaque blend state,
+  and disabled depth. It writes magenta RGB and the recovered fading alpha.
+  The viewport submits the draw at 2000 ms with zero alpha. It stops the draw
+  after 2000 ms. Vulkan uses a 256-byte fragment uniform view. D3D12 binds the
+  same view as `b5`. SwiftShader pixel tests cover 1x and 4x output.
   The backend also executes one explicitly authorized portable diffuse pair.
   The pair uses a sampled image at set 0, binding 0,
   and a sampler at set 0, binding 1. An optional uniform at binding 2 carries

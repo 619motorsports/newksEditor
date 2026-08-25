@@ -144,6 +144,12 @@ struct StaticSceneFrameDescription {
     // Editor overlays are submitted after all retained scene packets in the
     // same render pass. The caller owns the referenced pipeline and buffer.
     std::span<const OverlayLineDrawRequest> overlay_draws{};
+    // An optional recovered selected-mesh pass uses the one visible prepared
+    // static packet whose selected flag is set. It executes after all model
+    // packets and before editor line overlays. Both handles are required
+    // together and remain caller-owned through this synchronous call.
+    const PipelineProgram* selected_mesh_pipeline = nullptr;
+    const Buffer* selected_mesh_color_buffer = nullptr;
 };
 
 struct StaticSceneResourceResult;

@@ -335,3 +335,15 @@ SwiftShader Vulkan pixel evidence is:
 
 - `txDust.a=1`: `(81,81,60,255)`, equal to the base damage fixture.
 - `txDust.a=0`: `(4,4,2,255)`, with direct diffuse and specular light removed.
+
+## Selected mesh
+
+`selected_mesh.frag` reads one flat RGBA value from set zero, binding zero.
+The Vulkan backend uses this uniform with the selected-mesh matrix constants.
+D3D12 maps the same value to pixel register `b5`.
+
+This shader is a portable ABI fixture. It is not recovered stock bytecode.
+Its source SHA-256 is
+`55721172b8484cfe279fbeb9442c319c4a792808e8153cc21975cf90c17231f8`.
+Its SPIR-V SHA-256 is
+`4343fe40bd1add7687d114c66dc9c7c419fa74b420e89629ffe07223576c6213`.

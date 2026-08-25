@@ -123,12 +123,46 @@ selected-mesh code changes the default blend or cull values.
 `Node::render` sets the current world matrix before it renders active children.
 The selected object draws at its child position during this scene traversal.
 
+`SceneGraph.{ctor}` has token `0x06000063` and RVA `0x24C38`. It adds these
+children to the root in the listed order:
+
+1. `SCENE_ROOT`
+2. `SelectedMesh`
+3. `SCENE_FINISHED`
+
+`loadKN5` has token `0x060003A6` and RVA `0x28410`. It adds the model below
+`SCENE_ROOT`. Thus, the hierarchy is:
+
+```text
+ROOT
+|-- SCENE_ROOT
+|   `-- model
+|-- SelectedMesh
+`-- SCENE_FINISHED
+```
+
+`Node::render` traverses the child vector in insertion order. Therefore, all
+model geometry draws before the selected mesh. `SCENE_FINISHED` runs after it.
+
 The grid and the selected-node axis draw after the scene traversal. Therefore,
 they draw after the selected mesh and before the final frame operation.
 
-The exact construction and child position of the selected object remain
-unresolved. A port must not assume that the selected draw follows all scene
-geometry until evidence identifies this child position.
-
 The installed DXBC cannot use the portable native draw-matrices ABI directly.
 A faithful Vulkan and D3D12 port needs a dedicated selected-mesh contract.
+
+## Portable backend mapping
+
+The C++ port keeps model draws, the selected draw, and line overlays in one
+ordered batch. It resolves multisample color only after all these draws.
+
+The portable vertex contract uses the 128-byte `DrawMatrices` value. This
+contract is a labeled translation of the original `b0` and `b1` split.
+
+Vulkan keeps `DrawMatrices` in vertex push constants. It reads the selected
+color from a 256-byte uniform view at set zero, binding zero.
+
+D3D12 maps `DrawMatrices` to root constants at `b0`. It maps the selected
+color view to the recovered pixel constant-buffer register `b5`.
+
+The viewport accepts explicit shader modules for this contract. It does not
+infer the contract from opaque shader bytes.

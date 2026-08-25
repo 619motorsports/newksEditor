@@ -2,10 +2,13 @@
 
 #include "apex/core/parse_error.hpp"
 #include "apex/render/authoring_grid.hpp"
+#include "apex/render/selected_mesh.hpp"
 #include "apex/workspace/workspace_scene.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <new>
 #include <utility>
@@ -480,6 +483,8 @@ WorkspaceViewport::WorkspaceViewport(
     bool grid_visible,
     std::unique_ptr<render::Buffer> selection_axis_buffer,
     std::optional<apex::scene::Matrix4> selection_axis_world,
+    std::optional<render::PipelineProgram> selected_mesh_pipeline,
+    std::unique_ptr<render::Buffer> selected_mesh_color_buffer,
     std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps,
     std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows,
     std::optional<LodCatalog> lod_catalog)
@@ -491,6 +496,8 @@ WorkspaceViewport::WorkspaceViewport(
       grid_visible_(grid_visible),
       selection_axis_buffer_(std::move(selection_axis_buffer)),
       selection_axis_world_(std::move(selection_axis_world)),
+      selected_mesh_pipeline_(std::move(selected_mesh_pipeline)),
+      selected_mesh_color_buffer_(std::move(selected_mesh_color_buffer)),
       shadow_maps_(std::move(shadow_maps)),
       directional_shadows_(std::move(directional_shadows)),
       lod_catalog_(std::move(lod_catalog)) {}
@@ -592,6 +599,56 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
     frame.packet_visibility = packet_visibility;
     frame.apply_skinning = request.apply_skinning;
     frame.frame_constants = request.frame_constants;
+    if (request.selected_mesh_elapsed_ms.has_value() &&
+        !selected_mesh_pipeline_.has_value()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_selected_mesh_unprepared",
+            "A selected-mesh elapsed time requires prepared highlight resources");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (selected_mesh_pipeline_.has_value()) {
+        if (selected_mesh_color_buffer_ == nullptr) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_selected_mesh_resource_missing",
+                "The prepared selected-mesh pass has no color buffer");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        const auto elapsed_count = std::chrono::duration_cast<
+            std::chrono::milliseconds>(now - selected_mesh_touch_time_).count();
+        const std::uint32_t elapsed = request.selected_mesh_elapsed_ms.has_value()
+                                          ? *request.selected_mesh_elapsed_ms
+                                      : elapsed_count > render::selected_mesh_fade_milliseconds
+                                          ? render::selected_mesh_fade_milliseconds + 1U
+                                          : static_cast<std::uint32_t>(
+                                                std::max<std::int64_t>(0, elapsed_count));
+        const render::SelectedMeshHighlight highlight =
+            render::evaluate_selected_mesh_highlight(elapsed);
+        if (highlight.visible) {
+            const auto color_bytes = std::as_bytes(
+                std::span(&highlight.color, 1U));
+            const auto updated = device.update_buffer(
+                *selected_mesh_color_buffer_, 0U, color_bytes);
+            if (!updated.ok()) {
+                output_diagnostic = updated.diagnostic;
+                switch (updated.status) {
+                case render::BufferStatus::invalid_description:
+                    return WorkspaceViewportFrameStatus::invalid;
+                case render::BufferStatus::unsupported:
+                    return WorkspaceViewportFrameStatus::unsupported;
+                case render::BufferStatus::allocation_failed:
+                case render::BufferStatus::upload_failed:
+                    return WorkspaceViewportFrameStatus::execution_failed;
+                case render::BufferStatus::ready:
+                    break;
+                }
+                return WorkspaceViewportFrameStatus::execution_failed;
+            }
+            frame.selected_mesh_pipeline = &*selected_mesh_pipeline_;
+            frame.selected_mesh_color_buffer =
+                selected_mesh_color_buffer_.get();
+        }
+    }
 
     std::array<render::OverlayLineDrawRequest, 2U> overlay_draws{};
     std::size_t overlay_count = 0U;
@@ -988,6 +1045,116 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             lod_catalog = std::move(catalog);
         }
 
+        std::optional<render::PipelineProgram> selected_mesh_pipeline;
+        std::unique_ptr<render::Buffer> selected_mesh_color_buffer;
+        if (request.selected_mesh_pipeline.has_value()) {
+            const auto packets = execution->resources->prepared_packets();
+            const render::DrawPacket* selected_packet = nullptr;
+            for (const render::DrawPacket& packet : packets) {
+                if (!packet.flags.selected) continue;
+                if (selected_packet != nullptr) {
+                    result.status = WorkspaceViewportStatus::invalid;
+                    result.diagnostic = diagnostic(
+                        "workspace_viewport_selected_mesh_count_invalid",
+                        "A selected-mesh pipeline requires exactly one selected packet");
+                    return result;
+                }
+                selected_packet = &packet;
+            }
+            if (selected_packet == nullptr) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_selected_mesh_missing",
+                    "A selected-mesh pipeline requires one selected packet");
+                return result;
+            }
+            if (selected_packet->primitive !=
+                    render::DrawPrimitiveKind::static_mesh ||
+                selected_packet->vertex_stride_floats != 11U) {
+                result.status = WorkspaceViewportStatus::unsupported;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_selected_mesh_unsupported",
+                    "The recovered selected-mesh pass supports only static 44-byte geometry");
+                return result;
+            }
+            const render::PipelineProgram& pipeline =
+                *request.selected_mesh_pipeline;
+            const auto pipeline_validation = render::validate_pipeline(pipeline);
+            const render::PipelineVertexAttribute expected_position{
+                render::PipelineVertexSemantic::position,
+                render::PipelineVertexAttributeFormat::float32x3, 0U, 0U};
+            const bool shader_format_matches = std::all_of(
+                pipeline.shaders.begin(), pipeline.shaders.end(),
+                [&](const render::PipelineShaderModule& shader) {
+                    return shader.format ==
+                           (device.info().backend == render::Backend::Vulkan
+                                ? render::PipelineShaderFormat::spirv
+                                : render::PipelineShaderFormat::dxil);
+                });
+            const auto shader_stage_count = [&](render::PipelineShaderStage stage) {
+                return std::count_if(
+                    pipeline.shaders.begin(), pipeline.shaders.end(),
+                    [&](const render::PipelineShaderModule& shader) {
+                        return shader.stage == stage;
+                    });
+            };
+            if (!pipeline_validation.valid || pipeline.shaders.size() != 2U ||
+                shader_stage_count(render::PipelineShaderStage::vertex) != 1 ||
+                shader_stage_count(render::PipelineShaderStage::fragment) != 1 ||
+                !shader_format_matches ||
+                pipeline.transform_contract !=
+                    render::PipelineTransformContract::selected_mesh ||
+                pipeline.vertex_layout.stride != 11U * sizeof(float) ||
+                pipeline.vertex_layout.attributes.size() != 1U ||
+                pipeline.vertex_layout.attributes[0].semantic !=
+                    expected_position.semantic ||
+                pipeline.vertex_layout.attributes[0].format !=
+                    expected_position.format ||
+                pipeline.vertex_layout.attributes[0].location != 0U ||
+                pipeline.vertex_layout.attributes[0].offset != 0U ||
+                pipeline.targets.colors.size() != 1U ||
+                pipeline.targets.colors[0].format != *color_format ||
+                pipeline.targets.colors[0].samples != request.color_samples ||
+                !pipeline.targets.has_depth ||
+                pipeline.targets.depth.format !=
+                    render::PipelineRenderTargetFormat::depth32_float ||
+                pipeline.targets.depth.samples != request.color_samples ||
+                pipeline.raster.fill != render::PipelineFillMode::solid ||
+                pipeline.raster.cull != render::PipelineCullMode::front ||
+                pipeline.depth.test_enabled || pipeline.depth.write_enabled ||
+                pipeline.blend.enabled || pipeline.blend.alpha_to_coverage ||
+                !pipeline.resources.empty()) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_selected_mesh_pipeline_invalid",
+                    "The selected-mesh pipeline does not match the recovered pass contract");
+                return result;
+            }
+            const render::SelectedMeshHighlight initial =
+                render::evaluate_selected_mesh_highlight(0U);
+            std::array<std::byte, render::selected_mesh_color_view_bytes> bytes{};
+            std::memcpy(bytes.data(), &initial.color, sizeof(initial.color));
+            render::BufferDescription color_buffer_description;
+            color_buffer_description.size_bytes = bytes.size();
+            color_buffer_description.usage = render::BufferUsage::uniform;
+            color_buffer_description.memory = render::BufferMemory::host_visible;
+            color_buffer_description.mutability =
+                render::BufferMutability::mutable_data;
+            auto color_buffer = device.create_buffer(color_buffer_description, bytes);
+            if (!color_buffer.ok()) {
+                result.status =
+                    color_buffer.status == render::BufferStatus::allocation_failed
+                        ? WorkspaceViewportStatus::allocation_failed
+                    : color_buffer.status == render::BufferStatus::unsupported
+                        ? WorkspaceViewportStatus::unsupported
+                        : WorkspaceViewportStatus::invalid;
+                result.diagnostic = std::move(color_buffer.diagnostic);
+                return result;
+            }
+            selected_mesh_pipeline = pipeline;
+            selected_mesh_color_buffer = std::move(color_buffer.buffer);
+        }
+
         std::optional<render::PipelineProgram> authoring_overlay_pipeline;
         std::unique_ptr<render::Buffer> authoring_grid_buffer;
         std::unique_ptr<render::Buffer> selection_axis_buffer;
@@ -1118,6 +1285,8 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             std::move(authoring_grid_buffer), request.grid_visible,
             std::move(selection_axis_buffer),
             std::move(selection_axis_world),
+            std::move(selected_mesh_pipeline),
+            std::move(selected_mesh_color_buffer),
             std::move(shadow_maps), request.directional_shadows,
             std::move(lod_catalog)));
         result.status = WorkspaceViewportStatus::ready;

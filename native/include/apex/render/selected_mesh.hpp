@@ -10,10 +10,17 @@ inline constexpr std::array<float, 3U> selected_mesh_rgb = {
 inline constexpr float selected_mesh_initial_alpha = 0.5F;
 inline constexpr float selected_mesh_fade_per_millisecond = 0.0005F;
 inline constexpr std::uint32_t selected_mesh_fade_milliseconds = 2000U;
+inline constexpr std::uint32_t selected_mesh_color_view_bytes = 256U;
+
+struct SelectedMeshColor {
+    std::array<float, 4U> rgba{};
+};
+
+static_assert(sizeof(SelectedMeshColor) == 4U * sizeof(float));
 
 struct SelectedMeshHighlight {
     bool visible = false;
-    std::array<float, 4U> color{};
+    SelectedMeshColor color{};
 };
 
 // Reproduce SelectedMesh::render's unsigned GetTickCount delta contract. The

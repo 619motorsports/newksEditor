@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -752,6 +753,26 @@ struct IndexedStaticMeshDrawRequest {
     IndexedDirectionalShadowBinding directional_shadow_binding{};
 };
 
+// A recovered selected-mesh draw reuses one static 44-byte-stride mesh. The
+// draw is inserted at an explicit position in the ordered scene packet span.
+// Its flat color is a fragment-stage constant, not a material resource.
+struct SelectedMeshDrawRequest {
+    // Insert before this element of IndexedStaticMeshBatchDescription::draws.
+    // max() is the append sentinel and normalizes to draws.size().
+    std::uint32_t scene_position = std::numeric_limits<std::uint32_t>::max();
+    const DrawPacket* packet = nullptr;
+    const PipelineProgram* pipeline = nullptr;
+    const Buffer* vertex_buffer = nullptr;
+    const Buffer* index_buffer = nullptr;
+    StaticMeshIndexType index_type = StaticMeshIndexType::uint16;
+    const Buffer* color_buffer = nullptr;
+    std::uint64_t color_offset_bytes = 0U;
+    std::uint32_t color_range_bytes = 0U;
+    DrawMatrices matrices{};
+};
+
+inline constexpr std::size_t max_selected_mesh_draws = 1U;
+
 enum class IndexedStaticMeshDrawStatus {
     ready,
     invalid_request,
@@ -790,6 +811,9 @@ struct IndexedStaticMeshBatchDescription {
     // Resource-free line draws execute after indexed scene draws and before
     // the batch's optional MSAA resolve.
     std::span<const OverlayLineDrawRequest> overlay_draws{};
+    // Selected draws merge into the indexed scene sequence by scene_position.
+    // All line overlays still execute after the complete merged sequence.
+    std::span<const SelectedMeshDrawRequest> selected_mesh_draws{};
 };
 
 enum class IndexedStaticMeshBatchStatus {
@@ -1047,6 +1071,10 @@ inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
 
 [[nodiscard]] IndexedStaticMeshBatchStatus validate_overlay_line_draw_request(
     const Texture& texture, const OverlayLineDrawRequest& request,
+    Diagnostic& diagnostic);
+
+[[nodiscard]] IndexedStaticMeshBatchStatus validate_selected_mesh_draw_request(
+    const Texture& texture, const SelectedMeshDrawRequest& request,
     Diagnostic& diagnostic);
 
 // Preflight an ordered batch without changing any caller-owned request. The

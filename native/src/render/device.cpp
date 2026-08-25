@@ -1,4 +1,5 @@
 #include "apex/render/device.hpp"
+#include "apex/render/selected_mesh.hpp"
 #include "apex/render/draw_packet.hpp"
 #include "backend_internal.hpp"
 
@@ -2167,6 +2168,200 @@ IndexedStaticMeshBatchStatus validate_overlay_line_draw_request(
     return IndexedStaticMeshBatchStatus::ready;
 }
 
+IndexedStaticMeshBatchStatus validate_selected_mesh_draw_request(
+    const Texture& texture, const SelectedMeshDrawRequest& request,
+    Diagnostic& diagnostic) {
+    if (request.packet == nullptr || request.pipeline == nullptr ||
+        request.vertex_buffer == nullptr || request.index_buffer == nullptr ||
+        request.color_buffer == nullptr) {
+        diagnostic = {"selected_mesh_handle_missing",
+                      "Selected-mesh drawing requires geometry, pipeline, and color-buffer handles"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    const DrawPacket& packet = *request.packet;
+    const PipelineProgram& pipeline = *request.pipeline;
+    if (packet.primitive != DrawPrimitiveKind::static_mesh ||
+        packet.vertex_stride_floats != 11U) {
+        diagnostic = {"selected_mesh_static_contract_required",
+                      "Selected-mesh drawing requires the recovered static 44-byte vertex contract"};
+        return IndexedStaticMeshBatchStatus::unsupported;
+    }
+    if (!packet.flags.selected) {
+        diagnostic = {"selected_mesh_packet_not_selected",
+                      "Selected-mesh drawing requires an explicitly selected packet"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (packet.vertex_count == 0U || packet.index_count == 0U ||
+        packet.index_count % 3U != 0U ||
+        packet.vertex_count > max_indexed_static_mesh_vertices ||
+        packet.index_count > max_indexed_static_mesh_indices) {
+        diagnostic = {"selected_mesh_geometry_count_invalid",
+                      "Selected-mesh geometry must contain bounded complete indexed triangles"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (request.index_type != StaticMeshIndexType::uint16) {
+        diagnostic = {"selected_mesh_index_type_unsupported",
+                      "Selected-mesh drawing supports only uint16 indices"};
+        return IndexedStaticMeshBatchStatus::unsupported;
+    }
+    const PipelineValidationResult pipeline_validation = validate_pipeline(pipeline);
+    if (!pipeline_validation.valid) {
+        diagnostic = pipeline_validation.diagnostics.empty()
+                         ? Diagnostic{"selected_mesh_pipeline_invalid",
+                                      "Selected-mesh pipeline validation failed"}
+                         : Diagnostic{"selected_mesh_pipeline_" +
+                                          pipeline_validation.diagnostics.front().code,
+                                      pipeline_validation.diagnostics.front().message};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (pipeline.shaders.size() != 2U ||
+        std::count_if(pipeline.shaders.begin(), pipeline.shaders.end(),
+                      [](const PipelineShaderModule& shader) {
+                          return shader.stage == PipelineShaderStage::vertex;
+                      }) != 1 ||
+        std::count_if(pipeline.shaders.begin(), pipeline.shaders.end(),
+                      [](const PipelineShaderModule& shader) {
+                          return shader.stage == PipelineShaderStage::fragment;
+                      }) != 1) {
+        diagnostic = {"selected_mesh_shader_pair_invalid",
+                      "Selected-mesh pipelines require one vertex and one fragment shader"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    const PipelineVertexAttribute expected_position{
+        PipelineVertexSemantic::position,
+        PipelineVertexAttributeFormat::float32x3, 0U, 0U};
+    const auto& attributes = pipeline.vertex_layout.attributes;
+    if (pipeline.vertex_layout.stride != 11U * sizeof(float) ||
+        attributes.size() != 1U ||
+        attributes[0].semantic != expected_position.semantic ||
+        attributes[0].format != expected_position.format ||
+        attributes[0].location != expected_position.location ||
+        attributes[0].offset != expected_position.offset) {
+        diagnostic = {"selected_mesh_vertex_layout_invalid",
+                      "Selected-mesh pipelines require position float3 at offset zero in a 44-byte vertex"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    const TextureDescription& target = texture.info().description;
+    const auto expected_format = [&] {
+        switch (target.format) {
+        case TextureFormat::rgba8_unorm: return PipelineRenderTargetFormat::rgba8_unorm;
+        case TextureFormat::rgba8_srgb: return PipelineRenderTargetFormat::rgba8_srgb;
+        case TextureFormat::bgra8_unorm: return PipelineRenderTargetFormat::bgra8_unorm;
+        case TextureFormat::bgra8_srgb: return PipelineRenderTargetFormat::bgra8_srgb;
+        default: return PipelineRenderTargetFormat::unknown;
+        }
+    }();
+    if (expected_format == PipelineRenderTargetFormat::unknown) {
+        diagnostic = {"selected_mesh_target_format_unsupported",
+                      "Selected meshes support only RGBA8 and BGRA8 color targets"};
+        return IndexedStaticMeshBatchStatus::unsupported;
+    }
+    if (pipeline.targets.colors.size() != 1U ||
+        pipeline.targets.colors[0].format != expected_format ||
+        pipeline.targets.colors[0].samples != target.samples) {
+        diagnostic = {"selected_mesh_pipeline_target_mismatch",
+                      "Selected-mesh pipeline target metadata must match the batch color target"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (pipeline.transform_contract != PipelineTransformContract::selected_mesh) {
+        diagnostic = {"selected_mesh_transform_contract_invalid",
+                      "Selected meshes require draw matrices and fragment color constants"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (pipeline.raster.fill != PipelineFillMode::solid ||
+        pipeline.raster.cull != PipelineCullMode::front) {
+        diagnostic = {"selected_mesh_raster_state_invalid",
+                      "Selected meshes require recovered solid fill and front-face culling"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (pipeline.depth.test_enabled || pipeline.depth.write_enabled) {
+        diagnostic = {"selected_mesh_depth_state_invalid",
+                      "Selected meshes require recovered depth mode off"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (pipeline.blend.enabled || pipeline.blend.alpha_to_coverage) {
+        diagnostic = {"selected_mesh_blend_state_invalid",
+                      "Selected meshes require recovered opaque blend state"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (!pipeline.resources.empty()) {
+        diagnostic = {"selected_mesh_resources_invalid",
+                      "Selected-mesh pipelines use only stage-visible constants"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (request.vertex_buffer->backend() != texture.backend() ||
+        request.index_buffer->backend() != texture.backend() ||
+        request.color_buffer->backend() != texture.backend()) {
+        diagnostic = {"selected_mesh_backend_mismatch",
+                      "Selected-mesh buffers and color target must use one backend"};
+        return IndexedStaticMeshBatchStatus::unsupported;
+    }
+    const BufferDescription& vertices = request.vertex_buffer->info().description;
+    const BufferDescription& indices = request.index_buffer->info().description;
+    const BufferDescription& color = request.color_buffer->info().description;
+    if (vertices.mutability != BufferMutability::immutable ||
+        indices.mutability != BufferMutability::immutable) {
+        diagnostic = {"selected_mesh_buffer_mutable",
+                      "Selected-mesh drawing requires immutable static vertex and index buffers"};
+        return IndexedStaticMeshBatchStatus::unsupported;
+    }
+    if (!any(vertices.usage & BufferUsage::vertex) ||
+        !any(indices.usage & BufferUsage::index)) {
+        diagnostic = {"selected_mesh_buffer_usage_invalid",
+                      "Selected-mesh buffers require vertex and index usage"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (color.usage != BufferUsage::uniform ||
+        color.mutability != BufferMutability::mutable_data ||
+        request.color_range_bytes != selected_mesh_color_view_bytes ||
+        request.color_offset_bytes % selected_mesh_color_view_bytes != 0U ||
+        request.color_offset_bytes > color.size_bytes ||
+        request.color_range_bytes >
+            color.size_bytes - request.color_offset_bytes) {
+        diagnostic = {"selected_mesh_color_buffer_invalid",
+                      "Selected-mesh color requires a mutable aligned 256-byte uniform view"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    constexpr std::uint64_t stride = 11U * sizeof(float);
+    const std::uint64_t vertex_offset = packet.vertex_offset;
+    const std::uint64_t index_offset = packet.index_offset;
+    if (vertex_offset > std::numeric_limits<std::uint64_t>::max() / stride ||
+        index_offset > std::numeric_limits<std::uint64_t>::max() /
+                           sizeof(std::uint16_t)) {
+        diagnostic = {"selected_mesh_offset_overflow",
+                      "Selected-mesh offsets overflow byte arithmetic"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    const std::uint64_t vertex_bytes = vertex_offset * stride;
+    const std::uint64_t index_bytes = index_offset * sizeof(std::uint16_t);
+    const std::uint64_t vertex_span =
+        static_cast<std::uint64_t>(packet.vertex_count) * stride;
+    const std::uint64_t index_span =
+        static_cast<std::uint64_t>(packet.index_count) * sizeof(std::uint16_t);
+    if (vertex_bytes > vertices.size_bytes ||
+        vertex_span > vertices.size_bytes - vertex_bytes ||
+        index_bytes > indices.size_bytes ||
+        index_span > indices.size_bytes - index_bytes) {
+        diagnostic = {"selected_mesh_buffer_range_invalid",
+                      "Selected-mesh draw range exceeds its buffers"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    for (const float value : request.matrices.world)
+        if (!std::isfinite(value)) {
+            diagnostic = {"selected_mesh_matrix_non_finite",
+                          "Selected-mesh matrices must contain only finite values"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+    for (const float value : request.matrices.view_projection)
+        if (!std::isfinite(value)) {
+            diagnostic = {"selected_mesh_matrix_non_finite",
+                          "Selected-mesh matrices must contain only finite values"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+    diagnostic = {};
+    return IndexedStaticMeshBatchStatus::ready;
+}
+
 IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
     const Texture& texture, const IndexedStaticMeshBatchDescription& description,
     Diagnostic& diagnostic) {
@@ -2179,6 +2374,59 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
         diagnostic = {"overlay_line_batch_limit",
                       "Overlay line batch exceeds the bounded draw limit"};
         return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (description.selected_mesh_draws.size() > max_selected_mesh_draws) {
+        diagnostic = {"selected_mesh_batch_limit",
+                      "Selected-mesh batch exceeds the recovered single-selection limit"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (description.selected_mesh_draws.size() >
+        max_indexed_static_mesh_batch_draws - description.draws.size()) {
+        diagnostic = {"indexed_static_mesh_batch_limit",
+                      "Merged scene and selected-mesh draws exceed the bounded draw limit"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    std::uint32_t previous_selected_position = 0U;
+    bool has_previous_selected_position = false;
+    for (const SelectedMeshDrawRequest& selected :
+         description.selected_mesh_draws) {
+        const std::size_t normalized =
+            selected.scene_position == std::numeric_limits<std::uint32_t>::max()
+                ? description.draws.size()
+                : static_cast<std::size_t>(selected.scene_position);
+        if (normalized > description.draws.size()) {
+            diagnostic = {"selected_mesh_scene_position_invalid",
+                          "Selected-mesh scene position exceeds the ordinary draw count"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        const std::uint32_t position = static_cast<std::uint32_t>(normalized);
+        if (has_previous_selected_position &&
+            position < previous_selected_position) {
+            diagnostic = {"selected_mesh_scene_order_invalid",
+                          "Selected-mesh scene positions must be nondecreasing"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        previous_selected_position = position;
+        has_previous_selected_position = true;
+        Diagnostic selected_diagnostic;
+        const IndexedStaticMeshBatchStatus selected_status =
+            validate_selected_mesh_draw_request(texture, selected,
+                                                selected_diagnostic);
+        if (selected_status != IndexedStaticMeshBatchStatus::ready) {
+            diagnostic = std::move(selected_diagnostic);
+            return selected_status;
+        }
+        const bool batch_has_depth = description.depth_attachment != nullptr;
+        if (selected.pipeline->targets.has_depth != batch_has_depth ||
+            (batch_has_depth &&
+             (selected.pipeline->targets.depth.format !=
+                  PipelineRenderTargetFormat::depth32_float ||
+              selected.pipeline->targets.depth.samples !=
+                  texture.info().description.samples))) {
+            diagnostic = {"selected_mesh_pipeline_depth_target_mismatch",
+                          "Selected-mesh depth target metadata must match the batch render pass"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
     }
     std::uint64_t overlay_vertices = 0U;
     for (const OverlayLineDrawRequest& overlay : description.overlay_draws) {

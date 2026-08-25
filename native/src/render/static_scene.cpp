@@ -1,6 +1,7 @@
 #include "apex/render/static_scene.hpp"
 
 #include "apex/render/decoded_dds_texture.hpp"
+#include "apex/render/selected_mesh.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1686,10 +1687,70 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         }
         draws.push_back(std::move(*draw));
     }
-    const IndexedStaticMeshBatchDescription batch{
-        draws, frame.depth_attachment, frame.load_color, frame.clear_color,
-        frame.clear_depth, frame.depth_clear_value, frame.resolve_target,
-        frame.capture_rgba8, frame.overlay_draws};
+    const bool has_selected_pipeline = frame.selected_mesh_pipeline != nullptr;
+    const bool has_selected_color = frame.selected_mesh_color_buffer != nullptr;
+    if (has_selected_pipeline != has_selected_color)
+        return {IndexedStaticMeshBatchStatus::invalid_request,
+                {"static_scene_selected_mesh_resource_incomplete",
+                 "Selected-mesh execution requires both its pipeline and color buffer"},
+                {}};
+    std::array<SelectedMeshDrawRequest, max_selected_mesh_draws> selected_draws{};
+    std::size_t selected_draw_count = 0U;
+    if (has_selected_pipeline) {
+        std::optional<std::size_t> selected_packet_index;
+        for (std::size_t index = 0U; index < packets_.size(); ++index) {
+            if (!packet_for_frame(index).flags.selected) continue;
+            if (selected_packet_index.has_value())
+                return {IndexedStaticMeshBatchStatus::invalid_request,
+                        {"static_scene_selected_mesh_count_invalid",
+                         "Selected-mesh execution requires exactly one selected packet"},
+                        {}};
+            selected_packet_index = index;
+        }
+        if (!selected_packet_index.has_value())
+            return {IndexedStaticMeshBatchStatus::invalid_request,
+                    {"static_scene_selected_mesh_missing",
+                     "Selected-mesh execution requires one selected packet"},
+                    {}};
+        const std::size_t packet_index = *selected_packet_index;
+        const DrawPacket& packet = packet_for_frame(packet_index);
+        if (packet.primitive != DrawPrimitiveKind::static_mesh)
+            return {IndexedStaticMeshBatchStatus::unsupported,
+                    {"static_scene_selected_mesh_skinned_unsupported",
+                     "The recovered selected-mesh pass supports only static geometry"},
+                    {}};
+        if (packet_visible(packet_index)) {
+            const std::size_t upload_index = upload_for_packet_[packet_index];
+            if (upload_index >= uploads_.size() || uploads_[upload_index] == nullptr)
+                return {IndexedStaticMeshBatchStatus::invalid_request,
+                        {"static_scene_selected_mesh_resource_invalid",
+                         "The selected packet has no retained static geometry"},
+                        {}};
+            SelectedMeshDrawRequest& selected =
+                selected_draws[selected_draw_count++];
+            selected.packet = &packet;
+            selected.pipeline = frame.selected_mesh_pipeline;
+            selected.vertex_buffer = uploads_[upload_index]->vertex_buffer.get();
+            selected.index_buffer = uploads_[upload_index]->index_buffer.get();
+            selected.color_buffer = frame.selected_mesh_color_buffer;
+            selected.color_range_bytes = selected_mesh_color_view_bytes;
+            selected.matrices = {packet.world_matrix,
+                                 frame.camera.view_projection};
+        }
+    }
+    IndexedStaticMeshBatchDescription batch;
+    batch.draws = draws;
+    batch.depth_attachment = frame.depth_attachment;
+    batch.load_color = frame.load_color;
+    batch.clear_color = frame.clear_color;
+    batch.clear_depth = frame.clear_depth;
+    batch.depth_clear_value = frame.depth_clear_value;
+    batch.resolve_target = frame.resolve_target;
+    batch.capture_rgba8 = frame.capture_rgba8;
+    batch.overlay_draws = frame.overlay_draws;
+    batch.selected_mesh_draws =
+        std::span<const SelectedMeshDrawRequest>(selected_draws)
+            .first(selected_draw_count);
     Diagnostic batch_diagnostic;
     const IndexedStaticMeshBatchStatus batch_validation =
         validate_indexed_static_mesh_batch_description(target, batch, batch_diagnostic);

@@ -8,9 +8,9 @@ SelectedMeshHighlight evaluate_selected_mesh_highlight(
                        selected_mesh_fade_per_millisecond;
     if (fade > 1.0F) return {};
     return {true,
-            {selected_mesh_rgb[0], selected_mesh_rgb[1],
-             selected_mesh_rgb[2],
-             (1.0F - fade) * selected_mesh_initial_alpha}};
+            {{selected_mesh_rgb[0], selected_mesh_rgb[1],
+              selected_mesh_rgb[2],
+              (1.0F - fade) * selected_mesh_initial_alpha}}};
 }
 
 } // namespace apex::render

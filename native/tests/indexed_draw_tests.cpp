@@ -1,5 +1,6 @@
 #include "apex/render/draw_packet.hpp"
 #include "apex/render/device.hpp"
+#include "apex/render/selected_mesh.hpp"
 
 #include <array>
 #include <cstddef>
@@ -130,6 +131,14 @@ PipelineProgram overlay_pipeline_fixture() {
     pipeline.shaders.push_back({PipelineShaderStage::fragment,
                                 PipelineShaderFormat::spirv,
                                 shader_fixture()});
+    return pipeline;
+}
+
+PipelineProgram selected_mesh_pipeline_fixture() {
+    PipelineProgram pipeline = pipeline_fixture();
+    pipeline.name = "selected-mesh-contract";
+    pipeline.raster.cull = PipelineCullMode::front;
+    pipeline.transform_contract = PipelineTransformContract::selected_mesh;
     return pipeline;
 }
 
@@ -2428,6 +2437,91 @@ void rejects_staged_draw_packet() {
             "explicit pipeline authority still requires the transform contract");
 }
 
+void validates_selected_mesh_draw_contract() {
+    DrawPacket packet = packet_fixture();
+    packet.flags.selected = true;
+    PipelineProgram pipeline = selected_mesh_pipeline_fixture();
+    FakeTexture target(Backend::Vulkan, target_description());
+    FakeBuffer vertices(Backend::Vulkan,
+                        {132U, BufferUsage::vertex,
+                         BufferMemory::device_local,
+                         BufferMutability::immutable});
+    FakeBuffer indices(Backend::Vulkan,
+                       {6U, BufferUsage::index,
+                        BufferMemory::device_local,
+                        BufferMutability::immutable});
+    FakeBuffer color(Backend::Vulkan,
+                     {selected_mesh_color_view_bytes, BufferUsage::uniform,
+                      BufferMemory::host_visible,
+                      BufferMutability::mutable_data});
+    SelectedMeshDrawRequest selected;
+    selected.packet = &packet;
+    selected.pipeline = &pipeline;
+    selected.vertex_buffer = &vertices;
+    selected.index_buffer = &indices;
+    selected.color_buffer = &color;
+    selected.color_range_bytes = selected_mesh_color_view_bytes;
+    Diagnostic diagnostic;
+    require(validate_selected_mesh_draw_request(target, selected, diagnostic) ==
+                IndexedStaticMeshBatchStatus::ready,
+            "recovered selected-mesh request accepted");
+
+    const std::array selected_draws = {selected};
+    IndexedStaticMeshBatchDescription batch;
+    batch.selected_mesh_draws = selected_draws;
+    require(validate_indexed_static_mesh_batch_description(
+                target, batch, diagnostic) ==
+                IndexedStaticMeshBatchStatus::ready,
+            "append-position selected-mesh batch accepted");
+
+    selected.scene_position = 1U;
+    const std::array out_of_range = {selected};
+    batch.selected_mesh_draws = out_of_range;
+    require(validate_indexed_static_mesh_batch_description(
+                target, batch, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "selected_mesh_scene_position_invalid",
+            "selected-mesh scene position is range checked");
+
+    selected.scene_position = 0U;
+    DrawPacket skinned = packet;
+    skinned.primitive = DrawPrimitiveKind::skinned_mesh;
+    skinned.vertex_stride_floats = 19U;
+    selected.packet = &skinned;
+    require(validate_selected_mesh_draw_request(target, selected, diagnostic) ==
+                IndexedStaticMeshBatchStatus::unsupported &&
+                diagnostic.code == "selected_mesh_static_contract_required",
+            "selected-mesh shader rejects skinned input");
+
+    selected.packet = &packet;
+    packet.index_count = 2U;
+    require(validate_selected_mesh_draw_request(target, selected, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "selected_mesh_geometry_count_invalid",
+            "truncated selected triangle is rejected");
+    packet.index_count = 3U;
+
+    packet.vertex_offset = 1U;
+    require(validate_selected_mesh_draw_request(target, selected, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "selected_mesh_buffer_range_invalid",
+            "selected vertex span cannot exceed its buffer");
+    packet.vertex_offset = 0U;
+
+    selected.color_range_bytes = 16U;
+    require(validate_selected_mesh_draw_request(target, selected, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "selected_mesh_color_buffer_invalid",
+            "selected color rejects a truncated uniform view");
+    selected.color_range_bytes = selected_mesh_color_view_bytes;
+
+    pipeline.blend.enabled = true;
+    require(validate_selected_mesh_draw_request(target, selected, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "selected_mesh_blend_state_invalid",
+            "selected pass rejects an approximate blended state");
+}
+
 } // namespace
 
 int main() {
@@ -2457,6 +2551,7 @@ int main() {
         validates_overlay_line_batch_contract();
         rejects_static_indexed_limits_and_ownership();
         rejects_staged_draw_packet();
+        validates_selected_mesh_draw_contract();
         std::cout << "indexed draw tests passed\n";
         return 0;
     } catch (const std::exception& error) {

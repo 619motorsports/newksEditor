@@ -1479,7 +1479,10 @@ struct D3D12GeometryDescriptor {
 struct D3D12IndexedBatchDraw {
     D3D12GeometryDescriptor geometry{};
     const PipelineProgram* pipeline = nullptr;
+    const IndexedStaticMeshDrawRequest* scene_request = nullptr;
     DrawMatrices matrices{};
+    const D3D12Buffer* selected_color = nullptr;
+    UINT64 selected_color_offset = 0U;
     bool alpha_tested = false;
     D3D12Texture* alpha_texture = nullptr;
     D3D12Sampler* alpha_sampler = nullptr;
@@ -2520,9 +2523,10 @@ bool draw_indexed_static_mesh_batch_and_readback(
             return false;
         }
         material_bindings.resize(draws.size());
-        for (std::size_t index = 0; index < batch.draws.size(); ++index) {
+        for (std::size_t index = 0; index < draws.size(); ++index) {
+            if (draws[index].scene_request == nullptr) continue;
             const std::size_t descriptor_index = index * material_descriptor_stride;
-            if (!prepare_d3d12_material_binding(context, batch.draws[index], srv_heap.Get(),
+            if (!prepare_d3d12_material_binding(context, *draws[index].scene_request, srv_heap.Get(),
                                                  static_cast<UINT>(descriptor_index),
                                                  static_cast<UINT>(descriptor_index +
                                                                    (has_material_constants ? 1U : 0U)),
@@ -2582,6 +2586,8 @@ bool draw_indexed_static_mesh_batch_and_readback(
     std::vector<UINT> shadow_srv_root_indices(draws.size(), std::numeric_limits<UINT>::max());
     std::vector<UINT> shadow_sampler_root_indices(draws.size(), std::numeric_limits<UINT>::max());
     std::vector<UINT> shadow_cbv_root_indices(draws.size(), std::numeric_limits<UINT>::max());
+    std::vector<UINT> selected_color_root_indices(draws.size(),
+                                                   std::numeric_limits<UINT>::max());
     root_signatures.resize(draws.size());
     pipelines.resize(draws.size());
     for (std::size_t index = 0; index < draws.size(); ++index) {
@@ -2646,9 +2652,21 @@ bool draw_indexed_static_mesh_batch_and_readback(
         D3D12_ROOT_PARAMETER shadow_sampler_parameter{};
         D3D12_DESCRIPTOR_RANGE shadow_cbv_range{};
         D3D12_ROOT_PARAMETER shadow_cbv_parameter{};
-        std::array<D3D12_ROOT_PARAMETER, 20> root_parameters{};
+        std::array<D3D12_ROOT_PARAMETER, 21> root_parameters{};
         UINT root_parameter_count = 1U;
         root_parameters[0] = transform_parameter;
+        D3D12_ROOT_PARAMETER selected_color_parameter{};
+        if (program.transform_contract ==
+            PipelineTransformContract::selected_mesh) {
+            selected_color_parameter.ParameterType =
+                D3D12_ROOT_PARAMETER_TYPE_CBV;
+            selected_color_parameter.Descriptor.ShaderRegister = 5U;
+            selected_color_parameter.Descriptor.RegisterSpace = 0U;
+            selected_color_parameter.ShaderVisibility =
+                D3D12_SHADER_VISIBILITY_PIXEL;
+            selected_color_root_indices[index] = root_parameter_count;
+            root_parameters[root_parameter_count++] = selected_color_parameter;
+        }
         if (!program.resources.empty()) {
             srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
             srv_range.NumDescriptors = 1U;
@@ -3098,6 +3116,14 @@ bool draw_indexed_static_mesh_batch_and_readback(
         list->SetGraphicsRootSignature(root_signatures[index].Get());
         list->SetGraphicsRoot32BitConstants(0U, static_cast<UINT>(sizeof(DrawMatrices) / sizeof(std::uint32_t)),
                                              &draw.matrices, 0U);
+        if (draw.selected_color != nullptr &&
+            selected_color_root_indices[index] !=
+                std::numeric_limits<UINT>::max()) {
+            list->SetGraphicsRootConstantBufferView(
+                selected_color_root_indices[index],
+                draw.selected_color->resource()->GetGPUVirtualAddress() +
+                    draw.selected_color_offset);
+        }
         if (!material_bindings.empty() && material_bindings[index].enabled) {
             list->SetGraphicsRootDescriptorTable(1U, material_bindings[index].srv_gpu);
             list->SetGraphicsRootDescriptorTable(2U, material_bindings[index].sampler_gpu);
@@ -5957,38 +5983,49 @@ public:
                      "Batch resources belong to another D3D12 device"}, {}};
         }
         std::vector<D3D12IndexedBatchDraw> draws;
-        draws.reserve(batch.draws.size() + batch.overlay_draws.size());
-        for (const IndexedStaticMeshDrawRequest& request : batch.draws) {
-            const auto* vertex = dynamic_cast<const D3D12Buffer*>(request.vertex_buffer);
-            const auto* index = dynamic_cast<const D3D12Buffer*>(request.index_buffer);
+        draws.reserve(batch.draws.size() + batch.selected_mesh_draws.size() +
+                      batch.overlay_draws.size());
+        IndexedStaticMeshBatchStatus assembly_status =
+            IndexedStaticMeshBatchStatus::ready;
+        const auto append_indexed_draw =
+            [&](const Buffer* vertex_buffer, const Buffer* index_buffer,
+                const DrawPacket& packet, const PipelineProgram& pipeline,
+                const DrawMatrices& matrices,
+                const IndexedStaticMeshDrawRequest* scene_request,
+                const SelectedMeshDrawRequest* selected_request) {
+            const auto* vertex = dynamic_cast<const D3D12Buffer*>(vertex_buffer);
+            const auto* index = dynamic_cast<const D3D12Buffer*>(index_buffer);
             if (vertex == nullptr || index == nullptr || vertex->context() != context || index->context() != context) {
-                return {IndexedStaticMeshBatchStatus::unsupported,
-                        {"indexed_static_mesh_batch_context_mismatch",
-                         "Batch geometry buffers belong to another D3D12 device"}, {}};
+                assembly_status = IndexedStaticMeshBatchStatus::unsupported;
+                diagnostic = {"indexed_static_mesh_batch_context_mismatch",
+                              "Batch geometry buffers belong to another D3D12 device"};
+                return false;
             }
             const UINT required_vertex_state =
                 static_cast<UINT>(D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
             const UINT required_index_state = static_cast<UINT>(D3D12_RESOURCE_STATE_INDEX_BUFFER);
             if ((static_cast<UINT>(vertex->state()) & required_vertex_state) == 0U ||
                 (static_cast<UINT>(index->state()) & required_index_state) == 0U) {
-                return {IndexedStaticMeshBatchStatus::invalid_request,
-                        {"indexed_static_mesh_batch_resource_state_invalid",
-                         "Batch geometry buffers are not in D3D12 vertex/index state"}, {}};
+                assembly_status = IndexedStaticMeshBatchStatus::invalid_request;
+                diagnostic = {"indexed_static_mesh_batch_resource_state_invalid",
+                              "Batch geometry buffers are not in D3D12 vertex/index state"};
+                return false;
             }
-            const std::uint64_t stride = request.pipeline->vertex_layout.stride;
-            const std::uint64_t vertex_offset = static_cast<std::uint64_t>(request.packet->vertex_offset);
-            const std::uint64_t index_offset = static_cast<std::uint64_t>(request.packet->index_offset);
+            const std::uint64_t stride = pipeline.vertex_layout.stride;
+            const std::uint64_t vertex_offset = static_cast<std::uint64_t>(packet.vertex_offset);
+            const std::uint64_t index_offset = static_cast<std::uint64_t>(packet.index_offset);
             if (stride == 0U || vertex_offset > std::numeric_limits<std::uint64_t>::max() / stride ||
                 index_offset > std::numeric_limits<std::uint64_t>::max() / sizeof(std::uint16_t)) {
-                return {IndexedStaticMeshBatchStatus::invalid_request,
-                        {"indexed_static_mesh_batch_offset_overflow",
-                         "Batch geometry offsets overflow D3D12 byte arithmetic"}, {}};
+                assembly_status = IndexedStaticMeshBatchStatus::invalid_request;
+                diagnostic = {"indexed_static_mesh_batch_offset_overflow",
+                              "Batch geometry offsets overflow D3D12 byte arithmetic"};
+                return false;
             }
             const std::uint64_t vertex_byte_offset = vertex_offset * stride;
             const std::uint64_t index_byte_offset = index_offset * sizeof(std::uint16_t);
-            const std::uint64_t vertex_bytes = static_cast<std::uint64_t>(request.packet->vertex_count) * stride;
+            const std::uint64_t vertex_bytes = static_cast<std::uint64_t>(packet.vertex_count) * stride;
             const std::uint64_t index_bytes =
-                static_cast<std::uint64_t>(request.packet->index_count) * sizeof(std::uint16_t);
+                static_cast<std::uint64_t>(packet.index_count) * sizeof(std::uint16_t);
             constexpr std::uint64_t max_uint = static_cast<std::uint64_t>(std::numeric_limits<UINT>::max());
             const D3D12_RESOURCE_DESC vertex_description = vertex->resource()->GetDesc();
             const D3D12_RESOURCE_DESC index_description = index->resource()->GetDesc();
@@ -6003,13 +6040,15 @@ public:
                 index_bytes > index_description.Width - index_byte_offset ||
                 vertex_address > std::numeric_limits<D3D12_GPU_VIRTUAL_ADDRESS>::max() - vertex_byte_offset ||
                 index_address > std::numeric_limits<D3D12_GPU_VIRTUAL_ADDRESS>::max() - index_byte_offset) {
-                return {IndexedStaticMeshBatchStatus::invalid_request,
-                        {"indexed_static_mesh_batch_buffer_range_invalid",
-                         "Batch geometry range exceeds D3D12 buffer limits"}, {}};
+                assembly_status = IndexedStaticMeshBatchStatus::invalid_request;
+                diagnostic = {"indexed_static_mesh_batch_buffer_range_invalid",
+                              "Batch geometry range exceeds D3D12 buffer limits"};
+                return false;
             }
             D3D12IndexedBatchDraw draw;
-            draw.pipeline = request.pipeline;
-            draw.matrices = {request.packet->world_matrix, request.camera_frame->view_projection};
+            draw.pipeline = &pipeline;
+            draw.scene_request = scene_request;
+            draw.matrices = matrices;
             draw.geometry.vertex_resource = vertex->resource();
             draw.geometry.vertex_offset = vertex_byte_offset;
             draw.geometry.vertex_size = static_cast<UINT>(vertex_bytes);
@@ -6017,9 +6056,77 @@ public:
             draw.geometry.index_resource = index->resource();
             draw.geometry.index_offset = index_byte_offset;
             draw.geometry.index_size = static_cast<UINT>(index_bytes);
-            draw.geometry.index_count = request.packet->index_count;
+            draw.geometry.index_count = packet.index_count;
             draw.geometry.indexed = true;
+            if (selected_request != nullptr) {
+                const auto* color = dynamic_cast<const D3D12Buffer*>(
+                    selected_request->color_buffer);
+                if (color == nullptr || color->context() != context) {
+                    assembly_status = IndexedStaticMeshBatchStatus::unsupported;
+                    diagnostic = {"selected_mesh_context_mismatch",
+                                  "The selected-mesh color buffer belongs to another D3D12 device"};
+                    return false;
+                }
+                if ((static_cast<UINT>(color->state()) & required_vertex_state) == 0U) {
+                    assembly_status = IndexedStaticMeshBatchStatus::invalid_request;
+                    diagnostic = {"selected_mesh_resource_state_invalid",
+                                  "The selected-mesh color buffer is not in D3D12 constant-buffer state"};
+                    return false;
+                }
+                const D3D12_RESOURCE_DESC color_description =
+                    color->resource()->GetDesc();
+                const D3D12_GPU_VIRTUAL_ADDRESS color_address =
+                    color->resource()->GetGPUVirtualAddress();
+                if (selected_request->color_offset_bytes > color_description.Width ||
+                    selected_request->color_range_bytes >
+                        color_description.Width - selected_request->color_offset_bytes ||
+                    color_address >
+                        std::numeric_limits<D3D12_GPU_VIRTUAL_ADDRESS>::max() -
+                            selected_request->color_offset_bytes) {
+                    assembly_status = IndexedStaticMeshBatchStatus::invalid_request;
+                    diagnostic = {"selected_mesh_buffer_range_invalid",
+                                  "The selected-mesh color view exceeds D3D12 buffer limits"};
+                    return false;
+                }
+                draw.selected_color = color;
+                draw.selected_color_offset =
+                    selected_request->color_offset_bytes;
+            }
             draws.push_back(draw);
+            return true;
+        };
+        const auto append_scene_draw = [&](const IndexedStaticMeshDrawRequest& request) {
+            return append_indexed_draw(
+                request.vertex_buffer, request.index_buffer, *request.packet,
+                *request.pipeline,
+                {request.packet->world_matrix,
+                 request.camera_frame->view_projection},
+                &request, nullptr);
+        };
+        const auto append_selected_draw = [&](const SelectedMeshDrawRequest& request) {
+            return append_indexed_draw(
+                request.vertex_buffer, request.index_buffer, *request.packet,
+                *request.pipeline, request.matrices, nullptr, &request);
+        };
+        std::size_t selected_index = 0U;
+        for (std::size_t scene_index = 0U;
+             scene_index <= batch.draws.size(); ++scene_index) {
+            while (selected_index < batch.selected_mesh_draws.size()) {
+                const SelectedMeshDrawRequest& selected =
+                    batch.selected_mesh_draws[selected_index];
+                const std::size_t position =
+                    selected.scene_position ==
+                            std::numeric_limits<std::uint32_t>::max()
+                        ? batch.draws.size()
+                        : static_cast<std::size_t>(selected.scene_position);
+                if (position != scene_index) break;
+                if (!append_selected_draw(selected))
+                    return {assembly_status, std::move(diagnostic), {}};
+                ++selected_index;
+            }
+            if (scene_index < batch.draws.size() &&
+                !append_scene_draw(batch.draws[scene_index]))
+                return {assembly_status, std::move(diagnostic), {}};
         }
         for (const OverlayLineDrawRequest& request : batch.overlay_draws) {
             const auto* vertex =

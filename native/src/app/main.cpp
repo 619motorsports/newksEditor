@@ -60,6 +60,7 @@ void usage(std::ostream& output) {
               "                       [--weather <stock-id>] [--sun-heading <degrees>] [--sun-height <degrees>]\n"
               "                       [--shader-family <name> --shader-vertex <file> --shader-fragment <file>]\n"
               "                       [--authoring-overlay-vertex <file> --authoring-overlay-fragment <file>]\n"
+              "                       [--selected-mesh-vertex <file> --selected-mesh-fragment <file>]\n"
               "                       [--directional-shadow-vertex <file>]\n"
            << "  apex-native --inspect-kn5 <file>\n"
            << "  apex-native --inspect-dds <file>\n"
@@ -540,6 +541,8 @@ struct WindowWorkspaceOptions {
     std::vector<WindowShaderSpec> shaders;
     std::optional<std::filesystem::path> authoringOverlayVertex;
     std::optional<std::filesystem::path> authoringOverlayFragment;
+    std::optional<std::filesystem::path> selectedMeshVertex;
+    std::optional<std::filesystem::path> selectedMeshFragment;
     std::optional<std::filesystem::path> directionalShadowVertex;
 };
 
@@ -553,6 +556,8 @@ struct LoadedWindowWorkspace {
     std::vector<apex::render::StockMaterialShaderModules> descriptors;
     std::optional<std::vector<apex::render::PipelineShaderModule>>
         authoringOverlayModules;
+    std::optional<std::vector<apex::render::PipelineShaderModule>>
+        selectedMeshModules;
     std::optional<apex::app::WorkspaceViewportDirectionalShadowOptions>
         directionalShadows;
     apex::app::WorkspaceSelectionState selection;
@@ -756,6 +761,18 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
                     "duplicate authoring-overlay fragment option");
             result.authoringOverlayFragment = std::filesystem::path(
                 require_value(option));
+        } else if (option == "--selected-mesh-vertex") {
+            if (result.selectedMeshVertex.has_value())
+                throw std::runtime_error(
+                    "duplicate selected-mesh vertex option");
+            result.selectedMeshVertex = std::filesystem::path(
+                require_value(option));
+        } else if (option == "--selected-mesh-fragment") {
+            if (result.selectedMeshFragment.has_value())
+                throw std::runtime_error(
+                    "duplicate selected-mesh fragment option");
+            result.selectedMeshFragment = std::filesystem::path(
+                require_value(option));
         } else {
             throw std::runtime_error("unknown window option");
         }
@@ -782,7 +799,9 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
     if ((!result.model.has_value() && !result.workspaceRoot.has_value()) &&
         (!result.shaders.empty() || result.directionalShadowVertex.has_value() ||
          result.authoringOverlayVertex.has_value() ||
-         result.authoringOverlayFragment.has_value()))
+         result.authoringOverlayFragment.has_value() ||
+         result.selectedMeshVertex.has_value() ||
+         result.selectedMeshFragment.has_value()))
         throw std::runtime_error("shader modules require a workspace model");
     if (result.authoringOverlayVertex.has_value() !=
         result.authoringOverlayFragment.has_value())
@@ -795,6 +814,14 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
     if (result.gridVisible && !result.authoringOverlayVertex.has_value())
         throw std::runtime_error(
             "--grid requires authoring-overlay shader modules");
+    if (result.selectedMeshVertex.has_value() !=
+        result.selectedMeshFragment.has_value())
+        throw std::runtime_error(
+            "selected-mesh vertex and fragment modules must be supplied together");
+    if (result.selectedMeshVertex.has_value() &&
+        !result.selectedNode.has_value())
+        throw std::runtime_error(
+            "selected-mesh shader modules require --selected-node");
     if (result.directionalShadowVertex.has_value() && result.shaders.empty())
         throw std::runtime_error(
             "--directional-shadow-vertex requires receiver-capable material shader modules");
@@ -1014,6 +1041,26 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
         }
         loaded.authoringOverlayModules = std::move(modules);
     }
+    if (options.selectedMeshVertex.has_value()) {
+        std::vector<apex::render::PipelineShaderModule> modules;
+        modules.push_back({apex::render::PipelineShaderStage::vertex,
+                           shader_format,
+                           read_file(*options.selectedMeshVertex)});
+        modules.push_back({apex::render::PipelineShaderStage::fragment,
+                           shader_format,
+                           read_file(*options.selectedMeshFragment)});
+        for (const auto& module : modules) {
+            if (module.bytes.size() > apex::render::max_shader_module_bytes)
+                throw std::runtime_error(
+                    "a selected-mesh module exceeds the native module budget");
+            if (module.bytes.size() > max_shader_bytes ||
+                shader_bytes > max_shader_bytes - module.bytes.size())
+                throw std::runtime_error(
+                    "caller-supplied shader modules exceed the native shader budget");
+            shader_bytes += module.bytes.size();
+        }
+        loaded.selectedMeshModules = std::move(modules);
+    }
     if (options.directionalShadowVertex.has_value()) {
         auto shadow_bytes = read_file(*options.directionalShadowVertex);
         if (shadow_bytes.size() > apex::render::max_shader_module_bytes)
@@ -1192,6 +1239,30 @@ int run_window(int argc, char** argv) {
             pipeline.transform_contract =
                 apex::render::PipelineTransformContract::draw_matrices;
             request.authoring_overlay_pipeline = std::move(pipeline);
+        }
+        if (loaded_workspace.selectedMeshModules.has_value()) {
+            apex::render::PipelineProgram pipeline;
+            pipeline.name = "workspace-selected-mesh";
+            pipeline.shaders = *loaded_workspace.selectedMeshModules;
+            pipeline.vertex_layout.stride = 11U * sizeof(float);
+            pipeline.vertex_layout.attributes = {
+                {apex::render::PipelineVertexSemantic::position,
+                 apex::render::PipelineVertexAttributeFormat::float32x3,
+                 0U, 0U},
+            };
+            pipeline.targets.colors = {{pipeline_color_format(
+                request.presentation.format), request.color_samples}};
+            pipeline.targets.has_depth = true;
+            pipeline.targets.depth = {
+                apex::render::PipelineRenderTargetFormat::depth32_float,
+                request.color_samples};
+            pipeline.raster.fill = apex::render::PipelineFillMode::solid;
+            pipeline.raster.cull = apex::render::PipelineCullMode::front;
+            pipeline.depth.test_enabled = false;
+            pipeline.depth.write_enabled = false;
+            pipeline.transform_contract =
+                apex::render::PipelineTransformContract::selected_mesh;
+            request.selected_mesh_pipeline = std::move(pipeline);
         }
         if (loaded_workspace.directionalShadows.has_value()) {
             request.directional_shadow_receiver = true;
