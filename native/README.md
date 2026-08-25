@@ -233,6 +233,11 @@ The interval always uses interpolation and disables depth tests and writes.
 `--ai-spline-show-right` shows the recovered right side spline.
 The side options are independent and off by default. They require version-7
 payloads and use cyan with normal depth.
+`--ai-spline-index <index>` draws the recovered current-point marker.
+The zero-based index refers to the retained point array. The center line is
+yellow and 40 units high. If the left width is nonzero, the option also draws
+two cyan width markers. This option uses normal depth and requires version-7
+payloads.
 `--ai-spline-show-camber` shows one vertical camber line at each point.
 Positive camber is green. Zero and negative camber are red. The line height is
 the absolute camber value times 1,000. This option uses normal depth and

@@ -274,6 +274,10 @@ This pass always uses interpolation and disables depth tests and writes.
 The backend-neutral line-list conversion is a labeled translation of the
 original OpenGL line strip. Independent version-7 side options add the
 recovered cyan raw splines. These passes use normal depth after the interval.
+An independent version-7 current-index option adds the recovered yellow
+center line and optional cyan width lines. It uses normal depth after the side
+passes. The CLI accepts one retained-point index. Multi-selection and mutable
+edit points remain staged.
 An independent version-7 camber option adds the recovered vertical red and
 green lines. This pass also uses normal depth. Edit overlays remain staged.
 

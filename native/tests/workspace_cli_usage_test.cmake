@@ -157,6 +157,56 @@ if(NOT detached_ai_side_result STREQUAL "1")
   message(FATAL_ERROR
     "detached AI side returned ${detached_ai_side_result}: ${detached_ai_side_error}")
 endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --ai-spline-index 0
+  RESULT_VARIABLE detached_ai_index_result
+  ERROR_VARIABLE detached_ai_index_error
+)
+if(NOT detached_ai_index_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached AI index returned ${detached_ai_index_result}: ${detached_ai_index_error}")
+endif()
+string(FIND "${detached_ai_index_error}"
+  "AI spline overlays require --ai-spline" detached_ai_index_position)
+if(detached_ai_index_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached AI index was not diagnosed: ${detached_ai_index_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --ai-spline-index 0 --ai-spline-index 1
+  RESULT_VARIABLE duplicate_ai_index_result
+  ERROR_VARIABLE duplicate_ai_index_error
+)
+if(NOT duplicate_ai_index_result STREQUAL "1")
+  message(FATAL_ERROR
+    "duplicate AI index returned ${duplicate_ai_index_result}: ${duplicate_ai_index_error}")
+endif()
+string(FIND "${duplicate_ai_index_error}"
+  "duplicate --ai-spline-index option" duplicate_ai_index_position)
+if(duplicate_ai_index_position EQUAL -1)
+  message(FATAL_ERROR
+    "duplicate AI index was not diagnosed: ${duplicate_ai_index_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --ai-spline-index -1
+  RESULT_VARIABLE malformed_ai_index_result
+  ERROR_VARIABLE malformed_ai_index_error
+)
+if(NOT malformed_ai_index_result STREQUAL "1")
+  message(FATAL_ERROR
+    "malformed AI index returned ${malformed_ai_index_result}: ${malformed_ai_index_error}")
+endif()
+string(FIND "${malformed_ai_index_error}"
+  "AI spline index must be a valid unsigned 32-bit integer"
+  malformed_ai_index_position)
+if(malformed_ai_index_position EQUAL -1)
+  message(FATAL_ERROR
+    "malformed AI index was not diagnosed: ${malformed_ai_index_error}")
+endif()
 string(FIND "${detached_ai_side_error}"
   "AI spline overlays require --ai-spline" detached_ai_side_position)
 if(detached_ai_side_position EQUAL -1)
@@ -568,7 +618,8 @@ endif()
 execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
           --ai-spline "${ai_spline}"
-          --ai-spline-show-left --ai-spline-show-right --ai-spline-show-camber
+          --ai-spline-show-left --ai-spline-show-right --ai-spline-index 0
+          --ai-spline-show-camber
           --shader-family fixture --shader-vertex missing.vert.spv
           --shader-fragment missing.frag.spv
           --authoring-overlay-vertex missing-overlay.vert.spv
@@ -590,10 +641,35 @@ string(FIND "${side_ai_load_output}"
 string(FIND "${side_ai_load_output}"
   "AI spline camber: lines=3536, draws=2"
   camber_ai_load_position)
+string(FIND "${side_ai_load_output}"
+  "AI spline current index: index=0, lines=3, draws=1"
+  current_ai_index_position)
 if(left_ai_load_position EQUAL -1 OR right_ai_load_position EQUAL -1 OR
-   camber_ai_load_position EQUAL -1)
+   current_ai_index_position EQUAL -1 OR camber_ai_load_position EQUAL -1)
   message(FATAL_ERROR
     "AI sides did not load before shader setup: ${side_ai_load_output}${side_ai_load_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --ai-spline "${ai_spline}" --ai-spline-index 3536
+          --shader-family fixture --shader-vertex missing.vert.spv
+          --shader-fragment missing.frag.spv
+          --authoring-overlay-vertex missing-overlay.vert.spv
+          --authoring-overlay-fragment missing-overlay.frag.spv
+  RESULT_VARIABLE out_of_range_ai_index_result
+  ERROR_VARIABLE out_of_range_ai_index_error
+)
+if(NOT out_of_range_ai_index_result STREQUAL "1")
+  message(FATAL_ERROR
+    "out-of-range AI index returned ${out_of_range_ai_index_result}: ${out_of_range_ai_index_error}")
+endif()
+string(FIND "${out_of_range_ai_index_error}"
+  "workspace_ai_spline_selection_index_invalid"
+  out_of_range_ai_index_position)
+if(out_of_range_ai_index_position EQUAL -1)
+  message(FATAL_ERROR
+    "out-of-range AI index was not diagnosed: ${out_of_range_ai_index_error}")
 endif()
 string(FIND "${side_ai_load_error}"
   "cannot open missing.vert.spv" side_ai_shader_position)

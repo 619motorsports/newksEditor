@@ -6094,6 +6094,17 @@ float4 main(float3 color : COLOR) : SV_Target { return float4(color, 1.0); }
         }
         return count;
     };
+    const auto count_yellow = [](std::span<const std::byte> rgba) {
+        std::size_t count = 0U;
+        for (std::size_t offset = 0U; offset + 3U < rgba.size(); offset += 4U) {
+            const auto red = std::to_integer<unsigned>(rgba[offset]);
+            const auto green = std::to_integer<unsigned>(rgba[offset + 1U]);
+            const auto blue = std::to_integer<unsigned>(rgba[offset + 2U]);
+            if (red > blue && green > blue && red > 0U && green > 0U)
+                ++count;
+        }
+        return count;
+    };
     PipelineProgram overlay_pipeline = make_overlay_pipeline(1U);
     OverlayLineDrawRequest overlay_request;
     overlay_request.pipeline = &overlay_pipeline;
@@ -6244,6 +6255,41 @@ float4 main(float3 color : COLOR) : SV_Target { return float4(color, 1.0); }
     require(ai_side_occluded.ok() && count_cyan(ai_side_occluded.rgba8) == 0U,
             "normal-depth cyan AI spline side fails nearer clear depth");
 
+    const std::array<OverlayLineVertex, 4U> ai_selection_vertices = {{
+        {{-0.3F, -0.8F, 0.5F}, {3.0F, 3.0F, 0.0F}},
+        {{-0.3F, 0.2F, 0.5F}, {3.0F, 3.0F, 0.0F}},
+        {{0.3F, -0.8F, 0.5F}, {0.0F, 3.0F, 3.0F}},
+        {{0.3F, 0.2F, 0.5F}, {0.0F, 3.0F, 3.0F}},
+    }};
+    ai_spline_buffer_description.size_bytes = sizeof(ai_selection_vertices);
+    BufferResult ai_selection_buffer = device.device->create_buffer(
+        ai_spline_buffer_description,
+        std::as_bytes(std::span(ai_selection_vertices)));
+    require(ai_selection_buffer.ok(),
+            "AI spline current-index vertex buffer creation");
+    OverlayLineDrawRequest ai_selection_request = ai_spline_request;
+    ai_selection_request.vertex_buffer = ai_selection_buffer.buffer.get();
+    ai_selection_request.vertex_count =
+        static_cast<std::uint32_t>(ai_selection_vertices.size());
+    const std::array ai_selection_requests = {ai_selection_request};
+    ai_spline_batch.depth_clear_value = 1.0F;
+    ai_spline_batch.overlay_draws = ai_selection_requests;
+    const auto ai_selection_visible =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *triangle_texture.texture, ai_spline_batch);
+    require(ai_selection_visible.ok() &&
+                count_yellow(ai_selection_visible.rgba8) > 8U &&
+                count_cyan(ai_selection_visible.rgba8) > 8U,
+            "normal-depth current-index colors pass clear depth");
+    ai_spline_batch.depth_clear_value = 0.0F;
+    const auto ai_selection_occluded =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *triangle_texture.texture, ai_spline_batch);
+    require(ai_selection_occluded.ok() &&
+                count_yellow(ai_selection_occluded.rgba8) == 0U &&
+                count_cyan(ai_selection_occluded.rgba8) == 0U,
+            "normal-depth current-index colors fail nearer clear depth");
+
     const std::array<OverlayLineVertex, 4U> ai_camber_vertices = {{
         {{-0.4F, -0.8F, 0.5F}, {3.0F, 0.0F, 0.0F}},
         {{-0.4F, 0.0F, 0.5F}, {3.0F, 0.0F, 0.0F}},
@@ -6336,6 +6382,17 @@ float4 main(float3 color : COLOR) : SV_Target { return float4(color, 1.0); }
     require(ai_side_msaa_result.ok() &&
                 count_cyan(ai_side_msaa_result.rgba8) > 8U,
             "four-sample normal-depth cyan AI spline side survives resolve");
+
+    ai_selection_request.pipeline = &ai_spline_msaa_pipeline;
+    const std::array ai_selection_msaa_requests = {ai_selection_request};
+    ai_spline_batch.overlay_draws = ai_selection_msaa_requests;
+    const auto ai_selection_msaa_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *overlay_msaa.texture, ai_spline_batch);
+    require(ai_selection_msaa_result.ok() &&
+                count_yellow(ai_selection_msaa_result.rgba8) > 8U &&
+                count_cyan(ai_selection_msaa_result.rgba8) > 8U,
+            "four-sample current-index colors survive normal-depth resolve");
 
     ai_camber_request.pipeline = &ai_spline_msaa_pipeline;
     const std::array ai_camber_msaa_requests = {ai_camber_request};

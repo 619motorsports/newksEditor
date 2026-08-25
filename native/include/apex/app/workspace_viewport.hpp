@@ -124,6 +124,10 @@ struct WorkspaceViewportPrepareRequest {
     std::optional<render::PipelineProgram> ai_spline_left_pipeline;
     const WorkspaceAiSplineGeometry* ai_spline_right_geometry = nullptr;
     std::optional<render::PipelineProgram> ai_spline_right_pipeline;
+    // Optional recovered current-index marker. This normal-depth pass follows
+    // the side splines and must be supplied with the primary spline pass.
+    const WorkspaceAiSplineGeometry* ai_spline_selection_geometry = nullptr;
+    std::optional<render::PipelineProgram> ai_spline_selection_pipeline;
     const WorkspaceAiSplineGeometry* ai_spline_camber_geometry = nullptr;
     std::optional<render::PipelineProgram> ai_spline_camber_pipeline;
     // Optional recovered magenta selected-mesh pass. The selected packet must

@@ -1504,6 +1504,103 @@ void draws_recovered_ai_spline_camber_pass() {
             "camber shares the bounded AI spline aggregate budget");
 }
 
+void draws_recovered_ai_spline_current_index_pass() {
+    auto value = fixture();
+    apex::formats::AiSpline spline;
+    spline.version = 7U;
+    spline.points.resize(3U);
+    spline.points[0U].position = {0.0F, 0.0F, 0.0F};
+    spline.points[1U].position = {10.0F, 0.0F, 0.0F};
+    spline.points[2U].position = {20.0F, 0.0F, 0.0F};
+    spline.points[0U].tag = 0;
+    spline.points[1U].tag = 1;
+    spline.points[2U].tag = 2;
+    spline.payloads.resize(3U);
+    spline.payloads[0U].side0 = 1.0F;
+    spline.payloads[0U].side1 = 2.0F;
+    const auto primary = apex::app::buildWorkspaceAiSplineGeometry(spline);
+    const auto selection =
+        apex::app::buildWorkspaceAiSplineSelectionGeometry(spline, 0U);
+    require(primary.ok() && selection.ok(),
+            "current-index viewport fixtures convert");
+
+    auto request = request_for(value);
+    request.ai_spline_geometry = &primary.geometry;
+    request.ai_spline_pipeline = ai_spline_pipeline(value);
+    request.ai_spline_selection_geometry = &selection.geometry;
+    request.ai_spline_selection_pipeline = ai_spline_camber_pipeline(value);
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok(), "primary and current-index passes prepare");
+
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    Diagnostic diagnostic;
+    require(prepared.viewport->drawAndPresent(
+                device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.overlay_counts == std::vector<std::size_t>({2U}) &&
+                device.overlay_vertex_counts ==
+                    std::vector<std::uint32_t>({4U, 6U}) &&
+                device.overlay_depth_tests ==
+                    std::vector<bool>({true, true}) &&
+                device.overlay_depth_writes ==
+                    std::vector<bool>({true, true}),
+            "current-index marker follows the primary pass with normal depth");
+
+    auto missing_primary_request = request_for(value);
+    missing_primary_request.ai_spline_selection_geometry =
+        &selection.geometry;
+    missing_primary_request.ai_spline_selection_pipeline =
+        ai_spline_camber_pipeline(value);
+    FakeDevice missing_primary_device;
+    const auto missing_primary = apex::app::prepareWorkspaceViewport(
+        missing_primary_device, value.document, missing_primary_request);
+    require(!missing_primary.ok() && missing_primary.diagnostic.code ==
+                "workspace_viewport_ai_spline_overlay_primary_missing",
+            "current-index marker cannot be detached from the primary spline");
+
+    auto wrong_color_geometry = selection.geometry;
+    wrong_color_geometry.vertices[0U].color =
+        apex::app::workspace_ai_spline_selection_side_color;
+    auto wrong_color_request = request;
+    wrong_color_request.ai_spline_selection_geometry = &wrong_color_geometry;
+    FakeDevice wrong_color_device;
+    const auto wrong_color = apex::app::prepareWorkspaceViewport(
+        wrong_color_device, value.document, wrong_color_request);
+    require(!wrong_color.ok() && wrong_color.diagnostic.code ==
+                "workspace_viewport_ai_spline_selection_line_invalid",
+            "current-index marker rejects reordered recovered colors");
+
+    auto nonvertical_geometry = selection.geometry;
+    nonvertical_geometry.vertices[1U].position[0] += 1.0F;
+    auto nonvertical_request = request;
+    nonvertical_request.ai_spline_selection_geometry =
+        &nonvertical_geometry;
+    FakeDevice nonvertical_device;
+    const auto nonvertical = apex::app::prepareWorkspaceViewport(
+        nonvertical_device, value.document, nonvertical_request);
+    require(!nonvertical.ok() && nonvertical.diagnostic.code ==
+                "workspace_viewport_ai_spline_selection_line_invalid",
+            "current-index marker rejects a nonvertical line");
+
+    auto wrong_topology_geometry = selection.geometry;
+    wrong_topology_geometry.topology =
+        apex::app::WorkspaceAiSplineTopology::polyline;
+    auto wrong_topology_request = request;
+    wrong_topology_request.ai_spline_selection_geometry =
+        &wrong_topology_geometry;
+    FakeDevice wrong_topology_device;
+    const auto wrong_topology = apex::app::prepareWorkspaceViewport(
+        wrong_topology_device, value.document, wrong_topology_request);
+    require(!wrong_topology.ok() && wrong_topology.diagnostic.code ==
+                "workspace_viewport_ai_spline_geometry_invalid",
+            "current-index marker rejects polyline topology");
+}
+
 void draws_selected_mesh_with_recovered_fade_boundary() {
     auto value = fixture();
     auto request = request_for(value);
@@ -2150,6 +2247,7 @@ int main() {
         draws_and_toggles_recovered_world_view_axis();
         draws_raw_ai_spline_in_recovered_scene_phase();
         draws_recovered_ai_spline_side_passes();
+        draws_recovered_ai_spline_current_index_pass();
         draws_recovered_ai_spline_camber_pass();
         draws_selected_mesh_with_recovered_fade_boundary();
         toggles_prepared_authoring_grid_per_frame();

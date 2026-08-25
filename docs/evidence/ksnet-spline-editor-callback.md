@@ -71,6 +71,16 @@ The callback then processes the selected indices and the current movable edit
 point. If more than four edit points exist, it draws a temporary interpolating
 spline in `(0, 3, 0, 1)`. It draws camber data only when that mode is active.
 
+`SplineEditor.showCurrentSplineIndexInfo` has token `0x0600010D` and RVA
+`0x2DB38`. Despite its name, the method draws line geometry. It does not draw
+text. It draws a yellow `(3, 3, 0)` line from the current point to 40 units
+above that point. It uses the horizontal direction to the next wrapped point.
+The cross product of that direction and world up gives the side direction.
+If the left payload width is nonzero, the method draws two cyan `(0, 3, 3)`
+vertical lines. Each line extends from 20 units below to 20 units above its
+side point. A zero left width skips both side lines. The point tag selects the
+payload. The method inherits the identity world matrix and normal depth.
+
 `SplineEditor.renderCamberOnSpline` has token `0x0600010C` and RVA `0x2E8C0`.
 It draws one vertical line for each point. The line height is
 `abs(payload.camber) * 1000`.
@@ -116,6 +126,10 @@ zero to one.
 `--ai-spline-show-left` and `--ai-spline-show-right` enable independent side
 passes. Both options require version-7 payloads. The default state is off,
 which matches the two installed-editor checkboxes.
+
+`--ai-spline-index <index>` enables one recovered current-point marker. The
+CLI uses one zero-based retained-point index. It keeps multi-selection and the
+mutable edit-point lifecycle staged.
 
 `--ai-spline-show-camber` enables the independent camber pass. This option
 also requires version-7 payloads and starts off. Spline edit controls remain

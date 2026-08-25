@@ -64,7 +64,7 @@ void usage(std::ostream& output) {
               "                       [--track-camera-position <value>] [--track-camera-play]\n"
               "                       [--track-camera-mode webgl|installed-editor]\n"
               "                       [--ai-spline <file> [--ai-spline-mode raw|interpolated] [--ai-spline-interval <in> <out>]]\n"
-              "                       [--ai-spline-show-left] [--ai-spline-show-right] [--ai-spline-show-camber]\n"
+              "                       [--ai-spline-show-left] [--ai-spline-show-right] [--ai-spline-index <index>] [--ai-spline-show-camber]\n"
               "                       [--node-search <query>] [--selected-node <id> [--isolate-selected]]\n"
               "                       [--show-hidden] [--wireframe] [--grid] [--view-axis]\n"
               "                       [--weather <stock-id>] [--sun-heading <degrees>] [--sun-height <degrees>]\n"
@@ -560,6 +560,7 @@ struct WindowWorkspaceOptions {
     std::optional<apex::app::WorkspaceAiSplineInterval> aiSplineInterval;
     bool aiSplineShowLeft = false;
     bool aiSplineShowRight = false;
+    std::optional<std::uint32_t> aiSplineIndex;
     bool aiSplineShowCamber = false;
     std::optional<std::string> nodeSearch;
     std::optional<apex::scene::NodeId> selectedNode;
@@ -619,6 +620,7 @@ struct LoadedWindowWorkspace {
     std::optional<apex::app::WorkspaceAiSplineGeometry> aiSplineInterval;
     std::optional<apex::app::WorkspaceAiSplineGeometry> aiSplineLeft;
     std::optional<apex::app::WorkspaceAiSplineGeometry> aiSplineRight;
+    std::optional<apex::app::WorkspaceAiSplineGeometry> aiSplineSelection;
     std::optional<apex::app::WorkspaceAiSplineGeometry> aiSplineCamber;
     apex::app::WorkspaceSelectionState selection;
     bool animationSkinningRequired = false;
@@ -837,6 +839,12 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
                 throw std::runtime_error(
                     "duplicate --ai-spline-show-right option");
             result.aiSplineShowRight = true;
+        } else if (option == "--ai-spline-index") {
+            if (result.aiSplineIndex.has_value())
+                throw std::runtime_error(
+                    "duplicate --ai-spline-index option");
+            result.aiSplineIndex = parse_unsigned_index(
+                require_value("--ai-spline-index"), "AI spline index");
         } else if (option == "--ai-spline-show-camber") {
             if (result.aiSplineShowCamber)
                 throw std::runtime_error(
@@ -1065,6 +1073,7 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
         throw std::runtime_error(
             "--ai-spline-interval requires --ai-spline");
     if ((result.aiSplineShowLeft || result.aiSplineShowRight ||
+         result.aiSplineIndex.has_value() ||
          result.aiSplineShowCamber) &&
         !result.aiSpline.has_value())
         throw std::runtime_error(
@@ -1321,6 +1330,21 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
                       << ", segments=" << side.geometry.vertices.size() / 2U
                       << ", draws=" << side.geometry.chunks.size() << '\n';
             loaded.aiSplineRight = std::move(side.geometry);
+        }
+        if (options.aiSplineIndex.has_value()) {
+            auto selection =
+                apex::app::buildWorkspaceAiSplineSelectionGeometry(
+                    spline, *options.aiSplineIndex);
+            if (!selection.ok())
+                throw std::runtime_error(selection.diagnostic.code + ": " +
+                                         selection.diagnostic.message);
+            std::cout << "AI spline current index: index="
+                      << *options.aiSplineIndex
+                      << ", lines="
+                      << selection.geometry.sample_point_count
+                      << ", draws=" << selection.geometry.chunks.size()
+                      << '\n';
+            loaded.aiSplineSelection = std::move(selection.geometry);
         }
         if (options.aiSplineShowCamber) {
             auto camber = apex::app::buildWorkspaceAiSplineCamberGeometry(
@@ -1766,6 +1790,14 @@ int run_window(int argc, char** argv) {
                 request.ai_spline_right_geometry =
                     &*loaded_workspace.aiSplineRight;
                 request.ai_spline_right_pipeline = std::move(side_pipeline);
+            }
+            if (loaded_workspace.aiSplineSelection.has_value()) {
+                auto selection_pipeline = pipeline;
+                selection_pipeline.name = "workspace-ai-spline-selection";
+                request.ai_spline_selection_geometry =
+                    &*loaded_workspace.aiSplineSelection;
+                request.ai_spline_selection_pipeline =
+                    std::move(selection_pipeline);
             }
             if (loaded_workspace.aiSplineCamber.has_value()) {
                 auto camber_pipeline = pipeline;

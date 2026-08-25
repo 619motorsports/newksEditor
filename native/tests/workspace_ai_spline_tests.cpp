@@ -589,6 +589,8 @@ void buildsRecoveredCamberGeometry() {
     require(result.ok() &&
                 result.geometry.pass ==
                     apex::app::WorkspaceAiSplinePassKind::camber &&
+                result.geometry.topology ==
+                    apex::app::WorkspaceAiSplineTopology::independent_lines &&
                 result.geometry.mode ==
                     apex::app::WorkspaceAiSplineDisplayMode::raw &&
                 result.geometry.source_point_count == 3U &&
@@ -631,6 +633,150 @@ void buildsRecoveredCamberGeometry() {
                 single_result.geometry.vertices.size() == 2U &&
                 single_result.geometry.chunks.size() == 1U,
             "one point must emit one immediate camber line");
+}
+
+void buildsRecoveredCurrentIndexMarker() {
+    apex::formats::AiSpline spline;
+    spline.version = 7U;
+    spline.points = {point(0.0F, 10.0F, 0.0F),
+                     point(10.0F, 20.0F, 0.0F),
+                     point(20.0F, 30.0F, 0.0F)};
+    spline.points[0U].tag = 2;
+    spline.points[1U].tag = 0;
+    spline.points[2U].tag = 1;
+    spline.payloads.resize(3U);
+    spline.payloads[2U].side0 = 1.0F;
+    spline.payloads[2U].side1 = 2.0F;
+
+    const auto result =
+        apex::app::buildWorkspaceAiSplineSelectionGeometry(spline, 0U);
+    require(result.ok() &&
+                result.geometry.pass ==
+                    apex::app::WorkspaceAiSplinePassKind::selection &&
+                result.geometry.topology ==
+                    apex::app::WorkspaceAiSplineTopology::independent_lines &&
+                result.geometry.source_point_count == 3U &&
+                result.geometry.sample_point_count == 3U &&
+                result.geometry.vertices.size() == 6U &&
+                result.geometry.chunks.size() == 1U &&
+                result.geometry.chunks[0U].vertex_count == 6U,
+            "current-index marker metadata mismatch");
+    const std::array<std::array<float, 3U>, 6U> expected = {{
+        {0.0F, 10.0F, 0.0F}, {0.0F, 50.0F, 0.0F},
+        {0.0F, -10.0F, -1.0F}, {0.0F, 30.0F, -1.0F},
+        {0.0F, -10.0F, 2.0F}, {0.0F, 30.0F, 2.0F},
+    }};
+    for (std::size_t index = 0U; index < expected.size(); ++index)
+        require(result.geometry.vertices[index].position == expected[index],
+                "current-index marker position mismatch");
+    require(result.geometry.vertices[0U].color ==
+                    apex::app::workspace_ai_spline_selection_color &&
+                result.geometry.vertices[1U].color ==
+                    apex::app::workspace_ai_spline_selection_color,
+            "current-index center marker must be yellow");
+    for (std::size_t index = 2U; index < 6U; ++index)
+        require(result.geometry.vertices[index].color ==
+                    apex::app::workspace_ai_spline_selection_side_color,
+                "current-index side markers must be cyan");
+
+    spline.payloads[2U].side0 = 0.0F;
+    const auto center_only =
+        apex::app::buildWorkspaceAiSplineSelectionGeometry(spline, 0U);
+    require(center_only.ok() &&
+                center_only.geometry.sample_point_count == 1U &&
+                center_only.geometry.vertices.size() == 2U,
+            "zero left width must skip both current-index side markers");
+
+    spline.payloads[2U].side0 = 1.0F;
+    spline.payloads[2U].side1 = 0.0F;
+    const auto zero_right =
+        apex::app::buildWorkspaceAiSplineSelectionGeometry(spline, 0U);
+    require(zero_right.ok() && zero_right.geometry.vertices.size() == 6U &&
+                zero_right.geometry.vertices[4U].position[2] == 0.0F &&
+                zero_right.geometry.vertices[5U].position[2] == 0.0F,
+            "zero right width must retain its native coincident marker");
+
+    spline.points[1U].position = {100.0F, 20.0F, 0.0F};
+    spline.points[2U].position = {200.0F, 30.0F, 0.0F};
+    spline.payloads[1U].side0 = 1.0F;
+    spline.payloads[1U].side1 = 2.0F;
+    const auto open_final =
+        apex::app::buildWorkspaceAiSplineSelectionGeometry(spline, 2U);
+    require(open_final.ok() &&
+                open_final.geometry.vertices[2U].position[0] == 200.0F &&
+                open_final.geometry.vertices[2U].position[2] == 0.0F &&
+                open_final.geometry.vertices[4U].position[0] == 200.0F &&
+                open_final.geometry.vertices[4U].position[2] == 0.0F,
+            "open final current index must clamp its next point");
+
+    spline.points[2U].position = {50.0F, 30.0F, 0.0F};
+    const auto closed_final =
+        apex::app::buildWorkspaceAiSplineSelectionGeometry(spline, 2U);
+    require(closed_final.ok() &&
+                closed_final.geometry.vertices[2U].position[2] == 1.0F &&
+                closed_final.geometry.vertices[4U].position[2] == -2.0F,
+            "closed final current index must wrap to the first point");
+}
+
+void rejectsUnsafeCurrentIndexMarkers() {
+    apex::formats::AiSpline spline;
+    spline.version = 2U;
+    auto result =
+        apex::app::buildWorkspaceAiSplineSelectionGeometry(spline, 0U);
+    require(!result.ok() && result.diagnostic.code ==
+                "workspace_ai_spline_selection_version_unsupported",
+            "version-2 current-index markers must be rejected");
+
+    spline.version = 7U;
+    spline.points = {point(0.0F, 0.0F, 0.0F)};
+    result = apex::app::buildWorkspaceAiSplineSelectionGeometry(spline, 0U);
+    require(!result.ok() && result.diagnostic.code ==
+                "workspace_ai_spline_selection_payload_count_invalid",
+            "current-index markers must validate payload count");
+
+    spline.payloads.resize(1U);
+    result = apex::app::buildWorkspaceAiSplineSelectionGeometry(spline, 1U);
+    require(!result.ok() && result.diagnostic.code ==
+                "workspace_ai_spline_selection_index_invalid",
+            "current-index markers must validate the selected index");
+
+    spline.points[0U].tag = -1;
+    result = apex::app::buildWorkspaceAiSplineSelectionGeometry(spline, 0U);
+    require(!result.ok() && result.diagnostic.code ==
+                "workspace_ai_spline_selection_payload_index_invalid",
+            "current-index markers must validate point tags");
+
+    spline.points[0U].tag = 0;
+    spline.payloads[0U].side0 =
+        std::numeric_limits<float>::quiet_NaN();
+    result = apex::app::buildWorkspaceAiSplineSelectionGeometry(spline, 0U);
+    require(!result.ok() && result.diagnostic.code ==
+                "workspace_ai_spline_selection_source_non_finite",
+            "current-index markers must reject non-finite widths");
+
+    spline.points.push_back(point(
+        1.0F, 0.0F, std::numeric_limits<float>::max()));
+    spline.points[1U].tag = 1;
+    spline.payloads.resize(2U);
+    spline.payloads[0U].side0 = -std::numeric_limits<float>::max();
+    spline.points[0U].position[2] = std::numeric_limits<float>::max();
+    result = apex::app::buildWorkspaceAiSplineSelectionGeometry(spline, 0U);
+    require(!result.ok() && result.diagnostic.code ==
+                "workspace_ai_spline_selection_derived_non_finite",
+            "current-index markers must reject non-finite derived points");
+
+    apex::formats::AiSpline oversized;
+    oversized.version = 7U;
+    oversized.points.resize(
+        apex::app::workspace_ai_spline_max_interpolation_control_points + 1U);
+    oversized.payloads.resize(oversized.points.size());
+    result = apex::app::buildWorkspaceAiSplineSelectionGeometry(oversized, 0U);
+    require(!result.ok() &&
+                result.status ==
+                    apex::app::WorkspaceAiSplineStatus::limit_exceeded &&
+                result.diagnostic.code ==
+                    "workspace_ai_spline_selection_source_limit",
+            "current-index markers must enforce the bounded point limit");
 }
 
 void rejectsUnsafeCamberSources() {
@@ -701,6 +847,8 @@ int main() {
         rejectsUnsafeSideSplineSources();
         buildsRecoveredCamberGeometry();
         rejectsUnsafeCamberSources();
+        buildsRecoveredCurrentIndexMarker();
+        rejectsUnsafeCurrentIndexMarkers();
     } catch (const std::exception& error) {
         std::cerr << "workspace_ai_spline_tests: " << error.what() << '\n';
         return 1;

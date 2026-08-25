@@ -20,8 +20,14 @@ inline constexpr std::array<float, 3U>
     workspace_ai_spline_camber_positive_color = {0.0F, 3.0F, 0.0F};
 inline constexpr std::array<float, 3U>
     workspace_ai_spline_camber_nonpositive_color = {3.0F, 0.0F, 0.0F};
+inline constexpr std::array<float, 3U>
+    workspace_ai_spline_selection_color = {3.0F, 3.0F, 0.0F};
+inline constexpr std::array<float, 3U>
+    workspace_ai_spline_selection_side_color = {0.0F, 3.0F, 3.0F};
 inline constexpr float workspace_ai_spline_camber_height_scale = 1'000.0F;
-inline constexpr std::size_t workspace_ai_spline_pass_count = 5U;
+inline constexpr float workspace_ai_spline_selection_height = 40.0F;
+inline constexpr float workspace_ai_spline_selection_side_half_height = 20.0F;
+inline constexpr std::size_t workspace_ai_spline_pass_count = 6U;
 inline constexpr float workspace_ai_spline_interpolation_step = 0.0002F;
 inline constexpr std::uint32_t
     workspace_ai_spline_interpolated_sample_count = 5'001U;
@@ -38,7 +44,13 @@ enum class WorkspaceAiSplinePassKind : std::uint8_t {
     interval,
     left_side,
     right_side,
+    selection,
     camber,
+};
+
+enum class WorkspaceAiSplineTopology : std::uint8_t {
+    polyline,
+    independent_lines,
 };
 
 enum class WorkspaceAiSplineSide : std::uint8_t {
@@ -68,6 +80,7 @@ struct WorkspaceAiSplineGeometry {
     std::uint32_t sample_point_count = 0U;
     WorkspaceAiSplineDisplayMode mode = WorkspaceAiSplineDisplayMode::raw;
     WorkspaceAiSplinePassKind pass = WorkspaceAiSplinePassKind::primary;
+    WorkspaceAiSplineTopology topology = WorkspaceAiSplineTopology::polyline;
     std::vector<render::OverlayLineVertex> vertices;
     std::vector<WorkspaceAiSplineChunk> chunks;
 };
@@ -111,6 +124,11 @@ buildWorkspaceAiSplineGeometry(
 // camber are red. Height is abs(camber) times 1,000.
 [[nodiscard]] WorkspaceAiSplineResult buildWorkspaceAiSplineCamberGeometry(
     const formats::AiSpline& spline);
+
+// Build the recovered marker for one current spline index. The marker includes
+// a yellow center line and optional cyan side-width lines.
+[[nodiscard]] WorkspaceAiSplineResult buildWorkspaceAiSplineSelectionGeometry(
+    const formats::AiSpline& spline, std::uint32_t selected_index);
 
 [[nodiscard]] const char* workspace_ai_spline_display_mode_name(
     WorkspaceAiSplineDisplayMode mode) noexcept;

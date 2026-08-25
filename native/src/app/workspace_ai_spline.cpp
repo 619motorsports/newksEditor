@@ -64,6 +64,26 @@ void build_line_list(WorkspaceAiSplineGeometry& geometry,
     }
 }
 
+void build_independent_line_chunks(WorkspaceAiSplineGeometry& geometry) {
+    geometry.sample_point_count =
+        static_cast<std::uint32_t>(geometry.vertices.size() / 2U);
+    const std::size_t vertices_per_chunk =
+        render::max_overlay_line_vertices -
+        render::max_overlay_line_vertices % 2U;
+    geometry.chunks.reserve(
+        (geometry.vertices.size() + vertices_per_chunk - 1U) /
+        vertices_per_chunk);
+    for (std::size_t first_vertex = 0U;
+         first_vertex < geometry.vertices.size();
+         first_vertex += vertices_per_chunk) {
+        const std::size_t vertex_count = std::min(
+            vertices_per_chunk, geometry.vertices.size() - first_vertex);
+        geometry.chunks.push_back(
+            {static_cast<std::uint32_t>(first_vertex),
+             static_cast<std::uint32_t>(vertex_count)});
+    }
+}
+
 WorkspaceAiSplineResult build_geometry(
     const formats::AiSpline& spline, WorkspaceAiSplineDisplayMode mode,
     WorkspaceAiSplinePassKind pass,
@@ -415,63 +435,187 @@ WorkspaceAiSplineResult build_camber_geometry(
             static_cast<std::uint32_t>(spline.points.size());
         result.geometry.mode = WorkspaceAiSplineDisplayMode::raw;
         result.geometry.pass = WorkspaceAiSplinePassKind::camber;
+        result.geometry.topology =
+            WorkspaceAiSplineTopology::independent_lines;
         result.geometry.vertices.reserve(spline.points.size() * 2U);
-        const std::size_t lines_per_chunk =
-            render::max_overlay_line_vertices / 2U;
-        result.geometry.chunks.reserve(
-            (spline.points.size() + lines_per_chunk - 1U) /
-            lines_per_chunk);
-        for (std::size_t first_line = 0U;
-             first_line < spline.points.size();
-             first_line += lines_per_chunk) {
-            const std::size_t line_count = std::min(
-                lines_per_chunk, spline.points.size() - first_line);
-            const std::size_t first_vertex = result.geometry.vertices.size();
-            for (std::size_t index = first_line;
-                 index < first_line + line_count; ++index) {
-                const auto& source_point = spline.points[index];
-                const auto* payload = payload_for_point(spline, source_point);
-                if (payload == nullptr) {
-                    result.status = WorkspaceAiSplineStatus::invalid_source;
-                    result.diagnostic = diagnostic(
-                        "workspace_ai_spline_camber_payload_index_invalid",
-                        "AI spline camber point tag is outside the payload array");
-                    result.geometry = {};
-                    return result;
-                }
-                if (!finite_position(source_point.position) ||
-                    !std::isfinite(payload->camber)) {
-                    result.status = WorkspaceAiSplineStatus::invalid_source;
-                    result.diagnostic = diagnostic(
-                        "workspace_ai_spline_camber_source_non_finite",
-                        "AI spline camber overlay requires finite points and values");
-                    result.geometry = {};
-                    return result;
-                }
-                const auto& color =
-                    payload->camber > 0.0F
-                        ? workspace_ai_spline_camber_positive_color
-                        : workspace_ai_spline_camber_nonpositive_color;
-                const float height = std::abs(payload->camber) *
-                                     workspace_ai_spline_camber_height_scale;
-                auto endpoint = source_point.position;
-                endpoint[1] += height;
-                if (!std::isfinite(height) || !finite_position(endpoint)) {
-                    result.status = WorkspaceAiSplineStatus::invalid_source;
-                    result.diagnostic = diagnostic(
-                        "workspace_ai_spline_camber_derived_non_finite",
-                        "AI spline camber height produced a non-finite point");
-                    result.geometry = {};
-                    return result;
-                }
-                result.geometry.vertices.push_back(
-                    {source_point.position, color});
-                result.geometry.vertices.push_back({endpoint, color});
+        for (std::size_t index = 0U; index < spline.points.size(); ++index) {
+            const auto& source_point = spline.points[index];
+            const auto* payload = payload_for_point(spline, source_point);
+            if (payload == nullptr) {
+                result.status = WorkspaceAiSplineStatus::invalid_source;
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_camber_payload_index_invalid",
+                    "AI spline camber point tag is outside the payload array");
+                result.geometry = {};
+                return result;
             }
-            result.geometry.chunks.push_back(
-                {static_cast<std::uint32_t>(first_vertex),
-                 static_cast<std::uint32_t>(line_count * 2U)});
+            if (!finite_position(source_point.position) ||
+                !std::isfinite(payload->camber)) {
+                result.status = WorkspaceAiSplineStatus::invalid_source;
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_camber_source_non_finite",
+                    "AI spline camber overlay requires finite points and values");
+                result.geometry = {};
+                return result;
+            }
+            const auto& color =
+                payload->camber > 0.0F
+                    ? workspace_ai_spline_camber_positive_color
+                    : workspace_ai_spline_camber_nonpositive_color;
+            const float height = std::abs(payload->camber) *
+                                 workspace_ai_spline_camber_height_scale;
+            auto endpoint = source_point.position;
+            endpoint[1] += height;
+            if (!std::isfinite(height) || !finite_position(endpoint)) {
+                result.status = WorkspaceAiSplineStatus::invalid_source;
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_camber_derived_non_finite",
+                    "AI spline camber height produced a non-finite point");
+                result.geometry = {};
+                return result;
+            }
+            result.geometry.vertices.push_back(
+                {source_point.position, color});
+            result.geometry.vertices.push_back({endpoint, color});
         }
+        build_independent_line_chunks(result.geometry);
+        result.status = WorkspaceAiSplineStatus::ready;
+        return result;
+    } catch (const std::bad_alloc&) {
+        result.status = WorkspaceAiSplineStatus::allocation_failed;
+        result.diagnostic = diagnostic(
+            "workspace_ai_spline_allocation_failed",
+            "AI spline geometry exceeded available allocation capacity");
+        result.geometry = {};
+        return result;
+    }
+}
+
+WorkspaceAiSplineResult build_selection_geometry(
+    const formats::AiSpline& spline, std::uint32_t selected_index) {
+    WorkspaceAiSplineResult result;
+    try {
+        if (spline.version != 7U) {
+            result.status = WorkspaceAiSplineStatus::invalid_source;
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_selection_version_unsupported",
+                "AI spline current-index markers require version-7 payloads");
+            return result;
+        }
+        if (spline.points.size() != spline.payloads.size()) {
+            result.status = WorkspaceAiSplineStatus::invalid_source;
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_selection_payload_count_invalid",
+                "AI spline current-index markers require one payload per point");
+            return result;
+        }
+        if (spline.points.size() >
+            workspace_ai_spline_max_interpolation_control_points) {
+            result.status = WorkspaceAiSplineStatus::limit_exceeded;
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_selection_source_limit",
+                "AI spline current-index marker source exceeds the bounded "
+                "point limit");
+            return result;
+        }
+        if (static_cast<std::size_t>(selected_index) >= spline.points.size()) {
+            result.status = WorkspaceAiSplineStatus::invalid_source;
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_selection_index_invalid",
+                "AI spline current index is outside the retained points");
+            return result;
+        }
+
+        const auto& source_point =
+            spline.points[static_cast<std::size_t>(selected_index)];
+        const auto* payload = payload_for_point(spline, source_point);
+        if (payload == nullptr) {
+            result.status = WorkspaceAiSplineStatus::invalid_source;
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_selection_payload_index_invalid",
+                "AI spline current point tag is outside the payload array");
+            return result;
+        }
+        const auto& point = source_point.position;
+        const bool closed =
+            spline.points.size() >= 2U &&
+            installedEditorSplinePointDistance(
+                spline.points.back().position,
+                spline.points.front().position) <=
+                installed_editor_spline_closure_distance;
+        const std::size_t selected =
+            static_cast<std::size_t>(selected_index);
+        const std::size_t next_index =
+            selected + 1U < spline.points.size()
+                ? selected + 1U
+                : (closed ? 0U : selected);
+        const auto& next = spline.points[next_index].position;
+        if (!finite_position(point) || !finite_position(next) ||
+            !std::isfinite(payload->side0) ||
+            !std::isfinite(payload->side1)) {
+            result.status = WorkspaceAiSplineStatus::invalid_source;
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_selection_source_non_finite",
+                "AI spline current-index markers require finite points and "
+                "widths");
+            return result;
+        }
+
+        result.geometry.source_point_count =
+            static_cast<std::uint32_t>(spline.points.size());
+        result.geometry.mode = WorkspaceAiSplineDisplayMode::raw;
+        result.geometry.pass = WorkspaceAiSplinePassKind::selection;
+        result.geometry.topology =
+            WorkspaceAiSplineTopology::independent_lines;
+        result.geometry.vertices.reserve(payload->side0 == 0.0F ? 2U : 6U);
+
+        auto center_end = point;
+        center_end[1] += workspace_ai_spline_selection_height;
+        result.geometry.vertices.push_back(
+            {point, workspace_ai_spline_selection_color});
+        result.geometry.vertices.push_back(
+            {center_end, workspace_ai_spline_selection_color});
+
+        if (payload->side0 != 0.0F) {
+            float forward_x = next[0] - point[0];
+            float forward_z = next[2] - point[2];
+            const float length = std::sqrt(
+                forward_x * forward_x + forward_z * forward_z);
+            if (length != 0.0F) {
+                forward_x /= length;
+                forward_z /= length;
+            }
+            const std::array<float, 3U> lateral = {
+                -forward_z, 0.0F, forward_x};
+            const auto append_side = [&](float width) {
+                std::array<float, 3U> begin = {
+                    point[0] + lateral[0] * width,
+                    point[1] - workspace_ai_spline_selection_side_half_height,
+                    point[2] + lateral[2] * width,
+                };
+                auto end = begin;
+                end[1] += 2.0F *
+                          workspace_ai_spline_selection_side_half_height;
+                result.geometry.vertices.push_back(
+                    {begin, workspace_ai_spline_selection_side_color});
+                result.geometry.vertices.push_back(
+                    {end, workspace_ai_spline_selection_side_color});
+            };
+            append_side(-payload->side0);
+            append_side(payload->side1);
+        }
+        for (const auto& vertex : result.geometry.vertices) {
+            if (!finite_position(vertex.position)) {
+                result.status = WorkspaceAiSplineStatus::invalid_source;
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_selection_derived_non_finite",
+                    "AI spline current-index marker produced a non-finite "
+                    "point");
+                result.geometry = {};
+                return result;
+            }
+        }
+        build_independent_line_chunks(result.geometry);
         result.status = WorkspaceAiSplineStatus::ready;
         return result;
     } catch (const std::bad_alloc&) {
@@ -507,6 +651,11 @@ WorkspaceAiSplineResult buildWorkspaceAiSplineSideGeometry(
 WorkspaceAiSplineResult buildWorkspaceAiSplineCamberGeometry(
     const formats::AiSpline& spline) {
     return build_camber_geometry(spline);
+}
+
+WorkspaceAiSplineResult buildWorkspaceAiSplineSelectionGeometry(
+    const formats::AiSpline& spline, std::uint32_t selected_index) {
+    return build_selection_geometry(spline, selected_index);
 }
 
 const char* workspace_ai_spline_display_mode_name(
