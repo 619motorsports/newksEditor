@@ -85,6 +85,10 @@ add_library(apex_formats STATIC
 )
 add_library(ApexEditor::Formats ALIAS apex_formats)
 target_link_libraries(apex_formats PUBLIC ApexEditor::Core)
+if(JPEG_FOUND)
+  target_compile_definitions(apex_formats PRIVATE APEX_HAS_JPEG=1)
+  target_link_libraries(apex_formats PRIVATE JPEG::JPEG)
+endif()
 
 add_library(apex_authoring STATIC
   src/authoring/geometry.cpp
