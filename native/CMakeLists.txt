@@ -199,6 +199,7 @@ add_library(apex_render STATIC
   src/render/pipeline.cpp
   src/render/render_plan.cpp
   src/render/selection_axis.cpp
+  src/render/selected_mesh.cpp
   src/render/static_mesh_upload.cpp
   src/render/skinned_mesh_upload.cpp
   src/render/static_scene.cpp
@@ -355,6 +356,7 @@ apex_add_native_test(material_profile_tests.cpp material_profile_tests ApexEdito
 apex_add_native_test(pipeline_tests.cpp pipeline_tests ApexEditor::Render)
 apex_add_native_test(render_plan_tests.cpp render_plan_tests ApexEditor::Render)
 apex_add_native_test(selection_axis_tests.cpp selection_axis_tests ApexEditor::Render)
+apex_add_native_test(selected_mesh_tests.cpp selected_mesh_tests ApexEditor::Render)
 apex_add_native_test(texture_upload_tests.cpp texture_upload_tests ApexEditor::Render)
 apex_add_native_test(platform_security_tests.cpp platform_security_tests ApexEditor::Platform)
 apex_add_native_test(platform_window_tests.cpp platform_window_tests ApexEditor::Platform)
@@ -421,7 +423,7 @@ if(TEST render_backend_tests)
       ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")
   endif()
 endif()
-foreach(render_test IN ITEMS authoring_grid_tests camera_tests bmp_texture_tests csp_node_state_tests damage_preview_tests external_texture_authority_tests draw_packet_tests frame_plan_tests indexed_draw_tests selection_axis_tests static_mesh_upload_tests skinned_mesh_upload_tests static_scene_tests stock_material_execution_tests stock_scene_execution_tests workspace_real_fixture_tests lighting_tests material_binding_tests
+foreach(render_test IN ITEMS authoring_grid_tests camera_tests bmp_texture_tests csp_node_state_tests damage_preview_tests external_texture_authority_tests draw_packet_tests frame_plan_tests indexed_draw_tests selection_axis_tests selected_mesh_tests static_mesh_upload_tests skinned_mesh_upload_tests static_scene_tests stock_material_execution_tests stock_scene_execution_tests workspace_real_fixture_tests lighting_tests material_binding_tests
                              material_profile_tests pipeline_tests render_plan_tests texture_upload_tests)
   if(TEST ${render_test})
     set_tests_properties(${render_test} PROPERTIES LABELS "unit;render")

@@ -232,8 +232,16 @@ magenta RGBA `(1, 0, 1, 0.5)`. Its alpha decreases linearly to zero during
 
 The current WebGL orange 28-percent material tint is a preview approximation.
 It does not reproduce this recovered pass. A faithful C++ implementation needs
-a separate selected-mesh draw contract. The exact blend and cull states remain
-unresolved and must not be labeled as exact.
+a separate selected-mesh draw contract.
+
+The selected material uses opaque blending, front-face culling, and solid fill.
+The selected draw disables depth tests and depth writes. Its changing alpha is
+written to the target, but it does not blend the magenta RGB value.
+
+The selected object draws at its child position during the normal scene
+traversal. The grid and selected-node axis draw after that traversal. The exact
+child position remains unresolved. Therefore, a port must not describe a
+fixed scene-then-selection order as exact.
 
 ### Native blurred-rim switch
 

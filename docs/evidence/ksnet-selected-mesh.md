@@ -95,12 +95,40 @@ ret
 Thus, the original highlight is a separate flat-color mesh pass. It is not a
 wireframe pass and is not the orange material tint in the WebGL preview.
 
-## Unresolved state
+## Material and render state
 
-`SelectedMesh.render` does not set blend, cull, or raster mode. The selected
-material or backend supplies those states. The exact blend equation and cull
-mode remain unresolved. The precise world-matrix update before the selected
-draw also remains unresolved.
+`Material::Material` at `0x1003fcc7` sets these default values:
+
+- Opaque blend mode with blending and alpha-to-coverage disabled.
+- Front-face culling.
+- Solid fill.
+- Normal depth mode.
+- `doubleFace=false`.
+
+`Material::apply` applies the material blend and cull modes. It changes the
+cull mode to none only when `doubleFace` is true.
+
+`SelectedMesh.render` does not change these blend or cull values. It changes
+the depth mode to off before the draw. It restores normal depth after the draw.
+Thus, the changing shader alpha is written to the target but does not blend
+the selected RGB value with the scene color.
+
+The exact packed fields of the native D3D11 rasterizer state remain unresolved.
+The `MaterialFilter` callback is also an evidence boundary. No inspected
+selected-mesh code changes the default blend or cull values.
+
+## Schedule and transform
+
+`ksGraphics.render` updates world matrices before it starts the scene draw.
+`Node::render` sets the current world matrix before it renders active children.
+The selected object draws at its child position during this scene traversal.
+
+The grid and the selected-node axis draw after the scene traversal. Therefore,
+they draw after the selected mesh and before the final frame operation.
+
+The exact construction and child position of the selected object remain
+unresolved. A port must not assume that the selected draw follows all scene
+geometry until evidence identifies this child position.
 
 The installed DXBC cannot use the portable native draw-matrices ABI directly.
 A faithful Vulkan and D3D12 port needs a dedicated selected-mesh contract.
