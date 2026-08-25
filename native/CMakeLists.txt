@@ -201,6 +201,16 @@ target_link_libraries(apex_render
   PUBLIC ApexEditor::Scene ApexEditor::Csp ApexEditor::Platform
 )
 
+# Renderer-facing application composition remains separate from apex_app so
+# workspace authoring and asset authority stay independent of GPU backends.
+add_library(apex_app_render STATIC
+  src/app/workspace_viewport.cpp
+)
+add_library(ApexEditor::AppRender ALIAS apex_app_render)
+target_link_libraries(apex_app_render
+  PUBLIC ApexEditor::App ApexEditor::Render
+)
+
 # Keep filesystem and packed-asset authority above the backend-neutral renderer.
 # This bridge resolves and decodes CPU resources, but it creates no GPU objects.
 add_library(apex_external_texture_authority STATIC
@@ -274,6 +284,7 @@ apex_add_native_test(authoring_project_tests.cpp authoring_project_tests ApexEdi
 apex_add_native_test(authoring_service_tests.cpp authoring_service_tests ApexEditor::App)
 apex_add_native_test(presentation_recreation_tests.cpp presentation_recreation_tests ApexEditor::App)
 apex_add_native_test(workspace_session_tests.cpp workspace_session_tests ApexEditor::App)
+apex_add_native_test(workspace_viewport_tests.cpp workspace_viewport_tests ApexEditor::AppRender)
 apex_add_native_test(project_workspace_tests.cpp project_workspace_tests ApexEditor::App)
 apex_add_native_test(project_bake_tests.cpp project_bake_tests ApexEditor::Authoring)
 apex_add_native_test(geometry_bake_tests.cpp geometry_bake_tests ApexEditor::Authoring)
