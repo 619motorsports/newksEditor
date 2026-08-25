@@ -922,6 +922,41 @@ void validates_directional_shadow_receiver_contract() {
             "partial receiver declaration is unsupported");
 }
 
+void validates_recovered_stock_directional_shadow_abi() {
+    std::array<apex::scene::Matrix4, indexed_directional_shadow_cascade_count>
+        matrices{};
+    matrices[0][0] = 1.0F;
+    matrices[1][5] = 2.0F;
+    matrices[2][10] = 3.0F;
+    const std::array<float, indexed_directional_shadow_cascade_count> biases = {
+        0.000002F, 0.000015F, 0.0003F};
+    const StockDirectionalShadowReceiverConstants constants =
+        make_stock_directional_shadow_receiver_constants(matrices, biases, 2048U);
+    require(constants.shadow_matrices == matrices && constants.biases == biases,
+            "stock receiver packing preserves matrices and bias order");
+    require(constants.texture_size == 1.0F / 2048.0F,
+            "stock receiver textureSize is the render-target reciprocal");
+
+    const auto bytes = std::as_bytes(
+        std::span<const StockDirectionalShadowReceiverConstants>(&constants, 1U));
+    require(bytes.size() == stock_directional_shadow_buffer_view_bytes,
+            "stock receiver packing is exactly 208 bytes");
+    require(offsetof(StockDirectionalShadowReceiverConstants, biases) == 192U &&
+                offsetof(StockDirectionalShadowReceiverConstants, texture_size) == 204U,
+            "stock receiver offsets remain explicit for both backend handoffs");
+
+    for (const Backend backend : {Backend::Vulkan, Backend::D3D12}) {
+        FakeBuffer native_constants(
+            backend,
+            {stock_directional_shadow_buffer_view_bytes, BufferUsage::uniform,
+             BufferMemory::host_visible, BufferMutability::mutable_data});
+        require(native_constants.backend() == backend &&
+                    native_constants.info().description.size_bytes ==
+                        stock_directional_shadow_buffer_view_bytes,
+                "stock receiver byte contract is backend-neutral");
+    }
+}
+
 void validates_portable_normal_map_contract() {
     PipelineProgram pipeline = pipeline_fixture();
     pipeline.resources = {
@@ -1998,6 +2033,7 @@ int main() {
         validates_portable_material_buffer_contract();
         validates_portable_frame_buffer_contract();
         validates_directional_shadow_receiver_contract();
+        validates_recovered_stock_directional_shadow_abi();
         validates_portable_normal_map_contract();
         validates_portable_maps_contract();
         validates_portable_detail_stack_contract();

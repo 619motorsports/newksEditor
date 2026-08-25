@@ -490,6 +490,43 @@ static_assert(std::is_trivially_copyable_v<DirectionalShadowReceiverConstants>);
 
 inline constexpr std::uint32_t portable_directional_shadow_buffer_view_bytes = 256U;
 
+// Recovered stock D3D11 ksPerPixel cbShadowMaps packing. The original
+// compiler reflection and host setters place three matrices at byte offsets
+// 0, 64, and 128, three bias floats at 192, and textureSize at 204. This is
+// a backend-neutral byte contract for a future native shader handoff; it is
+// deliberately separate from the current 256-byte portable receiver ABI.
+struct StockDirectionalShadowReceiverConstants {
+    std::array<apex::scene::Matrix4, indexed_directional_shadow_cascade_count>
+        shadow_matrices{};
+    std::array<float, indexed_directional_shadow_cascade_count> biases{};
+    float texture_size = 0.0F;
+};
+
+static_assert(sizeof(StockDirectionalShadowReceiverConstants) == 208U);
+static_assert(offsetof(StockDirectionalShadowReceiverConstants, shadow_matrices) == 0U);
+static_assert(offsetof(StockDirectionalShadowReceiverConstants, biases) == 192U);
+static_assert(offsetof(StockDirectionalShadowReceiverConstants, texture_size) == 204U);
+static_assert(std::is_trivially_copyable_v<StockDirectionalShadowReceiverConstants>);
+
+inline constexpr std::uint32_t stock_directional_shadow_buffer_view_bytes = 208U;
+
+// The stock host writes the reciprocal of the render-target width. A zero
+// width is represented as zero so callers can reject it before submission.
+[[nodiscard]] inline StockDirectionalShadowReceiverConstants
+make_stock_directional_shadow_receiver_constants(
+    const std::array<apex::scene::Matrix4, indexed_directional_shadow_cascade_count>&
+        shadow_matrices,
+    const std::array<float, indexed_directional_shadow_cascade_count>& biases,
+    std::uint32_t render_target_width) noexcept {
+    StockDirectionalShadowReceiverConstants constants;
+    constants.shadow_matrices = shadow_matrices;
+    constants.biases = biases;
+    constants.texture_size = render_target_width == 0U
+                                 ? 0.0F
+                                 : 1.0F / static_cast<float>(render_target_width);
+    return constants;
+}
+
 struct IndexedDirectionalShadowBinding {
     // Non-owning. All three maps and the sampler must remain alive until the
     // synchronous draw returns. The sampler is nearest/clamp-to-edge with
