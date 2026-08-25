@@ -1,6 +1,8 @@
 #include "apex/core/parse_error.hpp"
+#include "apex/domain/animation_preview.hpp"
 #include "apex/render/draw_packet.hpp"
 #include "apex/render/kn5_scene_node_map.hpp"
+#include "apex/scene/kn5_scene.hpp"
 
 #include <array>
 #include <cmath>
@@ -353,6 +355,66 @@ void builds_validated_skinned_packet_with_bone_palette() {
     require(duplicate, "duplicate bone names are diagnosed while retaining first-name lookup");
 }
 
+void carries_a_fixed_animation_pose_into_cpu_skinning() {
+    auto model = static_model("ksSkinnedMesh");
+    model.root.transform = identity();
+    auto& mesh = model.root.children.front();
+    mesh.type = 3U;
+    mesh.kind = "skinnedMesh";
+    mesh.vertexStride = 19U;
+    mesh.transform = identity(3.0F);
+    mesh.vertices = {0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0,
+                     1, 0, 0, 0, 0, 0, 0, 0};
+    mesh.indices = {0, 0, 0};
+    mesh.bones.push_back({"BONE", identity()});
+
+    apex::formats::Kn5Node bone;
+    bone.type = 1U;
+    bone.kind = "node";
+    bone.name = "BONE";
+    bone.active = true;
+    bone.transform = identity();
+    model.root.children.push_back(std::move(bone));
+
+    apex::formats::KsAnimation animation;
+    animation.source = "pose.ksanim";
+    animation.version = 2U;
+    animation.frameCount = 2U;
+    apex::formats::KsAnimationTrack bone_track;
+    bone_track.name = "BONE";
+    bone_track.animated = true;
+    bone_track.frames = {
+        {{0, 0, 0, 1}, {0, 0, 0}, {1, 1, 1}},
+        {{0, 0, 0, 1}, {4, 0, 0}, {1, 1, 1}},
+    };
+    animation.tracks.push_back(std::move(bone_track));
+
+    const auto animation_bytes = apex::formats::serializeKsAnimation(animation);
+    const auto parsed_animation = apex::formats::parseKsAnimation(
+        animation_bytes, "pose.ksanim");
+    const auto applied = apex::domain::apply_animation_preview(
+        model, parsed_animation, 0.25F);
+    require(applied.position == 0.25F && applied.matched_nodes == 1U &&
+                applied.skinning_required,
+            "fixed animation pose requests CPU skinning");
+
+    const auto converted = apex::scene::convertKn5Scene(model);
+    const auto packets = apex::render::build_draw_packets(
+        model, converted.snapshot, one_item_plan());
+    require(packets.packets.size() == 1U &&
+                packets.packets[0].bone_palette.size() == 1U &&
+                std::abs(packets.packets[0].bone_palette[0][12] - 2.0F) < 1.0e-6F,
+            "fixed animation pose reaches the draw packet bone palette");
+
+    const auto& animated_mesh = model.root.children.front();
+    const auto skinned = apex::render::skin_vertices_reference(
+        animated_mesh.vertices, packets.packets[0].bone_palette,
+        packets.packets[0].world_matrix);
+    require(skinned.size() == 19U &&
+                std::abs(skinned[0] - 2.0F) < 1.0e-6F,
+            "fixed animation pose changes the CPU-skinned vertex stream");
+}
+
 void validates_layout_resource_identity_and_metadata_limits() {
     auto layout_model = static_model("ksSkinnedMesh");
     auto layout_scene = static_scene();
@@ -463,6 +525,7 @@ int main() {
         cpu_skinning_matches_reference_transform_and_validates_influences();
         palette_skinning_overload_matches_kn5_helper_and_rejects_malformed_streams();
         builds_validated_skinned_packet_with_bone_palette();
+        carries_a_fixed_animation_pose_into_cpu_skinning();
         validates_layout_resource_identity_and_metadata_limits();
         cpu_skinning_matches_rotation_nonuniform_scale_and_inverse_bind();
         rejects_invalid_geometry_and_limits_before_packet_growth();

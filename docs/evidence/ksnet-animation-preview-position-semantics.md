@@ -60,10 +60,36 @@ The matching PDB names `AnimationPlayer::setCurrentPos` at `0x1006001a`, with
    present in `ksGraphics::render` or `loadFBXAnimation`.
 
 The PDB-named helper `AnimationPlayer::isAnimatingNode` is at `0x1005fe6b`.
-The native application loop at `0x1005f3c8` processes only player-set records
-whose animated byte is set, then `quatpos::lerp` at `0x1005fe91` produces the
-sampled transform. These are selection/application details, not a playback
-clock.
+The native application loop at `0x1005f3c8` processes only player sets whose
+`AnimationPlayerSet::isActive` byte at offset `0x50` is set. Then
+`quatpos::lerp` at `0x1005fe91` produces the sampled transform. These are
+selection and application details, not a playback clock.
+
+The player uses the frame count from its first player set as `N`. The managed
+wrapper creates the player with `AnimationAddingMode::eOnlyAnimated`, which has
+the numeric value `1`. The FBX importer marks every imported set as animated.
+Thus, this mode retains static imported sets too.
+
+The recovered loop indexes every active player set with this shared `N`. The
+bounded C++ adapter rejects active tracks with different frame counts. This
+avoids an unsafe index and does not label per-track sampling as exact behavior.
+
+## FBX load replacement behavior
+
+`ksGraphics.loadFBXAnimation` is metadata row 933 at RVA `0x25e1c`. It first
+calls `FBXImporter::loadAnimation`. It then removes the old player and creates
+a new player from the returned animation. The wrapper does not reset the
+normalized position.
+
+The wrapper saves the imported animation before it creates the player. It uses
+the source path without its extension and does not append `.ksanim`. The new
+player receives `20.0f` in its `timeLength` field. The fixed-position render
+path does not read this field.
+
+`FBXImporter::loadAnimation` shows a message if `FbxImporter::Initialize`
+fails. It then continues the import and can return an empty animation. The
+bounded C++ importer stops on malformed input instead of reproducing this
+partial-result behavior.
 
 ## Integration recommendation
 
@@ -81,10 +107,8 @@ positions over time is recovered.
   Editor RVA `0x2fdc`) calls `ksGraphics.render`, but its two metadata
   parameters are a focus flag and a native-object parameter, not a proven
   elapsed-time value. This callback therefore does not establish a clock.
-- The native `AnimationPlayer` constructor's `AnimationAddingMode` filtering
-  and the target-node byte tested by `0x1005f3c8` are not fully named by the
-  available PDB. Do not infer reset or selection policy from the managed
-  `loadFBXAnimation` wrapper alone.
+- The one-frame interpolation case still needs a native fixture. The recovered
+  branch reads frame `1` at position zero before later index clamping is clear.
 - NaN/out-of-range conversion behavior outside the normal finite normalized
   slider domain is not a supported editor input contract. The current adapter
   may continue to reject non-finite positions until a native malformed-input

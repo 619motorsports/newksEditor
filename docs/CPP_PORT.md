@@ -410,7 +410,13 @@ remains unchanged and feature-complete.
   after the RPM transform, so animation wins when both target one node. The
   recovered editor path does not advance or loop this value. It sends the
   slider position on each frame and clamps it to `[0, 1]`. The command uses the
-  same fixed-position contract. An interactive slider remains staged.
+  same fixed-position contract. The original player uses one shared frame
+  count. The adapter rejects animated tracks with different frame counts
+  instead of sampling them approximately. It exposes a bounded pure pose
+  sampler for future interactive controls. When a matched animation changes a
+  model with skinned geometry, the window enables CPU skinning for each color
+  frame. When a skinned shadow pipeline is available, both passes use the same
+  prepared pose. An interactive slider remains staged.
   A bounded hierarchy service validates scene topology before it searches or
   selects nodes. Search uses deterministic preorder and ASCII case-insensitive
   matching. Duplicate names remain distinct. The window command maps selection,

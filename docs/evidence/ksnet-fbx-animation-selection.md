@@ -31,6 +31,22 @@ stops before the end time, and advances by `(end - start) * 0.01`. The constant
 at `0x1101d740` is the IEEE-754 double `0.01`. The implementation keeps this
 100-sample schedule and the existing explicit-linear interpolation restriction.
 
+The loader divides each FBX start and stop tick by `46,186,158`. It truncates
+the result before sampling. `loadAnimationNode` multiplies each sample value by
+the same integer before it creates `FbxTime`. This pair is consistent with an
+integer-millisecond conversion. The unit interpretation is an inference from
+the paired operations and the FBX tick scale.
+
+`Animation::getAnimationSet` compares exact wide-string names. A duplicate name
+reuses the first set and appends more frames. The first occurrence controls the
+set order. `Animation::addFrame` marks a set as animated when a matrix float
+changes. `loadAnimation` later marks every imported set as animated, including
+static sets.
+
+`AnimationPlayer` calls recursive `Node::findChildrenByName` at `0x1003f343`.
+This method returns every exact-name scene node in depth-first hierarchy order.
+Therefore, one merged animation set controls all matching scene nodes.
+
 ## Port boundary and tests
 
 `native/src/formats/fbx_conversion.cpp` builds the ordered Model hierarchy from
@@ -45,6 +61,7 @@ Camera exclusion, static tracks alongside a curve-bound Model, a bounded
 curve-free stack, and the track-count limit. Malformed curve and connection
 coverage remains in the existing focused test group.
 
-Exact native pivot evaluation, non-linear interpolation, and duplicate-name
-track/set behavior remain separate recovery targets. This change does not claim
-to reproduce pivot transforms.
+The bounded bridge merges duplicate Model names in first-seen order. Its tests
+cover merged frame order and aggregate frame limits. Exact native pivot
+evaluation and non-linear interpolation remain separate recovery targets. This
+change does not claim to reproduce pivot transforms.

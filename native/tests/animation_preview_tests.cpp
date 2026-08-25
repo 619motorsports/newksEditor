@@ -21,7 +21,11 @@ void expects_error(Function &&function, std::string_view code) {
   try {
     function();
   } catch (const apex::core::ParseError &error) {
-    require(error.code() == code, "unexpected animation preview error code");
+    if (error.code() != code) {
+      throw std::runtime_error("expected animation preview error " +
+                               std::string(code) + ", received " +
+                               error.code());
+    }
     return;
   }
   throw std::runtime_error("invalid animation preview input was accepted");
@@ -91,6 +95,76 @@ void applies_exact_null_node_tracks_with_last_precedence() {
           "exact null-node binding and last-track precedence");
 }
 
+void samples_a_bounded_fixed_position_pose() {
+  apex::formats::KsAnimation animation;
+  animation.source = "door.ksanim";
+  animation.tracks.push_back(track("DOOR", 10.0F));
+  animation.tracks.push_back(track("STATIC", 100.0F, false));
+  animation.tracks.push_back(track("DOOR", 20.0F));
+
+  const auto middle =
+      apex::domain::sample_animation_preview_pose(animation, 0.25F);
+  require(middle.position == 0.25F && middle.tracks == 3U &&
+              middle.animated_tracks == 2U && middle.transforms.size() == 1U &&
+              middle.transforms[0].name == "DOOR" &&
+              std::abs(middle.transforms[0].transform[12] - 10.0F) < 1.0e-6F,
+          "fixed-position pose uses last duplicate track");
+  require(middle.diagnostics.size() == 1U &&
+              middle.diagnostics[0].code == "DUPLICATE_ANIMATED_TRACK" &&
+              middle.diagnostics[0].source == "door.ksanim" &&
+              !middle.has_errors(),
+          "fixed-position pose retains duplicate diagnostic");
+
+  const auto before =
+      apex::domain::sample_animation_preview_pose(animation, -2.0F);
+  const auto after =
+      apex::domain::sample_animation_preview_pose(animation, 2.0F);
+  require(
+      before.position == 0.0F && before.transforms[0].transform[12] == 0.0F &&
+          after.position == 1.0F && after.transforms[0].transform[12] == 20.0F,
+      "fixed-position pose clamps both endpoints");
+
+  apex::formats::KsAnimationTrack boundaries;
+  boundaries.name = "BOUNDARY";
+  boundaries.animated = true;
+  boundaries.frames = {frame(0.0F), frame(10.0F), frame(20.0F)};
+  animation.tracks = {boundaries};
+  const auto first =
+      apex::domain::sample_animation_preview_pose(animation, 0.0F);
+  const auto second =
+      apex::domain::sample_animation_preview_pose(animation, 1.0F / 3.0F);
+  const auto final_interval =
+      apex::domain::sample_animation_preview_pose(animation, 2.0F / 3.0F);
+  const auto endpoint =
+      apex::domain::sample_animation_preview_pose(animation, 1.0F);
+  require(first.transforms[0].transform[12] == 0.0F &&
+              second.transforms[0].transform[12] == 10.0F &&
+              final_interval.transforms[0].transform[12] == 20.0F &&
+              endpoint.transforms[0].transform[12] == 20.0F,
+          "fixed-position pose follows recovered frame-count boundaries");
+
+  boundaries.frames = {frame(7.0F)};
+  animation.tracks = {boundaries};
+  const auto one_frame =
+      apex::domain::sample_animation_preview_pose(animation, 0.5F);
+  require(one_frame.transforms.size() == 1U &&
+              one_frame.transforms[0].transform[12] == 7.0F,
+          "bounded one-frame pose selects its only frame");
+
+  animation.tracks[0].frames.clear();
+  expects_error(
+      [&] {
+        (void)apex::domain::sample_animation_preview_pose(animation, 0.0F);
+      },
+      "EMPTY_ANIMATED_TRACK");
+  expects_error(
+      [&] {
+        (void)apex::domain::sample_animation_preview_pose(
+            animation, std::numeric_limits<float>::infinity());
+      },
+      "NON_FINITE_POSITION");
+}
+
 void rejects_limits_and_non_finite_sampling_without_partial_mutation() {
   apex::formats::Kn5File model;
   model.source = "car.kn5";
@@ -113,6 +187,22 @@ void rejects_limits_and_non_finite_sampling_without_partial_mutation() {
       "NON_FINITE_TRANSFORM");
   require(model.root.children[0].transform == before,
           "failed sampling exposes no partial transform");
+
+  apex::formats::KsAnimation inconsistent;
+  inconsistent.source = "inconsistent.ksanim";
+  inconsistent.tracks.push_back(track("FIRST", 2.0F));
+  auto three_frames = track("OVERFLOW", 3.0F);
+  three_frames.frames.insert(three_frames.frames.begin() + 1U, frame(1.5F));
+  inconsistent.tracks.push_back(std::move(three_frames));
+  const auto overflow_before = model.root.children[1].transform;
+  expects_error(
+      [&] {
+        (void)apex::domain::apply_animation_preview(model, inconsistent, 0.25F);
+      },
+      "INCONSISTENT_FRAME_COUNT");
+  require(model.root.children[0].transform == before &&
+              model.root.children[1].transform == overflow_before,
+          "inconsistent track lengths expose no partial transform");
 
   expects_error(
       [&] {
@@ -171,6 +261,43 @@ void bounds_unmatched_output_and_aggregate_work() {
                                                     limits);
       },
       "AGGREGATE_LIMIT");
+  expects_error(
+      [&] {
+        (void)apex::domain::sample_animation_preview_pose(animation, 0.0F,
+                                                          limits);
+      },
+      "AGGREGATE_LIMIT");
+
+  limits = {};
+  limits.max_tracks = 0U;
+  expects_error(
+      [&] {
+        (void)apex::domain::sample_animation_preview_pose(animation, 0.0F,
+                                                          limits);
+      },
+      "TRACK_LIMIT");
+
+  apex::formats::KsAnimation duplicate;
+  duplicate.source = "duplicate.ksanim";
+  duplicate.tracks.push_back(track("A", 1.0F));
+  duplicate.tracks.push_back(track("A", 2.0F));
+  limits = {};
+  limits.max_diagnostics = 0U;
+  expects_error(
+      [&] {
+        (void)apex::domain::sample_animation_preview_pose(duplicate, 0.0F,
+                                                          limits);
+      },
+      "DIAGNOSTIC_LIMIT");
+
+  limits = {};
+  limits.max_unmatched_tracks = 0U;
+  const auto no_unmatched =
+      apex::domain::apply_animation_preview(model, animation, 0.0F, limits);
+  require(no_unmatched.unmatched_tracks.empty() &&
+              no_unmatched.diagnostics.size() == 1U &&
+              no_unmatched.diagnostics[0].code == "UNMATCHED_OUTPUT_LIMIT",
+          "zero unmatched-output limit returns one bounded diagnostic");
 }
 
 void animation_overrides_the_analog_rpm_transform() {
@@ -200,14 +327,38 @@ void animation_overrides_the_analog_rpm_transform() {
           "animation replaces the analog local transform");
 }
 
+void reports_when_the_frame_requires_cpu_skinning() {
+  apex::formats::Kn5File model;
+  model.source = "driver.kn5";
+  model.root = node("ROOT");
+  model.root.children.push_back(node("BONE"));
+  model.root.children.push_back(node("BODY", "skinnedMesh"));
+
+  apex::formats::KsAnimation animation;
+  animation.source = "driver.ksanim";
+  animation.tracks.push_back(track("BONE", 2.0F));
+  const auto animated =
+      apex::domain::apply_animation_preview(model, animation, 0.5F);
+  require(animated.matched_nodes == 1U && animated.skinning_required,
+          "an animated model with skinned geometry requires CPU skinning");
+
+  model.root.children[1].kind = "mesh";
+  const auto static_only =
+      apex::domain::apply_animation_preview(model, animation, 0.5F);
+  require(!static_only.skinning_required,
+          "an animated static model does not request CPU skinning");
+}
+
 } // namespace
 
 int main() {
   try {
     applies_exact_null_node_tracks_with_last_precedence();
+    samples_a_bounded_fixed_position_pose();
     rejects_limits_and_non_finite_sampling_without_partial_mutation();
     bounds_unmatched_output_and_aggregate_work();
     animation_overrides_the_analog_rpm_transform();
+    reports_when_the_frame_requires_cpu_skinning();
     std::cout << "animation preview tests passed\n";
     return 0;
   } catch (const std::exception &error) {

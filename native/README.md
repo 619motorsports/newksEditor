@@ -169,6 +169,12 @@ The animation options apply a fixed-position KSANIM preview to exact-name null
 nodes. Later animated duplicate tracks win. Animation replaces an RPM transform
 when both options target the same node. The recovered editor does not advance
 or loop this value. It clamps the slider position to `[0, 1]` on each frame.
+The original player uses one shared frame count. The adapter rejects animated
+tracks with different frame counts instead of sampling them approximately.
+The adapter also exposes the same bounded sampling operation without changing
+a model. If a matched animation changes a model with skinned geometry, the
+window enables CPU skinning for each color frame. When a skinned shadow
+pipeline is available, both passes use the same prepared pose.
 The hierarchy options search, select, isolate, show hidden nodes, and enable
 wireframe through the backend-neutral viewport request. Search uses bounded
 ASCII case-insensitive matching. It retains duplicate node names.

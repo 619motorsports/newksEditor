@@ -533,6 +533,7 @@ struct LoadedWindowWorkspace {
     std::optional<apex::app::WorkspaceViewportDirectionalShadowOptions>
         directionalShadows;
     apex::app::WorkspaceSelectionState selection;
+    bool animationSkinningRequired = false;
 };
 
 apex::app::WorkspaceSessionKind parse_workspace_kind(std::string_view value) {
@@ -859,6 +860,7 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
                       << "]: " << item.message << '\n';
         }
         model_changed = applied.matched_nodes > 0U || model_changed;
+        loaded.animationSkinningRequired = applied.skinning_required;
         std::cout << "animation: tracks=" << applied.tracks
                   << ", animated=" << applied.animated_tracks
                   << ", matched-tracks=" << applied.matched_tracks
@@ -1198,6 +1200,8 @@ int run_window(int argc, char** argv) {
             apex::app::WorkspaceViewportFrameRequest frame_request;
             frame_request.camera = *camera.frame;
             frame_request.frame_constants = workspace_lighting.frame_constants;
+            frame_request.apply_skinning =
+                loaded_workspace.animationSkinningRequired;
             viewport_status = viewport->drawAndPresent(
                 *device_result.device, *target_result.target, frame_request,
                 viewport_diagnostic);

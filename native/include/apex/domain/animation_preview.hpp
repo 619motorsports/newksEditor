@@ -29,6 +29,22 @@ struct AnimationPreviewDiagnostic {
   std::string source;
 };
 
+struct AnimationPreviewTrackPose {
+  std::string name;
+  formats::Kn5Matrix4 transform{};
+};
+
+struct AnimationPreviewPose {
+  std::string source;
+  float position = 0.0F;
+  std::size_t tracks = 0U;
+  std::size_t animated_tracks = 0U;
+  std::vector<AnimationPreviewTrackPose> transforms;
+  std::vector<AnimationPreviewDiagnostic> diagnostics;
+
+  [[nodiscard]] bool has_errors() const noexcept;
+};
+
 struct AnimationPreviewApplication {
   std::string source;
   float position = 0.0F;
@@ -37,11 +53,25 @@ struct AnimationPreviewApplication {
   std::size_t unique_animated_tracks = 0U;
   std::size_t matched_tracks = 0U;
   std::size_t matched_nodes = 0U;
+  // True when an animated node affects a model that contains skinned
+  // geometry. The frame must enable CPU skinning to show this pose.
+  bool skinning_required = false;
   std::vector<std::string> unmatched_tracks;
   std::vector<AnimationPreviewDiagnostic> diagnostics;
 
   [[nodiscard]] bool has_errors() const noexcept;
 };
+
+/**
+ * Sample the fixed normalized animation position without changing a model.
+ *
+ * The position is clamped to [0, 1]. Later animated duplicate tracks replace
+ * earlier tracks. The returned track table uses first-seen name order.
+ */
+[[nodiscard]] AnimationPreviewPose
+sample_animation_preview_pose(const formats::KsAnimation &animation,
+                              float position,
+                              AnimationPreviewLimits limits = {});
 
 /**
  * Apply sampled KSANIM matrices to exact-name KN5 null nodes.

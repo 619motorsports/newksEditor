@@ -2601,7 +2601,13 @@ The PDB identifies `FBXImporter::loadAnimation` at `0x100071a0` and
 skeleton, and null attributes. It evaluates each accepted node in local space.
 
 The native sample step is one percent of the selected animation time span. The loop
-stops before the end time. As a result, each nonempty animation contains 100 frames.
+stops before the end time. A positive finite span nominally produces 100 frames.
+The loader divides FBX ticks by `46,186,158`, then multiplies each sampled value by
+the same integer. This pair is consistent with truncated integer milliseconds.
+
+Exact duplicate node names share one first-seen animation set. Later nodes append
+their frames to that set. The importer marks every set as animated after sampling.
+The player binds each set to all exact-name scene nodes in depth-first order.
 
 KN5 null nodes contain local transforms. KN5 mesh records do not contain local
 transforms. The native SDK `sphere.kn5` gives its null node and child mesh the same
