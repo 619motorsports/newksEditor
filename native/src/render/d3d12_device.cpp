@@ -4482,11 +4482,14 @@ public:
         Diagnostic diagnostic;
         if (buffer.backend() != Backend::D3D12)
             return {BufferStatus::unsupported, {"buffer_backend_mismatch", "The buffer belongs to another graphics backend"}};
-        if (!valid_buffer_update(buffer, offset, data.size(), diagnostic))
-            return {BufferStatus::invalid_description, std::move(diagnostic)};
         auto* d3d_buffer = dynamic_cast<D3D12Buffer*>(&buffer);
         if (d3d_buffer == nullptr)
             return {BufferStatus::unsupported, {"buffer_type_unsupported", "The D3D12 device received an unknown buffer handle"}};
+        if (d3d_buffer->context() != context_.get())
+            return {BufferStatus::unsupported,
+                    {"buffer_context_mismatch", "The buffer belongs to another D3D12 device"}};
+        if (!valid_buffer_update(buffer, offset, data.size(), diagnostic))
+            return {BufferStatus::invalid_description, std::move(diagnostic)};
         const bool updated = d3d_buffer->info().description.memory == BufferMemory::host_visible
                                  ? d3d_buffer->write_host(offset, data, diagnostic)
                                  : d3d_buffer->write_device(offset, data, diagnostic);
@@ -4718,12 +4721,15 @@ public:
         if (texture.backend() != Backend::D3D12)
             return {TextureStatus::unsupported,
                     {"texture_backend_mismatch", "The texture belongs to another graphics backend"}};
-        if (!valid_texture_update(texture, uploads, diagnostic))
-            return {TextureStatus::invalid_description, std::move(diagnostic)};
         auto* d3d_texture = dynamic_cast<D3D12Texture*>(&texture);
         if (d3d_texture == nullptr)
             return {TextureStatus::unsupported,
                     {"texture_type_unsupported", "The D3D12 device received an unknown texture handle"}};
+        if (d3d_texture->context() != context_.get())
+            return {TextureStatus::unsupported,
+                    {"texture_context_mismatch", "The texture belongs to another D3D12 device"}};
+        if (!valid_texture_update(texture, uploads, diagnostic))
+            return {TextureStatus::invalid_description, std::move(diagnostic)};
         return d3d_texture->upload(uploads, diagnostic)
                    ? TextureUpdateResult{TextureStatus::ready, {}}
                    : TextureUpdateResult{TextureStatus::upload_failed, std::move(diagnostic)};
@@ -4742,6 +4748,9 @@ public:
         if (d3d_texture == nullptr)
             return {TextureReadbackStatus::unsupported,
                     {"texture_type_unsupported", "The D3D12 device received an unknown texture handle"}, {}};
+        if (d3d_texture->context() != context_.get())
+            return {TextureReadbackStatus::unsupported,
+                    {"texture_context_mismatch", "The texture belongs to another D3D12 device"}, {}};
         std::vector<std::byte> output;
         if (!d3d_texture->clear_readback(request, output, diagnostic))
             return {TextureReadbackStatus::execution_failed, std::move(diagnostic), {}};
@@ -4760,6 +4769,9 @@ public:
         if (d3d_texture == nullptr)
             return {TriangleDrawStatus::unsupported,
                     {"texture_type_unsupported", "The D3D12 device received an unknown texture handle"}, {}};
+        if (d3d_texture->context() != context_.get())
+            return {TriangleDrawStatus::unsupported,
+                    {"texture_context_mismatch", "The texture belongs to another D3D12 device"}, {}};
         std::vector<std::byte> output;
         if (!d3d_texture->draw_triangle(request, output, diagnostic))
             return {TriangleDrawStatus::execution_failed, std::move(diagnostic), {}};

@@ -1227,6 +1227,13 @@ bool contract_backend(apex::render::Backend backend) {
     require(device.device != nullptr, "created device");
     require(device.device->info().backend == backend, "created backend");
     require(!device.device->info().name.empty(), "device name");
+    // Resources retain their backend context, so a second device gives the
+    // real backend contract a portable same-API ownership fixture.
+    DeviceResult peer_device = create_device(backend, options);
+    if (!peer_device.ok()) {
+        require(!peer_device.diagnostic.code.empty() && !peer_device.diagnostic.message.empty(),
+                "peer device ownership diagnostic");
+    }
     const PresentationCapabilities presentation =
         device.device->presentation_capabilities();
     require(presentation.offscreen,
@@ -1372,6 +1379,15 @@ bool contract_backend(apex::render::Backend backend) {
     BufferResult mutable_buffer = device.device->create_buffer(mutable_description, initial);
     require(mutable_buffer.ok(), "host-visible mutable buffer creation");
     require(mutable_buffer.buffer->info().description.size_bytes == 16U, "buffer size metadata");
+    if (peer_device.ok()) {
+        BufferResult peer_buffer = peer_device.device->create_buffer(mutable_description, initial);
+        require(peer_buffer.ok(), "peer host-visible mutable buffer creation");
+        const BufferUpdateResult foreign_buffer_update =
+            device.device->update_buffer(*peer_buffer.buffer, 0U, initial);
+        require(foreign_buffer_update.status == BufferStatus::unsupported &&
+                    foreign_buffer_update.diagnostic.code == "buffer_context_mismatch",
+                "real backend rejects same-backend foreign buffer ownership");
+    }
     BufferUpdateResult update = device.device->update_buffer(*mutable_buffer.buffer, 4U, initial);
     require(update.ok(), "host-visible mutable buffer update");
     update = device.device->update_buffer(*mutable_buffer.buffer, 15U, initial);
@@ -1394,6 +1410,16 @@ bool contract_backend(apex::render::Backend backend) {
     TextureUploadPlan texture_uploads{{TextureUpload{0U, 0U, 2U, 2U, 8U, texture_pixels}}};
     TextureResult mutable_texture = device.device->create_texture(mutable_texture_description, texture_uploads);
     require(mutable_texture.ok(), "mutable texture creation and upload");
+    if (peer_device.ok()) {
+        TextureResult peer_texture = peer_device.device->create_texture(
+            mutable_texture_description, texture_uploads);
+        require(peer_texture.ok(), "peer mutable texture creation and upload");
+        const TextureUpdateResult foreign_texture_update =
+            device.device->update_texture(*peer_texture.texture, texture_uploads);
+        require(foreign_texture_update.status == TextureStatus::unsupported &&
+                    foreign_texture_update.diagnostic.code == "texture_context_mismatch",
+                "real backend rejects same-backend foreign texture updates");
+    }
     TextureUpdateResult texture_update = device.device->update_texture(*mutable_texture.texture, texture_uploads);
     require(texture_update.ok(), "mutable texture update");
     TextureDescription immutable_texture_description = mutable_texture_description;
@@ -1412,6 +1438,16 @@ bool contract_backend(apex::render::Backend backend) {
     TextureResult clear_texture = device.device->create_texture(clear_texture_description);
     require(clear_texture.ok(), "clear/readback texture creation");
     const TextureClearReadbackRequest clear_request{{0.0F, 1.0F, 0.0F, 1.0F}, 0U, 0U, 2U, 2U};
+    TextureResult peer_clear_texture;
+    if (peer_device.ok()) {
+        peer_clear_texture = peer_device.device->create_texture(clear_texture_description);
+        require(peer_clear_texture.ok(), "peer clear/readback texture creation");
+        const TextureClearReadbackResult foreign_context_readback =
+            device.device->clear_texture_and_readback(*peer_clear_texture.texture, clear_request);
+        require(foreign_context_readback.status == TextureReadbackStatus::unsupported &&
+                    foreign_context_readback.diagnostic.code == "texture_context_mismatch",
+                "real backend rejects same-backend foreign texture readback");
+    }
     TextureClearReadbackResult foreign_result;
     if (backend == Backend::Vulkan) {
         ContractD3D12Texture foreign_texture(clear_texture_description);
@@ -1495,6 +1531,17 @@ bool contract_backend(apex::render::Backend backend) {
         reinterpret_cast<const std::byte*>(triangle_vertices.data()), sizeof(triangle_vertices));
     const TriangleDrawRequest triangle_request{&triangle_pipeline, triangle_vertex_bytes, 3U, 0U, 0U,
                                                 {0.0F, 0.0F, 0.0F, 1.0F}};
+    if (peer_device.ok()) {
+        TextureResult peer_triangle_texture =
+            peer_device.device->create_texture(triangle_description);
+        require(peer_triangle_texture.ok(), "peer executable triangle target creation");
+        const TriangleDrawResult foreign_context_triangle =
+            device.device->draw_triangle_and_readback(*peer_triangle_texture.texture,
+                                                      triangle_request);
+        require(foreign_context_triangle.status == TriangleDrawStatus::unsupported &&
+                    foreign_context_triangle.diagnostic.code == "texture_context_mismatch",
+                "real backend rejects same-backend foreign triangle texture");
+    }
     TriangleDrawResult foreign_triangle;
     if (backend == Backend::Vulkan) {
         ContractD3D12Texture foreign_texture(triangle_description);

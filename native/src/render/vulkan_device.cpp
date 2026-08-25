@@ -5462,12 +5462,16 @@ public:
         if (buffer.backend() != Backend::Vulkan) {
             return {BufferStatus::unsupported, {"buffer_backend_mismatch", "The buffer belongs to another graphics backend"}};
         }
-        if (!valid_buffer_update(buffer, offset, data.size(), diagnostic))
-            return {BufferStatus::invalid_description, std::move(diagnostic)};
         auto* vulkan_buffer = dynamic_cast<VulkanBuffer*>(&buffer);
         if (vulkan_buffer == nullptr) {
             return {BufferStatus::unsupported, {"buffer_type_unsupported", "The Vulkan device received an unknown buffer handle"}};
         }
+        if (vulkan_buffer->context().get() != context_.get()) {
+            return {BufferStatus::unsupported,
+                    {"buffer_context_mismatch", "The buffer belongs to another Vulkan device"}};
+        }
+        if (!valid_buffer_update(buffer, offset, data.size(), diagnostic))
+            return {BufferStatus::invalid_description, std::move(diagnostic)};
         const bool host_visible = vulkan_buffer->info().description.memory == BufferMemory::host_visible;
         const bool updated = host_visible ? vulkan_buffer->write_host(offset, data, diagnostic)
                                           : vulkan_buffer->write_device(offset, data, diagnostic);
@@ -5509,12 +5513,15 @@ public:
         if (texture.backend() != Backend::Vulkan)
             return {TextureStatus::unsupported,
                     {"texture_backend_mismatch", "The texture belongs to another graphics backend"}};
-        if (!valid_texture_update(texture, uploads, diagnostic))
-            return {TextureStatus::invalid_description, std::move(diagnostic)};
         auto* vulkan_texture = dynamic_cast<VulkanTexture*>(&texture);
         if (vulkan_texture == nullptr)
             return {TextureStatus::unsupported,
                     {"texture_type_unsupported", "The Vulkan device received an unknown texture handle"}};
+        if (vulkan_texture->context().get() != context_.get())
+            return {TextureStatus::unsupported,
+                    {"texture_context_mismatch", "The texture belongs to another Vulkan device"}};
+        if (!valid_texture_update(texture, uploads, diagnostic))
+            return {TextureStatus::invalid_description, std::move(diagnostic)};
         return vulkan_texture->upload(uploads, diagnostic)
                    ? TextureUpdateResult{TextureStatus::ready, {}}
                    : TextureUpdateResult{TextureStatus::upload_failed, std::move(diagnostic)};
@@ -5586,6 +5593,9 @@ public:
         if (vulkan_texture == nullptr)
             return {TextureReadbackStatus::unsupported,
                     {"texture_type_unsupported", "The Vulkan device received an unknown texture handle"}, {}};
+        if (vulkan_texture->context().get() != context_.get())
+            return {TextureReadbackStatus::unsupported,
+                    {"texture_context_mismatch", "The texture belongs to another Vulkan device"}, {}};
         std::vector<std::byte> output;
         if (!vulkan_texture->clear_readback(request, output, diagnostic))
             return {TextureReadbackStatus::execution_failed, std::move(diagnostic), {}};
@@ -5604,6 +5614,9 @@ public:
         if (vulkan_texture == nullptr)
             return {TriangleDrawStatus::unsupported,
                     {"texture_type_unsupported", "The Vulkan device received an unknown texture handle"}, {}};
+        if (vulkan_texture->context().get() != context_.get())
+            return {TriangleDrawStatus::unsupported,
+                    {"texture_context_mismatch", "The texture belongs to another Vulkan device"}, {}};
         std::vector<std::byte> output;
         if (!vulkan_texture->draw_triangle(request, output, diagnostic))
             return {TriangleDrawStatus::execution_failed, std::move(diagnostic), {}};
