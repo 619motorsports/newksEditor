@@ -158,6 +158,23 @@ endif()
 
 execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --animation "${animation}" --animation-position 2
+  RESULT_VARIABLE clamped_animation_result
+  OUTPUT_VARIABLE clamped_animation_output
+  ERROR_VARIABLE clamped_animation_error
+)
+if(NOT clamped_animation_result STREQUAL "1")
+  message(FATAL_ERROR
+    "clamped animation returned ${clamped_animation_result}: ${clamped_animation_error}")
+endif()
+string(FIND "${clamped_animation_output}" "position=1" clamped_animation_position)
+if(clamped_animation_position EQUAL -1)
+  message(FATAL_ERROR
+    "animation position did not use the recovered endpoint clamp: ${clamped_animation_output}${clamped_animation_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
           --animation-position 0.5
   RESULT_VARIABLE detached_animation_result
   OUTPUT_VARIABLE detached_animation_output
@@ -190,6 +207,99 @@ string(FIND "${invalid_animation_position_error}"
 if(invalid_animation_position EQUAL -1)
   message(FATAL_ERROR
     "non-finite animation position was not diagnosed: ${invalid_animation_position_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --node-search "GEO_Fabric1" --selected-node 0 --show-hidden --wireframe
+  RESULT_VARIABLE hierarchy_result
+  OUTPUT_VARIABLE hierarchy_output
+  ERROR_VARIABLE hierarchy_error
+)
+if(NOT hierarchy_result STREQUAL "1")
+  message(FATAL_ERROR "hierarchy workspace returned ${hierarchy_result}: ${hierarchy_error}")
+endif()
+string(FIND "${hierarchy_output}" "hierarchy: matches=" hierarchy_position)
+if(hierarchy_position EQUAL -1)
+  message(FATAL_ERROR
+    "hierarchy search did not reach native selection: ${hierarchy_output}${hierarchy_error}")
+endif()
+string(FIND "${hierarchy_error}" "caller-supplied shader modules" hierarchy_modules_position)
+if(hierarchy_modules_position EQUAL -1)
+  message(FATAL_ERROR
+    "hierarchy workspace did not reach shader validation: ${hierarchy_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --selected-node 999999
+  RESULT_VARIABLE missing_node_result
+  OUTPUT_VARIABLE missing_node_output
+  ERROR_VARIABLE missing_node_error
+)
+if(NOT missing_node_result STREQUAL "1")
+  message(FATAL_ERROR
+    "missing selected node returned ${missing_node_result}: ${missing_node_error}")
+endif()
+string(FIND "${missing_node_error}"
+  "workspace_selection_node_invalid" missing_node_position)
+if(missing_node_position EQUAL -1)
+  message(FATAL_ERROR
+    "missing selected node was not diagnosed: ${missing_node_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --selected-node 0 --isolate-selected
+  RESULT_VARIABLE group_isolation_result
+  OUTPUT_VARIABLE group_isolation_output
+  ERROR_VARIABLE group_isolation_error
+)
+if(NOT group_isolation_result STREQUAL "1")
+  message(FATAL_ERROR
+    "group isolation returned ${group_isolation_result}: ${group_isolation_error}")
+endif()
+string(FIND "${group_isolation_error}"
+  "workspace_selection_isolation_invalid" group_isolation_position)
+if(group_isolation_position EQUAL -1)
+  message(FATAL_ERROR
+    "group isolation was not diagnosed: ${group_isolation_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --isolate-selected
+  RESULT_VARIABLE detached_isolation_result
+  OUTPUT_VARIABLE detached_isolation_output
+  ERROR_VARIABLE detached_isolation_error
+)
+if(NOT detached_isolation_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached isolation returned ${detached_isolation_result}: ${detached_isolation_error}")
+endif()
+string(FIND "${detached_isolation_error}"
+  "--isolate-selected requires --selected-node" detached_isolation_position)
+if(detached_isolation_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached isolation was not diagnosed: ${detached_isolation_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --selected-node -1
+  RESULT_VARIABLE invalid_node_id_result
+  OUTPUT_VARIABLE invalid_node_id_output
+  ERROR_VARIABLE invalid_node_id_error
+)
+if(NOT invalid_node_id_result STREQUAL "1")
+  message(FATAL_ERROR
+    "invalid node ID returned ${invalid_node_id_result}: ${invalid_node_id_error}")
+endif()
+string(FIND "${invalid_node_id_error}"
+  "selected node ID must be a valid unsigned integer" invalid_node_id_position)
+if(invalid_node_id_position EQUAL -1)
+  message(FATAL_ERROR
+    "invalid node ID was not diagnosed: ${invalid_node_id_error}")
 endif()
 
 # Exercise the production AssetSource path with a bounded car-LOD manifest.

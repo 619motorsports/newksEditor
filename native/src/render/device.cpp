@@ -87,7 +87,7 @@ TextureStatus validate_texture_block_upload_contract(const TextureDescription& d
     if (description.samples != 1U || description.mutability != TextureMutability::immutable ||
         description.array_layers != 1U || description.usage != TextureUsage::sampled) {
         diagnostic = {"texture_compressed_upload_unsupported",
-                      "BC1, BC3, BC4, BC5, BC6H, and BC7 uploads require one-layer, one-sample immutable sampled texture resources"};
+                      "BC1, BC2, BC3, BC4, BC5, BC6H, and BC7 uploads require one-layer, one-sample immutable sampled texture resources"};
         return TextureStatus::unsupported;
     }
     return TextureStatus::ready;
@@ -441,7 +441,7 @@ TextureStatus validate_texture_description(const TextureDescription& description
         initial_uploads.subresources.size() !=
             static_cast<std::size_t>(description.mip_levels) * description.array_layers) {
         diagnostic = {"texture_compressed_upload_incomplete",
-                      "Immutable BC1, BC3, BC4, BC5, BC6H, and BC7 textures require one upload for every subresource"};
+                      "Immutable BC1, BC2, BC3, BC4, BC5, BC6H, and BC7 textures require one upload for every subresource"};
         return TextureStatus::invalid_description;
     }
     constexpr auto max_size_t = static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max());
@@ -1565,9 +1565,10 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             const std::uint64_t shadow_range =
                 request.directional_shadow_binding.constants_range_bytes;
             if (shadow_offset % portable_directional_shadow_buffer_view_bytes != 0U ||
-                shadow_range != portable_directional_shadow_buffer_view_bytes) {
+                (shadow_range != portable_directional_shadow_buffer_view_bytes &&
+                 shadow_range != stock_directional_shadow_buffer_view_bytes)) {
                 diagnostic = {"indexed_directional_shadow_constants_alignment_invalid",
-                              "Directional-shadow constants require a 256-byte aligned offset and 256-byte range"};
+                              "Directional-shadow constants require a 256-byte aligned offset and either the portable 256-byte or recovered stock 208-byte range"};
                 return IndexedStaticMeshDrawStatus::invalid_request;
             }
             if (shadow_offset > constants_description.size_bytes ||

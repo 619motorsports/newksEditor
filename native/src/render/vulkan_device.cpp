@@ -778,6 +778,10 @@ VkFormat vk_texture_format(TextureFormat format) {
         return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
     case TextureFormat::bc1_srgb:
         return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+    case TextureFormat::bc2_unorm:
+        return VK_FORMAT_BC2_UNORM_BLOCK;
+    case TextureFormat::bc2_srgb:
+        return VK_FORMAT_BC2_SRGB_BLOCK;
     case TextureFormat::bc3_unorm:
         return VK_FORMAT_BC3_UNORM_BLOCK;
     case TextureFormat::bc3_srgb:
@@ -801,6 +805,7 @@ VkFormat vk_texture_format(TextureFormat format) {
 
 bool vk_supported_block_upload_format(TextureFormat format) noexcept {
     return format == TextureFormat::bc1_unorm || format == TextureFormat::bc1_srgb ||
+           format == TextureFormat::bc2_unorm || format == TextureFormat::bc2_srgb ||
            format == TextureFormat::bc3_unorm || format == TextureFormat::bc3_srgb ||
            format == TextureFormat::bc4_unorm ||
            format == TextureFormat::bc5_unorm ||
@@ -815,7 +820,7 @@ bool validate_vulkan_texture_format_capabilities(const std::shared_ptr<VulkanCon
     if (!vk_supported_block_upload_format(description.format)) return true;
     if (description.samples != 1U) {
         diagnostic = {"vulkan_compressed_samples_unsupported",
-                      "Vulkan BC1, BC3, BC4, BC5, BC6H, and BC7 uploads require a single-sample texture"};
+                      "Vulkan BC1, BC2, BC3, BC4, BC5, BC6H, and BC7 uploads require a single-sample texture"};
         return false;
     }
     VkFormatProperties properties{};
@@ -832,7 +837,7 @@ bool validate_vulkan_texture_format_capabilities(const std::shared_ptr<VulkanCon
         required |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
     if ((properties.optimalTilingFeatures & required) != required) {
         diagnostic = {"vulkan_compressed_format_unsupported",
-                      "The Vulkan device does not support the requested BC1, BC3, BC4, BC5, BC6H, or BC7 texture usage"};
+                      "The Vulkan device does not support the requested BC1, BC2, BC3, BC4, BC5, BC6H, or BC7 texture usage"};
         return false;
     }
     return true;

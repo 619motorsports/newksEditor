@@ -1248,6 +1248,14 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
     IndexedDirectionalShadowBinding directional_shadow_binding;
     if (requires_directional_shadow_receiver) {
         DirectionalShadowMapResources& maps = *frame.directional_shadow_maps;
+        if (frame.directional_shadow_constants_layout !=
+                DirectionalShadowReceiverConstantsLayout::portable &&
+            frame.directional_shadow_constants_layout !=
+                DirectionalShadowReceiverConstantsLayout::stock_ks_shadow_maps)
+            return {IndexedStaticMeshBatchStatus::invalid_request,
+                    {"static_scene_directional_shadow_constants_layout_invalid",
+                     "Directional-shadow constants layout is not a supported explicit ABI"},
+                    {}};
         if (&device != maps.device_ || maps.backend_ != backend_)
             return {IndexedStaticMeshBatchStatus::unsupported,
                     {"static_scene_directional_shadow_device_mismatch",
@@ -1313,6 +1321,8 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         constants.camera_forward = {maps.metadata_.forward[0],
                                     maps.metadata_.forward[1],
                                     maps.metadata_.forward[2], 0.0F};
+        std::array<apex::scene::Matrix4, directional_shadow_cascade_count>
+            shadow_matrices{};
         for (std::size_t cascade = 0U;
              cascade < directional_shadow_cascade_count; ++cascade) {
             const ShadowCascade& metadata = maps.metadata_.cascades[cascade];
@@ -1348,19 +1358,31 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
                         {}};
             constants.shadow_matrices[cascade] =
                 maps.cameras_[cascade].view_projection;
+            shadow_matrices[cascade] = maps.cameras_[cascade].view_projection;
             constants.split_distances[cascade] = maps.metadata_.splits[cascade];
             constants.depth_biases[cascade] = ks_shadow_biases[cascade];
             directional_shadow_binding.maps[cascade] =
                 maps.attachments_[cascade].get();
         }
-        std::memcpy(directional_shadow_bytes.data(), &constants,
-                    sizeof(constants));
+        std::uint32_t constants_range =
+            portable_directional_shadow_buffer_view_bytes;
+        if (frame.directional_shadow_constants_layout ==
+            DirectionalShadowReceiverConstantsLayout::stock_ks_shadow_maps) {
+            const StockDirectionalShadowReceiverConstants stock_constants =
+                make_stock_directional_shadow_receiver_constants(
+                    shadow_matrices, ks_shadow_biases, maps.metadata_.map_size);
+            std::memcpy(directional_shadow_bytes.data(), &stock_constants,
+                        sizeof(stock_constants));
+            constants_range = stock_directional_shadow_buffer_view_bytes;
+        } else {
+            std::memcpy(directional_shadow_bytes.data(), &constants,
+                        sizeof(constants));
+        }
         directional_shadow_binding.sampler =
             owned_directional_shadow_sampler_.get();
         directional_shadow_binding.constants =
             owned_directional_shadow_constants_.get();
-        directional_shadow_binding.constants_range_bytes =
-            portable_directional_shadow_buffer_view_bytes;
+        directional_shadow_binding.constants_range_bytes = constants_range;
     }
 
     if (owns_frame_constants()) {

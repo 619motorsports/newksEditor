@@ -1,3 +1,4 @@
+#include "apex/app/workspace_selection.hpp"
 #include "apex/app/workspace_session.hpp"
 #include "apex/app/workspace_viewport.hpp"
 
@@ -246,8 +247,22 @@ void opens_real_model_and_presents_through_the_composition_seams(
         });
     require(isolated != opened.document->scene.snapshot.nodes.end(),
             "real model contains an isolated renderable node");
-    prepare_request.render.isolated = true;
-    prepare_request.render.isolated_node = isolated->id;
+    apex::app::WorkspaceSelectionRequest selection_request;
+    selection_request.collect_matches = false;
+    selection_request.selected_node = isolated->id;
+    selection_request.isolate_selected = true;
+    selection_request.show_hidden = true;
+    selection_request.wireframe = true;
+    const auto selection = apex::app::resolve_workspace_selection(
+        opened.document->scene.snapshot, selection_request);
+    require(selection.ok(),
+            "real model selection resolves through the bounded hierarchy service");
+    prepare_request.render.isolated = selection.state.isolate_selected;
+    prepare_request.render.isolated_node = selection.state.selected_node;
+    prepare_request.render.show_hidden = selection.state.show_hidden;
+    prepare_request.packets.selected_node = selection.state.selected_node;
+    prepare_request.packets.wireframe = selection.state.wireframe;
+    prepare_request.wireframe = selection.state.wireframe;
     const auto prepared = apex::app::prepareWorkspaceViewport(
         device, *opened.document, prepare_request);
     if (!prepared.ok())
@@ -271,6 +286,22 @@ void opens_real_model_and_presents_through_the_composition_seams(
             "real model draws and presents through the backend-neutral seam");
 }
 
+void rejects_truncated_real_model_atomically(std::span<const std::uint8_t> bytes) {
+    require(bytes.size() > 1U, "real fixture is large enough for truncation coverage");
+    apex::app::WorkspaceSessionFile file;
+    file.name = "619_gen6_fusion13.truncated.kn5";
+    file.bytes = bytes.first(bytes.size() - 1U);
+    apex::app::WorkspaceSessionOpenRequest request;
+    request.name = file.name;
+    request.modelFiles = std::span<const apex::app::WorkspaceSessionFile>(&file, 1U);
+    const auto result = apex::app::WorkspaceSession{}.open(request);
+    require(!result.ok() && !result.document.has_value() &&
+                !result.diagnostics.empty() &&
+                result.diagnostics.front().code == "MODEL_INVALID" &&
+                result.diagnostics.front().path == file.name,
+            "truncated real LFS model fails atomically with source attribution");
+}
+
 }  // namespace
 
 int main() {
@@ -280,6 +311,7 @@ int main() {
         return 77;
     }
     try {
+        rejects_truncated_real_model_atomically(bytes);
         opens_real_model_and_presents_through_the_composition_seams(bytes);
         std::cout << "workspace_real_fixture_tests: ok\n";
         return 0;

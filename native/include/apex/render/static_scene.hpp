@@ -113,6 +113,11 @@ struct StaticSceneFrameDescription {
     // alive through this synchronous call. Caster execution remains an
     // explicit operation through draw_opaque_directional_shadows().
     DirectionalShadowMapResources* directional_shadow_maps = nullptr;
+    // The portable 256-byte receiver record remains the default. Select the
+    // recovered 208-byte stock cbShadowMaps layout only with matching caller
+    // shader modules; this field never infers an ABI from opaque bytecode.
+    DirectionalShadowReceiverConstantsLayout directional_shadow_constants_layout =
+        DirectionalShadowReceiverConstantsLayout::portable;
     // For caller_tables authority, these non-owning tables use the final
     // Kn5File::textures ordering. When a prepared packet uses txDiffuse,
     // txNormal, txMaps, txDetail, txNormalDetail, txDamage, or txDamageMask,

@@ -490,11 +490,19 @@ static_assert(std::is_trivially_copyable_v<DirectionalShadowReceiverConstants>);
 
 inline constexpr std::uint32_t portable_directional_shadow_buffer_view_bytes = 256U;
 
+// The receiver layout is an explicit caller choice because shader modules
+// own the ABI. Portable remains the default; stock_ks_shadow_maps selects the
+// recovered D3D11 cbShadowMaps byte layout below.
+enum class DirectionalShadowReceiverConstantsLayout : std::uint8_t {
+    portable,
+    stock_ks_shadow_maps,
+};
+
 // Recovered stock D3D11 ksPerPixel cbShadowMaps packing. The original
 // compiler reflection and host setters place three matrices at byte offsets
 // 0, 64, and 128, three bias floats at 192, and textureSize at 204. This is
-// a backend-neutral byte contract for a future native shader handoff; it is
-// deliberately separate from the current 256-byte portable receiver ABI.
+// a backend-neutral byte contract for an explicit native shader handoff. It
+// remains separate from the 256-byte portable receiver ABI.
 struct StockDirectionalShadowReceiverConstants {
     std::array<apex::scene::Matrix4, indexed_directional_shadow_cascade_count>
         shadow_matrices{};

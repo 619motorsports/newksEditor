@@ -92,6 +92,21 @@ void mapsPortableAndSdkFormats() {
                 bcMapping.mapping->vulkanFormat == 134u && bcMapping.mapping->dxgiFormat == 72u,
             "BC1 sRGB mapping");
 
+    const auto bc2 = apex::formats::inspectDds(dx10(4, 4, 74, 16));
+    require(bc2.has_value(), "DX10 BC2 descriptor");
+    const auto bc2Mapping = mapDdsTextureFormat(*bc2);
+    require(bc2Mapping.ok() && bc2Mapping.mapping->format == TextureFormat::bc2_unorm &&
+                bc2Mapping.mapping->vulkanFormat == 135u && bc2Mapping.mapping->dxgiFormat == 74u,
+            "BC2 mapping");
+
+    const auto bc2Srgb = apex::formats::inspectDds(dx10(4, 4, 75, 16));
+    require(bc2Srgb.has_value(), "DX10 BC2 sRGB descriptor");
+    const auto bc2SrgbMapping = mapDdsTextureFormat(*bc2Srgb);
+    require(bc2SrgbMapping.ok() && bc2SrgbMapping.mapping->format == TextureFormat::bc2_srgb &&
+                bc2SrgbMapping.mapping->vulkanFormat == 136u &&
+                bc2SrgbMapping.mapping->dxgiFormat == 75u && bc2SrgbMapping.mapping->srgb,
+            "BC2 sRGB mapping");
+
     const auto bc6 = apex::formats::inspectDds(dx10(4, 4, 96, 16));
     require(bc6.has_value(), "DX10 BC6H descriptor");
     const auto bc6Mapping = mapDdsTextureFormat(*bc6);
@@ -146,6 +161,16 @@ void plansCompressedEdgesAndMips() {
                 bc7EdgePlan.plan->subresources[0].rowPitch == 32U &&
                 bc7EdgePlan.plan->subresources[0].size == 32U,
             "BC7 edge pitches");
+
+    const auto bc2Edge = dx10(5, 3, 74, 32);
+    const auto bc2EdgePlan = buildDdsUploadPlan(bc2Edge, "bc2-edge.dds");
+    require(bc2EdgePlan.ok() && bc2EdgePlan.plan->mapping.format == TextureFormat::bc2_unorm &&
+                bc2EdgePlan.plan->subresources.size() == 1U &&
+                bc2EdgePlan.plan->subresources[0].blocksWide == 2U &&
+                bc2EdgePlan.plan->subresources[0].blocksHigh == 1U &&
+                bc2EdgePlan.plan->subresources[0].rowPitch == 32U &&
+                bc2EdgePlan.plan->subresources[0].size == 32U,
+            "BC2 edge pitches");
 
     // 8x8 -> 4x4 -> 2x2 has 4, 1, and 1 compressed blocks respectively.
     const auto chain = legacyBc("ATI2", 8, 8, 3, 64u + 16u + 16u);
@@ -226,6 +251,12 @@ void rejectsMalformedPayloadAndLimits() {
                 shortBc7Plan.diagnostic.code == "truncated_payload" &&
                 shortBc7Plan.diagnostic.offset == 148U,
             "truncated BC7 edge payload");
+    const auto shortBc2 = dx10(5, 3, 74, 16);
+    const auto shortBc2Plan = buildDdsUploadPlan(shortBc2, "bc2-short.dds");
+    require(!shortBc2Plan.ok() && shortBc2Plan.status == TextureUploadStatus::invalid &&
+                shortBc2Plan.diagnostic.code == "truncated_payload" &&
+                shortBc2Plan.diagnostic.offset == 148U,
+            "truncated BC2 edge payload");
     const auto shortBc5 = dx10(5, 3, 83, 16);
     const auto shortBc5Plan = buildDdsUploadPlan(shortBc5, "bc5-short.dds");
     require(!shortBc5Plan.ok() && shortBc5Plan.status == TextureUploadStatus::invalid &&

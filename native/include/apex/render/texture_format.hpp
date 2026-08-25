@@ -95,6 +95,8 @@ struct TextureFormatInfo {
     switch (format) {
     case TextureFormat::bc1_unorm:
     case TextureFormat::bc1_srgb:
+    case TextureFormat::bc2_unorm:
+    case TextureFormat::bc2_srgb:
     case TextureFormat::bc3_unorm:
     case TextureFormat::bc3_srgb:
     case TextureFormat::bc4_unorm:

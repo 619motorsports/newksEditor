@@ -773,6 +773,12 @@ void contract_texture_limits() {
                 bc7_info.block_height == 4U && bc7_info.block_bytes == 16U && bc7_info.srgb &&
                 texture_format_is_compressed(TextureFormat::bc7_srgb),
             "BC7 texture metadata");
+    const auto bc2_info = texture_format_info(TextureFormat::bc2_srgb);
+    require(bc2_info.classification == TextureFormatClass::block_compressed &&
+                bc2_info.block_width == 4U && bc2_info.block_height == 4U &&
+                bc2_info.block_bytes == 16U && bc2_info.srgb &&
+                texture_format_is_compressed(TextureFormat::bc2_srgb),
+            "BC2 texture metadata");
     const auto bc5_info = texture_format_info(TextureFormat::bc5_unorm);
     require(bc5_info.classification == TextureFormatClass::block_compressed &&
                 bc5_info.block_width == 4U && bc5_info.block_height == 4U &&
@@ -838,6 +844,8 @@ void contract_texture_limits() {
     };
     check_bc_upload(TextureFormat::bc1_unorm, 8U, "BC1");
     check_bc_upload(TextureFormat::bc1_srgb, 8U, "BC1 sRGB");
+    check_bc_upload(TextureFormat::bc2_unorm, 16U, "BC2");
+    check_bc_upload(TextureFormat::bc2_srgb, 16U, "BC2 sRGB");
     check_bc_upload(TextureFormat::bc3_unorm, 16U, "BC3");
     check_bc_upload(TextureFormat::bc3_srgb, 16U, "BC3 sRGB");
     check_bc_upload(TextureFormat::bc4_unorm, 8U, "BC4");
@@ -879,7 +887,7 @@ void contract_texture_limits() {
     require(validate_texture_description(description, empty, diagnostic) == TextureStatus::unsupported,
             "unknown texture format rejected");
     require(diagnostic.code == "texture_format_unknown", "unknown texture format diagnostic");
-    description.format = TextureFormat::bc2_unorm;
+    description.format = TextureFormat::bc4_snorm;
     require(validate_texture_description(description, empty, diagnostic) == TextureStatus::unsupported,
             "unsupported compressed texture format rejected explicitly");
     require(diagnostic.code == "texture_compressed_format_unsupported",
@@ -2377,6 +2385,27 @@ bool contract_backend(apex::render::Backend backend) {
     } else {
         require(bc5_texture.ok(), "BC5 generic sampled texture creation");
     }
+
+    // BC2 is an exact RGBA block resource. It has no material-binding claim
+    // in this fixture, but both native backends must admit the raw upload or
+    // return their explicit adapter-format capability diagnostic.
+    const std::array<std::uint8_t, 16> bc2_block{};
+    const auto create_bc2_texture = [&](TextureFormat format, std::string_view name) {
+        const TextureDescription bc2_description{
+            4U, 4U, 1U, 1U, format, TextureUsage::sampled,
+            TextureMemory::device_local, TextureMutability::immutable};
+        const TextureUploadPlan bc2_uploads{{
+            TextureUpload{0U, 0U, 4U, 4U, 16U, std::as_bytes(std::span(bc2_block))}}};
+        TextureResult bc2_texture = device.device->create_texture(bc2_description, bc2_uploads);
+        if (!bc2_texture.ok() && bc2_texture.status == TextureStatus::unsupported &&
+            (bc2_texture.diagnostic.code == "vulkan_compressed_format_unsupported" ||
+             bc2_texture.diagnostic.code == "d3d12_texture_format_unsupported")) {
+            return;
+        }
+        require(bc2_texture.ok(), std::string(name) + " generic sampled texture creation");
+    };
+    create_bc2_texture(TextureFormat::bc2_unorm, "BC2");
+    create_bc2_texture(TextureFormat::bc2_srgb, "BC2 sRGB");
 
     // BC4 is admitted to the generic block upload API as a scalar texture.
     // The existing diffuse/maps shader ABIs require RGB-capable resources, so

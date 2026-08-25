@@ -149,6 +149,7 @@ out/native/dev/native/apex-native --window vulkan --frames 300
 out/native/dev/native/apex-native --window vulkan --model car.kn5 \
   --analog-instruments data/analog_instruments.ini --rpm 6000 \
   --animation animations/car_door_l.ksanim --animation-position 0.5 \
+  --node-search door --selected-node 42 --isolate-selected --wireframe \
   --shader-family ksPerPixel --shader-vertex stock.vert.spv \
   --shader-fragment stock.frag.spv
 ```
@@ -157,7 +158,11 @@ The analog RPM options apply the recovered linear needle transform before scene
 conversion. The command rejects LUT instruments because their exact mapping is not ported.
 The animation options apply a fixed-position KSANIM preview to exact-name null
 nodes. Later animated duplicate tracks win. Animation replaces an RPM transform
-when both options target the same node. Live playback is not connected yet.
+when both options target the same node. The recovered editor does not advance
+or loop this value. It clamps the slider position to `[0, 1]` on each frame.
+The hierarchy options search, select, isolate, show hidden nodes, and enable
+wireframe through the backend-neutral viewport request. Search uses bounded
+ASCII case-insensitive matching. It retains duplicate node names.
 
 Export a project through the native authoring service:
 
@@ -183,12 +188,13 @@ The current backends initialize devices and create/upload buffers and bounded
 2D textures, samplers, and immutable shader modules. They execute bounded
 RGBA8/BGRA8 texture clears and canonical RGBA8 readback. They also validate a
 pipeline and execute fixed and indexed R16 static-mesh draws with readback.
-The device API uploads immutable, one-layer BC1, BC3, BC4, BC5, and BC7 sampled textures.
+The device API uploads immutable, one-layer BC1, BC2, BC3, BC4, BC5, BC6H, and BC7
+sampled textures.
 The owned static-scene path uploads bounded PNG decodes as RGBA8 UNORM.
 It validates each block row before allocation. Vulkan and D3D12 query format
-support before they create a compressed image. BC2, BC4 SNORM, and BC6H remain
-outside this direct-upload path. BC4 UNORM is a scalar generic texture and is
-not admitted to the existing RGB material bindings.
+support before they create a compressed image. BC4 SNORM remains outside this
+direct-upload path. BC2, BC4 UNORM, and BC6H are generic textures. The
+existing RGB material bindings do not accept them.
 The indexed path validates 11-float KN5 static geometry before allocation.
 It uploads immutable vertex and R16 index buffers. The adapter rejects
 malformed geometry, non-finite values, invalid packet ranges, and unsafe
@@ -296,7 +302,9 @@ allocation. The facade can resolve F4 damage before it creates the plan. It
 merges the activity writes and complete material table before allocation. A
 real SwiftShader test executes the complete facade through
 pixel readback. Its optional retained-shadow receiver uses the same validated
-facade and static-scene ownership path. A second test executes the
+facade and static-scene ownership path. It uses a portable 256-byte record by
+default. A caller can select the recovered 208-byte stock `cbShadowMaps` record
+when its shader modules use that ABI. A second test executes the
 three-texture MultiMap facade and
 checks the `maps.r` and `maps.g` result. It also executes the AT family on a
 4x target and checks partial resolved coverage. An F4 facade test executes
@@ -334,17 +342,18 @@ supported DDS 2D mip chains and bounded PNG images to RGBA8. DDS retains
 explicit sRGB metadata. PNG retains straight alpha and top-to-bottom rows and
 uses RGBA8 UNORM without implicit color conversion. This portable CPU decode is not a
 direct block-compressed path. The separate device API supports direct BC1,
-BC3, BC5, and BC7 uploads. The embedded path retains its exact, bounded BC7
-CPU fallback. The bounded normal-map ABI does not accept BC5. This ABI needs
+BC2, BC3, BC4, BC5, BC6H, and BC7 uploads. The embedded path retains its exact,
+bounded BC7 CPU fallback. The bounded normal-map ABI does not accept BC5. This ABI needs
 a three-channel sampled normal. Its shader does not reconstruct Z.
 The BC7 pixel test needs a supported Vulkan device or a Windows D3D12 device.
-BC6H still requires a capable GPU path. The upload planner supports DX10 2D
-arrays, cubemaps, and RGB24 conversion. The embedded static-scene mode rejects
+BC6H requires a capable GPU because no portable CPU decoder is available. The
+upload planner supports DX10 2D arrays, cubemaps, and RGB24 conversion. The
+embedded static-scene mode rejects
 arrays, cubemaps, 1D/3D textures, BC6H, and legacy D3D9 float textures.
 The maps path rejects sRGB payloads before backend allocation. Source, decoded,
 and host-preparation budgets include the maps resource and its retained tables.
-A separate CPU bridge resolves external DDS and PNG files through explicit
-`AssetSource` grants. It rejects unsafe, missing, ambiguous, and over-budget
+A separate CPU bridge resolves external DDS, PNG, JPEG, and BMP files through
+explicit `AssetSource` grants. It rejects unsafe, missing, ambiguous, and over-budget
 requests. It retains source identity and returns no partial table after an
 error. The bridge copies validated image bytes into opaque, synthetic KN5
 textures. It rewrites only the requested material slots and preserves their

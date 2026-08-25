@@ -2851,6 +2851,45 @@ void binds_retained_directional_maps_through_static_scene_frames() {
                 constants.camera_forward[2] == -1.0F,
             "receiver record carries matrices, recovered splits and biases, and camera state");
 
+    frame.directional_shadow_constants_layout =
+        DirectionalShadowReceiverConstantsLayout::stock_ks_shadow_maps;
+    const auto stock_layout_draw = prepared.resources->draw_and_readback(
+        device, target, frame);
+    StockDirectionalShadowReceiverConstants stock_constants;
+    std::memcpy(&stock_constants, device.updated_bytes.back().data(),
+                sizeof(stock_constants));
+    require(stock_layout_draw.ok() &&
+                device.directional_shadow_ranges[0U] ==
+                    stock_directional_shadow_buffer_view_bytes &&
+                stock_constants.shadow_matrices[0] ==
+                    maps.resources->camera(0U).view_projection &&
+                stock_constants.biases[0] == ks_shadow_biases[0] &&
+                stock_constants.biases[1] == ks_shadow_biases[1] &&
+                stock_constants.biases[2] == ks_shadow_biases[2] &&
+                stock_constants.texture_size == 1.0F / 32.0F &&
+                            std::all_of(device.updated_bytes.back().begin() +
+                                stock_directional_shadow_buffer_view_bytes,
+                            device.updated_bytes.back().end(),
+                            [](std::byte byte_value) {
+                                return byte_value == std::byte{0};
+                            }),
+            "explicit stock receiver layout preserves the recovered 208-byte packing and reciprocal map width");
+
+    const std::size_t updates_before_invalid_layout = device.update_calls;
+    const std::size_t batches_before_invalid_layout = device.batch_calls;
+    frame.directional_shadow_constants_layout =
+        static_cast<DirectionalShadowReceiverConstantsLayout>(255U);
+    const auto invalid_layout = prepared.resources->draw_and_readback(
+        device, target, frame);
+    require(invalid_layout.status == IndexedStaticMeshBatchStatus::invalid_request &&
+                invalid_layout.diagnostic.code ==
+                    "static_scene_directional_shadow_constants_layout_invalid" &&
+                device.update_calls == updates_before_invalid_layout &&
+                device.batch_calls == batches_before_invalid_layout,
+            "unknown receiver ABI values fail before mutable updates or submission");
+    frame.directional_shadow_constants_layout =
+        DirectionalShadowReceiverConstantsLayout::portable;
+
     const std::size_t updates_before_missing = device.update_calls;
     const std::size_t batches_before_missing = device.batch_calls;
     frame.directional_shadow_maps = nullptr;

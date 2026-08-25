@@ -71,6 +71,7 @@ add_library(apex_formats STATIC
   src/formats/ai_spline.cpp
   src/formats/acd.cpp
   src/formats/bc7.cpp
+  src/formats/bmp.cpp
   src/formats/dds.cpp
   src/formats/fbx.cpp
   src/formats/fbx_conversion.cpp
@@ -155,6 +156,7 @@ target_link_libraries(apex_workspace PUBLIC ApexEditor::Scene)
 add_library(apex_app STATIC
   src/app/authoring_service.cpp
   src/app/presentation_recreation.cpp
+  src/app/workspace_selection.cpp
   src/app/workspace_session.cpp
   src/authoring/project_workspace.cpp
 )
@@ -290,6 +292,7 @@ apex_add_native_test(kn5_tests.cpp kn5_tests ApexEditor::Formats)
 apex_add_native_test(kn5_write_tests.cpp kn5_write_tests ApexEditor::Formats)
 apex_add_native_test(dds_tests.cpp dds_tests ApexEditor::Formats)
 apex_add_native_test(bc7_tests.cpp bc7_tests ApexEditor::Formats)
+apex_add_native_test(bmp_tests.cpp bmp_tests ApexEditor::Formats)
 apex_add_native_test(png_tests.cpp png_tests ApexEditor::Formats)
 apex_add_native_test(fbx_tests.cpp fbx_tests ApexEditor::Formats)
 apex_add_native_test(fbx_conversion_tests.cpp fbx_conversion_tests ApexEditor::Formats)
@@ -299,6 +302,7 @@ apex_add_native_test(vao_tests.cpp vao_tests ApexEditor::Formats)
 apex_add_native_test(authoring_project_tests.cpp authoring_project_tests ApexEditor::Authoring)
 apex_add_native_test(authoring_service_tests.cpp authoring_service_tests ApexEditor::App)
 apex_add_native_test(presentation_recreation_tests.cpp presentation_recreation_tests ApexEditor::App)
+apex_add_native_test(workspace_selection_tests.cpp workspace_selection_tests ApexEditor::App)
 apex_add_native_test(workspace_session_tests.cpp workspace_session_tests ApexEditor::App)
 apex_add_native_test(workspace_viewport_tests.cpp workspace_viewport_tests ApexEditor::AppRender)
 apex_add_native_test(workspace_real_fixture_tests.cpp workspace_real_fixture_tests ApexEditor::AppRender)
@@ -326,6 +330,7 @@ if(TARGET workspace_scene_tests)
   target_link_libraries(workspace_scene_tests PRIVATE ApexEditor::Render)
 endif()
 apex_add_native_test(camera_tests.cpp camera_tests ApexEditor::Render)
+apex_add_native_test(bmp_texture_tests.cpp bmp_texture_tests ApexEditor::Render)
 apex_add_native_test(csp_node_state_tests.cpp csp_node_state_tests ApexEditor::Render)
 apex_add_native_test(damage_preview_tests.cpp damage_preview_tests ApexEditor::Render)
 apex_add_native_test(external_texture_authority_tests.cpp external_texture_authority_tests ApexEditor::ExternalTextureAuthority)
@@ -375,14 +380,14 @@ endif()
 if(TEST knh_tests)
   set_tests_properties(knh_tests PROPERTIES LABELS "unit;malformed")
 endif()
-foreach(parser_test IN ITEMS ai_spline_tests kn5_tests kn5_write_tests dds_tests bc7_tests png_tests fbx_tests
+foreach(parser_test IN ITEMS ai_spline_tests kn5_tests kn5_write_tests dds_tests bc7_tests bmp_tests bmp_texture_tests png_tests fbx_tests
                              fbx_conversion_tests acd_tests ini_tests vao_tests)
   if(TEST ${parser_test})
     set_tests_properties(${parser_test} PROPERTIES LABELS "unit;malformed")
   endif()
 endforeach()
 foreach(boundary_test IN ITEMS authoring_project_tests project_bake_tests geometry_bake_tests project_io_tests
-                               authoring_service_tests project_workspace_tests
+                               authoring_service_tests project_workspace_tests workspace_selection_tests
                                asset_index_tests asset_source_tests csp_config_model_tests
                                csp_material_evaluator_tests car_damage_tests secondary_asset_tests car_validation_tests
                                project_surfaces_tests
@@ -409,7 +414,7 @@ if(TEST render_backend_tests)
       ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")
   endif()
 endif()
-foreach(render_test IN ITEMS camera_tests csp_node_state_tests damage_preview_tests external_texture_authority_tests draw_packet_tests frame_plan_tests indexed_draw_tests static_mesh_upload_tests skinned_mesh_upload_tests static_scene_tests stock_material_execution_tests stock_scene_execution_tests workspace_real_fixture_tests lighting_tests material_binding_tests
+foreach(render_test IN ITEMS camera_tests bmp_texture_tests csp_node_state_tests damage_preview_tests external_texture_authority_tests draw_packet_tests frame_plan_tests indexed_draw_tests static_mesh_upload_tests skinned_mesh_upload_tests static_scene_tests stock_material_execution_tests stock_scene_execution_tests workspace_real_fixture_tests lighting_tests material_binding_tests
                              material_profile_tests pipeline_tests render_plan_tests texture_upload_tests)
   if(TEST ${render_test})
     set_tests_properties(${render_test} PROPERTIES LABELS "unit;render")

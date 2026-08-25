@@ -312,8 +312,12 @@ remains unchanged and feature-complete.
   objects, ZIP metadata, extracted payloads, and record arrays. Alternate
   records and split-AO application remain staged with explicit diagnostics.
   KN5 baking is available. Bounded PNG decoding supports non-interlaced,
-  8-bit grayscale, RGB, indexed, grayscale-alpha, and RGBA images. JPEG,
-  WebP, unsupported PNG variants, and remaining image formats are not ported.
+  8-bit grayscale, RGB, indexed, grayscale-alpha, and RGBA images. An optional
+  bounded decoder supports baseline 8-bit grayscale and RGB JPEG images.
+  Builds without libjpeg report this format as unsupported. A bounded BMP
+  decoder supports the observed uncompressed 24-bit Windows font layout.
+  WebP, progressive JPEG, unsupported PNG variants, and remaining image
+  formats are not ported.
 - P2 is partial. KN5 conversion feeds the neutral scene snapshot. Material
   binding is explicit. KN5 scene conversion has aggregate limits for native
   records, copied strings, child links, geometry metadata, and path state.
@@ -365,8 +369,15 @@ remains unchanged and feature-complete.
   A bounded native animation adapter samples KSANIM at a finite normalized
   position. It applies tracks only to exact-name KN5 null nodes. Later animated
   duplicate tracks replace earlier tracks. The window command applies animation
-  after the RPM transform, so animation wins when both target one node. Live
-  playback and interactive animation selection remain staged.
+  after the RPM transform, so animation wins when both target one node. The
+  recovered editor path does not advance or loop this value. It sends the
+  slider position on each frame and clamps it to `[0, 1]`. The command uses the
+  same fixed-position contract. An interactive slider remains staged.
+  A bounded hierarchy service validates scene topology before it searches or
+  selects nodes. Search uses deterministic preorder and ASCII case-insensitive
+  matching. Duplicate names remain distinct. The window command maps selection,
+  isolation, hidden-node visibility, and wireframe state to the existing
+  backend-neutral viewport request.
   The native INI parser rejects a dangling continuation marker. The reference
   JavaScript parser only reports missing fields for this malformed input.
   A separate renderer-facing workspace viewport bridge now prepares this
@@ -448,11 +459,15 @@ remains unchanged and feature-complete.
   The retained static-scene path filters the equivalent
   `DrawPacket::flags.cast_shadows` state. It submits the supported opaque
   static subset to exactly three owned shader-readable D32 maps. Vulkan binds
-  these maps through the portable receiver ABI. D3D12 creates typeless depth
+  these maps through the portable receiver ABI. Callers can instead select the
+  recovered 208-byte stock `cbShadowMaps` layout for matching shader modules.
+  This choice is explicit and does not infer an ABI from shader bytecode.
+  D3D12 creates typeless depth
   resources and sampled views, but descriptor execution remains staged pending
   WARP verification. The
-  device API directly uploads immutable, one-layer BC1, BC3, BC4 UNORM, BC5, and BC7 sampled
-  textures. The upload path validates compressed block rows before allocation.
+  device API directly uploads immutable, one-layer BC1, BC2, BC3, BC4 UNORM, BC5,
+  BC6H, and BC7 sampled textures. The upload path validates compressed block
+  rows before allocation.
   Vulkan and D3D12 query format support before image creation. The generic
   device API accepts BC4 UNORM and BC5 uploads. BC4 is scalar and remains outside
   the RGB material bindings. The normal-map ABI remains RGBA8/BGRA8 because its
@@ -555,18 +570,20 @@ WebGL error zero. The repository has no shared driver KN5 fixture. Bounded
 native tests therefore prove driver-name matching and subtree suppression.
 
 DDS BC7 has a bounded CPU decoder with differential fixtures for all eight
-modes, and both native backends can upload BC7 blocks directly when the adapter
-reports format support. BC5 is also available through the generic device path;
-the normal-map resource ABI remains unchanged. BC6H remains explicit and
-requires a GPU path. The checked upload
+modes. Both native backends can upload BC7 blocks when the adapter reports
+format support. BC5 is also available through the generic device path. The
+normal-map resource ABI remains unchanged. The generic device path uploads
+BC6H UF16 and SF16 blocks on a capable adapter. The checked upload
 planner supports DX10 2D arrays and cubemaps. It also converts legacy RGB24 to
 RGBA8 without a color change. The embedded static-scene path uses the bounded
 CPU decoder for supported 2D mip chains. Each decode receives the remaining
 aggregate byte budget before it allocates output. Upload plans also reject
 subresource-entry floods before iteration. This path retains the DDS sRGB flag.
-It rejects arrays, cubemaps, BC6H, and legacy D3D9 float data. This portable
+It rejects arrays, cubemaps, BC6H, and legacy D3D9 float data. No portable
+BC6H CPU decoder is available. This portable
 decode is still the embedded static-scene path. The separate device path
-uploads BC1, BC3, BC5, and BC7 blocks directly. It does not prove stock-shader parity.
+uploads BC1, BC2, BC3, BC4, BC5, BC6H, and BC7 blocks directly. It does not prove
+stock-shader parity.
 
 ## Source-module mapping
 

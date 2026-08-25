@@ -1,5 +1,6 @@
 #include "apex/app/authoring_service.hpp"
 #include "apex/app/presentation_recreation.hpp"
+#include "apex/app/workspace_selection.hpp"
 #include "apex/app/workspace_viewport.hpp"
 #include "apex/assets/asset_source.hpp"
 #include "apex/core/parse_error.hpp"
@@ -53,6 +54,8 @@ void usage(std::ostream& output) {
            << "  apex-native --window vulkan|d3d12 [--model <file>] [--workspace-root <dir> --manifest <file> --kind track|carLods]\n"
               "                       [--analog-instruments <file> [--rpm <value>]]\n"
               "                       [--animation <file> [--animation-position <value>]]\n"
+              "                       [--node-search <query>] [--selected-node <id> [--isolate-selected]]\n"
+              "                       [--show-hidden] [--wireframe]\n"
               "                       [--shader-family <name> --shader-vertex <file> --shader-fragment <file>]\n"
            << "  apex-native --inspect-kn5 <file>\n"
            << "  apex-native --inspect-dds <file>\n"
@@ -460,6 +463,17 @@ std::uint64_t parse_frame_count(std::string_view value) {
     return result;
 }
 
+apex::scene::NodeId parse_scene_node_id(std::string_view value) {
+    std::uint64_t result = 0U;
+    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result);
+    if (value.empty() || parsed.ec != std::errc{} ||
+        parsed.ptr != value.data() + value.size() ||
+        result >= static_cast<std::uint64_t>(apex::scene::invalid_node_id)) {
+        throw std::runtime_error("selected node ID must be a valid unsigned integer");
+    }
+    return static_cast<apex::scene::NodeId>(result);
+}
+
 struct WindowShaderSpec {
     std::string family;
     std::filesystem::path vertex;
@@ -478,6 +492,11 @@ struct WindowWorkspaceOptions {
     std::optional<std::filesystem::path> animation;
     double animationPosition = 0.0;
     bool animationPositionSpecified = false;
+    std::optional<std::string> nodeSearch;
+    std::optional<apex::scene::NodeId> selectedNode;
+    bool isolateSelected = false;
+    bool showHidden = false;
+    bool wireframe = false;
     std::vector<WindowShaderSpec> shaders;
 };
 
@@ -489,6 +508,7 @@ struct LoadedWindowWorkspace {
     };
     std::vector<ShaderSet> shaderSets;
     std::vector<apex::render::StockMaterialShaderModules> descriptors;
+    apex::app::WorkspaceSelectionState selection;
 };
 
 apex::app::WorkspaceSessionKind parse_workspace_kind(std::string_view value) {
@@ -506,6 +526,24 @@ double parse_finite_number(std::string_view value, std::string_view label) {
         throw std::runtime_error(std::string(label) + " must be a finite number");
     }
     return result;
+}
+
+void write_cli_text(std::ostream& output, std::string_view value) {
+    constexpr std::string_view hex = "0123456789ABCDEF";
+    output << '"';
+    for (const char raw_character : value) {
+        const auto character = static_cast<unsigned char>(raw_character);
+        if (character == static_cast<unsigned char>('\\')) {
+            output << "\\\\";
+        } else if (character == static_cast<unsigned char>('"')) {
+            output << "\\\"";
+        } else if (character >= 0x20U && character <= 0x7eU) {
+            output << static_cast<char>(character);
+        } else {
+            output << "\\x" << hex[character >> 4U] << hex[character & 0x0fU];
+        }
+    }
+    output << '"';
 }
 
 std::string workspace_kind_name(apex::app::WorkspaceSessionKind kind) {
@@ -592,6 +630,27 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             result.animationPosition = parse_finite_number(
                 require_value("--animation-position"), "animation position");
             result.animationPositionSpecified = true;
+        } else if (option == "--node-search") {
+            if (result.nodeSearch.has_value())
+                throw std::runtime_error("duplicate --node-search option");
+            result.nodeSearch = std::string(require_value("--node-search"));
+        } else if (option == "--selected-node") {
+            if (result.selectedNode.has_value())
+                throw std::runtime_error("duplicate --selected-node option");
+            result.selectedNode = parse_scene_node_id(
+                require_value("--selected-node"));
+        } else if (option == "--isolate-selected") {
+            if (result.isolateSelected)
+                throw std::runtime_error("duplicate --isolate-selected option");
+            result.isolateSelected = true;
+        } else if (option == "--show-hidden") {
+            if (result.showHidden)
+                throw std::runtime_error("duplicate --show-hidden option");
+            result.showHidden = true;
+        } else if (option == "--wireframe") {
+            if (result.wireframe)
+                throw std::runtime_error("duplicate --wireframe option");
+            result.wireframe = true;
         } else if (option == "--shader-family") {
             const auto family = std::string(require_value("--shader-family"));
             if (family.empty()) throw std::runtime_error("shader family cannot be empty");
@@ -640,6 +699,14 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
     if (result.animation.has_value() &&
         !result.model.has_value() && !result.workspaceRoot.has_value())
         throw std::runtime_error("--animation requires a workspace model");
+    if (result.isolateSelected && !result.selectedNode.has_value())
+        throw std::runtime_error("--isolate-selected requires --selected-node");
+    const bool selection_options = result.nodeSearch.has_value() ||
+                                   result.selectedNode.has_value() ||
+                                   result.showHidden || result.wireframe;
+    if (selection_options && !result.model.has_value() &&
+        !result.workspaceRoot.has_value())
+        throw std::runtime_error("hierarchy options require a workspace model");
     return result;
 }
 
@@ -729,6 +796,45 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
         loaded.document->sceneBinding = apex::workspace::bindWorkspaceScene(
             loaded.document->scene.snapshot,
             loaded.document->assembly.workspace);
+    }
+    const bool selection_options = options.nodeSearch.has_value() ||
+                                   options.selectedNode.has_value() ||
+                                   options.showHidden || options.wireframe;
+    if (selection_options) {
+        apex::app::WorkspaceSelectionRequest request;
+        request.query = options.nodeSearch.has_value()
+                            ? std::string_view(*options.nodeSearch)
+                            : std::string_view{};
+        request.collect_matches = options.nodeSearch.has_value();
+        request.selected_node = options.selectedNode.value_or(
+            apex::scene::invalid_node_id);
+        request.isolate_selected = options.isolateSelected;
+        request.show_hidden = options.showHidden;
+        request.wireframe = options.wireframe;
+        const auto selection = apex::app::resolve_workspace_selection(
+            loaded.document->scene.snapshot, request);
+        if (!selection.ok()) {
+            std::cerr << selection.diagnostic.code;
+            if (selection.diagnostic.node != apex::scene::invalid_node_id)
+                std::cerr << " [node " << selection.diagnostic.node << ']';
+            std::cerr << ": " << selection.diagnostic.message << '\n';
+            throw std::runtime_error("workspace hierarchy selection failed");
+        }
+        loaded.selection = selection.state;
+        if (options.nodeSearch.has_value()) {
+            std::cout << "hierarchy: matches=" << selection.matches.size()
+                      << '\n';
+            for (const auto& match : selection.matches) {
+                std::cout << "node: id=" << match.node
+                          << ", depth=" << match.depth
+                          << ", kind="
+                          << apex::app::workspace_selection_node_kind_name(
+                                 match.kind)
+                          << ", name=";
+                write_cli_text(std::cout, match.name);
+                std::cout << '\n';
+            }
+        }
     }
     if (options.shaders.empty())
         throw std::runtime_error("workspace rendering requires caller-supplied shader modules");
@@ -820,6 +926,12 @@ int run_window(int argc, char** argv) {
         request.presentation = target_result.target->info().description;
         request.shader_modules = loaded_workspace.descriptors;
         request.render.camera_position = {0.0F, 0.0F, 5.0F};
+        request.render.isolated = loaded_workspace.selection.isolate_selected;
+        request.render.isolated_node = loaded_workspace.selection.selected_node;
+        request.render.show_hidden = loaded_workspace.selection.show_hidden;
+        request.packets.selected_node = loaded_workspace.selection.selected_node;
+        request.packets.wireframe = loaded_workspace.selection.wireframe;
+        request.wireframe = loaded_workspace.selection.wireframe;
         std::vector<apex::scene::NodeId> fixed_lod_exclusions;
         if (loaded_workspace.document->assembly.workspace.kind == "carLods") {
             // This shell has no interactive orbit state. Select the first
