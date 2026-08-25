@@ -274,6 +274,18 @@ WorkspaceLodResolution resolveWorkspaceLod(
             seen[static_cast<std::size_t>(id)] = true;
             validate_lod(workspace.files[index]);
         }
+        if (request.selected_index.has_value()) {
+            const bool present = std::any_of(
+                workspace.files.begin(), workspace.files.end(),
+                [&](const WorkspaceFile& file) {
+                    return file.lod.has_value() &&
+                           file.lod->index == *request.selected_index;
+                });
+            if (!present) {
+                throw error("INVALID_LOD_SELECTION",
+                            "selected workspace LOD index is not present");
+            }
+        }
 
         const double dx = static_cast<double>(request.camera_position[0]) -
                           static_cast<double>(request.bounds_center[0]);

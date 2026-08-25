@@ -54,6 +54,7 @@ void usage(std::ostream& output) {
            << "  apex-native --window vulkan|d3d12 [--model <file>] [--workspace-root <dir> --manifest <file> --kind track|carLods]\n"
               "                       [--analog-instruments <file> [--rpm <value>]]\n"
               "                       [--animation <file> [--animation-position <value>]]\n"
+              "                       [--lod-index <index>]\n"
               "                       [--node-search <query>] [--selected-node <id> [--isolate-selected]]\n"
               "                       [--show-hidden] [--wireframe]\n"
               "                       [--shader-family <name> --shader-vertex <file> --shader-fragment <file>]\n"
@@ -474,6 +475,17 @@ apex::scene::NodeId parse_scene_node_id(std::string_view value) {
     return static_cast<apex::scene::NodeId>(result);
 }
 
+std::uint32_t parse_lod_index(std::string_view value) {
+    std::uint64_t result = 0U;
+    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result);
+    if (value.empty() || parsed.ec != std::errc{} ||
+        parsed.ptr != value.data() + value.size() ||
+        result > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::runtime_error("LOD index must be a valid unsigned 32-bit integer");
+    }
+    return static_cast<std::uint32_t>(result);
+}
+
 struct WindowShaderSpec {
     std::string family;
     std::filesystem::path vertex;
@@ -492,6 +504,7 @@ struct WindowWorkspaceOptions {
     std::optional<std::filesystem::path> animation;
     double animationPosition = 0.0;
     bool animationPositionSpecified = false;
+    std::optional<std::uint32_t> lodIndex;
     std::optional<std::string> nodeSearch;
     std::optional<apex::scene::NodeId> selectedNode;
     bool isolateSelected = false;
@@ -630,6 +643,10 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             result.animationPosition = parse_finite_number(
                 require_value("--animation-position"), "animation position");
             result.animationPositionSpecified = true;
+        } else if (option == "--lod-index") {
+            if (result.lodIndex.has_value())
+                throw std::runtime_error("duplicate --lod-index option");
+            result.lodIndex = parse_lod_index(require_value("--lod-index"));
         } else if (option == "--node-search") {
             if (result.nodeSearch.has_value())
                 throw std::runtime_error("duplicate --node-search option");
@@ -699,6 +716,11 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
     if (result.animation.has_value() &&
         !result.model.has_value() && !result.workspaceRoot.has_value())
         throw std::runtime_error("--animation requires a workspace model");
+    if (result.lodIndex.has_value() &&
+        (!result.workspaceRoot.has_value() ||
+         result.kind != apex::app::WorkspaceSessionKind::carLods)) {
+        throw std::runtime_error("--lod-index requires a carLods workspace");
+    }
     if (result.isolateSelected && !result.selectedNode.has_value())
         throw std::runtime_error("--isolate-selected requires --selected-node");
     const bool selection_options = result.nodeSearch.has_value() ||
@@ -744,6 +766,16 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
         throw std::runtime_error("workspace open failed");
     }
     loaded.document = std::move(opened.document);
+    if (options.lodIndex.has_value()) {
+        const auto& files = loaded.document->assembly.workspace.files;
+        const bool present = std::any_of(
+            files.begin(), files.end(), [&](const auto& file) {
+                return file.lod.has_value() &&
+                       file.lod->index == *options.lodIndex;
+            });
+        if (!present)
+            throw std::runtime_error("selected workspace LOD index is not present");
+    }
     bool model_changed = false;
     if (options.analogInstruments.has_value()) {
         const auto bytes = read_file(*options.analogInstruments);
@@ -916,63 +948,104 @@ int run_window(int argc, char** argv) {
         return target_result.status == apex::render::PresentationTargetStatus::unsupported ? 77 : 1;
     }
 
+    const auto clip_space = backend == apex::render::Backend::Vulkan
+                                ? apex::render::CameraClipSpace::vulkan
+                                : apex::render::CameraClipSpace::d3d12;
+    apex::app::WorkspaceViewportCameraController camera_controller;
+    if (loaded_workspace.document.has_value() &&
+        loaded_workspace.document->scene.preview_bounds.has_value()) {
+        const auto& bounds = *loaded_workspace.document->scene.preview_bounds;
+        const double distance = std::max(
+            static_cast<double>(bounds.radius) * 2.35, 0.2);
+        if (!std::isfinite(distance) || distance > 1.0e7) {
+            throw std::runtime_error(
+                "workspace preview bounds exceed the native camera range");
+        }
+        camera_controller.target = bounds.center;
+        camera_controller.distance = static_cast<float>(distance);
+    }
+
+    auto current_camera = [&]() {
+        const auto description = target_result.target->info().description;
+        return camera_controller.frame(
+            static_cast<float>(description.width) /
+                static_cast<float>(description.height),
+            clip_space);
+    };
+    auto resolve_current_lods = [&](const apex::render::CameraFrame& camera)
+        -> std::optional<apex::workspace::WorkspaceLodResolution> {
+        if (!loaded_workspace.document.has_value() ||
+            loaded_workspace.document->assembly.workspace.kind != "carLods") {
+            return std::nullopt;
+        }
+        if (!loaded_workspace.document->scene.preview_bounds.has_value()) {
+            throw std::runtime_error(
+                "carLods workspace has no preview-visible geometry bounds");
+        }
+        apex::workspace::WorkspaceLodResolutionRequest request;
+        request.workspace = &loaded_workspace.document->assembly.workspace;
+        request.scene = &loaded_workspace.document->scene.snapshot;
+        request.file_root_nodes =
+            loaded_workspace.document->sceneBinding.file_root_nodes;
+        request.bounds_center =
+            loaded_workspace.document->scene.preview_bounds->center;
+        request.camera_position = camera.position;
+        request.selected_index = workspace_options.lodIndex;
+        return apex::workspace::resolveWorkspaceLod(request);
+    };
+
     std::unique_ptr<apex::app::WorkspaceViewport> viewport;
+    std::vector<std::uint32_t> active_lod_indices;
     auto prepare_viewport = [&]() {
         if (!loaded_workspace.document.has_value()) {
             viewport.reset();
+            active_lod_indices.clear();
             return true;
         }
+        const auto camera = current_camera();
+        if (!camera.ok()) {
+            std::cerr << "workspace camera: " << camera.code << ": "
+                      << camera.message << '\n';
+            return false;
+        }
+        const auto lod = resolve_current_lods(*camera.frame);
         apex::app::WorkspaceViewportPrepareRequest request;
         request.presentation = target_result.target->info().description;
         request.shader_modules = loaded_workspace.descriptors;
-        request.render.camera_position = {0.0F, 0.0F, 5.0F};
+        request.render.camera_position = camera.frame->position;
         request.render.isolated = loaded_workspace.selection.isolate_selected;
         request.render.isolated_node = loaded_workspace.selection.selected_node;
         request.render.show_hidden = loaded_workspace.selection.show_hidden;
         request.packets.selected_node = loaded_workspace.selection.selected_node;
         request.packets.wireframe = loaded_workspace.selection.wireframe;
         request.wireframe = loaded_workspace.selection.wireframe;
-        std::vector<apex::scene::NodeId> fixed_lod_exclusions;
-        if (loaded_workspace.document->assembly.workspace.kind == "carLods") {
-            // This shell has no interactive orbit state. Select the first
-            // manifest LOD explicitly instead of drawing all LODs together.
-            const auto& files = loaded_workspace.document->assembly.workspace.files;
-            const auto& roots = loaded_workspace.document->sceneBinding.file_root_nodes;
-            const auto selected = std::find_if(
-                files.begin(), files.end(), [](const auto& file) {
-                    return file.lod.has_value();
-                });
-            if (selected != files.end()) {
-                const auto selected_index = selected->lod->index;
-                for (std::size_t index = 0U;
-                     index < files.size() && index < roots.size(); ++index) {
-                    if (files[index].lod.has_value() &&
-                        files[index].lod->index != selected_index)
-                        fixed_lod_exclusions.push_back(roots[index]);
-                }
-                request.render.excluded_subtree_roots = fixed_lod_exclusions;
-            }
+        if (lod.has_value()) {
+            request.workspace.lod_bounds_center =
+                loaded_workspace.document->scene.preview_bounds->center;
+            request.workspace.lod_index = workspace_options.lodIndex;
         }
         auto prepared = apex::app::prepareWorkspaceViewport(
             *device_result.device, *loaded_workspace.document, request);
         if (!prepared.ok()) {
             std::cerr << "workspace render: " << prepared.diagnostic.code << ": "
                       << prepared.diagnostic.message << '\n';
-            viewport.reset();
             return false;
         }
         viewport = std::move(prepared.viewport);
+        active_lod_indices = lod.has_value()
+                                 ? std::move(lod->active_indices)
+                                 : std::vector<std::uint32_t>{};
         return true;
     };
     if (!prepare_viewport()) return 1;
 
     std::array<apex::platform::WindowEvent, 64U> events{};
-    apex::app::WorkspaceViewportCameraController camera_controller;
     std::uint64_t frames = 0U;
     apex::app::PresentationRecreationController recreation;
     while (!window_result.window->close_requested() &&
            (frame_limit == 0U || frames < frame_limit)) {
         bool resized = false;
+        bool camera_changed = false;
         const auto event_count = window_result.window->poll_events(events);
         for (std::size_t index = 0U; index < event_count; ++index) {
             if (events[index].type == apex::platform::WindowEventType::pixel_size_changed)
@@ -981,7 +1054,8 @@ int run_window(int argc, char** argv) {
             case apex::platform::WindowEventType::key_down:
                 if (const auto movement = workspace_camera_move_for_key(
                         events[index].key); movement.has_value()) {
-                    (void)camera_controller.move(*movement);
+                    camera_changed = camera_controller.move(*movement) ||
+                                     camera_changed;
                 }
                 break;
             case apex::platform::WindowEventType::mouse_button_down:
@@ -1001,14 +1075,16 @@ int run_window(int argc, char** argv) {
                     0.0F, 0.0F});
                 break;
             case apex::platform::WindowEventType::mouse_motion:
-                (void)camera_controller.apply({
+                camera_changed = camera_controller.apply({
                     apex::app::WorkspaceViewportCameraGesture::drag,
-                    events[index].x_relative, events[index].y_relative});
+                    events[index].x_relative, events[index].y_relative}) ||
+                                 camera_changed;
                 break;
             case apex::platform::WindowEventType::mouse_wheel:
-                (void)camera_controller.apply({
+                camera_changed = camera_controller.apply({
                     apex::app::WorkspaceViewportCameraGesture::wheel,
-                    events[index].x_relative, events[index].y_relative});
+                    events[index].x_relative, events[index].y_relative}) ||
+                                 camera_changed;
                 break;
             default:
                 break;
@@ -1032,6 +1108,21 @@ int run_window(int argc, char** argv) {
             }
             if (!prepare_viewport()) return 1;
         }
+        if (camera_changed && !workspace_options.lodIndex.has_value() &&
+            loaded_workspace.document.has_value() &&
+            loaded_workspace.document->assembly.workspace.kind == "carLods") {
+            const auto camera = current_camera();
+            if (!camera.ok()) {
+                std::cerr << "workspace camera: " << camera.code << ": "
+                          << camera.message << '\n';
+                return 1;
+            }
+            const auto lod = resolve_current_lods(*camera.frame);
+            if (lod.has_value() && lod->active_indices != active_lod_indices &&
+                !prepare_viewport()) {
+                return 1;
+            }
+        }
         apex::render::PresentationFrameResult blank_frame;
         apex::app::WorkspaceViewportFrameStatus viewport_status =
             apex::app::WorkspaceViewportFrameStatus::ready;
@@ -1039,9 +1130,7 @@ int run_window(int argc, char** argv) {
         if (viewport != nullptr) {
             const auto camera = camera_controller.frame(
                 static_cast<float>(pixel_width) / static_cast<float>(pixel_height),
-                backend == apex::render::Backend::Vulkan
-                    ? apex::render::CameraClipSpace::vulkan
-                    : apex::render::CameraClipSpace::d3d12);
+                clip_space);
             if (!camera.ok()) {
                 std::cerr << "workspace camera: " << camera.code << ": "
                           << camera.message << '\n';

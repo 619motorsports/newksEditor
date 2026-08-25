@@ -391,6 +391,10 @@ void rejects_malformed_state_without_partial_binding() {
     expects_error([&] { (void)apex::workspace::resolveWorkspaceLod(request); },
                   "NON_FINITE_CAMERA");
     request = request_for(value, binding);
+    request.selected_index = 99U;
+    expects_error([&] { (void)apex::workspace::resolveWorkspaceLod(request); },
+                  "INVALID_LOD_SELECTION");
+    request = request_for(value, binding);
     auto duplicate_roots = binding.file_root_nodes;
     duplicate_roots[1] = duplicate_roots[0];
     request.file_root_nodes = duplicate_roots;

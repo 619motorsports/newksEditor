@@ -128,6 +128,56 @@ void test_ids_are_repeatable() {
     }
 }
 
+void test_preview_bounds_follow_transformed_authored_visibility() {
+    Kn5File model;
+    model.materials.push_back(fixture().materials.front());
+    model.root = node("root", {1, 0, 0, 0, 0, 1, 0, 0,
+                                0, 0, 1, 0, 10, 2, -3, 1});
+
+    auto visible = mesh("visible");
+    const std::array<std::array<float, 3>, 3> positions = {
+        std::array<float, 3>{-2.0F, 1.0F, 0.0F},
+        std::array<float, 3>{4.0F, 5.0F, 2.0F},
+        std::array<float, 3>{0.0F, -1.0F, 6.0F}};
+    for (std::size_t vertex = 0U; vertex < positions.size(); ++vertex) {
+        for (std::size_t axis = 0U; axis < 3U; ++axis)
+            visible.vertices[vertex * visible.vertexStride + axis] = positions[vertex][axis];
+    }
+    model.root.children.push_back(std::move(visible));
+
+    auto hidden = mesh("hidden");
+    hidden.visible = false;
+    hidden.vertices[0] = -1000.0F;
+    model.root.children.push_back(std::move(hidden));
+
+    auto not_renderable = mesh("not-renderable");
+    not_renderable.renderable = false;
+    not_renderable.vertices[1] = 1000.0F;
+    model.root.children.push_back(std::move(not_renderable));
+
+    auto inactive = node("inactive");
+    inactive.active = false;
+    auto inactive_mesh = mesh("inactive-mesh");
+    inactive_mesh.vertices[0] = 1000.0F;
+    inactive.children.push_back(std::move(inactive_mesh));
+    model.root.children.push_back(std::move(inactive));
+
+    const auto conversion = apex::scene::convertKn5Scene(model);
+    require(conversion.preview_bounds.has_value(), "visible preview bounds exist");
+    const auto& bounds = *conversion.preview_bounds;
+    require(bounds.minimum == apex::scene::Vector3({8.0F, 1.0F, -3.0F}) &&
+                bounds.maximum == apex::scene::Vector3({14.0F, 7.0F, 3.0F}) &&
+                bounds.center == apex::scene::Vector3({11.0F, 4.0F, 0.0F}),
+            "preview bounds use transformed visible vertices only");
+    require(std::abs(bounds.radius - std::sqrt(27.0F)) < 1e-5F,
+            "preview radius is the transformed AABB half diagonal");
+
+    model.root.active = false;
+    const auto inactive_conversion = apex::scene::convertKn5Scene(model);
+    require(!inactive_conversion.preview_bounds.has_value(),
+            "inactive hierarchy has no preview bounds");
+}
+
 template <typename Function>
 void requireError(Function&& function, std::string_view context) {
     try {
@@ -257,6 +307,7 @@ int main() {
     try {
         test_world_conversion_and_metadata();
         test_ids_are_repeatable();
+        test_preview_bounds_follow_transformed_authored_visibility();
         test_invalid_references_and_boundaries();
         test_conversion_limits_before_snapshot_allocation();
         test_conversion_aggregate_budget_and_string_limits();

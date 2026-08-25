@@ -161,6 +161,8 @@ void rejectsReferencesTruncationAndBudgets() {
     const auto truncatedResult = WorkspaceSession().open(trackRequest(manifest, truncatedFiles));
     require(!truncatedResult.ok() && !truncatedResult.diagnostics.empty() &&
                 truncatedResult.diagnostics.front().code == "MODEL_INVALID" &&
+                truncatedResult.diagnostics.front().path == "main.kn5" &&
+                truncatedResult.diagnostics.front().offset > 0U &&
                 !truncatedResult.document.has_value(),
             std::string("truncated model fails atomically: ") +
                 (truncatedResult.diagnostics.empty() ? "no diagnostic"

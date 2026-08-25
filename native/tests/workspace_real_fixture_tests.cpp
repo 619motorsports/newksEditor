@@ -13,6 +13,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 using namespace apex::render;
@@ -143,14 +144,13 @@ private:
                      0U, 0U, 0U, true};
 };
 
-std::vector<std::uint8_t> read_fixture() {
-    constexpr std::array<const char*, 5U> paths = {
-        "test/content/cars/619_gen6_arca_base/619_gen6_fusion13.kn5",
-        "../test/content/cars/619_gen6_arca_base/619_gen6_fusion13.kn5",
-        "../../test/content/cars/619_gen6_arca_base/619_gen6_fusion13.kn5",
-        "../../../test/content/cars/619_gen6_arca_base/619_gen6_fusion13.kn5",
-        "../../../../test/content/cars/619_gen6_arca_base/619_gen6_fusion13.kn5"};
-    for (const char* path : paths) {
+std::vector<std::uint8_t> read_fixture(std::string_view relative) {
+    constexpr std::array<std::string_view, 5U> prefixes = {
+        "", "../", "../../", "../../../", "../../../../"};
+    for (const auto prefix : prefixes) {
+        const std::string path = std::string(prefix) +
+                                 "test/content/cars/619_gen6_arca_base/" +
+                                 std::string(relative);
         std::ifstream input(path, std::ios::binary | std::ios::ate);
         if (!input) continue;
         const auto end = input.tellg();
@@ -162,6 +162,32 @@ std::vector<std::uint8_t> read_fixture() {
         if (input.good() || input.eof()) return bytes;
     }
     return {};
+}
+
+void rejects_real_four_lod_manifest_atomically(
+    const std::array<std::vector<std::uint8_t>, 4U>& models,
+    std::span<const std::uint8_t> manifest) {
+    constexpr std::array<std::string_view, 4U> names = {
+        "619_gen6_fusion13.kn5", "619_gen6_fusion13_lod_b.kn5",
+        "619_gen6_fusion13_lod_c.kn5", "619_gen6_fusion13_lod_d.kn5"};
+    std::array<apex::app::WorkspaceSessionFile, 4U> files;
+    for (std::size_t index = 0U; index < files.size(); ++index) {
+        files[index].name = std::string(names[index]);
+        files[index].bytes = models[index];
+    }
+    apex::app::WorkspaceSessionOpenRequest request;
+    request.kind = apex::app::WorkspaceSessionKind::carLods;
+    request.name = "real four-LOD fixture";
+    request.manifestName = "data/lods.ini";
+    request.manifestBytes = manifest;
+    request.modelFiles = files;
+    const auto opened = apex::app::WorkspaceSession{}.open(request);
+    require(!opened.ok() && !opened.document.has_value() &&
+                opened.diagnostics.size() == 1U &&
+                opened.diagnostics.front().code == "MODEL_INVALID" &&
+                opened.diagnostics.front().path == names[1] &&
+                opened.diagnostics.front().offset == 33'898U,
+            "real lower LOD non-finite vertex rejects the whole workspace atomically");
 }
 
 std::vector<std::uint8_t> shader_bytes() {
@@ -305,14 +331,22 @@ void rejects_truncated_real_model_atomically(std::span<const std::uint8_t> bytes
 }  // namespace
 
 int main() {
-    const auto bytes = read_fixture();
-    if (bytes.empty()) {
+    const std::array<std::vector<std::uint8_t>, 4U> models = {
+        read_fixture("619_gen6_fusion13.kn5"),
+        read_fixture("619_gen6_fusion13_lod_b.kn5"),
+        read_fixture("619_gen6_fusion13_lod_c.kn5"),
+        read_fixture("619_gen6_fusion13_lod_d.kn5")};
+    const auto manifest = read_fixture("data/lods.ini");
+    if (std::any_of(models.begin(), models.end(),
+                    [](const auto& bytes) { return bytes.empty(); }) ||
+        manifest.empty()) {
         std::cerr << "workspace_real_fixture_tests: repository LFS fixture unavailable\n";
         return 77;
     }
     try {
-        rejects_truncated_real_model_atomically(bytes);
-        opens_real_model_and_presents_through_the_composition_seams(bytes);
+        rejects_truncated_real_model_atomically(models.front());
+        opens_real_model_and_presents_through_the_composition_seams(models.front());
+        rejects_real_four_lod_manifest_atomically(models, manifest);
         std::cout << "workspace_real_fixture_tests: ok\n";
         return 0;
     } catch (const std::exception& error) {

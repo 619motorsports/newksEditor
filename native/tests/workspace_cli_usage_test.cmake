@@ -302,6 +302,42 @@ if(invalid_node_id_position EQUAL -1)
     "invalid node ID was not diagnosed: ${invalid_node_id_error}")
 endif()
 
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --lod-index 0
+  RESULT_VARIABLE detached_lod_result
+  OUTPUT_VARIABLE detached_lod_output
+  ERROR_VARIABLE detached_lod_error
+)
+if(NOT detached_lod_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached LOD index returned ${detached_lod_result}: ${detached_lod_error}")
+endif()
+string(FIND "${detached_lod_error}"
+  "--lod-index requires a carLods workspace" detached_lod_position)
+if(detached_lod_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached LOD index was not diagnosed: ${detached_lod_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --workspace-root x
+          --manifest lods.ini --kind carLods --lod-index -1
+  RESULT_VARIABLE invalid_lod_result
+  OUTPUT_VARIABLE invalid_lod_output
+  ERROR_VARIABLE invalid_lod_error
+)
+if(NOT invalid_lod_result STREQUAL "1")
+  message(FATAL_ERROR
+    "invalid LOD index returned ${invalid_lod_result}: ${invalid_lod_error}")
+endif()
+string(FIND "${invalid_lod_error}"
+  "LOD index must be a valid unsigned 32-bit integer" invalid_lod_position)
+if(invalid_lod_position EQUAL -1)
+  message(FATAL_ERROR
+    "invalid LOD index was not diagnosed: ${invalid_lod_error}")
+endif()
+
 # Exercise the production AssetSource path with a bounded car-LOD manifest.
 # The repository's complete car fixture includes optional LOD files that are
 # intentionally outside this test's scope, so copy one known-good model into
@@ -315,7 +351,7 @@ file(WRITE "${workspace_root}/lods.ini"
 execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
           --workspace-root "${workspace_root}"
-          --manifest data/lods.ini --kind carLods
+          --manifest data/lods.ini --kind carLods --lod-index 0
   RESULT_VARIABLE car_workspace_result
   OUTPUT_VARIABLE car_workspace_output
   ERROR_VARIABLE car_workspace_error
@@ -328,6 +364,24 @@ string(FIND "${car_workspace_error}" "caller-supplied shader modules" car_worksp
 if(car_workspace_position EQUAL -1)
   message(FATAL_ERROR
     "car-LOD workspace did not reach shader validation: ${car_workspace_error}")
+endif()
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --workspace-root "${workspace_root}"
+          --manifest data/lods.ini --kind carLods --lod-index 1
+  RESULT_VARIABLE missing_lod_result
+  OUTPUT_VARIABLE missing_lod_output
+  ERROR_VARIABLE missing_lod_error
+)
+if(NOT missing_lod_result STREQUAL "1")
+  message(FATAL_ERROR
+    "missing LOD index returned ${missing_lod_result}: ${missing_lod_error}")
+endif()
+string(FIND "${missing_lod_error}"
+  "selected workspace LOD index is not present" missing_lod_position)
+if(missing_lod_position EQUAL -1)
+  message(FATAL_ERROR
+    "missing LOD index was not diagnosed: ${missing_lod_error}")
 endif()
 file(REMOVE_RECURSE "${workspace_root}")
 

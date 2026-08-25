@@ -13,6 +13,21 @@ namespace {
 
 using core::ParseError;
 
+class WorkspaceModelError final : public std::runtime_error {
+public:
+    WorkspaceModelError(std::string source, std::size_t offset,
+                        std::string message)
+        : std::runtime_error(std::move(message)), source_(std::move(source)),
+          offset_(offset) {}
+
+    [[nodiscard]] const std::string& source() const noexcept { return source_; }
+    [[nodiscard]] std::size_t offset() const noexcept { return offset_; }
+
+private:
+    std::string source_;
+    std::size_t offset_ = 0U;
+};
+
 [[nodiscard]] ParseError sessionError(std::string_view source, std::string_view code,
                                       std::string_view message) {
     return ParseError("WORKSPACE_SESSION", std::string(source), 0,
@@ -114,7 +129,11 @@ void validateManifestName(std::string_view value, std::size_t maxBytes) {
     for (const auto& file : request.modelFiles) {
         auto parseOptions = limits.kn5;
         parseOptions.metadataOnly = false;
-        models.push_back(formats::parseKn5(file.bytes, file.name, parseOptions));
+        try {
+            models.push_back(formats::parseKn5(file.bytes, file.name, parseOptions));
+        } catch (const formats::Kn5Error& error) {
+            throw WorkspaceModelError(file.name, error.offset(), error.what());
+        }
     }
 
     std::vector<workspace::WorkspaceModelInput> inputs;
@@ -227,10 +246,10 @@ WorkspaceSessionResult WorkspaceSession::open(
     } catch (const ParseError& error) {
         result.status = WorkspaceSessionStatus::invalid;
         result.diagnostics.push_back(diagnostic(error));
-    } catch (const formats::Kn5Error& error) {
+    } catch (const WorkspaceModelError& error) {
         result.status = WorkspaceSessionStatus::invalid;
-        result.diagnostics.push_back(diagnostic(
-            "MODEL_INVALID", request.name, error.what()));
+        result.diagnostics.push_back({"MODEL_INVALID", error.source(), error.what(),
+                                      error.offset()});
     } catch (const std::bad_alloc&) {
         result.status = WorkspaceSessionStatus::failed;
         result.diagnostics.push_back(diagnostic(

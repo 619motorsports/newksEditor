@@ -65,6 +65,52 @@ struct LocalBounds {
     float radius = 0.0F;
 };
 
+struct PreviewBoundsAccumulator {
+    Vector3 minimum = {std::numeric_limits<float>::infinity(),
+                       std::numeric_limits<float>::infinity(),
+                       std::numeric_limits<float>::infinity()};
+    Vector3 maximum = {-std::numeric_limits<float>::infinity(),
+                       -std::numeric_limits<float>::infinity(),
+                       -std::numeric_limits<float>::infinity()};
+    bool has_point = false;
+
+    void include(const Vector3& point) noexcept {
+        for (std::size_t axis = 0U; axis < 3U; ++axis) {
+            minimum[axis] = std::min(minimum[axis], point[axis]);
+            maximum[axis] = std::max(maximum[axis], point[axis]);
+        }
+        has_point = true;
+    }
+};
+
+[[nodiscard]] Kn5PreviewBounds finishPreviewBounds(
+    const PreviewBoundsAccumulator& bounds) {
+    Kn5PreviewBounds result;
+    result.minimum = bounds.minimum;
+    result.maximum = bounds.maximum;
+    double squared_radius = 0.0;
+    for (std::size_t axis = 0U; axis < 3U; ++axis) {
+        const double minimum = static_cast<double>(bounds.minimum[axis]);
+        const double maximum = static_cast<double>(bounds.maximum[axis]);
+        const double center = minimum + (maximum - minimum) * 0.5;
+        if (!std::isfinite(center) ||
+            center < -static_cast<double>(std::numeric_limits<float>::max()) ||
+            center > static_cast<double>(std::numeric_limits<float>::max())) {
+            invalid("scene", "preview bounds center is outside float range");
+        }
+        result.center[axis] = static_cast<float>(center);
+        const double half_extent = (maximum - minimum) * 0.5;
+        squared_radius += half_extent * half_extent;
+    }
+    const double radius = std::sqrt(squared_radius);
+    if (!std::isfinite(radius) ||
+        radius > static_cast<double>(std::numeric_limits<float>::max())) {
+        invalid("scene", "preview bounds radius is outside float range");
+    }
+    result.radius = static_cast<float>(radius);
+    return result;
+}
+
 LocalBounds geometryBounds(const formats::Kn5Node& source, std::string_view path) {
     if (source.type == 2) {
         for (const auto value : source.bounds) requireFinite(value, path, "mesh bounds");
@@ -235,6 +281,7 @@ void preflightNode(const formats::Kn5Node& source, std::size_t depth,
 
 void appendNode(const formats::Kn5Node& source, NodeId parent, const Matrix4& parentWorld,
                 std::size_t depth, std::string path, const Kn5SceneLimits& limits,
+                bool parent_active, PreviewBoundsAccumulator& preview_bounds,
                 Kn5SceneConversion& result) {
     if (depth > limits.max_depth) invalid(path, "hierarchy is too deep");
     if (result.snapshot.nodes.size() >= limits.max_nodes ||
@@ -248,6 +295,7 @@ void appendNode(const formats::Kn5Node& source, NodeId parent, const Matrix4& pa
         local = source.transform;
     }
     const Matrix4 world = multiply(parentWorld, local, path);
+    const bool branch_active = parent_active && source.active;
 
     SceneNode node;
     node.name = source.name;
@@ -291,6 +339,16 @@ void appendNode(const formats::Kn5Node& source, NodeId parent, const Matrix4& pa
         node.bounds_radius = bounds.radius * maxScale(world, path);
         requireFinite(node.bounds_radius, path, "world bounds radius");
 
+        if (branch_active && source.visible && source.renderable) {
+            for (std::size_t offset = 0U; offset < source.vertices.size();
+                 offset += source.vertexStride) {
+                const Vector3 position = {source.vertices[offset],
+                                          source.vertices[offset + 1U],
+                                          source.vertices[offset + 2U]};
+                preview_bounds.include(transformPoint(world, position, path));
+            }
+        }
+
         result.geometry.push_back({
             static_cast<NodeId>(result.snapshot.nodes.size()),
             static_cast<std::uint32_t>(vertexCount),
@@ -315,7 +373,8 @@ void appendNode(const formats::Kn5Node& source, NodeId parent, const Matrix4& pa
 
     for (std::size_t index = 0; index < source.children.size(); ++index) {
         appendNode(source.children[index], id, world, depth + 1,
-                   path + "/" + std::to_string(index), limits, result);
+                   path + "/" + std::to_string(index), limits, branch_active,
+                   preview_bounds, result);
     }
 }
 
@@ -359,7 +418,11 @@ Kn5SceneConversion convertKn5Scene(const formats::Kn5File& model,
         }
         result.snapshot.nodes.reserve(counts.nodes);
         result.geometry.reserve(counts.geometry);
-        appendNode(model.root, invalid_node_id, identity_matrix, 0, "root", limits, result);
+        PreviewBoundsAccumulator preview_bounds;
+        appendNode(model.root, invalid_node_id, identity_matrix, 0, "root", limits,
+                   true, preview_bounds, result);
+        if (preview_bounds.has_point)
+            result.preview_bounds = finishPreviewBounds(preview_bounds);
 
         for (const auto& node : result.snapshot.nodes) {
             const float distance = std::sqrt(node.bounds_center[0] * node.bounds_center[0] +

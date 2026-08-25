@@ -152,6 +152,11 @@ out/native/dev/native/apex-native --window vulkan --model car.kn5 \
   --node-search door --selected-node 42 --isolate-selected --wireframe \
   --shader-family ksPerPixel --shader-vertex stock.vert.spv \
   --shader-fragment stock.frag.spv
+out/native/dev/native/apex-native --window vulkan \
+  --workspace-root content/cars/example --manifest data/lods.ini \
+  --kind carLods --lod-index 1 \
+  --shader-family ksPerPixel --shader-vertex stock.vert.spv \
+  --shader-fragment stock.frag.spv
 ```
 
 The analog RPM options apply the recovered linear needle transform before scene
@@ -163,6 +168,10 @@ or loop this value. It clamps the slider position to `[0, 1]` on each frame.
 The hierarchy options search, select, isolate, show hidden nodes, and enable
 wireframe through the backend-neutral viewport request. Search uses bounded
 ASCII case-insensitive matching. It retains duplicate node names.
+KN5 conversion computes preview bounds from transformed visible vertices. A
+car-LOD workspace uses those bounds for initial framing and automatic range
+selection. Camera movement prepares new resources only after a range change.
+`--lod-index` selects one manifest index and disables automatic selection.
 
 Export a project through the native authoring service:
 
@@ -313,18 +322,19 @@ and the recovered normal-alpha attenuation. The same tests run through D3D12/WAR
 CI. The input snapshot must contain resolved workspace and CSP state. A
 bounded workspace adapter
 maps files to merged scene roots in source order. It attaches file and
-auxiliary labels without partial mutation. A bounded LOD resolver uses the
-production half-open ranges and FOV formula. The caller must supply the exact
-preview AABB center and camera position. The resolver gives excluded roots to
-the stock-scene facade. Isolation bypasses these exclusions and authored
-visibility. A second bounded resolver supplies cockpit, rim, and driver preview
-state without changing the scene. It uses exact cockpit and rim names. Driver
+auxiliary labels without partial mutation. KN5 conversion supplies the exact
+transformed preview AABB for authored visible geometry. A bounded LOD resolver
+uses the production half-open ranges and FOV formula. The resolver gives
+excluded roots to the stock-scene facade. Isolation bypasses these exclusions
+and authored visibility. A second bounded resolver supplies cockpit, rim, and
+driver preview state without changing the scene. It uses exact cockpit and rim names. Driver
 hidden names are trimmed, matched with ASCII case ignored, and limited to driver
 subtrees. Show-hidden bypasses authored and preview state. It does not bypass
 driver suppression, workspace LOD exclusions, or mesh LOD. Isolation bypasses
 visibility and subtree filters. It still applies the selected mesh LOD range.
-The contract follows `itemPreviewVisible()` and the draw filter in
-`public/app.js`. The cockpit audit in `src/cockpit-preview.js` supplies the F3
+The workspace-file contract follows `itemPreviewVisible()` and the draw filter
+in `public/app.js`. It does not claim recovered ksNet per-mesh culling parity.
+The cockpit audit in `src/cockpit-preview.js` supplies the F3
 pair. Surface overlays, extended-profile shadow shader variants, reflections,
 and post-processing remain staged. A separate bounded damage adapter resolves the
 five exact F4 node sequences. It creates scene activity and material overrides

@@ -267,16 +267,20 @@ remains unchanged and feature-complete.
   The test executes `txDust` alpha and the recovered normal-alpha attenuation.
   The caller must still resolve surface overlays. A
   bounded workspace adapter maps metadata to merged scene roots. It attaches
-  file and auxiliary labels without partial mutation. A bounded resolver implements
-  half-open workspace LOD ranges and the production FOV formula. The caller
-  supplies the exact preview AABB center and camera position. The resolver
-  passes excluded roots to the stock-scene facade. A second bounded resolver
+  file and auxiliary labels without partial mutation. KN5 conversion computes
+  the exact transformed AABB for authored preview-visible vertices. A bounded
+  resolver implements half-open workspace LOD ranges and the production FOV
+  formula. The resolver passes excluded roots to the stock-scene facade. The
+  native shell selects from the live camera or a validated `--lod-index`.
+  Camera movement prepares a replacement only when the active range changes.
+  A second bounded resolver
   implements cockpit F3, rim F1, and driver cockpit-hidden state. It does not
   change authored node flags. Show-hidden bypasses authored and preview state.
   It keeps driver suppression, workspace LOD exclusions, and mesh LOD. Exact
   mesh isolation bypasses visibility and subtree filters. It keeps the selected
-  mesh LOD range. These rules follow `itemPreviewVisible()` and the draw filter
-  in `public/app.js`. The cockpit pair follows `src/cockpit-preview.js`.
+  mesh LOD range. These workspace-file rules follow `itemPreviewVisible()` and
+  the draw filter in `public/app.js`. They do not claim parity with recovered
+  ksNet per-mesh culling. The cockpit pair follows `src/cockpit-preview.js`.
   Shadows, reflections, sky, CSP lights, and post-processing remain staged
   with explicit evidence.
 - P1 is partial. Bounded readers support KN5 v4/v5/v6, DDS, ACD, INI/CSP,
@@ -554,9 +558,11 @@ reported no errors. The selected wheel changed from 1,164 to 212 triangles.
 This gate proves production LOD selection. Native workspace LOD/FOV selection
 uses the same half-open ranges and FOV formula. Native tests cover automatic,
 forced, overlapping, gapped, auxiliary, and track-camera cases. The
-stock-scene facade consumes the resolved root exclusions. The caller still
-supplies the production preview AABB center because the scene snapshot does
-not contain that exact value.
+stock-scene facade consumes the resolved root exclusions. KN5 conversion now
+supplies the production preview AABB from transformed, preview-visible
+vertices. Real LFS tests also reject the lower LOD with a non-finite vertex.
+The failed open returns no partial workspace and reports the exact source
+offset.
 
 The production preview-state gate uses the repository car and Sepang track.
 The car loaded all 63 textures. Its one HR root contains 48 meshes. Its one LR

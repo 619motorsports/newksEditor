@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -31,9 +32,22 @@ struct Kn5GeometryMetadata {
     bool skinned = false;
 };
 
+/** Exact transformed AABB for authored preview-visible KN5 geometry.
+ *
+ * This matches the browser preview framing source. It excludes geometry under
+ * inactive branches and geometry with authored visibility or rendering off.
+ */
+struct Kn5PreviewBounds {
+    Vector3 minimum{};
+    Vector3 maximum{};
+    Vector3 center{};
+    float radius = 0.0F;
+};
+
 struct Kn5SceneConversion {
     SceneSnapshot snapshot;
     std::vector<Kn5GeometryMetadata> geometry;
+    std::optional<Kn5PreviewBounds> preview_bounds;
 };
 
 // Conversion limits are separate from binary KN5 parser limits. They protect
