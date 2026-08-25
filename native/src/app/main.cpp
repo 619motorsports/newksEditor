@@ -6,9 +6,13 @@
 #include "apex/formats/kn5.hpp"
 #include "apex/formats/ksanim.hpp"
 #include "apex/formats/vao.hpp"
+#include "apex/platform/window.hpp"
 #include "apex/render/device.hpp"
 
 #include <algorithm>
+#include <array>
+#include <charconv>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -19,6 +23,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 #if defined(_WIN32)
@@ -35,6 +40,7 @@ namespace {
 void usage(std::ostream& output) {
     output << "Usage:\n"
            << "  apex-native --backend vulkan|d3d12 [--validation]\n"
+           << "  apex-native --window vulkan|d3d12 [--frames <count>] [--validation]\n"
            << "  apex-native --inspect-kn5 <file>\n"
            << "  apex-native --inspect-dds <file>\n"
            << "  apex-native --inspect-acd <asset-directory-name> <file>\n"
@@ -42,7 +48,7 @@ void usage(std::ostream& output) {
            << "  apex-native --inspect-vao <file>\n"
            << "  apex-native --inspect-ksanim <file>\n"
            << "  apex-native --export-project kn5|csp <source.kn5> <project.apex.json> <output>\n"
-           << "  apex-native --export-project collider|damage|bottom-colliders|surfaces <source.kn5> "
+           << "  apex-native --export-project collider|damage|bottom-colliders|surfaces|models|lods <source.kn5> "
               "<project.apex.json> <secondary-input> <output>\n";
 }
 
@@ -230,7 +236,8 @@ int export_project(int argc, char** argv) {
     const std::string_view kind = argv[2];
     const bool primaryOutput = kind == "kn5" || kind == "csp";
     const bool secondaryOutput = kind == "collider" || kind == "damage" ||
-                                 kind == "bottom-colliders" || kind == "surfaces";
+                                 kind == "bottom-colliders" || kind == "surfaces" ||
+                                 kind == "models" || kind == "lods";
     if ((!primaryOutput && !secondaryOutput) ||
         (primaryOutput && argc != 6) || (secondaryOutput && argc != 7)) {
         throw std::runtime_error("invalid --export-project arguments");
@@ -303,13 +310,29 @@ int export_project(int argc, char** argv) {
         write_file_exclusive(outputPath, std::string_view(exported.text));
         std::cout << outputPath.string() << ": " << exported.text.size()
                   << " bytes, revision " << exported.revision << '\n';
-    } else {
+    } else if (kind == "surfaces") {
         const auto bound = service.openSurfaces(logicalName, secondaryBytes);
         if (!bound.ok()) return report_authoring_failure("open surfaces.ini", bound);
         report_authoring_diagnostics(bound);
         const auto exported = service.exportSurfacesIni();
         if (!exported.ok())
             return report_authoring_failure("export surfaces.ini", exported);
+        report_authoring_diagnostics(exported);
+        write_file_exclusive(outputPath, std::string_view(exported.text));
+        std::cout << outputPath.string() << ": " << exported.text.size()
+                  << " bytes, revision " << exported.revision << '\n';
+    } else {
+        const auto workspaceKind = kind == "models"
+                                       ? apex::authoring::ProjectWorkspaceKind::trackModels
+                                       : apex::authoring::ProjectWorkspaceKind::carLods;
+        const auto bound = service.openWorkspace(
+            workspaceKind, logicalName, secondaryBytes);
+        if (!bound.ok())
+            return report_authoring_failure("open workspace manifest", bound);
+        report_authoring_diagnostics(bound);
+        const auto exported = service.exportWorkspaceIni();
+        if (!exported.ok())
+            return report_authoring_failure("export workspace manifest", exported);
         report_authoring_diagnostics(exported);
         write_file_exclusive(outputPath, std::string_view(exported.text));
         std::cout << outputPath.string() << ": " << exported.text.size()
@@ -413,6 +436,121 @@ int probe_backend(apex::render::Backend backend, bool validation) {
     return 0;
 }
 
+std::uint64_t parse_frame_count(std::string_view value) {
+    constexpr std::uint64_t maximum = 1'000'000U;
+    std::uint64_t result = 0U;
+    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result);
+    if (value.empty() || parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() ||
+        result > maximum) {
+        throw std::runtime_error("frame count must be between 0 and 1000000");
+    }
+    return result;
+}
+
+int run_window(int argc, char** argv) {
+    if (argc < 3) throw std::runtime_error("invalid --window arguments");
+    const auto backend = parse_backend(argv[2]);
+    bool validation = false;
+    std::uint64_t frame_limit = 0U;
+    for (int index = 3; index < argc; ++index) {
+        const std::string_view option = argv[index];
+        if (option == "--validation") {
+            if (validation) throw std::runtime_error("duplicate --validation option");
+            validation = true;
+        } else if (option == "--frames") {
+            if (index + 1 >= argc) throw std::runtime_error("--frames requires a count");
+            frame_limit = parse_frame_count(argv[++index]);
+        } else {
+            throw std::runtime_error("unknown window option");
+        }
+    }
+
+    apex::platform::WindowDescription window_description;
+    window_description.title = "Apex Editor native shell";
+    window_description.vulkan = backend == apex::render::Backend::Vulkan;
+    auto window_result = apex::platform::Window::create(window_description);
+    if (!window_result.ok()) {
+        std::cerr << "window: " << window_result.diagnostic.code << ": "
+                  << window_result.diagnostic.message << '\n';
+        return window_result.status == apex::platform::WindowStatus::unavailable ? 77 : 1;
+    }
+
+    apex::render::DeviceOptions options;
+    options.headless = false;
+    options.enable_validation = validation;
+    options.native_surface = window_result.window->native_surface_source();
+    auto device_result = apex::render::create_device(backend, options);
+    if (!device_result.ok()) {
+        std::cerr << apex::render::backend_name(backend) << ": "
+                  << device_result.diagnostic.code << ": "
+                  << device_result.diagnostic.message << '\n';
+        return device_result.status == apex::render::DeviceStatus::unavailable ? 77 : 1;
+    }
+
+    auto create_target = [&]() {
+        apex::render::PresentationTargetDescription description;
+        description.width = window_result.window->pixel_width();
+        description.height = window_result.window->pixel_height();
+        return device_result.device->create_presentation_target(description);
+    };
+    auto target_result = create_target();
+    if (!target_result.ok()) {
+        std::cerr << "presentation: " << target_result.diagnostic.code << ": "
+                  << target_result.diagnostic.message << '\n';
+        return target_result.status == apex::render::PresentationTargetStatus::unsupported ? 77 : 1;
+    }
+
+    std::array<apex::platform::WindowEvent, 64U> events{};
+    std::uint64_t frames = 0U;
+    std::uint32_t recreate_attempts = 0U;
+    while (!window_result.window->close_requested() &&
+           (frame_limit == 0U || frames < frame_limit)) {
+        bool resized = false;
+        const auto event_count = window_result.window->poll_events(events);
+        for (std::size_t index = 0U; index < event_count; ++index) {
+            if (events[index].type == apex::platform::WindowEventType::pixel_size_changed)
+                resized = true;
+        }
+        if (window_result.window->close_requested()) break;
+        if (window_result.window->pixel_width() == 0U ||
+            window_result.window->pixel_height() == 0U) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            continue;
+        }
+        if (resized) {
+            target_result.target.reset();
+            target_result = create_target();
+            if (!target_result.ok()) {
+                std::cerr << "presentation resize: " << target_result.diagnostic.code << ": "
+                          << target_result.diagnostic.message << '\n';
+                return 1;
+            }
+        }
+        const auto frame = device_result.device->clear_and_present(
+            *target_result.target, {0.035F, 0.055F, 0.085F, 1.0F});
+        if (!frame.ok() && frame.diagnostic.code == "vulkan_presentation_target_out_of_date" &&
+            recreate_attempts < 8U) {
+            ++recreate_attempts;
+            target_result.target.reset();
+            target_result = create_target();
+            if (target_result.ok()) continue;
+        }
+        if (!frame.ok()) {
+            std::cerr << "presentation frame: " << frame.diagnostic.code << ": "
+                      << frame.diagnostic.message << '\n';
+            return 1;
+        }
+        recreate_attempts = 0U;
+        ++frames;
+    }
+    device_result.device->wait_idle();
+    std::cout << apex::render::backend_name(backend) << ": "
+              << device_result.device->info().name << ", window="
+              << window_result.window->pixel_width() << 'x'
+              << window_result.window->pixel_height() << ", frames=" << frames << '\n';
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -424,6 +562,8 @@ int main(int argc, char** argv) {
             }
             return export_project(argc, argv);
         }
+        if (argc >= 3 && std::string_view(argv[1]) == "--window")
+            return run_window(argc, argv);
         if (argc == 3 && std::string_view(argv[1]) == "--inspect-ksanim")
             return inspect_ksanim(argv[2]);
         if (argc == 3 && std::string_view(argv[1]) == "--inspect-kn5")

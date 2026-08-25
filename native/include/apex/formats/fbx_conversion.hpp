@@ -18,6 +18,9 @@ struct FbxStaticMesh {
     std::string name;
     std::vector<float> positions;
     std::vector<std::uint32_t> triangle_indices;
+    // When an FBX UV layer is supported, this is two floats per emitted
+    // vertex. Face-varying seams are represented by expanded vertices.
+    std::vector<float> uvs;
 };
 
 struct FbxNodeTransform {

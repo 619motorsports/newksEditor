@@ -1,6 +1,7 @@
 #pragma once
 
 #include "apex/render/camera.hpp"
+#include "apex/platform/native_surface.hpp"
 #include "apex/render/pipeline.hpp"
 #include "apex/render/texture_format.hpp"
 
@@ -41,9 +42,8 @@ struct Diagnostic {
 
 /** Options shared by all backend implementations. */
 struct DeviceOptions {
-    // Devices are still created for headless execution. Backends can report
-    // presentation API prerequisites, but they do not create a surface or
-    // swapchain through this option.
+    // Headless remains the default. Set headless=false and provide
+    // native_surface to opt into Vulkan native-window presentation.
     bool headless = true;
     bool enable_validation = false;
     bool allow_software = true;
@@ -54,6 +54,9 @@ struct DeviceOptions {
     // explicitly; Vulkan prioritizes CPU physical devices.
     bool prefer_software = false;
     std::uint32_t adapter_index = 0;
+    // A native presentation source selects the Vulkan WSI surface supplied by
+    // the platform layer. It is mutually exclusive with headless mode.
+    std::optional<apex::platform::NativeSurfaceSource> native_surface;
 };
 
 struct DeviceInfo {

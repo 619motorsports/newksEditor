@@ -342,6 +342,193 @@ std::vector<float> geometryPositions(const FbxNode& geometry, std::string_view p
     return result;
 }
 
+const FbxValue* firstChildValue(const FbxNode& node, std::string_view childName) {
+    for (const auto& child : node.children) {
+        if (child.name != childName) continue;
+        for (const auto& property : child.properties)
+            if (!property.values.empty()) return &property.values.front();
+        return nullptr;
+    }
+    return nullptr;
+}
+
+const FbxNode* firstChildNode(const FbxNode& node, std::string_view childName) {
+    for (const auto& child : node.children)
+        if (child.name == childName) return &child;
+    return nullptr;
+}
+
+bool supportedUvLayer(const FbxNode& layer) {
+    const auto* mapping = firstChildValue(layer, "MappingInformationType");
+    const auto* reference = firstChildValue(layer, "ReferenceInformationType");
+    const auto* mappingText = stringValue(mapping);
+    const auto* referenceText = stringValue(reference);
+    return mappingText != nullptr && referenceText != nullptr &&
+           *mappingText == "ByPolygonVertex" && *referenceText == "IndexToDirect";
+}
+
+struct ParsedUvLayer {
+    const FbxArray* direct = nullptr;
+    const std::vector<std::int64_t>* indices = nullptr;
+    std::size_t directCount = 0u;
+};
+
+ParsedUvLayer parseUvLayer(const FbxNode& layer, std::string_view path,
+                           const FbxConversionLimits& limits, Budget& budget) {
+    const auto* uvNode = firstChildNode(layer, "UV");
+    const auto* indexNode = firstChildNode(layer, "UVIndex");
+    if (uvNode == nullptr || indexNode == nullptr)
+        fail("invalid_uv", "FBX UV layer is missing UV or UVIndex data", std::string(path));
+
+    const auto uvValues = values(*uvNode, &budget, path);
+    if (uvValues.empty()) fail("invalid_uv", "FBX UV array is empty", std::string(path));
+    const auto* direct = std::get_if<FbxArray>(uvValues.front());
+    if (direct == nullptr) fail("invalid_uv", "FBX UV data is not an array", std::string(path));
+    std::size_t directValues = 0u;
+    if (const auto doubles = std::get_if<std::vector<double>>(direct)) directValues = doubles->size();
+    else if (const auto floats = std::get_if<std::vector<float>>(direct)) directValues = floats->size();
+    else fail("invalid_uv", "FBX UV data has an unsupported numeric type", std::string(path));
+    if (directValues % 2u != 0u)
+        fail("invalid_uv", "FBX UV data is not pair-aligned", std::string(path));
+    const auto directCount = directValues / 2u;
+    if (directCount > limits.max_vertices)
+        fail("vertex_limit", "FBX UV direct values exceed the vertex limit", std::string(path));
+    const auto checkFinite = [&](double value) {
+        if (!std::isfinite(value) || value < -static_cast<double>(std::numeric_limits<float>::max()) ||
+            value > static_cast<double>(std::numeric_limits<float>::max()))
+            fail("non_finite", "FBX UV value is not representable as a finite float", std::string(path));
+    };
+    if (const auto doubles = std::get_if<std::vector<double>>(direct)) {
+        for (const auto value : *doubles) checkFinite(value);
+    } else {
+        for (const auto value : *std::get_if<std::vector<float>>(direct)) checkFinite(value);
+    }
+
+    const auto indexValues = values(*indexNode, &budget, path);
+    if (indexValues.empty()) fail("invalid_uv", "FBX UVIndex array is empty", std::string(path));
+    const auto* indexArray = std::get_if<FbxArray>(indexValues.front());
+    const auto* indices = indexArray == nullptr ? nullptr : std::get_if<std::vector<std::int64_t>>(indexArray);
+    if (indices == nullptr)
+        fail("invalid_uv", "FBX UVIndex data has an unsupported numeric type", std::string(path));
+    return {direct, indices, directCount};
+}
+
+struct UvCorner {
+    std::uint32_t position = 0u;
+    std::size_t uv = 0u;
+};
+
+struct ExpandedUvGeometry {
+    std::vector<float> positions;
+    std::vector<float> uvs;
+    std::vector<std::uint32_t> triangle_indices;
+};
+
+double uvComponent(const ParsedUvLayer& layer, std::size_t index) {
+    if (const auto doubles = std::get_if<std::vector<double>>(layer.direct)) {
+        return (*doubles)[index];
+    }
+    return static_cast<double>((*std::get_if<std::vector<float>>(layer.direct))[index]);
+}
+
+ExpandedUvGeometry geometryWithUvs(const FbxNode& geometry, const FbxNode& layer,
+                                   std::string_view path, const FbxConversionLimits& limits,
+                                   Budget& budget, const std::vector<float>& controlPositions) {
+    const auto parsed = parseUvLayer(layer, path, limits, budget);
+    const auto* polygon = firstChildNode(geometry, "PolygonVertexIndex");
+    if (polygon == nullptr)
+        fail("missing_geometry", "FBX geometry has no PolygonVertexIndex array", std::string(path));
+    const auto polygonValues = values(*polygon, &budget, path);
+    if (polygonValues.empty())
+        fail("missing_geometry", "FBX PolygonVertexIndex property is empty", std::string(path));
+    const auto* polygonArray = std::get_if<FbxArray>(polygonValues.front());
+    const auto* encoded = polygonArray == nullptr ? nullptr : std::get_if<std::vector<std::int64_t>>(polygonArray);
+    if (encoded == nullptr)
+        fail("invalid_geometry", "FBX PolygonVertexIndex has an unsupported type", std::string(path));
+    if (parsed.indices->size() != encoded->size())
+        fail("invalid_uv", "FBX UVIndex count " + std::to_string(parsed.indices->size()) +
+                              " does not match polygon vertex count " + std::to_string(encoded->size()), std::string(path));
+
+    const auto vertexCount = controlPositions.size() / 3u;
+    if (vertexCount >= static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))
+        fail("id_limit", "FBX vertex indices exceed their uint32 range", std::string(path));
+    const auto maxPolygonVertices = checkedAdd(limits.max_indices / 3u, 2u, path);
+    std::size_t polygonSize = 0u;
+    std::size_t outputVertices = 0u;
+    for (std::size_t index = 0u; index < encoded->size(); ++index) {
+        const auto value = (*encoded)[index];
+        const auto decoded = value < 0 ? ~value : value;
+        if (decoded < 0 || static_cast<std::uint64_t>(decoded) >= vertexCount)
+            fail("invalid_index", "FBX polygon index references a missing vertex", std::string(path));
+        const auto uvIndex = (*parsed.indices)[index];
+        if (uvIndex < 0 || static_cast<std::uint64_t>(uvIndex) >= parsed.directCount)
+            fail("invalid_uv", "FBX UVIndex references a missing direct UV", std::string(path));
+        if (polygonSize >= maxPolygonVertices)
+            fail("index_limit", "FBX polygon vertex count exceeds its limit", std::string(path));
+        ++polygonSize;
+        if (value < 0) {
+            if (polygonSize < 3u)
+                fail("invalid_geometry", "FBX polygon has fewer than three vertices", std::string(path));
+            const auto triangles = polygonSize - 2u;
+            const auto triangleVertices = checkedMultiply(triangles, 3u, path);
+            if (outputVertices > limits.max_indices || triangleVertices > limits.max_indices - outputVertices)
+                fail("index_limit", "FBX triangle index count exceeds its limit", std::string(path));
+            outputVertices = checkedAdd(outputVertices, triangleVertices, path);
+            polygonSize = 0u;
+        }
+    }
+    if (polygonSize != 0u)
+        fail("invalid_geometry", "FBX polygon index stream lacks a terminal index", std::string(path));
+    if (outputVertices > limits.max_vertices)
+        fail("vertex_limit", "expanded FBX UV geometry exceeds the vertex limit", std::string(path));
+    if (outputVertices >= static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))
+        fail("id_limit", "expanded FBX UV geometry exceeds its uint32 range", std::string(path));
+
+    const auto positionValues = checkedMultiply(outputVertices, 3u, path);
+    const auto uvValues = checkedMultiply(outputVertices, 2u, path);
+    budget.add(checkedMultiply(positionValues, sizeof(float), path), path);
+    budget.add(checkedMultiply(uvValues, sizeof(float), path), path);
+    budget.add(checkedMultiply(outputVertices, sizeof(std::uint32_t), path), path);
+    ExpandedUvGeometry result;
+    result.positions.reserve(positionValues);
+    result.uvs.reserve(uvValues);
+    result.triangle_indices.reserve(outputVertices);
+
+    std::vector<UvCorner> polygonCorners;
+    const auto appendCorner = [&](const UvCorner corner) {
+        const auto positionOffset = checkedMultiply(static_cast<std::size_t>(corner.position), 3u, path);
+        const auto uvOffset = checkedMultiply(corner.uv, 2u, path);
+        const auto outputIndex = result.positions.size() / 3u;
+        if (outputIndex >= static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))
+            fail("id_limit", "expanded FBX UV geometry exceeds its uint32 range", std::string(path));
+        result.positions.insert(result.positions.end(), controlPositions.begin() + static_cast<std::ptrdiff_t>(positionOffset),
+                                controlPositions.begin() + static_cast<std::ptrdiff_t>(positionOffset + 3u));
+        result.uvs.push_back(static_cast<float>(uvComponent(parsed, uvOffset)));
+        result.uvs.push_back(-static_cast<float>(uvComponent(parsed, uvOffset + 1u)));
+        result.triangle_indices.push_back(static_cast<std::uint32_t>(outputIndex));
+    };
+    const auto appendTriangle = [&](const UvCorner& first, const UvCorner& second, const UvCorner& third) {
+        appendCorner(first); appendCorner(second); appendCorner(third);
+    };
+    for (std::size_t index = 0u; index < encoded->size(); ++index) {
+        const auto value = (*encoded)[index];
+        const auto decoded = value < 0 ? ~value : value;
+        if (polygonCorners.size() >= maxPolygonVertices)
+            fail("index_limit", "FBX polygon vertex count exceeds its limit", std::string(path));
+        reserveForAppend(polygonCorners, polygonCorners.size() + 1u, budget, path);
+        polygonCorners.push_back({static_cast<std::uint32_t>(decoded), static_cast<std::size_t>((*parsed.indices)[index])});
+        if (value < 0) {
+            for (std::size_t corner = 1u; corner + 1u < polygonCorners.size(); ++corner)
+                appendTriangle(polygonCorners[0], polygonCorners[corner], polygonCorners[corner + 1u]);
+            polygonCorners.clear();
+        }
+    }
+    if (result.positions.size() != positionValues || result.uvs.size() != uvValues ||
+        result.triangle_indices.size() != outputVertices)
+        fail("invalid_geometry", "expanded FBX UV geometry count changed during conversion", std::string(path));
+    return result;
+}
+
 std::vector<std::uint32_t> geometryIndices(const FbxNode& geometry, std::string_view path,
                                            std::size_t vertexCount, const FbxConversionLimits& limits,
                                            Budget& budget) {
@@ -415,7 +602,9 @@ void unsupportedFeatureScan(const FbxDocument& document, FbxSceneConversion& res
             const auto& node = *frame.node;
             if (node.name == "AnimationStack" || node.name == "AnimationLayer" || node.name == "AnimationCurve" || node.name == "AnimationCurveNode") add("unsupported_animation", "FBX animation records are not converted");
             if (node.name == "Texture" || node.name == "Video" || node.name == "Image") add("unsupported_images", "FBX image and texture records are not converted");
-            if (node.name == "LayerElementNormal" || node.name == "LayerElementUV" || node.name == "LayerElementMaterial") add("unsupported_layer_mapping", "FBX layer-element mappings are not converted");
+            if (node.name == "LayerElementNormal" || node.name == "LayerElementMaterial" ||
+                (node.name == "LayerElementUV" && !supportedUvLayer(node)))
+                add("unsupported_layer_mapping", "FBX layer-element mappings are not converted");
             if (node.name == "Deformer" || node.name == "Skin" || node.name == "Cluster") add("unsupported_skinning", "FBX skinning and deformers are not converted");
         }
         if (frame.child == frame.node->children.size()) { stack.pop_back(); continue; }
@@ -480,7 +669,7 @@ FbxConversionError::FbxConversionError(FbxConversionDiagnostic diagnostic)
 
 FbxConversionCapabilityDetail fbxSceneConversionCapability() {
     return {true, true, true, false, false, false, false,
-            "Static FBX geometry, transforms, and material assignments are converted; skinning, animation, images, and layer mappings are explicitly unsupported"};
+            "Static FBX geometry, transforms, material assignments, and one bounded UV mapping are converted; normals, material layers, skinning, animation, and images remain unsupported"};
 }
 
 FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLimits limits) {
@@ -659,8 +848,19 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
         const auto& record = records[geometryIndex];
         const auto path = "Objects/Geometry/" + std::to_string(record.id);
         budget.add(record.name.size(), path);
-        auto mesh = FbxStaticMesh{record.id, record.name, geometryPositions(*record.node, path, limits, budget), {}};
-        mesh.triangle_indices = geometryIndices(*record.node, path, mesh.positions.size() / 3u, limits, budget);
+        FbxStaticMesh mesh;
+        mesh.object_id = record.id;
+        mesh.name = record.name;
+        mesh.positions = geometryPositions(*record.node, path, limits, budget);
+        const auto* uvLayer = firstChildNode(*record.node, "LayerElementUV");
+        if (uvLayer != nullptr && supportedUvLayer(*uvLayer)) {
+            auto expanded = geometryWithUvs(*record.node, *uvLayer, path, limits, budget, mesh.positions);
+            mesh.positions = std::move(expanded.positions);
+            mesh.uvs = std::move(expanded.uvs);
+            mesh.triangle_indices = std::move(expanded.triangle_indices);
+        } else {
+            mesh.triangle_indices = geometryIndices(*record.node, path, mesh.positions.size() / 3u, limits, budget);
+        }
         if (mesh.triangle_indices.empty()) fail("invalid_geometry", "FBX geometry has no triangles", path);
         if (result.meshes.size() >= static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))
             fail("id_limit", "FBX mesh IDs exceed their uint32 range", path);

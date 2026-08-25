@@ -1,5 +1,6 @@
 #include "apex/formats/fbx_conversion.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -36,12 +37,24 @@ FbxNode propertyNode(std::string name, std::vector<FbxValue> values) {
     return node(std::move(name), std::move(values));
 }
 
+FbxNode uvLayer(std::string_view mapping = "ByPolygonVertex",
+                std::string_view reference = "IndexToDirect",
+                FbxArray direct = FbxArray{std::vector<double>{0.0, 0.0, 1.0, 0.0, 0.0, 1.0}},
+                FbxArray indices = FbxArray{std::vector<std::int64_t>{0, 1, 2}}) {
+    return node("LayerElementUV", {}, {
+        propertyNode("MappingInformationType", {std::string(mapping)}),
+        propertyNode("ReferenceInformationType", {std::string(reference)}),
+        propertyNode("UV", {std::move(direct)}),
+        propertyNode("UVIndex", {std::move(indices)})});
+}
+
 FbxDocument fixture() {
     const FbxNode geometry = node("Geometry", {
         std::int64_t(100), std::string("Geometry::Triangle"), std::string("Mesh")}, {
         propertyNode("Vertices", {FbxArray{std::vector<double>{0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0}}}),
         propertyNode("PolygonVertexIndex", {FbxArray{std::vector<std::int64_t>{0, 1, -3}}}),
-        propertyNode("LayerElementNormal", {})});
+        propertyNode("LayerElementNormal", {}),
+        uvLayer()});
     const FbxNode model = node("Model", {
         std::int64_t(200), std::string("Model::Triangle"), std::string("Mesh")}, {
         node("Properties70", {}, {
@@ -60,6 +73,22 @@ FbxDocument fixture() {
     return document;
 }
 
+FbxDocument seamFixture() {
+    auto document = fixture();
+    auto& geometry = document.roots[0].children[1];
+    geometry.children[0].properties[0].values[0] =
+        FbxValue{FbxArray{std::vector<double>{0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                                              1.0, 1.0, 0.0, 0.0, 1.0, 0.0}}};
+    geometry.children[1].properties[0].values[0] =
+        FbxValue{FbxArray{std::vector<std::int64_t>{0, 1, -3, 0, 2, -4}}};
+    geometry.children[3] = uvLayer(
+        "ByPolygonVertex", "IndexToDirect",
+        FbxArray{std::vector<double>{0.0, 0.0, 1.0, 0.0, 1.0, 1.0,
+                                     0.25, 0.5, 0.5, 1.0, 0.0, 1.0}},
+        FbxArray{std::vector<std::int64_t>{0, 1, 2, 3, 4, 5}});
+    return document;
+}
+
 std::string asciiTriangle() {
     return "FBXVersion: 7400\nObjects: {\n"
            " Model: 200, \"Model::Triangle\", \"Mesh\" { }\n"
@@ -69,6 +98,16 @@ std::string asciiTriangle() {
            "  }\n"
            "  PolygonVertexIndex: *3 {\n"
            "   a: 0,1,-3\n"
+           "  }\n"
+           "  LayerElementUV: 0 {\n"
+           "   MappingInformationType: \"ByPolygonVertex\"\n"
+           "   ReferenceInformationType: \"IndexToDirect\"\n"
+           "   UV: *6 {\n"
+           "    a: 0.0,0.0,1.0,0.0,0.0,1.0\n"
+           "   }\n"
+           "   UVIndex: *3 {\n"
+           "    a: 0,1,2\n"
+           "   }\n"
            "  }\n"
            " }\n"
            "}\nConnections: {\n C: \"OO\", 100, 200\n}\n";
@@ -81,6 +120,7 @@ void convertsParsedAsciiTriangle() {
     const auto result = apex::formats::convertFbxScene(document);
     require(result.meshes.size() == 1u && result.meshes[0].positions ==
                 std::vector<float>{0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F} &&
+                result.meshes[0].uvs == std::vector<float>{0.0F, -0.0F, 1.0F, -0.0F, 0.0F, -1.0F} &&
                 result.meshes[0].triangle_indices == std::vector<std::uint32_t>{0u, 1u, 2u},
             "parsed ASCII triangle converts to static geometry");
 }
@@ -91,6 +131,7 @@ void convertsStaticGeometryTransformsAndMaterials() {
     require(result.snapshot.nodes[1].kind == apex::scene::NodeKind::mesh && result.snapshot.nodes[1].material == 0u,
             "FBX mesh and material assignment");
     require(result.meshes.size() == 1u && result.meshes[0].positions.size() == 9u &&
+                result.meshes[0].uvs == std::vector<float>{0.0F, -0.0F, 1.0F, -0.0F, 0.0F, -1.0F} &&
                 result.meshes[0].triangle_indices == std::vector<std::uint32_t>{0u, 1u, 2u},
             "FBX static triangle geometry");
     require(result.transforms.size() == 1u && std::abs(result.transforms[0].local[12] - 1.0F) < 1e-6F &&
@@ -104,12 +145,28 @@ void convertsStaticGeometryTransformsAndMaterials() {
             "FBX material metadata");
 }
 
+void convertsUvSeamsAndFlipsV() {
+    const auto result = apex::formats::convertFbxScene(seamFixture());
+    require(result.meshes.size() == 1u && result.meshes[0].positions.size() == 18u &&
+                result.meshes[0].uvs == std::vector<float>{0.0F, -0.0F, 1.0F, -0.0F, 1.0F, -1.0F,
+                                                            0.25F, -0.5F, 0.5F, -1.0F, 0.0F, -1.0F} &&
+                result.meshes[0].triangle_indices == std::vector<std::uint32_t>{0u, 1u, 2u, 3u, 4u, 5u},
+            "FBX UV seams expand polygon corners and flip V");
+    require(result.meshes[0].positions[0] == result.meshes[0].positions[9] &&
+                result.meshes[0].positions[1] == result.meshes[0].positions[10] &&
+                result.meshes[0].positions[2] == result.meshes[0].positions[11] &&
+                result.meshes[0].uvs[0] != result.meshes[0].uvs[6],
+            "FBX UV seam duplicates shared position with a distinct UV");
+}
+
 template <typename Function>
 void expectsError(Function&& function, std::string_view code) {
     try {
         function();
     } catch (const FbxConversionError& error) {
-        require(error.diagnostic().code == code, "unexpected FBX conversion diagnostic");
+        require(error.diagnostic().code == code,
+                std::string("unexpected FBX conversion diagnostic: ") + error.diagnostic().code +
+                    " (" + error.diagnostic().message + ")");
         return;
     }
     throw std::runtime_error("invalid FBX DOM was accepted");
@@ -149,6 +206,8 @@ void rejectsInvalidReferencesIndicesAndNonFiniteValues() {
     auto oversizedPolygon = fixture();
     oversizedPolygon.roots[0].children[1].children[1].properties[0].values[0] =
         FbxValue{FbxArray{std::vector<std::int64_t>(32u, 0)}};
+    oversizedPolygon.roots[0].children[1].children[3].children[3].properties[0].values[0] =
+        FbxValue{FbxArray{std::vector<std::int64_t>(32u, 0)}};
     auto indexLimits = apex::formats::FbxConversionLimits{};
     indexLimits.max_indices = 3u;
     expectsError([&] { (void)apex::formats::convertFbxScene(oversizedPolygon, indexLimits); }, "index_limit");
@@ -159,6 +218,69 @@ void rejectsInvalidReferencesIndicesAndNonFiniteValues() {
                                               -std::numeric_limits<float>::max(), 1.0F, 0.0F,
                                               0.0F, 0.0F, std::numeric_limits<float>::max()}}};
     expectsError([&] { (void)apex::formats::convertFbxScene(extreme); }, "non_finite");
+}
+
+void rejectsMalformedAndUnsupportedUvLayers() {
+    auto oddShape = fixture();
+    auto& oddDirect = oddShape.roots[0].children[1].children[3].children[2].properties[0].values[0];
+    oddDirect = FbxValue{FbxArray{std::vector<double>{0.0, 0.0, 1.0, 0.0, 0.5}}};
+    expectsError([&] { (void)apex::formats::convertFbxScene(oddShape); }, "invalid_uv");
+
+    auto outOfRange = fixture();
+    auto& uvIndices = outOfRange.roots[0].children[1].children[3].children[3].properties[0].values[0];
+    uvIndices = FbxValue{FbxArray{std::vector<std::int64_t>{0, 1, 3}}};
+    expectsError([&] { (void)apex::formats::convertFbxScene(outOfRange); }, "invalid_uv");
+
+    auto countMismatch = fixture();
+    auto& shortUvIndices = countMismatch.roots[0].children[1].children[3].children[3].properties[0].values[0];
+    shortUvIndices = FbxValue{FbxArray{std::vector<std::int64_t>{0, 1}}};
+    expectsError([&] { (void)apex::formats::convertFbxScene(countMismatch); }, "invalid_uv");
+
+    auto missingIndex = fixture();
+    missingIndex.roots[0].children[1].children[3].children.pop_back();
+    expectsError([&] { (void)apex::formats::convertFbxScene(missingIndex); }, "invalid_uv");
+
+    auto nonFiniteUv = fixture();
+    auto& finiteUv = nonFiniteUv.roots[0].children[1].children[3].children[2].properties[0].values[0];
+    finiteUv = FbxValue{FbxArray{std::vector<double>{0.0, 0.0, std::numeric_limits<double>::infinity(), 0.0, 0.0, 1.0}}};
+    expectsError([&] { (void)apex::formats::convertFbxScene(nonFiniteUv); }, "non_finite");
+
+    auto unsupportedMapping = fixture();
+    unsupportedMapping.roots[0].children[1].children[3].children[0].properties[0].values[0] =
+        std::string("ByVertice");
+    const auto mappingResult = apex::formats::convertFbxScene(unsupportedMapping);
+    require(mappingResult.meshes.size() == 1u && mappingResult.meshes[0].uvs.empty() && !mappingResult.complete,
+            "unsupported FBX UV mapping remains explicit and does not alter static geometry");
+    require(std::any_of(mappingResult.diagnostics.begin(), mappingResult.diagnostics.end(),
+                        [](const auto& diagnostic) { return diagnostic.code == "unsupported_layer_mapping"; }),
+            "unsupported FBX UV mapping diagnostic");
+
+    auto unsupportedReference = fixture();
+    unsupportedReference.roots[0].children[1].children[3].children[1].properties[0].values[0] =
+        std::string("Direct");
+    const auto referenceResult = apex::formats::convertFbxScene(unsupportedReference);
+    require(referenceResult.meshes.size() == 1u && referenceResult.meshes[0].uvs.empty() && !referenceResult.complete,
+            "unsupported FBX UV reference remains explicit");
+    require(std::any_of(referenceResult.diagnostics.begin(), referenceResult.diagnostics.end(),
+                        [](const auto& diagnostic) { return diagnostic.code == "unsupported_layer_mapping"; }),
+            "unsupported FBX UV reference diagnostic");
+}
+
+void enforcesUvExpansionBudgets() {
+    auto indexLimited = fixture();
+    auto indexLimits = apex::formats::FbxConversionLimits{};
+    indexLimits.max_indices = 2u;
+    expectsError([&] { (void)apex::formats::convertFbxScene(indexLimited, indexLimits); }, "index_limit");
+
+    auto vertexLimited = seamFixture();
+    auto vertexLimits = apex::formats::FbxConversionLimits{};
+    vertexLimits.max_vertices = 4u;
+    expectsError([&] { (void)apex::formats::convertFbxScene(vertexLimited, vertexLimits); }, "vertex_limit");
+
+    auto outputLimited = fixture();
+    auto outputLimits = apex::formats::FbxConversionLimits{};
+    outputLimits.max_output_bytes = 1u;
+    expectsError([&] { (void)apex::formats::convertFbxScene(outputLimited, outputLimits); }, "output_limit");
 }
 
 void enforcesLimitsAndUnsupportedCapability() {
@@ -269,7 +391,10 @@ int main() {
     try {
         convertsParsedAsciiTriangle();
         convertsStaticGeometryTransformsAndMaterials();
+        convertsUvSeamsAndFlipsV();
         rejectsInvalidReferencesIndicesAndNonFiniteValues();
+        rejectsMalformedAndUnsupportedUvLayers();
+        enforcesUvExpansionBudgets();
         enforcesLimitsAndUnsupportedCapability();
         boundsTemporaryContainersBeforeConversion();
         std::cout << "fbx conversion tests passed\n";

@@ -16,6 +16,47 @@ namespace {
 
 inline constexpr std::uint32_t max_spirv_id_bound = 1U << 24U;
 inline constexpr std::uint32_t max_dxbc_chunks = 4096U;
+inline constexpr std::size_t max_native_surface_extensions = 64U;
+inline constexpr std::size_t max_native_surface_extension_name = 255U;
+
+bool valid_native_surface_source(const platform::NativeSurfaceSource& source,
+                                 Diagnostic& diagnostic) {
+    if (source.createVulkanSurface == nullptr || source.destroyVulkanSurface == nullptr) {
+        diagnostic = {"native_surface_callbacks_missing",
+                      "A native surface source requires both Vulkan create and destroy callbacks"};
+        return false;
+    }
+    if (source.vulkanInstanceExtensions.empty() ||
+        source.vulkanInstanceExtensions.size() > max_native_surface_extensions) {
+        diagnostic = {"native_surface_extensions_invalid",
+                      "A native surface source must provide between one and 64 bounded Vulkan instance extensions"};
+        return false;
+    }
+    bool has_surface_extension = false;
+    for (std::size_t index = 0U; index < source.vulkanInstanceExtensions.size(); ++index) {
+        const std::string& extension = source.vulkanInstanceExtensions[index];
+        if (extension.empty() || extension.size() > max_native_surface_extension_name ||
+            extension.find('\0') != std::string::npos) {
+            diagnostic = {"native_surface_extension_name_invalid",
+                          "Native Vulkan instance extension names must be non-empty and bounded"};
+            return false;
+        }
+        for (std::size_t previous = 0U; previous < index; ++previous) {
+            if (source.vulkanInstanceExtensions[previous] == extension) {
+                diagnostic = {"native_surface_extension_duplicate",
+                              "Native Vulkan instance extension names must be unique"};
+                return false;
+            }
+        }
+        if (extension == "VK_KHR_surface") has_surface_extension = true;
+    }
+    if (!has_surface_extension) {
+        diagnostic = {"native_surface_extension_missing",
+                      "A native Vulkan surface source must request VK_KHR_surface"};
+        return false;
+    }
+    return true;
+}
 
 bool valid_render_sample_count(std::uint32_t samples) noexcept {
     return samples == 1U || samples == 4U;
@@ -2793,9 +2834,23 @@ const char* shader_module_status_name(ShaderModuleStatus status) noexcept {
 }
 
 AdapterResult enumerate_adapters(Backend backend, const DeviceOptions& options) {
+    if ((!options.headless && options.enable_headless_presentation) ||
+        (options.headless && options.native_surface.has_value())) {
+        return invalid_options("presentation_mode_conflict",
+                               "Headless and native presentation modes are mutually exclusive");
+    }
     if (!options.headless) {
-        return invalid_options("headless_required",
-                               "The native renderer device contract only supports headless initialization");
+        if (!options.native_surface.has_value()) {
+            return invalid_options("native_surface_required",
+                                   "Non-headless initialization requires a native presentation source");
+        }
+        if (backend == Backend::D3D12) {
+            return unavailable("d3d12_native_presentation_unsupported",
+                               "Direct3D 12 native presentation is not enabled by this renderer contract");
+        }
+        Diagnostic diagnostic;
+        if (!valid_native_surface_source(*options.native_surface, diagnostic))
+            return invalid_options(diagnostic.code.c_str(), std::move(diagnostic.message));
     }
     if (options.prefer_software && !options.allow_software) {
         return invalid_options("software_adapter_disallowed",
@@ -2812,9 +2867,23 @@ AdapterResult enumerate_adapters(Backend backend, const DeviceOptions& options) 
 }
 
 DeviceResult create_device(Backend backend, const DeviceOptions& options) {
+    if ((!options.headless && options.enable_headless_presentation) ||
+        (options.headless && options.native_surface.has_value())) {
+        return invalid_device_options("presentation_mode_conflict",
+                                      "Headless and native presentation modes are mutually exclusive");
+    }
     if (!options.headless) {
-        return invalid_device_options("headless_required",
-                                      "The native renderer device contract only supports headless initialization");
+        if (!options.native_surface.has_value()) {
+            return invalid_device_options("native_surface_required",
+                                          "Non-headless initialization requires a native presentation source");
+        }
+        if (backend == Backend::D3D12) {
+            return unavailable_device("d3d12_native_presentation_unsupported",
+                                      "Direct3D 12 native presentation is not enabled by this renderer contract");
+        }
+        Diagnostic diagnostic;
+        if (!valid_native_surface_source(*options.native_surface, diagnostic))
+            return invalid_device_options(diagnostic.code.c_str(), std::move(diagnostic.message));
     }
     if (options.prefer_software && !options.allow_software) {
         return invalid_device_options("software_adapter_disallowed",

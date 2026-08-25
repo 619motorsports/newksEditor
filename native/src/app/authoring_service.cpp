@@ -83,6 +83,15 @@ void addSurfaceDiagnostics(
             diagnostic(item.code, item.path, item.message, item.line));
 }
 
+template <typename Result>
+void addWorkspaceDiagnostics(
+    Result& result,
+    const std::vector<authoring::ProjectWorkspaceDiagnostic>& diagnostics) {
+    for (const auto& item : diagnostics)
+        result.diagnostics.push_back(
+            diagnostic(item.code, item.path, item.message, item.line));
+}
+
 [[nodiscard]] SourceIdentity identityFor(std::string name,
                                          std::span<const std::uint8_t> bytes,
                                          std::optional<std::uint32_t> kn5Version = std::nullopt) {
@@ -162,6 +171,19 @@ void addSurfaceDiagnostics(
     return AuthoringServiceStatus::failed;
 }
 
+[[nodiscard]] AuthoringServiceStatus workspaceStatus(
+    authoring::ProjectWorkspaceStatus status) noexcept {
+    switch (status) {
+    case authoring::ProjectWorkspaceStatus::ok:
+        return AuthoringServiceStatus::ok;
+    case authoring::ProjectWorkspaceStatus::invalid:
+        return AuthoringServiceStatus::invalid;
+    case authoring::ProjectWorkspaceStatus::failed:
+        return AuthoringServiceStatus::failed;
+    }
+    return AuthoringServiceStatus::failed;
+}
+
 template <typename Result>
 void setRevision(Result& result, const std::unique_ptr<authoring::ProjectSession>& session) {
     result.revision = session ? session->state().revision : 0U;
@@ -209,6 +231,7 @@ AuthoringServiceOpenResult AuthoringService::openPrimary(
         damage_.reset();
         bottom_colliders_.reset();
         surfaces_.reset();
+        workspace_.reset();
         result.status = AuthoringServiceStatus::ok;
         result.identity = std::move(identity);
         setRevision(result, session_);
@@ -559,6 +582,31 @@ AuthoringServiceResult AuthoringService::openSurfaces(
     return result;
 }
 
+AuthoringServiceResult AuthoringService::openWorkspace(
+    authoring::ProjectWorkspaceKind kind, std::string name,
+    std::span<const std::uint8_t> bytes) {
+    if (!isOpen()) {
+        return failure(AuthoringServiceStatus::not_open, "NOT_OPEN", "workspaceEdits",
+                       "a primary KN5 is not open");
+    }
+    AuthoringServiceResult result;
+    auto captured = kind == authoring::ProjectWorkspaceKind::trackModels
+                        ? authoring::captureProjectTrackWorkspaceBaseline(
+                              name, bytes, limits_.workspace_ini,
+                              limits_.workspace)
+                        : authoring::captureProjectCarLodWorkspaceBaseline(
+                              name, bytes, limits_.workspace_ini,
+                              limits_.workspace);
+    result.status = workspaceStatus(captured.status);
+    addWorkspaceDiagnostics(result, captured.diagnostics);
+    if (captured.ok() && captured.baseline) {
+        workspace_ = std::move(*captured.baseline);
+        result.status = AuthoringServiceStatus::ok;
+    }
+    setRevision(result, session_);
+    return result;
+}
+
 AuthoringServiceBytesResult AuthoringService::exportColliderKn5() const {
     AuthoringServiceBytesResult result;
     if (!isOpen()) {
@@ -657,6 +705,32 @@ AuthoringServiceTextResult AuthoringService::exportSurfacesIni() const {
     result.status = surfacesStatus(exported.status);
     result.text = exported.text;
     addSurfaceDiagnostics(result, exported.diagnostics);
+    if (!result.ok()) result.text.clear();
+    return result;
+}
+
+AuthoringServiceTextResult AuthoringService::exportWorkspaceIni() const {
+    AuthoringServiceTextResult result;
+    if (!isOpen()) {
+        result.status = AuthoringServiceStatus::not_open;
+        result.diagnostics.push_back(diagnostic(
+            "NOT_OPEN", "workspaceEdits", "a primary KN5 is not open"));
+        return result;
+    }
+    if (!workspace_) {
+        result.status = AuthoringServiceStatus::unbound;
+        result.diagnostics.push_back(diagnostic(
+            "SECONDARY_NOT_OPEN", "workspaceEdits",
+            "no models.ini or lods.ini workspace manifest is bound"));
+        return result;
+    }
+    result.revision = session_->state().revision;
+    const auto exported = authoring::exportProjectWorkspace(
+        session_->state(), *workspace_, limits_.workspace);
+    result.status = workspaceStatus(exported.status);
+    result.suggested_name = exported.suggested_name;
+    result.text = exported.text;
+    addWorkspaceDiagnostics(result, exported.diagnostics);
     if (!result.ok()) result.text.clear();
     return result;
 }

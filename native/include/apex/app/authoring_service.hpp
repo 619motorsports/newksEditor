@@ -3,6 +3,7 @@
 #include "apex/authoring/project_bake.hpp"
 #include "apex/authoring/project_io.hpp"
 #include "apex/authoring/project_surfaces.hpp"
+#include "apex/authoring/project_workspace.hpp"
 #include "apex/authoring/secondary_assets.hpp"
 #include "apex/core/parse_limits.hpp"
 #include "apex/domain/car_damage.hpp"
@@ -71,6 +72,8 @@ struct AuthoringServiceLimits {
     domain::CarDamageLimits damage{};
     domain::BottomColliderLimits bottom_colliders{};
     domain::TrackDataLimits surfaces{};
+    formats::IniParseLimits workspace_ini{};
+    workspace::WorkspaceLimits workspace{};
 };
 
 /**
@@ -122,11 +125,15 @@ public:
         std::string name, std::span<const std::uint8_t> bytes);
     [[nodiscard]] AuthoringServiceResult openSurfaces(
         std::string name, std::span<const std::uint8_t> bytes);
+    [[nodiscard]] AuthoringServiceResult openWorkspace(
+        authoring::ProjectWorkspaceKind kind, std::string name,
+        std::span<const std::uint8_t> bytes);
 
     [[nodiscard]] AuthoringServiceBytesResult exportColliderKn5() const;
     [[nodiscard]] AuthoringServiceTextResult exportDamageIni() const;
     [[nodiscard]] AuthoringServiceTextResult exportBottomCollidersIni() const;
     [[nodiscard]] AuthoringServiceTextResult exportSurfacesIni() const;
+    [[nodiscard]] AuthoringServiceTextResult exportWorkspaceIni() const;
 
     [[nodiscard]] bool isOpen() const noexcept;
     [[nodiscard]] const authoring::ProjectState* state() const noexcept;
@@ -157,6 +164,7 @@ private:
     std::optional<DamageState> damage_;
     std::optional<BottomColliderState> bottom_colliders_;
     std::optional<authoring::ProjectSurfacesBaseline> surfaces_;
+    std::optional<authoring::ProjectWorkspaceBaseline> workspace_;
 };
 
 [[nodiscard]] const char* authoring_service_status_name(

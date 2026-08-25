@@ -15,8 +15,11 @@ encryption records consume this budget before allocation. DDS includes bounded
 BC7 CPU decode. Its upload planner supports DX10 2D arrays, cubemaps, and exact
 RGB24 to RGBA8 conversion. FBX support includes a bounded binary/ASCII DOM and
 a static-geometry conversion subset. The ASCII parser converts declared
-numeric arrays to typed FBX arrays. It rejects count mismatches, non-finite
-values, truncated blocks, and input that exceeds the array budgets.
+numeric arrays to typed FBX arrays. The converter supports one
+`ByPolygonVertex`/`IndexToDirect` UV layer, expands face-varying seams, and
+matches the production importer by negating V. It rejects count mismatches,
+non-finite values, truncated blocks, invalid UV indices, and input or output
+that exceeds the configured budgets.
 
 The VAO core binds decoded records to non-owning mesh views. It uses the exact
 name, vertex count, and first-position gate from `src/vao-patch.js`. It binds
@@ -66,6 +69,10 @@ The workspace library writes bounded `models.ini` and `lods.ini` manifests.
 The track-data library writes bounded `surfaces.ini` files. These writers use
 deterministic field order and reject unsafe text, duplicate identities,
 non-finite values, and output that exceeds its limit.
+The application service can bind immutable track-model or car-LOD manifest
+baselines and apply persisted positional workspace edits to deterministic
+exports. Failed capture or export does not replace the bound baseline or emit
+partial text.
 
 The render library includes DDS upload, recovered lighting math, shadow math,
 reflection math, camera matrices, and frame-pass plans. The camera code uses
@@ -77,14 +84,16 @@ and bounded color and D32 readback. Portable validation protects the desktop
 boundary. Backend API types stay inside `src/render`. Format and authoring
 libraries do not depend on a graphics API.
 
-The device API reports presentation prerequisites without creating a window.
-An optional Vulkan mode creates a `VK_EXT_headless_surface` surface and a
-swapchain. It can acquire, clear, submit, and present an image. The target owns
-its image views, framebuffers, commands, and synchronization objects. It can
-also copy a completed, same-format color attachment into a swapchain image.
-D3D12
-reports its DXGI factory, device, and queue prerequisites. D3D12 does not create
-a swapchain because the application does not yet supply a native window handle.
+The optional SDL3 platform library provides a bounded native window and input
+seam without exposing filesystem or Node.js capabilities to the renderer. A
+Vulkan window supplies only borrowed, type-erased surface callbacks and the
+required instance extensions. Vulkan can create a swapchain for that surface,
+acquire, clear, submit, and present an image. The target owns its image views,
+framebuffers, commands, and synchronization objects. It can also copy a
+completed, same-format color attachment into a swapchain image. Headless
+`VK_EXT_headless_surface` presentation remains available when the driver
+supports it. D3D12 reports its DXGI factory, device, queue, and borrowed Win32
+window prerequisite, but native D3D12 swapchain creation remains staged.
 
 ## Build and test
 
@@ -107,6 +116,7 @@ out/native/dev/native/apex-native --inspect-acd car_directory data.acd
 out/native/dev/native/apex-native --inspect-ini ext_config.ini
 out/native/dev/native/apex-native --inspect-vao car.vao-patch
 out/native/dev/native/apex-native --inspect-ksanim animation.ksanim
+out/native/dev/native/apex-native --window vulkan --frames 300
 ```
 
 Export a project through the native authoring service:
@@ -118,6 +128,8 @@ out/native/dev/native/apex-native --export-project collider car.kn5 car.apex.jso
 out/native/dev/native/apex-native --export-project damage car.kn5 car.apex.json damage.ini damage_apex.ini
 out/native/dev/native/apex-native --export-project bottom-colliders car.kn5 car.apex.json colliders.ini colliders_apex.ini
 out/native/dev/native/apex-native --export-project surfaces track.kn5 track.apex.json surfaces.ini surfaces_apex.ini
+out/native/dev/native/apex-native --export-project models track.kn5 track.apex.json models.ini models_apex.ini
+out/native/dev/native/apex-native --export-project lods car.kn5 car.apex.json data/lods.ini lods_apex.ini
 ```
 
 The command reads all input before it writes output. The output path must not
@@ -294,10 +306,11 @@ bind points. Then the stock-scene facade can own and execute the effective
 model. A real backend pixel test proves the ACD-to-GPU path. The renderer does
 not receive the `AssetSource`, the grant, or the external path.
 The FBX converter handles static positions, triangulation, hierarchy, a
-bounded transform subset, and first material assignment. Its aggregate budget
-includes temporary containers, copied strings, and output containers. It
-explicitly diagnoses unsupported images, skinning, animation, layer mappings,
-and advanced transform semantics.
+bounded transform subset, first material assignment, and one face-varying UV
+layer. Its aggregate budget includes temporary containers, copied strings,
+seam-expanded vertices, and output containers. It explicitly diagnoses
+unsupported images, skinning, animation, normal/material layer mappings, UV
+mapping modes outside the supported subset, and advanced transform semantics.
 
 The strict Linux build detects the Vulkan SDK. The runtime test uses a software
 Vulkan device when an ICD is available. CI defines the same Vulkan test. The

@@ -49,6 +49,13 @@ std::string environment_value(const char* name) {
 #endif
 }
 
+bool contract_native_surface_create(void*, void*, void*, std::string& diagnostic) {
+    diagnostic = "contract callback is not a real platform surface";
+    return false;
+}
+
+void contract_native_surface_destroy(void*, void*, void*) noexcept {}
+
 void put_word(std::vector<std::byte>& bytes, std::size_t offset, std::uint32_t value) {
     require(offset + sizeof(std::uint32_t) <= bytes.size(), "shader fixture write out of bounds");
     bytes[offset] = std::byte{static_cast<unsigned char>(value & 0xffU)};
@@ -514,9 +521,75 @@ void contract_options() {
     const DeviceResult device = create_device(Backend::Vulkan, options);
     require(adapters.status == DeviceStatus::invalid_options, "adapter invalid-options status");
     require(device.status == DeviceStatus::invalid_options, "device invalid-options status");
-    require(adapters.diagnostic.code == "headless_required", "adapter headless diagnostic");
-    require(device.diagnostic.code == "headless_required", "device headless diagnostic");
+    require(adapters.diagnostic.code == "native_surface_required", "adapter native-surface diagnostic");
+    require(device.diagnostic.code == "native_surface_required", "device native-surface diagnostic");
 
+    apex::platform::NativeSurfaceSource source;
+    source.vulkanInstanceExtensions = {"VK_KHR_surface"};
+    options.native_surface = source;
+    options.headless = true;
+    require(enumerate_adapters(Backend::Vulkan, options).diagnostic.code ==
+                "presentation_mode_conflict",
+            "headless/native presentation mode conflict");
+    require(create_device(Backend::Vulkan, options).diagnostic.code ==
+                "presentation_mode_conflict",
+            "device headless/native presentation mode conflict");
+
+    options.headless = false;
+    options.native_surface = source;
+    require(enumerate_adapters(Backend::D3D12, options).status == DeviceStatus::unavailable &&
+                enumerate_adapters(Backend::D3D12, options).diagnostic.code ==
+                    "d3d12_native_presentation_unsupported",
+            "D3D12 native presentation is explicitly unsupported");
+    require(create_device(Backend::D3D12, options).status == DeviceStatus::unavailable &&
+                create_device(Backend::D3D12, options).diagnostic.code ==
+                    "d3d12_native_presentation_unsupported",
+            "D3D12 native device creation is explicitly unsupported");
+
+    source.createVulkanSurface = contract_native_surface_create;
+    source.destroyVulkanSurface = contract_native_surface_destroy;
+    source.createVulkanSurface = nullptr;
+    options.native_surface = source;
+    require(enumerate_adapters(Backend::Vulkan, options).diagnostic.code ==
+                "native_surface_callbacks_missing",
+            "native surface create callback required");
+    source.createVulkanSurface = contract_native_surface_create;
+    source.destroyVulkanSurface = nullptr;
+    options.native_surface = source;
+    require(create_device(Backend::Vulkan, options).diagnostic.code ==
+                "native_surface_callbacks_missing",
+            "native surface destroy callback required");
+    source.destroyVulkanSurface = contract_native_surface_destroy;
+    source.vulkanInstanceExtensions.clear();
+    options.native_surface = source;
+    require(enumerate_adapters(Backend::Vulkan, options).diagnostic.code ==
+                "native_surface_extensions_invalid",
+            "native surface extension list required");
+    source.vulkanInstanceExtensions = {"VK_KHR_surface", "VK_KHR_surface"};
+    options.native_surface = source;
+    require(create_device(Backend::Vulkan, options).diagnostic.code ==
+                "native_surface_extension_duplicate",
+            "native surface extension list must be unique");
+    source.vulkanInstanceExtensions = {"VK_KHR_surface"};
+    for (std::size_t index = 1U; index <= 64U; ++index)
+        source.vulkanInstanceExtensions.push_back("VK_EXT_contract_" + std::to_string(index));
+    options.native_surface = source;
+    require(enumerate_adapters(Backend::Vulkan, options).diagnostic.code ==
+                "native_surface_extensions_invalid",
+            "native surface extension count is bounded");
+    source.vulkanInstanceExtensions = {"VK_KHR_xcb_surface"};
+    options.native_surface = source;
+    require(enumerate_adapters(Backend::Vulkan, options).diagnostic.code ==
+                "native_surface_extension_missing",
+            "native surface VK_KHR_surface requirement");
+    source.vulkanInstanceExtensions = {
+        std::string("VK_KHR_surface\0bad", 18U)};
+    options.native_surface = source;
+    require(create_device(Backend::Vulkan, options).diagnostic.code ==
+                "native_surface_extension_name_invalid",
+            "native surface extension names reject embedded NUL bytes");
+
+    options.native_surface.reset();
     options.headless = true;
     options.allow_software = false;
     options.prefer_software = true;

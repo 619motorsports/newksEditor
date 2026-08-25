@@ -83,7 +83,7 @@ state.
 
 ## Current implementation status
 
-As of 2026-08-21, the native port is additive and the JavaScript/WebGL editor
+As of 2026-08-24, the native port is additive and the JavaScript/WebGL editor
 remains unchanged and feature-complete.
 
 - P0 is partial. CMake, strict warnings, sanitizers, cross-platform CI,
@@ -94,9 +94,12 @@ remains unchanged and feature-complete.
   Vulkan mode creates a headless surface and swapchain. It acquires, clears,
   submits, and presents swapchain images. It also presents a completed,
   same-format offscreen color attachment through a backend-neutral API.
-  D3D12 reports the DXGI factory,
-  device, and queue prerequisite. D3D12 still requires a native-window seam
-  before it can create a swapchain.
+  An optional SDL3 platform layer now owns bounded native windows and events.
+  It supplies borrowed, type-erased Vulkan surface callbacks and instance
+  extensions without leaking Vulkan types into the public platform contract.
+  Vulkan can create the same presentation target for this native surface.
+  D3D12 reports the DXGI factory, device, queue, and borrowed Win32 window
+  prerequisite, but D3D12 swapchain creation remains staged.
   Both backends implement bounded synchronous RGBA8/BGRA8 texture
   clear/readback. Each
   backend validates a pipeline and executes fixed and indexed R16 mesh draws
@@ -292,8 +295,11 @@ remains unchanged and feature-complete.
   FBX arrays after declared-count, finite-value, and allocation-budget checks.
   A bounded FBX conversion subset
   supports static positions, polygon triangulation, hierarchy, local/world
-  transforms, and first material assignment. It rejects or diagnoses skinning,
-  animation, embedded images, layer mappings, and advanced transform semantics.
+  transforms, first material assignment, and one
+  `ByPolygonVertex`/`IndexToDirect` UV layer. The UV path expands seams and
+  negates V like `src/fbx-import.js`. It rejects malformed or over-budget UV
+  data and diagnoses skinning, animation, embedded images, unsupported layer
+  mappings, and advanced transform semantics.
   The conversion budget includes temporary vectors, maps, sets, child lists,
   flattened property views, copied strings, and output containers.
   A bounded VAO binder matches decoded records to mesh views. It uses exact
@@ -426,9 +432,10 @@ remains unchanged and feature-complete.
   stable draw ordering, CSP mesh state, and packet validation for a
   pre-resolved snapshot.
   It does not execute stock KN5 shader containers. Vulkan can create a
-  headless surface and swapchain. Vulkan can present a completed offscreen
-  color attachment with the same size and format. The port does not create native windows or
-  D3D12 swapchains. It does not provide full golden-image parity.
+  headless or SDL3-backed native surface and swapchain. Vulkan can present a
+  completed offscreen color attachment with the same size and format. The
+  port does not create D3D12 swapchains and does not provide full golden-image
+  parity.
 
 The production WebGL material gate uses the synthetic `BC7_PLANE` scene. The
 baseline screenshot SHA-256 is

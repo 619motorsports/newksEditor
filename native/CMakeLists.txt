@@ -1,4 +1,7 @@
 find_package(Vulkan QUIET)
+if(APEX_ENABLE_NATIVE_WINDOW)
+  find_package(SDL3 CONFIG QUIET)
+endif()
 
 add_library(apex_native INTERFACE)
 add_library(ApexEditor::Native ALIAS apex_native)
@@ -123,17 +126,6 @@ target_link_libraries(apex_secondary_assets
   PUBLIC ApexEditor::Authoring ApexEditor::Domain
 )
 
-# Application composition owns project sessions and format baselines. It
-# returns owned data and diagnostics without exposing filesystem or renderer
-# capabilities to the authoring model.
-add_library(apex_app STATIC
-  src/app/authoring_service.cpp
-)
-add_library(ApexEditor::App ALIAS apex_app)
-target_link_libraries(apex_app
-  PUBLIC ApexEditor::SecondaryAssets
-)
-
 add_library(apex_scene STATIC
   src/scene/scene.cpp
   src/scene/kn5_scene.cpp
@@ -148,11 +140,34 @@ add_library(apex_workspace STATIC
 add_library(ApexEditor::Workspace ALIAS apex_workspace)
 target_link_libraries(apex_workspace PUBLIC ApexEditor::Scene)
 
+# Application composition owns project sessions and format baselines. It
+# returns owned data and diagnostics without exposing filesystem or renderer
+# capabilities to the authoring model.
+add_library(apex_app STATIC
+  src/app/authoring_service.cpp
+  src/authoring/project_workspace.cpp
+)
+add_library(ApexEditor::App ALIAS apex_app)
+target_link_libraries(apex_app
+  PUBLIC ApexEditor::SecondaryAssets ApexEditor::Workspace
+)
+
 add_library(apex_platform STATIC
   src/platform/security.cpp
+  src/platform/window.cpp
 )
 add_library(ApexEditor::Platform ALIAS apex_platform)
 target_link_libraries(apex_platform PUBLIC ApexEditor::Native)
+if(APEX_ENABLE_NATIVE_WINDOW AND SDL3_FOUND)
+  target_compile_definitions(apex_platform PRIVATE APEX_HAS_SDL3=1)
+  target_link_libraries(apex_platform PRIVATE SDL3::SDL3)
+  set(APEX_NATIVE_WINDOW_AVAILABLE TRUE)
+else()
+  set(APEX_NATIVE_WINDOW_AVAILABLE FALSE)
+  if(APEX_ENABLE_NATIVE_WINDOW)
+    message(STATUS "SDL3 not found; native window support is disabled")
+  endif()
+endif()
 
 add_library(apex_render STATIC
   src/render/camera.cpp
@@ -179,7 +194,9 @@ add_library(apex_render STATIC
   src/render/d3d12_device.cpp
 )
 add_library(ApexEditor::Render ALIAS apex_render)
-target_link_libraries(apex_render PUBLIC ApexEditor::Scene ApexEditor::Csp)
+target_link_libraries(apex_render
+  PUBLIC ApexEditor::Scene ApexEditor::Csp ApexEditor::Platform
+)
 
 # Keep filesystem and packed-asset authority above the backend-neutral renderer.
 # This bridge resolves and decodes CPU resources, but it creates no GPU objects.
@@ -193,7 +210,9 @@ target_link_libraries(apex_external_texture_authority
 
 add_executable(apex_native_app src/app/main.cpp)
 set_target_properties(apex_native_app PROPERTIES OUTPUT_NAME apex-native)
-target_link_libraries(apex_native_app PRIVATE ApexEditor::App ApexEditor::Formats ApexEditor::Render)
+target_link_libraries(apex_native_app
+  PRIVATE ApexEditor::App ApexEditor::Formats ApexEditor::Render ApexEditor::Platform
+)
 
 if(NOT BUILD_TESTING OR NOT APEX_BUILD_TESTS)
   return()
@@ -249,6 +268,7 @@ apex_add_native_test(ini_tests.cpp ini_tests ApexEditor::Formats)
 apex_add_native_test(vao_tests.cpp vao_tests ApexEditor::Formats)
 apex_add_native_test(authoring_project_tests.cpp authoring_project_tests ApexEditor::Authoring)
 apex_add_native_test(authoring_service_tests.cpp authoring_service_tests ApexEditor::App)
+apex_add_native_test(project_workspace_tests.cpp project_workspace_tests ApexEditor::App)
 apex_add_native_test(project_bake_tests.cpp project_bake_tests ApexEditor::Authoring)
 apex_add_native_test(geometry_bake_tests.cpp geometry_bake_tests ApexEditor::Authoring)
 apex_add_native_test(project_io_tests.cpp project_io_tests ApexEditor::Authoring)
@@ -289,6 +309,7 @@ apex_add_native_test(pipeline_tests.cpp pipeline_tests ApexEditor::Render)
 apex_add_native_test(render_plan_tests.cpp render_plan_tests ApexEditor::Render)
 apex_add_native_test(texture_upload_tests.cpp texture_upload_tests ApexEditor::Render)
 apex_add_native_test(platform_security_tests.cpp platform_security_tests ApexEditor::Platform)
+apex_add_native_test(platform_window_tests.cpp platform_window_tests ApexEditor::Platform)
 
 if(TARGET render_backend_tests AND WIN32)
   # The Windows execution test compiles its small HLSL fixture at runtime so
@@ -315,7 +336,7 @@ foreach(parser_test IN ITEMS kn5_tests kn5_write_tests dds_tests bc7_tests png_t
   endif()
 endforeach()
 foreach(boundary_test IN ITEMS authoring_project_tests project_bake_tests geometry_bake_tests project_io_tests
-                               authoring_service_tests
+                               authoring_service_tests project_workspace_tests
                                asset_index_tests asset_source_tests csp_config_model_tests
                                csp_material_evaluator_tests car_damage_tests secondary_asset_tests car_validation_tests
                                project_surfaces_tests
@@ -325,6 +346,9 @@ foreach(boundary_test IN ITEMS authoring_project_tests project_bake_tests geomet
     set_tests_properties(${boundary_test} PROPERTIES LABELS "unit;malformed")
   endif()
 endforeach()
+if(TEST platform_window_tests)
+  set_tests_properties(platform_window_tests PROPERTIES LABELS "unit;security")
+endif()
 if(TEST render_backend_tests)
   set_tests_properties(render_backend_tests PROPERTIES LABELS "unit;render")
   if(APEX_ENABLE_SANITIZERS AND NOT MSVC)

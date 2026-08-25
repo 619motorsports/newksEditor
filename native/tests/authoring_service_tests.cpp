@@ -25,6 +25,7 @@ using apex::authoring::SetMeshEdit;
 using apex::authoring::SetMaterialScalarEdit;
 using apex::authoring::SetNodeEdit;
 using apex::authoring::SetSurfaceEdit;
+using apex::authoring::SetWorkspaceFileEdit;
 
 void require(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
@@ -347,6 +348,67 @@ void surfacesBindApplyAndFailAtomically() {
             "undo restores the last valid surface export");
 }
 
+void workspaceBindsAppliesAndExports() {
+    const auto primary = modelBytes();
+    const std::string manifestText =
+        "[MODEL_4]\nFILE=base.kn5\nPOSITION=1,2,3\nROTATION=0,0,0\n"
+        "[DYNAMIC_OBJECT_9]\nFILE=flag.kn5\nPROBABILITY=50\n"
+        "RND_POS_CENTER=7,8,9\n";
+    const std::vector<std::uint8_t> manifest(
+        manifestText.begin(), manifestText.end());
+
+    AuthoringService service;
+    require(service.openPrimary("track.kn5", primary).ok(),
+            "service opens for workspace authoring");
+    require(service.exportWorkspaceIni().status == AuthoringServiceStatus::unbound,
+            "workspace export requires a bound baseline");
+    require(service.openWorkspace(
+                apex::authoring::ProjectWorkspaceKind::trackModels,
+                "models_track.ini", manifest).ok(),
+            "track workspace baseline binds from caller-owned bytes");
+
+    apex::authoring::WorkspaceFileEdit edit;
+    edit.position = apex::authoring::Vector3{4.0F, 5.0F, 6.0F};
+    AuthoringTransaction transaction;
+    transaction.label = "author workspace";
+    transaction.operations = {SetWorkspaceFileEdit{0U, edit}};
+    require(service.commit(transaction).ok(), "workspace transaction commits");
+
+    const auto first = service.exportWorkspaceIni();
+    const auto second = service.exportWorkspaceIni();
+    require(first.ok() && first.text == second.text &&
+                first.suggested_name == "models.ini" &&
+                first.text.find("[MODEL_4]") != std::string::npos &&
+                first.text.find("POSITION=4, 5, 6") != std::string::npos &&
+                first.text.find("[DYNAMIC_OBJECT_9]") != std::string::npos,
+            "workspace export is deterministic and preserves sparse identities");
+
+    const std::string truncatedText = "[MODEL_0]\nFILE=broken.kn5\\";
+    const std::vector<std::uint8_t> truncated(
+        truncatedText.begin(), truncatedText.end());
+    const auto failed = service.openWorkspace(
+        apex::authoring::ProjectWorkspaceKind::trackModels,
+        "models_track.ini", truncated);
+    require(failed.status == AuthoringServiceStatus::invalid &&
+                !failed.diagnostics.empty() &&
+                service.exportWorkspaceIni().text == first.text,
+            "truncated workspace input cannot replace the bound baseline");
+
+    apex::authoring::WorkspaceFileEdit missingEdit;
+    missingEdit.position = apex::authoring::Vector3{1.0F, 1.0F, 1.0F};
+    AuthoringTransaction missing;
+    missing.label = "missing workspace position";
+    missing.operations = {SetWorkspaceFileEdit{8U, missingEdit}};
+    require(service.commit(missing).ok(),
+            "missing-position workspace edit commits to project state");
+    const auto invalid = service.exportWorkspaceIni();
+    require(invalid.status == AuthoringServiceStatus::invalid &&
+                invalid.text.empty() && !invalid.diagnostics.empty(),
+            "missing workspace position fails without partial output");
+    require(service.undo().ok() && service.exportWorkspaceIni().text == first.text,
+            "workspace undo restores the last valid export");
+}
+
 }  // namespace
 
 int main() {
@@ -355,6 +417,7 @@ int main() {
         projectRoundTripUndoRedoAndExports();
         secondaryAssetsBindAndFailClosed();
         surfacesBindApplyAndFailAtomically();
+        workspaceBindsAppliesAndExports();
         std::cout << "authoring_service_tests: ok\n";
         return 0;
     } catch (const std::exception& error) {
