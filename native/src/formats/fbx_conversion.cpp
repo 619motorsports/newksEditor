@@ -899,8 +899,6 @@ std::vector<std::int64_t> nativeAnimationModelOrder(
             fail("depth_limit", "FBX animation hierarchy exceeds its limit", "animation");
         const auto& record = records[byId.at(current.id)];
         if (isNativeAnimationModel(record)) {
-            if (result.size() >= limits.max_animation_tracks)
-                fail("animation_track_limit", "FBX animation output track count exceeds its limit", "animation");
             result.push_back(current.id);
         }
         const auto child = children.find(current.id);
@@ -1177,6 +1175,36 @@ void extractAnimations(const std::vector<ObjectRecord>& records,
             continue;
         }
         if (animationModelIds.empty()) continue;
+        struct AnimationTrackGroup {
+            std::string_view name;
+            std::vector<std::int64_t> modelIds;
+        };
+        std::vector<AnimationTrackGroup> trackGroups;
+        std::map<std::string_view, std::size_t> trackGroupByName;
+        budget.add(checkedMultiply(animationModelIds.size(), sizeof(AnimationTrackGroup), stackPath), stackPath);
+        trackGroups.reserve(animationModelIds.size());
+        for (const auto modelId : animationModelIds) {
+            const auto& modelName = records[byId.at(modelId)].name;
+            auto group = trackGroupByName.find(modelName);
+            if (group == trackGroupByName.end()) {
+                if (trackGroups.size() >= limits.max_animation_tracks)
+                    fail("animation_track_limit", "FBX animation output track count exceeds its limit", stackPath);
+                const auto groupIndex = trackGroups.size();
+                chargeAssociativeNode(budget,
+                                      sizeof(std::pair<const std::string_view,
+                                                       std::size_t>),
+                                      "animation track names");
+                const auto [inserted, wasInserted] = trackGroupByName.emplace(modelName, groupIndex);
+                (void)inserted;
+                if (!wasInserted) fail("invalid_animation", "FBX animation track-name grouping is inconsistent", stackPath);
+                trackGroups.push_back({modelName, {}});
+                group = trackGroupByName.find(modelName);
+            }
+            auto& groupedModels = trackGroups[group->second].modelIds;
+            reserveForAppend(groupedModels, groupedModels.size() + 1u, budget,
+                             "animation track-name models");
+            groupedModels.push_back(modelId);
+        }
         FbxAnimationClip clip;
         budget.add(checkedMultiply(2u, stackRecord.name.size(), stackPath), stackPath);
         clip.name = stackRecord.name;
@@ -1187,33 +1215,39 @@ void extractAnimations(const std::vector<ObjectRecord>& records,
         clip.animation.source = clip.name;
         clip.animation.version = 2;
         clip.animation.frameCount = 100u;
-        budget.add(checkedMultiply(animationModelIds.size(), sizeof(KsAnimationTrack), stackPath), stackPath);
-        clip.animation.tracks.reserve(animationModelIds.size());
-        for (const auto modelId : animationModelIds) {
-            const auto modelPath = stackPath + "/Model/" + std::to_string(modelId);
-            const auto* model = objectNode(records, byId, modelId, modelPath);
-            const auto base = animationBase(*model, modelPath);
+        budget.add(checkedMultiply(trackGroups.size(), sizeof(KsAnimationTrack), stackPath), stackPath);
+        clip.animation.tracks.reserve(trackGroups.size());
+        for (const auto& trackGroup : trackGroups) {
+            const auto groupPath = stackPath + "/Track";
             KsAnimationTrack track;
-            const auto& trackName = records[byId.at(modelId)].name;
-            budget.add(trackName.size(), modelPath);
-            track.name = trackName;
-            budget.add(checkedAdd(8u, checkedMultiply(100u, sizeof(KsAnimationFrame), modelPath), modelPath), modelPath);
-            track.frames.reserve(100u);
-            for (std::size_t frameIndex = 0; frameIndex < 100u; ++frameIndex) {
-                const auto time = static_cast<std::int64_t>(
-                    static_cast<long double>(start) + span * frameIndex / 100.0L);
-                std::array<float, 3> translation = base.translation, rotation = base.rotation, scale = base.scale;
-                for (const auto& [key, binding] : bindings) {
-                    (void)key;
-                    if (binding.model != modelId) continue;
-                    auto* target = binding.property == "Lcl Translation" ? &translation : binding.property == "Lcl Rotation" ? &rotation : &scale;
-                    for (std::size_t axis = 0; axis < 3u; ++axis) {
-                        const auto curveId = binding.curves[axis];
-                        const auto found = curveData.find(curveId);
-                        if (curveId != 0 && found != curveData.end()) (*target)[axis] = sampleAnimationCurve(found->second, time);
+            budget.add(trackGroup.name.size(), groupPath);
+            track.name = trackGroup.name;
+            const auto frameCount = checkedMultiply(trackGroup.modelIds.size(), std::size_t{100}, groupPath);
+            if (frameCount > limits.max_animation_merged_frames)
+                fail("animation_frame_limit",
+                     "Merged FBX animation-set frames exceed their limit", groupPath);
+            budget.add(checkedAdd(8u, checkedMultiply(frameCount, sizeof(KsAnimationFrame), groupPath), groupPath), groupPath);
+            track.frames.reserve(frameCount);
+            for (const auto modelId : trackGroup.modelIds) {
+                const auto modelPath = stackPath + "/Model/" + std::to_string(modelId);
+                const auto* model = objectNode(records, byId, modelId, modelPath);
+                const auto base = animationBase(*model, modelPath);
+                for (std::size_t frameIndex = 0; frameIndex < 100u; ++frameIndex) {
+                    const auto time = static_cast<std::int64_t>(
+                        static_cast<long double>(start) + span * frameIndex / 100.0L);
+                    std::array<float, 3> translation = base.translation, rotation = base.rotation, scale = base.scale;
+                    for (const auto& [key, binding] : bindings) {
+                        (void)key;
+                        if (binding.model != modelId) continue;
+                        auto* target = binding.property == "Lcl Translation" ? &translation : binding.property == "Lcl Rotation" ? &rotation : &scale;
+                        for (std::size_t axis = 0; axis < 3u; ++axis) {
+                            const auto curveId = binding.curves[axis];
+                            const auto found = curveData.find(curveId);
+                            if (curveId != 0 && found != curveData.end()) (*target)[axis] = sampleAnimationCurve(found->second, time);
+                        }
                     }
+                    track.frames.push_back(animationFrame(translation, rotation, scale, modelPath));
                 }
-                track.frames.push_back(animationFrame(translation, rotation, scale, modelPath));
             }
             track.animated = false;
             if (track.frames.size() > 1u)
@@ -1223,7 +1257,10 @@ void extractAnimations(const std::vector<ObjectRecord>& records,
                                      track.frames[frame].scale != track.frames.front().scale;
             clip.animation.tracks.push_back(std::move(track));
         }
-        if (!clip.animation.tracks.empty()) result.animations.push_back(std::move(clip));
+        if (!clip.animation.tracks.empty()) {
+            clip.animation.frameCount = clip.animation.tracks.front().frames.size();
+            result.animations.push_back(std::move(clip));
+        }
     }
 }
 

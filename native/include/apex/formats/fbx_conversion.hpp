@@ -87,6 +87,7 @@ struct FbxConversionLimits {
     std::size_t max_animation_keys = 10'000'000u;
     std::size_t max_animation_clips = 64u;
     std::size_t max_animation_frames = 100u;
+    std::size_t max_animation_merged_frames = 10'000'000u;
 };
 
 class FbxConversionError final : public std::runtime_error {

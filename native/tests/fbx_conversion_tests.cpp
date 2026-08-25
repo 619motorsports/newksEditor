@@ -136,6 +136,16 @@ FbxDocument animationSelectionFixture() {
     return document;
 }
 
+FbxDocument duplicateNameAnimationFixture() {
+    auto document = animationSelectionFixture();
+    auto& objects = document.roots[0];
+    // Model 201 is static but shares the first Model's native animation-set
+    // name.  Model 203 remains a distinct eligible track; the Camera remains
+    // excluded from both cases.
+    objects.children[7].properties[0].values[1] = std::string("Model::Triangle");
+    return document;
+}
+
 FbxDocument staticAnimationFixture() {
     auto document = fixture();
     document.roots[0].children.push_back(node("AnimationStack", {
@@ -348,6 +358,46 @@ void emitsBoundedStaticAnimationWithoutCurves() {
     require(clip.animation.tracks.front().frames.front().position ==
                 std::array<float, 3>{1.0F, 2.0F, 3.0F},
             "FBX curve-free animation preserves the Model base transform");
+}
+
+void mergesDuplicateNativeAnimationSetNames() {
+    const auto result = apex::formats::convertFbxScene(duplicateNameAnimationFixture());
+    require(result.animations.size() == 1u, "FBX duplicate-name fixture converts one clip");
+    const auto& clip = result.animations.front();
+    require(clip.source_track_count == 1u && clip.animation.tracks.size() == 2u &&
+                clip.animation.frameCount == 200u,
+            "FBX duplicate Model names merge into one first-seen animation set");
+    require(clip.animation.tracks[0].name == "Triangle" &&
+                clip.animation.tracks[0].frames.size() == 200u &&
+                clip.animation.tracks[1].name == "StaticLimb" &&
+                clip.animation.tracks[1].frames.size() == 100u,
+            "FBX duplicate-name frames append before the next hierarchy track");
+    require(std::abs(clip.animation.tracks[0].frames[99].position[0] - 9.9F) < 1e-4F &&
+                clip.animation.tracks[0].frames[100].position ==
+                    std::array<float, 3>{0.0F, 0.0F, 0.0F},
+            "FBX duplicate-name output preserves each Model frame contribution");
+
+    auto limits = apex::formats::FbxConversionLimits{};
+    limits.max_animation_tracks = 1u;
+    auto oneName = duplicateNameAnimationFixture();
+    oneName.roots[0].children[9].properties[0].values[1] = std::string("Model::Triangle");
+    const auto bounded = apex::formats::convertFbxScene(oneName, limits);
+    require(bounded.animations.size() == 1u && bounded.animations.front().animation.tracks.size() == 1u &&
+                bounded.animations.front().animation.tracks.front().frames.size() == 300u,
+            "FBX track limits count unique native animation-set names");
+
+    auto frameLimits = apex::formats::FbxConversionLimits{};
+    frameLimits.max_animation_merged_frames = 199u;
+    expectsError(
+        [&] {
+            (void)apex::formats::convertFbxScene(
+                duplicateNameAnimationFixture(), frameLimits);
+        },
+        "animation_frame_limit");
+
+    auto malformed = duplicateNameAnimationFixture();
+    malformed.roots[0].children[7].properties[0].values[1] = FbxValue{std::int64_t(7)};
+    expectsError([&] { (void)apex::formats::convertFbxScene(malformed); }, "invalid_object");
 }
 
 void rejectsMalformedAnimationCurvesAndUnsupportedInterpolation() {
@@ -645,6 +695,7 @@ int main() {
         convertsBoundedLinearAnimationToKsanimV2();
         selectsNativeAnimationModelsInHierarchyOrder();
         emitsBoundedStaticAnimationWithoutCurves();
+        mergesDuplicateNativeAnimationSetNames();
         rejectsMalformedAnimationCurvesAndUnsupportedInterpolation();
         rejectsInvalidReferencesIndicesAndNonFiniteValues();
         rejectsMalformedAndUnsupportedUvLayers();
