@@ -1,6 +1,7 @@
 #include "apex/render/decoded_dds_texture.hpp"
 
 #include "apex/core/parse_error.hpp"
+#include "apex/formats/jpeg.hpp"
 #include "apex/formats/png.hpp"
 
 #include <algorithm>
@@ -126,6 +127,46 @@ plan_decoded_texture_payload(std::span<const std::uint8_t> bytes,
       std::equal(bytes.begin(),
                  bytes.begin() + static_cast<std::ptrdiff_t>(prefix_size),
                  png_signature.begin());
+  const bool jpeg_prefix = bytes.size() >= 3u && bytes[0] == 0xffu &&
+                           bytes[1] == 0xd8u && bytes[2] == 0xffu;
+  if (jpeg_prefix) {
+    try {
+      formats::JpegLimits jpeg_limits;
+      jpeg_limits.parse = limits;
+      formats::JpegImage image =
+          formats::decodeJpegRgba8(bytes, source, jpeg_limits);
+      DecodedTexturePlan plan;
+      plan.description = {
+          image.width, image.height, 1U, 1U, TextureFormat::rgba8_unorm,
+          TextureUsage::sampled, TextureMemory::device_local,
+          TextureMutability::immutable};
+      plan.levels.push_back({image.width, image.height, std::move(image.pixels)});
+      const TextureUploadPlan uploads = plan.make_upload_plan();
+      Diagnostic diagnostic;
+      const TextureStatus validation =
+          validate_texture_description(plan.description, uploads, diagnostic);
+      if (validation != TextureStatus::ready)
+        return failure(validation == TextureStatus::unsupported
+                           ? TextureUploadStatus::unsupported
+                           : TextureUploadStatus::invalid,
+                       std::move(diagnostic.code), std::move(diagnostic.message),
+                       0U, std::move(source));
+      return {TextureUploadStatus::ready, {}, std::move(plan)};
+    } catch (const apex::core::ParseError &error) {
+      return failure(unsupported_parse_code(error.code())
+                         ? TextureUploadStatus::unsupported
+                         : TextureUploadStatus::invalid,
+                     normalized_parse_code(error.code()), error.what(),
+                     error.offset(), error.source());
+    } catch (const std::bad_alloc &) {
+      return failure(TextureUploadStatus::invalid, "allocation_failed",
+                     "JPEG decode planning has insufficient memory for bounded storage", 0U,
+                     std::move(source));
+    } catch (const std::exception &error) {
+      return failure(TextureUploadStatus::invalid, "decode_failed", error.what(),
+                     0U, std::move(source));
+    }
+  }
   if (!png_prefix)
     return plan_decoded_dds_texture(bytes, std::move(source), limits);
 

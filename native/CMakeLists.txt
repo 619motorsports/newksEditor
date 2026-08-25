@@ -294,6 +294,7 @@ apex_add_native_test(authoring_service_tests.cpp authoring_service_tests ApexEdi
 apex_add_native_test(presentation_recreation_tests.cpp presentation_recreation_tests ApexEditor::App)
 apex_add_native_test(workspace_session_tests.cpp workspace_session_tests ApexEditor::App)
 apex_add_native_test(workspace_viewport_tests.cpp workspace_viewport_tests ApexEditor::AppRender)
+apex_add_native_test(workspace_real_fixture_tests.cpp workspace_real_fixture_tests ApexEditor::AppRender)
 apex_add_native_test(project_workspace_tests.cpp project_workspace_tests ApexEditor::App)
 apex_add_native_test(project_bake_tests.cpp project_bake_tests ApexEditor::Authoring)
 apex_add_native_test(geometry_bake_tests.cpp geometry_bake_tests ApexEditor::Authoring)
@@ -400,7 +401,7 @@ if(TEST render_backend_tests)
       ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")
   endif()
 endif()
-foreach(render_test IN ITEMS camera_tests csp_node_state_tests damage_preview_tests external_texture_authority_tests draw_packet_tests frame_plan_tests indexed_draw_tests static_mesh_upload_tests skinned_mesh_upload_tests static_scene_tests stock_material_execution_tests stock_scene_execution_tests lighting_tests material_binding_tests
+foreach(render_test IN ITEMS camera_tests csp_node_state_tests damage_preview_tests external_texture_authority_tests draw_packet_tests frame_plan_tests indexed_draw_tests static_mesh_upload_tests skinned_mesh_upload_tests static_scene_tests stock_material_execution_tests stock_scene_execution_tests workspace_real_fixture_tests lighting_tests material_binding_tests
                              material_profile_tests pipeline_tests render_plan_tests texture_upload_tests)
   if(TEST ${render_test})
     set_tests_properties(${render_test} PROPERTIES LABELS "unit;render")
