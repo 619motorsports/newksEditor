@@ -274,10 +274,10 @@ This pass always uses interpolation and disables depth tests and writes.
 The backend-neutral line-list conversion is a labeled translation of the
 original OpenGL line strip. Independent version-7 side options add the
 recovered cyan raw splines. These passes use normal depth after the interval.
-An independent version-7 current-index option adds the recovered yellow
-center line and optional cyan width lines. It uses normal depth after the side
-passes. The CLI accepts one retained-point index. Multi-selection and mutable
-edit points remain staged.
+Repeated version-7 index options add recovered yellow center lines and optional
+cyan width lines. The CLI keeps insertion order and ignores duplicates. These
+markers use normal depth after the side passes. Mutable edit points remain
+staged.
 An independent version-7 camber option adds the recovered vertical red and
 green lines. This pass also uses normal depth. Edit overlays remain staged.
 
@@ -3009,6 +3009,23 @@ It writes directly to the destination and ignores stream errors. The C++
 writer returns owned bytes and does not write a file. Grid rebuild and a safe
 filesystem save command remain staged. Version-2 output also remains staged
 because the current model does not invent version-7 payloads.
+
+## ksEditor AI spline selection evidence
+
+The PDB places `SplineEditor.selectedIndices` at offset 52 as a
+`std::vector<int>`. `SplineEditor.addIndex` is at `0x10024bfc`. The method
+ignores an existing index and appends each new index. Thus, the vector keeps
+insertion order without duplicates.
+
+`SplineEditor.onNodeRender` has method RVA `0x2f754` and execution VA
+`0x1002f760`. It renders each selected index. The first entry drives the
+mutable edit call. `onPickedPoint` at `0x1002fed0` uses the final entry for its
+normalized UI return.
+
+The C++ marker builder accepts the selected-index vector and keeps its order.
+It ignores duplicate indices before it emits geometry. The builder bounds the
+input count and total line vertices. The single-index overload remains for
+existing callers. Repeated `--ai-spline-index` options use this vector model.
 
 ## Native ksNet camera pose evidence
 

@@ -211,10 +211,11 @@ remains unchanged and feature-complete.
   This pass follows the primary spline and disables depth tests and writes.
   Independent version-7 options add the recovered cyan left and right side
   passes. These raw passes follow the interval and use normal depth.
-  A version-7 current-index option adds the recovered yellow center marker and
-  optional cyan width markers. This pass follows the side passes and uses
-  normal depth. The CLI exposes one retained-point index. Native
-  multi-selection and mutable edit points remain staged.
+  Repeated version-7 index options add recovered yellow center markers and
+  optional cyan width markers. The port keeps insertion order and ignores
+  duplicate indices. The last unique index supplies the normalized UI return.
+  This pass follows the side passes and uses normal depth. The native first-
+  selected mutable edit path remains staged.
   The format library writes the exact `AISpline::save` version-7 record
   layout. The writer emits zero reserved words and preserves a valid grid.
   It rejects version 2 because the port has not recovered the conversion of

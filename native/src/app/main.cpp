@@ -39,6 +39,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #if defined(_WIN32)
@@ -64,7 +65,7 @@ void usage(std::ostream& output) {
               "                       [--track-camera-position <value>] [--track-camera-play]\n"
               "                       [--track-camera-mode webgl|installed-editor]\n"
               "                       [--ai-spline <file> [--ai-spline-mode raw|interpolated] [--ai-spline-interval <in> <out>]]\n"
-              "                       [--ai-spline-show-left] [--ai-spline-show-right] [--ai-spline-index <index>] [--ai-spline-show-camber]\n"
+              "                       [--ai-spline-show-left] [--ai-spline-show-right] [--ai-spline-index <index> ...] [--ai-spline-show-camber]\n"
               "                       [--node-search <query>] [--selected-node <id> [--isolate-selected]]\n"
               "                       [--show-hidden] [--wireframe] [--grid] [--view-axis]\n"
               "                       [--weather <stock-id>] [--sun-heading <degrees>] [--sun-height <degrees>]\n"
@@ -560,7 +561,7 @@ struct WindowWorkspaceOptions {
     std::optional<apex::app::WorkspaceAiSplineInterval> aiSplineInterval;
     bool aiSplineShowLeft = false;
     bool aiSplineShowRight = false;
-    std::optional<std::uint32_t> aiSplineIndex;
+    std::vector<std::uint32_t> aiSplineIndices;
     bool aiSplineShowCamber = false;
     std::optional<std::string> nodeSearch;
     std::optional<apex::scene::NodeId> selectedNode;
@@ -721,6 +722,7 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
                                                        bool& validation,
                                                        std::uint64_t& frame_limit) {
     WindowWorkspaceOptions result;
+    std::unordered_set<std::uint32_t> ai_spline_index_membership;
     for (int index = first_option; index < argc; ++index) {
         const std::string_view option = argv[index];
         auto require_value = [&](std::string_view name) -> std::string_view {
@@ -840,11 +842,15 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
                     "duplicate --ai-spline-show-right option");
             result.aiSplineShowRight = true;
         } else if (option == "--ai-spline-index") {
-            if (result.aiSplineIndex.has_value())
-                throw std::runtime_error(
-                    "duplicate --ai-spline-index option");
-            result.aiSplineIndex = parse_unsigned_index(
+            const std::uint32_t selected_index = parse_unsigned_index(
                 require_value("--ai-spline-index"), "AI spline index");
+            if (ai_spline_index_membership.insert(selected_index).second) {
+                if (result.aiSplineIndices.size() >=
+                    apex::app::workspace_ai_spline_max_selection_points)
+                    throw std::runtime_error(
+                        "AI spline selection exceeds the bounded marker limit");
+                result.aiSplineIndices.push_back(selected_index);
+            }
         } else if (option == "--ai-spline-show-camber") {
             if (result.aiSplineShowCamber)
                 throw std::runtime_error(
@@ -1073,7 +1079,7 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
         throw std::runtime_error(
             "--ai-spline-interval requires --ai-spline");
     if ((result.aiSplineShowLeft || result.aiSplineShowRight ||
-         result.aiSplineIndex.has_value() ||
+         !result.aiSplineIndices.empty() ||
          result.aiSplineShowCamber) &&
         !result.aiSpline.has_value())
         throw std::runtime_error(
@@ -1331,18 +1337,20 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
                       << ", draws=" << side.geometry.chunks.size() << '\n';
             loaded.aiSplineRight = std::move(side.geometry);
         }
-        if (options.aiSplineIndex.has_value()) {
+        if (!options.aiSplineIndices.empty()) {
             auto selection =
                 apex::app::buildWorkspaceAiSplineSelectionGeometry(
-                    spline, *options.aiSplineIndex);
+                    spline, options.aiSplineIndices);
             if (!selection.ok())
                 throw std::runtime_error(selection.diagnostic.code + ": " +
                                          selection.diagnostic.message);
-            std::cout << "AI spline current index: index="
-                      << *options.aiSplineIndex
+            std::cout << "AI spline last selected index: index="
+                      << *selection.geometry.last_selected_index
                       << ", lines="
                       << selection.geometry.sample_point_count
                       << ", draws=" << selection.geometry.chunks.size()
+                      << ", selected="
+                      << selection.geometry.selected_point_count
                       << '\n';
             loaded.aiSplineSelection = std::move(selection.geometry);
         }

@@ -239,10 +239,13 @@ The interval always uses interpolation and disables depth tests and writes.
 `--ai-spline-show-right` shows the recovered right side spline.
 The side options are independent and off by default. They require version-7
 payloads and use cyan with normal depth.
-`--ai-spline-index <index>` draws the recovered current-point marker.
-The zero-based index refers to the retained point array. The center line is
-yellow and 40 units high. If the left width is nonzero, the option also draws
-two cyan width markers. This option uses normal depth and requires version-7
+`--ai-spline-index <index>` draws a recovered selected-point marker.
+Repeat this option to select more points. The CLI keeps insertion order and
+ignores duplicate indices. The last unique index supplies the normalized UI
+return in the native editor.
+Each zero-based index refers to the retained point array. Each center line is
+yellow and 40 units high. If the left width is nonzero, the marker also has
+two cyan width lines. This option uses normal depth and requires version-7
 payloads.
 `--ai-spline-show-camber` shows one vertical camber line at each point.
 Positive camber is green. Zero and negative camber are red. The line height is
@@ -250,7 +253,7 @@ the absolute camber value times 1,000. This option uses normal depth and
 requires version-7 payloads.
 The Vulkan and D3D12 line list is a labeled translation of the OpenGL line
 strip. The translation keeps all segments at portable chunk boundaries.
-The option does not enable editing.
+The option does not enable the native first-selected mutable edit path.
 The old `--selection-axis-vertex` and `--selection-axis-fragment` names remain aliases.
 The grid starts hidden. `--grid` shows the recovered 10 m magenta grid.
 The view axis starts hidden. `--view-axis` shows the recovered one-meter

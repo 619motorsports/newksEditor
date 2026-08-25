@@ -1365,10 +1365,14 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                           ? (static_cast<std::size_t>(
                                  geometry.sample_point_count) - 1U) * 2U
                           : 0U;
+            const bool selection_state_empty =
+                geometry.selected_point_count == 0U &&
+                !geometry.last_selected_index.has_value();
             const bool primary_metadata_valid =
                 input.kind == WorkspaceAiSplinePassKind::primary &&
                 geometry.pass == WorkspaceAiSplinePassKind::primary &&
                 geometry.topology == WorkspaceAiSplineTopology::polyline &&
+                selection_state_empty &&
                 (geometry.mode == WorkspaceAiSplineDisplayMode::raw
                      ? geometry.sample_point_count ==
                            geometry.source_point_count
@@ -1382,6 +1386,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 geometry.pass == WorkspaceAiSplinePassKind::interval &&
                 geometry.topology == WorkspaceAiSplineTopology::polyline &&
                 geometry.mode == WorkspaceAiSplineDisplayMode::interpolated &&
+                selection_state_empty &&
                 geometry.source_point_count >= 4U &&
                 geometry.sample_point_count >= 1U &&
                 geometry.sample_point_count <=
@@ -1392,6 +1397,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 geometry.pass == input.kind &&
                 geometry.topology == WorkspaceAiSplineTopology::polyline &&
                 geometry.mode == WorkspaceAiSplineDisplayMode::raw &&
+                selection_state_empty &&
                 geometry.sample_point_count <= geometry.source_point_count &&
                 geometry.source_point_count <=
                     render::max_overlay_line_total_vertices / 2U + 1U &&
@@ -1404,8 +1410,17 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 geometry.topology ==
                     WorkspaceAiSplineTopology::independent_lines &&
                 geometry.mode == WorkspaceAiSplineDisplayMode::raw &&
-                (geometry.sample_point_count == 1U ||
-                 geometry.sample_point_count == 3U) &&
+                geometry.selected_point_count >= 1U &&
+                geometry.selected_point_count <=
+                    geometry.source_point_count &&
+                geometry.last_selected_index.has_value() &&
+                *geometry.last_selected_index <
+                    geometry.source_point_count &&
+                geometry.sample_point_count >=
+                    geometry.selected_point_count &&
+                static_cast<std::size_t>(geometry.sample_point_count) <=
+                    static_cast<std::size_t>(
+                        geometry.selected_point_count) * 3U &&
                 geometry.source_point_count <=
                     workspace_ai_spline_max_interpolation_control_points &&
                 request.ai_spline_geometry != nullptr &&
@@ -1417,6 +1432,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 geometry.topology ==
                     WorkspaceAiSplineTopology::independent_lines &&
                 geometry.mode == WorkspaceAiSplineDisplayMode::raw &&
+                selection_state_empty &&
                 geometry.sample_point_count == geometry.source_point_count &&
                 geometry.source_point_count <=
                     render::max_overlay_line_total_vertices / 2U &&
@@ -1466,25 +1482,51 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 }
             }
             if (input.kind == WorkspaceAiSplinePassKind::selection) {
+                std::size_t center_count = 0U;
+                std::size_t side_count = 0U;
                 for (std::size_t vertex = 0U;
                      vertex < geometry.vertices.size(); vertex += 2U) {
                     const auto& begin = geometry.vertices[vertex];
                     const auto& end = geometry.vertices[vertex + 1U];
-                    const bool center = vertex == 0U;
+                    const bool center =
+                        begin.color == workspace_ai_spline_selection_color;
+                    if (center) {
+                        if (side_count != 0U && side_count != 2U) {
+                            result.status = WorkspaceViewportStatus::invalid;
+                            result.diagnostic = diagnostic(
+                                "workspace_viewport_ai_spline_selection_line_invalid",
+                                "Each AI spline selection marker requires zero or two side lines");
+                            return result;
+                        }
+                        ++center_count;
+                        side_count = 0U;
+                    } else {
+                        ++side_count;
+                    }
                     const auto& line_color =
                         center ? workspace_ai_spline_selection_color
                                : workspace_ai_spline_selection_side_color;
-                    if (begin.color != line_color || end.color != line_color ||
+                    if (center_count == 0U || side_count > 2U ||
+                        begin.color != line_color || end.color != line_color ||
                         begin.position[0] != end.position[0] ||
                         begin.position[2] != end.position[2] ||
-                        end.position[1] < begin.position[1]) {
+                        end.position[1] !=
+                            begin.position[1] +
+                                workspace_ai_spline_selection_height) {
                         result.status = WorkspaceViewportStatus::invalid;
                         result.diagnostic = diagnostic(
                             "workspace_viewport_ai_spline_selection_line_invalid",
-                            "AI spline current-index lines must be ordered, "
-                            "vertical, upward, and use recovered colors");
+                            "AI spline selection lines must be vertical and use the recovered height and colors");
                         return result;
                     }
+                }
+                if ((side_count != 0U && side_count != 2U) ||
+                    center_count != geometry.selected_point_count) {
+                    result.status = WorkspaceViewportStatus::invalid;
+                    result.diagnostic = diagnostic(
+                        "workspace_viewport_ai_spline_selection_line_invalid",
+                        "AI spline selection markers do not match the recovered line groups");
+                    return result;
                 }
             }
             if (input.kind == WorkspaceAiSplinePassKind::camber) {

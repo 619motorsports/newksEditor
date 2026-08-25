@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace apex::app {
@@ -33,6 +34,8 @@ inline constexpr std::uint32_t
     workspace_ai_spline_interpolated_sample_count = 5'001U;
 inline constexpr std::size_t
     workspace_ai_spline_max_interpolation_control_points = 65'536U;
+inline constexpr std::size_t workspace_ai_spline_max_selection_points =
+    render::max_overlay_line_total_vertices / 2U;
 
 enum class WorkspaceAiSplineDisplayMode : std::uint8_t {
     raw,
@@ -78,6 +81,8 @@ struct WorkspaceAiSplineChunk {
 struct WorkspaceAiSplineGeometry {
     std::uint32_t source_point_count = 0U;
     std::uint32_t sample_point_count = 0U;
+    std::uint32_t selected_point_count = 0U;
+    std::optional<std::uint32_t> last_selected_index;
     WorkspaceAiSplineDisplayMode mode = WorkspaceAiSplineDisplayMode::raw;
     WorkspaceAiSplinePassKind pass = WorkspaceAiSplinePassKind::primary;
     WorkspaceAiSplineTopology topology = WorkspaceAiSplineTopology::polyline;
@@ -125,8 +130,16 @@ buildWorkspaceAiSplineGeometry(
 [[nodiscard]] WorkspaceAiSplineResult buildWorkspaceAiSplineCamberGeometry(
     const formats::AiSpline& spline);
 
-// Build the recovered marker for one current spline index. The marker includes
-// a yellow center line and optional cyan side-width lines.
+// Build the recovered markers for an ordered selected-index vector. Repeated
+// indices are ignored, as in SplineEditor::addIndex. Each selected point emits
+// a yellow center line and optional cyan side-width lines. The final unique
+// index supplies the native normalized pick/UI return.
+[[nodiscard]] WorkspaceAiSplineResult buildWorkspaceAiSplineSelectionGeometry(
+    const formats::AiSpline& spline,
+    std::span<const std::uint32_t> selected_indices);
+
+// Keep the original one-index entry point for callers that do not manage a
+// selected-index vector.
 [[nodiscard]] WorkspaceAiSplineResult buildWorkspaceAiSplineSelectionGeometry(
     const formats::AiSpline& spline, std::uint32_t selected_index);
 

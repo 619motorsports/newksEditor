@@ -1,11 +1,13 @@
 #include "apex/app/workspace_ai_spline.hpp"
 
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <vector>
 
 namespace {
 
@@ -656,6 +658,8 @@ void buildsRecoveredCurrentIndexMarker() {
                 result.geometry.topology ==
                     apex::app::WorkspaceAiSplineTopology::independent_lines &&
                 result.geometry.source_point_count == 3U &&
+                result.geometry.selected_point_count == 1U &&
+                result.geometry.last_selected_index == 0U &&
                 result.geometry.sample_point_count == 3U &&
                 result.geometry.vertices.size() == 6U &&
                 result.geometry.chunks.size() == 1U &&
@@ -718,6 +722,91 @@ void buildsRecoveredCurrentIndexMarker() {
             "closed final current index must wrap to the first point");
 }
 
+void buildsRecoveredSelectedIndexMarkers() {
+    apex::formats::AiSpline spline;
+    spline.version = 7U;
+    spline.points = {point(0.0F, 10.0F, 0.0F),
+                     point(10.0F, 20.0F, 0.0F),
+                     point(20.0F, 30.0F, 0.0F)};
+    spline.points[0U].tag = 2;
+    spline.points[1U].tag = 0;
+    spline.points[2U].tag = 1;
+    spline.payloads.resize(3U);
+    spline.payloads[0U].side0 = 0.0F;
+    spline.payloads[0U].side1 = 99.0F;
+    spline.payloads[2U].side0 = 1.0F;
+    spline.payloads[2U].side1 = 2.0F;
+
+    const std::array<std::uint32_t, 3U> selected = {1U, 0U, 1U};
+    const auto result =
+        apex::app::buildWorkspaceAiSplineSelectionGeometry(spline, selected);
+    require(result.ok() && result.geometry.selected_point_count == 2U &&
+                result.geometry.last_selected_index == 0U &&
+                result.geometry.sample_point_count == 4U &&
+                result.geometry.vertices.size() == 8U &&
+                result.geometry.chunks.size() == 1U,
+            "ordered selected-index markers must deduplicate repeated indices");
+    const std::array<std::array<float, 3U>, 8U> expected = {{
+        {10.0F, 20.0F, 0.0F}, {10.0F, 60.0F, 0.0F},
+        {0.0F, 10.0F, 0.0F}, {0.0F, 50.0F, 0.0F},
+        {0.0F, -10.0F, -1.0F}, {0.0F, 30.0F, -1.0F},
+        {0.0F, -10.0F, 2.0F}, {0.0F, 30.0F, 2.0F},
+    }};
+    for (std::size_t index = 0U; index < expected.size(); ++index)
+        require(result.geometry.vertices[index].position == expected[index],
+                "selected-index marker order or endpoint mismatch");
+    require(result.geometry.vertices[2U].color ==
+                    apex::app::workspace_ai_spline_selection_color &&
+                result.geometry.vertices[4U].color ==
+                    apex::app::workspace_ai_spline_selection_side_color,
+            "each selected-index marker must start with its yellow center line");
+
+    constexpr std::size_t selected_count = 700U;
+    apex::formats::AiSpline many;
+    many.version = 7U;
+    many.points.resize(selected_count);
+    many.payloads.resize(selected_count);
+    std::vector<std::uint32_t> many_indices;
+    many_indices.reserve(selected_count);
+    for (std::size_t index = 0U; index < selected_count; ++index) {
+        many.points[index].tag = static_cast<std::int32_t>(index);
+        many.points[index].position[0] = static_cast<float>(index);
+        many.payloads[index].side0 = 1.0F;
+        many_indices.push_back(static_cast<std::uint32_t>(index));
+    }
+    const auto chunked =
+        apex::app::buildWorkspaceAiSplineSelectionGeometry(many,
+                                                            many_indices);
+    require(chunked.ok() && chunked.geometry.selected_point_count == 700U &&
+                chunked.geometry.last_selected_index == 699U &&
+                chunked.geometry.sample_point_count == 2'100U &&
+                chunked.geometry.vertices.size() == 4'200U &&
+                chunked.geometry.chunks.size() == 2U &&
+                chunked.geometry.chunks[0U].vertex_count ==
+                    apex::render::max_overlay_line_vertices &&
+                chunked.geometry.chunks[1U].first_vertex ==
+                    apex::render::max_overlay_line_vertices &&
+                chunked.geometry.chunks[1U].vertex_count == 104U &&
+                chunked.geometry.vertices.front().color ==
+                    apex::app::workspace_ai_spline_selection_color &&
+                chunked.geometry.vertices.back().color ==
+                    apex::app::workspace_ai_spline_selection_side_color,
+            "wide selected-index markers must cross chunks without dropped lines");
+
+    apex::formats::AiSpline large_direction;
+    large_direction.version = 7U;
+    large_direction.points = {point(0.0F, 0.0F, 0.0F),
+                              point(3.0e38F, 0.0F, 0.0F)};
+    large_direction.payloads.resize(2U);
+    large_direction.payloads[0U].side0 = 1.0F;
+    const auto stable_direction =
+        apex::app::buildWorkspaceAiSplineSelectionGeometry(
+            large_direction, 0U);
+    require(stable_direction.ok() &&
+                stable_direction.geometry.vertices[2U].position[2] == -1.0F,
+            "finite large directions must not collapse during normalization");
+}
+
 void rejectsUnsafeCurrentIndexMarkers() {
     apex::formats::AiSpline spline;
     spline.version = 2U;
@@ -777,6 +866,69 @@ void rejectsUnsafeCurrentIndexMarkers() {
                 result.diagnostic.code ==
                     "workspace_ai_spline_selection_source_limit",
             "current-index markers must enforce the bounded point limit");
+
+    const std::vector<std::uint32_t> empty_selection;
+    result = apex::app::buildWorkspaceAiSplineSelectionGeometry(
+        spline, empty_selection);
+    require(!result.ok() && result.diagnostic.code ==
+                "workspace_ai_spline_selection_empty",
+            "empty selection geometry must be rejected");
+
+    apex::formats::AiSpline too_many;
+    too_many.version = 7U;
+    too_many.points.resize(
+        apex::app::workspace_ai_spline_max_selection_points + 1U);
+    too_many.payloads.resize(too_many.points.size());
+    std::vector<std::uint32_t> too_many_indices;
+    too_many_indices.reserve(too_many.points.size());
+    for (std::size_t index = 0U; index < too_many.points.size(); ++index) {
+        too_many.points[index].tag = static_cast<std::int32_t>(index);
+        too_many_indices.push_back(static_cast<std::uint32_t>(index));
+    }
+    result = apex::app::buildWorkspaceAiSplineSelectionGeometry(
+        too_many, too_many_indices);
+    require(!result.ok() &&
+                result.status ==
+                    apex::app::WorkspaceAiSplineStatus::limit_exceeded &&
+                result.diagnostic.code ==
+                    "workspace_ai_spline_selection_count_limit",
+            "selection input must enforce its bounded unique-marker count");
+
+    constexpr std::size_t wide_count =
+        apex::render::max_overlay_line_total_vertices / 6U + 1U;
+    apex::formats::AiSpline wide;
+    wide.version = 7U;
+    wide.points.resize(wide_count);
+    wide.payloads.resize(wide_count);
+    std::vector<std::uint32_t> wide_indices;
+    wide_indices.reserve(wide_count);
+    for (std::size_t index = 0U; index < wide_count; ++index) {
+        wide.points[index].tag = static_cast<std::int32_t>(index);
+        wide.points[index].position[0] = static_cast<float>(index);
+        wide.payloads[index].side0 = 1.0F;
+        wide_indices.push_back(static_cast<std::uint32_t>(index));
+    }
+    result = apex::app::buildWorkspaceAiSplineSelectionGeometry(
+        wide, wide_indices);
+    require(!result.ok() &&
+                result.status ==
+                    apex::app::WorkspaceAiSplineStatus::limit_exceeded &&
+                result.diagnostic.code ==
+                    "workspace_ai_spline_selection_vertex_limit",
+            "selection markers must enforce the total vertex limit");
+
+    apex::formats::AiSpline subtraction_overflow;
+    subtraction_overflow.version = 7U;
+    subtraction_overflow.points = {
+        point(-std::numeric_limits<float>::max(), 0.0F, 0.0F),
+        point(std::numeric_limits<float>::max(), 0.0F, 0.0F)};
+    subtraction_overflow.payloads.resize(2U);
+    subtraction_overflow.payloads[0U].side0 = 1.0F;
+    result = apex::app::buildWorkspaceAiSplineSelectionGeometry(
+        subtraction_overflow, 0U);
+    require(!result.ok() && result.diagnostic.code ==
+                "workspace_ai_spline_selection_derived_non_finite",
+            "selection markers must reject an overflowing direction delta");
 }
 
 void rejectsUnsafeCamberSources() {
@@ -848,6 +1000,7 @@ int main() {
         buildsRecoveredCamberGeometry();
         rejectsUnsafeCamberSources();
         buildsRecoveredCurrentIndexMarker();
+        buildsRecoveredSelectedIndexMarkers();
         rejectsUnsafeCurrentIndexMarkers();
     } catch (const std::exception& error) {
         std::cerr << "workspace_ai_spline_tests: " << error.what() << '\n';

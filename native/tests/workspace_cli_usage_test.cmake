@@ -175,23 +175,6 @@ if(detached_ai_index_position EQUAL -1)
 endif()
 
 execute_process(
-  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
-          --ai-spline-index 0 --ai-spline-index 1
-  RESULT_VARIABLE duplicate_ai_index_result
-  ERROR_VARIABLE duplicate_ai_index_error
-)
-if(NOT duplicate_ai_index_result STREQUAL "1")
-  message(FATAL_ERROR
-    "duplicate AI index returned ${duplicate_ai_index_result}: ${duplicate_ai_index_error}")
-endif()
-string(FIND "${duplicate_ai_index_error}"
-  "duplicate --ai-spline-index option" duplicate_ai_index_position)
-if(duplicate_ai_index_position EQUAL -1)
-  message(FATAL_ERROR
-    "duplicate AI index was not diagnosed: ${duplicate_ai_index_error}")
-endif()
-
-execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --ai-spline-index -1
   RESULT_VARIABLE malformed_ai_index_result
   ERROR_VARIABLE malformed_ai_index_error
@@ -618,7 +601,8 @@ endif()
 execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
           --ai-spline "${ai_spline}"
-          --ai-spline-show-left --ai-spline-show-right --ai-spline-index 0
+          --ai-spline-show-left --ai-spline-show-right
+          --ai-spline-index 0 --ai-spline-index 1 --ai-spline-index 0
           --ai-spline-show-camber
           --shader-family fixture --shader-vertex missing.vert.spv
           --shader-fragment missing.frag.spv
@@ -642,7 +626,7 @@ string(FIND "${side_ai_load_output}"
   "AI spline camber: lines=3536, draws=2"
   camber_ai_load_position)
 string(FIND "${side_ai_load_output}"
-  "AI spline current index: index=0, lines=3, draws=1"
+  "AI spline last selected index: index=1, lines=6, draws=1, selected=2"
   current_ai_index_position)
 if(left_ai_load_position EQUAL -1 OR right_ai_load_position EQUAL -1 OR
    current_ai_index_position EQUAL -1 OR camber_ai_load_position EQUAL -1)

@@ -81,6 +81,16 @@ vertical lines. Each line extends from 20 units below to 20 units above its
 side point. A zero left width skips both side lines. The point tag selects the
 payload. The method inherits the identity world matrix and normal depth.
 
+The `selectedIndices` field is a `std::vector<int>` at offset 52.
+`SplineEditor.addIndex` is at `0x10024BFC`. It ignores an existing index and
+appends each new index. Thus, the vector keeps insertion order without
+duplicates. `getSelectedIndices` is at `0x1001F6A8` and returns a copy.
+
+`onNodeRender` has method RVA `0x2F754` and execution VA `0x1002F760`.
+It calls `showCurrentSplineIndexInfo` for each selected index. The first entry
+drives `editSplineManual` during mutable editing. The movable edit point uses
+a separate edit-point vector.
+
 `SplineEditor.renderCamberOnSpline` has token `0x0600010C` and RVA `0x2E8C0`.
 It draws one vertical line for each point. The line height is
 `abs(payload.camber) * 1000`.
@@ -89,9 +99,9 @@ Positive camber uses `(0, 3, 0, 1)`. Zero and negative camber use
 `(3, 0, 0, 1)`. The helper changes neither the matrix nor the depth mode.
 It gets each payload through the point-tag mapping.
 
-If selected indices exist, the helper copies the last selected camber into
-`currentCamber`. Otherwise, it sets `currentCamber` to zero. This state does
-not change the number of rendered lines.
+`onPickedPoint` is at `0x1002FED0`. It returns the final selected index divided
+by the point count. This value is the normalized pick/UI position. This return
+does not make the final entry the mutable edit point.
 
 `GLRenderer::spline` is at `0x100479E8` and PDB location `0001:289256`.
 It returns when the point count is two or less. Otherwise, it emits open line
@@ -127,9 +137,10 @@ zero to one.
 passes. Both options require version-7 payloads. The default state is off,
 which matches the two installed-editor checkboxes.
 
-`--ai-spline-index <index>` enables one recovered current-point marker. The
-CLI uses one zero-based retained-point index. It keeps multi-selection and the
-mutable edit-point lifecycle staged.
+Each `--ai-spline-index <index>` adds one recovered selected-point marker.
+Repeated options model `addIndex`: they keep insertion order and ignore
+duplicate indices. The CLI reports the last selected index. The native
+first-selected mutable edit path remains staged.
 
 `--ai-spline-show-camber` enables the independent camber pass. This option
 also requires version-7 payloads and starts off. Spline edit controls remain
