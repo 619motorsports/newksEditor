@@ -3,7 +3,7 @@
 This note records recovered behavior from the installed `ksNet.dll` and its
 matching PDB. The DLL SHA-256 is
 `b38dcb826a3311d7233cf0a6a58e5da16b6c8679f8490091e7b434bf730091ca`.
-The native viewport implements the raw and interpolated primary-spline paths.
+The native viewport implements the primary spline and interpolated interval.
 The implementation uses a labeled line-list translation for Vulkan and D3D12.
 
 `SplineEditor.onNodeRender` has managed token `0x06000107` and RVA `0x2F748`.
@@ -36,9 +36,14 @@ length. Closing-segment lookup divides by the same endpoint chord. The safe
 adapter rejects a zero endpoint chord instead of reproducing native division
 by zero.
 
-If the input and output interval values are valid, the callback draws that
-interval in `(0, 0, 3, 1)`. The interval helper (`0x06000109`) uses the same
-increment. It selects depth mode 2 before the draw and restores depth mode 0.
+The constructor sets `inPoint` and `outPoint` to `-1.0F` at offsets 12 and 16.
+The callback skips the interval when either value equals this sentinel.
+The Track Cameras tab supplies these values through its `set IN` and `set OUT`
+controls. The AI tab has no interval controls.
+The interval helper has token `0x06000109` and native RVA `0x1002DA90`.
+It samples from `inPoint` through `outPoint` with the same float increment.
+The helper uses `(0, 0, 3, 1)` and depth mode 2 (`eDepthOff`).
+It restores depth mode 0 (`eDepthNormal`) after the draw.
 
 The callback creates a wrapped horizontal direction cache. It creates the left
 and right splines only when the left spline exists and the right spline is
@@ -66,24 +71,25 @@ point pair to one line-list segment. It keeps every segment at a portable
 chunk boundary. Thus, this behavior is not an exact copy of the boundary gap
 in the original OpenGL helper.
 
-The viewport stores the converted data in an immutable buffer. It uses normal
-less-or-equal depth tests and writes. It draws the spline after the selected
-mesh, before the view axis and transparent geometry. The grid and the selected
-node axis remain in the late overlay phase.
+The viewport stores each converted pass in an immutable buffer. The primary
+pass uses normal less-or-equal depth tests and writes. The blue interval uses
+no depth test or write. It follows the primary pass at the same callback phase.
+The grid and selected-node axis remain in the late overlay phase.
 
 The CLI option is `--ai-spline <file>`. It accepts bounded version-2 and
 version-7 files. It requires a workspace model and the authoring-overlay shader
 pair. Raw mode remains the default. `--ai-spline-mode interpolated` enables the
-recovered interpolated path. Intervals, side splines, camber, and edit controls
-remain staged.
+recovered interpolated primary path. `--ai-spline-interval <in> <out>` adds the
+recovered blue interval. The safe adapter requires a finite, ordered range from
+zero to one. Side splines, camber, and edit controls remain staged.
 
 The production WebGL source has no AI-spline load or render path. A source
 search found no AI-spline or `fast_lane.ai` identifiers. Thus, a direct WebGL
 visual comparison is not possible for this native-only feature. The complete
 production WebGL suite passed 380 tests. It skipped 34 installed-fixture tests.
 
-SwiftShader executes the native line path at 1x and 4x MSAA. The pixel test
-checks magenta color clamping, normal-depth rejection, and the final resolve.
+SwiftShader executes both native line passes at 1x and 4x MSAA. The pixel test
+checks magenta depth rejection and blue depth-off rendering through an occluder.
 The sanitizer-enabled native suite passed all 75 tests with SwiftShader.
 The D3D12 code uses the same batch contract. A Windows WARP test remains
 necessary for D3D12 execution evidence.

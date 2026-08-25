@@ -63,7 +63,7 @@ void usage(std::ostream& output) {
               "                       [--track-camera-set <file> --track-camera-index <index>]\n"
               "                       [--track-camera-position <value>] [--track-camera-play]\n"
               "                       [--track-camera-mode webgl|installed-editor]\n"
-              "                       [--ai-spline <file> [--ai-spline-mode raw|interpolated]]\n"
+              "                       [--ai-spline <file> [--ai-spline-mode raw|interpolated] [--ai-spline-interval <in> <out>]]\n"
               "                       [--node-search <query>] [--selected-node <id> [--isolate-selected]]\n"
               "                       [--show-hidden] [--wireframe] [--grid] [--view-axis]\n"
               "                       [--weather <stock-id>] [--sun-heading <degrees>] [--sun-height <degrees>]\n"
@@ -556,6 +556,7 @@ struct WindowWorkspaceOptions {
     apex::app::WorkspaceAiSplineDisplayMode aiSplineMode =
         apex::app::WorkspaceAiSplineDisplayMode::raw;
     bool aiSplineModeSpecified = false;
+    std::optional<apex::app::WorkspaceAiSplineInterval> aiSplineInterval;
     std::optional<std::string> nodeSearch;
     std::optional<apex::scene::NodeId> selectedNode;
     bool isolateSelected = false;
@@ -611,6 +612,7 @@ struct LoadedWindowWorkspace {
     };
     std::optional<TrackCamera> trackCamera;
     std::optional<apex::app::WorkspaceAiSplineGeometry> aiSpline;
+    std::optional<apex::app::WorkspaceAiSplineGeometry> aiSplineInterval;
     apex::app::WorkspaceSelectionState selection;
     bool animationSkinningRequired = false;
 };
@@ -803,6 +805,21 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             result.aiSplineMode = parse_ai_spline_mode(
                 require_value("--ai-spline-mode"));
             result.aiSplineModeSpecified = true;
+        } else if (option == "--ai-spline-interval") {
+            if (result.aiSplineInterval.has_value())
+                throw std::runtime_error(
+                    "duplicate --ai-spline-interval option");
+            const double begin = parse_finite_number(
+                require_value("--ai-spline-interval"),
+                "AI spline interval start");
+            const double end = parse_finite_number(
+                require_value("--ai-spline-interval"),
+                "AI spline interval end");
+            if (begin < 0.0 || end > 1.0 || begin > end)
+                throw std::runtime_error(
+                    "AI spline interval must be ordered and from zero to one");
+            result.aiSplineInterval = {
+                static_cast<float>(begin), static_cast<float>(end)};
         } else if (option == "--node-search") {
             if (result.nodeSearch.has_value())
                 throw std::runtime_error("duplicate --node-search option");
@@ -1022,6 +1039,9 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
     if (result.aiSplineModeSpecified && !result.aiSpline.has_value())
         throw std::runtime_error(
             "--ai-spline-mode requires --ai-spline");
+    if (result.aiSplineInterval.has_value() && !result.aiSpline.has_value())
+        throw std::runtime_error(
+            "--ai-spline-interval requires --ai-spline");
     if (result.isolateSelected && !result.selectedNode.has_value())
         throw std::runtime_error("--isolate-selected requires --selected-node");
     const bool selection_options = result.nodeSearch.has_value() ||
@@ -1233,6 +1253,24 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
                          geometry.geometry.mode)
                   << '\n';
         loaded.aiSpline = std::move(geometry.geometry);
+        if (options.aiSplineInterval.has_value()) {
+            auto interval =
+                apex::app::buildWorkspaceAiSplineIntervalGeometry(
+                    spline, *options.aiSplineInterval);
+            if (!interval.ok())
+                throw std::runtime_error(interval.diagnostic.code + ": " +
+                                         interval.diagnostic.message);
+            std::cout << "AI spline interval: in="
+                      << options.aiSplineInterval->begin
+                      << ", out=" << options.aiSplineInterval->end
+                      << ", samples="
+                      << interval.geometry.sample_point_count
+                      << ", segments="
+                      << interval.geometry.vertices.size() / 2U
+                      << ", draws=" << interval.geometry.chunks.size()
+                      << '\n';
+            loaded.aiSplineInterval = std::move(interval.geometry);
+        }
     }
     const bool selection_options = options.nodeSearch.has_value() ||
                                    options.selectedNode.has_value() ||
@@ -1643,6 +1681,16 @@ int run_window(int argc, char** argv) {
             pipeline.transform_contract =
                 apex::render::PipelineTransformContract::draw_matrices;
             request.ai_spline_geometry = &*loaded_workspace.aiSpline;
+            if (loaded_workspace.aiSplineInterval.has_value()) {
+                auto interval_pipeline = pipeline;
+                interval_pipeline.name = "workspace-ai-spline-interval";
+                interval_pipeline.depth.test_enabled = false;
+                interval_pipeline.depth.write_enabled = false;
+                request.ai_spline_interval_geometry =
+                    &*loaded_workspace.aiSplineInterval;
+                request.ai_spline_interval_pipeline =
+                    std::move(interval_pipeline);
+            }
             request.ai_spline_pipeline = std::move(pipeline);
         }
         if (loaded_workspace.selectedMeshModules.has_value()) {

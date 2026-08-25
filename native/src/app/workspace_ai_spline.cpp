@@ -20,7 +20,8 @@ bool finite_position(const std::array<float, 3U>& position) noexcept {
 }
 
 void build_line_list(WorkspaceAiSplineGeometry& geometry,
-                     std::span<const std::array<float, 3U>> positions) {
+                     std::span<const std::array<float, 3U>> positions,
+                     const std::array<float, 3U>& color) {
     geometry.sample_point_count =
         static_cast<std::uint32_t>(positions.size());
     // GLRenderer::spline returns without drawing for zero, one, or two
@@ -44,9 +45,9 @@ void build_line_list(WorkspaceAiSplineGeometry& geometry,
         for (std::size_t segment = first_segment;
              segment < first_segment + current_segments; ++segment) {
             geometry.vertices.push_back(
-                {positions[segment], workspace_ai_spline_raw_color});
+                {positions[segment], color});
             geometry.vertices.push_back(
-                {positions[segment + 1U], workspace_ai_spline_raw_color});
+                {positions[segment + 1U], color});
         }
         geometry.chunks.push_back(
             {static_cast<std::uint32_t>(first_vertex),
@@ -54,19 +55,32 @@ void build_line_list(WorkspaceAiSplineGeometry& geometry,
     }
 }
 
-} // namespace
-
-WorkspaceAiSplineResult
-buildWorkspaceAiSplineGeometry(const formats::AiSpline& spline,
-                               WorkspaceAiSplineDisplayMode mode) {
+WorkspaceAiSplineResult build_geometry(
+    const formats::AiSpline& spline, WorkspaceAiSplineDisplayMode mode,
+    WorkspaceAiSplinePassKind pass,
+    const std::optional<WorkspaceAiSplineInterval>& interval) {
     WorkspaceAiSplineResult result;
     try {
-        if (mode != WorkspaceAiSplineDisplayMode::raw &&
-            mode != WorkspaceAiSplineDisplayMode::interpolated) {
+        if ((mode != WorkspaceAiSplineDisplayMode::raw &&
+             mode != WorkspaceAiSplineDisplayMode::interpolated) ||
+            (pass != WorkspaceAiSplinePassKind::primary &&
+             pass != WorkspaceAiSplinePassKind::interval) ||
+            (interval.has_value() !=
+             (pass == WorkspaceAiSplinePassKind::interval))) {
             result.status = WorkspaceAiSplineStatus::invalid_source;
             result.diagnostic = diagnostic(
                 "workspace_ai_spline_mode_invalid",
                 "AI spline display mode is invalid");
+            return result;
+        }
+        if (interval.has_value() &&
+            (!std::isfinite(interval->begin) ||
+             !std::isfinite(interval->end) || interval->begin < 0.0F ||
+             interval->end > 1.0F || interval->begin > interval->end)) {
+            result.status = WorkspaceAiSplineStatus::invalid_source;
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_interval_invalid",
+                "AI spline interval must be finite, ordered, and from zero to one");
             return result;
         }
 
@@ -84,7 +98,8 @@ buildWorkspaceAiSplineGeometry(const formats::AiSpline& spline,
             return result;
         }
         const std::size_t max_source_points =
-            mode == WorkspaceAiSplineDisplayMode::raw
+            mode == WorkspaceAiSplineDisplayMode::raw &&
+                    pass == WorkspaceAiSplinePassKind::primary
                 ? render::max_overlay_line_total_vertices / 2U + 1U
                 : workspace_ai_spline_max_interpolation_control_points;
         if (source_point_count > max_source_points) {
@@ -127,6 +142,7 @@ buildWorkspaceAiSplineGeometry(const formats::AiSpline& spline,
         result.geometry.source_point_count =
             static_cast<std::uint32_t>(positions.size());
         result.geometry.mode = mode;
+        result.geometry.pass = pass;
         for (const auto& position : positions) {
             if (!finite_position(position)) {
                 result.status = WorkspaceAiSplineStatus::invalid_source;
@@ -138,7 +154,8 @@ buildWorkspaceAiSplineGeometry(const formats::AiSpline& spline,
         }
 
         if (mode == WorkspaceAiSplineDisplayMode::raw) {
-            build_line_list(result.geometry, positions);
+            build_line_list(result.geometry, positions,
+                            workspace_ai_spline_raw_color);
         } else {
             if (positions.size() < 4U) {
                 result.status = WorkspaceAiSplineStatus::invalid_source;
@@ -163,7 +180,9 @@ buildWorkspaceAiSplineGeometry(const formats::AiSpline& spline,
 
             std::vector<std::array<float, 3U>> samples;
             samples.reserve(workspace_ai_spline_interpolated_sample_count);
-            for (float position = 0.0F; position <= 1.0F;
+            const float begin = interval.has_value() ? interval->begin : 0.0F;
+            const float end = interval.has_value() ? interval->end : 1.0F;
+            for (float position = begin; position <= end;
                  position += workspace_ai_spline_interpolation_step) {
                 const auto sample = sampleInstalledEditorSpline(
                     interpolating, position);
@@ -176,8 +195,16 @@ buildWorkspaceAiSplineGeometry(const formats::AiSpline& spline,
                     return result;
                 }
                 samples.push_back(*sample);
+                if (samples.size() >
+                    workspace_ai_spline_interpolated_sample_count) {
+                    result.status = WorkspaceAiSplineStatus::limit_exceeded;
+                    result.diagnostic = diagnostic(
+                        "workspace_ai_spline_interval_sample_limit",
+                        "AI spline interval exceeds the recovered sample limit");
+                    return result;
+                }
             }
-            if (samples.size() !=
+            if (!interval.has_value() && samples.size() !=
                 workspace_ai_spline_interpolated_sample_count) {
                 result.status = WorkspaceAiSplineStatus::invalid_source;
                 result.diagnostic = diagnostic(
@@ -186,7 +213,10 @@ buildWorkspaceAiSplineGeometry(const formats::AiSpline& spline,
                     "sampling schedule");
                 return result;
             }
-            build_line_list(result.geometry, samples);
+            build_line_list(result.geometry, samples,
+                            interval.has_value()
+                                ? workspace_ai_spline_interval_color
+                                : workspace_ai_spline_raw_color);
         }
         if (result.geometry.chunks.size() >
                 render::max_overlay_line_draws ||
@@ -209,6 +239,21 @@ buildWorkspaceAiSplineGeometry(const formats::AiSpline& spline,
         result.geometry = {};
         return result;
     }
+}
+
+} // namespace
+
+WorkspaceAiSplineResult
+buildWorkspaceAiSplineGeometry(const formats::AiSpline& spline,
+                               WorkspaceAiSplineDisplayMode mode) {
+    return build_geometry(spline, mode, WorkspaceAiSplinePassKind::primary,
+                          std::nullopt);
+}
+
+WorkspaceAiSplineResult buildWorkspaceAiSplineIntervalGeometry(
+    const formats::AiSpline& spline, WorkspaceAiSplineInterval interval) {
+    return build_geometry(spline, WorkspaceAiSplineDisplayMode::interpolated,
+                          WorkspaceAiSplinePassKind::interval, interval);
 }
 
 const char* workspace_ai_spline_display_mode_name(

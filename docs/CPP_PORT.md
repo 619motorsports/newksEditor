@@ -200,13 +200,15 @@ remains unchanged and feature-complete.
   The same batch accepts one recovered selected-mesh draw. Opaque geometry
   draws first. The selected mesh, AI spline, and view axis draw next.
   Transparent geometry and late editor overlays follow in that order.
-  The optional AI spline uses the fixed line ABI with normal depth.
+  The optional primary AI spline uses the fixed line ABI with normal depth.
   Raw mode uses version-7 points or the recovered retained version-2 points.
   The line-list conversion keeps all source segments across bounded chunks.
   This conversion is a labeled portable translation of the OpenGL line strip.
   Explicit interpolated mode recomputes the installed editor's Catmull-Rom
   arc-length table. It ignores serialized point lengths and emits 5,001
   samples in three bounded draws. Raw mode remains the default.
+  An optional normalized interval adds the recovered blue interpolated pass.
+  This pass follows the primary spline and disables depth tests and writes.
   The selected pass uses solid fill, front-face culling, opaque blend state,
   and disabled depth. It writes magenta RGB and the recovered fading alpha.
   The viewport submits the draw at 2000 ms with zero alpha. It stops the draw

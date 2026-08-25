@@ -95,6 +95,58 @@ if(duplicate_ai_mode_position EQUAL -1)
   message(FATAL_ERROR
     "duplicate AI spline mode was not diagnosed: ${duplicate_ai_mode_error}")
 endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --ai-spline-interval 0.25 0.75
+  RESULT_VARIABLE detached_ai_interval_result
+  ERROR_VARIABLE detached_ai_interval_error
+)
+if(NOT detached_ai_interval_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached AI interval returned ${detached_ai_interval_result}: ${detached_ai_interval_error}")
+endif()
+string(FIND "${detached_ai_interval_error}"
+  "--ai-spline-interval requires --ai-spline" detached_ai_interval_position)
+if(detached_ai_interval_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached AI interval was not diagnosed: ${detached_ai_interval_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --ai-spline-interval 0.75 0.25
+  RESULT_VARIABLE reversed_ai_interval_result
+  ERROR_VARIABLE reversed_ai_interval_error
+)
+if(NOT reversed_ai_interval_result STREQUAL "1")
+  message(FATAL_ERROR
+    "reversed AI interval returned ${reversed_ai_interval_result}: ${reversed_ai_interval_error}")
+endif()
+string(FIND "${reversed_ai_interval_error}"
+  "AI spline interval must be ordered and from zero to one"
+  reversed_ai_interval_position)
+if(reversed_ai_interval_position EQUAL -1)
+  message(FATAL_ERROR
+    "reversed AI interval was not diagnosed: ${reversed_ai_interval_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --ai-spline-interval 0 1 --ai-spline-interval 0.25 0.75
+  RESULT_VARIABLE duplicate_ai_interval_result
+  ERROR_VARIABLE duplicate_ai_interval_error
+)
+if(NOT duplicate_ai_interval_result STREQUAL "1")
+  message(FATAL_ERROR
+    "duplicate AI interval returned ${duplicate_ai_interval_result}: ${duplicate_ai_interval_error}")
+endif()
+string(FIND "${duplicate_ai_interval_error}"
+  "duplicate --ai-spline-interval option" duplicate_ai_interval_position)
+if(duplicate_ai_interval_position EQUAL -1)
+  message(FATAL_ERROR
+    "duplicate AI interval was not diagnosed: ${duplicate_ai_interval_error}")
+endif()
 string(FIND "${malformed_error}" "unknown window option" malformed_position)
 if(malformed_position EQUAL -1)
   message(FATAL_ERROR "unknown workspace-window option was not diagnosed: ${malformed_error}")
@@ -432,6 +484,35 @@ string(FIND "${interpolated_ai_load_error}"
 if(interpolated_ai_shader_position EQUAL -1)
   message(FATAL_ERROR
     "interpolated AI spline probe did not reach shader setup: ${interpolated_ai_load_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --ai-spline "${ai_spline}" --ai-spline-interval 0.25 0.75
+          --shader-family fixture --shader-vertex missing.vert.spv
+          --shader-fragment missing.frag.spv
+          --authoring-overlay-vertex missing-overlay.vert.spv
+          --authoring-overlay-fragment missing-overlay.frag.spv
+  RESULT_VARIABLE interval_ai_load_result
+  OUTPUT_VARIABLE interval_ai_load_output
+  ERROR_VARIABLE interval_ai_load_error
+)
+if(NOT interval_ai_load_result STREQUAL "1")
+  message(FATAL_ERROR
+    "AI interval load probe returned ${interval_ai_load_result}: ${interval_ai_load_error}")
+endif()
+string(FIND "${interval_ai_load_output}"
+  "AI spline interval: in=0.25, out=0.75, samples=2501, segments=2500, draws=2"
+  interval_ai_load_position)
+if(interval_ai_load_position EQUAL -1)
+  message(FATAL_ERROR
+    "AI interval did not load before shader setup: ${interval_ai_load_output}${interval_ai_load_error}")
+endif()
+string(FIND "${interval_ai_load_error}"
+  "cannot open missing.vert.spv" interval_ai_shader_position)
+if(interval_ai_shader_position EQUAL -1)
+  message(FATAL_ERROR
+    "AI interval probe did not reach shader setup: ${interval_ai_load_error}")
 endif()
 
 execute_process(

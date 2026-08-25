@@ -268,10 +268,11 @@ recorded in
 The C++ viewport implements the raw and interpolated primary AI spline on
 Vulkan and D3D12. Raw mode remains the default. Interpolated mode uses the
 recovered Catmull-Rom arc-length mapping and the 5,001-sample float schedule.
-Both modes use the recovered color, identity world matrix, normal depth, and
-callback phase. The backend-neutral line-list conversion is a labeled
-translation of the original OpenGL line strip. Interval, side-spline, camber,
-and edit overlays remain staged.
+Both modes use the recovered magenta color, identity matrix, normal depth, and
+callback phase. An optional normalized interval adds the recovered blue pass.
+This pass always uses interpolation and disables depth tests and writes.
+The backend-neutral line-list conversion is a labeled translation of the
+original OpenGL line strip. Side-spline, camber, and edit overlays remain staged.
 
 ### Native blurred-rim switch
 

@@ -114,6 +114,10 @@ struct WorkspaceViewportPrepareRequest {
     // by reference.
     const WorkspaceAiSplineGeometry* ai_spline_geometry = nullptr;
     std::optional<render::PipelineProgram> ai_spline_pipeline;
+    // Optional recovered interpolated in/out overlay. This is a second blue,
+    // depth-off pass and must be supplied with the primary spline pass.
+    const WorkspaceAiSplineGeometry* ai_spline_interval_geometry = nullptr;
+    std::optional<render::PipelineProgram> ai_spline_interval_pipeline;
     // Optional recovered magenta selected-mesh pass. The selected packet must
     // be static. This pipeline is independent of the line-overlay pipeline.
     std::optional<render::PipelineProgram> selected_mesh_pipeline;
@@ -245,6 +249,12 @@ private:
         std::vector<std::uint8_t> frame_visibility;
     };
 
+    struct AiSplinePassResources {
+        std::optional<render::PipelineProgram> pipeline;
+        std::unique_ptr<render::Buffer> buffer;
+        std::vector<WorkspaceAiSplineChunk> chunks;
+    };
+
     WorkspaceViewport(
         render::Backend backend,
         render::PresentationTargetDescription presentation,
@@ -253,9 +263,7 @@ private:
         std::unique_ptr<render::DepthAttachment> depth,
         std::unique_ptr<render::StockSceneExecutionResult> execution,
         std::optional<render::PipelineProgram> authoring_overlay_pipeline,
-        std::optional<render::PipelineProgram> ai_spline_pipeline,
-        std::unique_ptr<render::Buffer> ai_spline_buffer,
-        std::vector<WorkspaceAiSplineChunk> ai_spline_chunks,
+        std::array<AiSplinePassResources, 2U> ai_spline_passes,
         std::unique_ptr<render::Buffer> authoring_grid_buffer,
         bool grid_visible,
         std::unique_ptr<render::Buffer> view_axis_buffer,
@@ -275,9 +283,7 @@ private:
     std::unique_ptr<render::DepthAttachment> depth_;
     std::unique_ptr<render::StockSceneExecutionResult> execution_;
     std::optional<render::PipelineProgram> authoring_overlay_pipeline_;
-    std::optional<render::PipelineProgram> ai_spline_pipeline_;
-    std::unique_ptr<render::Buffer> ai_spline_buffer_;
-    std::vector<WorkspaceAiSplineChunk> ai_spline_chunks_;
+    std::array<AiSplinePassResources, 2U> ai_spline_passes_;
     std::unique_ptr<render::Buffer> authoring_grid_buffer_;
     bool grid_visible_ = false;
     std::unique_ptr<render::Buffer> view_axis_buffer_;

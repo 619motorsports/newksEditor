@@ -306,6 +306,75 @@ void rejectsUnsafeInterpolatedSources() {
             "unknown AI spline display mode must be rejected");
 }
 
+void buildsRecoveredInterpolatedInterval() {
+    apex::formats::AiSpline spline;
+    spline.version = 7U;
+    spline.points = {point(0.0F, 0.0F, 0.0F),
+                     point(100.0F, 0.0F, 0.0F),
+                     point(200.0F, 100.0F, 0.0F),
+                     point(300.0F, 100.0F, 0.0F)};
+
+    const auto full = apex::app::buildWorkspaceAiSplineIntervalGeometry(
+        spline, {0.0F, 1.0F});
+    require(full.ok() &&
+                full.geometry.pass ==
+                    apex::app::WorkspaceAiSplinePassKind::interval &&
+                full.geometry.mode ==
+                    apex::app::WorkspaceAiSplineDisplayMode::interpolated &&
+                full.geometry.sample_point_count == 5'001U &&
+                full.geometry.vertices.size() == 10'000U &&
+                full.geometry.chunks.size() == 3U,
+            "full recovered interval metadata mismatch");
+    for (const auto& vertex : full.geometry.vertices)
+        require(vertex.color == apex::app::workspace_ai_spline_interval_color,
+                "recovered interval must use the native blue color");
+    require(sampled_vertex(full.geometry, 0U).position ==
+                std::array<float, 3U>{0.0F, 0.0F, 0.0F},
+            "full interval must begin at normalized zero");
+
+    const auto partial = apex::app::buildWorkspaceAiSplineIntervalGeometry(
+        spline, {0.25F, 0.2504F});
+    require(partial.ok() && partial.geometry.sample_point_count == 3U &&
+                partial.geometry.vertices.size() == 4U,
+            "partial interval must preserve recovered float accumulation");
+    require_near(sampled_vertex(partial.geometry, 0U).position[0], 84.089714F,
+                 "partial interval start sample mismatch");
+
+    const auto point_interval =
+        apex::app::buildWorkspaceAiSplineIntervalGeometry(
+            spline, {0.5F, 0.5F});
+    require(point_interval.ok() &&
+                point_interval.geometry.sample_point_count == 1U &&
+                point_interval.geometry.vertices.empty() &&
+                point_interval.geometry.chunks.empty(),
+            "equal interval endpoints must reproduce the native no-draw pass");
+}
+
+void rejectsUnsafeInterpolatedIntervals() {
+    apex::formats::AiSpline spline;
+    spline.version = 7U;
+    spline.points = {point(0.0F, 0.0F, 0.0F),
+                     point(100.0F, 0.0F, 0.0F),
+                     point(200.0F, 100.0F, 0.0F),
+                     point(300.0F, 100.0F, 0.0F)};
+    const std::array<apex::app::WorkspaceAiSplineInterval, 5U> invalid = {{
+        {-0.1F, 0.5F},
+        {0.0F, 1.1F},
+        {0.75F, 0.25F},
+        {std::numeric_limits<float>::quiet_NaN(), 1.0F},
+        {0.0F, std::numeric_limits<float>::infinity()},
+    }};
+    for (const auto interval : invalid) {
+        const auto result =
+            apex::app::buildWorkspaceAiSplineIntervalGeometry(spline,
+                                                                interval);
+        require(!result.ok() &&
+                    result.diagnostic.code ==
+                        "workspace_ai_spline_interval_invalid",
+                "unsafe interval must be rejected before sampling");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -319,6 +388,8 @@ int main() {
         convertsRecoveredInterpolatedSpline();
         preservesInterpolatedV2RetentionChoice();
         rejectsUnsafeInterpolatedSources();
+        buildsRecoveredInterpolatedInterval();
+        rejectsUnsafeInterpolatedIntervals();
     } catch (const std::exception& error) {
         std::cerr << "workspace_ai_spline_tests: " << error.what() << '\n';
         return 1;

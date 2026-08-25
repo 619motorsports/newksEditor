@@ -152,6 +152,7 @@ out/native/dev/native/apex-native --window vulkan --model car.kn5 \
   --analog-instruments data/analog_instruments.ini --rpm 6000 \
   --animation animations/car_door_l.ksanim --animation-position 0.5 \
   --ai-spline data/fast_lane.ai --ai-spline-mode interpolated \
+  --ai-spline-interval 0.25 0.75 \
   --node-search door --selected-node 42 --isolate-selected --wireframe --grid \
   --weather 5_light_clouds --sun-heading 40 --sun-height 55 \
   --shader-family ksPerPixel --shader-vertex stock.vert.spv \
@@ -225,9 +226,12 @@ This mode recomputes the native arc-length table and ignores stored point
 lengths. It samples 5,001 points with the recovered float increment.
 Both modes use an identity world matrix.
 The spline uses normal depth and the recovered scene-finished phase.
+`--ai-spline-interval <in> <out>` adds the recovered blue interval.
+The values must be finite, ordered, and from zero to one.
+The interval always uses interpolation and disables depth tests and writes.
 The Vulkan and D3D12 line list is a labeled translation of the OpenGL line
 strip. The translation keeps all segments at portable chunk boundaries.
-The option does not enable intervals, side splines, camber, or editing.
+The option does not enable side splines, camber, or editing.
 The old `--selection-axis-vertex` and `--selection-axis-fragment` names remain aliases.
 The grid starts hidden. `--grid` shows the recovered 10 m magenta grid.
 The view axis starts hidden. `--view-axis` shows the recovered one-meter

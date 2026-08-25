@@ -156,6 +156,8 @@ secondary exports include collider KN5, `damage.ini`, `colliders.ini`, and
 - Version-2 and version-7 AI-spline previews with bounded parsing and raw
   magenta lines. An explicit interpolated mode uses the installed editor's
   Catmull-Rom curve, arc-length lookup, and 5,001-sample draw schedule.
+  A normalized in/out option adds the recovered blue interpolated interval.
+  This interval uses a separate depth-off pass after the primary spline.
   Vulkan and D3D12 use the same backend-neutral line geometry.
 - Packed `data.acd` browsing with bounds checks, unsafe-path rejection, duplicate
   diagnostics, and virtual read-only INI files; packed or unpacked car `data/lods.ini`

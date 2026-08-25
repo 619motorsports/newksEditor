@@ -5,12 +5,15 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace apex::app {
 
 inline constexpr std::array<float, 3U> workspace_ai_spline_raw_color = {
     3.0F, 0.0F, 3.0F};
+inline constexpr std::array<float, 3U> workspace_ai_spline_interval_color = {
+    0.0F, 0.0F, 3.0F};
 inline constexpr float workspace_ai_spline_interpolation_step = 0.0002F;
 inline constexpr std::uint32_t
     workspace_ai_spline_interpolated_sample_count = 5'001U;
@@ -20,6 +23,16 @@ inline constexpr std::size_t
 enum class WorkspaceAiSplineDisplayMode : std::uint8_t {
     raw,
     interpolated,
+};
+
+enum class WorkspaceAiSplinePassKind : std::uint8_t {
+    primary,
+    interval,
+};
+
+struct WorkspaceAiSplineInterval {
+    float begin = 0.0F;
+    float end = 1.0F;
 };
 
 enum class WorkspaceAiSplineStatus : std::uint8_t {
@@ -38,6 +51,7 @@ struct WorkspaceAiSplineGeometry {
     std::uint32_t source_point_count = 0U;
     std::uint32_t sample_point_count = 0U;
     WorkspaceAiSplineDisplayMode mode = WorkspaceAiSplineDisplayMode::raw;
+    WorkspaceAiSplinePassKind pass = WorkspaceAiSplinePassKind::primary;
     std::vector<render::OverlayLineVertex> vertices;
     std::vector<WorkspaceAiSplineChunk> chunks;
 };
@@ -61,6 +75,13 @@ struct WorkspaceAiSplineResult {
 buildWorkspaceAiSplineGeometry(
     const formats::AiSpline& spline,
     WorkspaceAiSplineDisplayMode mode = WorkspaceAiSplineDisplayMode::raw);
+
+// Build the recovered blue in/out interval pass. The installed editor always
+// interpolates this pass, independently of the primary spline display mode.
+// Values are normalized spline positions and must be finite, ordered, and in
+// the inclusive range [0, 1].
+[[nodiscard]] WorkspaceAiSplineResult buildWorkspaceAiSplineIntervalGeometry(
+    const formats::AiSpline& spline, WorkspaceAiSplineInterval interval);
 
 [[nodiscard]] const char* workspace_ai_spline_display_mode_name(
     WorkspaceAiSplineDisplayMode mode) noexcept;

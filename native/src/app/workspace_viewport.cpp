@@ -512,9 +512,7 @@ WorkspaceViewport::WorkspaceViewport(
     std::unique_ptr<render::DepthAttachment> depth,
     std::unique_ptr<render::StockSceneExecutionResult> execution,
     std::optional<render::PipelineProgram> authoring_overlay_pipeline,
-    std::optional<render::PipelineProgram> ai_spline_pipeline,
-    std::unique_ptr<render::Buffer> ai_spline_buffer,
-    std::vector<WorkspaceAiSplineChunk> ai_spline_chunks,
+    std::array<AiSplinePassResources, 2U> ai_spline_passes,
     std::unique_ptr<render::Buffer> authoring_grid_buffer,
     bool grid_visible,
     std::unique_ptr<render::Buffer> view_axis_buffer,
@@ -530,9 +528,7 @@ WorkspaceViewport::WorkspaceViewport(
       resolved_color_(std::move(resolved_color)),
       depth_(std::move(depth)), execution_(std::move(execution)),
       authoring_overlay_pipeline_(std::move(authoring_overlay_pipeline)),
-      ai_spline_pipeline_(std::move(ai_spline_pipeline)),
-      ai_spline_buffer_(std::move(ai_spline_buffer)),
-      ai_spline_chunks_(std::move(ai_spline_chunks)),
+      ai_spline_passes_(std::move(ai_spline_passes)),
       authoring_grid_buffer_(std::move(authoring_grid_buffer)),
       grid_visible_(grid_visible),
       view_axis_buffer_(std::move(view_axis_buffer)),
@@ -706,17 +702,19 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
     std::array<render::OverlayLineDrawRequest, render::max_overlay_line_draws>
         scene_finished_draws{};
     std::size_t scene_finished_draw_count = 0U;
-    if (ai_spline_buffer_ != nullptr) {
-        for (const WorkspaceAiSplineChunk& chunk : ai_spline_chunks_) {
-            auto& draw = scene_finished_draws[scene_finished_draw_count++];
-            draw.pipeline = &*ai_spline_pipeline_;
-            draw.vertex_buffer = ai_spline_buffer_.get();
-            draw.vertex_offset_bytes =
-                static_cast<std::uint64_t>(chunk.first_vertex) *
-                sizeof(render::OverlayLineVertex);
-            draw.vertex_count = chunk.vertex_count;
-            draw.matrices.world = apex::scene::identity_matrix;
-            draw.matrices.view_projection = request.camera.view_projection;
+    for (const AiSplinePassResources& pass : ai_spline_passes_) {
+        if (pass.buffer != nullptr) {
+            for (const WorkspaceAiSplineChunk& chunk : pass.chunks) {
+                auto& draw = scene_finished_draws[scene_finished_draw_count++];
+                draw.pipeline = &*pass.pipeline;
+                draw.vertex_buffer = pass.buffer.get();
+                draw.vertex_offset_bytes =
+                    static_cast<std::uint64_t>(chunk.first_vertex) *
+                    sizeof(render::OverlayLineVertex);
+                draw.vertex_count = chunk.vertex_count;
+                draw.matrices.world = apex::scene::identity_matrix;
+                draw.matrices.view_projection = request.camera.view_projection;
+            }
         }
     }
     frame.scene_finished_overlay_draws =
@@ -1245,25 +1243,42 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         }
 
         std::optional<render::PipelineProgram> authoring_overlay_pipeline;
-        std::optional<render::PipelineProgram> ai_spline_pipeline;
-        std::unique_ptr<render::Buffer> ai_spline_buffer;
-        std::vector<WorkspaceAiSplineChunk> ai_spline_chunks;
+        std::array<WorkspaceViewport::AiSplinePassResources, 2U>
+            ai_spline_passes;
         std::unique_ptr<render::Buffer> authoring_grid_buffer;
         std::unique_ptr<render::Buffer> view_axis_buffer;
         std::unique_ptr<render::Buffer> selection_axis_buffer;
         std::optional<apex::scene::Matrix4> selection_axis_world;
         const bool selection_axis_requested =
             request.packets.selected_node != apex::scene::invalid_node_id;
-        const bool has_ai_spline_geometry =
-            request.ai_spline_geometry != nullptr;
-        const bool has_ai_spline_pipeline =
-            request.ai_spline_pipeline.has_value();
-        if (has_ai_spline_geometry != has_ai_spline_pipeline) {
+        struct AiSplinePassInput {
+            const WorkspaceAiSplineGeometry* geometry = nullptr;
+            const std::optional<render::PipelineProgram>* pipeline = nullptr;
+            WorkspaceAiSplinePassKind kind =
+                WorkspaceAiSplinePassKind::primary;
+        };
+        const std::array<AiSplinePassInput, 2U> ai_spline_inputs = {{
+            {request.ai_spline_geometry, &request.ai_spline_pipeline,
+             WorkspaceAiSplinePassKind::primary},
+            {request.ai_spline_interval_geometry,
+             &request.ai_spline_interval_pipeline,
+             WorkspaceAiSplinePassKind::interval},
+        }};
+        for (const AiSplinePassInput& input : ai_spline_inputs) {
+            if ((input.geometry != nullptr) != input.pipeline->has_value()) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_ai_spline_configuration_invalid",
+                    "Each AI spline pass requires geometry and a pipeline");
+                return result;
+            }
+        }
+        if (request.ai_spline_interval_geometry != nullptr &&
+            request.ai_spline_geometry == nullptr) {
             result.status = WorkspaceViewportStatus::invalid;
-            result.diagnostic =
-                diagnostic("workspace_viewport_ai_spline_configuration_invalid",
-                           "AI spline geometry and its pipeline must be "
-                           "supplied together");
+            result.diagnostic = diagnostic(
+                "workspace_viewport_ai_spline_interval_primary_missing",
+                "The AI spline interval requires the primary spline pass");
             return result;
         }
         const std::size_t authoring_draw_count =
@@ -1274,14 +1289,14 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             (request.grid_visible ? render::authoring_grid_vertex_count : 0U) +
             (request.view_axis_visible ? render::view_axis_vertex_count : 0U) +
             (selection_axis_requested ? 6U : 0U);
-        const std::size_t ai_draw_count =
-            has_ai_spline_geometry
-                ? request.ai_spline_geometry->chunks.size()
-                : 0U;
-        const std::size_t ai_vertex_count =
-            has_ai_spline_geometry
-                ? request.ai_spline_geometry->vertices.size()
-                : 0U;
+        std::size_t ai_draw_count = 0U;
+        std::size_t ai_vertex_count = 0U;
+        for (const AiSplinePassInput& input : ai_spline_inputs) {
+            if (input.geometry != nullptr) {
+                ai_draw_count += input.geometry->chunks.size();
+                ai_vertex_count += input.geometry->vertices.size();
+            }
+        }
         if (ai_draw_count > render::max_overlay_line_draws ||
             ai_vertex_count > render::max_overlay_line_total_vertices) {
             result.status = WorkspaceViewportStatus::invalid;
@@ -1300,9 +1315,11 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 "AI spline and authoring overlays exceed the shared render budget");
             return result;
         }
-        if (request.ai_spline_geometry != nullptr) {
-            const WorkspaceAiSplineGeometry& geometry =
-                *request.ai_spline_geometry;
+        for (std::size_t pass_index = 0U;
+             pass_index < ai_spline_inputs.size(); ++pass_index) {
+            const AiSplinePassInput& input = ai_spline_inputs[pass_index];
+            if (input.geometry == nullptr) continue;
+            const WorkspaceAiSplineGeometry& geometry = *input.geometry;
             std::size_t expected_first = 0U;
             for (const WorkspaceAiSplineChunk& chunk : geometry.chunks) {
                 if (chunk.first_vertex != expected_first ||
@@ -1324,19 +1341,29 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                     ? (static_cast<std::size_t>(
                            geometry.sample_point_count) - 1U) * 2U
                     : 0U;
-            const bool mode_metadata_valid =
-                geometry.mode == WorkspaceAiSplineDisplayMode::raw
-                    ? geometry.sample_point_count ==
-                          geometry.source_point_count
-                    : geometry.mode ==
-                              WorkspaceAiSplineDisplayMode::interpolated &&
-                          geometry.source_point_count >= 4U &&
-                          geometry.sample_point_count ==
-                              workspace_ai_spline_interpolated_sample_count;
+            const bool primary_metadata_valid =
+                input.kind == WorkspaceAiSplinePassKind::primary &&
+                geometry.pass == WorkspaceAiSplinePassKind::primary &&
+                (geometry.mode == WorkspaceAiSplineDisplayMode::raw
+                     ? geometry.sample_point_count ==
+                           geometry.source_point_count
+                     : geometry.mode ==
+                               WorkspaceAiSplineDisplayMode::interpolated &&
+                           geometry.source_point_count >= 4U &&
+                           geometry.sample_point_count ==
+                               workspace_ai_spline_interpolated_sample_count);
+            const bool interval_metadata_valid =
+                input.kind == WorkspaceAiSplinePassKind::interval &&
+                geometry.pass == WorkspaceAiSplinePassKind::interval &&
+                geometry.mode == WorkspaceAiSplineDisplayMode::interpolated &&
+                geometry.source_point_count >= 4U &&
+                geometry.sample_point_count >= 1U &&
+                geometry.sample_point_count <=
+                    workspace_ai_spline_interpolated_sample_count;
             if (expected_first != geometry.vertices.size() ||
                 (geometry.vertices.empty() != geometry.chunks.empty()) ||
                 geometry.vertices.size() != expected_vertices ||
-                !mode_metadata_valid) {
+                !(primary_metadata_valid || interval_metadata_valid)) {
                 result.status = WorkspaceViewportStatus::invalid;
                 result.diagnostic = diagnostic(
                     "workspace_viewport_ai_spline_geometry_invalid",
@@ -1344,27 +1371,37 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                     "sample count, and chunk metadata");
                 return result;
             }
+            const auto& expected_color =
+                input.kind == WorkspaceAiSplinePassKind::primary
+                    ? workspace_ai_spline_raw_color
+                    : workspace_ai_spline_interval_color;
             for (const render::OverlayLineVertex& vertex : geometry.vertices) {
                 if (!finite_vector(vertex.position) ||
-                    vertex.color != workspace_ai_spline_raw_color) {
+                    vertex.color != expected_color) {
                     result.status = WorkspaceViewportStatus::invalid;
                     result.diagnostic = diagnostic(
                         "workspace_viewport_ai_spline_vertex_invalid",
                         "AI spline vertices require finite positions and the "
-                        "recovered magenta color");
+                        "recovered pass color");
                     return result;
                 }
             }
             const render::PipelineProgram& pipeline =
-                *request.ai_spline_pipeline;
-            if (!pipeline.depth.test_enabled || !pipeline.depth.write_enabled ||
-                pipeline.depth.compare !=
-                    render::PipelineCompareOperation::less_or_equal) {
+                **input.pipeline;
+            const bool depth_valid =
+                input.kind == WorkspaceAiSplinePassKind::primary
+                    ? pipeline.depth.test_enabled &&
+                          pipeline.depth.write_enabled &&
+                          pipeline.depth.compare ==
+                              render::PipelineCompareOperation::less_or_equal
+                    : !pipeline.depth.test_enabled &&
+                          !pipeline.depth.write_enabled;
+            if (!depth_valid) {
                 result.status = WorkspaceViewportStatus::invalid;
                 result.diagnostic =
                     diagnostic("workspace_viewport_ai_spline_depth_invalid",
-                               "The recovered AI spline requires normal "
-                               "less-or-equal depth test and writes");
+                               "AI spline pass depth state does not match the "
+                               "recovered primary or interval behavior");
                 return result;
             }
             if (!geometry.vertices.empty()) {
@@ -1420,10 +1457,11 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                     result.diagnostic = std::move(overlay_diagnostic);
                     return result;
                 }
-                ai_spline_buffer = std::move(buffer.buffer);
+                ai_spline_passes[pass_index].buffer =
+                    std::move(buffer.buffer);
             }
-            ai_spline_pipeline = pipeline;
-            ai_spline_chunks = geometry.chunks;
+            ai_spline_passes[pass_index].pipeline = pipeline;
+            ai_spline_passes[pass_index].chunks = geometry.chunks;
         }
         if (request.grid_visible &&
             !request.authoring_overlay_pipeline.has_value()) {
@@ -1571,8 +1609,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             std::move(resolved_color), std::move(depth.attachment),
             std::move(execution),
             std::move(authoring_overlay_pipeline),
-            std::move(ai_spline_pipeline), std::move(ai_spline_buffer),
-            std::move(ai_spline_chunks),
+            std::move(ai_spline_passes),
             std::move(authoring_grid_buffer), request.grid_visible,
             std::move(view_axis_buffer), request.view_axis_visible,
             std::move(selection_axis_buffer),

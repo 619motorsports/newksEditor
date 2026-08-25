@@ -550,6 +550,15 @@ PipelineProgram ai_spline_pipeline(const Fixture& fixture_value,
     return pipeline;
 }
 
+PipelineProgram ai_spline_interval_pipeline(const Fixture& fixture_value,
+                                            std::uint32_t samples = 1U) {
+    PipelineProgram pipeline = ai_spline_pipeline(fixture_value, samples);
+    pipeline.name = "viewport-ai-spline-interval";
+    pipeline.depth.test_enabled = false;
+    pipeline.depth.write_enabled = false;
+    return pipeline;
+}
+
 PipelineProgram selected_mesh_pipeline(const Fixture& fixture_value,
                                        std::uint32_t samples = 1U) {
     PipelineProgram pipeline;
@@ -1045,6 +1054,94 @@ void draws_raw_ai_spline_in_recovered_scene_phase() {
                 forged.diagnostic.code ==
                     "workspace_viewport_ai_spline_geometry_invalid",
             "viewport rejects forged interpolated spline metadata");
+
+    const auto interval =
+        apex::app::buildWorkspaceAiSplineIntervalGeometry(
+            curved_spline, {0.25F, 0.2504F});
+    require(interval.ok(), "interpolated interval fixture converts");
+    const auto primary =
+        apex::app::buildWorkspaceAiSplineGeometry(curved_spline);
+    require(primary.ok(), "interval primary fixture converts");
+    auto interval_request = request_for(value);
+    interval_request.ai_spline_geometry = &primary.geometry;
+    interval_request.ai_spline_pipeline = ai_spline_pipeline(value);
+    interval_request.ai_spline_interval_geometry = &interval.geometry;
+    interval_request.ai_spline_interval_pipeline =
+        ai_spline_interval_pipeline(value);
+    FakeDevice interval_device;
+    auto interval_prepared = apex::app::prepareWorkspaceViewport(
+        interval_device, value.document, interval_request);
+    require(interval_prepared.ok(),
+            "primary and interval AI spline passes prepare together");
+    FakeTarget interval_target(interval_request.presentation);
+    WorkspaceViewportFrameRequest interval_frame;
+    interval_frame.camera.clip_space = CameraClipSpace::vulkan;
+    interval_frame.frame_constants = KsPerPixelFrameConstants{};
+    Diagnostic interval_diagnostic;
+    require(interval_prepared.viewport->drawAndPresent(
+                interval_device, interval_target, interval_frame,
+                interval_diagnostic) == WorkspaceViewportFrameStatus::ready &&
+                interval_device.overlay_counts ==
+                    std::vector<std::size_t>({2U}) &&
+                interval_device.overlay_vertex_counts ==
+                    std::vector<std::uint32_t>({6U, 4U}) &&
+                interval_device.overlay_depth_tests ==
+                    std::vector<bool>({true, false}) &&
+                interval_device.overlay_depth_writes ==
+                    std::vector<bool>({true, false}) &&
+                interval_device.overlay_buffers[0] !=
+                    interval_device.overlay_buffers[1],
+            "blue interval follows the primary spline with depth disabled");
+
+    auto wrong_depth_request = interval_request;
+    wrong_depth_request.ai_spline_interval_pipeline =
+        ai_spline_pipeline(value);
+    FakeDevice wrong_depth_device;
+    const auto wrong_depth = apex::app::prepareWorkspaceViewport(
+        wrong_depth_device, value.document, wrong_depth_request);
+    require(!wrong_depth.ok() &&
+                wrong_depth.diagnostic.code ==
+                    "workspace_viewport_ai_spline_depth_invalid",
+            "interval pass rejects a normal-depth pipeline");
+
+    auto forged_interval = interval.geometry;
+    forged_interval.vertices.front().color =
+        apex::app::workspace_ai_spline_raw_color;
+    auto wrong_color_request = interval_request;
+    wrong_color_request.ai_spline_interval_geometry = &forged_interval;
+    FakeDevice wrong_color_device;
+    const auto wrong_color = apex::app::prepareWorkspaceViewport(
+        wrong_color_device, value.document, wrong_color_request);
+    require(!wrong_color.ok() &&
+                wrong_color.diagnostic.code ==
+                    "workspace_viewport_ai_spline_vertex_invalid",
+            "interval pass rejects a forged non-blue vertex");
+
+    auto missing_primary_request = request_for(value);
+    missing_primary_request.ai_spline_interval_geometry = &interval.geometry;
+    missing_primary_request.ai_spline_interval_pipeline =
+        ai_spline_interval_pipeline(value);
+    FakeDevice missing_primary_device;
+    const auto missing_primary = apex::app::prepareWorkspaceViewport(
+        missing_primary_device, value.document, missing_primary_request);
+    require(!missing_primary.ok() &&
+                missing_primary.diagnostic.code ==
+                    "workspace_viewport_ai_spline_interval_primary_missing",
+            "interval pass cannot be detached from the primary spline");
+
+    auto interval_budget_request = request_for(value);
+    interval_budget_request.ai_spline_geometry = &maximum_geometry.geometry;
+    interval_budget_request.ai_spline_pipeline = ai_spline_pipeline(value);
+    interval_budget_request.ai_spline_interval_geometry = &interval.geometry;
+    interval_budget_request.ai_spline_interval_pipeline =
+        ai_spline_interval_pipeline(value);
+    FakeDevice interval_budget_device;
+    const auto interval_budget = apex::app::prepareWorkspaceViewport(
+        interval_budget_device, value.document, interval_budget_request);
+    require(!interval_budget.ok() &&
+                interval_budget.diagnostic.code ==
+                    "workspace_viewport_ai_spline_limit",
+            "primary and interval passes share the bounded AI spline budget");
 }
 
 void draws_selected_mesh_with_recovered_fade_boundary() {

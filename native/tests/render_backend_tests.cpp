@@ -6176,6 +6176,35 @@ float4 main(float3 color : COLOR) : SV_Target { return float4(color, 1.0); }
                 count_magenta(ai_spline_occluded.rgba8) == 0U,
             "normal-depth raw AI spline pixels fail nearer clear depth");
 
+    // The recovered interpolated in/out interval is a second blue pass with
+    // depth mode off. It must remain visible through a nearer depth clear.
+    const std::array<OverlayLineVertex, 2U> ai_interval_vertices = {{
+        {{-0.9F, 0.3F, 0.5F}, {0.0F, 0.0F, 3.0F}},
+        {{0.9F, 0.3F, 0.5F}, {0.0F, 0.0F, 3.0F}},
+    }};
+    ai_spline_buffer_description.size_bytes = sizeof(ai_interval_vertices);
+    BufferResult ai_interval_buffer = device.device->create_buffer(
+        ai_spline_buffer_description,
+        std::as_bytes(std::span(ai_interval_vertices)));
+    require(ai_interval_buffer.ok(),
+            "AI spline interval vertex buffer creation");
+    PipelineProgram ai_interval_pipeline = make_ai_spline_pipeline(1U);
+    ai_interval_pipeline.name = "native-ai-spline-interval";
+    ai_interval_pipeline.depth.test_enabled = false;
+    ai_interval_pipeline.depth.write_enabled = false;
+    OverlayLineDrawRequest ai_interval_request = ai_spline_request;
+    ai_interval_request.pipeline = &ai_interval_pipeline;
+    ai_interval_request.vertex_buffer = ai_interval_buffer.buffer.get();
+    const std::array ai_interval_requests = {ai_interval_request};
+    ai_spline_batch.depth_clear_value = 0.0F;
+    ai_spline_batch.overlay_draws = ai_interval_requests;
+    const auto ai_interval_visible =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *triangle_texture.texture, ai_spline_batch);
+    require(ai_interval_visible.ok() &&
+                count_dominant_channel(ai_interval_visible.rgba8, 2U) > 8U,
+            "depth-off blue AI spline interval passes nearer clear depth");
+
     IndexedStaticMeshBatchDescription appended_overlay_batch;
     appended_overlay_batch.draws = overlap_batch_draws;
     appended_overlay_batch.overlay_draws = overlay_requests;
@@ -6222,6 +6251,23 @@ float4 main(float3 color : COLOR) : SV_Target { return float4(color, 1.0); }
     require(ai_spline_msaa_result.ok() &&
                 count_magenta(ai_spline_msaa_result.rgba8) > 8U,
             "four-sample normal-depth raw AI spline survives resolve");
+
+    PipelineProgram ai_interval_msaa_pipeline =
+        make_ai_spline_pipeline(4U);
+    ai_interval_msaa_pipeline.name = "native-ai-spline-interval-msaa";
+    ai_interval_msaa_pipeline.depth.test_enabled = false;
+    ai_interval_msaa_pipeline.depth.write_enabled = false;
+    ai_interval_request.pipeline = &ai_interval_msaa_pipeline;
+    const std::array ai_interval_msaa_requests = {ai_interval_request};
+    ai_spline_batch.depth_clear_value = 0.0F;
+    ai_spline_batch.overlay_draws = ai_interval_msaa_requests;
+    const auto ai_interval_msaa_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *overlay_msaa.texture, ai_spline_batch);
+    require(ai_interval_msaa_result.ok() &&
+                count_dominant_channel(ai_interval_msaa_result.rgba8, 2U) >
+                    8U,
+            "four-sample blue AI spline interval survives resolve with depth off");
 
     PipelineProgram msaa_order_red_pipeline = batch_order_red_pipeline;
     msaa_order_red_pipeline.name = "batch-order-red-4x";
