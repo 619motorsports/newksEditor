@@ -57,6 +57,7 @@ void usage(std::ostream& output) {
               "                       [--lod-index <index>]\n"
               "                       [--node-search <query>] [--selected-node <id> [--isolate-selected]]\n"
               "                       [--show-hidden] [--wireframe]\n"
+              "                       [--weather <stock-id>] [--sun-heading <degrees>] [--sun-height <degrees>]\n"
               "                       [--shader-family <name> --shader-vertex <file> --shader-fragment <file>]\n"
               "                       [--directional-shadow-vertex <file>]\n"
            << "  apex-native --inspect-kn5 <file>\n"
@@ -511,6 +512,12 @@ struct WindowWorkspaceOptions {
     bool isolateSelected = false;
     bool showHidden = false;
     bool wireframe = false;
+    std::string weather;
+    bool weatherSpecified = false;
+    double sunHeading = apex::app::workspace_viewport_default_sun_heading_degrees;
+    bool sunHeadingSpecified = false;
+    double sunHeight = apex::app::workspace_viewport_default_sun_height_degrees;
+    bool sunHeightSpecified = false;
     std::vector<WindowShaderSpec> shaders;
     std::optional<std::filesystem::path> directionalShadowVertex;
 };
@@ -672,6 +679,23 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             if (result.wireframe)
                 throw std::runtime_error("duplicate --wireframe option");
             result.wireframe = true;
+        } else if (option == "--weather") {
+            if (result.weatherSpecified)
+                throw std::runtime_error("duplicate --weather option");
+            result.weather = std::string(require_value("--weather"));
+            result.weatherSpecified = true;
+        } else if (option == "--sun-heading") {
+            if (result.sunHeadingSpecified)
+                throw std::runtime_error("duplicate --sun-heading option");
+            result.sunHeading = parse_finite_number(
+                require_value("--sun-heading"), "sun heading");
+            result.sunHeadingSpecified = true;
+        } else if (option == "--sun-height") {
+            if (result.sunHeightSpecified)
+                throw std::runtime_error("duplicate --sun-height option");
+            result.sunHeight = parse_finite_number(
+                require_value("--sun-height"), "sun height");
+            result.sunHeightSpecified = true;
         } else if (option == "--shader-family") {
             const auto family = std::string(require_value("--shader-family"));
             if (family.empty()) throw std::runtime_error("shader family cannot be empty");
@@ -742,6 +766,12 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
     if (selection_options && !result.model.has_value() &&
         !result.workspaceRoot.has_value())
         throw std::runtime_error("hierarchy options require a workspace model");
+    const bool lighting_options = result.weatherSpecified ||
+                                  result.sunHeadingSpecified ||
+                                  result.sunHeightSpecified;
+    if (lighting_options && !result.model.has_value() &&
+        !result.workspaceRoot.has_value())
+        throw std::runtime_error("lighting options require a workspace model");
     return result;
 }
 
@@ -964,6 +994,15 @@ int run_window(int argc, char** argv) {
     std::uint64_t frame_limit = 0U;
     const auto workspace_options = parse_window_workspace_options(
         argc, argv, 3, validation, frame_limit);
+    const auto workspace_lighting =
+        apex::app::evaluateWorkspaceViewportLighting({
+            workspace_options.weather,
+            static_cast<float>(workspace_options.sunHeading),
+            static_cast<float>(workspace_options.sunHeight)});
+    if (!workspace_lighting.ok()) {
+        throw std::runtime_error(workspace_lighting.diagnostic.code + ": " +
+                                 workspace_lighting.diagnostic.message);
+    }
     LoadedWindowWorkspace loaded_workspace;
     load_window_workspace(workspace_options, backend, loaded_workspace);
 
@@ -1053,6 +1092,8 @@ int run_window(int argc, char** argv) {
             request.directional_shadows = loaded_workspace.directionalShadows;
             request.directional_shadows->maps.lighting.scene_radius = std::max(
                 1.0F, loaded_workspace.document->scene.snapshot.bounds_radius);
+            request.directional_shadows->maps.lighting.sun_direction =
+                workspace_lighting.evaluated.sun_direction;
         }
         if (loaded_workspace.document->assembly.workspace.kind == "carLods") {
             if (!loaded_workspace.document->scene.preview_bounds.has_value()) {
@@ -1156,7 +1197,7 @@ int run_window(int argc, char** argv) {
             }
             apex::app::WorkspaceViewportFrameRequest frame_request;
             frame_request.camera = *camera.frame;
-            frame_request.frame_constants = apex::render::KsPerPixelFrameConstants{};
+            frame_request.frame_constants = workspace_lighting.frame_constants;
             viewport_status = viewport->drawAndPresent(
                 *device_result.device, *target_result.target, frame_request,
                 viewport_diagnostic);

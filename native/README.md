@@ -152,6 +152,7 @@ out/native/dev/native/apex-native --window vulkan --model car.kn5 \
   --analog-instruments data/analog_instruments.ini --rpm 6000 \
   --animation animations/car_door_l.ksanim --animation-position 0.5 \
   --node-search door --selected-node 42 --isolate-selected --wireframe \
+  --weather 5_light_clouds --sun-heading 40 --sun-height 55 \
   --shader-family ksPerPixel --shader-vertex stock.vert.spv \
   --shader-fragment receiver.frag.spv \
   --directional-shadow-vertex shadow.vert.spv
@@ -171,6 +172,12 @@ or loop this value. It clamps the slider position to `[0, 1]` on each frame.
 The hierarchy options search, select, isolate, show hidden nodes, and enable
 wireframe through the backend-neutral viewport request. Search uses bounded
 ASCII case-insensitive matching. It retains duplicate node names.
+The lighting options select one of the seven bounded stock weather presets and
+finite sun angles. The default is `5_light_clouds` at a 40-degree heading and
+55-degree height, as used by the production renderer. The native shell uploads
+the evaluated sun, sun color, and ambient color through the existing 64-byte
+frame record. It uses the same sun direction for directional shadow cascades.
+Sky, fog, and post-processing remain staged.
 KN5 conversion computes preview bounds from transformed visible vertices. A
 car-LOD workspace uses those bounds for initial framing and automatic range
 selection. The viewport prepares all car LOD packets once. Camera movement
@@ -183,6 +190,8 @@ compiles one FBX for each LOD menu selection.
 material modules must implement the receiver bindings selected by this flag.
 The viewport owns three fixed D32 maps and reuses them when the camera moves.
 It executes three caster passes before the receiver color pass and present.
+Malformed initial map or lighting state fails before map allocation. Malformed
+per-frame lighting fails before any caster, color, or present work.
 The CLI program covers opaque static casters. Alpha-tested and skinned casters
 stay staged until callers supply their explicit programs through the viewport
 API. The viewport reports staged branches instead of claiming exact output.

@@ -2928,6 +2928,19 @@ void retains_three_directional_maps_and_executes_only_opaque_static_casters() {
                 device.depth_attachment_calls == directional_shadow_cascade_count,
             "oversized three-map input fails before backend allocation");
 
+    DirectionalShadowMapRequest malformed_maps = map_request;
+    malformed_maps.lighting.sun_direction[0U] =
+        std::numeric_limits<float>::quiet_NaN();
+    const auto malformed_map_result = prepare_directional_shadow_maps(
+        device, malformed_maps);
+    require(!malformed_map_result.ok() &&
+                malformed_map_result.status ==
+                    DirectionalShadowMapStatus::invalid_request &&
+                malformed_map_result.diagnostic.code ==
+                    "directional_shadow_input_invalid" &&
+                device.depth_attachment_calls == directional_shadow_cascade_count,
+            "malformed shadow lighting fails before backend allocation");
+
     RecordingDevice failing_device;
     failing_device.fail_depth_attachment_call = 2U;
     const auto failed_maps =

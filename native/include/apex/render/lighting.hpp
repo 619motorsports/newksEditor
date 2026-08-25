@@ -190,7 +190,7 @@ struct ExponentialShadowParams { float max_range=10, range_inverse=.1F, range_in
 [[nodiscard]] float resolveCspExponentialShadow(float occluder, float receiver_distance,
                                                  float bias_factor, const ExponentialShadowParams& params) noexcept;
 
-struct DirectionalShadowInput { LightingVec3 eye{}, target{}, up{0,1,0}, sun_direction = ks_sun_direction; float fov_radians=0.785398F, aspect=1, near_plane=.01F, far_plane=0, scene_radius=1; std::array<float,3> splits=ks_shadow_splits; std::uint32_t map_size=ks_shadow_map_size; };
+struct DirectionalShadowInput { LightingVec3 eye{0,0,5}, target{}, up{0,1,0}, sun_direction = ks_sun_direction; float fov_radians=0.785398F, aspect=1, near_plane=.01F, far_plane=50, scene_radius=1; std::array<float,3> splits=ks_shadow_splits; std::uint32_t map_size=ks_shadow_map_size; };
 struct ShadowCascade { std::uint32_t index=0; float near_plane=0, far_plane=0, radius=0, texel_world_size=0; LightingVec3 center{}; LightingMat4 matrix{}; };
 struct DirectionalShadowResult { std::vector<ShadowCascade> cascades; std::vector<float> splits; LightingVec3 forward{}, light_direction{}; std::uint32_t map_size=0; LightingSource source_kind=LightingSource::source_evidenced; };
 [[nodiscard]] DirectionalShadowResult computeDirectionalShadowCascades(const DirectionalShadowInput& input);

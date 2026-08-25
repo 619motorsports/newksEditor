@@ -189,6 +189,11 @@ DirectionalShadowMapResult prepare_directional_shadow_maps(
                     "directional_shadow_map_budget",
                     "Three directional shadow maps exceed the bounded byte budget");
     }
+    if (!valid_refresh_input(request.lighting)) {
+        return fail(DirectionalShadowMapStatus::invalid_request,
+                    "directional_shadow_input_invalid",
+                    "Directional shadow preparation requires finite camera and lighting values");
+    }
     DirectionalShadowCameraState camera_state;
     Diagnostic camera_diagnostic;
     const auto camera_status = build_camera_state(

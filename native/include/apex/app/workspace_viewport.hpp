@@ -12,6 +12,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace apex::app {
@@ -59,6 +60,36 @@ struct WorkspaceViewportDirectionalShadowOptions {
     render::DirectionalShadowReceiverConstantsLayout constants_layout =
         render::DirectionalShadowReceiverConstantsLayout::portable;
 };
+
+inline constexpr float workspace_viewport_default_sun_heading_degrees = 40.0F;
+inline constexpr float workspace_viewport_default_sun_height_degrees = 55.0F;
+
+struct WorkspaceViewportLightingRequest {
+    // Empty selects the production default weather preset.
+    std::string_view weather_id{};
+    float sun_heading_degrees = workspace_viewport_default_sun_heading_degrees;
+    float sun_height_degrees = workspace_viewport_default_sun_height_degrees;
+};
+
+enum class WorkspaceViewportLightingStatus : std::uint8_t {
+    ready,
+    invalid,
+    allocation_failed,
+};
+
+struct WorkspaceViewportLightingResult {
+    WorkspaceViewportLightingStatus status = WorkspaceViewportLightingStatus::invalid;
+    render::Diagnostic diagnostic;
+    render::EvaluatedLighting evaluated;
+    render::KsPerPixelFrameConstants frame_constants{};
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == WorkspaceViewportLightingStatus::ready;
+    }
+};
+
+[[nodiscard]] WorkspaceViewportLightingResult evaluateWorkspaceViewportLighting(
+    const WorkspaceViewportLightingRequest& request);
 
 struct WorkspaceViewportPrepareRequest {
     render::PresentationTargetDescription presentation{};

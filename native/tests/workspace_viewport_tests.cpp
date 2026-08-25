@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <limits>
@@ -72,6 +73,12 @@ private:
 
 class FakeDevice final : public Device {
 public:
+    struct BufferUpdate {
+        Buffer* buffer = nullptr;
+        std::uint64_t offset = 0U;
+        std::vector<std::byte> bytes;
+    };
+
     const DeviceInfo& info() const noexcept override { return info_; }
 
     BufferResult create_buffer(const BufferDescription& description,
@@ -80,8 +87,10 @@ public:
         return {BufferStatus::ready, {}, std::make_unique<FakeBuffer>(description)};
     }
 
-    BufferUpdateResult update_buffer(Buffer&, std::uint64_t,
-                                     std::span<const std::byte>) override {
+    BufferUpdateResult update_buffer(Buffer& buffer, std::uint64_t offset,
+                                     std::span<const std::byte> bytes) override {
+        buffer_updates.push_back(
+            {&buffer, offset, {bytes.begin(), bytes.end()}});
         return {BufferStatus::ready, {}};
     }
 
@@ -147,6 +156,10 @@ public:
         depth_draw_counts.push_back(batch.draws.size());
         depth_clear_values.push_back(batch.clear_depth ? batch.depth_clear_value
                                                        : -1.0F);
+        if (!batch.draws.empty() && batch.draws.front().camera_frame.has_value()) {
+            depth_camera_matrices.push_back(
+                batch.draws.front().camera_frame->view_projection);
+        }
         if (fail_depth_batch_call != 0U &&
             depth_batch_calls == fail_depth_batch_call) {
             return {DepthOnlyIndexedStaticMeshBatchStatus::execution_failed,
@@ -194,6 +207,8 @@ public:
     std::vector<const DepthAttachment*> depth_targets;
     std::vector<std::size_t> depth_draw_counts;
     std::vector<float> depth_clear_values;
+    std::vector<apex::scene::Matrix4> depth_camera_matrices;
+    std::vector<BufferUpdate> buffer_updates;
     std::vector<std::array<const DepthAttachment*,
                            indexed_directional_shadow_cascade_count>> receiver_maps;
 
@@ -452,6 +467,45 @@ CameraFrame valid_shadow_camera(float x = 0.0F) {
     return *built.frame;
 }
 
+void evaluates_bounded_workspace_lighting() {
+    const auto default_lighting =
+        apex::app::evaluateWorkspaceViewportLighting({});
+    require(default_lighting.ok() &&
+                default_lighting.evaluated.preset.id == "5_light_clouds",
+            "workspace lighting selects the production default weather");
+    const auto& direction = default_lighting.evaluated.sun_direction;
+    require(std::abs(direction[0] - 0.3686878F) < 1.0e-5F &&
+                std::abs(direction[1] - 0.8191520F) < 1.0e-5F &&
+                std::abs(direction[2] - 0.4393850F) < 1.0e-5F &&
+                default_lighting.frame_constants.sun_direction ==
+                    std::array<float, 4U>{direction[0], direction[1],
+                                          direction[2], 0.0F} &&
+                default_lighting.frame_constants.sun_color ==
+                    std::array<float, 4U>{
+                        default_lighting.evaluated.sun_color[0],
+                        default_lighting.evaluated.sun_color[1],
+                        default_lighting.evaluated.sun_color[2], 0.0F} &&
+                default_lighting.frame_constants.ambient_color ==
+                    std::array<float, 4U>{
+                        default_lighting.evaluated.ambient_color[0],
+                        default_lighting.evaluated.ambient_color[1],
+                        default_lighting.evaluated.ambient_color[2], 0.0F} &&
+                default_lighting.frame_constants.camera_position ==
+                    std::array<float, 4U>{},
+            "workspace lighting packs the source-matched 64-byte frame ABI");
+
+    require(apex::app::evaluateWorkspaceViewportLighting(
+                {"3_clear", 120.0F, 35.0F}).ok(),
+            "workspace lighting accepts a bounded stock weather selection");
+    require(!apex::app::evaluateWorkspaceViewportLighting(
+                 {"missing", 40.0F, 55.0F}).ok() &&
+                !apex::app::evaluateWorkspaceViewportLighting(
+                 {"", std::numeric_limits<float>::quiet_NaN(), 55.0F}).ok() &&
+                !apex::app::evaluateWorkspaceViewportLighting(
+                 {"", 40.0F, 91.0F}).ok(),
+            "workspace lighting rejects unknown and malformed state");
+}
+
 void camera_controller_matches_bounded_editor_gestures() {
     apex::app::WorkspaceViewportCameraController controller;
     const auto initial = controller.frame(1.0F, CameraClipSpace::vulkan);
@@ -592,7 +646,10 @@ void schedules_directional_shadows_before_color_and_reuses_maps() {
     FakeTarget target(request.presentation);
     WorkspaceViewportFrameRequest frame;
     frame.camera = valid_shadow_camera();
-    frame.frame_constants = KsPerPixelFrameConstants{};
+    const auto lighting = apex::app::evaluateWorkspaceViewportLighting(
+        {"3_clear", 120.0F, 35.0F});
+    require(lighting.ok(), "non-default viewport lighting evaluates");
+    frame.frame_constants = lighting.frame_constants;
     Diagnostic diagnostic;
     require(prepared.viewport->drawAndPresent(
                 device, target, frame, diagnostic) ==
@@ -605,6 +662,47 @@ void schedules_directional_shadows_before_color_and_reuses_maps() {
                     std::vector<float>({1.0F, 1.0F, 1.0F}) &&
                 device.receiver_maps.size() == 1U,
             "viewport executes three cascades before receiver color and present");
+
+    require(!device.buffer_updates.empty() &&
+                device.buffer_updates.back().offset == 0U &&
+                device.buffer_updates.back().bytes.size() ==
+                    portable_frame_buffer_view_bytes,
+            "receiver uploads one bounded frame-lighting record");
+    KsPerPixelFrameConstants uploaded{};
+    std::memcpy(&uploaded, device.buffer_updates.back().bytes.data(),
+                sizeof(uploaded));
+    require(uploaded.sun_direction == lighting.frame_constants.sun_direction &&
+                uploaded.sun_color == lighting.frame_constants.sun_color &&
+                uploaded.ambient_color == lighting.frame_constants.ambient_color &&
+                uploaded.camera_position ==
+                    std::array<float, 4U>{frame.camera.position[0],
+                                          frame.camera.position[1],
+                                          frame.camera.position[2], 0.0F},
+            "receiver upload keeps evaluated weather and renderer-owned camera state");
+
+    auto expected_shadow = shadows.maps.lighting;
+    expected_shadow.eye = frame.camera.position;
+    expected_shadow.target = {
+        frame.camera.position[0] + frame.camera.forward[0],
+        frame.camera.position[1] + frame.camera.forward[1],
+        frame.camera.position[2] + frame.camera.forward[2]};
+    expected_shadow.up = frame.camera.up;
+    expected_shadow.fov_radians = frame.camera.fov_radians;
+    expected_shadow.aspect = frame.camera.aspect;
+    expected_shadow.near_plane = frame.camera.near_plane;
+    expected_shadow.far_plane = frame.camera.far_plane;
+    expected_shadow.sun_direction = lighting.evaluated.sun_direction;
+    const auto expected_cascades = computeDirectionalShadowCascades(expected_shadow);
+    const auto expected_matrix = convertDirectionalShadowCascadeMatrix(
+        expected_cascades.cascades.front().matrix, CameraClipSpace::vulkan);
+    require(expected_matrix.ok() && !device.depth_camera_matrices.empty() &&
+                std::equal(expected_matrix.matrix.begin(),
+                           expected_matrix.matrix.end(),
+                           device.depth_camera_matrices.front().begin(),
+                           [](float left, float right) {
+                               return std::abs(left - right) < 1.0e-5F;
+                           }),
+            "shadow camera and receiver use the same evaluated sun direction");
     for (std::size_t cascade = 0U;
          cascade < directional_shadow_cascade_count; ++cascade) {
         require(device.receiver_maps.front()[cascade] ==
@@ -621,6 +719,34 @@ void schedules_directional_shadows_before_color_and_reuses_maps() {
                 std::equal(retained_targets.begin(), retained_targets.end(),
                            device.depth_targets.begin() + 3U),
             "camera movement refreshes cascade matrices and reuses native map allocations");
+
+    const auto shadow_before_bad_lighting = device.depth_batch_calls;
+    const auto color_before_bad_lighting = device.draw_calls;
+    const auto present_before_bad_lighting = device.present_calls;
+    auto invalid_constants = lighting.frame_constants;
+    invalid_constants.sun_direction[0] =
+        std::numeric_limits<float>::quiet_NaN();
+    frame.frame_constants = invalid_constants;
+    require(prepared.viewport->drawAndPresent(
+                device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code == "static_scene_frame_constants_non_finite" &&
+                device.depth_batch_calls == shadow_before_bad_lighting &&
+                device.draw_calls == color_before_bad_lighting &&
+                device.present_calls == present_before_bad_lighting,
+            "non-finite lighting fails before shadow, color, and present work");
+    invalid_constants = lighting.frame_constants;
+    invalid_constants.sun_direction = {};
+    frame.frame_constants = invalid_constants;
+    require(prepared.viewport->drawAndPresent(
+                device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code == "static_scene_frame_sun_direction_invalid" &&
+                device.depth_batch_calls == shadow_before_bad_lighting &&
+                device.draw_calls == color_before_bad_lighting &&
+                device.present_calls == present_before_bad_lighting,
+            "zero sun lighting fails before shadow, color, and present work");
+    frame.frame_constants = lighting.frame_constants;
 
     const auto color_before_failure = device.draw_calls;
     const auto present_before_failure = device.present_calls;
@@ -954,6 +1080,7 @@ void rejects_frame_mismatch_and_preserves_present_atomicity() {
 
 int main() {
     try {
+        evaluates_bounded_workspace_lighting();
         opens_and_draws();
         accepts_track_and_car_lod_documents();
         selects_car_lod_roots_at_viewport_boundary();

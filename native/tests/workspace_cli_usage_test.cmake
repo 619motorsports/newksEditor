@@ -17,6 +17,54 @@ if(malformed_position EQUAL -1)
 endif()
 
 execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --sun-height 55
+  RESULT_VARIABLE detached_lighting_result
+  ERROR_VARIABLE detached_lighting_error
+)
+if(NOT detached_lighting_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached lighting returned ${detached_lighting_result}: ${detached_lighting_error}")
+endif()
+string(FIND "${detached_lighting_error}"
+  "lighting options require a workspace model" detached_lighting_position)
+if(detached_lighting_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached lighting was not diagnosed: ${detached_lighting_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --sun-heading nan
+  RESULT_VARIABLE invalid_sun_result
+  ERROR_VARIABLE invalid_sun_error
+)
+if(NOT invalid_sun_result STREQUAL "1")
+  message(FATAL_ERROR
+    "non-finite sun returned ${invalid_sun_result}: ${invalid_sun_error}")
+endif()
+string(FIND "${invalid_sun_error}"
+  "sun heading must be a finite number" invalid_sun_position)
+if(invalid_sun_position EQUAL -1)
+  message(FATAL_ERROR "non-finite sun was not diagnosed: ${invalid_sun_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --weather 3_clear --weather 5_light_clouds
+  RESULT_VARIABLE duplicate_weather_result
+  ERROR_VARIABLE duplicate_weather_error
+)
+if(NOT duplicate_weather_result STREQUAL "1")
+  message(FATAL_ERROR
+    "duplicate weather returned ${duplicate_weather_result}: ${duplicate_weather_error}")
+endif()
+string(FIND "${duplicate_weather_error}"
+  "duplicate --weather option" duplicate_weather_position)
+if(duplicate_weather_position EQUAL -1)
+  message(FATAL_ERROR
+    "duplicate weather was not diagnosed: ${duplicate_weather_error}")
+endif()
+
+execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
           --directional-shadow-vertex shadow.spv
   RESULT_VARIABLE detached_shadow_result
@@ -49,6 +97,23 @@ if(kind_position EQUAL -1)
 endif()
 
 set(model "${APEX_SOURCE_DIR}/test/content/cars/619_gen6_arca_base/619_gen6_fusion13.kn5")
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --weather missing
+  RESULT_VARIABLE unknown_weather_result
+  ERROR_VARIABLE unknown_weather_error
+)
+if(NOT unknown_weather_result STREQUAL "1")
+  message(FATAL_ERROR
+    "unknown weather returned ${unknown_weather_result}: ${unknown_weather_error}")
+endif()
+string(FIND "${unknown_weather_error}"
+  "workspace_viewport_weather_unknown" unknown_weather_position)
+if(unknown_weather_position EQUAL -1)
+  message(FATAL_ERROR
+    "unknown weather was not diagnosed: ${unknown_weather_error}")
+endif()
+
 execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
   RESULT_VARIABLE missing_modules_result

@@ -428,6 +428,18 @@ remains unchanged and feature-complete.
   a failed draw. The native shell maps bounded SDL mouse gestures and
   portable WASD/QE keycodes to an application-owned camera controller. Motion
   translates the orbit target without exposing platform or backend types.
+  The shell also evaluates one of the seven stock weather presets with bounded
+  sun angles. It uploads sun direction, sun color, and ambient color through
+  the existing portable frame record. Directional shadow refresh uses that
+  same sun direction. The default preset and angles match the production
+  renderer. Native sky, fog, and post-processing remain staged.
+  Recovered `ksNet.dll` evidence supports the lighting record order.
+  `GraphicsManager::updateLightingSetttings` at `0x10046c2c` writes sun
+  direction at offset `0x00`, sun RGB at `0x30`, and ambient RGB at `0x40`.
+  The installed editor `race.ini` selects `5_light_clouds`. Managed editor UI
+  startup controls use values `50`, `180`, and `90`. Therefore, the shell's
+  40-degree and 55-degree angles are labeled production WebGL defaults. They
+  are not claimed as recovered original-editor startup angles.
   Car damage and bottom-collider authoring have bounded schemas and deterministic output. A
   single-hierarchy car validator checks required nodes, wheels, pivots,
   colliders, and visual-model bounds. Multi-LOD validation is still staged.

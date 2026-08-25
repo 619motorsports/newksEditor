@@ -221,7 +221,97 @@ using render::PipelineRenderTargetFormat;
     return true;
 }
 
+[[nodiscard]] bool finiteFrameLighting(
+    const render::KsPerPixelFrameConstants& constants) noexcept {
+    const auto finite = [](const auto& values) {
+        return std::all_of(values.begin(), values.end(),
+                           [](float value) { return std::isfinite(value); });
+    };
+    return finite(constants.sun_direction) && finite(constants.sun_color) &&
+           finite(constants.ambient_color) && finite(constants.camera_position);
+}
+
+[[nodiscard]] bool nonzeroFrameSun(
+    const render::KsPerPixelFrameConstants& constants) noexcept {
+    const double length_squared =
+        static_cast<double>(constants.sun_direction[0]) *
+            constants.sun_direction[0] +
+        static_cast<double>(constants.sun_direction[1]) *
+            constants.sun_direction[1] +
+        static_cast<double>(constants.sun_direction[2]) *
+            constants.sun_direction[2];
+    return length_squared > 1.0e-12;
+}
+
 }  // namespace
+
+WorkspaceViewportLightingResult evaluateWorkspaceViewportLighting(
+    const WorkspaceViewportLightingRequest& request) try {
+    WorkspaceViewportLightingResult result;
+    if (request.weather_id.size() > 128U ||
+        !std::isfinite(request.sun_heading_degrees) ||
+        !std::isfinite(request.sun_height_degrees) ||
+        request.sun_heading_degrees < 0.0F ||
+        request.sun_heading_degrees > 360.0F ||
+        request.sun_height_degrees < 0.0F ||
+        request.sun_height_degrees > 90.0F) {
+        result.diagnostic = diagnostic(
+            "workspace_viewport_lighting_input_invalid",
+            "Weather ID and sun angles must stay inside their finite bounds");
+        return result;
+    }
+
+    const auto& presets = render::stockWeatherPresets();
+    const render::WeatherPreset* preset = &render::defaultWeatherPreset();
+    if (!request.weather_id.empty()) {
+        const auto found = std::find_if(
+            presets.begin(), presets.end(), [&](const auto& candidate) {
+                return candidate.id == request.weather_id;
+            });
+        if (found == presets.end()) {
+            result.diagnostic = diagnostic(
+                "workspace_viewport_weather_unknown",
+                "Weather ID must name one of the bounded stock presets");
+            return result;
+        }
+        preset = &*found;
+    }
+
+    const auto sun_direction = render::sunDirectionFromAngles(
+        request.sun_heading_degrees, request.sun_height_degrees);
+    result.evaluated = render::evaluateKsLighting(*preset, sun_direction);
+    const auto finite = [](const auto& values) {
+        return std::all_of(values.begin(), values.end(),
+                           [](float value) { return std::isfinite(value); });
+    };
+    if (!finite(result.evaluated.sun_direction) ||
+        !finite(result.evaluated.sun_color) ||
+        !finite(result.evaluated.ambient_color)) {
+        result.diagnostic = diagnostic(
+            "workspace_viewport_lighting_result_invalid",
+            "Evaluated weather lighting must contain only finite values");
+        return result;
+    }
+    result.frame_constants.sun_direction = {
+        result.evaluated.sun_direction[0], result.evaluated.sun_direction[1],
+        result.evaluated.sun_direction[2], 0.0F};
+    result.frame_constants.sun_color = {
+        result.evaluated.sun_color[0], result.evaluated.sun_color[1],
+        result.evaluated.sun_color[2], 0.0F};
+    result.frame_constants.ambient_color = {
+        result.evaluated.ambient_color[0], result.evaluated.ambient_color[1],
+        result.evaluated.ambient_color[2], 0.0F};
+    result.frame_constants.camera_position = {};
+    result.status = WorkspaceViewportLightingStatus::ready;
+    return result;
+} catch (const std::bad_alloc&) {
+    WorkspaceViewportLightingResult result;
+    result.status = WorkspaceViewportLightingStatus::allocation_failed;
+    result.diagnostic = diagnostic(
+        "workspace_viewport_lighting_allocation_failed",
+        "Weather lighting evaluation has insufficient memory");
+    return result;
+}
 
 bool WorkspaceViewportCameraController::apply(
     const WorkspaceViewportCameraInput& input) noexcept {
@@ -460,6 +550,27 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
                 "Prepared directional shadows require retained map resources");
             return WorkspaceViewportFrameStatus::invalid;
         }
+        if (execution_->resources->owns_frame_constants() &&
+            !request.frame_constants.has_value()) {
+            output_diagnostic = diagnostic(
+                "static_scene_frame_constants_missing",
+                "A prepared pipeline requires per-frame constants");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        if (request.frame_constants.has_value() &&
+            !finiteFrameLighting(*request.frame_constants)) {
+            output_diagnostic = diagnostic(
+                "static_scene_frame_constants_non_finite",
+                "Per-frame constants must contain only finite values");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        if (request.frame_constants.has_value() &&
+            !nonzeroFrameSun(*request.frame_constants)) {
+            output_diagnostic = diagnostic(
+                "static_scene_frame_sun_direction_invalid",
+                "Per-frame lighting requires a nonzero sun direction");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
         auto lighting = directional_shadows_->maps.lighting;
         lighting.eye = request.camera.position;
         lighting.target = {
@@ -472,6 +583,13 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
         lighting.aspect = request.camera.aspect;
         lighting.near_plane = request.camera.near_plane;
         lighting.far_plane = request.camera.far_plane;
+        if (request.frame_constants.has_value()) {
+            lighting.sun_direction = {
+                request.frame_constants->sun_direction[0],
+                request.frame_constants->sun_direction[1],
+                request.frame_constants->sun_direction[2],
+            };
+        }
         const auto refreshed = render::refresh_directional_shadow_maps(
             *shadow_maps_, lighting);
         if (!refreshed.ok()) {
