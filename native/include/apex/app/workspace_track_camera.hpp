@@ -1,5 +1,6 @@
 #pragma once
 
+#include "apex/app/installed_editor_spline.hpp"
 #include "apex/domain/track_data.hpp"
 #include "apex/render/camera.hpp"
 
@@ -20,8 +21,10 @@ inline constexpr float installed_editor_track_camera_default_speed = 0.5F;
 inline constexpr float installed_editor_track_camera_default_lookahead = 1.0F;
 inline constexpr float installed_editor_track_camera_endpoint_factor =
     0.9999899864196777F;
-inline constexpr float installed_editor_track_camera_closure_distance = 75.0F;
-inline constexpr float installed_editor_track_camera_length_step = 0.001F;
+inline constexpr float installed_editor_track_camera_closure_distance =
+    installed_editor_spline_closure_distance;
+inline constexpr float installed_editor_track_camera_length_step =
+    installed_editor_spline_length_step;
 inline constexpr std::size_t
     installed_editor_track_camera_max_spline_points = 65'536U;
 
@@ -48,12 +51,7 @@ struct WorkspaceTrackCameraFrameRequest {
 [[nodiscard]] render::CameraFrameResult buildWorkspaceTrackCameraFrame(
     const WorkspaceTrackCameraFrameRequest& request);
 
-struct InstalledEditorTrackCameraSpline {
-    std::vector<std::array<float, 3U>> points;
-    std::vector<float> cumulative_lengths;
-    float length = 0.0F;
-    bool closed = false;
-};
+using InstalledEditorTrackCameraSpline = InstalledEditorSpline;
 
 struct InstalledEditorTrackCameraSplineResult {
     std::optional<InstalledEditorTrackCameraSpline> spline;

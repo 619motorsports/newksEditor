@@ -140,6 +140,172 @@ void rejectsVisualizationBudgetOverflow() {
             "render-budget overflow must be rejected");
 }
 
+void require_near(float actual, float expected, const char* message,
+                  float tolerance = 0.001F) {
+    if (std::abs(actual - expected) > tolerance)
+        throw std::runtime_error(message);
+}
+
+const apex::render::OverlayLineVertex&
+sampled_vertex(const apex::app::WorkspaceAiSplineGeometry& geometry,
+               std::size_t sample_index) {
+    if (sample_index == 0U) return geometry.vertices.front();
+    return geometry.vertices[sample_index * 2U - 1U];
+}
+
+void convertsRecoveredInterpolatedSpline() {
+    apex::formats::AiSpline spline;
+    spline.version = 7U;
+    spline.points = {point(0.0F, 0.0F, 0.0F),
+                     point(100.0F, 0.0F, 0.0F),
+                     point(200.0F, 100.0F, 0.0F),
+                     point(300.0F, 100.0F, 0.0F)};
+    // load() calls computeSplineLength() after it reads either supported
+    // version. These serialized values must not drive the display curve.
+    spline.points[0].length = 400.0F;
+    spline.points[1].length = -20.0F;
+    spline.points[2].length = 1.0e20F;
+    spline.points[3].length = 0.0F;
+
+    const auto result = apex::app::buildWorkspaceAiSplineGeometry(
+        spline, apex::app::WorkspaceAiSplineDisplayMode::interpolated);
+    require(result.ok(), "interpolated v7 spline must convert");
+    require(result.geometry.mode ==
+                    apex::app::WorkspaceAiSplineDisplayMode::interpolated &&
+                result.geometry.source_point_count == 4U &&
+                result.geometry.sample_point_count == 5'001U,
+            "interpolated spline metadata mismatch");
+    require(result.geometry.vertices.size() == 10'000U &&
+                result.geometry.chunks.size() == 3U,
+            "interpolated spline line-list size mismatch");
+    require(result.geometry.chunks[0].first_vertex == 0U &&
+                result.geometry.chunks[0].vertex_count == 4'096U &&
+                result.geometry.chunks[1].first_vertex == 4'096U &&
+                result.geometry.chunks[1].vertex_count == 4'096U &&
+                result.geometry.chunks[2].first_vertex == 8'192U &&
+                result.geometry.chunks[2].vertex_count == 1'808U,
+            "interpolated spline chunk ranges mismatch");
+
+    const auto& first = sampled_vertex(result.geometry, 0U).position;
+    const auto& quarter = sampled_vertex(result.geometry, 1'250U).position;
+    const auto& middle = sampled_vertex(result.geometry, 2'500U).position;
+    const auto& three_quarters =
+        sampled_vertex(result.geometry, 3'750U).position;
+    const auto& last = sampled_vertex(result.geometry, 5'000U).position;
+    require(first == std::array<float, 3U>{0.0F, 0.0F, 0.0F},
+            "interpolated spline must start at normalized zero");
+    require_near(quarter[0], 84.090866F,
+                 "interpolated quarter-sample x mismatch");
+    require_near(quarter[1], -5.408871F,
+                 "interpolated quarter-sample y mismatch");
+    require_near(middle[0], 150.002029F,
+                 "interpolated midpoint x mismatch");
+    require_near(middle[1], 50.002514F,
+                 "interpolated midpoint y mismatch");
+    require_near(three_quarters[0], 215.901169F,
+                 "interpolated three-quarter x mismatch");
+    require_near(three_quarters[1], 105.407196F,
+                 "interpolated three-quarter y mismatch");
+    require_near(last[0], 299.989990F,
+                 "float loop must stop before normalized one");
+    require_near(last[1], 99.999985F,
+                 "interpolated final sample y mismatch");
+}
+
+void preservesInterpolatedV2RetentionChoice() {
+    apex::formats::AiSpline v7;
+    v7.version = 7U;
+    v7.points = {point(0.0F, 0.0F, 0.0F),
+                 point(100.0F, 0.0F, 0.0F),
+                 point(200.0F, 100.0F, 0.0F),
+                 point(300.0F, 100.0F, 0.0F)};
+    const auto expected = apex::app::buildWorkspaceAiSplineGeometry(
+        v7, apex::app::WorkspaceAiSplineDisplayMode::interpolated);
+    require(expected.ok(), "interpolated v7 comparison spline converts");
+
+    apex::formats::AiSpline v2;
+    v2.version = 2U;
+    v2.legacyV2Records.resize(10U);
+    for (auto& record : v2.legacyV2Records)
+        record.position = {9'999.0F, 9'999.0F, 9'999.0F};
+    v2.legacyV2Records[0U].position = v7.points[0U].position;
+    v2.legacyV2Records[3U].position = v7.points[1U].position;
+    v2.legacyV2Records[6U].position = v7.points[2U].position;
+    v2.legacyV2Records[9U].position = v7.points[3U].position;
+    v2.nativeRetainedIndices = {0U, 3U, 6U, 9U};
+    const auto actual = apex::app::buildWorkspaceAiSplineGeometry(
+        v2, apex::app::WorkspaceAiSplineDisplayMode::interpolated);
+    require(actual.ok(), "interpolated retained v2 spline converts");
+    require(actual.geometry.vertices.size() ==
+                expected.geometry.vertices.size(),
+            "interpolated v2 output size mismatch");
+    for (std::size_t index = 0U;
+         index < actual.geometry.vertices.size(); ++index) {
+        require(actual.geometry.vertices[index].position ==
+                        expected.geometry.vertices[index].position &&
+                    actual.geometry.vertices[index].color ==
+                        expected.geometry.vertices[index].color,
+                "interpolated v2 must use only native retained source indices");
+    }
+}
+
+void rejectsUnsafeInterpolatedSources() {
+    apex::formats::AiSpline short_spline;
+    short_spline.version = 7U;
+    short_spline.points = {point(0.0F, 0.0F, 0.0F),
+                           point(1.0F, 0.0F, 0.0F),
+                           point(2.0F, 0.0F, 0.0F)};
+    auto result = apex::app::buildWorkspaceAiSplineGeometry(
+        short_spline, apex::app::WorkspaceAiSplineDisplayMode::interpolated);
+    require(!result.ok() &&
+                result.diagnostic.code ==
+                    "workspace_ai_spline_interpolation_too_short",
+            "short interpolated spline must be rejected safely");
+
+    apex::formats::AiSpline repeated;
+    repeated.version = 7U;
+    repeated.points.resize(4U);
+    result = apex::app::buildWorkspaceAiSplineGeometry(
+        repeated, apex::app::WorkspaceAiSplineDisplayMode::interpolated);
+    require(!result.ok() &&
+                result.diagnostic.code ==
+                    "workspace_ai_spline_interpolation_length_invalid",
+            "zero-length interpolated spline must be rejected safely");
+
+    apex::formats::AiSpline exact_endpoint;
+    exact_endpoint.version = 7U;
+    exact_endpoint.points = {
+        point(0.0F, 0.0F, 0.0F), point(10.0F, 0.0F, 0.0F),
+        point(10.0F, 10.0F, 0.0F), point(0.0F, 0.0F, 0.0F)};
+    result = apex::app::buildWorkspaceAiSplineGeometry(
+        exact_endpoint, apex::app::WorkspaceAiSplineDisplayMode::interpolated);
+    require(!result.ok(),
+            "zero closed endpoint chord must not reach native division by zero");
+
+    apex::formats::AiSpline oversized;
+    oversized.version = 7U;
+    oversized.points.resize(
+        apex::app::workspace_ai_spline_max_interpolation_control_points + 1U);
+    result = apex::app::buildWorkspaceAiSplineGeometry(
+        oversized, apex::app::WorkspaceAiSplineDisplayMode::interpolated);
+    require(!result.ok() &&
+                result.status ==
+                    apex::app::WorkspaceAiSplineStatus::limit_exceeded,
+            "interpolated control-point budget must be checked before work");
+
+    apex::formats::AiSpline valid;
+    valid.version = 7U;
+    valid.points = {point(0.0F, 0.0F, 0.0F),
+                    point(100.0F, 0.0F, 0.0F),
+                    point(200.0F, 100.0F, 0.0F),
+                    point(300.0F, 100.0F, 0.0F)};
+    result = apex::app::buildWorkspaceAiSplineGeometry(
+        valid, static_cast<apex::app::WorkspaceAiSplineDisplayMode>(255U));
+    require(!result.ok() &&
+                result.diagnostic.code == "workspace_ai_spline_mode_invalid",
+            "unknown AI spline display mode must be rejected");
+}
+
 } // namespace
 
 int main() {
@@ -150,6 +316,9 @@ int main() {
         rejectsMalformedConstructedSources();
         chunksWithoutDroppingPortableSegments();
         rejectsVisualizationBudgetOverflow();
+        convertsRecoveredInterpolatedSpline();
+        preservesInterpolatedV2RetentionChoice();
+        rejectsUnsafeInterpolatedSources();
     } catch (const std::exception& error) {
         std::cerr << "workspace_ai_spline_tests: " << error.what() << '\n';
         return 1;

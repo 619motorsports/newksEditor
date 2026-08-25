@@ -1319,17 +1319,29 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 }
                 expected_first += chunk.vertex_count;
             }
+            const std::size_t expected_vertices =
+                geometry.sample_point_count > 2U
+                    ? (static_cast<std::size_t>(
+                           geometry.sample_point_count) - 1U) * 2U
+                    : 0U;
+            const bool mode_metadata_valid =
+                geometry.mode == WorkspaceAiSplineDisplayMode::raw
+                    ? geometry.sample_point_count ==
+                          geometry.source_point_count
+                    : geometry.mode ==
+                              WorkspaceAiSplineDisplayMode::interpolated &&
+                          geometry.source_point_count >= 4U &&
+                          geometry.sample_point_count ==
+                              workspace_ai_spline_interpolated_sample_count;
             if (expected_first != geometry.vertices.size() ||
                 (geometry.vertices.empty() != geometry.chunks.empty()) ||
-                (geometry.source_point_count <= 2U &&
-                 !geometry.vertices.empty()) ||
-                (geometry.source_point_count > 2U &&
-                 geometry.vertices.empty())) {
+                geometry.vertices.size() != expected_vertices ||
+                !mode_metadata_valid) {
                 result.status = WorkspaceViewportStatus::invalid;
                 result.diagnostic = diagnostic(
                     "workspace_viewport_ai_spline_geometry_invalid",
-                    "AI spline geometry does not match its source-point and "
-                    "chunk metadata");
+                    "AI spline geometry does not match its display mode, "
+                    "sample count, and chunk metadata");
                 return result;
             }
             for (const render::OverlayLineVertex& vertex : geometry.vertices) {
@@ -1339,7 +1351,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                     result.diagnostic = diagnostic(
                         "workspace_viewport_ai_spline_vertex_invalid",
                         "AI spline vertices require finite positions and the "
-                        "recovered raw color");
+                        "recovered magenta color");
                     return result;
                 }
             }
@@ -1351,7 +1363,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 result.status = WorkspaceViewportStatus::invalid;
                 result.diagnostic =
                     diagnostic("workspace_viewport_ai_spline_depth_invalid",
-                               "The recovered raw AI spline requires normal "
+                               "The recovered AI spline requires normal "
                                "less-or-equal depth test and writes");
                 return result;
             }

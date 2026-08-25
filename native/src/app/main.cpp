@@ -63,7 +63,7 @@ void usage(std::ostream& output) {
               "                       [--track-camera-set <file> --track-camera-index <index>]\n"
               "                       [--track-camera-position <value>] [--track-camera-play]\n"
               "                       [--track-camera-mode webgl|installed-editor]\n"
-           "                       [--ai-spline <file>]\n"
+              "                       [--ai-spline <file> [--ai-spline-mode raw|interpolated]]\n"
               "                       [--node-search <query>] [--selected-node <id> [--isolate-selected]]\n"
               "                       [--show-hidden] [--wireframe] [--grid] [--view-axis]\n"
               "                       [--weather <stock-id>] [--sun-heading <degrees>] [--sun-height <degrees>]\n"
@@ -553,6 +553,9 @@ struct WindowWorkspaceOptions {
         apex::app::TrackCameraPreviewMode::webgl;
     bool trackCameraModeSpecified = false;
     std::optional<std::filesystem::path> aiSpline;
+    apex::app::WorkspaceAiSplineDisplayMode aiSplineMode =
+        apex::app::WorkspaceAiSplineDisplayMode::raw;
+    bool aiSplineModeSpecified = false;
     std::optional<std::string> nodeSearch;
     std::optional<apex::scene::NodeId> selectedNode;
     bool isolateSelected = false;
@@ -627,6 +630,16 @@ apex::app::TrackCameraPreviewMode parse_track_camera_mode(
         return apex::app::TrackCameraPreviewMode::installed_editor;
     throw std::runtime_error(
         "track-camera mode must be webgl or installed-editor");
+}
+
+apex::app::WorkspaceAiSplineDisplayMode parse_ai_spline_mode(
+    std::string_view value) {
+    if (value == "raw")
+        return apex::app::WorkspaceAiSplineDisplayMode::raw;
+    if (value == "interpolated")
+        return apex::app::WorkspaceAiSplineDisplayMode::interpolated;
+    throw std::runtime_error(
+        "AI spline mode must be raw or interpolated");
 }
 
 double parse_finite_number(std::string_view value, std::string_view label) {
@@ -783,6 +796,13 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
                 throw std::runtime_error("duplicate --ai-spline option");
             result.aiSpline =
                 std::filesystem::path(require_value("--ai-spline"));
+        } else if (option == "--ai-spline-mode") {
+            if (result.aiSplineModeSpecified)
+                throw std::runtime_error(
+                    "duplicate --ai-spline-mode option");
+            result.aiSplineMode = parse_ai_spline_mode(
+                require_value("--ai-spline-mode"));
+            result.aiSplineModeSpecified = true;
         } else if (option == "--node-search") {
             if (result.nodeSearch.has_value())
                 throw std::runtime_error("duplicate --node-search option");
@@ -999,6 +1019,9 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
         !result.authoringOverlayVertex.has_value())
         throw std::runtime_error(
             "--ai-spline requires authoring-overlay shader modules");
+    if (result.aiSplineModeSpecified && !result.aiSpline.has_value())
+        throw std::runtime_error(
+            "--ai-spline-mode requires --ai-spline");
     if (result.isolateSelected && !result.selectedNode.has_value())
         throw std::runtime_error("--isolate-selected requires --selected-node");
     const bool selection_options = result.nodeSearch.has_value() ||
@@ -1195,14 +1218,20 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
         const auto bytes = read_file(*options.aiSpline);
         const auto spline = apex::formats::parseAiSpline(
             bytes, options.aiSpline->generic_string());
-        auto geometry = apex::app::buildWorkspaceAiSplineGeometry(spline);
+        auto geometry = apex::app::buildWorkspaceAiSplineGeometry(
+            spline, options.aiSplineMode);
         if (!geometry.ok())
             throw std::runtime_error(geometry.diagnostic.code + ": " +
                                      geometry.diagnostic.message);
         std::cout << "AI spline: version=" << spline.version
                   << ", points=" << geometry.geometry.source_point_count
+                  << ", samples=" << geometry.geometry.sample_point_count
                   << ", segments=" << geometry.geometry.vertices.size() / 2U
-                  << ", draws=" << geometry.geometry.chunks.size() << '\n';
+                  << ", draws=" << geometry.geometry.chunks.size()
+                  << ", mode="
+                  << apex::app::workspace_ai_spline_display_mode_name(
+                         geometry.geometry.mode)
+                  << '\n';
         loaded.aiSpline = std::move(geometry.geometry);
     }
     const bool selection_options = options.nodeSearch.has_value() ||

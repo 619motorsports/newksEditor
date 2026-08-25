@@ -109,8 +109,9 @@ struct WorkspaceViewportPrepareRequest {
     // The view axis, grid, and selected-node marker share this fixed
     // position/color line contract. Selection can omit its marker.
     std::optional<render::PipelineProgram> authoring_overlay_pipeline;
-    // Optional recovered raw SplineEditor pass. The geometry is copied to an
-    // immutable buffer during preparation and is not retained by reference.
+    // Optional recovered raw or interpolated SplineEditor pass. The geometry
+    // is copied to an immutable buffer during preparation and is not retained
+    // by reference.
     const WorkspaceAiSplineGeometry* ai_spline_geometry = nullptr;
     std::optional<render::PipelineProgram> ai_spline_pipeline;
     // Optional recovered magenta selected-mesh pass. The selected packet must

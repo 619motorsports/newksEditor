@@ -153,6 +153,10 @@ secondary exports include collider KN5, `damage.ini`, `colliders.ini`, and
   one-shot playback use `SPLINE_ANIMATION_LENGTH`. An explicit installed-editor
   mode uses recovered arc-length Catmull-Rom sampling, absolute spline points,
   target-facing look-ahead, and the editor's distance-based playback.
+- Version-2 and version-7 AI-spline previews with bounded parsing and raw
+  magenta lines. An explicit interpolated mode uses the installed editor's
+  Catmull-Rom curve, arc-length lookup, and 5,001-sample draw schedule.
+  Vulkan and D3D12 use the same backend-neutral line geometry.
 - Packed `data.acd` browsing with bounds checks, unsafe-path rejection, duplicate
   diagnostics, and virtual read-only INI files; packed or unpacked car `data/lods.ini`
   workspaces with contiguous `LOD_n` loading, `IN`/`OUT`

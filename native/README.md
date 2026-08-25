@@ -151,7 +151,7 @@ out/native/dev/native/apex-native --window vulkan --frames 300
 out/native/dev/native/apex-native --window vulkan --model car.kn5 \
   --analog-instruments data/analog_instruments.ini --rpm 6000 \
   --animation animations/car_door_l.ksanim --animation-position 0.5 \
-  --ai-spline data/fast_lane.ai \
+  --ai-spline data/fast_lane.ai --ai-spline-mode interpolated \
   --node-search door --selected-node 42 --isolate-selected --wireframe --grid \
   --weather 5_light_clouds --sun-heading 40 --sun-height 55 \
   --shader-family ksPerPixel --shader-vertex stock.vert.spv \
@@ -219,11 +219,15 @@ The authoring-overlay modules use the fixed position-and-color line ABI.
 The module pair requires `--selected-node`, `--grid`, `--view-axis`, or
 `--ai-spline`.
 The AI-spline option loads a bounded version-2 or version-7 file.
-It draws the recovered raw magenta spline with an identity world matrix.
+The default `raw` mode draws the recovered raw magenta spline.
+`--ai-spline-mode interpolated` draws the recovered Catmull-Rom curve.
+This mode recomputes the native arc-length table and ignores stored point
+lengths. It samples 5,001 points with the recovered float increment.
+Both modes use an identity world matrix.
 The spline uses normal depth and the recovered scene-finished phase.
 The Vulkan and D3D12 line list is a labeled translation of the OpenGL line
 strip. The translation keeps all segments at portable chunk boundaries.
-The option does not enable interpolation, side splines, camber, or editing.
+The option does not enable intervals, side splines, camber, or editing.
 The old `--selection-axis-vertex` and `--selection-axis-fragment` names remain aliases.
 The grid starts hidden. `--grid` shows the recovered 10 m magenta grid.
 The view axis starts hidden. `--view-axis` shows the recovered one-meter

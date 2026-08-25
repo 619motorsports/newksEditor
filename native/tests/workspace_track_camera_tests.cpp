@@ -169,9 +169,13 @@ void builds_recovered_installed_editor_spline() {
         apex::app::buildInstalledEditorTrackCameraSpline(closed_points);
     require(closed.ok() && closed.spline->closed,
             "endpoints within 75 world units select closed topology");
+    require(closed.spline->closing_length == 1.0F,
+            "closed spline keeps the endpoint chord used by native lookup");
     require(closed.spline->length >
-                closed.spline->cumulative_lengths.back(),
-            "closed spline length includes the final wrapped segment");
+                closed.spline->cumulative_lengths.back() +
+                    closed.spline->closing_length,
+            "closed spline length includes the wrapped curve and the native "
+            "endpoint-chord addition");
 }
 
 void builds_installed_editor_target_camera_frame() {

@@ -30,12 +30,6 @@ using Point = std::array<float, 3U>;
     return std::isfinite(output);
 }
 
-[[nodiscard]] bool finite_point(const Point& point) noexcept {
-    return std::all_of(point.begin(), point.end(), [](float value) {
-        return std::isfinite(value);
-    });
-}
-
 [[nodiscard]] Point subtract(const Point& left, const Point& right) noexcept {
     return {left[0] - right[0], left[1] - right[1], left[2] - right[2]};
 }
@@ -56,107 +50,6 @@ using Point = std::array<float, 3U>;
 [[nodiscard]] float point_length(const Point& point) noexcept {
     const float squared = dot(point, point);
     return squared == 0.0F ? 0.0F : std::sqrt(squared);
-}
-
-[[nodiscard]] float point_distance(const Point& left,
-                                   const Point& right) noexcept {
-    return point_length(subtract(left, right));
-}
-
-[[nodiscard]] std::size_t spline_index(std::ptrdiff_t index,
-                                       std::size_t count,
-                                       bool closed) noexcept {
-    if (closed) {
-        if (index < 0) index += static_cast<std::ptrdiff_t>(count);
-        else if (index >= static_cast<std::ptrdiff_t>(count))
-            index -= static_cast<std::ptrdiff_t>(count);
-        return static_cast<std::size_t>(index);
-    }
-    if (index < 0) return 0U;
-    const auto converted = static_cast<std::size_t>(index);
-    return std::min(converted, count - 1U);
-}
-
-[[nodiscard]] Point catmull_segment(
-    std::span<const Point> points, std::size_t segment, float value,
-    bool closed) noexcept {
-    const auto count = points.size();
-    const auto base = static_cast<std::ptrdiff_t>(segment);
-    const auto& p0 = points[spline_index(base - 1, count, closed)];
-    const auto& p1 = points[spline_index(base, count, closed)];
-    const auto& p2 = points[spline_index(base + 1, count, closed)];
-    const auto& p3 = points[spline_index(base + 2, count, closed)];
-    const float value2 = value * value;
-    const float value3 = value2 * value;
-    const float c0 = -value3 + 2.0F * value2 - value;
-    const float c1 = 3.0F * value3 - 5.0F * value2 + 2.0F;
-    const float c2 = 4.0F * value2 - 3.0F * value3 + value;
-    const float c3 = value3 - value2;
-    Point result{};
-    for (std::size_t axis = 0U; axis < 3U; ++axis) {
-        result[axis] = 0.5F *
-            (p0[axis] * c0 + p1[axis] * c1 +
-             p2[axis] * c2 + p3[axis] * c3);
-    }
-    return result;
-}
-
-[[nodiscard]] float catmull_segment_length(
-    std::span<const Point> points, std::size_t segment,
-    bool closed) noexcept {
-    Point previous = catmull_segment(points, segment, 0.0F, closed);
-    float length = 0.0F;
-    for (float value = 0.0F; value <= 1.0F;
-         value += installed_editor_track_camera_length_step) {
-        const Point current = catmull_segment(
-            points, segment, value, closed);
-        length += point_distance(current, previous);
-        previous = current;
-    }
-    return length;
-}
-
-[[nodiscard]] Point sample_installed_spline(
-    const InstalledEditorTrackCameraSpline& spline,
-    float normalized_position) noexcept {
-    const float position = std::clamp(normalized_position, 0.0F, 1.0F);
-    if (position == 0.0F) return spline.points.front();
-
-    const float distance = spline.length * position;
-    const std::size_t last = spline.points.size() - 1U;
-    for (std::size_t index = 0U; index < last; ++index) {
-        const float begin = spline.cumulative_lengths[index];
-        const float end = spline.cumulative_lengths[index + 1U];
-        if (begin <= distance && distance < end) {
-            const float local = (distance - begin) / (end - begin);
-            return catmull_segment(spline.points, index, local,
-                                   spline.closed);
-        }
-    }
-    if (spline.closed) {
-        const float begin = spline.cumulative_lengths.back();
-        const float closing_length = spline.length - begin;
-        if (closing_length > 0.0F) {
-            const float local = (distance - begin) / closing_length;
-            return catmull_segment(spline.points, last, local, true);
-        }
-    }
-    return spline.points.back();
-}
-
-[[nodiscard]] bool valid_cumulative_lengths(
-    const InstalledEditorTrackCameraSpline& spline) noexcept {
-    if (spline.cumulative_lengths.empty() ||
-        spline.cumulative_lengths.front() != 0.0F)
-        return false;
-    float previous = 0.0F;
-    for (const float value : spline.cumulative_lengths) {
-        if (!std::isfinite(value) || value < previous ||
-            value > spline.length)
-            return false;
-        previous = value;
-    }
-    return true;
 }
 
 } // namespace
@@ -246,27 +139,12 @@ buildInstalledEditorTrackCameraSpline(
         }
         spline.points.push_back(converted);
     }
-    spline.closed = point_distance(spline.points.back(),
-                                   spline.points.front()) <=
-                    installed_editor_track_camera_closure_distance;
-    spline.cumulative_lengths.assign(spline.points.size(), 0.0F);
-    float length = 0.0F;
-    for (std::size_t segment = 0U;
-         segment + 1U < spline.points.size(); ++segment) {
-        length += catmull_segment_length(spline.points, segment,
-                                         spline.closed);
-        spline.cumulative_lengths[segment + 1U] = length;
-    }
-    if (spline.closed) {
-        length += catmull_segment_length(
-            spline.points, spline.points.size() - 1U, true);
-    }
-    if (!(length > 0.0F) || !std::isfinite(length)) {
+    spline.closed = installedEditorSplineIsClosed(spline.points);
+    if (!recomputeInstalledEditorSplineLengths(spline)) {
         return {std::nullopt,
                 "installed_editor_track_camera_spline_length_invalid",
                 "Installed-editor camera spline must have a positive finite length"};
     }
-    spline.length = length;
     return {std::move(spline), {}, {}};
 }
 
@@ -285,11 +163,7 @@ render::CameraFrameResult buildInstalledEditorTrackCameraFrame(
             "Installed-editor camera position and look-ahead must be finite");
     }
     const auto& spline = *request.spline;
-    if (spline.points.size() < 4U ||
-        spline.points.size() != spline.cumulative_lengths.size() ||
-        !(spline.length > 0.0F) || !std::isfinite(spline.length) ||
-        !std::all_of(spline.points.begin(), spline.points.end(), finite_point) ||
-        !valid_cumulative_lengths(spline)) {
+    if (!validInstalledEditorSpline(spline)) {
         return failure(
             "installed_editor_track_camera_spline_invalid",
             "Installed-editor camera spline data is incomplete or invalid");
@@ -298,11 +172,19 @@ render::CameraFrameResult buildInstalledEditorTrackCameraFrame(
     const float scaled = request.spline_position *
                          installed_editor_track_camera_endpoint_factor;
     const float position = std::clamp(scaled, 0.0F, 1.0F);
-    const Point eye = sample_installed_spline(spline, position);
+    const auto eye_sample = sampleInstalledEditorSpline(spline, position);
     const float target_position = std::clamp(
         position + request.lookahead_world_units / spline.length,
         0.0F, 1.0F);
-    const Point target = sample_installed_spline(spline, target_position);
+    const auto target_sample =
+        sampleInstalledEditorSpline(spline, target_position);
+    if (!eye_sample.has_value() || !target_sample.has_value()) {
+        return failure(
+            "installed_editor_track_camera_spline_invalid",
+            "Installed-editor camera spline data is incomplete or invalid");
+    }
+    const Point& eye = *eye_sample;
+    const Point& target = *target_sample;
     const Point direction_source = subtract(target, eye);
     const float direction_length = point_length(direction_source);
     if (!(direction_length > 1.0e-6F) || !std::isfinite(direction_length)) {

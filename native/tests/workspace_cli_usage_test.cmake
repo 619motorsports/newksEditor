@@ -44,6 +44,57 @@ if(duplicate_ai_position EQUAL -1)
   message(FATAL_ERROR
     "duplicate AI spline was not diagnosed: ${duplicate_ai_error}")
 endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --ai-spline-mode interpolated
+  RESULT_VARIABLE detached_ai_mode_result
+  ERROR_VARIABLE detached_ai_mode_error
+)
+if(NOT detached_ai_mode_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached AI spline mode returned ${detached_ai_mode_result}: ${detached_ai_mode_error}")
+endif()
+string(FIND "${detached_ai_mode_error}"
+  "--ai-spline-mode requires --ai-spline" detached_ai_mode_position)
+if(detached_ai_mode_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached AI spline mode was not diagnosed: ${detached_ai_mode_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --ai-spline-mode approximate
+  RESULT_VARIABLE malformed_ai_mode_result
+  ERROR_VARIABLE malformed_ai_mode_error
+)
+if(NOT malformed_ai_mode_result STREQUAL "1")
+  message(FATAL_ERROR
+    "malformed AI spline mode returned ${malformed_ai_mode_result}: ${malformed_ai_mode_error}")
+endif()
+string(FIND "${malformed_ai_mode_error}"
+  "AI spline mode must be raw or interpolated" malformed_ai_mode_position)
+if(malformed_ai_mode_position EQUAL -1)
+  message(FATAL_ERROR
+    "malformed AI spline mode was not diagnosed: ${malformed_ai_mode_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --ai-spline-mode raw --ai-spline-mode interpolated
+  RESULT_VARIABLE duplicate_ai_mode_result
+  ERROR_VARIABLE duplicate_ai_mode_error
+)
+if(NOT duplicate_ai_mode_result STREQUAL "1")
+  message(FATAL_ERROR
+    "duplicate AI spline mode returned ${duplicate_ai_mode_result}: ${duplicate_ai_mode_error}")
+endif()
+string(FIND "${duplicate_ai_mode_error}"
+  "duplicate --ai-spline-mode option" duplicate_ai_mode_position)
+if(duplicate_ai_mode_position EQUAL -1)
+  message(FATAL_ERROR
+    "duplicate AI spline mode was not diagnosed: ${duplicate_ai_mode_error}")
+endif()
 string(FIND "${malformed_error}" "unknown window option" malformed_position)
 if(malformed_position EQUAL -1)
   message(FATAL_ERROR "unknown workspace-window option was not diagnosed: ${malformed_error}")
@@ -341,7 +392,7 @@ if(NOT ai_load_result STREQUAL "1")
     "AI spline load probe returned ${ai_load_result}: ${ai_load_error}")
 endif()
 string(FIND "${ai_load_output}"
-  "AI spline: version=7, points=3536, segments=3535, draws=2"
+  "AI spline: version=7, points=3536, samples=3536, segments=3535, draws=2, mode=raw"
   ai_load_position)
 if(ai_load_position EQUAL -1)
   message(FATAL_ERROR
@@ -352,6 +403,35 @@ string(FIND "${ai_load_error}"
 if(ai_shader_position EQUAL -1)
   message(FATAL_ERROR
     "AI spline probe did not reach shader setup: ${ai_load_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --ai-spline "${ai_spline}" --ai-spline-mode interpolated
+          --shader-family fixture --shader-vertex missing.vert.spv
+          --shader-fragment missing.frag.spv
+          --authoring-overlay-vertex missing-overlay.vert.spv
+          --authoring-overlay-fragment missing-overlay.frag.spv
+  RESULT_VARIABLE interpolated_ai_load_result
+  OUTPUT_VARIABLE interpolated_ai_load_output
+  ERROR_VARIABLE interpolated_ai_load_error
+)
+if(NOT interpolated_ai_load_result STREQUAL "1")
+  message(FATAL_ERROR
+    "interpolated AI spline load probe returned ${interpolated_ai_load_result}: ${interpolated_ai_load_error}")
+endif()
+string(FIND "${interpolated_ai_load_output}"
+  "AI spline: version=7, points=3536, samples=5001, segments=5000, draws=3, mode=interpolated"
+  interpolated_ai_load_position)
+if(interpolated_ai_load_position EQUAL -1)
+  message(FATAL_ERROR
+    "interpolated AI spline did not load before shader setup: ${interpolated_ai_load_output}${interpolated_ai_load_error}")
+endif()
+string(FIND "${interpolated_ai_load_error}"
+  "cannot open missing.vert.spv" interpolated_ai_shader_position)
+if(interpolated_ai_shader_position EQUAL -1)
+  message(FATAL_ERROR
+    "interpolated AI spline probe did not reach shader setup: ${interpolated_ai_load_error}")
 endif()
 
 execute_process(

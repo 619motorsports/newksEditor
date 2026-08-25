@@ -3,7 +3,7 @@
 This note records recovered behavior from the installed `ksNet.dll` and its
 matching PDB. The DLL SHA-256 is
 `b38dcb826a3311d7233cf0a6a58e5da16b6c8679f8490091e7b434bf730091ca`.
-The native viewport implements the raw primary-spline part of this pass.
+The native viewport implements the raw and interpolated primary-spline paths.
 The implementation uses a labeled line-list translation for Vulkan and D3D12.
 
 `SplineEditor.onNodeRender` has managed token `0x06000107` and RVA `0x2F748`.
@@ -19,7 +19,22 @@ It draws this spline in `(3, 0, 3, 1)`. The raw path does not change the depth
 mode. If interpolated display is active, it calls `renderSplineInterpolated`
 (`0x06000108`) instead.
 That helper samples from zero through one with an increment of
-`0.0001999999949975`. It sends the samples to `GLRenderer::spline`.
+`0.00019999999494757503F`. Float accumulation emits 5,001 samples.
+The final sample is approximately `0.99994123`, not exactly one.
+It sends the samples to `GLRenderer::spline`.
+
+`AISpline::loadFast` is at `0x1006959B`. It selects the legacy loader at
+`0x1006968F` or the version-7 loader at `0x10069AEC`. It then calls
+`Spline::computeSplineLength` at `0x10069663` for both versions. Thus, stored
+version-7 point lengths do not control interpolation.
+
+`Spline::computeSplineLength` is at `0x100365C3`. It samples each Catmull-Rom
+segment with float increment `0.001F`. The constant bytes at `0x1011072C` are
+`6f 12 83 3a`. A closed spline also samples the wrapped final segment.
+`Spline::length` at `0x10033A1A` adds the straight endpoint chord to that curve
+length. Closing-segment lookup divides by the same endpoint chord. The safe
+adapter rejects a zero endpoint chord instead of reproducing native division
+by zero.
 
 If the input and output interval values are valid, the callback draws that
 interval in `(0, 0, 3, 1)`. The interval helper (`0x06000109`) uses the same
@@ -58,15 +73,17 @@ node axis remain in the late overlay phase.
 
 The CLI option is `--ai-spline <file>`. It accepts bounded version-2 and
 version-7 files. It requires a workspace model and the authoring-overlay shader
-pair. Interpolation, intervals, side splines, camber, and edit controls remain
-staged.
+pair. Raw mode remains the default. `--ai-spline-mode interpolated` enables the
+recovered interpolated path. Intervals, side splines, camber, and edit controls
+remain staged.
 
 The production WebGL source has no AI-spline load or render path. A source
-search found no AI-spline or `fast_lane.ai` identifiers. The in-app browser had
-no available connection during this verification. Thus, a production WebGL
-visual comparison was not possible for this native-only feature.
+search found no AI-spline or `fast_lane.ai` identifiers. Thus, a direct WebGL
+visual comparison is not possible for this native-only feature. The complete
+production WebGL suite passed 380 tests. It skipped 34 installed-fixture tests.
 
 SwiftShader executes the native line path at 1x and 4x MSAA. The pixel test
 checks magenta color clamping, normal-depth rejection, and the final resolve.
+The sanitizer-enabled native suite passed all 75 tests with SwiftShader.
 The D3D12 code uses the same batch contract. A Windows WARP test remains
 necessary for D3D12 execution evidence.

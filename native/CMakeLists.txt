@@ -218,6 +218,7 @@ target_link_libraries(apex_render
 # Renderer-facing application composition remains separate from apex_app so
 # workspace authoring and asset authority stay independent of GPU backends.
 add_library(apex_app_render STATIC
+  src/app/installed_editor_spline.cpp
   src/app/workspace_ai_spline.cpp
   src/app/workspace_shadow_programs.cpp
   src/app/workspace_track_camera.cpp

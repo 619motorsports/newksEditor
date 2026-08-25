@@ -996,6 +996,55 @@ void draws_raw_ai_spline_in_recovered_scene_phase() {
                 over_budget.diagnostic.code ==
                     "workspace_viewport_overlay_budget_exceeded",
             "AI spline and authoring overlays share one bounded budget");
+
+    apex::formats::AiSpline curved_spline;
+    curved_spline.version = 7U;
+    curved_spline.points.resize(4U);
+    curved_spline.points[0].position = {0.0F, 0.0F, 0.0F};
+    curved_spline.points[1].position = {100.0F, 0.0F, 0.0F};
+    curved_spline.points[2].position = {200.0F, 100.0F, 0.0F};
+    curved_spline.points[3].position = {300.0F, 100.0F, 0.0F};
+    const auto interpolated = apex::app::buildWorkspaceAiSplineGeometry(
+        curved_spline,
+        apex::app::WorkspaceAiSplineDisplayMode::interpolated);
+    require(interpolated.ok(), "interpolated AI spline fixture converts");
+    auto interpolated_request = request_for(value);
+    interpolated_request.ai_spline_geometry = &interpolated.geometry;
+    interpolated_request.ai_spline_pipeline = ai_spline_pipeline(value);
+    FakeDevice interpolated_device;
+    auto interpolated_prepared = apex::app::prepareWorkspaceViewport(
+        interpolated_device, value.document, interpolated_request);
+    require(interpolated_prepared.ok(),
+            "interpolated AI spline viewport preparation succeeds");
+    FakeTarget interpolated_target(interpolated_request.presentation);
+    WorkspaceViewportFrameRequest interpolated_frame;
+    interpolated_frame.camera.clip_space = CameraClipSpace::vulkan;
+    interpolated_frame.frame_constants = KsPerPixelFrameConstants{};
+    Diagnostic interpolated_diagnostic;
+    require(interpolated_prepared.viewport->drawAndPresent(
+                interpolated_device, interpolated_target, interpolated_frame,
+                interpolated_diagnostic) ==
+                    WorkspaceViewportFrameStatus::ready &&
+                interpolated_device.overlay_counts ==
+                    std::vector<std::size_t>({3U}) &&
+                interpolated_device.overlay_depth_tests ==
+                    std::vector<bool>({true, true, true}) &&
+                interpolated_device.overlay_depth_writes ==
+                    std::vector<bool>({true, true, true}),
+            "interpolated AI spline keeps the recovered pass and depth state");
+
+    auto forged_geometry = interpolated.geometry;
+    forged_geometry.sample_point_count = 5'000U;
+    auto forged_request = request_for(value);
+    forged_request.ai_spline_geometry = &forged_geometry;
+    forged_request.ai_spline_pipeline = ai_spline_pipeline(value);
+    FakeDevice forged_device;
+    const auto forged = apex::app::prepareWorkspaceViewport(
+        forged_device, value.document, forged_request);
+    require(!forged.ok() &&
+                forged.diagnostic.code ==
+                    "workspace_viewport_ai_spline_geometry_invalid",
+            "viewport rejects forged interpolated spline metadata");
 }
 
 void draws_selected_mesh_with_recovered_fade_boundary() {
