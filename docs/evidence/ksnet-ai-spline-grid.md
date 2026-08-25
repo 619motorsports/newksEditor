@@ -1,7 +1,7 @@
 # ksNet AI spline grid evidence
 
 This note records the recovered native grid algorithm. The C++ point-edit path
-must implement this algorithm before it changes point positions.
+uses the bounded port before it commits a changed point position.
 
 ## Symbols and data layout
 
@@ -74,5 +74,11 @@ The C++ port rejects empty splines. It returns all available indices for a
 spline with fewer than 10 points. This behavior is an intentional safety
 difference. The grid metadata keeps the native neighbor count of 10.
 
-The C++ port rejects non-finite coordinates and invalid dimensions. It bounds
-rows, cells, indices, distance work, and memory before allocation.
+The C++ port rejects non-finite coordinates and invalid dimensions. The
+dimension check rejects a rounded float value of `2^32` before integer
+conversion. This check prevents undefined conversion behavior.
+
+The port bounds rows, cells, indices, distance work, sort work, and memory
+before allocation. One sort-work unit represents one point at one binary sort
+level in one cell. The session also clamps grid limits to compatible writer
+limits before it rebuilds a candidate.

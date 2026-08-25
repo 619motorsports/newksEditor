@@ -90,6 +90,7 @@ void usage(std::ostream& output) {
               "                       [--add-radius <value>] [--add-side0 <value>] [--add-side1 <value>]\n"
               "                       [--add-camber-degrees <value>] [--add-length <value>] [--add-grade <value>]\n"
            << "  apex-native --invert-ai-spline <input.ai> <output.ai> --index <point-index> [--index <point-index> ...]\n"
+           << "  apex-native --set-ai-spline-point <input.ai> <output.ai> --index <point-index> --position <x> <y> <z>\n"
            << "  apex-native --export-project kn5|csp <source.kn5> <project.apex.json> <output>\n"
            << "  apex-native --export-project collider|damage|bottom-colliders|surfaces|models|lods <source.kn5> "
               "<project.apex.json> <secondary-input> <output>\n";
@@ -811,6 +812,64 @@ int invert_ai_spline(int argc, char** argv) {
     write_file_exclusive(output_path, session.currentBytes());
     std::cout << "AI spline camber inverted: selected=" << selection.size()
               << ", changed=" << (result.changed ? "yes" : "no")
+              << ", output=";
+    write_cli_text(std::cout, output_path.string());
+    std::cout << '\n';
+    return 0;
+}
+
+int set_ai_spline_point(int argc, char** argv) {
+    if (argc < 10)
+        throw std::runtime_error("invalid --set-ai-spline-point arguments");
+
+    const std::filesystem::path input_path = argv[2];
+    const std::filesystem::path output_path = argv[3];
+    std::optional<std::uint32_t> point_index;
+    std::optional<std::array<float, 3>> position;
+    for (int argument = 4; argument < argc; ++argument) {
+        const std::string_view option = argv[argument];
+        if (option == "--index") {
+            if (point_index.has_value())
+                throw std::runtime_error("duplicate --index option");
+            if (argument + 1 >= argc)
+                throw std::runtime_error("--index requires a value");
+            point_index =
+                parse_unsigned_index(argv[++argument], "AI spline point index");
+        } else if (option == "--position") {
+            if (position.has_value())
+                throw std::runtime_error("duplicate --position option");
+            if (argument + 3 >= argc)
+                throw std::runtime_error("--position requires x, y, and z");
+            position = std::array<float, 3>{
+                parse_finite_float(argv[++argument], "AI spline point x"),
+                parse_finite_float(argv[++argument], "AI spline point y"),
+                parse_finite_float(argv[++argument], "AI spline point z")};
+        } else {
+            throw std::runtime_error("unknown --set-ai-spline-point option: " +
+                                     std::string(option));
+        }
+    }
+    if (!point_index.has_value())
+        throw std::runtime_error("--set-ai-spline-point requires --index");
+    if (!position.has_value())
+        throw std::runtime_error("--set-ai-spline-point requires --position");
+
+    const auto input_bytes = read_file(input_path);
+    auto spline =
+        apex::formats::parseAiSpline(input_bytes, input_path.string());
+    apex::authoring::AiSplineSession session(std::move(spline));
+    const auto result = session.setPointPosition(*point_index, *position);
+    if (!result.ok()) {
+        if (result.diagnostics.empty())
+            throw std::runtime_error("AI spline point-position edit failed");
+        const auto& diagnostic = result.diagnostics.back();
+        throw std::runtime_error(diagnostic.code + ": " + diagnostic.message);
+    }
+
+    write_file_exclusive(output_path, session.currentBytes());
+    std::cout << "AI spline point position set: point=" << *result.pointIndex
+              << ", changed=" << (result.changed ? "yes" : "no")
+              << ", grid=" << (result.changed ? "rebuilt" : "preserved")
               << ", output=";
     write_cli_text(std::cout, output_path.string());
     std::cout << '\n';
@@ -2205,6 +2264,13 @@ int main(int argc, char** argv) {
                 return 2;
             }
             return invert_ai_spline(argc, argv);
+        }
+        if (argc >= 2 && std::string_view(argv[1]) == "--set-ai-spline-point") {
+            if (argc < 10) {
+                usage(std::cerr);
+                return 2;
+            }
+            return set_ai_spline_point(argc, argv);
         }
         if (argc >= 2 && std::string_view(argv[1]) == "--export-project") {
             if (argc < 3) {

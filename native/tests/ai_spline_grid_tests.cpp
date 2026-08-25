@@ -116,6 +116,14 @@ void rejectsMalformedAndOverLimitInput() {
     expectsGridError([&] { (void)buildAiSplineGrid(extreme); },
                      "GRID_DIMENSION_INVALID");
 
+    auto uint32Overflow =
+        pointSpline({{{0.0F, 0.0F, 0.0F}}, {{42949672960.0F, 0.0F, 0.0F}}});
+    auto wideDimensionLimits = AiSplineGridBuildLimits{};
+    wideDimensionLimits.maxGridRows = std::numeric_limits<std::uint32_t>::max();
+    expectsGridError(
+        [&] { (void)buildAiSplineGrid(uint32Overflow, wideDimensionLimits); },
+        "GRID_DIMENSION_INVALID");
+
     const auto normal = pointSpline({{{0.0F, 0.0F, 0.0F}}});
     auto rowLimits = AiSplineGridBuildLimits{};
     rowLimits.maxGridRows = 69U;
@@ -141,6 +149,14 @@ void rejectsMalformedAndOverLimitInput() {
     workLimits.maxDistanceEvaluations = 4'899U;
     expectsGridError([&] { (void)buildAiSplineGrid(normal, workLimits); },
                      "WORK_LIMIT");
+
+    const auto twoPoints =
+        pointSpline({{{0.0F, 0.0F, 0.0F}}, {{1.0F, 0.0F, 1.0F}}});
+    auto sortWorkLimits = AiSplineGridBuildLimits{};
+    sortWorkLimits.maxSortWork = 9'799U;
+    expectsGridError(
+        [&] { (void)buildAiSplineGrid(twoPoints, sortWorkLimits); },
+        "SORT_WORK_LIMIT");
 
     auto memoryLimits = AiSplineGridBuildLimits{};
     memoryLimits.maxAggregateBytes = 1U;

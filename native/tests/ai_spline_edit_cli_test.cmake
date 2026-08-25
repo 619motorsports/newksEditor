@@ -8,8 +8,14 @@ set(output "${APEX_BINARY_DIR}/ai-spline-edit-cli-output.ai")
 set(roundtrip_output "${APEX_BINARY_DIR}/ai-spline-edit-cli-roundtrip.ai")
 set(invert_output "${APEX_BINARY_DIR}/ai-spline-invert-cli-output.ai")
 set(invert_roundtrip "${APEX_BINARY_DIR}/ai-spline-invert-cli-roundtrip.ai")
+set(point_input
+    "${APEX_SOURCE_DIR}/test/content/tracks/sepang/ai/pit_lane.ai")
+set(point_output "${APEX_BINARY_DIR}/ai spline point output.ai")
+set(point_roundtrip "${APEX_BINARY_DIR}/ai spline point roundtrip.ai")
+set(point_invalid "${APEX_BINARY_DIR}/ai spline point invalid.ai")
 file(REMOVE "${output}" "${roundtrip_output}" "${invert_output}"
-     "${invert_roundtrip}")
+     "${invert_roundtrip}" "${point_output}" "${point_roundtrip}"
+     "${point_invalid}")
 
 execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --edit-ai-spline "${input}" "${output}"
@@ -117,5 +123,93 @@ if(NOT input_hash STREQUAL invert_roundtrip_hash)
     "two AI spline camber inversions did not restore the source bytes")
 endif()
 
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --set-ai-spline-point "${point_input}"
+          "${point_output}" --index 0 --position 375.941 3.949335 72.81585
+  RESULT_VARIABLE point_result
+  OUTPUT_VARIABLE point_standard_output
+  ERROR_VARIABLE point_standard_error
+)
+if(NOT point_result STREQUAL "0" OR NOT EXISTS "${point_output}")
+  message(FATAL_ERROR
+    "AI spline point movement failed; stderr: ${point_standard_error}")
+endif()
+string(FIND "${point_standard_output}" "point=0" moved_point_position)
+string(FIND "${point_standard_output}" "changed=yes" point_changed_position)
+string(FIND "${point_standard_output}" "grid=rebuilt" grid_rebuilt_position)
+if(moved_point_position EQUAL -1 OR point_changed_position EQUAL -1 OR
+   grid_rebuilt_position EQUAL -1)
+  message(FATAL_ERROR
+    "AI spline point movement did not report its point, change, and grid")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --set-ai-spline-point "${point_output}"
+          "${point_roundtrip}" --index 0 --position 375.941 3.949335 72.81585
+  RESULT_VARIABLE point_roundtrip_result
+  OUTPUT_VARIABLE point_roundtrip_standard_output
+  ERROR_VARIABLE point_roundtrip_standard_error
+)
+if(NOT point_roundtrip_result STREQUAL "0" OR
+   NOT EXISTS "${point_roundtrip}")
+  message(FATAL_ERROR
+    "moved AI spline did not parse again; stderr: ${point_roundtrip_standard_error}")
+endif()
+string(FIND "${point_roundtrip_standard_output}" "changed=no"
+       point_no_change_position)
+string(FIND "${point_roundtrip_standard_output}" "grid=preserved"
+       grid_preserved_position)
+if(point_no_change_position EQUAL -1 OR grid_preserved_position EQUAL -1)
+  message(FATAL_ERROR
+    "identical AI spline point movement did not report a no-op")
+endif()
+file(SHA256 "${point_output}" point_output_hash)
+file(SHA256 "${point_roundtrip}" point_roundtrip_hash)
+if(NOT point_output_hash STREQUAL point_roundtrip_hash)
+  message(FATAL_ERROR
+    "identical AI spline point movement changed canonical bytes")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --set-ai-spline-point "${point_output}"
+          "${point_output}" --index 0 --position 375.941 3.949335 72.81585
+  RESULT_VARIABLE point_overwrite_result
+  ERROR_VARIABLE point_overwrite_error
+)
+if(NOT point_overwrite_result STREQUAL "1")
+  message(FATAL_ERROR
+    "existing AI spline point output was unexpectedly overwritten")
+endif()
+string(FIND "${point_overwrite_error}" "output already exists"
+       point_overwrite_position)
+if(point_overwrite_position EQUAL -1)
+  message(FATAL_ERROR
+    "point-position overwrite rejection did not report its cause")
+endif()
+file(SHA256 "${point_output}" point_overwrite_hash)
+if(NOT point_output_hash STREQUAL point_overwrite_hash)
+  message(FATAL_ERROR "overwrite rejection changed the existing AI spline")
+endif()
+file(GLOB point_temporary_files "${point_output}.apex-tmp-*")
+if(point_temporary_files)
+  message(FATAL_ERROR "overwrite rejection left temporary AI spline files")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --set-ai-spline-point "${point_input}"
+          "${point_invalid}" --index 0 --position nan 0 0
+  RESULT_VARIABLE point_invalid_result
+  ERROR_VARIABLE point_invalid_error
+)
+if(NOT point_invalid_result STREQUAL "1" OR EXISTS "${point_invalid}")
+  message(FATAL_ERROR "non-finite AI spline point movement was not rejected")
+endif()
+string(FIND "${point_invalid_error}" "finite" point_invalid_position)
+if(point_invalid_position EQUAL -1)
+  message(FATAL_ERROR
+    "non-finite AI spline point rejection did not report its cause")
+endif()
+
 file(REMOVE "${output}" "${roundtrip_output}" "${invert_output}"
-     "${invert_roundtrip}")
+     "${invert_roundtrip}" "${point_output}" "${point_roundtrip}"
+     "${point_invalid}")

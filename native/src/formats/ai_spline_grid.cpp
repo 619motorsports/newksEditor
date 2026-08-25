@@ -229,8 +229,9 @@ void sortComparablePointsAsNative(std::vector<ComparablePoint>& points) {
     const float width = roundedFloat(maximum - minimum);
     const float reciprocal = roundedFloat(1.0F / kSamplingDensity);
     const float scaled = roundedFloat(width * reciprocal);
+    constexpr double kUint32Limit = 4294967296.0;
     if (!std::isfinite(width) || !std::isfinite(scaled) || scaled < 1.0F ||
-        scaled > static_cast<float>(std::numeric_limits<std::uint32_t>::max()))
+        static_cast<double>(scaled) >= kUint32Limit)
         fail("GRID_DIMENSION_INVALID",
              "AI spline grid dimensions are not finite positive counts");
     const auto dimension = static_cast<std::uint32_t>(scaled);
@@ -333,6 +334,15 @@ AiSplineGrid buildAiSplineGrid(const AiSpline& spline,
             distanceEvaluations > limits.maxDistanceEvaluations)
             fail("WORK_LIMIT",
                  "AI spline grid distance work exceeds its limit");
+        std::size_t sortLevels = 0U;
+        for (std::size_t count = spline.points.size(); count > 1U;
+             count = count / 2U + count % 2U)
+            ++sortLevels;
+        std::size_t sortWork = 0U;
+        if (!checkedMultiply(distanceEvaluations, sortLevels, sortWork) ||
+            sortWork > limits.maxSortWork)
+            fail("SORT_WORK_LIMIT",
+                 "AI spline grid sort work exceeds its limit");
 
         std::size_t rowBytes = 0U;
         std::size_t cellBytes = 0U;

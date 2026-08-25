@@ -1,7 +1,9 @@
 #pragma once
 
 #include "apex/authoring/ai_spline.hpp"
+#include "apex/formats/ai_spline_grid.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -15,9 +17,12 @@ namespace apex::authoring {
 struct AiSplineSessionLimits {
     std::size_t maxHistory = 64U;
     // This byte limit measures retained canonical serializations. The parsed
-    // snapshot models have additional bounded storage from the writer limits.
+    // snapshot models use the separate model limits below.
     std::size_t maxHistoryBytes = 64U * 1024U * 1024U;
+    std::size_t maxSnapshotModelBytes = 256U * 1024U * 1024U;
+    std::size_t maxHistoryModelBytes = 256U * 1024U * 1024U;
     std::size_t maxSelectionEntries = aiSplineMaxSelectionEntries;
+    formats::AiSplineGridBuildLimits grid{};
     formats::AiSplineWriteLimits write{};
 };
 
@@ -35,10 +40,10 @@ struct AiSplineSessionResult {
     }
 };
 
-// A payload-editing session keeps the native editor's independent, immutable
+// An AI spline editing session keeps the native editor's independent, immutable
 // load-time backup. Each snapshot owns a parsed model and its validated,
-// canonical writer bytes. Point movement remains outside this class until the
-// derived native grid has been rebuilt.
+// canonical writer bytes. Position edits rebuild the derived native grid
+// before the candidate becomes visible.
 // Construction throws AiSplineWriteError if the baseline is unsafe or cannot
 // use the recovered version-7 writer.
 class AiSplineSession final {
@@ -65,6 +70,11 @@ public:
                        const AiSplineWaypointEdit& edit);
     [[nodiscard]] AiSplineSessionResult
     invertSelectedCamber(std::span<const std::uint32_t> selectedPointIndices);
+    // Set one absolute point position. This preserves point length, tag, and
+    // every payload field, matching the recovered Spline::setPointAt scope.
+    [[nodiscard]] AiSplineSessionResult
+    setPointPosition(std::uint32_t pointIndex,
+                     const std::array<float, 3>& position);
     // Restore selected records from the load-time backup in raw vector order.
     // A point-count mismatch restores the complete native backup instead.
     [[nodiscard]] AiSplineSessionResult restoreSelectedDefaults(
@@ -77,6 +87,7 @@ private:
     struct Snapshot {
         formats::AiSpline spline;
         std::vector<std::uint8_t> bytes;
+        std::size_t modelBytes = 0U;
     };
     using SnapshotPtr = std::shared_ptr<const Snapshot>;
 
@@ -84,9 +95,13 @@ private:
     commitSnapshot(SnapshotPtr next, std::size_t applied,
                    std::optional<std::uint32_t> pointIndex = std::nullopt,
                    std::optional<std::uint32_t> payloadIndex = std::nullopt);
+    [[nodiscard]] SnapshotPtr
+    makeSnapshot(formats::AiSpline spline,
+                 std::vector<std::uint8_t> bytes) const;
     [[nodiscard]] bool stagePush(const SnapshotPtr& snapshot,
                                  std::deque<SnapshotPtr>& history,
                                  std::size_t& historyBytes,
+                                 std::size_t& historyModelBytes,
                                  AiSplineSessionResult& result) const;
     [[nodiscard]] AiSplineSessionResult moveHistory(bool undoDirection);
 
@@ -97,6 +112,8 @@ private:
     std::deque<SnapshotPtr> redo_;
     std::size_t undoBytes_ = 0U;
     std::size_t redoBytes_ = 0U;
+    std::size_t undoModelBytes_ = 0U;
+    std::size_t redoModelBytes_ = 0U;
     std::uint64_t revision_ = 0U;
 };
 

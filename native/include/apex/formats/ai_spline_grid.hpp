@@ -16,16 +16,18 @@ struct AiSplineGridBuildLimits {
     std::size_t maxGridCells = 1'000'000U;
     std::size_t maxGridIndices = 10'000'000U;
     std::size_t maxDistanceEvaluations = 250'000'000U;
+    // One sort-work unit is one point for one binary sort level in one cell.
+    std::size_t maxSortWork = 2'500'000'000U;
     std::size_t maxAggregateBytes = 512U * 1024U * 1024U;
 };
 
 class AiSplineGridBuildError final : public std::runtime_error {
-  public:
+    public:
     AiSplineGridBuildError(std::string code, std::string message);
 
     [[nodiscard]] const std::string& code() const noexcept { return code_; }
 
-  private:
+    private:
     std::string code_;
 };
 

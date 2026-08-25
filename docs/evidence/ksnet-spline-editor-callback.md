@@ -88,8 +88,19 @@ duplicates. `getSelectedIndices` is at `0x1001F6A8` and returns a copy.
 
 `onNodeRender` has method RVA `0x2F754` and execution VA `0x1002F760`.
 It calls `showCurrentSplineIndexInfo` for each selected index. The first entry
-drives `editSplineManual` during mutable editing. The movable edit point uses
-a separate edit-point vector.
+does not have a special movement role. During mutable editing, the method calls
+`editSplineManual` for each unique selected index. Thus, one input step moves
+each selected point once. The movable edit point uses a separate edit-point
+vector.
+
+`Spline::setPointAt` is at `0x1003408C`. It writes only the three position
+components in the selected 20-byte point. It does not change the stored length
+or tag. It does not recompute payload length or forward fields.
+
+The keyboard path supplies a local movement vector to `editSplineManual`.
+The method converts this vector with the cached horizontal forward direction.
+The C++ point-position API accepts an absolute position. This API is a
+deterministic authoring boundary, not an emulation of the keyboard path.
 
 `SplineEditor.renderCamberOnSpline` has token `0x0600010C` and RVA `0x2E8C0`.
 It draws one vertical line for each point. The line height is
@@ -153,14 +164,16 @@ replaces its payload field. The second object adds all fields after replacement.
 The C++ `--edit-ai-spline` command ports this order. It adds strict bounds,
 finite-value validation, complete writer validation, and exclusive output.
 
-The payload session keeps a separate load-time backup. Save and refresh do not
+The spline session keeps a separate load-time backup. Save and refresh do not
 replace this backup. The session supplies bounded undo and redo history.
-The history byte limit counts canonical writer bytes. Writer limits bound each
-parsed model. A separate limit bounds hostile raw selection input.
+The history byte limit counts canonical writer bytes. Separate limits count the
+logical model size of one snapshot and all retained history snapshots. Writer
+limits bound the serialized records. A separate limit bounds hostile raw
+selection input.
 
 The selected reset copies complete points and tagged payloads from the backup.
-The payload-only session keeps point positions fixed. Thus, its grid remains
-valid after a selected reset.
+If it restores a point position, the session rebuilds the grid before commit.
+Payload-only resets preserve the parsed grid.
 
 The recovered camber command negates stored radians in raw selection order.
 The low-level API keeps duplicate entries. The CLI removes duplicates in
@@ -182,8 +195,14 @@ a temporary file and does not replace an existing destination. Payload edits
 preserve the parsed grid.
 
 The format layer now includes a bounded port of `AISpline.buildGrid`. The port
-reproduces the checked-in native pit-lane grid byte for byte. Point edits remain
-staged until the session can rebuild and commit the grid as one operation.
+reproduces the checked-in native pit-lane grid byte for byte. The session changes
+only the selected point position before it rebuilds this grid. It serializes the
+candidate and commits the point and grid as one undoable revision.
+
+The `--set-ai-spline-point` command exposes the absolute-position session API.
+The command rejects non-finite values and invalid indices. It writes only a
+fully rebuilt and validated candidate. An identical position is a byte-stable
+no-op and preserves the parsed grid.
 
 The production WebGL source has no AI-spline load or render path. A source
 search found no AI-spline or `fast_lane.ai` identifiers. Thus, a direct WebGL
@@ -193,7 +212,8 @@ production WebGL suite passed 380 tests. It skipped 34 installed-fixture tests.
 SwiftShader executes the native line passes at 1x and 4x MSAA. The pixel test
 checks magenta and cyan depth rejection. It also checks blue depth-off output.
 The test checks red and green camber lines with normal depth.
-The sanitizer-enabled suite passed 75 runnable tests. It skipped three
-environment-specific tests. The explicit Vulkan target found no physical device.
-The D3D12 code uses the same batch contract. A Windows WARP test remains
-necessary for D3D12 execution evidence.
+The current native suite passed 78 tests. The explicit Vulkan target found no
+physical device and skipped. All AI-spline tests passed with the sanitizers.
+The complete sanitizer run reported one 183-byte NVIDIA driver leak after the
+platform-window test. The D3D12 code uses the same batch contract. A Windows
+WARP test remains necessary for D3D12 execution evidence.

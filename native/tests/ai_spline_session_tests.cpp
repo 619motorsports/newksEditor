@@ -66,6 +66,15 @@ AiSpline fixture() {
     return spline;
 }
 
+AiSpline movableFixture(bool includeGrid = true) {
+    auto spline = fixture();
+    if (includeGrid)
+        spline.grid = apex::formats::buildAiSplineGrid(spline);
+    else
+        spline.grid.reset();
+    return spline;
+}
+
 bool sameGrid(const AiSplineGrid& left, const AiSplineGrid& right) {
     if (left.maximum != right.maximum || left.minimum != right.minimum ||
         left.neighborCount != right.neighborCount ||
@@ -203,6 +212,177 @@ void restoresSelectedRecordsFromLoadBaseline() {
                 session.current().payloads[0U].camber == 0.1F &&
                 session.baseline().payloads[0U].camber == 0.1F,
             "whole-session restore returns to the immutable load snapshot");
+}
+
+void movesPointPositionsWithDerivedGridHistory() {
+    AiSplineSession session(movableFixture());
+    const auto baselineBytes = session.currentBytes();
+    const auto baselinePoint = session.baseline().points[0U];
+    const auto baselineGrid = *session.baseline().grid;
+    const std::array<float, 3> movedPosition{401.0F, 2.0F, 3.0F};
+    const auto moved = session.setPointPosition(0U, movedPosition);
+    require(moved.ok() && moved.changed && moved.applied == 1U &&
+                moved.pointIndex == 0U && !moved.payloadIndex.has_value() &&
+                moved.revision == 1U,
+            "point-position edit commits one revision");
+    require(session.current().points[0U].position == movedPosition &&
+                session.current().points[0U].length == baselinePoint.length &&
+                session.current().points[0U].tag == baselinePoint.tag &&
+                session.current().grid.has_value() &&
+                !sameGrid(*session.current().grid, baselineGrid),
+            "point-position edit preserves point metadata and rebuilds grid");
+
+    auto restoredCandidate = session.current();
+    restoredCandidate.points[0U] = baselinePoint;
+    restoredCandidate.grid = baselineGrid;
+    require(apex::formats::serializeAiSpline(restoredCandidate) ==
+                baselineBytes,
+            "point-position edit preserves every non-position source record");
+    const auto reparsed = apex::formats::parseAiSpline(
+        session.currentBytes(), "moved-session-output.ai");
+    require(reparsed.points[0U].position == movedPosition &&
+                reparsed.grid.has_value() &&
+                sameGrid(*reparsed.grid, *session.current().grid),
+            "moved point and rebuilt grid reparse from canonical bytes");
+
+    const auto noOp = session.setPointPosition(0U, movedPosition);
+    require(noOp.ok() && !noOp.changed && noOp.applied == 1U &&
+                noOp.revision == 1U && session.undoCount() == 1U,
+            "identical point position does not rebuild or add history");
+    require(session.undo().ok() && session.currentBytes() == baselineBytes,
+            "point-position undo restores point and grid together");
+    require(session.redo().ok() &&
+                session.current().points[0U].position == movedPosition &&
+                !sameGrid(*session.current().grid, baselineGrid),
+            "point-position redo restores point and rebuilt grid together");
+    require(session.undo().ok() && session.canRedo(),
+            "point-position redo-clear setup succeeds");
+    require(
+        session.setPointPosition(1U, std::array<float, 3>{5.0F, 600.0F, 7.0F})
+                .ok() &&
+            !session.canRedo(),
+        "new point-position edit after undo clears redo history");
+
+    AiSplineSession yOnly(movableFixture());
+    const auto yGrid = *yOnly.current().grid;
+    require(
+        yOnly.setPointPosition(0U, std::array<float, 3>{1.0F, 2000.0F, 3.0F})
+                .ok() &&
+            sameGrid(*yOnly.current().grid, yGrid),
+        "Y-only movement rebuilds an equivalent planar grid");
+
+    AiSplineSession withoutGrid(movableFixture(false));
+    require(!withoutGrid.current().grid.has_value() &&
+                withoutGrid.setPointPosition(0U, movedPosition).ok() &&
+                withoutGrid.current().grid.has_value(),
+            "point-position edit creates a grid for a no-grid source");
+}
+
+void rebuildsGridWhenMovedPointDefaultsAreRestored() {
+    AiSplineSession session(movableFixture());
+    const auto baselineBytes = session.currentBytes();
+    const std::array<float, 3> movedPosition{401.0F, 2.0F, 3.0F};
+    require(session.setPointPosition(0U, movedPosition).ok(),
+            "selected point reset setup movement commits");
+    const std::array<std::uint32_t, 2U> selection{0U, 0U};
+    const auto restored = session.restoreSelectedDefaults(selection);
+    require(restored.ok() && restored.changed && restored.applied == 2U &&
+                session.current().points[0U].position ==
+                    session.baseline().points[0U].position &&
+                session.currentBytes() == baselineBytes,
+            "selected point reset restores its position and rebuilt grid");
+    require(session.undo().ok() &&
+                session.current().points[0U].position == movedPosition,
+            "selected point reset participates in complete history");
+}
+
+void keepsPointPositionFailuresAtomic() {
+    AiSplineSession session(movableFixture());
+    const auto before = session.currentBytes();
+    const auto revision = session.revision();
+    const auto invalidIndex =
+        session.setPointPosition(99U, std::array<float, 3>{1.0F, 2.0F, 3.0F});
+    require(!invalidIndex.ok() &&
+                invalidIndex.diagnostics.back().code == "POINT_INDEX_INVALID" &&
+                session.currentBytes() == before &&
+                session.revision() == revision && !session.canUndo(),
+            "invalid point-position index is atomic");
+
+    const auto nonFinite = session.setPointPosition(
+        0U, std::array<float, 3>{1.0F, std::numeric_limits<float>::infinity(),
+                                 3.0F});
+    require(!nonFinite.ok() &&
+                nonFinite.diagnostics.back().code == "NON_FINITE_POSITION" &&
+                session.currentBytes() == before && !session.canUndo(),
+            "non-finite point position is atomic");
+
+    const auto extreme = session.setPointPosition(
+        0U,
+        std::array<float, 3>{std::numeric_limits<float>::max(), 2.0F, 3.0F});
+    require(!extreme.ok() &&
+                extreme.diagnostics.back().code == "GRID_DIMENSION_INVALID" &&
+                session.currentBytes() == before && !session.canUndo(),
+            "overflowing point-position grid is atomic");
+
+    AiSplineSessionLimits gridLimits;
+    gridLimits.grid.maxGridRows = 1U;
+    AiSplineSession gridLimited(movableFixture(), gridLimits);
+    const auto gridLimitedBefore = gridLimited.currentBytes();
+    const auto limited = gridLimited.setPointPosition(
+        0U, std::array<float, 3>{401.0F, 2.0F, 3.0F});
+    require(!limited.ok() && limited.diagnostics.back().code == "COUNT_LIMIT" &&
+                gridLimited.currentBytes() == gridLimitedBefore &&
+                gridLimited.revision() == 0U && !gridLimited.canUndo(),
+            "point-position grid limit is atomic");
+
+    auto noGrid = movableFixture(false);
+    const auto noGridBytes = apex::formats::serializeAiSpline(noGrid);
+    AiSplineSessionLimits outputLimits;
+    outputLimits.write.maxOutputBytes = 1'000U;
+    AiSplineSession outputLimited(noGrid, outputLimits);
+    const auto outputLimitedResult = outputLimited.setPointPosition(
+        0U, std::array<float, 3>{401.0F, 2.0F, 3.0F});
+    require(!outputLimitedResult.ok() &&
+                outputLimitedResult.diagnostics.back().code == "OUTPUT_LIMIT" &&
+                outputLimited.currentBytes() == noGridBytes &&
+                !outputLimited.canUndo(),
+            "point-position writer limit is atomic");
+
+    AiSplineSessionLimits candidateHistoryLimits;
+    candidateHistoryLimits.maxHistoryBytes = noGridBytes.size();
+    AiSplineSession historyLimited(noGrid, candidateHistoryLimits);
+    const auto historyLimitedResult = historyLimited.setPointPosition(
+        0U, std::array<float, 3>{401.0F, 2.0F, 3.0F});
+    require(!historyLimitedResult.ok() &&
+                historyLimitedResult.diagnostics.back().code ==
+                    "HISTORY_BYTE_LIMIT" &&
+                historyLimited.currentBytes() == noGridBytes &&
+                !historyLimited.canUndo(),
+            "large point-position candidate cannot make history asymmetric");
+
+    AiSplineSessionLimits modelLimits;
+    modelLimits.maxSnapshotModelBytes = 1'024U;
+    AiSplineSession modelLimited(noGrid, modelLimits);
+    const auto modelLimitedResult = modelLimited.setPointPosition(
+        0U, std::array<float, 3>{401.0F, 2.0F, 3.0F});
+    require(!modelLimitedResult.ok() &&
+                modelLimitedResult.diagnostics.back().code ==
+                    "MODEL_BYTE_LIMIT" &&
+                modelLimited.currentBytes() == noGridBytes &&
+                !modelLimited.canUndo(),
+            "point-position snapshot model limit is atomic");
+
+    AiSplineSessionLimits candidateModelHistoryLimits;
+    candidateModelHistoryLimits.maxHistoryModelBytes = 1'024U;
+    AiSplineSession modelHistoryLimited(noGrid, candidateModelHistoryLimits);
+    const auto modelHistoryLimitedResult = modelHistoryLimited.setPointPosition(
+        0U, std::array<float, 3>{401.0F, 2.0F, 3.0F});
+    require(!modelHistoryLimitedResult.ok() &&
+                modelHistoryLimitedResult.diagnostics.back().code ==
+                    "HISTORY_MODEL_LIMIT" &&
+                modelHistoryLimited.currentBytes() == noGridBytes &&
+                !modelHistoryLimited.canUndo(),
+            "large point-position model cannot make history asymmetric");
 }
 
 void keepsFailuresAtomic() {
@@ -366,7 +546,10 @@ int main() {
         keepsIndependentLoadBaselineAndRevisions();
         invertsRawSelectionOrderAndSignedZero();
         restoresSelectedRecordsFromLoadBaseline();
+        movesPointPositionsWithDerivedGridHistory();
+        rebuildsGridWhenMovedPointDefaultsAreRestored();
         keepsFailuresAtomic();
+        keepsPointPositionFailuresAtomic();
         boundsHistoryAndClearsRedo();
         std::cout << "ai_spline_session_tests: ok\n";
         return 0;
