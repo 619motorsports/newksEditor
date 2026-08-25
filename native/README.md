@@ -144,7 +144,14 @@ out/native/dev/native/apex-native --inspect-ini ext_config.ini
 out/native/dev/native/apex-native --inspect-vao car.vao-patch
 out/native/dev/native/apex-native --inspect-ksanim animation.ksanim
 out/native/dev/native/apex-native --window vulkan --frames 300
+out/native/dev/native/apex-native --window vulkan --model car.kn5 \
+  --analog-instruments data/analog_instruments.ini --rpm 6000 \
+  --shader-family ksPerPixel --shader-vertex stock.vert.spv \
+  --shader-fragment stock.frag.spv
 ```
+
+The analog RPM options apply the recovered linear needle transform before scene
+conversion. The command rejects LUT instruments because their exact mapping is not ported.
 
 Export a project through the native authoring service:
 

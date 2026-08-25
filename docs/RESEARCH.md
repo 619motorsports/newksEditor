@@ -2752,6 +2752,10 @@ A live browser check rendered the installed Porsche needle at 1,000 and 6,000 RP
 The capture hashes differed. Both captures returned WebGL error zero, with no browser errors.
 The desktop check loaded all 76 textures. Node APIs remained unavailable in the renderer.
 
+The native CLI also parsed the installed Porsche model and configuration at 6,000 RPM.
+It bound `ARROW_RPM` once and rebuilt the scene before shader-module validation.
+This check did not produce a native GPU capture.
+
 ## Desktop packaging evidence
 
 The desktop shell uses Electron 43.4.1 and serves the existing application from an

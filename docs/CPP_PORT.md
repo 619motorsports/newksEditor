@@ -356,7 +356,14 @@ remains unchanged and feature-complete.
   manifest bytes, or an existing `AssetSource`, and atomically assembles track
   and car-LOD workspaces into backend-neutral scene snapshots and workspace
   bindings. Missing/ambiguous references, truncated models, and aggregate
-  input or scene limits fail closed. GPU/window wiring remains separate.
+  input or scene limits fail closed. GPU and window ownership remain separate.
+  A bounded native analog-instrument adapter parses the first
+  `RPM_INDICATOR` section. It applies the recovered local positive-Z transform
+  to every exact-name match before scene conversion. The native window command
+  accepts an explicit configuration file and a finite RPM value. It does not
+  clamp the input. LUT instruments remain unsupported and produce an error.
+  The native INI parser rejects a dangling continuation marker. The reference
+  JavaScript parser only reports missing fields for this malformed input.
   A separate renderer-facing workspace viewport bridge now prepares this
   document through the bounded stock-scene facade, owns neutral single-sample
   color and D32 targets, and presents the completed color attachment through

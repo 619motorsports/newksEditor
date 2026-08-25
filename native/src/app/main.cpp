@@ -2,7 +2,9 @@
 #include "apex/app/presentation_recreation.hpp"
 #include "apex/app/workspace_viewport.hpp"
 #include "apex/assets/asset_source.hpp"
+#include "apex/core/parse_error.hpp"
 #include "apex/core/parse_limits.hpp"
+#include "apex/domain/analog_instruments.hpp"
 #include "apex/formats/acd.hpp"
 #include "apex/formats/dds.hpp"
 #include "apex/formats/ini.hpp"
@@ -16,6 +18,7 @@
 #include <array>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -47,6 +50,7 @@ void usage(std::ostream& output) {
            << "  apex-native --backend vulkan|d3d12 [--validation]\n"
            << "  apex-native --window vulkan|d3d12 [--frames <count>] [--validation]\n"
            << "  apex-native --window vulkan|d3d12 [--model <file>] [--workspace-root <dir> --manifest <file> --kind track|carLods]\n"
+              "                       [--analog-instruments <file> [--rpm <value>]]\n"
               "                       [--shader-family <name> --shader-vertex <file> --shader-fragment <file>]\n"
            << "  apex-native --inspect-kn5 <file>\n"
            << "  apex-native --inspect-dds <file>\n"
@@ -466,6 +470,9 @@ struct WindowWorkspaceOptions {
     std::optional<std::filesystem::path> manifest;
     apex::app::WorkspaceSessionKind kind = apex::app::WorkspaceSessionKind::generic;
     bool kindSpecified = false;
+    std::optional<std::filesystem::path> analogInstruments;
+    double rpm = 1'000.0;
+    bool rpmSpecified = false;
     std::vector<WindowShaderSpec> shaders;
 };
 
@@ -484,6 +491,16 @@ apex::app::WorkspaceSessionKind parse_workspace_kind(std::string_view value) {
     if (value == "carLods" || value == "car-lods")
         return apex::app::WorkspaceSessionKind::carLods;
     throw std::runtime_error("workspace kind must be track or carLods");
+}
+
+double parse_finite_number(std::string_view value, std::string_view label) {
+    double result = 0.0;
+    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result);
+    if (value.empty() || parsed.ec != std::errc{} ||
+        parsed.ptr != value.data() + value.size() || !std::isfinite(result)) {
+        throw std::runtime_error(std::string(label) + " must be a finite number");
+    }
+    return result;
 }
 
 std::string workspace_kind_name(apex::app::WorkspaceSessionKind kind) {
@@ -525,6 +542,15 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             if (result.kindSpecified) throw std::runtime_error("duplicate --kind option");
             result.kind = parse_workspace_kind(require_value("--kind"));
             result.kindSpecified = true;
+        } else if (option == "--analog-instruments") {
+            if (result.analogInstruments.has_value())
+                throw std::runtime_error("duplicate --analog-instruments option");
+            result.analogInstruments =
+                std::filesystem::path(require_value("--analog-instruments"));
+        } else if (option == "--rpm") {
+            if (result.rpmSpecified) throw std::runtime_error("duplicate --rpm option");
+            result.rpm = parse_finite_number(require_value("--rpm"), "RPM value");
+            result.rpmSpecified = true;
         } else if (option == "--shader-family") {
             const auto family = std::string(require_value("--shader-family"));
             if (family.empty()) throw std::runtime_error("shader family cannot be empty");
@@ -563,6 +589,11 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
     if ((!result.model.has_value() && !result.workspaceRoot.has_value()) &&
         (!result.shaders.empty()))
         throw std::runtime_error("shader modules require a workspace model");
+    if (result.rpmSpecified && !result.analogInstruments.has_value())
+        throw std::runtime_error("--rpm requires --analog-instruments");
+    if (result.analogInstruments.has_value() &&
+        !result.model.has_value() && !result.workspaceRoot.has_value())
+        throw std::runtime_error("--analog-instruments requires a workspace model");
     return result;
 }
 
@@ -600,6 +631,36 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
         throw std::runtime_error("workspace open failed");
     }
     loaded.document = std::move(opened.document);
+    if (options.analogInstruments.has_value()) {
+        const auto bytes = read_file(*options.analogInstruments);
+        const auto text = std::string_view(
+            reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        const auto config = apex::domain::parse_analog_instruments(
+            text, options.analogInstruments->generic_string());
+        for (const auto& item : config.diagnostics) {
+            std::cerr << item.code << " [" << item.source << ':' << item.line
+                      << "]: " << item.message << '\n';
+        }
+        if (!config.rpm.has_value())
+            throw std::runtime_error("analog instrument configuration has no valid RPM indicator");
+        if (!config.rpm->preview_supported)
+            throw std::runtime_error("analog RPM LUT preview is unsupported");
+        const auto applied = apex::domain::apply_analog_rpm(
+            loaded.document->assembly.model, &*config.rpm, options.rpm);
+        if (applied.applied_nodes == 0U) {
+            throw std::runtime_error(
+                std::string("analog RPM node binding is ") +
+                apex::domain::analog_rpm_binding_status_name(applied.status));
+        }
+        loaded.document->scene = apex::scene::convertKn5Scene(
+            loaded.document->assembly.model);
+        loaded.document->sceneBinding = apex::workspace::bindWorkspaceScene(
+            loaded.document->scene.snapshot,
+            loaded.document->assembly.workspace);
+        std::cout << "analog RPM: node=" << applied.object_name
+                  << ", matches=" << applied.matches
+                  << ", rpm=" << applied.rpm << '\n';
+    }
     if (options.shaders.empty())
         throw std::runtime_error("workspace rendering requires caller-supplied shader modules");
 
@@ -878,6 +939,9 @@ int main(int argc, char** argv) {
         }
         usage(std::cerr);
         return 2;
+    } catch (const apex::core::ParseError& error) {
+        std::cerr << "apex-native: " << error.code() << ": " << error.what() << '\n';
+        return 1;
     } catch (const std::exception& error) {
         std::cerr << "apex-native: " << error.what() << '\n';
         return 1;

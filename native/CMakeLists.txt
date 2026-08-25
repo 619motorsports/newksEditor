@@ -109,6 +109,7 @@ add_library(ApexEditor::Csp ALIAS apex_csp)
 target_link_libraries(apex_csp PUBLIC ApexEditor::Formats)
 
 add_library(apex_domain STATIC
+  src/domain/analog_instruments.cpp
   src/domain/car_damage.cpp
   src/domain/car_validation.cpp
   src/domain/driver.cpp
@@ -305,6 +306,7 @@ apex_add_native_test(car_damage_tests.cpp car_damage_tests ApexEditor::Domain)
 apex_add_native_test(project_surfaces_tests.cpp project_surfaces_tests ApexEditor::SecondaryAssets)
 apex_add_native_test(secondary_asset_tests.cpp secondary_asset_tests ApexEditor::SecondaryAssets)
 apex_add_native_test(car_validation_tests.cpp car_validation_tests ApexEditor::Domain)
+apex_add_native_test(analog_instruments_tests.cpp analog_instruments_tests ApexEditor::Domain)
 apex_add_native_test(driver_tests.cpp driver_tests ApexEditor::Domain)
 apex_add_native_test(skin_metadata_tests.cpp skin_metadata_tests ApexEditor::Domain)
 apex_add_native_test(track_data_tests.cpp track_data_tests ApexEditor::Domain)
@@ -375,7 +377,7 @@ foreach(boundary_test IN ITEMS authoring_project_tests project_bake_tests geomet
                                asset_index_tests asset_source_tests csp_config_model_tests
                                csp_material_evaluator_tests car_damage_tests secondary_asset_tests car_validation_tests
                                project_surfaces_tests
-                               driver_tests skin_metadata_tests
+                               analog_instruments_tests driver_tests skin_metadata_tests
                                track_data_tests kn5_scene_tests workspace_tests workspace_scene_tests
                                workspace_session_tests)
   if(TEST ${boundary_test})
