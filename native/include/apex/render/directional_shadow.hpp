@@ -118,6 +118,9 @@ struct StaticSceneDirectionalShadowFrameDescription {
     DirectionalShadowMapResources* maps = nullptr;
     const PipelineProgram* opaque_pipeline = nullptr;
     std::span<const DrawPacket> refreshed_packets{};
+    // Uses the same prepared-packet byte-mask contract as the color frame.
+    // Hidden packets are not selected or skinned as shadow casters.
+    std::span<const std::uint8_t> packet_visibility{};
     // Optional caller-supplied depth-only pipeline for already-retained CPU
     // skinned geometry. A missing pipeline keeps skinned casters staged; this
     // seam does not infer or synthesize a stock ksShadowGen shader.

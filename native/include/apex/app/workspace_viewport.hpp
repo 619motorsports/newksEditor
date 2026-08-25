@@ -71,6 +71,9 @@ struct WorkspaceViewportFrameRequest {
     bool clear_depth = true;
     float depth_clear_value = 1.0F;
     std::span<const render::DrawPacket> refreshed_packets{};
+    // Optional stable prepared-packet visibility mask. See the static-scene
+    // frame contract for count and value requirements.
+    std::span<const std::uint8_t> packet_visibility{};
     bool apply_skinning = false;
     std::optional<render::KsPerPixelFrameConstants> frame_constants;
 };

@@ -293,6 +293,7 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
     frame.clear_depth = request.clear_depth;
     frame.depth_clear_value = request.depth_clear_value;
     frame.refreshed_packets = request.refreshed_packets;
+    frame.packet_visibility = request.packet_visibility;
     frame.apply_skinning = request.apply_skinning;
     frame.frame_constants = request.frame_constants;
 

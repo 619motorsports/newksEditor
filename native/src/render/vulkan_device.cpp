@@ -3176,10 +3176,6 @@ bool draw_indexed_batch_and_readback(
     std::vector<std::byte>& output,
     Diagnostic& diagnostic) {
     std::lock_guard command_guard(context->command_mutex);
-    if (draws.empty()) {
-        diagnostic = {"indexed_static_mesh_batch_empty", "The Vulkan indexed batch contains no draws"};
-        return false;
-    }
     const VkSampleCountFlagBits sample_count = vk_sample_count(description.samples);
     if (sample_count == 0U) {
         diagnostic = {"vulkan_draw_samples_unsupported",

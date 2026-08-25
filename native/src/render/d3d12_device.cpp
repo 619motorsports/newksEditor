@@ -2279,8 +2279,9 @@ bool draw_indexed_static_mesh_batch_and_readback(
     D3D12_RESOURCE_STATES& destination_state,
     std::vector<std::byte>& output,
     Diagnostic& diagnostic) {
-    if (draws.empty() || destination == nullptr) {
-        diagnostic = {"indexed_static_mesh_batch_empty", "D3D12 indexed static-mesh batch has no executable draws"};
+    if (destination == nullptr) {
+        diagnostic = {"indexed_static_mesh_batch_target_missing",
+                      "D3D12 indexed static-mesh batch has no color target"};
         return false;
     }
     if (batch.load_color && !color_initialized) {

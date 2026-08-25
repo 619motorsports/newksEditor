@@ -297,6 +297,10 @@ ordered draw instances. It submits one batch with caller-supplied SPIR-V or
 DXIL pipelines. A constants-enabled pipeline requires an explicit table in
 final material order. The adapter validates this table before allocation. It
 owns one 256-byte buffer per used material and reuses it for duplicate packets.
+Each frame can supply a byte visibility mask in stable packet order. An empty
+mask keeps all packets visible. Other masks must match the packet count and use
+only zero or one. Hidden packets do not draw or update skinned geometry. An
+all-hidden frame uses a clear-only color batch, so the viewport stays valid.
 Static scenes accept 1x and 4x pipelines. A2C requires 4x color and matching
 depth samples. A bounded material handoff derives the supported resource
 layouts, constants, and profile state from KN5 materials. The caller must

@@ -1221,6 +1221,16 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         return {IndexedStaticMeshBatchStatus::invalid_request,
                 {"static_scene_frame_packet_count_invalid",
                  "Refreshed static-scene packet states must match the prepared packet count"}, {}};
+    if (!frame.packet_visibility.empty() &&
+        frame.packet_visibility.size() != packets_.size())
+        return {IndexedStaticMeshBatchStatus::invalid_request,
+                {"static_scene_frame_visibility_mask_count_invalid",
+                 "Static-scene packet visibility must match the prepared packet count"}, {}};
+    if (std::any_of(frame.packet_visibility.begin(), frame.packet_visibility.end(),
+                    [](std::uint8_t value) { return value > 1U; }))
+        return {IndexedStaticMeshBatchStatus::invalid_request,
+                {"static_scene_frame_visibility_mask_value_invalid",
+                 "Static-scene packet visibility values must be 0 or 1"}, {}};
     if (has_texture_resources_ &&
         texture_authority_ == StaticSceneTextureAuthority::caller_tables &&
         (frame.textures_by_global_index.size() != texture_count_ ||
@@ -1413,12 +1423,16 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
     const auto packet_for_frame = [&](std::size_t index) -> const DrawPacket& {
         return frame.refreshed_packets.empty() ? packets_[index] : frame.refreshed_packets[index];
     };
+    const auto packet_visible = [&](std::size_t index) {
+        return frame.packet_visibility.empty() || frame.packet_visibility[index] != 0U;
+    };
     for (std::size_t index = 0U; index < packets_.size(); ++index) {
         const DrawPacket& packet = packet_for_frame(index);
-        if (!same_prepared_draw_contract(packets_[index], packet) || !finite_world_matrix(packet))
+        if (!same_prepared_draw_contract(packets_[index], packet) ||
+            !finite_world_matrix(packet))
             return {IndexedStaticMeshBatchStatus::invalid_request,
                     {"static_scene_frame_packet_contract_invalid",
-                     "Refreshed packet state changed a prepared draw contract"}, {}};
+                     "Refreshed packet state changed a prepared draw contract or transform"}, {}};
         if (packet.primitive == DrawPrimitiveKind::skinned_mesh) {
             if (packet.bone_palette.empty())
                 return {IndexedStaticMeshBatchStatus::invalid_request,
@@ -1441,6 +1455,7 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
     std::vector<PendingSkinUpdate> pending_skin_updates;
     pending_skin_updates.reserve(skinned_uploads_.size());
     for (std::size_t index = 0U; index < packets_.size(); ++index) {
+        if (!packet_visible(index)) continue;
         const std::size_t upload_index = skinned_upload_for_packet_[index];
         if (upload_index == invalid_resource_index) continue;
         if (upload_index >= skinned_uploads_.size() || skinned_uploads_[upload_index] == nullptr)
@@ -1472,6 +1487,7 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
     std::vector<IndexedStaticMeshDrawRequest> draws;
     draws.reserve(packets_.size());
     for (std::size_t index = 0U; index < packets_.size(); ++index) {
+        if (!packet_visible(index)) continue;
         const DrawPacket& packet = packet_for_frame(index);
         const bool upload_index_invalid =
             packet.primitive == DrawPrimitiveKind::skinned_mesh
@@ -1711,6 +1727,16 @@ StaticSceneResources::draw_opaque_directional_shadows(
         return fail(StaticSceneDirectionalShadowStatus::invalid_request,
                     "directional_shadow_packet_count_invalid",
                     "Refreshed shadow packets must match the prepared packet count");
+    if (!frame.packet_visibility.empty() &&
+        frame.packet_visibility.size() != packets_.size())
+        return fail(StaticSceneDirectionalShadowStatus::invalid_request,
+                    "directional_shadow_visibility_mask_count_invalid",
+                    "Shadow packet visibility must match the prepared packet count");
+    if (std::any_of(frame.packet_visibility.begin(), frame.packet_visibility.end(),
+                    [](std::uint8_t value) { return value > 1U; }))
+        return fail(StaticSceneDirectionalShadowStatus::invalid_request,
+                    "directional_shadow_visibility_mask_value_invalid",
+                    "Shadow packet visibility values must be 0 or 1");
     if (maps.metadata_.cascades.size() != directional_shadow_cascade_count ||
         maps.metadata_.splits.size() != directional_shadow_cascade_count)
         return fail(StaticSceneDirectionalShadowStatus::invalid_request,
@@ -1720,6 +1746,9 @@ StaticSceneResources::draw_opaque_directional_shadows(
     const auto packet_for_frame = [&](std::size_t index) -> const DrawPacket& {
         return frame.refreshed_packets.empty() ? packets_[index]
                                                : frame.refreshed_packets[index];
+    };
+    const auto packet_visible = [&](std::size_t index) {
+        return frame.packet_visibility.empty() || frame.packet_visibility[index] != 0U;
     };
     for (std::size_t index = 0U; index < packets_.size(); ++index) {
         const DrawPacket& packet = packet_for_frame(index);
@@ -1735,6 +1764,7 @@ StaticSceneResources::draw_opaque_directional_shadows(
     executable_indices.reserve(packets_.size());
     result.staged_casters.reserve(packets_.size());
     for (std::size_t index = 0U; index < packets_.size(); ++index) {
+        if (!packet_visible(index)) continue;
         const DrawPacket& packet = packet_for_frame(index);
         if (!packet.flags.cast_shadows) continue;
         ++result.selected_casters;

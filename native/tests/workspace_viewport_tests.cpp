@@ -111,8 +111,9 @@ public:
     }
 
     IndexedStaticMeshBatchResult draw_indexed_static_mesh_batch_and_readback(
-        Texture&, const IndexedStaticMeshBatchDescription&) override {
+        Texture&, const IndexedStaticMeshBatchDescription& batch) override {
         ++draw_calls;
+        draw_counts.push_back(batch.draws.size());
         if (fail_draw)
             return {IndexedStaticMeshBatchStatus::execution_failed,
                     {"fake_draw_failed", "injected draw failure"}, {}};
@@ -152,6 +153,7 @@ public:
     std::size_t depth_calls = 0U;
     std::size_t draw_calls = 0U;
     std::size_t present_calls = 0U;
+    std::vector<std::size_t> draw_counts;
 
 private:
     DeviceInfo info_{Backend::Vulkan, "viewport fake", "unit", 1U, 0U, 0U,
@@ -450,11 +452,23 @@ void opens_and_draws() {
     WorkspaceViewportFrameRequest frame;
     frame.camera.clip_space = CameraClipSpace::vulkan;
     frame.frame_constants = KsPerPixelFrameConstants{};
+    const std::array<std::uint8_t, 1U> visible = {1U};
+    frame.packet_visibility = visible;
     Diagnostic diagnostic;
     const auto status = prepared.viewport->drawAndPresent(device, target, frame, diagnostic);
     require(status == WorkspaceViewportFrameStatus::ready &&
-                device.draw_calls == 1U && device.present_calls == 1U,
+                device.draw_calls == 1U && device.present_calls == 1U &&
+                device.draw_counts == std::vector<std::size_t>({1U}),
             "viewport draws before presenting one frame");
+
+    const std::array<std::uint8_t, 1U> hidden = {0U};
+    frame.packet_visibility = hidden;
+    const auto clear_only_status =
+        prepared.viewport->drawAndPresent(device, target, frame, diagnostic);
+    require(clear_only_status == WorkspaceViewportFrameStatus::ready &&
+                device.draw_calls == 2U && device.present_calls == 2U &&
+                device.draw_counts == std::vector<std::size_t>({1U, 0U}),
+            "all-hidden viewport frame clears and presents without rebuilding resources");
 }
 
 void accepts_track_and_car_lod_documents() {

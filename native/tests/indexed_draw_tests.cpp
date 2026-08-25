@@ -1853,9 +1853,8 @@ void validates_ordered_indexed_batch_contract() {
 
     description = {};
     require(validate_indexed_static_mesh_batch_description(target, description, diagnostic) ==
-                IndexedStaticMeshBatchStatus::invalid_request &&
-                diagnostic.code == "indexed_static_mesh_batch_empty",
-            "empty indexed batch rejected");
+                IndexedStaticMeshBatchStatus::ready,
+            "empty indexed batch is an explicit clear-only color frame");
     description.draws = requests;
     std::vector<IndexedStaticMeshDrawRequest> oversized(max_indexed_static_mesh_batch_draws + 1U,
                                                         requests[0]);

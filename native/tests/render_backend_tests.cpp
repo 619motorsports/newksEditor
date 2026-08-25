@@ -1534,6 +1534,30 @@ bool contract_backend(apex::render::Backend backend) {
                     clear_result.rgba8[pixel + 2U] == std::byte{0} && clear_result.rgba8[pixel + 3U] == std::byte{255},
                 "deterministic canonical RGBA8 clear pixels");
     }
+    DepthAttachmentDescription clear_only_depth_description;
+    clear_only_depth_description.width = 2U;
+    clear_only_depth_description.height = 2U;
+    DepthAttachmentResult clear_only_depth =
+        device.device->create_depth_attachment(clear_only_depth_description);
+    require(clear_only_depth.ok(), "clear-only indexed frame depth creation");
+    IndexedStaticMeshBatchDescription clear_only_color_batch;
+    clear_only_color_batch.depth_attachment = clear_only_depth.attachment.get();
+    clear_only_color_batch.clear_color = {1.0F, 0.0F, 1.0F, 1.0F};
+    clear_only_color_batch.clear_depth = true;
+    const IndexedStaticMeshBatchResult clear_only_color_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *clear_texture.texture, clear_only_color_batch);
+    require(clear_only_color_result.ok() &&
+                clear_only_color_result.rgba8.size() == 16U,
+            "real clear-only indexed frame execution");
+    for (std::size_t pixel = 0U;
+         pixel < clear_only_color_result.rgba8.size(); pixel += 4U) {
+        require(clear_only_color_result.rgba8[pixel] == std::byte{255} &&
+                    clear_only_color_result.rgba8[pixel + 1U] == std::byte{0} &&
+                    clear_only_color_result.rgba8[pixel + 2U] == std::byte{255} &&
+                    clear_only_color_result.rgba8[pixel + 3U] == std::byte{255},
+                "clear-only indexed frame preserves canonical RGBA8 pixels");
+    }
     TextureClearReadbackRequest invalid_clear = clear_request;
     invalid_clear.clear_color[0] = std::numeric_limits<float>::infinity();
     const TextureClearReadbackResult invalid_clear_result =

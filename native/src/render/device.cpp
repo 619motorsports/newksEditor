@@ -2019,11 +2019,6 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
 IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
     const Texture& texture, const IndexedStaticMeshBatchDescription& description,
     Diagnostic& diagnostic) {
-    if (description.draws.empty()) {
-        diagnostic = {"indexed_static_mesh_batch_empty",
-                      "An indexed static-mesh batch must contain at least one draw"};
-        return IndexedStaticMeshBatchStatus::invalid_request;
-    }
     if (description.draws.size() > max_indexed_static_mesh_batch_draws) {
         diagnostic = {"indexed_static_mesh_batch_limit",
                       "Indexed static-mesh batch exceeds the bounded draw limit"};

@@ -573,6 +573,55 @@ void prepares_mixed_static_and_skinned_scene_and_updates_only_after_preflight() 
                 device.updated_bytes.back() != bind_bytes,
             "active animation precomputes and commits the refreshed skinned pose");
 
+    const std::array<std::uint8_t, 3U> hide_skinned = {1U, 0U, 1U};
+    frame.packet_visibility = hide_skinned;
+    const std::size_t updates_before_hidden_skin = device.update_calls;
+    const auto hidden_skin = prepared.resources->draw_and_readback(device, target, frame);
+    require(hidden_skin.ok() && device.update_calls == updates_before_hidden_skin &&
+                device.nodes == std::vector<apex::scene::NodeId>({1U, 1U}),
+            "hidden skinned packet skips pose upload and color submission");
+
+    const std::array<std::uint8_t, 3U> show_only_skinned = {0U, 1U, 0U};
+    frame.packet_visibility = show_only_skinned;
+    const auto only_skin = prepared.resources->draw_and_readback(device, target, frame);
+    require(only_skin.ok() && device.update_calls == updates_before_hidden_skin + 1U &&
+                device.nodes == std::vector<apex::scene::NodeId>({2U}),
+            "visible skinned packet updates and submits without hidden static packets");
+
+    const std::array<std::uint8_t, 3U> hide_all = {0U, 0U, 0U};
+    frame.packet_visibility = hide_all;
+    const std::size_t updates_before_clear_only = device.update_calls;
+    const auto clear_only = prepared.resources->draw_and_readback(device, target, frame);
+    require(clear_only.ok() && device.update_calls == updates_before_clear_only &&
+                device.nodes.empty(),
+            "all-hidden frame clears and reads back without draws or skin uploads");
+
+    const std::array<std::uint8_t, 1U> short_visibility = {1U};
+    frame.packet_visibility = short_visibility;
+    const std::size_t batches_before_invalid_visibility = device.batch_calls;
+    const auto invalid_visibility_count =
+        prepared.resources->draw_and_readback(device, target, frame);
+    require(invalid_visibility_count.status ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                invalid_visibility_count.diagnostic.code ==
+                    "static_scene_frame_visibility_mask_count_invalid" &&
+                device.update_calls == updates_before_clear_only &&
+                device.batch_calls == batches_before_invalid_visibility,
+            "short packet visibility mask fails before update or color submission");
+
+    const std::array<std::uint8_t, 3U> invalid_visibility = {1U, 2U, 1U};
+    frame.packet_visibility = invalid_visibility;
+    const auto invalid_visibility_value =
+        prepared.resources->draw_and_readback(device, target, frame);
+    require(invalid_visibility_value.status ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                invalid_visibility_value.diagnostic.code ==
+                    "static_scene_frame_visibility_mask_value_invalid" &&
+                device.update_calls == updates_before_clear_only &&
+                device.batch_calls == batches_before_invalid_visibility,
+            "non-binary packet visibility fails before update or color submission");
+    frame.packet_visibility = {};
+
     const std::size_t updates_before_invalid = device.update_calls;
     const std::array<DrawPacket, 1> short_refresh = {refreshed.front()};
     frame.refreshed_packets = short_refresh;
@@ -2617,6 +2666,20 @@ void retains_three_directional_maps_and_executes_only_opaque_static_casters() {
                             }),
             "stock-default opaque casters use back-face shadow culling");
 
+    const std::array<std::uint8_t, 3U> hide_all_shadow_packets = {0U, 0U, 0U};
+    frame.packet_visibility = hide_all_shadow_packets;
+    const std::size_t shadow_calls_before_clear_only = device.depth_batch_calls;
+    const auto clear_only_shadows =
+        prepared.resources->draw_opaque_directional_shadows(device, frame);
+    require(clear_only_shadows.ok() && clear_only_shadows.selected_casters == 0U &&
+                clear_only_shadows.cascades_completed ==
+                    directional_shadow_cascade_count &&
+                device.depth_batch_calls ==
+                    shadow_calls_before_clear_only + directional_shadow_cascade_count &&
+                device.depth_nodes.back().empty(),
+            "all-hidden shadow frame clears each retained cascade without draws");
+    frame.packet_visibility = {};
+
     value.packets[0].flags.double_face_shadow = true;
     RecordingDevice double_face_device;
     auto double_face_prepared =
@@ -2698,6 +2761,57 @@ void retains_three_directional_maps_and_executes_only_opaque_static_casters() {
                 mixed_device.depth_nodes.back() ==
                     std::vector<apex::scene::NodeId>({1U, 2U, 1U}),
             "explicit skinned shadow pipeline executes CPU-skinned casters in all cascades");
+
+    const std::array<std::uint8_t, 3U> hide_shadow_skin = {1U, 0U, 1U};
+    mixed_frame.packet_visibility = hide_shadow_skin;
+    const std::size_t updates_before_hidden_shadow_skin = mixed_device.update_calls;
+    const auto hidden_shadow_skin =
+        mixed_prepared.resources->draw_opaque_directional_shadows(
+            mixed_device, mixed_frame);
+    require(hidden_shadow_skin.ok() && hidden_shadow_skin.opaque_casters == 2U &&
+                hidden_shadow_skin.skinned_casters == 0U &&
+                mixed_device.update_calls == updates_before_hidden_shadow_skin &&
+                mixed_device.depth_nodes.back() ==
+                    std::vector<apex::scene::NodeId>({1U, 1U}),
+            "hidden skinned shadow packet skips pose upload and every cascade");
+
+    const std::array<std::uint8_t, 3U> show_only_shadow_skin = {0U, 1U, 0U};
+    mixed_frame.packet_visibility = show_only_shadow_skin;
+    const auto only_shadow_skin =
+        mixed_prepared.resources->draw_opaque_directional_shadows(
+            mixed_device, mixed_frame);
+    require(only_shadow_skin.ok() && only_shadow_skin.opaque_casters == 0U &&
+                only_shadow_skin.skinned_casters == 1U &&
+                mixed_device.update_calls == updates_before_hidden_shadow_skin + 1U &&
+                mixed_device.depth_nodes.back() ==
+                    std::vector<apex::scene::NodeId>({2U}),
+            "visible skinned shadow packet executes without hidden static casters");
+    mixed_frame.packet_visibility = {};
+
+    const std::array<std::uint8_t, 1U> short_shadow_visibility = {1U};
+    frame.packet_visibility = short_shadow_visibility;
+    const std::size_t shadow_calls_before_invalid_mask = device.depth_batch_calls;
+    const auto invalid_shadow_visibility =
+        prepared.resources->draw_opaque_directional_shadows(device, frame);
+    require(invalid_shadow_visibility.status ==
+                StaticSceneDirectionalShadowStatus::invalid_request &&
+                invalid_shadow_visibility.diagnostic.code ==
+                    "directional_shadow_visibility_mask_count_invalid" &&
+                device.depth_batch_calls == shadow_calls_before_invalid_mask,
+            "short shadow visibility mask fails before any cascade write");
+
+    const std::array<std::uint8_t, 3U> invalid_shadow_visibility_values = {
+        1U, 3U, 1U};
+    frame.packet_visibility = invalid_shadow_visibility_values;
+    const auto invalid_shadow_visibility_value =
+        prepared.resources->draw_opaque_directional_shadows(device, frame);
+    require(invalid_shadow_visibility_value.status ==
+                StaticSceneDirectionalShadowStatus::invalid_request &&
+                invalid_shadow_visibility_value.diagnostic.code ==
+                    "directional_shadow_visibility_mask_value_invalid" &&
+                device.depth_batch_calls == shadow_calls_before_invalid_mask,
+            "non-binary shadow visibility fails before any cascade write");
+    frame.packet_visibility = {};
 
     std::vector<DrawPacket> malformed = value.packets;
     malformed.back().world_matrix[0] = std::numeric_limits<float>::quiet_NaN();

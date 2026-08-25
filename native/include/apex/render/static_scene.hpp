@@ -99,6 +99,11 @@ struct StaticSceneFrameDescription {
     // primitive, ranges, pipeline flags, and resources must remain stable;
     // world matrices and bone palettes may change.
     std::span<const DrawPacket> refreshed_packets{};
+    // Optional byte mask in prepared packet order. Empty means all packets
+    // are visible. A supplied mask must match the prepared packet count and
+    // contain only 0 (hidden) or 1 (visible). Hidden packets keep their stable
+    // prepared contract but do not draw or update retained skinned geometry.
+    std::span<const std::uint8_t> packet_visibility{};
     // When false, skinned uploads are restored to their bind-pose bytes. When
     // true, each skinned upload is CPU-skinned from refreshed_packets (or the
     // prepared packets when the span is empty) before the batch is submitted.

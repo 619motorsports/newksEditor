@@ -214,6 +214,11 @@ remains unchanged and feature-complete.
   bind-pose bytes when animation is not active. Backend uploads are sequential:
   a failed upload prevents batch submission but can leave earlier successful
   mutable uploads committed. Retrying the complete frame restores consistency.
+  A frame can also supply a byte visibility mask in stable packet order. An
+  empty mask keeps all packets visible. Other masks must match the prepared
+  packet count and contain only zero or one. Hidden packets do not draw or
+  update skinned geometry. Shadow submission uses the same mask contract.
+  An all-hidden color frame runs a clear-only batch and keeps the viewport.
   It owns one 256-byte material buffer per used material. Duplicate packets
   reuse the same buffer. Count and byte limits bound these allocations. Static
   scenes accept 1x or 4x pipelines. An alpha-to-coverage pipeline requires 4x
