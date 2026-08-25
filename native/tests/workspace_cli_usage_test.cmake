@@ -132,6 +132,66 @@ if(lut_analog_position EQUAL -1)
 endif()
 file(REMOVE "${truncated_analog}" "${lut_analog}")
 
+set(animation "${APEX_SOURCE_DIR}/test/content/cars/619_gen6_arca_base/animations/gascap.ksanim")
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --animation "${animation}" --animation-position 0.5
+  RESULT_VARIABLE animation_result
+  OUTPUT_VARIABLE animation_output
+  ERROR_VARIABLE animation_error
+)
+if(NOT animation_result STREQUAL "1")
+  message(FATAL_ERROR "animation workspace returned ${animation_result}: ${animation_error}")
+endif()
+string(FIND "${animation_output}"
+  "animation: tracks=5, animated=2, matched-tracks=0, matched-nodes=0, position=0.5"
+  animation_position)
+if(animation_position EQUAL -1)
+  message(FATAL_ERROR
+    "animation did not reach native model binding: ${animation_output}${animation_error}")
+endif()
+string(FIND "${animation_error}" "caller-supplied shader modules" animation_modules_position)
+if(animation_modules_position EQUAL -1)
+  message(FATAL_ERROR
+    "animation workspace did not reach shader validation: ${animation_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --animation-position 0.5
+  RESULT_VARIABLE detached_animation_result
+  OUTPUT_VARIABLE detached_animation_output
+  ERROR_VARIABLE detached_animation_error
+)
+if(NOT detached_animation_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached animation position returned ${detached_animation_result}: ${detached_animation_error}")
+endif()
+string(FIND "${detached_animation_error}"
+  "--animation-position requires --animation" detached_animation_position)
+if(detached_animation_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached animation position was not diagnosed: ${detached_animation_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --animation "${animation}" --animation-position inf
+  RESULT_VARIABLE invalid_animation_position_result
+  OUTPUT_VARIABLE invalid_animation_position_output
+  ERROR_VARIABLE invalid_animation_position_error
+)
+if(NOT invalid_animation_position_result STREQUAL "1")
+  message(FATAL_ERROR
+    "non-finite animation position returned ${invalid_animation_position_result}: ${invalid_animation_position_error}")
+endif()
+string(FIND "${invalid_animation_position_error}"
+  "animation position must be a finite number" invalid_animation_position)
+if(invalid_animation_position EQUAL -1)
+  message(FATAL_ERROR
+    "non-finite animation position was not diagnosed: ${invalid_animation_position_error}")
+endif()
+
 # Exercise the production AssetSource path with a bounded car-LOD manifest.
 # The repository's complete car fixture includes optional LOD files that are
 # intentionally outside this test's scope, so copy one known-good model into

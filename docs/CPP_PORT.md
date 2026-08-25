@@ -362,6 +362,11 @@ remains unchanged and feature-complete.
   to every exact-name match before scene conversion. The native window command
   accepts an explicit configuration file and a finite RPM value. It does not
   clamp the input. LUT instruments remain unsupported and produce an error.
+  A bounded native animation adapter samples KSANIM at a finite normalized
+  position. It applies tracks only to exact-name KN5 null nodes. Later animated
+  duplicate tracks replace earlier tracks. The window command applies animation
+  after the RPM transform, so animation wins when both target one node. Live
+  playback and interactive animation selection remain staged.
   The native INI parser rejects a dangling continuation marker. The reference
   JavaScript parser only reports missing fields for this malformed input.
   A separate renderer-facing workspace viewport bridge now prepares this

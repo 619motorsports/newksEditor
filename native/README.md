@@ -148,12 +148,16 @@ out/native/dev/native/apex-native --inspect-ksanim animation.ksanim
 out/native/dev/native/apex-native --window vulkan --frames 300
 out/native/dev/native/apex-native --window vulkan --model car.kn5 \
   --analog-instruments data/analog_instruments.ini --rpm 6000 \
+  --animation animations/car_door_l.ksanim --animation-position 0.5 \
   --shader-family ksPerPixel --shader-vertex stock.vert.spv \
   --shader-fragment stock.frag.spv
 ```
 
 The analog RPM options apply the recovered linear needle transform before scene
 conversion. The command rejects LUT instruments because their exact mapping is not ported.
+The animation options apply a fixed-position KSANIM preview to exact-name null
+nodes. Later animated duplicate tracks win. Animation replaces an RPM transform
+when both options target the same node. Live playback is not connected yet.
 
 Export a project through the native authoring service:
 

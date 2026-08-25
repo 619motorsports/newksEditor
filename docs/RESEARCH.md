@@ -2608,6 +2608,15 @@ transforms. The native SDK `sphere.kn5` gives its null node and child mesh the s
 `Sphere001` name. Apex therefore applies a matching animation track only to the null
 node. It does not create a second local transform for the same-named mesh.
 
+The native preview adapter follows this null-node rule. It also retains the later
+animated track when a KSANIM file contains duplicate names. The operation samples
+all selected tracks before it changes the KN5 hierarchy.
+
+The native CLI loaded the installed Porsche 917/30 door animation at position 0.5.
+It found three tracks, two animated tracks, two matching tracks, and two matching
+null nodes. The check stopped at caller-supplied shader validation. It did not
+produce a native GPU capture.
+
 `Animation::save` at `0x10043dd0` writes version 2, the track count, and each UTF-8
 track name. It then writes the frame count and 40 bytes for each frame. A frame contains
 one quaternion, one position, and one scale.
