@@ -115,8 +115,11 @@ zero to one.
 
 `--ai-spline-show-left` and `--ai-spline-show-right` enable independent side
 passes. Both options require version-7 payloads. The default state is off,
-which matches the two installed-editor checkboxes. Camber and edit controls
-remain staged.
+which matches the two installed-editor checkboxes.
+
+`--ai-spline-show-camber` enables the independent camber pass. This option
+also requires version-7 payloads and starts off. Spline edit controls remain
+staged.
 
 The production WebGL source has no AI-spline load or render path. A source
 search found no AI-spline or `fast_lane.ai` identifiers. Thus, a direct WebGL
@@ -125,6 +128,7 @@ production WebGL suite passed 380 tests. It skipped 34 installed-fixture tests.
 
 SwiftShader executes the native line passes at 1x and 4x MSAA. The pixel test
 checks magenta and cyan depth rejection. It also checks blue depth-off output.
+The test checks red and green camber lines with normal depth.
 The sanitizer-enabled native suite passed all 75 tests with SwiftShader.
 The D3D12 code uses the same batch contract. A Windows WARP test remains
 necessary for D3D12 execution evidence.

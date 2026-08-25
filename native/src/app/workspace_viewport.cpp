@@ -512,7 +512,8 @@ WorkspaceViewport::WorkspaceViewport(
     std::unique_ptr<render::DepthAttachment> depth,
     std::unique_ptr<render::StockSceneExecutionResult> execution,
     std::optional<render::PipelineProgram> authoring_overlay_pipeline,
-    std::array<AiSplinePassResources, 4U> ai_spline_passes,
+    std::array<AiSplinePassResources, workspace_ai_spline_pass_count>
+        ai_spline_passes,
     std::unique_ptr<render::Buffer> authoring_grid_buffer,
     bool grid_visible,
     std::unique_ptr<render::Buffer> view_axis_buffer,
@@ -1243,7 +1244,8 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         }
 
         std::optional<render::PipelineProgram> authoring_overlay_pipeline;
-        std::array<WorkspaceViewport::AiSplinePassResources, 4U>
+        std::array<WorkspaceViewport::AiSplinePassResources,
+                   workspace_ai_spline_pass_count>
             ai_spline_passes;
         std::unique_ptr<render::Buffer> authoring_grid_buffer;
         std::unique_ptr<render::Buffer> view_axis_buffer;
@@ -1257,7 +1259,8 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             WorkspaceAiSplinePassKind kind =
                 WorkspaceAiSplinePassKind::primary;
         };
-        const std::array<AiSplinePassInput, 4U> ai_spline_inputs = {{
+        const std::array<AiSplinePassInput, workspace_ai_spline_pass_count>
+            ai_spline_inputs = {{
             {request.ai_spline_geometry, &request.ai_spline_pipeline,
              WorkspaceAiSplinePassKind::primary},
             {request.ai_spline_interval_geometry,
@@ -1269,6 +1272,9 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             {request.ai_spline_right_geometry,
              &request.ai_spline_right_pipeline,
              WorkspaceAiSplinePassKind::right_side},
+            {request.ai_spline_camber_geometry,
+             &request.ai_spline_camber_pipeline,
+             WorkspaceAiSplinePassKind::camber},
         }};
         for (const AiSplinePassInput& input : ai_spline_inputs) {
             if ((input.geometry != nullptr) != input.pipeline->has_value()) {
@@ -1281,7 +1287,8 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         }
         if ((request.ai_spline_interval_geometry != nullptr ||
              request.ai_spline_left_geometry != nullptr ||
-             request.ai_spline_right_geometry != nullptr) &&
+             request.ai_spline_right_geometry != nullptr ||
+             request.ai_spline_camber_geometry != nullptr) &&
             request.ai_spline_geometry == nullptr) {
             result.status = WorkspaceViewportStatus::invalid;
             result.diagnostic = diagnostic(
@@ -1345,10 +1352,13 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 expected_first += chunk.vertex_count;
             }
             const std::size_t expected_vertices =
-                geometry.sample_point_count > 2U
-                    ? (static_cast<std::size_t>(
-                           geometry.sample_point_count) - 1U) * 2U
-                    : 0U;
+                input.kind == WorkspaceAiSplinePassKind::camber
+                    ? static_cast<std::size_t>(geometry.sample_point_count) *
+                          2U
+                    : geometry.sample_point_count > 2U
+                        ? (static_cast<std::size_t>(
+                               geometry.sample_point_count) - 1U) * 2U
+                        : 0U;
             const bool primary_metadata_valid =
                 input.kind == WorkspaceAiSplinePassKind::primary &&
                 geometry.pass == WorkspaceAiSplinePassKind::primary &&
@@ -1379,11 +1389,21 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 request.ai_spline_geometry != nullptr &&
                 geometry.source_point_count ==
                     request.ai_spline_geometry->source_point_count;
+            const bool camber_metadata_valid =
+                input.kind == WorkspaceAiSplinePassKind::camber &&
+                geometry.pass == WorkspaceAiSplinePassKind::camber &&
+                geometry.mode == WorkspaceAiSplineDisplayMode::raw &&
+                geometry.sample_point_count == geometry.source_point_count &&
+                geometry.source_point_count <=
+                    render::max_overlay_line_total_vertices / 2U &&
+                request.ai_spline_geometry != nullptr &&
+                geometry.source_point_count ==
+                    request.ai_spline_geometry->source_point_count;
             if (expected_first != geometry.vertices.size() ||
                 (geometry.vertices.empty() != geometry.chunks.empty()) ||
                 geometry.vertices.size() != expected_vertices ||
                 !(primary_metadata_valid || interval_metadata_valid ||
-                  side_metadata_valid)) {
+                  side_metadata_valid || camber_metadata_valid)) {
                 result.status = WorkspaceViewportStatus::invalid;
                 result.diagnostic = diagnostic(
                     "workspace_viewport_ai_spline_geometry_invalid",
@@ -1398,14 +1418,38 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                         ? workspace_ai_spline_interval_color
                         : workspace_ai_spline_side_color;
             for (const render::OverlayLineVertex& vertex : geometry.vertices) {
+                const bool color_valid =
+                    input.kind == WorkspaceAiSplinePassKind::camber
+                        ? vertex.color ==
+                                  workspace_ai_spline_camber_positive_color ||
+                              vertex.color ==
+                                  workspace_ai_spline_camber_nonpositive_color
+                        : vertex.color == expected_color;
                 if (!finite_vector(vertex.position) ||
-                    vertex.color != expected_color) {
+                    !color_valid) {
                     result.status = WorkspaceViewportStatus::invalid;
                     result.diagnostic = diagnostic(
                         "workspace_viewport_ai_spline_vertex_invalid",
                         "AI spline vertices require finite positions and the "
                         "recovered pass color");
                     return result;
+                }
+            }
+            if (input.kind == WorkspaceAiSplinePassKind::camber) {
+                for (std::size_t vertex = 0U;
+                     vertex < geometry.vertices.size(); vertex += 2U) {
+                    const auto& begin = geometry.vertices[vertex];
+                    const auto& end = geometry.vertices[vertex + 1U];
+                    if (begin.color != end.color ||
+                        begin.position[0] != end.position[0] ||
+                        begin.position[2] != end.position[2] ||
+                        end.position[1] < begin.position[1]) {
+                        result.status = WorkspaceViewportStatus::invalid;
+                        result.diagnostic = diagnostic(
+                            "workspace_viewport_ai_spline_camber_line_invalid",
+                            "AI spline camber lines must be vertical, upward, and one color");
+                        return result;
+                    }
                 }
             }
             const render::PipelineProgram& pipeline =

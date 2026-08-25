@@ -566,6 +566,13 @@ PipelineProgram ai_spline_side_pipeline(const Fixture& fixture_value,
     return pipeline;
 }
 
+PipelineProgram ai_spline_camber_pipeline(const Fixture& fixture_value,
+                                           std::uint32_t samples = 1U) {
+    PipelineProgram pipeline = ai_spline_pipeline(fixture_value, samples);
+    pipeline.name = "viewport-ai-spline-camber";
+    return pipeline;
+}
+
 PipelineProgram selected_mesh_pipeline(const Fixture& fixture_value,
                                        std::uint32_t samples = 1U) {
     PipelineProgram pipeline;
@@ -1295,6 +1302,208 @@ void draws_recovered_ai_spline_side_passes() {
             "side passes share the bounded AI spline aggregate budget");
 }
 
+void draws_recovered_ai_spline_camber_pass() {
+    auto value = fixture();
+    apex::formats::AiSpline spline;
+    spline.version = 7U;
+    spline.points.resize(3U);
+    spline.points[0].position = {0.0F, 10.0F, 1.0F};
+    spline.points[1].position = {2.0F, 20.0F, 3.0F};
+    spline.points[2].position = {4.0F, 30.0F, 5.0F};
+    spline.points[0].tag = 0;
+    spline.points[1].tag = 1;
+    spline.points[2].tag = 2;
+    spline.payloads.resize(3U);
+    spline.payloads[0].camber = 0.5F;
+    spline.payloads[1].camber = 0.0F;
+    spline.payloads[2].camber = -0.25F;
+    const auto primary = apex::app::buildWorkspaceAiSplineGeometry(spline);
+    const auto camber =
+        apex::app::buildWorkspaceAiSplineCamberGeometry(spline);
+    require(primary.ok() && camber.ok(),
+            "camber viewport fixtures convert");
+    require(camber.geometry.pass ==
+                    apex::app::WorkspaceAiSplinePassKind::camber &&
+                camber.geometry.mode ==
+                    apex::app::WorkspaceAiSplineDisplayMode::raw &&
+                camber.geometry.source_point_count == 3U &&
+                camber.geometry.sample_point_count == 3U &&
+                camber.geometry.vertices.size() == 6U &&
+                camber.geometry.chunks.size() == 1U,
+            "camber pass retains one line per source point");
+    bool saw_green = false;
+    bool saw_red = false;
+    for (const auto& vertex : camber.geometry.vertices) {
+        saw_green = saw_green ||
+                    vertex.color ==
+                        apex::app::workspace_ai_spline_camber_positive_color;
+        saw_red = saw_red ||
+                  vertex.color ==
+                      apex::app::workspace_ai_spline_camber_nonpositive_color;
+    }
+    require(saw_green && saw_red,
+            "camber pass retains mixed positive and nonpositive colors");
+
+    auto request = request_for(value);
+    request.ai_spline_geometry = &primary.geometry;
+    request.ai_spline_pipeline = ai_spline_pipeline(value);
+    request.ai_spline_camber_geometry = &camber.geometry;
+    request.ai_spline_camber_pipeline = ai_spline_camber_pipeline(value);
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok(), "primary and camber passes prepare");
+
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    Diagnostic diagnostic;
+    require(prepared.viewport->drawAndPresent(
+                device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.overlay_counts == std::vector<std::size_t>({2U}) &&
+                device.overlay_vertex_counts ==
+                    std::vector<std::uint32_t>({4U, 6U}) &&
+                device.overlay_depth_tests ==
+                    std::vector<bool>({true, true}) &&
+                device.overlay_depth_writes ==
+                    std::vector<bool>({true, true}) &&
+                device.overlay_buffers[0] != device.overlay_buffers[1],
+            "camber follows the primary pass with normal depth enabled");
+
+    apex::formats::AiSpline single;
+    single.version = 7U;
+    single.points.resize(1U);
+    single.points[0].position = {1.0F, 2.0F, 3.0F};
+    single.points[0].tag = 0;
+    single.payloads.resize(1U);
+    single.payloads[0].camber = 1.0F;
+    const auto single_primary =
+        apex::app::buildWorkspaceAiSplineGeometry(single);
+    const auto single_camber =
+        apex::app::buildWorkspaceAiSplineCamberGeometry(single);
+    require(single_primary.ok() && single_camber.ok() &&
+                single_camber.geometry.vertices.size() == 2U &&
+                single_camber.geometry.chunks.size() == 1U,
+            "one-point camber fixture emits one line");
+    auto single_request = request_for(value);
+    single_request.ai_spline_geometry = &single_primary.geometry;
+    single_request.ai_spline_pipeline = ai_spline_pipeline(value);
+    single_request.ai_spline_camber_geometry = &single_camber.geometry;
+    single_request.ai_spline_camber_pipeline = ai_spline_camber_pipeline(value);
+    FakeDevice single_device;
+    auto single_prepared = apex::app::prepareWorkspaceViewport(
+        single_device, value.document, single_request);
+    require(single_prepared.ok(), "one-point camber pass prepares");
+    FakeTarget single_target(single_request.presentation);
+    Diagnostic single_diagnostic;
+    require(single_prepared.viewport->drawAndPresent(
+                single_device, single_target, frame, single_diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                single_device.overlay_counts == std::vector<std::size_t>({1U}) &&
+                single_device.overlay_vertex_counts ==
+                    std::vector<std::uint32_t>({2U}),
+            "one-point camber pass submits one immediate line");
+
+    auto missing_primary_request = request_for(value);
+    missing_primary_request.ai_spline_camber_geometry = &camber.geometry;
+    missing_primary_request.ai_spline_camber_pipeline =
+        ai_spline_camber_pipeline(value);
+    FakeDevice missing_primary_device;
+    const auto missing_primary = apex::app::prepareWorkspaceViewport(
+        missing_primary_device, value.document, missing_primary_request);
+    require(!missing_primary.ok() &&
+                missing_primary.diagnostic.code ==
+                    "workspace_viewport_ai_spline_overlay_primary_missing",
+            "camber pass cannot be detached from the primary spline");
+
+    auto wrong_pass_geometry = camber.geometry;
+    wrong_pass_geometry.pass = apex::app::WorkspaceAiSplinePassKind::primary;
+    auto wrong_pass_request = request;
+    wrong_pass_request.ai_spline_camber_geometry = &wrong_pass_geometry;
+    FakeDevice wrong_pass_device;
+    const auto wrong_pass = apex::app::prepareWorkspaceViewport(
+        wrong_pass_device, value.document, wrong_pass_request);
+    require(!wrong_pass.ok() &&
+                wrong_pass.diagnostic.code ==
+                    "workspace_viewport_ai_spline_geometry_invalid",
+            "camber pass rejects primary metadata");
+
+    auto wrong_color_geometry = camber.geometry;
+    wrong_color_geometry.vertices.front().color =
+        apex::app::workspace_ai_spline_side_color;
+    auto wrong_color_request = request;
+    wrong_color_request.ai_spline_camber_geometry = &wrong_color_geometry;
+    FakeDevice wrong_color_device;
+    const auto wrong_color = apex::app::prepareWorkspaceViewport(
+        wrong_color_device, value.document, wrong_color_request);
+    require(!wrong_color.ok() &&
+                wrong_color.diagnostic.code ==
+                    "workspace_viewport_ai_spline_vertex_invalid",
+            "camber pass rejects a non-camber color");
+
+    auto nonvertical_geometry = camber.geometry;
+    nonvertical_geometry.vertices[1U].position[0] += 1.0F;
+    auto nonvertical_request = request;
+    nonvertical_request.ai_spline_camber_geometry = &nonvertical_geometry;
+    FakeDevice nonvertical_device;
+    const auto nonvertical = apex::app::prepareWorkspaceViewport(
+        nonvertical_device, value.document, nonvertical_request);
+    require(!nonvertical.ok() &&
+                nonvertical.diagnostic.code ==
+                    "workspace_viewport_ai_spline_camber_line_invalid",
+            "camber pass rejects a nonvertical line");
+
+    auto downward_geometry = camber.geometry;
+    downward_geometry.vertices[1U].position[1] =
+        downward_geometry.vertices[0U].position[1] - 1.0F;
+    auto downward_request = request;
+    downward_request.ai_spline_camber_geometry = &downward_geometry;
+    FakeDevice downward_device;
+    const auto downward = apex::app::prepareWorkspaceViewport(
+        downward_device, value.document, downward_request);
+    require(!downward.ok() &&
+                downward.diagnostic.code ==
+                    "workspace_viewport_ai_spline_camber_line_invalid",
+            "camber pass rejects a downward line");
+
+    auto mismatched_color_geometry = camber.geometry;
+    mismatched_color_geometry.vertices[1U].color =
+        apex::app::workspace_ai_spline_camber_nonpositive_color;
+    auto mismatched_color_request = request;
+    mismatched_color_request.ai_spline_camber_geometry =
+        &mismatched_color_geometry;
+    FakeDevice mismatched_color_device;
+    const auto mismatched_color = apex::app::prepareWorkspaceViewport(
+        mismatched_color_device, value.document, mismatched_color_request);
+    require(!mismatched_color.ok() &&
+                mismatched_color.diagnostic.code ==
+                    "workspace_viewport_ai_spline_camber_line_invalid",
+            "camber pass rejects mismatched endpoint colors");
+
+    apex::formats::AiSpline maximum_spline;
+    maximum_spline.version = 7U;
+    maximum_spline.points.resize(
+        max_overlay_line_total_vertices / 2U + 1U);
+    const auto maximum_primary =
+        apex::app::buildWorkspaceAiSplineGeometry(maximum_spline);
+    require(maximum_primary.ok(), "maximum primary camber fixture converts");
+    auto over_budget_request = request_for(value);
+    over_budget_request.ai_spline_geometry = &maximum_primary.geometry;
+    over_budget_request.ai_spline_pipeline = ai_spline_pipeline(value);
+    over_budget_request.ai_spline_camber_geometry = &camber.geometry;
+    over_budget_request.ai_spline_camber_pipeline =
+        ai_spline_camber_pipeline(value);
+    FakeDevice over_budget_device;
+    const auto over_budget = apex::app::prepareWorkspaceViewport(
+        over_budget_device, value.document, over_budget_request);
+    require(!over_budget.ok() &&
+                over_budget.diagnostic.code ==
+                    "workspace_viewport_ai_spline_limit",
+            "camber shares the bounded AI spline aggregate budget");
+}
+
 void draws_selected_mesh_with_recovered_fade_boundary() {
     auto value = fixture();
     auto request = request_for(value);
@@ -1941,6 +2150,7 @@ int main() {
         draws_and_toggles_recovered_world_view_axis();
         draws_raw_ai_spline_in_recovered_scene_phase();
         draws_recovered_ai_spline_side_passes();
+        draws_recovered_ai_spline_camber_pass();
         draws_selected_mesh_with_recovered_fade_boundary();
         toggles_prepared_authoring_grid_per_frame();
         rejects_unbound_selection_axis_requests();

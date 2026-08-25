@@ -6244,6 +6244,41 @@ float4 main(float3 color : COLOR) : SV_Target { return float4(color, 1.0); }
     require(ai_side_occluded.ok() && count_cyan(ai_side_occluded.rgba8) == 0U,
             "normal-depth cyan AI spline side fails nearer clear depth");
 
+    const std::array<OverlayLineVertex, 4U> ai_camber_vertices = {{
+        {{-0.4F, -0.8F, 0.5F}, {3.0F, 0.0F, 0.0F}},
+        {{-0.4F, 0.0F, 0.5F}, {3.0F, 0.0F, 0.0F}},
+        {{0.4F, -0.8F, 0.5F}, {0.0F, 3.0F, 0.0F}},
+        {{0.4F, 0.0F, 0.5F}, {0.0F, 3.0F, 0.0F}},
+    }};
+    ai_spline_buffer_description.size_bytes = sizeof(ai_camber_vertices);
+    BufferResult ai_camber_buffer = device.device->create_buffer(
+        ai_spline_buffer_description,
+        std::as_bytes(std::span(ai_camber_vertices)));
+    require(ai_camber_buffer.ok(),
+            "AI spline camber vertex buffer creation");
+    OverlayLineDrawRequest ai_camber_request = ai_spline_request;
+    ai_camber_request.vertex_buffer = ai_camber_buffer.buffer.get();
+    ai_camber_request.vertex_count =
+        static_cast<std::uint32_t>(ai_camber_vertices.size());
+    const std::array ai_camber_requests = {ai_camber_request};
+    ai_spline_batch.depth_clear_value = 1.0F;
+    ai_spline_batch.overlay_draws = ai_camber_requests;
+    const auto ai_camber_visible =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *triangle_texture.texture, ai_spline_batch);
+    require(ai_camber_visible.ok() &&
+                count_dominant_channel(ai_camber_visible.rgba8, 0U) > 8U &&
+                count_dominant_channel(ai_camber_visible.rgba8, 1U) > 8U,
+            "normal-depth red and green AI spline camber lines pass clear depth");
+    ai_spline_batch.depth_clear_value = 0.0F;
+    const auto ai_camber_occluded =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *triangle_texture.texture, ai_spline_batch);
+    require(ai_camber_occluded.ok() &&
+                count_dominant_channel(ai_camber_occluded.rgba8, 0U) == 0U &&
+                count_dominant_channel(ai_camber_occluded.rgba8, 1U) == 0U,
+            "normal-depth AI spline camber lines fail nearer clear depth");
+
     IndexedStaticMeshBatchDescription appended_overlay_batch;
     appended_overlay_batch.draws = overlap_batch_draws;
     appended_overlay_batch.overlay_draws = overlay_requests;
@@ -6301,6 +6336,18 @@ float4 main(float3 color : COLOR) : SV_Target { return float4(color, 1.0); }
     require(ai_side_msaa_result.ok() &&
                 count_cyan(ai_side_msaa_result.rgba8) > 8U,
             "four-sample normal-depth cyan AI spline side survives resolve");
+
+    ai_camber_request.pipeline = &ai_spline_msaa_pipeline;
+    const std::array ai_camber_msaa_requests = {ai_camber_request};
+    ai_spline_batch.depth_clear_value = 1.0F;
+    ai_spline_batch.overlay_draws = ai_camber_msaa_requests;
+    const auto ai_camber_msaa_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *overlay_msaa.texture, ai_spline_batch);
+    require(ai_camber_msaa_result.ok() &&
+                count_dominant_channel(ai_camber_msaa_result.rgba8, 0U) > 8U &&
+                count_dominant_channel(ai_camber_msaa_result.rgba8, 1U) > 8U,
+            "four-sample AI spline camber colors survive normal-depth resolve");
 
     PipelineProgram ai_interval_msaa_pipeline =
         make_ai_spline_pipeline(4U);

@@ -16,6 +16,12 @@ inline constexpr std::array<float, 3U> workspace_ai_spline_interval_color = {
     0.0F, 0.0F, 3.0F};
 inline constexpr std::array<float, 3U> workspace_ai_spline_side_color = {
     0.0F, 3.0F, 3.0F};
+inline constexpr std::array<float, 3U>
+    workspace_ai_spline_camber_positive_color = {0.0F, 3.0F, 0.0F};
+inline constexpr std::array<float, 3U>
+    workspace_ai_spline_camber_nonpositive_color = {3.0F, 0.0F, 0.0F};
+inline constexpr float workspace_ai_spline_camber_height_scale = 1'000.0F;
+inline constexpr std::size_t workspace_ai_spline_pass_count = 5U;
 inline constexpr float workspace_ai_spline_interpolation_step = 0.0002F;
 inline constexpr std::uint32_t
     workspace_ai_spline_interpolated_sample_count = 5'001U;
@@ -32,6 +38,7 @@ enum class WorkspaceAiSplinePassKind : std::uint8_t {
     interval,
     left_side,
     right_side,
+    camber,
 };
 
 enum class WorkspaceAiSplineSide : std::uint8_t {
@@ -98,6 +105,12 @@ buildWorkspaceAiSplineGeometry(
 // uses interpolation.
 [[nodiscard]] WorkspaceAiSplineResult buildWorkspaceAiSplineSideGeometry(
     const formats::AiSpline& spline, WorkspaceAiSplineSide side);
+
+// Build the recovered vertical camber lines. Each version-7 source point
+// emits one independent line. Positive camber is green. Zero and negative
+// camber are red. Height is abs(camber) times 1,000.
+[[nodiscard]] WorkspaceAiSplineResult buildWorkspaceAiSplineCamberGeometry(
+    const formats::AiSpline& spline);
 
 [[nodiscard]] const char* workspace_ai_spline_display_mode_name(
     WorkspaceAiSplineDisplayMode mode) noexcept;

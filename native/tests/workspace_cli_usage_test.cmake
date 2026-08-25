@@ -158,10 +158,27 @@ if(NOT detached_ai_side_result STREQUAL "1")
     "detached AI side returned ${detached_ai_side_result}: ${detached_ai_side_error}")
 endif()
 string(FIND "${detached_ai_side_error}"
-  "AI spline side overlays require --ai-spline" detached_ai_side_position)
+  "AI spline overlays require --ai-spline" detached_ai_side_position)
 if(detached_ai_side_position EQUAL -1)
   message(FATAL_ERROR
     "detached AI side was not diagnosed: ${detached_ai_side_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --ai-spline-show-camber --ai-spline-show-camber
+  RESULT_VARIABLE duplicate_ai_camber_result
+  ERROR_VARIABLE duplicate_ai_camber_error
+)
+if(NOT duplicate_ai_camber_result STREQUAL "1")
+  message(FATAL_ERROR
+    "duplicate AI camber returned ${duplicate_ai_camber_result}: ${duplicate_ai_camber_error}")
+endif()
+string(FIND "${duplicate_ai_camber_error}"
+  "duplicate --ai-spline-show-camber option" duplicate_ai_camber_position)
+if(duplicate_ai_camber_position EQUAL -1)
+  message(FATAL_ERROR
+    "duplicate AI camber was not diagnosed: ${duplicate_ai_camber_error}")
 endif()
 
 execute_process(
@@ -551,7 +568,7 @@ endif()
 execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
           --ai-spline "${ai_spline}"
-          --ai-spline-show-left --ai-spline-show-right
+          --ai-spline-show-left --ai-spline-show-right --ai-spline-show-camber
           --shader-family fixture --shader-vertex missing.vert.spv
           --shader-fragment missing.frag.spv
           --authoring-overlay-vertex missing-overlay.vert.spv
@@ -570,7 +587,11 @@ string(FIND "${side_ai_load_output}"
 string(FIND "${side_ai_load_output}"
   "AI spline right side: samples=3536, segments=3535, draws=2"
   right_ai_load_position)
-if(left_ai_load_position EQUAL -1 OR right_ai_load_position EQUAL -1)
+string(FIND "${side_ai_load_output}"
+  "AI spline camber: lines=3536, draws=2"
+  camber_ai_load_position)
+if(left_ai_load_position EQUAL -1 OR right_ai_load_position EQUAL -1 OR
+   camber_ai_load_position EQUAL -1)
   message(FATAL_ERROR
     "AI sides did not load before shader setup: ${side_ai_load_output}${side_ai_load_error}")
 endif()

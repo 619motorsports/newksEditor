@@ -124,6 +124,8 @@ struct WorkspaceViewportPrepareRequest {
     std::optional<render::PipelineProgram> ai_spline_left_pipeline;
     const WorkspaceAiSplineGeometry* ai_spline_right_geometry = nullptr;
     std::optional<render::PipelineProgram> ai_spline_right_pipeline;
+    const WorkspaceAiSplineGeometry* ai_spline_camber_geometry = nullptr;
+    std::optional<render::PipelineProgram> ai_spline_camber_pipeline;
     // Optional recovered magenta selected-mesh pass. The selected packet must
     // be static. This pipeline is independent of the line-overlay pipeline.
     std::optional<render::PipelineProgram> selected_mesh_pipeline;
@@ -269,7 +271,8 @@ private:
         std::unique_ptr<render::DepthAttachment> depth,
         std::unique_ptr<render::StockSceneExecutionResult> execution,
         std::optional<render::PipelineProgram> authoring_overlay_pipeline,
-        std::array<AiSplinePassResources, 4U> ai_spline_passes,
+        std::array<AiSplinePassResources, workspace_ai_spline_pass_count>
+            ai_spline_passes,
         std::unique_ptr<render::Buffer> authoring_grid_buffer,
         bool grid_visible,
         std::unique_ptr<render::Buffer> view_axis_buffer,
@@ -289,7 +292,8 @@ private:
     std::unique_ptr<render::DepthAttachment> depth_;
     std::unique_ptr<render::StockSceneExecutionResult> execution_;
     std::optional<render::PipelineProgram> authoring_overlay_pipeline_;
-    std::array<AiSplinePassResources, 4U> ai_spline_passes_;
+    std::array<AiSplinePassResources, workspace_ai_spline_pass_count>
+        ai_spline_passes_;
     std::unique_ptr<render::Buffer> authoring_grid_buffer_;
     bool grid_visible_ = false;
     std::unique_ptr<render::Buffer> view_axis_buffer_;

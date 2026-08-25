@@ -570,6 +570,118 @@ void rejectsUnsafeSideSplineSources() {
             "side geometry source bound must be enforced");
 }
 
+void buildsRecoveredCamberGeometry() {
+    apex::formats::AiSpline spline;
+    spline.version = 7U;
+    spline.points = {point(0.0F, 10.0F, 1.0F),
+                     point(2.0F, 20.0F, 3.0F),
+                     point(4.0F, 30.0F, 5.0F)};
+    spline.points[0U].tag = 2;
+    spline.points[1U].tag = 0;
+    spline.points[2U].tag = 1;
+    spline.payloads.resize(3U);
+    spline.payloads[0U].camber = 0.0F;
+    spline.payloads[1U].camber = -0.25F;
+    spline.payloads[2U].camber = 0.5F;
+
+    const auto result =
+        apex::app::buildWorkspaceAiSplineCamberGeometry(spline);
+    require(result.ok() &&
+                result.geometry.pass ==
+                    apex::app::WorkspaceAiSplinePassKind::camber &&
+                result.geometry.mode ==
+                    apex::app::WorkspaceAiSplineDisplayMode::raw &&
+                result.geometry.source_point_count == 3U &&
+                result.geometry.sample_point_count == 3U &&
+                result.geometry.vertices.size() == 6U &&
+                result.geometry.chunks.size() == 1U &&
+                result.geometry.chunks[0].vertex_count == 6U,
+            "camber geometry metadata mismatch");
+    const std::array<std::array<float, 3U>, 6U> expected_positions = {{
+        {0.0F, 10.0F, 1.0F}, {0.0F, 510.0F, 1.0F},
+        {2.0F, 20.0F, 3.0F}, {2.0F, 20.0F, 3.0F},
+        {4.0F, 30.0F, 5.0F}, {4.0F, 280.0F, 5.0F},
+    }};
+    for (std::size_t index = 0U; index < expected_positions.size(); ++index)
+        require(result.geometry.vertices[index].position ==
+                    expected_positions[index],
+                "camber line position mismatch");
+    require(result.geometry.vertices[0U].color ==
+                    apex::app::workspace_ai_spline_camber_positive_color &&
+                result.geometry.vertices[1U].color ==
+                    apex::app::workspace_ai_spline_camber_positive_color &&
+                result.geometry.vertices[2U].color ==
+                    apex::app::workspace_ai_spline_camber_nonpositive_color &&
+                result.geometry.vertices[3U].color ==
+                    apex::app::workspace_ai_spline_camber_nonpositive_color &&
+                result.geometry.vertices[4U].color ==
+                    apex::app::workspace_ai_spline_camber_nonpositive_color &&
+                result.geometry.vertices[5U].color ==
+                    apex::app::workspace_ai_spline_camber_nonpositive_color,
+            "camber colors must follow the recovered sign split");
+
+    apex::formats::AiSpline single;
+    single.version = 7U;
+    single.points = {point(1.0F, 2.0F, 3.0F)};
+    single.payloads.resize(1U);
+    single.payloads[0U].camber = 1.0F;
+    const auto single_result =
+        apex::app::buildWorkspaceAiSplineCamberGeometry(single);
+    require(single_result.ok() &&
+                single_result.geometry.vertices.size() == 2U &&
+                single_result.geometry.chunks.size() == 1U,
+            "one point must emit one immediate camber line");
+}
+
+void rejectsUnsafeCamberSources() {
+    apex::formats::AiSpline v2;
+    v2.version = 2U;
+    auto result = apex::app::buildWorkspaceAiSplineCamberGeometry(v2);
+    require(!result.ok() &&
+                result.diagnostic.code ==
+                    "workspace_ai_spline_camber_version_unsupported",
+            "version-2 camber geometry must be rejected");
+
+    apex::formats::AiSpline missing_payload;
+    missing_payload.version = 7U;
+    missing_payload.points = {point(0.0F, 0.0F, 0.0F)};
+    result = apex::app::buildWorkspaceAiSplineCamberGeometry(missing_payload);
+    require(!result.ok() &&
+                result.diagnostic.code ==
+                    "workspace_ai_spline_camber_payload_count_invalid",
+            "camber geometry must validate payload count");
+
+    missing_payload.payloads.resize(1U);
+    missing_payload.points[0U].tag = -1;
+    result = apex::app::buildWorkspaceAiSplineCamberGeometry(missing_payload);
+    require(!result.ok() &&
+                result.diagnostic.code ==
+                    "workspace_ai_spline_camber_payload_index_invalid",
+            "camber geometry must validate payload tags");
+
+    missing_payload.points[0U].tag = 0;
+    missing_payload.payloads[0U].camber =
+        std::numeric_limits<float>::max();
+    result = apex::app::buildWorkspaceAiSplineCamberGeometry(missing_payload);
+    require(!result.ok() &&
+                result.diagnostic.code ==
+                    "workspace_ai_spline_camber_derived_non_finite",
+            "non-finite derived camber point must be rejected");
+
+    apex::formats::AiSpline oversized;
+    oversized.version = 7U;
+    oversized.points.resize(
+        apex::render::max_overlay_line_total_vertices / 2U + 1U);
+    oversized.payloads.resize(oversized.points.size());
+    result = apex::app::buildWorkspaceAiSplineCamberGeometry(oversized);
+    require(!result.ok() &&
+                result.status ==
+                    apex::app::WorkspaceAiSplineStatus::limit_exceeded &&
+                result.diagnostic.code ==
+                    "workspace_ai_spline_camber_vertex_limit",
+            "camber geometry source bound must be enforced");
+}
+
 } // namespace
 
 int main() {
@@ -587,6 +699,8 @@ int main() {
         rejectsUnsafeInterpolatedIntervals();
         buildsRecoveredSideSplineGeometry();
         rejectsUnsafeSideSplineSources();
+        buildsRecoveredCamberGeometry();
+        rejectsUnsafeCamberSources();
     } catch (const std::exception& error) {
         std::cerr << "workspace_ai_spline_tests: " << error.what() << '\n';
         return 1;

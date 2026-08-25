@@ -274,7 +274,8 @@ This pass always uses interpolation and disables depth tests and writes.
 The backend-neutral line-list conversion is a labeled translation of the
 original OpenGL line strip. Independent version-7 side options add the
 recovered cyan raw splines. These passes use normal depth after the interval.
-Camber and edit overlays remain staged.
+An independent version-7 camber option adds the recovered vertical red and
+green lines. This pass also uses normal depth. Edit overlays remain staged.
 
 ### Native blurred-rim switch
 
