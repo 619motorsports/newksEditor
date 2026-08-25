@@ -2197,12 +2197,24 @@ biases from `cb3[12].xyz`, uses `cb3[12].w` in texture-size arithmetic, and perf
 3x3 PCF with comparison-sampling instructions. The shadow-enabled `ksPerPixel*`
 variants inspected retain these bindings; `ksPerPixel_nosdw_ps.fxo` omits them.
 
-The matching PDB identifies the host update paths as
-`GraphicsManager::setShadowMapBias` at segment offset `0001:284723`,
-`setShadowMapMatrix` at `0001:284787`, and `setShadowMapTexture` at
-`0001:284871`. Trustworthy setter decompilation is not yet available, so the exact
-host value assigned to `textureSize` remains unresolved. It must not be inferred
-from the shader arithmetic alone.
+Direct PE disassembly, cross-checked against the matching PDB, resolves the host
+updates. PDB segment offsets map to virtual addresses with `0x10001000 + offset`:
+`GraphicsManager::setShadowMapBias` is `0x10046833`, `setShadowMapMatrix` is
+`0x10046873`, and `setShadowMapTexture` is `0x100468c7`. The bias setter copies
+three floats to offset 192. The matrix setter copies cascade 0, 1, or 2 to offsets
+0, 64, or 128. The texture setter binds cascade `level` to texture slot
+`level + 6`, reads the render-target width at object offset 8, and writes
+`1.0F / width` to constant-buffer offset 204. `RenderTarget::RenderTarget` at
+`0x10064b05` independently confirms that object offset 8 stores its integer width.
+Therefore `cbShadowMaps.textureSize` is exactly the reciprocal shadow-map width.
+The shader uses it directly for PCF coordinate offsets and normalizes configured
+bias to a 2048-pixel reference size.
+
+`CameraShadowMapped::endShadowMapPass` at `0x1005e57f` loops over the three
+cascades and calls both the texture and matrix setters. `GraphicsManager` loads
+the three `SHADOW_MAP_BIAS_*` keys during construction; its missing-key defaults
+are `0.000001`, `0.000100`, and `0.001000`. The installed `dx11.ini` overrides
+them with the values listed above.
 
 Apex implements this as three portable WebGL depth targets. Each projection is fitted
 to its camera-frustum slice and snapped to shadow texels, then sampled with 3×3 PCF.
