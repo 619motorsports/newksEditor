@@ -146,11 +146,13 @@ target_link_libraries(apex_workspace PUBLIC ApexEditor::Scene)
 # capabilities to the authoring model.
 add_library(apex_app STATIC
   src/app/authoring_service.cpp
+  src/app/presentation_recreation.cpp
+  src/app/workspace_session.cpp
   src/authoring/project_workspace.cpp
 )
 add_library(ApexEditor::App ALIAS apex_app)
 target_link_libraries(apex_app
-  PUBLIC ApexEditor::SecondaryAssets ApexEditor::Workspace
+  PUBLIC ApexEditor::Assets ApexEditor::SecondaryAssets ApexEditor::Workspace
 )
 
 add_library(apex_platform STATIC
@@ -270,6 +272,8 @@ apex_add_native_test(ini_tests.cpp ini_tests ApexEditor::Formats)
 apex_add_native_test(vao_tests.cpp vao_tests ApexEditor::Formats)
 apex_add_native_test(authoring_project_tests.cpp authoring_project_tests ApexEditor::Authoring)
 apex_add_native_test(authoring_service_tests.cpp authoring_service_tests ApexEditor::App)
+apex_add_native_test(presentation_recreation_tests.cpp presentation_recreation_tests ApexEditor::App)
+apex_add_native_test(workspace_session_tests.cpp workspace_session_tests ApexEditor::App)
 apex_add_native_test(project_workspace_tests.cpp project_workspace_tests ApexEditor::App)
 apex_add_native_test(project_bake_tests.cpp project_bake_tests ApexEditor::Authoring)
 apex_add_native_test(geometry_bake_tests.cpp geometry_bake_tests ApexEditor::Authoring)
@@ -343,11 +347,15 @@ foreach(boundary_test IN ITEMS authoring_project_tests project_bake_tests geomet
                                csp_material_evaluator_tests car_damage_tests secondary_asset_tests car_validation_tests
                                project_surfaces_tests
                                driver_tests skin_metadata_tests
-                               track_data_tests kn5_scene_tests workspace_tests workspace_scene_tests)
+                               track_data_tests kn5_scene_tests workspace_tests workspace_scene_tests
+                               workspace_session_tests)
   if(TEST ${boundary_test})
     set_tests_properties(${boundary_test} PROPERTIES LABELS "unit;malformed")
   endif()
 endforeach()
+if(TEST presentation_recreation_tests)
+  set_tests_properties(presentation_recreation_tests PROPERTIES LABELS "unit")
+endif()
 if(TEST platform_window_tests)
   set_tests_properties(platform_window_tests PROPERTIES LABELS "unit;security")
 endif()

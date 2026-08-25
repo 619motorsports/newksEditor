@@ -1,4 +1,5 @@
 #include "apex/app/authoring_service.hpp"
+#include "apex/app/presentation_recreation.hpp"
 #include "apex/core/parse_limits.hpp"
 #include "apex/formats/acd.hpp"
 #include "apex/formats/dds.hpp"
@@ -502,7 +503,7 @@ int run_window(int argc, char** argv) {
 
     std::array<apex::platform::WindowEvent, 64U> events{};
     std::uint64_t frames = 0U;
-    std::uint32_t recreate_attempts = 0U;
+    apex::app::PresentationRecreationController recreation;
     while (!window_result.window->close_requested() &&
            (frame_limit == 0U || frames < frame_limit)) {
         bool resized = false;
@@ -512,12 +513,14 @@ int run_window(int argc, char** argv) {
                 resized = true;
         }
         if (window_result.window->close_requested()) break;
-        if (window_result.window->pixel_width() == 0U ||
-            window_result.window->pixel_height() == 0U) {
+        const auto pixel_width = window_result.window->pixel_width();
+        const auto pixel_height = window_result.window->pixel_height();
+        if (apex::app::presentation_surface_is_zero_sized(pixel_width, pixel_height)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(16));
             continue;
         }
-        if (resized) {
+        if (apex::app::presentation_resize_requires_recreation(
+                resized, pixel_width, pixel_height)) {
             target_result.target.reset();
             target_result = create_target();
             if (!target_result.ok()) {
@@ -528,19 +531,22 @@ int run_window(int argc, char** argv) {
         }
         const auto frame = device_result.device->clear_and_present(
             *target_result.target, {0.035F, 0.055F, 0.085F, 1.0F});
-        if (!frame.ok() && frame.diagnostic.code == "vulkan_presentation_target_out_of_date" &&
-            recreate_attempts < 8U) {
-            ++recreate_attempts;
+        if (!frame.ok() && recreation.begin_out_of_date_recreation(frame.diagnostic.code)) {
             target_result.target.reset();
             target_result = create_target();
-            if (target_result.ok()) continue;
+            if (!target_result.ok()) {
+                std::cerr << "presentation recreate: " << target_result.diagnostic.code << ": "
+                          << target_result.diagnostic.message << '\n';
+                return 1;
+            }
+            continue;
         }
         if (!frame.ok()) {
             std::cerr << "presentation frame: " << frame.diagnostic.code << ": "
                       << frame.diagnostic.message << '\n';
             return 1;
         }
-        recreate_attempts = 0U;
+        recreation.record_successful_frame();
         ++frames;
     }
     device_result.device->wait_idle();

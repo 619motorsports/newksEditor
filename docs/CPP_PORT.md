@@ -348,6 +348,11 @@ remains unchanged and feature-complete.
   It reports unsupported project categories instead of approximating them.
   Bounded serializers now write `models.ini`, `lods.ini`, and `surfaces.ini`.
   They retain sparse source identities and reject unsafe or unbounded output.
+  A bounded application workspace session now accepts caller-granted model and
+  manifest bytes, or an existing `AssetSource`, and atomically assembles track
+  and car-LOD workspaces into backend-neutral scene snapshots and workspace
+  bindings. Missing/ambiguous references, truncated models, and aggregate
+  input or scene limits fail closed. GPU/window wiring remains separate.
   Car damage and bottom-collider authoring have bounded schemas and deterministic output. A
   single-hierarchy car validator checks required nodes, wheels, pivots,
   colliders, and visual-model bounds. Multi-LOD validation is still staged.

@@ -74,6 +74,14 @@ The workspace library writes bounded `models.ini` and `lods.ini` manifests.
 The track-data library writes bounded `surfaces.ini` files. These writers use
 deterministic field order and reject unsafe text, duplicate identities,
 non-finite values, and output that exceeds its limit.
+
+The application workspace session accepts caller-granted model and manifest
+bytes, or resolves a manifest and its model references through the bounded
+`AssetSource`. It atomically returns an assembled workspace, a renderer-
+independent scene snapshot, and stable workspace bindings. Missing or
+ambiguous references, truncated models, and aggregate input or scene limits
+fail without returning a partial document. The session has no filesystem or
+Vulkan/D3D12 dependency; those capabilities remain above this boundary.
 The application service can bind immutable track-model or car-LOD manifest
 baselines and apply persisted positional workspace edits to deterministic
 exports. Failed capture or export does not replace the bound baseline or emit
@@ -99,6 +107,10 @@ completed, same-format color attachment into a swapchain image. Headless
 `VK_EXT_headless_surface` presentation remains available when the driver
 supports it. D3D12 reports its DXGI factory, device, queue, and borrowed Win32
 window prerequisite, but native D3D12 swapchain creation remains staged.
+The application keeps presentation recovery backend-neutral: Vulkan and D3D12
+out-of-date statuses can rebuild a target at most eight times until a frame
+succeeds. Zero-sized pixel surfaces pause rendering, and a failed target
+rebuild reports its own diagnostic.
 
 ## Build and test
 
