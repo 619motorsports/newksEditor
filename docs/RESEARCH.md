@@ -181,6 +181,13 @@ depth off and uses an identity world matrix. It emits one-meter lines from the w
 origin to +X, +Y, and +Z. The immediate colors are `(3, 0, 0)`, `(0, 3, 0)`, and
 `(0, 0, 3)`. The renderer restores normal depth mode after this marker.
 
+The C++ viewport now stores the six vertices in one immutable buffer. It uses
+the shared position-and-color line ABI with depth disabled. The neutral batch
+places the axis after opaque packets and the selected-mesh pass, but before
+transparent packets. The grid and selected-node axis stay in the late overlay
+phase. Vulkan and D3D12 consume the same ordered batch contract. The Linux
+SwiftShader test covers this order at 1x and 4x MSAA.
+
 A production Chrome check used the installed Abarth 500. The view-axis-on and
 view-axis-off captures hashed to `3337caacbb36b37a` and `31b3b6869fe2c020`.
 All 80 textures loaded, both captures returned WebGL error zero, and the browser
@@ -239,14 +246,19 @@ The selected draw disables depth tests and depth writes. Its changing alpha is
 written to the target, but it does not blend the magenta RGB value.
 
 `SceneGraph.{ctor}` adds `SCENE_ROOT`, `SelectedMesh`, and `SCENE_FINISHED` to
-the root in that order. `loadKN5` adds the model below `SCENE_ROOT`.
-Therefore, all model geometry draws before the selected mesh. The grid and
-selected-node axis draw after the scene traversal.
+the root in that order. `loadKN5` adds the model below `SCENE_ROOT`. The normal
+camera supplies an opaque filter, so model packets draw before the selected
+mesh. `SelectedMesh.render` has no pass-ID branch. The shadow-mapped camera
+traverses opaque and transparent root passes, but the exact selected-node
+attachment for that path is unresolved.
 
-The C++ viewport now executes this ordered pass on Vulkan and D3D12. Vulkan
+The C++ viewport now executes this phased pass on Vulkan and D3D12. Vulkan
 uses a fragment uniform at set zero, binding zero. D3D12 uses the recovered
 pixel constant-buffer register `b5`. Both backends keep the pass in one batch.
-They resolve 4x color after the line overlays.
+They resolve 4x color after transparent geometry and the late line overlays.
+The port draws the selected mesh once at the opaque-to-transparent boundary.
+This is a labeled portable mapping, not a claim that native shadow-mapped
+transparent participation has been recovered.
 
 ### Native blurred-rim switch
 

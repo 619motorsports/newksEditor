@@ -3,6 +3,7 @@
 #include "apex/render/device.hpp"
 
 #include <cstddef>
+#include <limits>
 #include <string>
 
 namespace apex::render {
@@ -39,5 +40,38 @@ namespace apex::render {
                                                    Diagnostic& diagnostic);
 [[nodiscard]] bool shader_bytecode_format(std::span<const std::byte> bytecode,
                                           ShaderBytecodeFormat& format) noexcept;
+
+// Visit one validated batch in its backend-neutral execution order. The
+// bounded scans keep selected draws before line draws at an equal scene
+// position. The ordinary scene draw at that position executes last.
+template <typename SceneDraw, typename SelectedDraw, typename OverlayDraw>
+[[nodiscard]] bool visit_indexed_static_mesh_batch_draws(
+    const IndexedStaticMeshBatchDescription& description,
+    SceneDraw&& visit_scene, SelectedDraw&& visit_selected,
+    OverlayDraw&& visit_overlay) {
+    const auto normalized_position = [&](std::uint32_t position) {
+        return position == std::numeric_limits<std::uint32_t>::max()
+                   ? description.draws.size()
+                   : static_cast<std::size_t>(position);
+    };
+    for (std::size_t scene_position = 0U;
+         scene_position <= description.draws.size(); ++scene_position) {
+        for (const SelectedMeshDrawRequest& request :
+             description.selected_mesh_draws) {
+            if (normalized_position(request.scene_position) == scene_position &&
+                !visit_selected(request))
+                return false;
+        }
+        for (const OverlayLineDrawRequest& request : description.overlay_draws) {
+            if (normalized_position(request.scene_position) == scene_position &&
+                !visit_overlay(request))
+                return false;
+        }
+        if (scene_position < description.draws.size() &&
+            !visit_scene(description.draws[scene_position]))
+            return false;
+    }
+    return true;
+}
 
 } // namespace apex::render

@@ -6043,6 +6043,23 @@ float4 main(float3 color : COLOR) : SV_Target { return float4(color, 1.0); }
     overlay_request.vertex_buffer = overlay_buffer.buffer.get();
     overlay_request.vertex_count =
         static_cast<std::uint32_t>(overlay_vertices.size());
+
+    overlay_request.scene_position = 0U;
+    const std::array interstitial_overlay_requests = {overlay_request};
+    IndexedStaticMeshBatchDescription interstitial_overlay_batch;
+    interstitial_overlay_batch.draws = overlap_batch_draws;
+    interstitial_overlay_batch.overlay_draws = interstitial_overlay_requests;
+    const auto interstitial_overlay_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *triangle_texture.texture, interstitial_overlay_batch);
+    require(interstitial_overlay_result.ok(),
+            "position-zero overlay and indexed scene batch execution");
+    require_pixel(interstitial_overlay_result.rgba8, 16U, 16U,
+                  std::byte{0}, std::byte{0}, std::byte{255},
+                  "later indexed scene draw overwrites an interstitial overlay");
+
+    overlay_request.scene_position =
+        std::numeric_limits<std::uint32_t>::max();
     const std::array overlay_requests = {overlay_request};
     IndexedStaticMeshBatchDescription overlay_batch;
     overlay_batch.overlay_draws = overlay_requests;
@@ -6057,6 +6074,18 @@ float4 main(float3 color : COLOR) : SV_Target { return float4(color, 1.0); }
                 count_color(overlay_result.rgba8, std::byte{0}, std::byte{0},
                             std::byte{255}) > 8U,
             "single-sample RGB overlay line pixels");
+
+    IndexedStaticMeshBatchDescription appended_overlay_batch;
+    appended_overlay_batch.draws = overlap_batch_draws;
+    appended_overlay_batch.overlay_draws = overlay_requests;
+    const auto appended_overlay_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *triangle_texture.texture, appended_overlay_batch);
+    require(appended_overlay_result.ok(),
+            "appended overlay and indexed scene batch execution");
+    require_pixel(appended_overlay_result.rgba8, 16U, 15U,
+                  std::byte{0}, std::byte{255}, std::byte{0},
+                  "appended overlay overwrites the indexed scene at the center line");
 
     TextureDescription overlay_msaa_description = triangle_description;
     overlay_msaa_description.samples = 4U;
@@ -6075,6 +6104,49 @@ float4 main(float3 color : COLOR) : SV_Target { return float4(color, 1.0); }
                 count_dominant_channel(overlay_msaa_result.rgba8, 1U) > 8U &&
                 count_dominant_channel(overlay_msaa_result.rgba8, 2U) > 8U,
             "four-sample RGB overlay survives the batch resolve");
+
+    PipelineProgram msaa_order_red_pipeline = batch_order_red_pipeline;
+    msaa_order_red_pipeline.name = "batch-order-red-4x";
+    msaa_order_red_pipeline.targets.colors[0].samples = 4U;
+    PipelineProgram msaa_order_blue_pipeline = batch_order_blue_pipeline;
+    msaa_order_blue_pipeline.name = "batch-order-blue-4x";
+    msaa_order_blue_pipeline.targets.colors[0].samples = 4U;
+    const std::array msaa_overlap_draws = {
+        make_batch_request(batch_overlap_upload, msaa_order_red_pipeline),
+        make_batch_request(batch_overlap_upload, msaa_order_blue_pipeline),
+    };
+    overlay_request.scene_position = 0U;
+    const std::array interstitial_msaa_overlays = {overlay_request};
+    IndexedStaticMeshBatchDescription interstitial_msaa_batch;
+    interstitial_msaa_batch.draws = msaa_overlap_draws;
+    interstitial_msaa_batch.overlay_draws = interstitial_msaa_overlays;
+    const auto interstitial_msaa_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *overlay_msaa.texture, interstitial_msaa_batch);
+    require(interstitial_msaa_result.ok(),
+            "four-sample interstitial overlay batch execution");
+    require_pixel(interstitial_msaa_result.rgba8, 16U, 16U,
+                  std::byte{0}, std::byte{0}, std::byte{255},
+                  "four-sample scene overwrites the position-zero overlay before resolve");
+
+    overlay_request.scene_position =
+        std::numeric_limits<std::uint32_t>::max();
+    const std::array appended_msaa_overlays = {overlay_request};
+    IndexedStaticMeshBatchDescription appended_msaa_batch;
+    appended_msaa_batch.draws = msaa_overlap_draws;
+    appended_msaa_batch.overlay_draws = appended_msaa_overlays;
+    const auto appended_msaa_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *overlay_msaa.texture, appended_msaa_batch);
+    require(appended_msaa_result.ok(),
+            "four-sample appended overlay batch execution");
+    const std::size_t appended_msaa_center =
+        (16U * 32U + 16U) * 4U;
+    require(std::to_integer<unsigned>(
+                appended_msaa_result.rgba8[appended_msaa_center + 1U]) > 0U &&
+                std::to_integer<unsigned>(
+                    appended_msaa_result.rgba8[appended_msaa_center + 2U]) < 255U,
+            "four-sample appended overlay contributes green after the blue scene before resolve");
 
     const auto grid_vertices = build_authoring_grid();
     BufferDescription grid_buffer_description = overlay_buffer_description;

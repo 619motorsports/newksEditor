@@ -1011,6 +1011,55 @@ IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
     return IndexedPortableResourceLayout::unsupported;
 }
 
+namespace {
+
+IndexedStaticMeshDrawStatus validate_indexed_color_target(
+    const TextureDescription& target, Diagnostic& diagnostic) {
+    if (!valid_render_sample_count(target.samples)) {
+        diagnostic = {"indexed_static_mesh_target_samples_unsupported",
+                      "Indexed static-mesh color targets require exactly 1 or 4 samples"};
+        return IndexedStaticMeshDrawStatus::unsupported;
+    }
+    const auto target_usage = static_cast<std::uint32_t>(target.usage);
+    const auto required_usage =
+        static_cast<std::uint32_t>(TextureUsage::color_attachment) |
+        static_cast<std::uint32_t>(TextureUsage::transfer_source);
+    if ((target_usage & required_usage) != required_usage) {
+        diagnostic = {"indexed_static_mesh_target_usage_invalid",
+                      "Indexed static-mesh drawing requires color-attachment and transfer-source usage"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (target.width == 0U || target.height == 0U ||
+        target.mip_levels != 1U || target.array_layers != 1U) {
+        diagnostic = {"indexed_static_mesh_target_invalid",
+                      "Indexed static-mesh target dimensions or subresource count are invalid"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    const std::uint64_t row_bytes =
+        static_cast<std::uint64_t>(target.width) * 4U;
+    const std::uint64_t height = target.height;
+    if (row_bytes > max_texture_readback_bytes / height ||
+        row_bytes * height >
+            static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        diagnostic = {"indexed_static_mesh_target_size_limit",
+                      "Indexed static-mesh target exceeds the bounded readback size"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    switch (target.format) {
+    case TextureFormat::rgba8_unorm:
+    case TextureFormat::rgba8_srgb:
+    case TextureFormat::bgra8_unorm:
+    case TextureFormat::bgra8_srgb:
+        return IndexedStaticMeshDrawStatus::ready;
+    default:
+        diagnostic = {"indexed_static_mesh_target_format_unsupported",
+                      "Indexed static-mesh drawing supports only RGBA8 and BGRA8 targets"};
+        return IndexedStaticMeshDrawStatus::unsupported;
+    }
+}
+
+} // namespace
+
 IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     const Texture& texture, const IndexedStaticMeshDrawRequest& request, Diagnostic& diagnostic) {
     if (request.packet == nullptr || request.pipeline == nullptr || request.vertex_buffer == nullptr ||
@@ -1038,11 +1087,10 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
         return IndexedStaticMeshDrawStatus::unsupported;
     }
     const TextureDescription& target = texture.info().description;
-    if (!valid_render_sample_count(target.samples)) {
-        diagnostic = {"indexed_static_mesh_target_samples_unsupported",
-                      "Indexed static-mesh color targets require exactly 1 or 4 samples"};
-        return IndexedStaticMeshDrawStatus::unsupported;
-    }
+    const IndexedStaticMeshDrawStatus target_status =
+        validate_indexed_color_target(target, diagnostic);
+    if (target_status != IndexedStaticMeshDrawStatus::ready)
+        return target_status;
     if (request.depth_attachment != nullptr) {
         const DepthAttachment& depth = *request.depth_attachment;
         if (depth.backend() != texture.backend()) {
@@ -1074,27 +1122,6 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                       "Indexed static-mesh drawing targets mip zero and array layer zero"};
         return IndexedStaticMeshDrawStatus::unsupported;
     }
-    const auto target_usage = static_cast<std::uint32_t>(target.usage);
-    const auto required_usage = static_cast<std::uint32_t>(TextureUsage::color_attachment) |
-                                static_cast<std::uint32_t>(TextureUsage::transfer_source);
-    if ((target_usage & required_usage) != required_usage) {
-        diagnostic = {"indexed_static_mesh_target_usage_invalid",
-                      "Indexed static-mesh drawing requires color-attachment and transfer-source usage"};
-        return IndexedStaticMeshDrawStatus::invalid_request;
-    }
-    if (target.width == 0U || target.height == 0U || target.mip_levels != 1U || target.array_layers != 1U) {
-        diagnostic = {"indexed_static_mesh_target_invalid",
-                      "Indexed static-mesh target dimensions or subresource count are invalid"};
-        return IndexedStaticMeshDrawStatus::invalid_request;
-    }
-    const std::uint64_t row_bytes = static_cast<std::uint64_t>(target.width) * 4U;
-    const std::uint64_t height = target.height;
-    if (row_bytes > max_texture_readback_bytes / height ||
-        row_bytes * height > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-        diagnostic = {"indexed_static_mesh_target_size_limit",
-                      "Indexed static-mesh target exceeds the bounded readback size"};
-        return IndexedStaticMeshDrawStatus::invalid_request;
-    }
     const auto expected_format = [&] {
         switch (target.format) {
         case TextureFormat::rgba8_unorm: return PipelineRenderTargetFormat::rgba8_unorm;
@@ -1104,11 +1131,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
         default: return PipelineRenderTargetFormat::unknown;
         }
     }();
-    if (expected_format == PipelineRenderTargetFormat::unknown) {
-        diagnostic = {"indexed_static_mesh_target_format_unsupported",
-                      "Indexed static-mesh drawing supports only RGBA8 and BGRA8 targets"};
-        return IndexedStaticMeshDrawStatus::unsupported;
-    }
+    // validate_indexed_color_target already rejected unknown target formats.
 
     const DrawPacket& packet = *request.packet;
     const bool static_mesh = packet.primitive == DrawPrimitiveKind::static_mesh;
@@ -2386,6 +2409,12 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
                       "Merged scene and selected-mesh draws exceed the bounded draw limit"};
         return IndexedStaticMeshBatchStatus::invalid_request;
     }
+    const IndexedStaticMeshDrawStatus target_status =
+        validate_indexed_color_target(texture.info().description, diagnostic);
+    if (target_status != IndexedStaticMeshDrawStatus::ready)
+        return target_status == IndexedStaticMeshDrawStatus::unsupported
+                   ? IndexedStaticMeshBatchStatus::unsupported
+                   : IndexedStaticMeshBatchStatus::invalid_request;
     std::uint32_t previous_selected_position = 0U;
     bool has_previous_selected_position = false;
     for (const SelectedMeshDrawRequest& selected :
@@ -2429,7 +2458,27 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
         }
     }
     std::uint64_t overlay_vertices = 0U;
+    std::uint32_t previous_overlay_position = 0U;
+    bool has_previous_overlay_position = false;
     for (const OverlayLineDrawRequest& overlay : description.overlay_draws) {
+        const std::size_t normalized =
+            overlay.scene_position == std::numeric_limits<std::uint32_t>::max()
+                ? description.draws.size()
+                : static_cast<std::size_t>(overlay.scene_position);
+        if (normalized > description.draws.size()) {
+            diagnostic = {"overlay_line_scene_position_invalid",
+                          "Overlay line scene position exceeds the ordinary draw count"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        const std::uint32_t position = static_cast<std::uint32_t>(normalized);
+        if (has_previous_overlay_position &&
+            position < previous_overlay_position) {
+            diagnostic = {"overlay_line_scene_order_invalid",
+                          "Overlay line scene positions must be nondecreasing"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        previous_overlay_position = position;
+        has_previous_overlay_position = true;
         overlay_vertices += overlay.vertex_count;
         if (overlay_vertices > max_overlay_line_total_vertices) {
             diagnostic = {"overlay_line_total_vertex_limit",
@@ -2575,11 +2624,30 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
         // Preflight a local request. The caller's ordered span and its request
         // objects remain unchanged; execution backends receive the batch state
         // through this same effective single-draw contract.
+        std::size_t merged_index = index;
+        for (const SelectedMeshDrawRequest& selected :
+             description.selected_mesh_draws) {
+            const std::size_t position =
+                selected.scene_position ==
+                        std::numeric_limits<std::uint32_t>::max()
+                    ? description.draws.size()
+                    : static_cast<std::size_t>(selected.scene_position);
+            if (position <= index) ++merged_index;
+        }
+        for (const OverlayLineDrawRequest& overlay :
+             description.overlay_draws) {
+            const std::size_t position =
+                overlay.scene_position ==
+                        std::numeric_limits<std::uint32_t>::max()
+                    ? description.draws.size()
+                    : static_cast<std::size_t>(overlay.scene_position);
+            if (position <= index) ++merged_index;
+        }
         IndexedStaticMeshDrawRequest effective = source;
         effective.depth_attachment = description.depth_attachment;
-        effective.load_color = description.load_color || index != 0U;
+        effective.load_color = description.load_color || merged_index != 0U;
         effective.clear_color = description.clear_color;
-        effective.clear_depth = description.clear_depth && index == 0U;
+        effective.clear_depth = description.clear_depth && merged_index == 0U;
         effective.depth_clear_value = description.depth_clear_value;
         Diagnostic draw_diagnostic;
         const IndexedStaticMeshDrawStatus draw_status =

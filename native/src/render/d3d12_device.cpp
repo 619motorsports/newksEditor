@@ -6108,42 +6108,22 @@ public:
                 request.vertex_buffer, request.index_buffer, *request.packet,
                 *request.pipeline, request.matrices, nullptr, &request);
         };
-        std::size_t selected_index = 0U;
-        for (std::size_t scene_index = 0U;
-             scene_index <= batch.draws.size(); ++scene_index) {
-            while (selected_index < batch.selected_mesh_draws.size()) {
-                const SelectedMeshDrawRequest& selected =
-                    batch.selected_mesh_draws[selected_index];
-                const std::size_t position =
-                    selected.scene_position ==
-                            std::numeric_limits<std::uint32_t>::max()
-                        ? batch.draws.size()
-                        : static_cast<std::size_t>(selected.scene_position);
-                if (position != scene_index) break;
-                if (!append_selected_draw(selected))
-                    return {assembly_status, std::move(diagnostic), {}};
-                ++selected_index;
-            }
-            if (scene_index < batch.draws.size() &&
-                !append_scene_draw(batch.draws[scene_index]))
-                return {assembly_status, std::move(diagnostic), {}};
-        }
-        for (const OverlayLineDrawRequest& request : batch.overlay_draws) {
+        const auto append_overlay_draw = [&](const OverlayLineDrawRequest& request) {
             const auto* vertex =
                 dynamic_cast<const D3D12Buffer*>(request.vertex_buffer);
             if (vertex == nullptr || vertex->context() != context) {
-                return {IndexedStaticMeshBatchStatus::unsupported,
-                        {"overlay_line_context_mismatch",
-                         "Overlay line buffers must belong to this D3D12 device"},
-                        {}};
+                assembly_status = IndexedStaticMeshBatchStatus::unsupported;
+                diagnostic = {"overlay_line_context_mismatch",
+                              "Overlay line buffers must belong to this D3D12 device"};
+                return false;
             }
             const UINT required_vertex_state = static_cast<UINT>(
                 D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
             if ((static_cast<UINT>(vertex->state()) & required_vertex_state) == 0U) {
-                return {IndexedStaticMeshBatchStatus::invalid_request,
-                        {"overlay_line_resource_state_invalid",
-                         "Overlay line buffer is not in D3D12 vertex state"},
-                        {}};
+                assembly_status = IndexedStaticMeshBatchStatus::invalid_request;
+                diagnostic = {"overlay_line_resource_state_invalid",
+                              "Overlay line buffer is not in D3D12 vertex state"};
+                return false;
             }
             const std::uint64_t vertex_bytes =
                 static_cast<std::uint64_t>(request.vertex_count) *
@@ -6155,10 +6135,10 @@ public:
                 request.vertex_offset_bytes > resource_description.Width ||
                 vertex_bytes >
                     resource_description.Width - request.vertex_offset_bytes) {
-                return {IndexedStaticMeshBatchStatus::invalid_request,
-                        {"overlay_line_vertex_range_invalid",
-                         "Overlay line vertex range exceeds D3D12 buffer limits"},
-                        {}};
+                assembly_status = IndexedStaticMeshBatchStatus::invalid_request;
+                diagnostic = {"overlay_line_vertex_range_invalid",
+                              "Overlay line vertex range exceeds D3D12 buffer limits"};
+                return false;
             }
             D3D12IndexedBatchDraw draw;
             draw.pipeline = request.pipeline;
@@ -6170,7 +6150,12 @@ public:
             draw.geometry.vertex_count = request.vertex_count;
             draw.geometry.indexed = false;
             draws.push_back(draw);
-        }
+            return true;
+        };
+        if (!visit_indexed_static_mesh_batch_draws(
+                batch, append_scene_draw, append_selected_draw,
+                append_overlay_draw))
+            return {assembly_status, std::move(diagnostic), {}};
         std::vector<std::byte> output;
         if (!d3d_texture->draw_indexed_static_mesh_batch(
                 batch, draws, d3d_depth, resolve_target, output, diagnostic))

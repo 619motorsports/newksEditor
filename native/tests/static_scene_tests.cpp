@@ -1,4 +1,5 @@
 #include "apex/render/static_scene.hpp"
+#include "apex/render/selected_mesh.hpp"
 #include "png_fixture.hpp"
 
 #include <algorithm>
@@ -219,6 +220,9 @@ public:
         directional_shadow_samplers.clear();
         directional_shadow_buffers.clear();
         directional_shadow_ranges.clear();
+        overlay_positions.clear();
+        overlay_buffers.clear();
+        selected_positions.clear();
         for (const auto& draw : batch.draws) {
             nodes.push_back(draw.packet->node);
             pipeline_names.push_back(draw.pipeline->name);
@@ -254,6 +258,12 @@ public:
                 draw.directional_shadow_binding.constants);
             directional_shadow_ranges.push_back(
                 draw.directional_shadow_binding.constants_range_bytes);
+        }
+        for (const auto& draw : batch.selected_mesh_draws)
+            selected_positions.push_back(draw.scene_position);
+        for (const auto& draw : batch.overlay_draws) {
+            overlay_positions.push_back(draw.scene_position);
+            overlay_buffers.push_back(draw.vertex_buffer);
         }
         Diagnostic diagnostic;
         const auto validation = validate_indexed_static_mesh_batch_description(texture, batch, diagnostic);
@@ -362,6 +372,9 @@ public:
     std::vector<const Sampler*> directional_shadow_samplers;
     std::vector<const Buffer*> directional_shadow_buffers;
     std::vector<std::uint32_t> directional_shadow_ranges;
+    std::vector<std::uint32_t> overlay_positions;
+    std::vector<const Buffer*> overlay_buffers;
+    std::vector<std::uint32_t> selected_positions;
     std::vector<DepthAttachmentDescription> depth_descriptions;
     std::vector<std::vector<apex::scene::NodeId>> depth_nodes;
     std::vector<apex::scene::Matrix4> depth_camera_matrices;
@@ -447,6 +460,30 @@ PipelineProgram pipeline_fixture(std::string name) {
         {PipelineShaderStage::vertex, PipelineShaderFormat::spirv, shader_fixture()});
     pipeline.shaders.push_back(
         {PipelineShaderStage::fragment, PipelineShaderFormat::spirv, shader_fixture()});
+    return pipeline;
+}
+
+PipelineProgram overlay_pipeline_fixture() {
+    PipelineProgram pipeline = pipeline_fixture("authoring-overlay");
+    pipeline.vertex_layout.stride = sizeof(OverlayLineVertex);
+    pipeline.vertex_layout.attributes = {
+        {PipelineVertexSemantic::position,
+         PipelineVertexAttributeFormat::float32x3, 0U, 0U},
+        {PipelineVertexSemantic::color,
+         PipelineVertexAttributeFormat::float32x3, 1U, 12U},
+    };
+    pipeline.raster.fill = PipelineFillMode::wireframe;
+    return pipeline;
+}
+
+PipelineProgram selected_mesh_pipeline_fixture() {
+    PipelineProgram pipeline = pipeline_fixture("selected-mesh");
+    pipeline.vertex_layout.attributes = {
+        {PipelineVertexSemantic::position,
+         PipelineVertexAttributeFormat::float32x3, 0U, 0U},
+    };
+    pipeline.raster.cull = PipelineCullMode::front;
+    pipeline.transform_contract = PipelineTransformContract::selected_mesh;
     return pipeline;
 }
 
@@ -741,6 +778,79 @@ void prepares_deduplicated_resources_and_executes_one_ordered_batch() {
     require(device.authorities == std::vector<IndexedShaderAuthority>(
                                       3U, IndexedShaderAuthority::explicit_pipeline),
             "each local request carries explicit executable-pipeline authority");
+}
+
+void schedules_selected_and_view_axis_at_transparent_boundary() {
+    Fixture value = fixture();
+    value.packets[0].flags.selected = true;
+    value.packets[1].flags.transparent = true;
+    value.packets[1].flags.blend_enabled = true;
+    value.second_pipeline.blend.enabled = true;
+    value.second_pipeline.blend.source_color =
+        PipelineBlendFactor::source_alpha;
+    value.second_pipeline.blend.destination_color =
+        PipelineBlendFactor::one_minus_source_alpha;
+    value.second_pipeline.blend.source_alpha =
+        PipelineBlendFactor::source_alpha;
+    value.second_pipeline.blend.destination_alpha =
+        PipelineBlendFactor::one_minus_source_alpha;
+    RecordingDevice device;
+    auto prepared = prepare_static_scene_resources(device, request_for(value));
+    require(prepared.ok(), "phased overlay scene preparation succeeds");
+
+    PipelineProgram overlay_pipeline = overlay_pipeline_fixture();
+    PipelineProgram selected_pipeline = selected_mesh_pipeline_fixture();
+    FakeBuffer overlay_buffer(
+        {6U * sizeof(OverlayLineVertex), BufferUsage::vertex,
+         BufferMemory::host_visible, BufferMutability::immutable});
+    FakeBuffer late_overlay_buffer(
+        {6U * sizeof(OverlayLineVertex), BufferUsage::vertex,
+         BufferMemory::host_visible, BufferMutability::immutable});
+    FakeBuffer selected_color(
+        {selected_mesh_color_view_bytes, BufferUsage::uniform,
+         BufferMemory::host_visible, BufferMutability::mutable_data});
+    OverlayLineDrawRequest view_axis;
+    view_axis.pipeline = &overlay_pipeline;
+    view_axis.vertex_buffer = &overlay_buffer;
+    view_axis.vertex_count = 6U;
+    OverlayLineDrawRequest late_overlay = view_axis;
+    late_overlay.vertex_buffer = &late_overlay_buffer;
+    const std::array view_axis_draws = {view_axis};
+    const std::array late_overlay_draws = {late_overlay};
+    const std::array<std::uint8_t, 3U> visible = {1U, 1U, 0U};
+
+    FakeTexture target;
+    StaticSceneFrameDescription frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.packet_visibility = visible;
+    frame.selected_mesh_pipeline = &selected_pipeline;
+    frame.selected_mesh_color_buffer = &selected_color;
+    frame.view_axis_draws = view_axis_draws;
+    frame.overlay_draws = late_overlay_draws;
+    const auto drawn = prepared.resources->draw_and_readback(
+        device, target, frame);
+    require(drawn.ok() && device.nodes ==
+                std::vector<apex::scene::NodeId>({1U, 2U}),
+            "visible ordinary packets retain opaque then transparent order");
+    require(device.selected_positions == std::vector<std::uint32_t>({1U}) &&
+                device.overlay_positions ==
+                    std::vector<std::uint32_t>({
+                        1U, std::numeric_limits<std::uint32_t>::max()}) &&
+                device.overlay_buffers ==
+                    std::vector<const Buffer*>({&overlay_buffer,
+                                                &late_overlay_buffer}),
+            "selected mesh and view axis precede transparent geometry and late overlays");
+
+    const std::size_t batches_before_invalid = device.batch_calls;
+    frame.packet_visibility = {};
+    const auto invalid_order = prepared.resources->draw_and_readback(
+        device, target, frame);
+    require(invalid_order.status ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                invalid_order.diagnostic.code ==
+                    "static_scene_draw_phase_order_invalid" &&
+                device.batch_calls == batches_before_invalid,
+            "phased overlays reject opaque packets after transparent packets");
 }
 
 void prepares_source_evidenced_wireframe_batch_state() {
@@ -3396,6 +3506,7 @@ void binds_retained_directional_maps_through_static_scene_frames() {
 int main() {
     try {
         prepares_deduplicated_resources_and_executes_one_ordered_batch();
+        schedules_selected_and_view_axis_at_transparent_boundary();
         prepares_mixed_static_and_skinned_scene_and_updates_only_after_preflight();
         prepares_source_evidenced_wireframe_batch_state();
         rejects_invalid_late_inputs_before_backend_allocation();

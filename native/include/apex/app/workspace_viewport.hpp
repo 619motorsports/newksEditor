@@ -105,8 +105,8 @@ struct WorkspaceViewportPrepareRequest {
     bool evaluate_damage_preview = false;
     std::optional<bool> damage_broken_visible;
     bool wireframe = false;
-    // Grid and selected-node markers share this fixed position/color line
-    // contract. A selected node can still drive filtering without a marker.
+    // The view axis, grid, and selected-node marker share this fixed
+    // position/color line contract. Selection can omit its marker.
     std::optional<render::PipelineProgram> authoring_overlay_pipeline;
     // Optional recovered magenta selected-mesh pass. The selected packet must
     // be static. This pipeline is independent of the line-overlay pipeline.
@@ -114,6 +114,9 @@ struct WorkspaceViewportPrepareRequest {
     // Prepare and show the recovered 10 m authoring grid. The native default
     // is false. A true value requires authoring_overlay_pipeline.
     bool grid_visible = false;
+    // Prepare and show the recovered one-meter world-origin view axis. The
+    // native default is false. A true value requires the overlay pipeline.
+    bool view_axis_visible = false;
     // Keep this explicit receiver-module selector for existing callers. A
     // true value requires directional_shadows so the viewport cannot prepare
     // a receiver that has no maps or caster schedule.
@@ -141,6 +144,9 @@ struct WorkspaceViewportFrameRequest {
     // Override the prepared grid state. A true value requires grid resources
     // to have been requested during viewport preparation.
     std::optional<bool> grid_visible;
+    // Override the prepared view-axis state. A true value requires view-axis
+    // resources to have been requested during viewport preparation.
+    std::optional<bool> view_axis_visible;
     // Override the prepared selected-node world transform for an animated
     // frame. Supplying this without a prepared selection axis is invalid.
     std::optional<apex::scene::Matrix4> selection_axis_world;
@@ -243,6 +249,8 @@ private:
         std::optional<render::PipelineProgram> authoring_overlay_pipeline,
         std::unique_ptr<render::Buffer> authoring_grid_buffer,
         bool grid_visible,
+        std::unique_ptr<render::Buffer> view_axis_buffer,
+        bool view_axis_visible,
         std::unique_ptr<render::Buffer> selection_axis_buffer,
         std::optional<apex::scene::Matrix4> selection_axis_world,
         std::optional<render::PipelineProgram> selected_mesh_pipeline,
@@ -260,6 +268,8 @@ private:
     std::optional<render::PipelineProgram> authoring_overlay_pipeline_;
     std::unique_ptr<render::Buffer> authoring_grid_buffer_;
     bool grid_visible_ = false;
+    std::unique_ptr<render::Buffer> view_axis_buffer_;
+    bool view_axis_visible_ = false;
     std::unique_ptr<render::Buffer> selection_axis_buffer_;
     std::optional<apex::scene::Matrix4> selection_axis_world_;
     std::optional<render::PipelineProgram> selected_mesh_pipeline_;

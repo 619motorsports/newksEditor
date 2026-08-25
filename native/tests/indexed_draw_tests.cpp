@@ -1,6 +1,7 @@
 #include "apex/render/draw_packet.hpp"
 #include "apex/render/device.hpp"
 #include "apex/render/selected_mesh.hpp"
+#include "../src/render/backend_internal.hpp"
 
 #include <array>
 #include <cstddef>
@@ -2147,8 +2148,8 @@ void validates_ordered_indexed_batch_contract() {
                 unsupported_source, multisample_description, diagnostic) ==
                 IndexedStaticMeshBatchStatus::unsupported &&
                 diagnostic.code ==
-                    "indexed_static_mesh_batch_resolve_format_unsupported",
-            "batch resolve rejects a non-color source before backend work");
+                    "indexed_static_mesh_target_format_unsupported",
+            "batch target validation rejects a non-color source before resolve work");
     multisample_description.resolve_target = &resolve_target;
     multisample_description.capture_rgba8 = true;
     FakeDepthAttachment mismatched_depth(Backend::Vulkan,
@@ -2210,6 +2211,71 @@ void validates_overlay_line_batch_contract() {
                                                            diagnostic) ==
                 IndexedStaticMeshBatchStatus::ready,
             "overlay-only batch accepted");
+
+    TextureDescription invalid_target_description = target_description();
+    invalid_target_description.usage = TextureUsage::transfer_source;
+    FakeTexture invalid_target(Backend::Vulkan, invalid_target_description);
+    require(validate_indexed_static_mesh_batch_description(
+                invalid_target, batch, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "indexed_static_mesh_target_usage_invalid",
+            "overlay-only batch rejects a target without color-attachment usage");
+
+    DrawPacket first_packet = packet_fixture();
+    DrawPacket second_packet = packet_fixture();
+    PipelineProgram scene_pipeline = pipeline_fixture();
+    FakeBuffer scene_vertices(
+        Backend::Vulkan,
+        {132U, BufferUsage::vertex, BufferMemory::device_local,
+         BufferMutability::immutable});
+    FakeBuffer scene_indices(
+        Backend::Vulkan,
+        {6U, BufferUsage::index, BufferMemory::device_local,
+         BufferMutability::immutable});
+    const std::array scene_draws = {
+        request_fixture(first_packet, scene_pipeline, scene_vertices,
+                        scene_indices),
+        request_fixture(second_packet, scene_pipeline, scene_vertices,
+                        scene_indices),
+    };
+    batch.draws = scene_draws;
+    request.scene_position = 0U;
+    const std::array first_overlay = {request};
+    batch.overlay_draws = first_overlay;
+    require(validate_indexed_static_mesh_batch_description(target, batch,
+                                                           diagnostic) ==
+                IndexedStaticMeshBatchStatus::ready,
+            "overlay can execute before the first ordinary scene draw");
+    request.scene_position = 1U;
+    const std::array middle_overlay = {request};
+    batch.overlay_draws = middle_overlay;
+    require(validate_indexed_static_mesh_batch_description(target, batch,
+                                                           diagnostic) ==
+                IndexedStaticMeshBatchStatus::ready,
+            "overlay can execute at an interior scene position");
+    request.scene_position = 3U;
+    const std::array invalid_position = {request};
+    batch.overlay_draws = invalid_position;
+    require(validate_indexed_static_mesh_batch_description(target, batch,
+                                                           diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "overlay_line_scene_position_invalid",
+            "overlay scene position is range checked");
+    OverlayLineDrawRequest later = request;
+    later.scene_position = 1U;
+    OverlayLineDrawRequest earlier = request;
+    earlier.scene_position = 0U;
+    const std::array unsorted = {later, earlier};
+    batch.overlay_draws = unsorted;
+    require(validate_indexed_static_mesh_batch_description(target, batch,
+                                                           diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "overlay_line_scene_order_invalid",
+            "overlay scene positions must be nondecreasing");
+    request.scene_position = std::numeric_limits<std::uint32_t>::max();
+    batch.draws = {};
+    const std::array restored_overlays = {request};
+    batch.overlay_draws = restored_overlays;
 
     request.vertex_count = 5U;
     require(validate_overlay_line_draw_request(target, request, diagnostic) ==
@@ -2474,6 +2540,15 @@ void validates_selected_mesh_draw_contract() {
                 IndexedStaticMeshBatchStatus::ready,
             "append-position selected-mesh batch accepted");
 
+    TextureDescription invalid_target_description = target_description();
+    invalid_target_description.width = 0U;
+    FakeTexture invalid_target(Backend::Vulkan, invalid_target_description);
+    require(validate_indexed_static_mesh_batch_description(
+                invalid_target, batch, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "indexed_static_mesh_target_invalid",
+            "selected-only batch rejects a zero-width color target");
+
     selected.scene_position = 1U;
     const std::array out_of_range = {selected};
     batch.selected_mesh_draws = out_of_range;
@@ -2522,6 +2597,45 @@ void validates_selected_mesh_draw_contract() {
             "selected pass rejects an approximate blended state");
 }
 
+void visits_generalized_batch_in_requested_phase_order() {
+    std::array<IndexedStaticMeshDrawRequest, 2U> scene_draws{};
+    SelectedMeshDrawRequest selected;
+    selected.scene_position = 1U;
+    const std::array selected_draws = {selected};
+    OverlayLineDrawRequest first_axis;
+    first_axis.scene_position = 1U;
+    OverlayLineDrawRequest second_axis;
+    second_axis.scene_position = 1U;
+    OverlayLineDrawRequest late_axis;
+    const std::array overlays = {first_axis, second_axis, late_axis};
+    IndexedStaticMeshBatchDescription batch;
+    batch.draws = scene_draws;
+    batch.selected_mesh_draws = selected_draws;
+    batch.overlay_draws = overlays;
+
+    std::vector<std::string> order;
+    std::size_t scene_index = 0U;
+    std::size_t overlay_index = 0U;
+    const bool visited = visit_indexed_static_mesh_batch_draws(
+        batch,
+        [&](const IndexedStaticMeshDrawRequest&) {
+            order.push_back("scene-" + std::to_string(scene_index++));
+            return true;
+        },
+        [&](const SelectedMeshDrawRequest&) {
+            order.emplace_back("selected");
+            return true;
+        },
+        [&](const OverlayLineDrawRequest&) {
+            order.push_back("overlay-" + std::to_string(overlay_index++));
+            return true;
+        });
+    require(visited && order == std::vector<std::string>({
+                                   "scene-0", "selected", "overlay-0",
+                                   "overlay-1", "scene-1", "overlay-2"}),
+            "batch visitor preserves selected, view-axis, transparent, and late-overlay order");
+}
+
 } // namespace
 
 int main() {
@@ -2552,6 +2666,7 @@ int main() {
         rejects_static_indexed_limits_and_ownership();
         rejects_staged_draw_packet();
         validates_selected_mesh_draw_contract();
+        visits_generalized_batch_in_requested_phase_order();
         std::cout << "indexed draw tests passed\n";
         return 0;
     } catch (const std::exception& error) {

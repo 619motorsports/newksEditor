@@ -105,8 +105,12 @@ wireframe pass and is not the orange material tint in the WebGL preview.
 - Normal depth mode.
 - `doubleFace=false`.
 
-`Material::apply` applies the material blend and cull modes. It changes the
-cull mode to none only when `doubleFace` is true.
+`MaterialFilter::apply` at `0x10064fa2` only caches the last material and calls
+`Material::apply`; it does not classify render passes. `Material::apply` at
+`0x1004016e` applies the material blend and cull modes. It changes the cull mode
+to none only when `doubleFace` is true. It applies the material depth mode only
+when the mesh filter pass ID is opaque. The recovered pass IDs are opaque zero,
+transparent one, and shadow generation two.
 
 `SelectedMesh.render` does not change these blend or cull values. It changes
 the depth mode to off before the draw. It restores normal depth after the draw.
@@ -114,8 +118,7 @@ Thus, the changing shader alpha is written to the target but does not blend
 the selected RGB value with the scene color.
 
 The exact packed fields of the native D3D11 rasterizer state remain unresolved.
-The `MaterialFilter` callback is also an evidence boundary. No inspected
-selected-mesh code changes the default blend or cull values.
+No inspected selected-mesh code changes the default blend or cull values.
 
 ## Schedule and transform
 
@@ -141,19 +144,30 @@ ROOT
 `-- SCENE_FINISHED
 ```
 
-`Node::render` traverses the child vector in insertion order. Therefore, all
-model geometry draws before the selected mesh. `SCENE_FINISHED` runs after it.
+`Node::render` traverses the child vector in insertion order. `Camera::render`
+uses an opaque mesh filter, so model packets draw before the selected mesh in
+that path. `SelectedMesh.render` has no pass-ID branch. Its material callback
+does not classify the pass. `CameraShadowMapped::renderPass` traverses its root
+with opaque and transparent filters. The exact attachment that proves selected
+participation in the second traversal remains unresolved.
 
-The grid and the selected-node axis draw after the scene traversal. Therefore,
-they draw after the selected mesh and before the final frame operation.
+The grid and the selected-node axis draw after the scene traversal and before
+the final frame operation. Their exact order relative to a possible second
+selected draw inherits the shadow-mapped attachment boundary above.
 
 The installed DXBC cannot use the portable native draw-matrices ABI directly.
 A faithful Vulkan and D3D12 port needs a dedicated selected-mesh contract.
 
 ## Portable backend mapping
 
-The C++ port keeps model draws, the selected draw, and line overlays in one
-ordered batch. It resolves multisample color only after all these draws.
+The C++ port keeps opaque and transparent model draws, the selected draw, and
+line overlays in one ordered batch. It places the selected draw before the
+world-origin axis at the opaque-to-transparent boundary. The late grid and
+selected-node axis follow transparent draws. It resolves multisample color only
+after all these draws.
+
+The one-draw selected placement is a labeled portable mapping. It does not claim
+that native shadow-mapped transparent-pass participation is resolved.
 
 The portable vertex contract uses the 128-byte `DrawMatrices` value. This
 contract is a labeled translation of the original `b0` and `b1` split.

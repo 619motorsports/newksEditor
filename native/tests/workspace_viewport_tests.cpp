@@ -1,4 +1,5 @@
 #include "apex/app/workspace_viewport.hpp"
+#include "apex/render/view_axis.hpp"
 
 #include <algorithm>
 #include <array>
@@ -137,6 +138,7 @@ public:
         for (const auto& overlay : batch.overlay_draws) {
             overlay_matrices.push_back(overlay.matrices);
             overlay_buffers.push_back(overlay.vertex_buffer);
+            overlay_scene_positions.push_back(overlay.scene_position);
         }
         std::vector<apex::scene::NodeId> nodes;
         nodes.reserve(batch.draws.size());
@@ -220,6 +222,7 @@ public:
     std::vector<std::size_t> selected_mesh_counts;
     std::vector<DrawMatrices> overlay_matrices;
     std::vector<const Buffer*> overlay_buffers;
+    std::vector<std::uint32_t> overlay_scene_positions;
     std::vector<std::vector<apex::scene::NodeId>> draw_nodes;
     std::vector<std::string> events;
     std::vector<const DepthAttachment*> depth_targets;
@@ -814,6 +817,48 @@ void draws_selected_axis_inside_the_scene_batch() {
             "animated frame override rebuilds normalized RGB axis geometry");
 }
 
+void draws_and_toggles_recovered_world_view_axis() {
+    auto value = fixture();
+    auto request = request_for(value);
+    request.authoring_overlay_pipeline = authoring_overlay_pipeline(value);
+    request.view_axis_visible = true;
+    request.grid_visible = true;
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok(), "view-axis viewport preparation succeeds");
+
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.camera.view_projection[5] = 0.75F;
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    Diagnostic diagnostic;
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.overlay_counts == std::vector<std::size_t>({2U}),
+            "view axis and grid share one scene batch");
+    require(device.overlay_scene_positions ==
+                std::vector<std::uint32_t>({
+                    1U, std::numeric_limits<std::uint32_t>::max()}) &&
+                device.overlay_buffers.size() == 2U &&
+                device.overlay_buffers[0] != device.overlay_buffers[1],
+            "view axis executes after opaque geometry and before the late grid");
+    require(device.overlay_matrices[0].world == apex::scene::identity_matrix &&
+                device.overlay_matrices[0].view_projection ==
+                    frame.camera.view_projection,
+            "view axis uses an identity world matrix and the frame camera");
+
+    frame.view_axis_visible = false;
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.overlay_counts ==
+                    std::vector<std::size_t>({2U, 1U}) &&
+                device.overlay_scene_positions.back() ==
+                    std::numeric_limits<std::uint32_t>::max(),
+            "frame override hides the prepared view axis without hiding the grid");
+}
+
 void draws_selected_mesh_with_recovered_fade_boundary() {
     auto value = fixture();
     auto request = request_for(value);
@@ -934,6 +979,26 @@ void rejects_unbound_selection_axis_requests() {
                 diagnostic.code == "workspace_viewport_grid_unprepared" &&
                 device.draw_calls == 0U && device.present_calls == 0U,
             "frame cannot enable an unprepared grid");
+
+    auto view_axis_request = request_for(value);
+    view_axis_request.view_axis_visible = true;
+    auto missing_view_axis_pipeline = apex::app::prepareWorkspaceViewport(
+        device, value.document, view_axis_request);
+    require(!missing_view_axis_pipeline.ok() &&
+                missing_view_axis_pipeline.diagnostic.code ==
+                    "workspace_viewport_view_axis_pipeline_missing",
+            "visible view axis requires explicit executable overlay modules");
+
+    frame.grid_visible.reset();
+    frame.view_axis_visible = true;
+    diagnostic = {};
+    const auto view_axis_status = prepared.viewport->drawAndPresent(
+        device, target, frame, diagnostic);
+    require(view_axis_status == WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code ==
+                    "workspace_viewport_view_axis_unprepared" &&
+                device.draw_calls == 0U && device.present_calls == 0U,
+            "frame cannot enable an unprepared view axis");
 }
 
 void schedules_directional_shadows_before_color_and_reuses_maps() {
@@ -1412,6 +1477,7 @@ int main() {
         opens_and_draws();
         draws_four_sample_viewport_through_retained_resolve();
         draws_selected_axis_inside_the_scene_batch();
+        draws_and_toggles_recovered_world_view_axis();
         draws_selected_mesh_with_recovered_fade_boundary();
         toggles_prepared_authoring_grid_per_frame();
         rejects_unbound_selection_axis_requests();

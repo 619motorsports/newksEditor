@@ -176,18 +176,25 @@ remains unchanged and feature-complete.
   every request, preserves packet order, and records all draws in one pass with
   one final readback. The batch also accepts bounded position-and-color
   line overlays. These overlays use non-indexed line lists and no material
-  resources. Vulkan and D3D12 draw them after the scene and before the final
-  resolve. The workspace viewport uses this path for the authoring grid and
-  selected-node RGB axis. The fixed grid contains 22 magenta segments on the
+  resources. Each overlay has a bounded scene position. Vulkan and D3D12 use
+  the same backend-neutral order and resolve only after all overlays. The
+  portable frame order is opaque scene, selected mesh, world-origin view axis,
+  transparent scene, then the late grid and selected-node axis. The view-axis
+  boundary is recovered. The single selected draw is a labeled portable
+  mapping because native transparent-pass participation remains unresolved. The
+  fixed grid contains 22 magenta segments on the
   XZ plane. It covers 10 m at 1 m intervals. The grid starts hidden and remains
   a viewport state. The axis helper matches the recovered normalized X, Y, and
   negative-Z directions. Each axis segment is one meter long. A frame can update
   the grid state and selected world transform before the draw. Callers must
   supply the explicit SPIR-V or DXIL shader pair. A validated SwiftShader test
   covers 1x and 4x output. The 4x output proves that both overlays reach the
-  resolved image.
-  The same batch accepts one recovered selected-mesh draw. Scene geometry
-  draws first. The selected mesh draws next, and line overlays draw last.
+  resolved image. The world-origin axis contains three one-meter segments in
+  the positive X, Y, and Z directions. It uses an identity world matrix,
+  disabled depth, and the recovered RGB intensities of three.
+  The same batch accepts one recovered selected-mesh draw. Opaque geometry
+  draws first. The selected mesh and view axis draw next. Transparent geometry
+  and late editor overlays follow in that order.
   The selected pass uses solid fill, front-face culling, opaque blend state,
   and disabled depth. It writes magenta RGB and the recovered fading alpha.
   The viewport submits the draw at 2000 ms with zero alpha. It stops the draw

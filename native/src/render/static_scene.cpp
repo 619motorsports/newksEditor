@@ -1687,6 +1687,13 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         }
         draws.push_back(std::move(*draw));
     }
+    if (frame.view_axis_draws.size() > max_overlay_line_draws ||
+        frame.overlay_draws.size() >
+            max_overlay_line_draws - frame.view_axis_draws.size())
+        return {IndexedStaticMeshBatchStatus::invalid_request,
+                {"static_scene_overlay_draw_limit",
+                 "View-axis and late overlay draws exceed the bounded line-draw limit"},
+                {}};
     const bool has_selected_pipeline = frame.selected_mesh_pipeline != nullptr;
     const bool has_selected_color = frame.selected_mesh_color_buffer != nullptr;
     if (has_selected_pipeline != has_selected_color)
@@ -1694,6 +1701,21 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
                 {"static_scene_selected_mesh_resource_incomplete",
                  "Selected-mesh execution requires both its pipeline and color buffer"},
                 {}};
+    std::size_t transparent_position = draws.size();
+    bool transparent_seen = false;
+    for (std::size_t index = 0U; index < draws.size(); ++index) {
+        const bool transparent = draws[index].packet->flags.transparent;
+        if (transparent && !transparent_seen) {
+            transparent_position = index;
+            transparent_seen = true;
+        } else if (!transparent && transparent_seen &&
+                   (has_selected_pipeline || !frame.view_axis_draws.empty())) {
+            return {IndexedStaticMeshBatchStatus::invalid_request,
+                    {"static_scene_draw_phase_order_invalid",
+                     "Selected and view-axis insertion requires opaque packets before transparent packets"},
+                    {}};
+        }
+    }
     std::array<SelectedMeshDrawRequest, max_selected_mesh_draws> selected_draws{};
     std::size_t selected_draw_count = 0U;
     if (has_selected_pipeline) {
@@ -1736,7 +1758,21 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
             selected.color_range_bytes = selected_mesh_color_view_bytes;
             selected.matrices = {packet.world_matrix,
                                  frame.camera.view_projection};
+            selected.scene_position =
+                static_cast<std::uint32_t>(transparent_position);
         }
+    }
+    std::array<OverlayLineDrawRequest, max_overlay_line_draws> overlay_draws{};
+    std::size_t overlay_draw_count = 0U;
+    for (const OverlayLineDrawRequest& source : frame.view_axis_draws) {
+        OverlayLineDrawRequest& draw = overlay_draws[overlay_draw_count++];
+        draw = source;
+        draw.scene_position = static_cast<std::uint32_t>(transparent_position);
+    }
+    for (const OverlayLineDrawRequest& source : frame.overlay_draws) {
+        OverlayLineDrawRequest& draw = overlay_draws[overlay_draw_count++];
+        draw = source;
+        draw.scene_position = std::numeric_limits<std::uint32_t>::max();
     }
     IndexedStaticMeshBatchDescription batch;
     batch.draws = draws;
@@ -1747,7 +1783,9 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
     batch.depth_clear_value = frame.depth_clear_value;
     batch.resolve_target = frame.resolve_target;
     batch.capture_rgba8 = frame.capture_rgba8;
-    batch.overlay_draws = frame.overlay_draws;
+    batch.overlay_draws =
+        std::span<const OverlayLineDrawRequest>(overlay_draws)
+            .first(overlay_draw_count);
     batch.selected_mesh_draws =
         std::span<const SelectedMeshDrawRequest>(selected_draws)
             .first(selected_draw_count);

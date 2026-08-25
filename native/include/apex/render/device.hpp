@@ -8,8 +8,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -703,6 +703,9 @@ struct OverlayLineDrawRequest {
     std::uint64_t vertex_offset_bytes = 0U;
     std::uint32_t vertex_count = 0U;
     DrawMatrices matrices{};
+    // Insert before this element of IndexedStaticMeshBatchDescription::draws.
+    // max() appends the line draw after all indexed scene draws.
+    std::uint32_t scene_position = std::numeric_limits<std::uint32_t>::max();
 };
 
 inline constexpr std::size_t max_overlay_line_draws = 16U;
@@ -808,11 +811,12 @@ struct IndexedStaticMeshBatchDescription {
     // Disable CPU readback when the caller only needs the retained GPU image.
     // A four-sample batch then requires resolve_target.
     bool capture_rgba8 = true;
-    // Resource-free line draws execute after indexed scene draws and before
-    // the batch's optional MSAA resolve.
+    // Resource-free line draws merge into the indexed scene sequence by each
+    // request's scene_position. A selected draw at the same position executes
+    // first. All line draws execute before the optional MSAA resolve.
     std::span<const OverlayLineDrawRequest> overlay_draws{};
     // Selected draws merge into the indexed scene sequence by scene_position.
-    // All line overlays still execute after the complete merged sequence.
+    // A selected draw executes before line draws at the same position.
     std::span<const SelectedMeshDrawRequest> selected_mesh_draws{};
 };
 

@@ -181,11 +181,14 @@ The hierarchy options search, select, isolate, show hidden nodes, and enable
 wireframe through the backend-neutral viewport request. Search uses bounded
 ASCII case-insensitive matching. It retains duplicate node names.
 The authoring-overlay modules use the fixed position-and-color line ABI.
-The module pair requires `--selected-node`, `--grid`, or both options.
+The module pair requires `--selected-node`, `--grid`, or `--view-axis`.
 The old `--selection-axis-vertex` and `--selection-axis-fragment` names remain aliases.
 The grid starts hidden. `--grid` shows the recovered 10 m magenta grid.
-The viewport draws the grid and RGB axis after the scene and before the MSAA resolve.
-The axis follows the selected-node transform from the current frame.
+The view axis starts hidden. `--view-axis` shows the recovered one-meter
+world-origin +X, +Y, and +Z marker. It draws after opaque geometry and before
+transparent geometry. The viewport draws the grid and selected-node RGB axis
+after the scene and before the MSAA resolve. The selected-node axis follows
+the selected transform from the current frame.
 The lighting options select one of the seven bounded stock weather presets and
 finite sun angles. The default is `5_light_clouds` at a 40-degree heading and
 55-degree height, as used by the production renderer. The native shell uploads
@@ -408,7 +411,8 @@ The render library also exposes the recovered bounded ksNet mesh predicate.
 It keeps PVS input, FOV scaling, the radius floor, inclusive limits, and an
 explicit `NO_CULL` input. The render planner does not select this rule yet.
 The ordered scene batch also supports one selected static mesh. It draws after
-the model packets and before the grid and selected-node axis. The pass uses
+opaque model packets and before the world view axis and transparent packets.
+The grid and selected-node axis remain late overlays. The pass uses
 the recovered solid, front-cull, opaque, and depth-off states. The viewport
 owns one mutable 256-byte color record and applies the recovered 2000 ms fade.
 Callers supply explicit SPIR-V or DXIL modules. The window CLI accepts

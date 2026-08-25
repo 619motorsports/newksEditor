@@ -126,11 +126,28 @@ if(NOT detached_overlay_result STREQUAL "1")
     "detached overlay modules returned ${detached_overlay_result}: ${detached_overlay_error}")
 endif()
 string(FIND "${detached_overlay_error}"
-  "authoring-overlay shader modules require --selected-node or --grid"
+  "authoring-overlay shader modules require --selected-node, --grid, or --view-axis"
   detached_overlay_position)
 if(detached_overlay_position EQUAL -1)
   message(FATAL_ERROR
     "detached overlay modules were not diagnosed: ${detached_overlay_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}" --view-axis
+  RESULT_VARIABLE view_axis_without_modules_result
+  ERROR_VARIABLE view_axis_without_modules_error
+)
+if(NOT view_axis_without_modules_result STREQUAL "1")
+  message(FATAL_ERROR
+    "view axis without modules returned ${view_axis_without_modules_result}: ${view_axis_without_modules_error}")
+endif()
+string(FIND "${view_axis_without_modules_error}"
+  "--view-axis requires authoring-overlay shader modules"
+  view_axis_without_modules_position)
+if(view_axis_without_modules_position EQUAL -1)
+  message(FATAL_ERROR
+    "view axis without modules was not diagnosed: ${view_axis_without_modules_error}")
 endif()
 
 execute_process(

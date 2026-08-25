@@ -3,6 +3,7 @@
 #include "apex/core/parse_error.hpp"
 #include "apex/render/authoring_grid.hpp"
 #include "apex/render/selected_mesh.hpp"
+#include "apex/render/view_axis.hpp"
 #include "apex/workspace/workspace_scene.hpp"
 
 #include <algorithm>
@@ -481,6 +482,8 @@ WorkspaceViewport::WorkspaceViewport(
     std::optional<render::PipelineProgram> authoring_overlay_pipeline,
     std::unique_ptr<render::Buffer> authoring_grid_buffer,
     bool grid_visible,
+    std::unique_ptr<render::Buffer> view_axis_buffer,
+    bool view_axis_visible,
     std::unique_ptr<render::Buffer> selection_axis_buffer,
     std::optional<apex::scene::Matrix4> selection_axis_world,
     std::optional<render::PipelineProgram> selected_mesh_pipeline,
@@ -494,6 +497,8 @@ WorkspaceViewport::WorkspaceViewport(
       authoring_overlay_pipeline_(std::move(authoring_overlay_pipeline)),
       authoring_grid_buffer_(std::move(authoring_grid_buffer)),
       grid_visible_(grid_visible),
+      view_axis_buffer_(std::move(view_axis_buffer)),
+      view_axis_visible_(view_axis_visible),
       selection_axis_buffer_(std::move(selection_axis_buffer)),
       selection_axis_world_(std::move(selection_axis_world)),
       selected_mesh_pipeline_(std::move(selected_mesh_pipeline)),
@@ -537,6 +542,16 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
         output_diagnostic = diagnostic(
             "workspace_viewport_grid_unprepared",
             "A frame cannot show a grid that was not prepared");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    const bool view_axis_visible =
+        request.view_axis_visible.value_or(view_axis_visible_);
+    if (view_axis_visible &&
+        (authoring_overlay_pipeline_ == std::nullopt ||
+         view_axis_buffer_ == nullptr)) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_view_axis_unprepared",
+            "A frame cannot show a view axis that was not prepared");
         return WorkspaceViewportFrameStatus::invalid;
     }
     if (request.selection_axis_world.has_value() &&
@@ -649,6 +664,21 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
                 selected_mesh_color_buffer_.get();
         }
     }
+
+    std::array<render::OverlayLineDrawRequest, 1U> view_axis_draws{};
+    std::size_t view_axis_draw_count = 0U;
+    if (view_axis_visible) {
+        auto& axis = view_axis_draws[view_axis_draw_count++];
+        axis.pipeline = &*authoring_overlay_pipeline_;
+        axis.vertex_buffer = view_axis_buffer_.get();
+        axis.vertex_count =
+            static_cast<std::uint32_t>(render::view_axis_vertex_count);
+        axis.matrices.world = apex::scene::identity_matrix;
+        axis.matrices.view_projection = request.camera.view_projection;
+    }
+    frame.view_axis_draws =
+        std::span<const render::OverlayLineDrawRequest>(view_axis_draws)
+            .first(view_axis_draw_count);
 
     std::array<render::OverlayLineDrawRequest, 2U> overlay_draws{};
     std::size_t overlay_count = 0U;
@@ -1157,6 +1187,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
 
         std::optional<render::PipelineProgram> authoring_overlay_pipeline;
         std::unique_ptr<render::Buffer> authoring_grid_buffer;
+        std::unique_ptr<render::Buffer> view_axis_buffer;
         std::unique_ptr<render::Buffer> selection_axis_buffer;
         std::optional<apex::scene::Matrix4> selection_axis_world;
         if (request.grid_visible &&
@@ -1167,15 +1198,24 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 "A visible authoring grid requires an overlay pipeline");
             return result;
         }
+        if (request.view_axis_visible &&
+            !request.authoring_overlay_pipeline.has_value()) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_view_axis_pipeline_missing",
+                "A visible view axis requires an overlay pipeline");
+            return result;
+        }
         if (request.authoring_overlay_pipeline.has_value()) {
             const auto selected = request.packets.selected_node;
             const bool selection_requested =
                 selected != apex::scene::invalid_node_id;
-            if (!request.grid_visible && !selection_requested) {
+            if (!request.grid_visible && !request.view_axis_visible &&
+                !selection_requested) {
                 result.status = WorkspaceViewportStatus::invalid;
                 result.diagnostic = diagnostic(
                     "workspace_viewport_selection_axis_node_invalid",
-                    "An authoring-overlay pipeline requires a grid or selected node");
+                    "An authoring-overlay pipeline requires a view axis, grid, or selected node");
                 return result;
             }
             if (selection_requested &&
@@ -1220,6 +1260,14 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                     authoring_grid_buffer))
                 return result;
 
+            const auto view_axis = render::build_view_axis();
+            if (request.view_axis_visible &&
+                !create_overlay_buffer(
+                    std::as_bytes(std::span(view_axis)),
+                    render::BufferMutability::immutable,
+                    view_axis_buffer))
+                return result;
+
             std::array<render::OverlayLineVertex, 6U> axis_vertices{};
             if (selection_requested) {
                 selection_axis_world = document.scene.snapshot.nodes[
@@ -1239,8 +1287,16 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                     return result;
             }
 
-            std::array<render::OverlayLineDrawRequest, 2U> overlay_draws{};
+            std::array<render::OverlayLineDrawRequest, 3U> overlay_draws{};
             std::size_t overlay_count = 0U;
+            if (view_axis_buffer != nullptr) {
+                auto& draw = overlay_draws[overlay_count++];
+                draw.pipeline = &*request.authoring_overlay_pipeline;
+                draw.vertex_buffer = view_axis_buffer.get();
+                draw.vertex_count =
+                    static_cast<std::uint32_t>(view_axis.size());
+                draw.scene_position = 0U;
+            }
             if (authoring_grid_buffer != nullptr) {
                 auto& draw = overlay_draws[overlay_count++];
                 draw.pipeline = &*request.authoring_overlay_pipeline;
@@ -1283,6 +1339,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             std::move(execution),
             std::move(authoring_overlay_pipeline),
             std::move(authoring_grid_buffer), request.grid_visible,
+            std::move(view_axis_buffer), request.view_axis_visible,
             std::move(selection_axis_buffer),
             std::move(selection_axis_world),
             std::move(selected_mesh_pipeline),

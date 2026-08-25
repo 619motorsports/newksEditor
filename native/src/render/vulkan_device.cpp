@@ -4561,26 +4561,7 @@ public:
             draws.push_back(draw);
             return true;
         };
-        std::size_t selected_index = 0U;
-        for (std::size_t scene_index = 0U;
-             scene_index <= description.draws.size(); ++scene_index) {
-            while (selected_index < description.selected_mesh_draws.size()) {
-                const SelectedMeshDrawRequest& selected =
-                    description.selected_mesh_draws[selected_index];
-                const std::size_t position =
-                    selected.scene_position ==
-                            std::numeric_limits<std::uint32_t>::max()
-                        ? description.draws.size()
-                        : static_cast<std::size_t>(selected.scene_position);
-                if (position != scene_index) break;
-                if (!append_selected_draw(selected)) return false;
-                ++selected_index;
-            }
-            if (scene_index < description.draws.size() &&
-                !append_scene_draw(description.draws[scene_index]))
-                return false;
-        }
-        for (const OverlayLineDrawRequest& request : description.overlay_draws) {
+        const auto append_overlay_draw = [&](const OverlayLineDrawRequest& request) {
             auto* vertices = dynamic_cast<const VulkanBuffer*>(request.vertex_buffer);
             if (vertices == nullptr || request.pipeline == nullptr) {
                 diagnostic = {"overlay_line_resource_invalid",
@@ -4607,7 +4588,12 @@ public:
             draw.indexed = false;
             draw.matrices = request.matrices;
             draws.push_back(draw);
-        }
+            return true;
+        };
+        if (!visit_indexed_static_mesh_batch_draws(
+                description, append_scene_draw, append_selected_draw,
+                append_overlay_draw))
+            return false;
         const bool drawn = draw_indexed_batch_and_readback(
             context_, raw_, info_.description, draws, depth_attachment, description.load_color,
             description.clear_depth, description.depth_clear_value, description.clear_color,

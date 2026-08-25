@@ -56,7 +56,7 @@ void usage(std::ostream& output) {
               "                       [--animation <file> [--animation-position <value>]]\n"
               "                       [--lod-index <index>]\n"
               "                       [--node-search <query>] [--selected-node <id> [--isolate-selected]]\n"
-              "                       [--show-hidden] [--wireframe] [--grid]\n"
+              "                       [--show-hidden] [--wireframe] [--grid] [--view-axis]\n"
               "                       [--weather <stock-id>] [--sun-heading <degrees>] [--sun-height <degrees>]\n"
               "                       [--shader-family <name> --shader-vertex <file> --shader-fragment <file>]\n"
               "                       [--authoring-overlay-vertex <file> --authoring-overlay-fragment <file>]\n"
@@ -532,6 +532,7 @@ struct WindowWorkspaceOptions {
     bool showHidden = false;
     bool wireframe = false;
     bool gridVisible = false;
+    bool viewAxisVisible = false;
     std::string weather;
     bool weatherSpecified = false;
     double sunHeading = apex::app::workspace_viewport_default_sun_heading_degrees;
@@ -712,6 +713,10 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             if (result.gridVisible)
                 throw std::runtime_error("duplicate --grid option");
             result.gridVisible = true;
+        } else if (option == "--view-axis") {
+            if (result.viewAxisVisible)
+                throw std::runtime_error("duplicate --view-axis option");
+            result.viewAxisVisible = true;
         } else if (option == "--weather") {
             if (result.weatherSpecified)
                 throw std::runtime_error("duplicate --weather option");
@@ -808,12 +813,16 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
         throw std::runtime_error(
             "authoring-overlay vertex and fragment modules must be supplied together");
     if (result.authoringOverlayVertex.has_value() &&
-        !result.selectedNode.has_value() && !result.gridVisible)
+        !result.selectedNode.has_value() && !result.gridVisible &&
+        !result.viewAxisVisible)
         throw std::runtime_error(
-            "authoring-overlay shader modules require --selected-node or --grid");
+            "authoring-overlay shader modules require --selected-node, --grid, or --view-axis");
     if (result.gridVisible && !result.authoringOverlayVertex.has_value())
         throw std::runtime_error(
             "--grid requires authoring-overlay shader modules");
+    if (result.viewAxisVisible && !result.authoringOverlayVertex.has_value())
+        throw std::runtime_error(
+            "--view-axis requires authoring-overlay shader modules");
     if (result.selectedMeshVertex.has_value() !=
         result.selectedMeshFragment.has_value())
         throw std::runtime_error(
@@ -845,7 +854,7 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
     const bool selection_options = result.nodeSearch.has_value() ||
                                    result.selectedNode.has_value() ||
                                    result.showHidden || result.wireframe ||
-                                   result.gridVisible;
+                                   result.gridVisible || result.viewAxisVisible;
     if (selection_options && !result.model.has_value() &&
         !result.workspaceRoot.has_value())
         throw std::runtime_error("hierarchy options require a workspace model");
@@ -1212,6 +1221,7 @@ int run_window(int argc, char** argv) {
         request.packets.wireframe = loaded_workspace.selection.wireframe;
         request.wireframe = loaded_workspace.selection.wireframe;
         request.grid_visible = workspace_options.gridVisible;
+        request.view_axis_visible = workspace_options.viewAxisVisible;
         if (loaded_workspace.authoringOverlayModules.has_value()) {
             apex::render::PipelineProgram pipeline;
             pipeline.name = "workspace-authoring-overlay";
