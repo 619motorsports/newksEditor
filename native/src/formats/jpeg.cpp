@@ -74,9 +74,9 @@ JpegImage decodeJpegRgba8(std::span<const std::uint8_t> bytes,
     JpegErrorManager error{};
     info.err = jpeg_std_error(&error.base);
     error.base.error_exit = jpegErrorExit;
-    bool created = false;
-    std::uint8_t* rawPixels = nullptr;
-    std::uint8_t* row = nullptr;
+    volatile bool created = false;
+    std::uint8_t* volatile rawPixels = nullptr;
+    std::uint8_t* volatile row = nullptr;
     if (setjmp(error.jump) != 0) {
         const std::string message = error.message[0] == '\0'
                                         ? "JPEG decoder rejected the input"
@@ -138,16 +138,24 @@ JpegImage decodeJpegRgba8(std::span<const std::uint8_t> bytes,
         throw jpegError(source, 0u, "SIZE_OVERFLOW",
                         "JPEG pixel storage size overflows");
     }
-    jpeg_start_decompress(&info);
-    const auto rowBytes = static_cast<std::size_t>(info.output_width) * 3u;
-    const auto pixelBytes = static_cast<std::size_t>(info.output_width) *
-                            static_cast<std::size_t>(info.output_height) * 4u;
+    const auto pixelBytes = width * height * 4u;
     if (pixelBytes > limits.parse.maxOutputBytes) {
         jpeg_destroy_decompress(&info);
         created = false;
         throw jpegError(source, 0u, "OUTPUT_TOO_LARGE",
                         "JPEG decoded pixels exceed configured limit");
     }
+    jpeg_start_decompress(&info);
+    const auto outputWidth = info.output_width;
+    const auto outputHeight = info.output_height;
+    if (outputWidth != info.image_width || outputHeight != info.image_height ||
+        info.output_components != 3) {
+        jpeg_destroy_decompress(&info);
+        created = false;
+        throw jpegError(source, 0u, "UNSUPPORTED_FORMAT",
+                        "JPEG decoder returned an unexpected output layout");
+    }
+    const auto rowBytes = static_cast<std::size_t>(outputWidth) * 3u;
     rawPixels = static_cast<std::uint8_t*>(std::malloc(pixelBytes));
     if (rawPixels == nullptr && pixelBytes != 0u) {
         jpeg_destroy_decompress(&info);
@@ -187,13 +195,15 @@ JpegImage decodeJpegRgba8(std::span<const std::uint8_t> bytes,
     jpeg_destroy_decompress(&info);
     created = false;
     std::free(row);
+    row = nullptr;
 
     JpegImage result;
-    result.width = info.output_width;
-    result.height = info.output_height;
+    result.width = outputWidth;
+    result.height = outputHeight;
     result.bytesRead = bytes.size();
     result.pixels.assign(rawPixels, rawPixels + pixelBytes);
     std::free(rawPixels);
+    rawPixels = nullptr;
     return result;
 #endif
 }
