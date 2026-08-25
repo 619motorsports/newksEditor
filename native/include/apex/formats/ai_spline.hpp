@@ -14,10 +14,9 @@
 
 namespace apex::formats {
 
-// Assetto Corsa AI spline files are little-endian binary records.  This
-// reader deliberately supports only the version-7 layout recovered from the
-// editor.  Version 2 and older layouts have different records and are not
-// guessed here.
+// Assetto Corsa AI spline files are little-endian binary records.  Version 7
+// and the legacy version-2 layout are kept separate: the legacy records do
+// not acquire fields which are only present in the version-7 representation.
 struct AiSplinePoint {
     std::array<float, 3> position{};
     float length = 0.0f;
@@ -41,6 +40,16 @@ struct AiSplinePayload {
     float grade = 0.0f;
 };
 
+// Version 2 stores every source sample as this 28-byte record.  The legacy
+// word is read by the native loader but is not interpreted there.
+struct AiSplineLegacyV2Record {
+    std::array<float, 3> position{};
+    std::uint32_t legacyWord = 0;
+    float speed = 0.0f;
+    float gas = 0.0f;
+    float lateralG = 0.0f;
+};
+
 struct AiSplineGridCell {
     std::vector<std::uint32_t> pointIndices;
 };
@@ -61,6 +70,7 @@ struct AiSplineParseLimits {
     apex::core::ParseLimits parse{};
     std::size_t maxPoints = 1'000'000;
     std::size_t maxPayloads = 1'000'000;
+    std::size_t maxRetainedPoints = 1'000'000;
     std::size_t maxGridNeighbors = 1'000'000;
     std::size_t maxGridRows = 1'000'000;
     std::size_t maxGridCellsPerRow = 1'000'000;
@@ -78,6 +88,11 @@ struct AiSpline {
     std::uint32_t reserved = 0;
     std::vector<AiSplinePoint> points;
     std::vector<AiSplinePayload> payloads;
+    // Populated only for version 2.  Version-7 points/payloads remain empty
+    // for this representation because their missing fields are not inferred.
+    std::vector<AiSplineLegacyV2Record> legacyV2Records;
+    // Native version-2 loading retains source indices 0, 3, 6, ... .
+    std::vector<std::uint32_t> nativeRetainedIndices;
     std::optional<AiSplineGrid> grid;
     std::size_t bytesRead = 0;
     std::size_t byteLength = 0;

@@ -2791,8 +2791,13 @@ version word, the file contains a 32-bit point count and a 32-bit lap-time
 value. Each of the declared records is exactly 28 bytes: three float32 position
 components, one opaque 32-bit word, then float32 speed, gas, and lateral G.
 There is no payload-count or grid section, so the exact file size is
-`12 + pointCount * 28`. The native loader retains only source indices
-`0, 3, 6, ...` for version 2 and derives forward vectors from positions.
+`12 + pointCount * 28`. The native loader derives each record's forward vector
+from the current raw position minus the immediately previous raw position
+before the three-to-one retention gate. Thus retained record `3k` keeps the
+direction from raw records `3k-1` to `3k`, not the direction between retained
+records. After loading, it overwrites only the first retained forward with the
+normalized wraparound vector from the last retained position to the first
+retained position.
 
 Four installed version-2 fixtures satisfy that size formula exactly. Imola has
 8,533 records and SHA-256
@@ -2802,9 +2807,11 @@ Magione has 4,506 records and SHA-256
 Silverstone GP and its international copy contain 10,433 records and share
 SHA-256 `c76dbef08af93bbd522281a35388ad50ce2d71fd04cc982a7a18bad4744ab935`.
 The opaque word is constant within a fixture but differs across tracks; it must
-not receive an inferred semantic name. Native version-2 parsing remains staged
-until it has independent bounded fixtures for truncation, count overflow, and
-the three-to-one retained-point behavior.
+not receive an inferred semantic name. The bounded native parser now retains
+every raw version-2 record and exposes the source indices `0, 3, 6, ...` used by
+the editor. It keeps version-2 data separate from version-7 points and payloads
+and rejects truncated prefixes, oversized counts, non-finite values, aggregate
+budget violations, and trailing bytes.
 
 ## Native ksNet camera pose evidence
 

@@ -12,8 +12,10 @@ namespace apex::formats {
 namespace {
 
 constexpr std::uint32_t kVersion7 = 7;
+constexpr std::uint32_t kVersion2 = 2;
 constexpr std::size_t kPointBytes = 20;
 constexpr std::size_t kPayloadBytes = 72;
+constexpr std::size_t kLegacyV2RecordBytes = 28;
 
 [[nodiscard]] AiSplineError error(const std::string& source, std::size_t offset,
                                   const char* code, const char* message) {
@@ -59,9 +61,66 @@ AiSpline parseAiSplineImpl(std::span<const std::uint8_t> bytes,
     apex::core::ByteReader reader(bytes, source, limits.parse, "AI_SPLINE");
     const auto versionOffset = reader.offset();
     const auto version = reader.u32("version");
+    if (version == kVersion2) {
+        const auto pointCountOffset = reader.offset();
+        const auto pointCount = reader.u32("version-2 point count");
+        requireCount(pointCount, limits.maxPoints, pointCountOffset,
+                     source, "AI spline version-2 point count exceeds its limit");
+        const auto lapTime = reader.u32("version-2 lap time");
+        const auto recordBytes = storageBytes(
+            pointCount, kLegacyV2RecordBytes, pointCountOffset, source,
+            "AI spline version-2 record storage");
+        if (recordBytes > reader.remaining()) {
+            throw error(source, reader.offset(), "TRUNCATED",
+                        "AI spline version-2 records are truncated");
+        }
+        const auto retainedCount = static_cast<std::size_t>(pointCount / 3U) +
+                                   (pointCount % 3U == 0U ? 0U : 1U);
+        requireCount(static_cast<std::uint32_t>(retainedCount), limits.maxRetainedPoints,
+                     pointCountOffset,
+                     source, "AI spline version-2 retained point count exceeds its limit");
+
+        Budget budget{0, limits.maxAggregateBytes, &source};
+        budget.charge(source.size(), 0U,
+                      "AI spline source name exceeds aggregate limit");
+        budget.charge(storageBytes(pointCount, sizeof(AiSplineLegacyV2Record),
+                                   pointCountOffset, source,
+                                   "AI spline version-2 record storage"),
+                      pointCountOffset,
+                      "AI spline version-2 record storage exceeds aggregate limit");
+        budget.charge(storageBytes(retainedCount, sizeof(std::uint32_t),
+                                   pointCountOffset, source,
+                                   "AI spline version-2 retained-index storage"),
+                      pointCountOffset,
+                      "AI spline version-2 retained-index storage exceeds aggregate limit");
+
+        AiSpline result;
+        result.source = source;
+        result.version = version;
+        result.lapTime = lapTime;
+        result.legacyV2Records.reserve(pointCount);
+        result.nativeRetainedIndices.reserve(retainedCount);
+        for (std::uint32_t index = 0; index < pointCount; ++index) {
+            AiSplineLegacyV2Record record;
+            for (auto& value : record.position)
+                value = reader.f32("version-2 point position");
+            record.legacyWord = reader.u32("version-2 legacy word");
+            record.speed = reader.f32("version-2 speed");
+            record.gas = reader.f32("version-2 gas");
+            record.lateralG = reader.f32("version-2 lateral G");
+            result.legacyV2Records.push_back(record);
+            if (index % 3U == 0U) result.nativeRetainedIndices.push_back(index);
+        }
+        if (reader.remaining() != 0U)
+            throw error(source, reader.offset(), "TRAILING_DATA",
+                        "unexpected trailing version-2 AI spline data");
+        result.bytesRead = reader.offset();
+        result.byteLength = bytes.size();
+        return result;
+    }
     if (version != kVersion7)
         throw error(source, versionOffset, "UNSUPPORTED_VERSION",
-                    "only AI spline version 7 is supported");
+                    "only AI spline versions 2 and 7 are supported");
 
     const auto pointCountOffset = reader.offset();
     const auto pointCount = reader.u32("spline point count");

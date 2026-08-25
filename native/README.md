@@ -7,9 +7,11 @@ native implementation works through the parity gates in
 
 The native port has shared bounded input utilities. It reads KN5 v4/v5/v6,
 DDS, bounded PNG, ACD, VAO, ordered INI/CSP, KSANIM v1/v2, KNH, and
-version-7 AI splines. The AI-spline reader retains points, driving payloads,
-and the optional spatial grid. It bounds every nested grid count and aggregate
-allocation; legacy version 2 remains explicitly staged. PNG
+version-2/version-7 AI splines. The AI-spline reader retains points, driving
+payloads, and the optional spatial grid for version 7. Version 2 retains every
+raw 28-byte record, including its opaque word, and exposes the native retained
+indices `0, 3, 6, ...` without inventing version-7 fields. It bounds every
+nested grid count and aggregate allocation. PNG
 support covers non-interlaced 8-bit grayscale, RGB, indexed,
 grayscale-alpha, and RGBA images. It writes KN5 files
 without byte changes when the model is unchanged. KN5 parsing also has an
