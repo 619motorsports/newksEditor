@@ -155,6 +155,8 @@ out/native/dev/native/apex-native --window vulkan --model car.kn5 \
   --weather 5_light_clouds --sun-heading 40 --sun-height 55 \
   --shader-family ksPerPixel --shader-vertex stock.vert.spv \
   --shader-fragment receiver.frag.spv \
+  --selection-axis-vertex overlay.vert.spv \
+  --selection-axis-fragment overlay.frag.spv \
   --directional-shadow-vertex shadow.vert.spv
 out/native/dev/native/apex-native --window vulkan \
   --workspace-root content/cars/example --manifest data/lods.ini \
@@ -178,6 +180,10 @@ pipeline is available, both passes use the same prepared pose.
 The hierarchy options search, select, isolate, show hidden nodes, and enable
 wireframe through the backend-neutral viewport request. Search uses bounded
 ASCII case-insensitive matching. It retains duplicate node names.
+The selection-axis modules use the fixed position-and-color line ABI.
+Both module options require `--selected-node`.
+The viewport draws the RGB axis after the scene and before the MSAA resolve.
+The axis follows the selected node transform from the current frame.
 The lighting options select one of the seven bounded stock weather presets and
 finite sun angles. The default is `5_light_clouds` at a 40-degree heading and
 55-degree height, as used by the production renderer. The native shell uploads

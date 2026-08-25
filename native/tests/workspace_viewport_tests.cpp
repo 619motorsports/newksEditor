@@ -132,6 +132,11 @@ public:
         resolve_targets.push_back(batch.resolve_target);
         capture_requests.push_back(batch.capture_rgba8);
         draw_counts.push_back(batch.draws.size());
+        overlay_counts.push_back(batch.overlay_draws.size());
+        if (!batch.overlay_draws.empty()) {
+            overlay_matrices.push_back(batch.overlay_draws.front().matrices);
+            overlay_buffers.push_back(batch.overlay_draws.front().vertex_buffer);
+        }
         std::vector<apex::scene::NodeId> nodes;
         nodes.reserve(batch.draws.size());
         for (const auto& draw : batch.draws)
@@ -210,6 +215,9 @@ public:
     std::size_t depth_batch_calls = 0U;
     std::size_t present_calls = 0U;
     std::vector<std::size_t> draw_counts;
+    std::vector<std::size_t> overlay_counts;
+    std::vector<DrawMatrices> overlay_matrices;
+    std::vector<const Buffer*> overlay_buffers;
     std::vector<std::vector<apex::scene::NodeId>> draw_nodes;
     std::vector<std::string> events;
     std::vector<const DepthAttachment*> depth_targets;
@@ -469,6 +477,31 @@ PipelineProgram opaque_shadow_pipeline(const Fixture& fixture_value) {
     return pipeline;
 }
 
+PipelineProgram selection_axis_pipeline(const Fixture& fixture_value,
+                                        std::uint32_t samples = 1U) {
+    PipelineProgram pipeline;
+    pipeline.name = "viewport-selection-axis";
+    pipeline.shaders = fixture_value.modules;
+    pipeline.vertex_layout.stride = sizeof(OverlayLineVertex);
+    pipeline.vertex_layout.attributes = {
+        {PipelineVertexSemantic::position,
+         PipelineVertexAttributeFormat::float32x3, 0U, 0U},
+        {PipelineVertexSemantic::color,
+         PipelineVertexAttributeFormat::float32x3, 1U, 12U},
+    };
+    pipeline.targets.colors = {
+        {PipelineRenderTargetFormat::rgba8_unorm, samples}};
+    pipeline.targets.has_depth = true;
+    pipeline.targets.depth = {
+        PipelineRenderTargetFormat::depth32_float, samples};
+    pipeline.raster.cull = PipelineCullMode::none;
+    pipeline.raster.fill = PipelineFillMode::wireframe;
+    pipeline.depth.test_enabled = false;
+    pipeline.depth.write_enabled = false;
+    pipeline.transform_contract = PipelineTransformContract::draw_matrices;
+    return pipeline;
+}
+
 CameraFrame valid_shadow_camera(float x = 0.0F) {
     CameraFrameRequest request;
     request.eye = {x, 0.0F, 5.0F};
@@ -701,6 +734,87 @@ void draws_four_sample_viewport_through_retained_resolve() {
                 device.events == std::vector<std::string>(
                     {"color", "present", "color", "present"}),
             "four-sample frames reuse one resolve image and present only its single-sample output");
+}
+
+void draws_selected_axis_inside_the_scene_batch() {
+    auto value = fixture();
+    auto request = request_for(value);
+    request.packets.selected_node = 1U;
+    request.selection_axis_pipeline = selection_axis_pipeline(value);
+    value.document.scene.snapshot.nodes[1U].transform[12] = 2.0F;
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok(), "selected-axis viewport preparation succeeds");
+
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.camera.view_projection[0] = 0.5F;
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    frame.selection_axis_world = value.document.scene.snapshot.nodes[1U].transform;
+    frame.selection_axis_world->at(12) = 3.0F;
+    Diagnostic diagnostic;
+    const auto status = prepared.viewport->drawAndPresent(
+        device, target, frame, diagnostic);
+    require(status == WorkspaceViewportFrameStatus::ready &&
+                device.draw_calls == 1U && device.present_calls == 1U &&
+                device.overlay_counts == std::vector<std::size_t>({1U}) &&
+                device.events ==
+                    std::vector<std::string>({"color", "present"}),
+            "selection axis is one overlay in the scene draw batch");
+    require(device.overlay_matrices.size() == 1U &&
+                device.overlay_matrices.front().world ==
+                    apex::scene::identity_matrix &&
+                device.overlay_matrices.front().view_projection ==
+                    frame.camera.view_projection,
+            "axis draw uses world-space vertices and the frame camera");
+    const auto axis_update = std::find_if(
+        device.buffer_updates.begin(), device.buffer_updates.end(),
+        [](const FakeDevice::BufferUpdate& update) {
+            return update.bytes.size() == 6U * sizeof(OverlayLineVertex);
+        });
+    require(axis_update != device.buffer_updates.end(),
+            "axis uploads exactly six position-color vertices");
+    std::array<OverlayLineVertex, 6U> vertices{};
+    std::memcpy(vertices.data(), axis_update->bytes.data(),
+                sizeof(vertices));
+    require(vertices[0].position[0] == 3.0F &&
+                vertices[1].position[0] == 4.0F &&
+                vertices[5].position[2] == -1.0F,
+            "animated frame override rebuilds normalized RGB axis geometry");
+}
+
+void rejects_unbound_selection_axis_requests() {
+    auto value = fixture();
+    auto request = request_for(value);
+    request.selection_axis_pipeline = selection_axis_pipeline(value);
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(!prepared.ok() &&
+                prepared.status == apex::app::WorkspaceViewportStatus::invalid &&
+                prepared.diagnostic.code ==
+                    "workspace_viewport_selection_axis_node_invalid",
+            "selection-axis preparation requires a valid selected node");
+
+    request.selection_axis_pipeline.reset();
+    prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok(), "ordinary viewport preparation succeeds");
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    frame.selection_axis_world = apex::scene::identity_matrix;
+    Diagnostic diagnostic;
+    const auto status = prepared.viewport->drawAndPresent(
+        device, target, frame, diagnostic);
+    require(status == WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code ==
+                    "workspace_viewport_selection_axis_unprepared" &&
+                device.draw_calls == 0U && device.present_calls == 0U,
+            "frame axis override requires prepared axis resources");
 }
 
 void schedules_directional_shadows_before_color_and_reuses_maps() {
@@ -1178,6 +1292,8 @@ int main() {
         evaluates_bounded_workspace_lighting();
         opens_and_draws();
         draws_four_sample_viewport_through_retained_resolve();
+        draws_selected_axis_inside_the_scene_batch();
+        rejects_unbound_selection_axis_requests();
         accepts_track_and_car_lod_documents();
         selects_car_lod_roots_at_viewport_boundary();
         resolves_preview_state_without_mutating_document();

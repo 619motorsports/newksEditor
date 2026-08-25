@@ -3,6 +3,7 @@
 #include "apex/app/workspace_session.hpp"
 #include "apex/render/device.hpp"
 #include "apex/render/directional_shadow.hpp"
+#include "apex/render/selection_axis.hpp"
 #include "apex/render/stock_scene_execution.hpp"
 
 #include <array>
@@ -103,6 +104,9 @@ struct WorkspaceViewportPrepareRequest {
     bool evaluate_damage_preview = false;
     std::optional<bool> damage_broken_visible;
     bool wireframe = false;
+    // A selected node is rendered only when the caller supplies executable
+    // backend modules for this fixed position/color line contract.
+    std::optional<render::PipelineProgram> selection_axis_pipeline;
     // Keep this explicit receiver-module selector for existing callers. A
     // true value requires directional_shadows so the viewport cannot prepare
     // a receiver that has no maps or caster schedule.
@@ -127,6 +131,9 @@ struct WorkspaceViewportFrameRequest {
     std::span<const std::uint8_t> packet_visibility{};
     bool apply_skinning = false;
     std::optional<render::KsPerPixelFrameConstants> frame_constants;
+    // Override the prepared selected-node world transform for an animated
+    // frame. Supplying this without a prepared selection axis is invalid.
+    std::optional<apex::scene::Matrix4> selection_axis_world;
 };
 
 // The editor's browser viewport uses an orbit target, yaw/pitch, and distance
@@ -220,6 +227,9 @@ private:
         std::unique_ptr<render::Texture> resolved_color,
         std::unique_ptr<render::DepthAttachment> depth,
         std::unique_ptr<render::StockSceneExecutionResult> execution,
+        std::optional<render::PipelineProgram> selection_axis_pipeline,
+        std::unique_ptr<render::Buffer> selection_axis_buffer,
+        std::optional<apex::scene::Matrix4> selection_axis_world,
         std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps,
         std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows,
         std::optional<LodCatalog> lod_catalog);
@@ -230,6 +240,9 @@ private:
     std::unique_ptr<render::Texture> resolved_color_;
     std::unique_ptr<render::DepthAttachment> depth_;
     std::unique_ptr<render::StockSceneExecutionResult> execution_;
+    std::optional<render::PipelineProgram> selection_axis_pipeline_;
+    std::unique_ptr<render::Buffer> selection_axis_buffer_;
+    std::optional<apex::scene::Matrix4> selection_axis_world_;
     std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps_;
     std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows_;
     std::optional<LodCatalog> lod_catalog_;

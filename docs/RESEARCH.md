@@ -197,6 +197,11 @@ The recovered origin was `(0, 0.2583455, 0)`. The selected and cleared captures 
 to `31b3b6869fe2c020` and `d711076968898938`. All 80 textures loaded, both frames
 returned WebGL error zero, and the browser log contained no errors.
 
+A second production Chrome check used the Gen6 fixture and selected `CHASSIS`.
+The selected and cleared captures hashed to `9525187a02419663` and
+`8e34e54dbbbf740c`. All 63 textures loaded. Both frames returned WebGL error
+zero, and the browser log contained no errors.
+
 ### Native blurred-rim switch
 
 The supporting IL opcodes, metadata tokens, string RVAs, and installed-binary hash

@@ -139,6 +139,32 @@ std::vector<std::uint8_t> executable_vertex_shader() {
     return result;
 }
 
+std::vector<std::uint8_t> executable_overlay_line_vertex_shader() {
+    // Generated from tests/shaders/overlay_line.vert with glslangValidator.
+    constexpr std::string_view hex =
+        "03022307000001000b0008002b0000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00090000000000040000006d61696e000000000d0000001d0000002800000029000000470003000b00000002000000480005000b000000000000000b00000000000000480005000b000000010000000b00000001000000480005000b000000020000000b00000003000000480005000b000000030000000b0000000400000047000300110000000200000048000400110000000000000005000000480005001100000000000000070000001000000048000500110000000000000023000000000000004800040011000000010000000500000048000500110000000100000007000000100000004800050011000000010000002300000040000000470004001d0000001e0000000000000047000400280000001e0000000000000047000400290000001e00000001000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000004000000150004000800000020000000000000002b0004000800000009000000010000001c0004000a00000006000000090000001e0006000b00000007000000060000000a0000000a000000200004000c000000030000000b0000003b0004000c0000000d00000003000000150004000e00000020000000010000002b0004000e0000000f00000000000000180004001000000007000000040000001e000400110000001000000010000000200004001200000009000000110000003b0004001200000013000000090000002b0004000e000000140000000100000020000400150000000900000010000000170004001b0000000600000003000000200004001c000000010000001b0000003b0004001c0000001d000000010000002b000400060000001f0000000000803f200004002500000003000000070000002000040027000000030000001b0000003b0004002700000028000000030000003b0004001c00000029000000010000003600050002000000040000000000000003000000f80002000500000041000500150000001600000013000000140000003d000400100000001700000016000000410005001500000018000000130000000f0000003d00040010000000190000001800000092000500100000001a00000017000000190000003d0004001b0000001e0000001d0000005100050006000000200000001e000000000000005100050006000000210000001e000000010000005100050006000000220000001e000000020000005000070007000000230000002000000021000000220000001f0000009100050007000000240000001a000000230000004100050025000000260000000d0000000f0000003e00030026000000240000003d0004001b0000002a000000290000003e000300280000002a000000fd00010038000100";
+    require(hex.size() % 2U == 0U, "embedded overlay vertex shader hex alignment");
+    std::vector<std::uint8_t> result(hex.size() / 2U);
+    for (std::size_t index = 0U; index < result.size(); ++index)
+        result[index] = static_cast<std::uint8_t>(
+            (hex_digit(hex[index * 2U]) << 4U) |
+            hex_digit(hex[index * 2U + 1U]));
+    return result;
+}
+
+std::vector<std::uint8_t> executable_overlay_line_fragment_shader() {
+    // Generated from tests/shaders/overlay_line.frag with glslangValidator.
+    constexpr std::string_view hex =
+        "03022307000001000b000800130000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00070004000000040000006d61696e00000000090000000c00000010000300040000000700000047000400090000001e00000000000000470004000c0000001e00000000000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000004000000200004000800000003000000070000003b000400080000000900000003000000170004000a0000000600000003000000200004000b000000010000000a0000003b0004000b0000000c000000010000002b000400060000000e0000000000803f3600050002000000040000000000000003000000f8000200050000003d0004000a0000000d0000000c00000051000500060000000f0000000d000000000000005100050006000000100000000d000000010000005100050006000000110000000d000000020000005000070007000000120000000f00000010000000110000000e0000003e0003000900000012000000fd00010038000100";
+    require(hex.size() % 2U == 0U, "embedded overlay fragment shader hex alignment");
+    std::vector<std::uint8_t> result(hex.size() / 2U);
+    for (std::size_t index = 0U; index < result.size(); ++index)
+        result[index] = static_cast<std::uint8_t>(
+            (hex_digit(hex[index * 2U]) << 4U) |
+            hex_digit(hex[index * 2U + 1U]));
+    return result;
+}
+
 std::vector<std::uint8_t> executable_transform_vertex_shader() {
     // Generated from tests/shaders/indexed_static_mesh.vert with:
     // glslangValidator -V --target-env vulkan1.0 -Os -g0 -S vert
@@ -5784,6 +5810,144 @@ bool contract_backend(apex::render::Backend backend) {
                 !depth_batch_draws[0].clear_depth && depth_batch_draws[1].depth_attachment == nullptr &&
                 !depth_batch_draws[1].load_color && !depth_batch_draws[1].clear_depth,
             "depth batch applies attachment and clear state without mutating requests");
+
+    // Resource-free RGB line vertices execute after indexed scene geometry in
+    // the same batch. The four-sample case proves that the batch resolve sees
+    // the overlay instead of resolving the mesh first and compositing later.
+    const std::array<OverlayLineVertex, 6U> overlay_vertices = {{
+        {{-0.9F, -0.5F, 0.0F}, {1.0F, 0.0F, 0.0F}},
+        {{0.9F, -0.5F, 0.0F}, {1.0F, 0.0F, 0.0F}},
+        {{-0.9F, 0.0F, 0.0F}, {0.0F, 1.0F, 0.0F}},
+        {{0.9F, 0.0F, 0.0F}, {0.0F, 1.0F, 0.0F}},
+        {{-0.9F, 0.5F, 0.0F}, {0.0F, 0.0F, 1.0F}},
+        {{0.9F, 0.5F, 0.0F}, {0.0F, 0.0F, 1.0F}},
+    }};
+    BufferDescription overlay_buffer_description;
+    overlay_buffer_description.size_bytes = sizeof(overlay_vertices);
+    overlay_buffer_description.usage = BufferUsage::vertex;
+    overlay_buffer_description.memory = BufferMemory::host_visible;
+    overlay_buffer_description.mutability = BufferMutability::mutable_data;
+    BufferResult overlay_buffer = device.device->create_buffer(
+        overlay_buffer_description, std::as_bytes(std::span(overlay_vertices)));
+    require(overlay_buffer.ok(), "overlay line vertex buffer creation");
+
+    const auto make_overlay_pipeline = [&](std::uint32_t samples) {
+        PipelineProgram pipeline;
+        pipeline.name = "native-overlay-line";
+        if (backend == Backend::Vulkan) {
+            pipeline.shaders = {
+                {PipelineShaderStage::vertex, PipelineShaderFormat::spirv,
+                 executable_overlay_line_vertex_shader()},
+                {PipelineShaderStage::fragment, PipelineShaderFormat::spirv,
+                 executable_overlay_line_fragment_shader()},
+            };
+        } else {
+#if defined(_WIN32)
+            constexpr std::string_view vertex_source = R"(
+cbuffer DrawMatrices : register(b0) {
+    column_major float4x4 world;
+    column_major float4x4 viewProjection;
+};
+struct Input { float3 position : POSITION; float3 color : COLOR; };
+struct Output { float4 position : SV_Position; float3 color : COLOR; };
+Output main(Input input) {
+    Output output;
+    output.position = mul(viewProjection, mul(world, float4(input.position, 1.0)));
+    output.color = input.color;
+    return output;
+})";
+            constexpr std::string_view fragment_source = R"(
+float4 main(float3 color : COLOR) : SV_Target { return float4(color, 1.0); }
+)";
+            pipeline.shaders = {
+                {PipelineShaderStage::vertex, PipelineShaderFormat::dxil,
+                 executable_d3d_shader(vertex_source, "vs_5_0")},
+                {PipelineShaderStage::fragment, PipelineShaderFormat::dxil,
+                 executable_d3d_shader(fragment_source, "ps_5_0")},
+            };
+#else
+            require(false,
+                    "D3D12 overlay line test requires Windows D3DCompile");
+#endif
+        }
+        pipeline.vertex_layout.stride = sizeof(OverlayLineVertex);
+        pipeline.vertex_layout.attributes = {
+            {PipelineVertexSemantic::position,
+             PipelineVertexAttributeFormat::float32x3, 0U, 0U},
+            {PipelineVertexSemantic::color,
+             PipelineVertexAttributeFormat::float32x3, 1U, 12U},
+        };
+        pipeline.targets.colors = {
+            {PipelineRenderTargetFormat::rgba8_unorm, samples}};
+        pipeline.raster.cull = PipelineCullMode::none;
+        pipeline.raster.fill = PipelineFillMode::wireframe;
+        pipeline.depth.test_enabled = false;
+        pipeline.depth.write_enabled = false;
+        pipeline.transform_contract = PipelineTransformContract::draw_matrices;
+        return pipeline;
+    };
+    const auto count_color = [](std::span<const std::byte> rgba,
+                                std::byte red, std::byte green,
+                                std::byte blue) {
+        std::size_t count = 0U;
+        for (std::size_t offset = 0U; offset + 3U < rgba.size(); offset += 4U) {
+            if (rgba[offset] == red && rgba[offset + 1U] == green &&
+                rgba[offset + 2U] == blue)
+                ++count;
+        }
+        return count;
+    };
+    const auto count_dominant_channel = [](
+        std::span<const std::byte> rgba, std::size_t channel) {
+        std::size_t count = 0U;
+        for (std::size_t offset = 0U; offset + 3U < rgba.size(); offset += 4U) {
+            const auto selected = std::to_integer<unsigned>(rgba[offset + channel]);
+            const auto first = std::to_integer<unsigned>(
+                rgba[offset + ((channel + 1U) % 3U)]);
+            const auto second = std::to_integer<unsigned>(
+                rgba[offset + ((channel + 2U) % 3U)]);
+            if (selected > 0U && selected > first && selected > second) ++count;
+        }
+        return count;
+    };
+    PipelineProgram overlay_pipeline = make_overlay_pipeline(1U);
+    OverlayLineDrawRequest overlay_request;
+    overlay_request.pipeline = &overlay_pipeline;
+    overlay_request.vertex_buffer = overlay_buffer.buffer.get();
+    overlay_request.vertex_count =
+        static_cast<std::uint32_t>(overlay_vertices.size());
+    const std::array overlay_requests = {overlay_request};
+    IndexedStaticMeshBatchDescription overlay_batch;
+    overlay_batch.overlay_draws = overlay_requests;
+    const auto overlay_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *triangle_texture.texture, overlay_batch);
+    require(overlay_result.ok() &&
+                count_color(overlay_result.rgba8, std::byte{255}, std::byte{0},
+                            std::byte{0}) > 8U &&
+                count_color(overlay_result.rgba8, std::byte{0}, std::byte{255},
+                            std::byte{0}) > 8U &&
+                count_color(overlay_result.rgba8, std::byte{0}, std::byte{0},
+                            std::byte{255}) > 8U,
+            "single-sample RGB overlay line pixels");
+
+    TextureDescription overlay_msaa_description = triangle_description;
+    overlay_msaa_description.samples = 4U;
+    TextureResult overlay_msaa =
+        device.device->create_texture(overlay_msaa_description);
+    require(overlay_msaa.ok(), "four-sample overlay target creation");
+    PipelineProgram overlay_msaa_pipeline = make_overlay_pipeline(4U);
+    overlay_request.pipeline = &overlay_msaa_pipeline;
+    const std::array overlay_msaa_requests = {overlay_request};
+    overlay_batch.overlay_draws = overlay_msaa_requests;
+    const auto overlay_msaa_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *overlay_msaa.texture, overlay_batch);
+    require(overlay_msaa_result.ok() &&
+                count_dominant_channel(overlay_msaa_result.rgba8, 0U) > 8U &&
+                count_dominant_channel(overlay_msaa_result.rgba8, 1U) > 8U &&
+                count_dominant_channel(overlay_msaa_result.rgba8, 2U) > 8U,
+            "four-sample RGB overlay survives the batch resolve");
 
     const TextureDescription bgra_description{3U, 2U, 1U, 1U, TextureFormat::bgra8_unorm,
                                                TextureUsage::color_attachment | TextureUsage::transfer_source,

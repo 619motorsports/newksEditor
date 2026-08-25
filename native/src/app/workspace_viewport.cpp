@@ -474,12 +474,18 @@ WorkspaceViewport::WorkspaceViewport(
     std::unique_ptr<render::Texture> resolved_color,
     std::unique_ptr<render::DepthAttachment> depth,
     std::unique_ptr<render::StockSceneExecutionResult> execution,
+    std::optional<render::PipelineProgram> selection_axis_pipeline,
+    std::unique_ptr<render::Buffer> selection_axis_buffer,
+    std::optional<apex::scene::Matrix4> selection_axis_world,
     std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps,
     std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows,
     std::optional<LodCatalog> lod_catalog)
     : backend_(backend), presentation_(presentation), color_(std::move(color)),
       resolved_color_(std::move(resolved_color)),
       depth_(std::move(depth)), execution_(std::move(execution)),
+      selection_axis_pipeline_(std::move(selection_axis_pipeline)),
+      selection_axis_buffer_(std::move(selection_axis_buffer)),
+      selection_axis_world_(std::move(selection_axis_world)),
       shadow_maps_(std::move(shadow_maps)),
       directional_shadows_(std::move(directional_shadows)),
       lod_catalog_(std::move(lod_catalog)) {}
@@ -510,6 +516,15 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
         output_diagnostic = diagnostic(
             "workspace_viewport_camera_clip_space",
             "camera clip space does not match the prepared backend");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (request.selection_axis_world.has_value() &&
+        (selection_axis_pipeline_ == std::nullopt ||
+         selection_axis_buffer_ == nullptr ||
+         selection_axis_world_ == std::nullopt)) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_selection_axis_unprepared",
+            "A frame cannot override a selection axis that was not prepared");
         return WorkspaceViewportFrameStatus::invalid;
     }
 
@@ -563,6 +578,42 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
     frame.packet_visibility = packet_visibility;
     frame.apply_skinning = request.apply_skinning;
     frame.frame_constants = request.frame_constants;
+
+    std::array<render::OverlayLineDrawRequest, 1U> overlay_draws{};
+    if (selection_axis_pipeline_.has_value() &&
+        selection_axis_buffer_ != nullptr && selection_axis_world_.has_value()) {
+        const auto axis = render::build_selection_axis(
+            request.selection_axis_world.value_or(*selection_axis_world_));
+        if (!axis.ok()) {
+            output_diagnostic = axis.diagnostic;
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        const auto bytes = std::as_bytes(std::span(axis.vertices));
+        const auto updated = device.update_buffer(
+            *selection_axis_buffer_, 0U, bytes);
+        if (!updated.ok()) {
+            output_diagnostic = updated.diagnostic;
+            switch (updated.status) {
+            case render::BufferStatus::invalid_description:
+                return WorkspaceViewportFrameStatus::invalid;
+            case render::BufferStatus::unsupported:
+                return WorkspaceViewportFrameStatus::unsupported;
+            case render::BufferStatus::allocation_failed:
+            case render::BufferStatus::upload_failed:
+                return WorkspaceViewportFrameStatus::execution_failed;
+            case render::BufferStatus::ready:
+                break;
+            }
+            return WorkspaceViewportFrameStatus::execution_failed;
+        }
+        overlay_draws[0].pipeline = &*selection_axis_pipeline_;
+        overlay_draws[0].vertex_buffer = selection_axis_buffer_.get();
+        overlay_draws[0].vertex_count =
+            static_cast<std::uint32_t>(axis.vertices.size());
+        overlay_draws[0].matrices.world = apex::scene::identity_matrix;
+        overlay_draws[0].matrices.view_projection = request.camera.view_projection;
+        frame.overlay_draws = overlay_draws;
+    }
 
     render::Diagnostic shadow_diagnostic;
     if (directional_shadows_.has_value()) {
@@ -910,10 +961,78 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             lod_catalog = std::move(catalog);
         }
 
+        std::optional<render::PipelineProgram> selection_axis_pipeline;
+        std::unique_ptr<render::Buffer> selection_axis_buffer;
+        std::optional<apex::scene::Matrix4> selection_axis_world;
+        if (request.selection_axis_pipeline.has_value()) {
+            const auto selected = request.packets.selected_node;
+            if (selected == apex::scene::invalid_node_id ||
+                static_cast<std::size_t>(selected) >=
+                    document.scene.snapshot.nodes.size()) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_selection_axis_node_invalid",
+                    "A selection-axis pipeline requires a valid selected scene node");
+                return result;
+            }
+            selection_axis_world =
+                document.scene.snapshot.nodes[static_cast<std::size_t>(selected)]
+                    .transform;
+            const auto axis = render::build_selection_axis(*selection_axis_world);
+            if (!axis.ok()) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = axis.diagnostic;
+                return result;
+            }
+            render::BufferDescription axis_buffer_description;
+            axis_buffer_description.size_bytes = sizeof(axis.vertices);
+            axis_buffer_description.usage = render::BufferUsage::vertex;
+            axis_buffer_description.memory = render::BufferMemory::host_visible;
+            axis_buffer_description.mutability =
+                render::BufferMutability::mutable_data;
+            auto buffer = device.create_buffer(
+                axis_buffer_description,
+                std::as_bytes(std::span(axis.vertices)));
+            if (!buffer.ok()) {
+                result.status = buffer.status == render::BufferStatus::unsupported
+                                    ? WorkspaceViewportStatus::unsupported
+                                : buffer.status == render::BufferStatus::allocation_failed
+                                    ? WorkspaceViewportStatus::allocation_failed
+                                    : WorkspaceViewportStatus::invalid;
+                result.diagnostic = std::move(buffer.diagnostic);
+                return result;
+            }
+            render::OverlayLineDrawRequest axis_request;
+            axis_request.pipeline = &*request.selection_axis_pipeline;
+            axis_request.vertex_buffer = buffer.buffer.get();
+            axis_request.vertex_count =
+                static_cast<std::uint32_t>(axis.vertices.size());
+            render::IndexedStaticMeshBatchDescription axis_batch;
+            axis_batch.depth_attachment = depth.attachment.get();
+            const std::array axis_draws = {axis_request};
+            axis_batch.overlay_draws = axis_draws;
+            render::Diagnostic axis_diagnostic;
+            const auto axis_validation =
+                render::validate_indexed_static_mesh_batch_description(
+                    *color.texture, axis_batch, axis_diagnostic);
+            if (axis_validation != render::IndexedStaticMeshBatchStatus::ready) {
+                result.status =
+                    axis_validation == render::IndexedStaticMeshBatchStatus::unsupported
+                        ? WorkspaceViewportStatus::unsupported
+                        : WorkspaceViewportStatus::invalid;
+                result.diagnostic = std::move(axis_diagnostic);
+                return result;
+            }
+            selection_axis_pipeline = *request.selection_axis_pipeline;
+            selection_axis_buffer = std::move(buffer.buffer);
+        }
+
         result.viewport = std::unique_ptr<WorkspaceViewport>(new WorkspaceViewport(
             device.info().backend, request.presentation, std::move(color.texture),
             std::move(resolved_color), std::move(depth.attachment),
             std::move(execution),
+            std::move(selection_axis_pipeline), std::move(selection_axis_buffer),
+            std::move(selection_axis_world),
             std::move(shadow_maps), request.directional_shadows,
             std::move(lod_catalog)));
         result.status = WorkspaceViewportStatus::ready;

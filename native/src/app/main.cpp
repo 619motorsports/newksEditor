@@ -59,6 +59,7 @@ void usage(std::ostream& output) {
               "                       [--show-hidden] [--wireframe]\n"
               "                       [--weather <stock-id>] [--sun-heading <degrees>] [--sun-height <degrees>]\n"
               "                       [--shader-family <name> --shader-vertex <file> --shader-fragment <file>]\n"
+              "                       [--selection-axis-vertex <file> --selection-axis-fragment <file>]\n"
               "                       [--directional-shadow-vertex <file>]\n"
            << "  apex-native --inspect-kn5 <file>\n"
            << "  apex-native --inspect-dds <file>\n"
@@ -366,6 +367,23 @@ apex::render::Backend parse_backend(std::string_view value) {
     throw std::runtime_error("backend must be vulkan or d3d12");
 }
 
+apex::render::PipelineRenderTargetFormat pipeline_color_format(
+    apex::render::TextureFormat format) {
+    switch (format) {
+    case apex::render::TextureFormat::rgba8_unorm:
+        return apex::render::PipelineRenderTargetFormat::rgba8_unorm;
+    case apex::render::TextureFormat::rgba8_srgb:
+        return apex::render::PipelineRenderTargetFormat::rgba8_srgb;
+    case apex::render::TextureFormat::bgra8_unorm:
+        return apex::render::PipelineRenderTargetFormat::bgra8_unorm;
+    case apex::render::TextureFormat::bgra8_srgb:
+        return apex::render::PipelineRenderTargetFormat::bgra8_srgb;
+    default:
+        throw std::runtime_error(
+            "presentation format has no selection-axis pipeline contract");
+    }
+}
+
 int inspect_ksanim(const std::filesystem::path& path) {
     const auto bytes = read_file(path);
     const auto animation = apex::formats::parseKsAnimation(bytes, path.string());
@@ -519,6 +537,8 @@ struct WindowWorkspaceOptions {
     double sunHeight = apex::app::workspace_viewport_default_sun_height_degrees;
     bool sunHeightSpecified = false;
     std::vector<WindowShaderSpec> shaders;
+    std::optional<std::filesystem::path> selectionAxisVertex;
+    std::optional<std::filesystem::path> selectionAxisFragment;
     std::optional<std::filesystem::path> directionalShadowVertex;
 };
 
@@ -530,6 +550,8 @@ struct LoadedWindowWorkspace {
     };
     std::vector<ShaderSet> shaderSets;
     std::vector<apex::render::StockMaterialShaderModules> descriptors;
+    std::optional<std::vector<apex::render::PipelineShaderModule>>
+        selectionAxisModules;
     std::optional<apex::app::WorkspaceViewportDirectionalShadowOptions>
         directionalShadows;
     apex::app::WorkspaceSelectionState selection;
@@ -715,6 +737,18 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
                     "duplicate --directional-shadow-vertex option");
             result.directionalShadowVertex = std::filesystem::path(
                 require_value("--directional-shadow-vertex"));
+        } else if (option == "--selection-axis-vertex") {
+            if (result.selectionAxisVertex.has_value())
+                throw std::runtime_error(
+                    "duplicate --selection-axis-vertex option");
+            result.selectionAxisVertex = std::filesystem::path(
+                require_value("--selection-axis-vertex"));
+        } else if (option == "--selection-axis-fragment") {
+            if (result.selectionAxisFragment.has_value())
+                throw std::runtime_error(
+                    "duplicate --selection-axis-fragment option");
+            result.selectionAxisFragment = std::filesystem::path(
+                require_value("--selection-axis-fragment"));
         } else {
             throw std::runtime_error("unknown window option");
         }
@@ -739,8 +773,17 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
         }
     }
     if ((!result.model.has_value() && !result.workspaceRoot.has_value()) &&
-        (!result.shaders.empty() || result.directionalShadowVertex.has_value()))
+        (!result.shaders.empty() || result.directionalShadowVertex.has_value() ||
+         result.selectionAxisVertex.has_value() ||
+         result.selectionAxisFragment.has_value()))
         throw std::runtime_error("shader modules require a workspace model");
+    if (result.selectionAxisVertex.has_value() !=
+        result.selectionAxisFragment.has_value())
+        throw std::runtime_error(
+            "selection-axis vertex and fragment modules must be supplied together");
+    if (result.selectionAxisVertex.has_value() && !result.selectedNode.has_value())
+        throw std::runtime_error(
+            "selection-axis shader modules require --selected-node");
     if (result.directionalShadowVertex.has_value() && result.shaders.empty())
         throw std::runtime_error(
             "--directional-shadow-vertex requires receiver-capable material shader modules");
@@ -939,6 +982,26 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
         }
         loaded.shaderSets.push_back(std::move(set));
     }
+    if (options.selectionAxisVertex.has_value()) {
+        std::vector<apex::render::PipelineShaderModule> modules;
+        modules.push_back({apex::render::PipelineShaderStage::vertex,
+                           shader_format,
+                           read_file(*options.selectionAxisVertex)});
+        modules.push_back({apex::render::PipelineShaderStage::fragment,
+                           shader_format,
+                           read_file(*options.selectionAxisFragment)});
+        for (const auto& module : modules) {
+            if (module.bytes.size() > apex::render::max_shader_module_bytes)
+                throw std::runtime_error(
+                    "a selection-axis module exceeds the native module budget");
+            if (module.bytes.size() > max_shader_bytes ||
+                shader_bytes > max_shader_bytes - module.bytes.size())
+                throw std::runtime_error(
+                    "caller-supplied shader modules exceed the native shader budget");
+            shader_bytes += module.bytes.size();
+        }
+        loaded.selectionAxisModules = std::move(modules);
+    }
     if (options.directionalShadowVertex.has_value()) {
         auto shadow_bytes = read_file(*options.directionalShadowVertex);
         if (shadow_bytes.size() > apex::render::max_shader_module_bytes)
@@ -1089,6 +1152,34 @@ int run_window(int argc, char** argv) {
         request.packets.selected_node = loaded_workspace.selection.selected_node;
         request.packets.wireframe = loaded_workspace.selection.wireframe;
         request.wireframe = loaded_workspace.selection.wireframe;
+        if (loaded_workspace.selectionAxisModules.has_value()) {
+            apex::render::PipelineProgram pipeline;
+            pipeline.name = "workspace-selection-axis";
+            pipeline.shaders = *loaded_workspace.selectionAxisModules;
+            pipeline.vertex_layout.stride =
+                sizeof(apex::render::OverlayLineVertex);
+            pipeline.vertex_layout.attributes = {
+                {apex::render::PipelineVertexSemantic::position,
+                 apex::render::PipelineVertexAttributeFormat::float32x3,
+                 0U, 0U},
+                {apex::render::PipelineVertexSemantic::color,
+                 apex::render::PipelineVertexAttributeFormat::float32x3,
+                 1U, 12U},
+            };
+            pipeline.targets.colors = {{pipeline_color_format(
+                request.presentation.format), request.color_samples}};
+            pipeline.targets.has_depth = true;
+            pipeline.targets.depth = {
+                apex::render::PipelineRenderTargetFormat::depth32_float,
+                request.color_samples};
+            pipeline.raster.cull = apex::render::PipelineCullMode::none;
+            pipeline.raster.fill = apex::render::PipelineFillMode::wireframe;
+            pipeline.depth.test_enabled = false;
+            pipeline.depth.write_enabled = false;
+            pipeline.transform_contract =
+                apex::render::PipelineTransformContract::draw_matrices;
+            request.selection_axis_pipeline = std::move(pipeline);
+        }
         if (loaded_workspace.directionalShadows.has_value()) {
             request.directional_shadow_receiver = true;
             request.directional_shadows = loaded_workspace.directionalShadows;
@@ -1202,6 +1293,15 @@ int run_window(int argc, char** argv) {
             frame_request.frame_constants = workspace_lighting.frame_constants;
             frame_request.apply_skinning =
                 loaded_workspace.animationSkinningRequired;
+            if (loaded_workspace.selectionAxisModules.has_value() &&
+                loaded_workspace.selection.selected_node !=
+                    apex::scene::invalid_node_id) {
+                frame_request.selection_axis_world =
+                    loaded_workspace.document->scene.snapshot.nodes[
+                        static_cast<std::size_t>(
+                            loaded_workspace.selection.selected_node)]
+                        .transform;
+            }
             viewport_status = viewport->drawAndPresent(
                 *device_result.device, *target_result.target, frame_request,
                 viewport_diagnostic);
