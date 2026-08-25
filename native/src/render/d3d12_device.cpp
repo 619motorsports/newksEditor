@@ -1471,6 +1471,7 @@ struct D3D12GeometryDescriptor {
     ID3D12Resource* index_resource = nullptr;
     UINT64 index_offset = 0U;
     UINT index_size = 0U;
+    UINT vertex_count = 0U;
     UINT index_count = 0U;
     bool indexed = false;
 };
@@ -2420,9 +2421,9 @@ bool draw_indexed_static_mesh_batch_and_readback(
     if (!validate_d3d12_sample_count(context, dxgi_texture_format(description.format),
                                      description.samples, diagnostic))
         return false;
-    for (const IndexedStaticMeshDrawRequest& request : batch.draws) {
-        if (request.pipeline == nullptr || request.pipeline->targets.colors.empty() ||
-            request.pipeline->targets.colors.front().samples != description.samples) {
+    for (const D3D12IndexedBatchDraw& draw : draws) {
+        if (draw.pipeline == nullptr || draw.pipeline->targets.colors.empty() ||
+            draw.pipeline->targets.colors.front().samples != description.samples) {
             diagnostic = {"d3d12_sample_count_mismatch",
                           "D3D12 color texture and every batch pipeline must use the same sample count"};
             return false;
@@ -2519,7 +2520,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
             return false;
         }
         material_bindings.resize(draws.size());
-        for (std::size_t index = 0; index < draws.size(); ++index) {
+        for (std::size_t index = 0; index < batch.draws.size(); ++index) {
             const std::size_t descriptor_index = index * material_descriptor_stride;
             if (!prepare_d3d12_material_binding(context, batch.draws[index], srv_heap.Get(),
                                                  static_cast<UINT>(descriptor_index),
@@ -3184,16 +3185,25 @@ bool draw_indexed_static_mesh_batch_and_readback(
         vertex_view.StrideInBytes = draw.geometry.vertex_stride;
         list->IASetVertexBuffers(0U, 1U, &vertex_view);
         D3D12_INDEX_BUFFER_VIEW index_view{};
-        index_view.BufferLocation = draw.geometry.index_resource->GetGPUVirtualAddress() + draw.geometry.index_offset;
-        index_view.SizeInBytes = draw.geometry.index_size;
-        index_view.Format = DXGI_FORMAT_R16_UINT;
-        list->IASetIndexBuffer(&index_view);
+        if (draw.geometry.indexed) {
+            index_view.BufferLocation =
+                draw.geometry.index_resource->GetGPUVirtualAddress() +
+                draw.geometry.index_offset;
+            index_view.SizeInBytes = draw.geometry.index_size;
+            index_view.Format = DXGI_FORMAT_R16_UINT;
+            list->IASetIndexBuffer(&index_view);
+        } else {
+            list->IASetIndexBuffer(nullptr);
+        }
         D3D12_VIEWPORT viewport{0.0F, 0.0F, static_cast<float>(description.width),
                                 static_cast<float>(description.height), 0.0F, 1.0F};
         D3D12_RECT scissor{0, 0, static_cast<LONG>(description.width), static_cast<LONG>(description.height)};
         list->RSSetViewports(1U, &viewport);
         list->RSSetScissorRects(1U, &scissor);
-        list->DrawIndexedInstanced(draw.geometry.index_count, 1U, 0U, 0, 0U);
+        if (draw.geometry.indexed)
+            list->DrawIndexedInstanced(draw.geometry.index_count, 1U, 0U, 0, 0U);
+        else
+            list->DrawInstanced(draw.geometry.vertex_count, 1U, 0U, 0U);
     }
     for (std::size_t shadow_index = 0U; shadow_index < shadow_attachments.size(); ++shadow_index) {
         if (shadow_states[shadow_index] == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) continue;
@@ -5947,7 +5957,7 @@ public:
                      "Batch resources belong to another D3D12 device"}, {}};
         }
         std::vector<D3D12IndexedBatchDraw> draws;
-        draws.reserve(batch.draws.size());
+        draws.reserve(batch.draws.size() + batch.overlay_draws.size());
         for (const IndexedStaticMeshDrawRequest& request : batch.draws) {
             const auto* vertex = dynamic_cast<const D3D12Buffer*>(request.vertex_buffer);
             const auto* index = dynamic_cast<const D3D12Buffer*>(request.index_buffer);
@@ -6009,6 +6019,49 @@ public:
             draw.geometry.index_size = static_cast<UINT>(index_bytes);
             draw.geometry.index_count = request.packet->index_count;
             draw.geometry.indexed = true;
+            draws.push_back(draw);
+        }
+        for (const OverlayLineDrawRequest& request : batch.overlay_draws) {
+            const auto* vertex =
+                dynamic_cast<const D3D12Buffer*>(request.vertex_buffer);
+            if (vertex == nullptr || vertex->context() != context) {
+                return {IndexedStaticMeshBatchStatus::unsupported,
+                        {"overlay_line_context_mismatch",
+                         "Overlay line buffers must belong to this D3D12 device"},
+                        {}};
+            }
+            const UINT required_vertex_state = static_cast<UINT>(
+                D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+            if ((static_cast<UINT>(vertex->state()) & required_vertex_state) == 0U) {
+                return {IndexedStaticMeshBatchStatus::invalid_request,
+                        {"overlay_line_resource_state_invalid",
+                         "Overlay line buffer is not in D3D12 vertex state"},
+                        {}};
+            }
+            const std::uint64_t vertex_bytes =
+                static_cast<std::uint64_t>(request.vertex_count) *
+                sizeof(OverlayLineVertex);
+            const auto resource_description = vertex->resource()->GetDesc();
+            constexpr std::uint64_t max_uint =
+                static_cast<std::uint64_t>(std::numeric_limits<UINT>::max());
+            if (vertex_bytes > max_uint ||
+                request.vertex_offset_bytes > resource_description.Width ||
+                vertex_bytes >
+                    resource_description.Width - request.vertex_offset_bytes) {
+                return {IndexedStaticMeshBatchStatus::invalid_request,
+                        {"overlay_line_vertex_range_invalid",
+                         "Overlay line vertex range exceeds D3D12 buffer limits"},
+                        {}};
+            }
+            D3D12IndexedBatchDraw draw;
+            draw.pipeline = request.pipeline;
+            draw.matrices = request.matrices;
+            draw.geometry.vertex_resource = vertex->resource();
+            draw.geometry.vertex_offset = request.vertex_offset_bytes;
+            draw.geometry.vertex_size = static_cast<UINT>(vertex_bytes);
+            draw.geometry.vertex_stride = sizeof(OverlayLineVertex);
+            draw.geometry.vertex_count = request.vertex_count;
+            draw.geometry.indexed = false;
             draws.push_back(draw);
         }
         std::vector<std::byte> output;

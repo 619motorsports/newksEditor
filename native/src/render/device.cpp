@@ -2016,6 +2016,157 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     return IndexedStaticMeshDrawStatus::ready;
 }
 
+IndexedStaticMeshBatchStatus validate_overlay_line_draw_request(
+    const Texture& texture, const OverlayLineDrawRequest& request,
+    Diagnostic& diagnostic) {
+    if (request.pipeline == nullptr || request.vertex_buffer == nullptr) {
+        diagnostic = {"overlay_line_handle_missing",
+                      "Overlay line drawing requires a pipeline and vertex buffer"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (request.vertex_count < 2U || request.vertex_count % 2U != 0U) {
+        diagnostic = {"overlay_line_vertex_count_invalid",
+                      "Overlay line vertex count must contain complete line pairs"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (request.vertex_count > max_overlay_line_vertices) {
+        diagnostic = {"overlay_line_vertex_limit",
+                      "Overlay line vertex count exceeds the bounded limit"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    const PipelineProgram& pipeline = *request.pipeline;
+    const PipelineValidationResult pipeline_validation = validate_pipeline(pipeline);
+    if (!pipeline_validation.valid) {
+        diagnostic = pipeline_validation.diagnostics.empty()
+                         ? Diagnostic{"overlay_line_pipeline_invalid",
+                                      "Overlay line pipeline validation failed"}
+                         : Diagnostic{"overlay_line_pipeline_" +
+                                          pipeline_validation.diagnostics.front().code,
+                                      pipeline_validation.diagnostics.front().message};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (pipeline.shaders.size() != 2U ||
+        std::count_if(pipeline.shaders.begin(), pipeline.shaders.end(),
+                      [](const PipelineShaderModule& shader) {
+                          return shader.stage == PipelineShaderStage::vertex;
+                      }) != 1 ||
+        std::count_if(pipeline.shaders.begin(), pipeline.shaders.end(),
+                      [](const PipelineShaderModule& shader) {
+                          return shader.stage == PipelineShaderStage::fragment;
+                      }) != 1) {
+        diagnostic = {"overlay_line_shader_pair_invalid",
+                      "Overlay line pipelines require one vertex and one fragment shader"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (pipeline.vertex_layout.stride != sizeof(OverlayLineVertex) ||
+        pipeline.vertex_layout.attributes.size() != 2U) {
+        diagnostic = {"overlay_line_vertex_layout_invalid",
+                      "Overlay line pipelines require the fixed position-color vertex ABI"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    const PipelineVertexAttribute expected_position{
+        PipelineVertexSemantic::position,
+        PipelineVertexAttributeFormat::float32x3, 0U, 0U};
+    const PipelineVertexAttribute expected_color{
+        PipelineVertexSemantic::color,
+        PipelineVertexAttributeFormat::float32x3, 1U,
+        static_cast<std::uint32_t>(3U * sizeof(float))};
+    const auto same_attribute = [](const PipelineVertexAttribute& left,
+                                   const PipelineVertexAttribute& right) {
+        return left.semantic == right.semantic && left.format == right.format &&
+               left.location == right.location && left.offset == right.offset;
+    };
+    if (!same_attribute(pipeline.vertex_layout.attributes[0], expected_position) ||
+        !same_attribute(pipeline.vertex_layout.attributes[1], expected_color)) {
+        diagnostic = {"overlay_line_vertex_layout_invalid",
+                      "Overlay line attributes must be position float3 at 0 and color float3 at 1"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    const TextureDescription& target = texture.info().description;
+    const auto expected_format = [&] {
+        switch (target.format) {
+        case TextureFormat::rgba8_unorm: return PipelineRenderTargetFormat::rgba8_unorm;
+        case TextureFormat::rgba8_srgb: return PipelineRenderTargetFormat::rgba8_srgb;
+        case TextureFormat::bgra8_unorm: return PipelineRenderTargetFormat::bgra8_unorm;
+        case TextureFormat::bgra8_srgb: return PipelineRenderTargetFormat::bgra8_srgb;
+        default: return PipelineRenderTargetFormat::unknown;
+        }
+    }();
+    if (expected_format == PipelineRenderTargetFormat::unknown) {
+        diagnostic = {"overlay_line_target_format_unsupported",
+                      "Overlay lines support only RGBA8 and BGRA8 color targets"};
+        return IndexedStaticMeshBatchStatus::unsupported;
+    }
+    if (pipeline.targets.colors.size() != 1U ||
+        pipeline.targets.colors[0].format != expected_format ||
+        pipeline.targets.colors[0].samples != target.samples) {
+        diagnostic = {"overlay_line_pipeline_target_mismatch",
+                      "Overlay line pipeline target must match the batch color target"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (pipeline.transform_contract != PipelineTransformContract::draw_matrices) {
+        diagnostic = {"overlay_line_transform_contract_invalid",
+                      "Overlay lines require the draw-matrices transform contract"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (pipeline.raster.fill != PipelineFillMode::wireframe ||
+        pipeline.raster.cull != PipelineCullMode::none) {
+        diagnostic = {"overlay_line_topology_invalid",
+                      "Overlay lines require line-list topology with culling disabled"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (pipeline.depth.test_enabled || pipeline.depth.write_enabled) {
+        diagnostic = {"overlay_line_depth_state_invalid",
+                      "Overlay line depth testing and writes must be disabled"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (pipeline.blend.enabled || pipeline.blend.alpha_to_coverage) {
+        diagnostic = {"overlay_line_blend_state_invalid",
+                      "Overlay line blending and alpha-to-coverage must be disabled"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (!pipeline.resources.empty()) {
+        diagnostic = {"overlay_line_resources_invalid",
+                      "Overlay line pipelines must be resource-free"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (request.vertex_buffer->backend() != texture.backend()) {
+        diagnostic = {"overlay_line_backend_mismatch",
+                      "Overlay line buffer and color target must use the same backend"};
+        return IndexedStaticMeshBatchStatus::unsupported;
+    }
+    const BufferDescription& buffer = request.vertex_buffer->info().description;
+    if (!any(buffer.usage & BufferUsage::vertex)) {
+        diagnostic = {"overlay_line_vertex_usage_invalid",
+                      "Overlay line buffer lacks vertex usage"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    const std::uint64_t vertex_bytes =
+        static_cast<std::uint64_t>(request.vertex_count) * sizeof(OverlayLineVertex);
+    if (request.vertex_offset_bytes > buffer.size_bytes ||
+        vertex_bytes > buffer.size_bytes - request.vertex_offset_bytes) {
+        diagnostic = {"overlay_line_vertex_range_invalid",
+                      "Overlay line vertex range exceeds its buffer"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    for (const float component : request.matrices.world) {
+        if (!std::isfinite(component)) {
+            diagnostic = {"overlay_line_matrix_non_finite",
+                          "Overlay line matrices must contain only finite values"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+    }
+    for (const float component : request.matrices.view_projection) {
+        if (!std::isfinite(component)) {
+            diagnostic = {"overlay_line_matrix_non_finite",
+                          "Overlay line matrices must contain only finite values"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+    }
+    diagnostic = {};
+    return IndexedStaticMeshBatchStatus::ready;
+}
+
 IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
     const Texture& texture, const IndexedStaticMeshBatchDescription& description,
     Diagnostic& diagnostic) {
@@ -2023,6 +2174,38 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
         diagnostic = {"indexed_static_mesh_batch_limit",
                       "Indexed static-mesh batch exceeds the bounded draw limit"};
         return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (description.overlay_draws.size() > max_overlay_line_draws) {
+        diagnostic = {"overlay_line_batch_limit",
+                      "Overlay line batch exceeds the bounded draw limit"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    std::uint64_t overlay_vertices = 0U;
+    for (const OverlayLineDrawRequest& overlay : description.overlay_draws) {
+        overlay_vertices += overlay.vertex_count;
+        if (overlay_vertices > max_overlay_line_total_vertices) {
+            diagnostic = {"overlay_line_total_vertex_limit",
+                          "Overlay line batch exceeds the bounded total vertex limit"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        Diagnostic overlay_diagnostic;
+        const IndexedStaticMeshBatchStatus overlay_status =
+            validate_overlay_line_draw_request(texture, overlay, overlay_diagnostic);
+        if (overlay_status != IndexedStaticMeshBatchStatus::ready) {
+            diagnostic = std::move(overlay_diagnostic);
+            return overlay_status;
+        }
+        const bool batch_has_depth = description.depth_attachment != nullptr;
+        if (overlay.pipeline->targets.has_depth != batch_has_depth ||
+            (batch_has_depth &&
+             (overlay.pipeline->targets.depth.format !=
+                  PipelineRenderTargetFormat::depth32_float ||
+              overlay.pipeline->targets.depth.samples !=
+                  texture.info().description.samples))) {
+            diagnostic = {"overlay_line_pipeline_depth_target_mismatch",
+                          "Overlay line depth target metadata must match the batch render pass"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
     }
     for (const float component : description.clear_color) {
         if (!std::isfinite(component)) {

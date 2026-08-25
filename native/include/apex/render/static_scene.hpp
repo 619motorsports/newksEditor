@@ -141,6 +141,9 @@ struct StaticSceneFrameDescription {
     // and uses owned resources.
     std::span<const Texture* const> textures_by_global_index{};
     std::span<const Sampler* const> samplers_by_global_index{};
+    // Editor overlays are submitted after all retained scene packets in the
+    // same render pass. The caller owns the referenced pipeline and buffer.
+    std::span<const OverlayLineDrawRequest> overlay_draws{};
 };
 
 struct StaticSceneResourceResult;

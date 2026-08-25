@@ -1786,7 +1786,9 @@ struct VulkanIndexedBatchDraw {
     const VulkanBuffer* indices = nullptr;
     VkDeviceSize vertex_offset = 0U;
     VkDeviceSize index_offset = 0U;
+    std::uint32_t vertex_count = 0U;
     std::uint32_t index_count = 0U;
+    bool indexed = true;
     DrawMatrices matrices{};
     bool has_sampled_binding = false;
     VkImage sampled_image = VK_NULL_HANDLE;
@@ -3502,7 +3504,8 @@ bool draw_indexed_batch_and_readback(
     std::vector<VulkanBatchPipeline> pipelines;
     pipelines.reserve(draws.size());
     for (const VulkanIndexedBatchDraw& draw : draws) {
-        if (draw.program == nullptr || draw.vertices == nullptr || draw.indices == nullptr) {
+        if (draw.program == nullptr || draw.vertices == nullptr ||
+            (draw.indexed && draw.indices == nullptr)) {
             vkDestroyFramebuffer(context->device, framebuffer, nullptr);
             vkDestroyRenderPass(context->device, render_pass, nullptr);
             diagnostic = {"indexed_static_mesh_batch_resource_invalid",
@@ -3671,8 +3674,13 @@ bool draw_indexed_batch_and_readback(
                                         0U, 1U, &descriptor_sets[index], 0U, nullptr);
             }
             vkCmdBindVertexBuffers(command, 0U, 1U, &vertex_buffer, &vertex_offset);
-            vkCmdBindIndexBuffer(command, draw.indices->raw().buffer, draw.index_offset, VK_INDEX_TYPE_UINT16);
-            vkCmdDrawIndexed(command, draw.index_count, 1U, 0U, 0, 0U);
+            if (draw.indexed) {
+                vkCmdBindIndexBuffer(command, draw.indices->raw().buffer,
+                                     draw.index_offset, VK_INDEX_TYPE_UINT16);
+                vkCmdDrawIndexed(command, draw.index_count, 1U, 0U, 0, 0U);
+            } else {
+                vkCmdDraw(command, draw.vertex_count, 1U, 0U, 0U);
+            }
         }
         vkCmdEndRenderPass(command);
         for (std::size_t index = 0U;
@@ -4302,7 +4310,7 @@ public:
             return false;
         }
         std::vector<VulkanIndexedBatchDraw> draws;
-        draws.reserve(description.draws.size());
+        draws.reserve(description.draws.size() + description.overlay_draws.size());
         for (const IndexedStaticMeshDrawRequest& request : description.draws) {
             auto* vertices = dynamic_cast<const VulkanBuffer*>(request.vertex_buffer);
             auto* indices = dynamic_cast<const VulkanBuffer*>(request.index_buffer);
@@ -4336,6 +4344,34 @@ public:
             draw.index_count = packet.index_count;
             draw.matrices = {packet.world_matrix, request.camera_frame->view_projection};
             if (!prepare_vulkan_sampled_binding(request, context_, draw, diagnostic)) return false;
+            draws.push_back(draw);
+        }
+        for (const OverlayLineDrawRequest& request : description.overlay_draws) {
+            auto* vertices = dynamic_cast<const VulkanBuffer*>(request.vertex_buffer);
+            if (vertices == nullptr || request.pipeline == nullptr) {
+                diagnostic = {"overlay_line_resource_invalid",
+                              "The Vulkan overlay batch contains an unknown or incomplete resource"};
+                return false;
+            }
+            if (vertices->context() != context_) {
+                diagnostic = {"overlay_line_context_mismatch",
+                              "Overlay line buffers must be owned by the same Vulkan device"};
+                return false;
+            }
+            if (request.vertex_offset_bytes >
+                std::numeric_limits<VkDeviceSize>::max()) {
+                diagnostic = {"overlay_line_offset_overflow",
+                              "Overlay line offset exceeds Vulkan addressability"};
+                return false;
+            }
+            VulkanIndexedBatchDraw draw;
+            draw.program = request.pipeline;
+            draw.vertices = vertices;
+            draw.vertex_offset =
+                static_cast<VkDeviceSize>(request.vertex_offset_bytes);
+            draw.vertex_count = request.vertex_count;
+            draw.indexed = false;
+            draw.matrices = request.matrices;
             draws.push_back(draw);
         }
         const bool drawn = draw_indexed_batch_and_readback(

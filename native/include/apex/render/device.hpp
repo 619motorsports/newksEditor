@@ -685,6 +685,29 @@ struct DrawMatrices {
 static_assert(sizeof(DrawMatrices) == 32U * sizeof(float));
 static_assert(std::is_trivially_copyable_v<DrawMatrices>);
 
+// World-space colored line geometry used by editor overlays. The fixed ABI
+// keeps overlay pipelines backend-neutral and leaves material descriptors out
+// of the authoring pass.
+struct OverlayLineVertex {
+    std::array<float, 3> position{};
+    std::array<float, 3> color{};
+};
+
+static_assert(sizeof(OverlayLineVertex) == 6U * sizeof(float));
+static_assert(std::is_trivially_copyable_v<OverlayLineVertex>);
+
+struct OverlayLineDrawRequest {
+    const PipelineProgram* pipeline = nullptr;
+    const Buffer* vertex_buffer = nullptr;
+    std::uint64_t vertex_offset_bytes = 0U;
+    std::uint32_t vertex_count = 0U;
+    DrawMatrices matrices{};
+};
+
+inline constexpr std::size_t max_overlay_line_draws = 16U;
+inline constexpr std::uint32_t max_overlay_line_vertices = 4096U;
+inline constexpr std::uint32_t max_overlay_line_total_vertices = 65'536U;
+
 struct IndexedStaticMeshDrawRequest {
     const DrawPacket* packet = nullptr;
     const PipelineProgram* pipeline = nullptr;
@@ -764,6 +787,9 @@ struct IndexedStaticMeshBatchDescription {
     // Disable CPU readback when the caller only needs the retained GPU image.
     // A four-sample batch then requires resolve_target.
     bool capture_rgba8 = true;
+    // Resource-free line draws execute after indexed scene draws and before
+    // the batch's optional MSAA resolve.
+    std::span<const OverlayLineDrawRequest> overlay_draws{};
 };
 
 enum class IndexedStaticMeshBatchStatus {
@@ -1018,6 +1044,10 @@ inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
 
 [[nodiscard]] IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     const Texture& texture, const IndexedStaticMeshDrawRequest& request, Diagnostic& diagnostic);
+
+[[nodiscard]] IndexedStaticMeshBatchStatus validate_overlay_line_draw_request(
+    const Texture& texture, const OverlayLineDrawRequest& request,
+    Diagnostic& diagnostic);
 
 // Preflight an ordered batch without changing any caller-owned request. The
 // function applies the batch attachment/load/clear state to local copies and

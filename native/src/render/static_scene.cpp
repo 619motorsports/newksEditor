@@ -1689,7 +1689,7 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
     const IndexedStaticMeshBatchDescription batch{
         draws, frame.depth_attachment, frame.load_color, frame.clear_color,
         frame.clear_depth, frame.depth_clear_value, frame.resolve_target,
-        frame.capture_rgba8};
+        frame.capture_rgba8, frame.overlay_draws};
     Diagnostic batch_diagnostic;
     const IndexedStaticMeshBatchStatus batch_validation =
         validate_indexed_static_mesh_batch_description(target, batch, batch_diagnostic);

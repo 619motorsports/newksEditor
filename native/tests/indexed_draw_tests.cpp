@@ -106,6 +106,33 @@ PipelineProgram pipeline_fixture() {
     return pipeline;
 }
 
+PipelineProgram overlay_pipeline_fixture() {
+    PipelineProgram pipeline;
+    pipeline.name = "overlay-line-contract";
+    pipeline.targets.colors.push_back(
+        {PipelineRenderTargetFormat::rgba8_unorm, 1U});
+    pipeline.raster.cull = PipelineCullMode::none;
+    pipeline.raster.fill = PipelineFillMode::wireframe;
+    pipeline.depth.test_enabled = false;
+    pipeline.depth.write_enabled = false;
+    pipeline.transform_contract = PipelineTransformContract::draw_matrices;
+    pipeline.vertex_layout.stride = sizeof(OverlayLineVertex);
+    pipeline.vertex_layout.attributes = {
+        {PipelineVertexSemantic::position,
+         PipelineVertexAttributeFormat::float32x3, 0U, 0U},
+        {PipelineVertexSemantic::color,
+         PipelineVertexAttributeFormat::float32x3, 1U,
+         static_cast<std::uint32_t>(3U * sizeof(float))},
+    };
+    pipeline.shaders.push_back({PipelineShaderStage::vertex,
+                                PipelineShaderFormat::spirv,
+                                shader_fixture()});
+    pipeline.shaders.push_back({PipelineShaderStage::fragment,
+                                PipelineShaderFormat::spirv,
+                                shader_fixture()});
+    return pipeline;
+}
+
 DrawPacket packet_fixture() {
     DrawPacket packet;
     packet.primitive = DrawPrimitiveKind::static_mesh;
@@ -2151,6 +2178,93 @@ void validates_ordered_indexed_batch_contract() {
             "over-limit indexed batch rejected");
 }
 
+void validates_overlay_line_batch_contract() {
+    PipelineProgram pipeline = overlay_pipeline_fixture();
+    FakeTexture target(Backend::Vulkan, target_description());
+    FakeBuffer vertices(
+        Backend::Vulkan,
+        {6U * sizeof(OverlayLineVertex), BufferUsage::vertex,
+         BufferMemory::host_visible, BufferMutability::mutable_data});
+    OverlayLineDrawRequest request;
+    request.pipeline = &pipeline;
+    request.vertex_buffer = &vertices;
+    request.vertex_count = 6U;
+    Diagnostic diagnostic;
+    require(validate_overlay_line_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshBatchStatus::ready,
+            "valid RGB overlay line contract accepted");
+
+    IndexedStaticMeshBatchDescription batch;
+    const std::array overlays = {request};
+    batch.overlay_draws = overlays;
+    require(validate_indexed_static_mesh_batch_description(target, batch,
+                                                           diagnostic) ==
+                IndexedStaticMeshBatchStatus::ready,
+            "overlay-only batch accepted");
+
+    request.vertex_count = 5U;
+    require(validate_overlay_line_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "overlay_line_vertex_count_invalid",
+            "incomplete line pair rejected");
+    request.vertex_count = 6U;
+    request.vertex_offset_bytes = sizeof(OverlayLineVertex);
+    require(validate_overlay_line_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "overlay_line_vertex_range_invalid",
+            "overlay buffer overrun rejected");
+    request.vertex_offset_bytes = 0U;
+    request.matrices.world[0] = std::numeric_limits<float>::quiet_NaN();
+    require(validate_overlay_line_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "overlay_line_matrix_non_finite",
+            "non-finite overlay matrix rejected");
+    request.matrices.world = apex::scene::identity_matrix;
+
+    pipeline.targets.has_depth = true;
+    pipeline.targets.depth = {PipelineRenderTargetFormat::depth32_float, 1U};
+    pipeline.depth.test_enabled = true;
+    require(validate_overlay_line_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "overlay_line_depth_state_invalid",
+            "depth-tested editor overlay rejected");
+    pipeline.depth.test_enabled = false;
+    pipeline.targets.has_depth = false;
+    pipeline.targets.depth = {};
+    pipeline.raster.fill = PipelineFillMode::solid;
+    require(validate_overlay_line_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "overlay_line_topology_invalid",
+            "triangle topology rejected for line overlay");
+    pipeline.raster.fill = PipelineFillMode::wireframe;
+
+    FakeDepthAttachment depth(
+        Backend::Vulkan,
+        {16U, 16U, 1U, DepthAttachmentFormat::d32_float});
+    batch.depth_attachment = &depth;
+    require(validate_indexed_static_mesh_batch_description(target, batch,
+                                                           diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code ==
+                    "overlay_line_pipeline_depth_target_mismatch",
+            "overlay pipeline depth metadata must match the shared pass");
+    pipeline.targets.has_depth = true;
+    pipeline.targets.depth = {PipelineRenderTargetFormat::depth32_float, 1U};
+    require(validate_indexed_static_mesh_batch_description(target, batch,
+                                                           diagnostic) ==
+                IndexedStaticMeshBatchStatus::ready,
+            "depth-off overlay can share a pass with a depth attachment");
+
+    std::vector<OverlayLineDrawRequest> too_many(max_overlay_line_draws + 1U,
+                                                 request);
+    batch.overlay_draws = too_many;
+    require(validate_indexed_static_mesh_batch_description(target, batch,
+                                                           diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "overlay_line_batch_limit",
+            "over-limit overlay batch rejected before execution");
+}
+
 void rejects_static_indexed_limits_and_ownership() {
     PipelineProgram pipeline = pipeline_fixture();
     DrawPacket packet = packet_fixture();
@@ -2340,6 +2454,7 @@ int main() {
         validates_alpha_tested_depth_only_contract();
         rejects_invalid_depth_contract();
         validates_ordered_indexed_batch_contract();
+        validates_overlay_line_batch_contract();
         rejects_static_indexed_limits_and_ownership();
         rejects_staged_draw_packet();
         std::cout << "indexed draw tests passed\n";
