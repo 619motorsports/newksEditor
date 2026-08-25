@@ -323,6 +323,16 @@ if(TARGET render_backend_tests AND WIN32)
   target_link_libraries(render_backend_tests PRIVATE d3dcompiler)
 endif()
 
+if(WIN32 AND APEX_ENABLE_D3D12 AND APEX_NATIVE_WINDOW_AVAILABLE)
+  add_executable(d3d12_presentation_tests tests/d3d12_presentation_tests.cpp)
+  target_link_libraries(d3d12_presentation_tests PRIVATE ApexEditor::Render ApexEditor::Platform)
+  add_test(NAME d3d12_presentation_tests COMMAND d3d12_presentation_tests)
+  set_tests_properties(d3d12_presentation_tests PROPERTIES
+    LABELS "unit;render"
+    SKIP_RETURN_CODE 77
+    SKIP_REGULAR_EXPRESSION "[Uu]navailable|[Nn]ot available|[Nn]o D3D12 adapter|SKIP D3D12 presentation")
+endif()
+
 if(TEST ksanim_tests)
   set_tests_properties(ksanim_tests PROPERTIES LABELS "unit;malformed")
 endif()
