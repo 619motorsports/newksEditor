@@ -281,6 +281,10 @@ remains unchanged and feature-complete.
   mesh LOD range. These workspace-file rules follow `itemPreviewVisible()` and
   the draw filter in `public/app.js`. They do not claim parity with recovered
   ksNet per-mesh culling. The cockpit pair follows `src/cockpit-preview.js`.
+  A separate bounded predicate implements the recovered ksNet per-mesh rule.
+  It includes the FOV scale, radius floor, inclusive limits, PVS input, and
+  explicit `NO_CULL` input. Render-plan integration remains staged until the
+  loader and per-frame submission paths are recovered.
   Shadows, reflections, sky, CSP lights, and post-processing remain staged
   with explicit evidence.
 - P1 is partial. Bounded readers support KN5 v4/v5/v6, DDS, ACD, INI/CSP,

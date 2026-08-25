@@ -334,6 +334,9 @@ driver suppression, workspace LOD exclusions, or mesh LOD. Isolation bypasses
 visibility and subtree filters. It still applies the selected mesh LOD range.
 The workspace-file contract follows `itemPreviewVisible()` and the draw filter
 in `public/app.js`. It does not claim recovered ksNet per-mesh culling parity.
+The render library also exposes the recovered bounded ksNet mesh predicate.
+It keeps PVS input, FOV scaling, the radius floor, inclusive limits, and an
+explicit `NO_CULL` input. The render planner does not select this rule yet.
 The cockpit audit in `src/cockpit-preview.js` supplies the F3
 pair. Surface overlays, extended-profile shadow shader variants, reflections,
 and post-processing remain staged. A separate bounded damage adapter resolves the

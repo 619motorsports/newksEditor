@@ -86,6 +86,38 @@ const char* reflection_selection_mode_name(ReflectionSelectionMode mode) noexcep
     return "fallback";
 }
 
+bool ksnet_mesh_lod_visible(const KsNetMeshLodRequest& request) noexcept {
+    if (!request.in_pvs) return false;
+    if (request.no_cull) return true;
+    if (!std::isfinite(request.camera_fov_degrees) ||
+        !std::isfinite(request.lod_in) || !std::isfinite(request.lod_out) ||
+        !std::isfinite(request.bounds_radius) || request.bounds_radius < 0.0F) {
+        return false;
+    }
+    for (const float value : request.camera_position)
+        if (!std::isfinite(value)) return false;
+    for (const float value : request.bounds_center)
+        if (!std::isfinite(value)) return false;
+
+    const float scale = std::clamp(request.camera_fov_degrees * 0.0125F,
+                                   0.0F, 1.0F);
+    const float dx = request.camera_position[0] - request.bounds_center[0];
+    const float dy = request.camera_position[1] - request.bounds_center[1];
+    const float dz = request.camera_position[2] - request.bounds_center[2];
+    const float distance_squared = dx * dx + dy * dy + dz * dz;
+    const float scale_squared = scale * scale;
+    const float scaled_distance_squared = distance_squared * scale_squared;
+    const float near_squared = request.lod_in * request.lod_in;
+    const float far = std::max(request.lod_out, request.bounds_radius);
+    const float far_squared = far * far;
+    if (!std::isfinite(scaled_distance_squared) ||
+        !std::isfinite(near_squared) || !std::isfinite(far_squared)) {
+        return false;
+    }
+    return !(scaled_distance_squared < near_squared ||
+             far_squared < scaled_distance_squared);
+}
+
 RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
                              const RenderPlanOptions& options) {
     RenderPlan plan;

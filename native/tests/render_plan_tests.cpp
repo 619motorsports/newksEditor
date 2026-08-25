@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -102,6 +103,47 @@ void lod_uses_each_item_world_distance_and_inclusive_out() {
     options.camera_position = {0.0F, 0.0F, 1.0F};
     plan = apex::render::build_render_plan(scene, options);
     require(plan.items.empty(), "LOD filtering uses each item's camera distance");
+}
+
+void recovered_ksnet_mesh_lod_rule_is_bounded_and_inclusive() {
+    apex::render::KsNetMeshLodRequest request;
+    request.camera_fov_degrees = 80.0F;
+    request.lod_in = 5.0F;
+    request.lod_out = 4.0F;
+    request.bounds_radius = 6.0F;
+    request.bounds_center = {10.0F, 2.0F, -3.0F};
+    request.camera_position = {10.0F, 2.0F, 2.0F};
+    require(apex::render::ksnet_mesh_lod_visible(request),
+            "ksNet near boundary is inclusive");
+    request.camera_position[2] = 3.0F;
+    require(apex::render::ksnet_mesh_lod_visible(request),
+            "ksNet radius-floored far boundary is inclusive");
+    request.camera_position[2] = 1.99F;
+    require(!apex::render::ksnet_mesh_lod_visible(request),
+            "ksNet distance below near is excluded");
+    request.camera_position[2] = 3.01F;
+    require(!apex::render::ksnet_mesh_lod_visible(request),
+            "ksNet distance above effective far is excluded");
+
+    request.camera_fov_degrees = 40.0F;
+    request.camera_position[2] = 7.0F;
+    require(apex::render::ksnet_mesh_lod_visible(request),
+            "ksNet FOV factor scales squared camera distance");
+    request.camera_fov_degrees = 160.0F;
+    request.camera_position[2] = 3.0F;
+    require(apex::render::ksnet_mesh_lod_visible(request),
+            "ksNet FOV factor clamps to one");
+    request.in_pvs = false;
+    request.no_cull = true;
+    require(!apex::render::ksnet_mesh_lod_visible(request),
+            "ksNet does not restore an entry absent from PVS");
+    request.in_pvs = true;
+    request.camera_position[2] = std::numeric_limits<float>::quiet_NaN();
+    require(apex::render::ksnet_mesh_lod_visible(request),
+            "ksNet NO_CULL preserves an existing PVS entry");
+    request.no_cull = false;
+    require(!apex::render::ksnet_mesh_lod_visible(request),
+            "bounded ksNet contract rejects non-finite distance");
 }
 
 void color_order_matches_viewport() {
@@ -243,6 +285,7 @@ int main() {
     try {
         visibility_lod_and_shadow();
         lod_uses_each_item_world_distance_and_inclusive_out();
+        recovered_ksnet_mesh_lod_rule_is_bounded_and_inclusive();
         color_order_matches_viewport();
         preview_visibility_precedence_is_immutable();
         csp_node_state_controls_order_lod_transparency_and_shadows();

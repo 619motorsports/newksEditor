@@ -92,11 +92,14 @@ function.
 
 ## Integration boundary and unknowns
 
-The exact native target for a future port is a bounded per-mesh LOD predicate
-with camera FOV and camera-matrix translation as inputs. It must preserve the
-strict boundary comparisons, FOV scale `0.0125`, radius floor, `NO_CULL` flag,
-and per-frame reevaluation. It should not reinterpret the editor's LOD1–LOD4
-menu as an automatic distance selector.
+The native port now exposes a bounded per-mesh predicate as
+`ksnet_mesh_lod_visible()`. It preserves the strict comparisons, FOV scale
+`0.0125`, radius floor, initial PVS state, and explicit `NO_CULL` input. The
+render planner does not enable this rule yet. Loader population and per-frame
+submission remain unrecovered.
+
+The predicate does not reinterpret the editor's LOD1–LOD4 menu as an
+automatic distance selector.
 
 The inspected evidence does not recover which loader populates each LOD file's
 `lodIns`/`lodOuts`, how multiple car LOD files are submitted together, or the

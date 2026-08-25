@@ -29,6 +29,26 @@ enum class ReflectionSelectionMode {
     fallback,
 };
 
+/** Inputs for the recovered ksNet PvsProcessor per-mesh LOD rule.
+ *
+ * The loader has not recovered runtime MESH_FLAG_NO_CULL population. Callers
+ * must supply that state explicitly and must not infer it from KN5 fields.
+ */
+struct KsNetMeshLodRequest {
+    apex::scene::Vector3 camera_position{};
+    apex::scene::Vector3 bounds_center{};
+    float camera_fov_degrees = 45.0F;
+    float lod_in = 0.0F;
+    float lod_out = 0.0F;
+    float bounds_radius = 0.0F;
+    bool in_pvs = true;
+    bool no_cull = false;
+};
+
+/** Apply the recovered inclusive FOV-scaled ksNet per-mesh LOD predicate. */
+[[nodiscard]] bool ksnet_mesh_lod_visible(
+    const KsNetMeshLodRequest& request) noexcept;
+
 struct RenderPlanOptions {
     // Camera position is used for each item's LOD interval and transparent order.
     // They do not imply a projection or a graphics API coordinate convention.
