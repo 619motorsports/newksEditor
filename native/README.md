@@ -220,13 +220,16 @@ Vulkan uses a 128-byte vertex push-constant block. D3D12 uses an equivalent
 root-constant block. Each camera must use the clip-space convention for its
 backend. Both backends create persistent 1x or 4x D32 attachments.
 Single-sample D32 attachments can request shader-readable allocation. The
-fixed receiver ABI uses three distinct maps at bindings 16-18, one nearest
-clamp-to-edge sampler at binding 19, and one 256-byte constants record at
-binding 20. Vulkan executes this ABI and transitions retained maps between
-depth-write, shader-read, and transfer-read states. A SwiftShader test samples
-all three maps and then runs the caster pass again. D3D12 creates a typeless
-R32 resource with a D32 view and an R32_FLOAT sampled view. D3D12 receiver
-descriptor execution stays staged until a Windows WARP build verifies it.
+fixed receiver ABI uses three distinct maps at bindings 16-18. It uses one
+nearest clamp-to-edge sampler at binding 19. It also uses one 256-byte
+constants record at binding 20.
+
+Both backends execute this ABI. They transition retained maps between depth
+write and shader read. They restore the prior map state after the receiver
+draw. A SwiftShader test samples all three maps and then runs the caster pass
+again. D3D12 uses a typeless R32 resource. This resource has a D32 view and an
+R32_FLOAT sampled view. The D3D12 pixel fixture requires a Windows WARP
+verification build.
 The native binding numbers and clip conversion are portable choices. They are
 not claims about the recovered native register layout.
 Static scenes that declare this receiver ABI own the sampler and 256-byte

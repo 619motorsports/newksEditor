@@ -2246,7 +2246,7 @@ bool contract_backend(apex::render::Backend backend) {
                 sampled_result.rgba8[3] == std::byte{255},
             "portable diffuse outside pixel retains clear color");
 
-    if (backend == Backend::Vulkan) {
+    if (backend == Backend::Vulkan || backend == Backend::D3D12) {
         constexpr std::array<float, directional_shadow_cascade_count>
             receiver_depths = {0.2F, 0.5F, 0.8F};
         for (std::size_t cascade = 0U;
@@ -2281,6 +2281,9 @@ bool contract_backend(apex::render::Backend backend) {
         const auto receiver_constant_bytes = std::as_bytes(
             std::span<const DirectionalShadowReceiverConstants>(
                 &receiver_constants, 1U));
+        // Keep the logical receiver view at one portable 256-byte CBV. The
+        // D3D12 backend may round its native allocation for alignment, but
+        // this request must never expand the caller-visible ABI range.
         BufferResult receiver_buffer = device.device->create_buffer(
             {portable_directional_shadow_buffer_view_bytes,
              BufferUsage::uniform, BufferMemory::host_visible,
@@ -2299,8 +2302,40 @@ bool contract_backend(apex::render::Backend backend) {
              {PipelineResourceKind::sampler, 0U, 19U, "shadowSampler"},
              {PipelineResourceKind::uniform_buffer, 0U, 20U,
               "shadowReceiver"}});
-        receiver_pipeline.shaders[1].bytes =
-            executable_directional_shadow_receiver_fragment_shader();
+        if (backend == Backend::Vulkan) {
+            receiver_pipeline.shaders[1].bytes =
+                executable_directional_shadow_receiver_fragment_shader();
+        } else {
+#if defined(_WIN32)
+            // This is the D3D12 counterpart of the explicit portable test
+            // receiver above. It intentionally samples the three retained
+            // maps directly instead of claiming recovered stock shadow
+            // shader behavior. Keep the portable ABI at t16-t18, s19, b20.
+            constexpr std::string_view receiver_fragment_source =
+                "Texture2D diffuseTexture : register(t0);"
+                "SamplerState diffuseSampler : register(s1);"
+                "Texture2D txShadow0 : register(t16);"
+                "Texture2D txShadow1 : register(t17);"
+                "Texture2D txShadow2 : register(t18);"
+                "SamplerState shadowSampler : register(s19);"
+                "cbuffer ShadowReceiver : register(b20) {"
+                "column_major float4x4 shadowMatrices[3];"
+                "float4 splitDistances; float4 depthBiases;"
+                "float4 cameraPosition; float4 cameraForward; };"
+                "float4 main(float4 position : SV_Position, float2 texcoord : TEXCOORD0) : SV_Target {"
+                "float2 sampleUv = saturate(texcoord);"
+                "float d0 = txShadow0.Sample(shadowSampler, sampleUv).r;"
+                "float d1 = txShadow1.Sample(shadowSampler, sampleUv).r;"
+                "float d2 = txShadow2.Sample(shadowSampler, sampleUv).r;"
+                "float contractUse = splitDistances.x * 0.0;"
+                "return float4(d0 + contractUse, d1, d2, 1.0); }";
+            receiver_pipeline.shaders[1].bytes = executable_d3d_shader(
+                receiver_fragment_source, "ps_5_0");
+#else
+            require(false,
+                    "D3D12 directional receiver test requires Windows D3DCompile");
+#endif
+        }
         IndexedStaticMeshDrawRequest receiver_request =
             sampled_upload.upload->make_request(receiver_pipeline,
                                                 *indexed_camera.frame);
@@ -2318,21 +2353,42 @@ bool contract_backend(apex::render::Backend backend) {
             device.device->draw_indexed_static_mesh_and_readback(
                 *triangle_texture.texture, receiver_request);
         require(receiver_result.ok(),
-                "Vulkan retained D32 maps execute as sampled receiver resources: " +
+                std::string(backend_name(backend)) +
+                    " retained D32 maps execute as sampled receiver resources: " +
                     receiver_result.diagnostic.code + ": " +
                     receiver_result.diagnostic.message);
-        const auto close_channel = [&](std::size_t channel, float expected) {
+        const auto close_channel = [](std::span<const std::byte> rgba8,
+                                      std::size_t channel, float expected) {
             const auto actual = static_cast<unsigned>(
                 std::to_integer<std::uint8_t>(
-                    receiver_result.rgba8[center + channel]));
+                    rgba8[center + channel]));
             const auto encoded = static_cast<unsigned>(expected * 255.0F + 0.5F);
             return actual + 1U >= encoded && actual <= encoded + 1U;
         };
-        require(close_channel(0U, receiver_depths[0U]) &&
-                    close_channel(1U, receiver_depths[1U]) &&
-                    close_channel(2U, receiver_depths[2U]) &&
+        require(close_channel(receiver_result.rgba8, 0U, receiver_depths[0U]) &&
+                    close_channel(receiver_result.rgba8, 1U, receiver_depths[1U]) &&
+                    close_channel(receiver_result.rgba8, 2U, receiver_depths[2U]) &&
                     receiver_result.rgba8[center + 3U] == std::byte{255},
                 "receiver center pixel samples cascades 0/1/2 into RGB");
+
+        const std::array<IndexedStaticMeshDrawRequest, 2> receiver_draws = {
+            receiver_request, receiver_request};
+        IndexedStaticMeshBatchDescription receiver_batch;
+        receiver_batch.draws = receiver_draws;
+        const IndexedStaticMeshBatchResult receiver_batch_result =
+            device.device->draw_indexed_static_mesh_batch_and_readback(
+                *triangle_texture.texture, receiver_batch);
+        require(receiver_batch_result.ok(),
+                std::string(backend_name(backend)) +
+                    " directional receiver ordered batch executes");
+        require(close_channel(receiver_batch_result.rgba8, 0U,
+                              receiver_depths[0U]) &&
+                    close_channel(receiver_batch_result.rgba8, 1U,
+                                  receiver_depths[1U]) &&
+                    close_channel(receiver_batch_result.rgba8, 2U,
+                                  receiver_depths[2U]) &&
+                    receiver_batch_result.rgba8[center + 3U] == std::byte{255},
+                "receiver ordered batch preserves cascaded depth samples");
 
         const auto sampled_map_readback = device.device->read_depth_attachment(
             three_maps.resources->attachment(1U), {512U, 512U});
@@ -2346,7 +2402,8 @@ bool contract_backend(apex::render::Backend backend) {
         require(rerendered_shadow.ok() &&
                     rerendered_shadow.cascades_completed ==
                         directional_shadow_cascade_count,
-                "next caster pass transitions sampled maps back to depth-write");
+                std::string(backend_name(backend)) +
+                    " next caster pass transitions sampled maps back to depth-write");
     }
 
     // Exercise the real backend sampled path with direct BC1/BC3/BC7 block

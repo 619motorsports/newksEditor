@@ -138,11 +138,13 @@ remains unchanged and feature-complete.
   test reads all three maps and finds caster depth and clear depth in each map.
   The SwiftShader fixture also executes the portable receiver ABI and samples
   all three retained maps. Bounded reference tests cover the source-evidenced
-  2/12/50 cascade boundaries and explicit 3x3 PCF. D3D12 retains the caster
-  path and creates sampled-depth views, but receiver descriptor execution remains
-  staged until a Windows WARP build verifies it. Vulkan integrates the receiver
-  with the bounded stock `ksPerPixel` facade; extended material variants and
-  recovered DXBC register packing remain staged. The executable main-pass subset uses the source-evidenced
+  2/12/50 cascade boundaries and explicit 3x3 PCF. Both backends bind the three
+  sampled-depth views, the nearest sampler, and the receiver constants. D3D12
+  restores each retained map to its prior tracked state after the draw. Its
+  executable pixel fixture requires a Windows WARP verification build. Vulkan
+  integrates the receiver with the bounded stock `ksPerPixel` facade. Extended
+  material variants and recovered DXBC register packing remain staged. The
+  executable main-pass subset uses the source-evidenced
   `LESS` depth comparison. It also executes explicitly blended packets. The
   ordinary alpha, multiply, and transparent-as-black factors match
   `applyItemRenderState` in `public/app.js`. The indexed path supports 4x

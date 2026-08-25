@@ -164,6 +164,8 @@ struct D3D12Context {
     }
 };
 
+class D3D12DepthAttachment;
+
 struct D3D12MaterialDescriptorBinding {
     // Keep the per-draw SRV heap alive until the synchronous fence completes.
     // The sampler descriptor is persistent in the context-owned shader-visible
@@ -185,6 +187,10 @@ struct D3D12MaterialDescriptorBinding {
     D3D12_GPU_DESCRIPTOR_HANDLE damage_sampler_gpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE damage_mask_srv_gpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE damage_mask_sampler_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE shadow_srv_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE shadow_sampler_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE shadow_cbv_gpu{};
+    std::array<D3D12DepthAttachment*, indexed_directional_shadow_cascade_count> shadow_attachments{};
     bool constant_enabled = false;
     bool frame_enabled = false;
     bool normal_enabled = false;
@@ -193,6 +199,7 @@ struct D3D12MaterialDescriptorBinding {
     bool normal_detail_enabled = false;
     bool damage_enabled = false;
     bool damage_mask_enabled = false;
+    bool shadow_enabled = false;
     bool enabled = false;
 };
 
@@ -300,6 +307,10 @@ struct D3D12MaterialDescriptorBinding {
     return texture && sampler;
 }
 
+[[nodiscard]] bool d3d12_pipeline_has_directional_shadow_receiver(const PipelineProgram& pipeline) noexcept {
+    return pipeline_declares_directional_shadow_receiver(pipeline);
+}
+
 [[nodiscard]] bool prepare_d3d12_material_binding(
     const std::shared_ptr<D3D12Context>& context,
     const IndexedStaticMeshDrawRequest& request,
@@ -313,6 +324,8 @@ struct D3D12MaterialDescriptorBinding {
     UINT normal_detail_srv_index,
     UINT damage_srv_index,
     UINT damage_mask_srv_index,
+    UINT shadow_srv_index,
+    UINT shadow_cbv_index,
     D3D12MaterialDescriptorBinding& output,
     Diagnostic& diagnostic);
 
@@ -1567,6 +1580,7 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
         const bool has_normal_detail_texture = d3d12_pipeline_has_normal_detail_texture(*request.pipeline);
         const bool has_damage_texture = d3d12_pipeline_has_damage_texture(*request.pipeline);
         const bool has_damage_mask_texture = d3d12_pipeline_has_damage_mask_texture(*request.pipeline);
+        const bool has_shadow_receiver = d3d12_pipeline_has_directional_shadow_receiver(*request.pipeline);
         srv_heap_description.NumDescriptors = 1U + static_cast<UINT>(has_material_constants) +
                                               static_cast<UINT>(has_frame_constants) +
                                               static_cast<UINT>(has_normal_texture) +
@@ -1574,7 +1588,14 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
                                               static_cast<UINT>(has_detail_texture) +
                                               static_cast<UINT>(has_normal_detail_texture) +
                                               static_cast<UINT>(has_damage_texture) +
-                                              static_cast<UINT>(has_damage_mask_texture);
+                                              static_cast<UINT>(has_damage_mask_texture) +
+                                              3U * static_cast<UINT>(has_shadow_receiver) +
+                                              static_cast<UINT>(has_shadow_receiver);
+        const UINT shadow_base = 1U + static_cast<UINT>(has_material_constants) +
+                                 static_cast<UINT>(has_frame_constants) + static_cast<UINT>(has_normal_texture) +
+                                 static_cast<UINT>(has_maps_texture) + static_cast<UINT>(has_detail_texture) +
+                                 static_cast<UINT>(has_normal_detail_texture) + static_cast<UINT>(has_damage_texture) +
+                                 static_cast<UINT>(has_damage_mask_texture);
         srv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         srv_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         ComPtr<ID3D12DescriptorHeap> srv_heap;
@@ -1626,6 +1647,8 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
                                                        static_cast<UINT>(has_normal_detail_texture) +
                                                        static_cast<UINT>(has_damage_texture)
                                                  : 0U,
+                                             has_shadow_receiver ? shadow_base : 0U,
+                                             has_shadow_receiver ? shadow_base + 3U : 0U,
                                              material_binding, diagnostic))
             return false;
     }
@@ -1665,8 +1688,17 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     D3D12_ROOT_PARAMETER damage_mask_srv_parameter{};
     D3D12_DESCRIPTOR_RANGE damage_mask_sampler_range{};
     D3D12_ROOT_PARAMETER damage_mask_sampler_parameter{};
-    std::array<D3D12_ROOT_PARAMETER, 17> root_parameters{};
+    D3D12_DESCRIPTOR_RANGE shadow_srv_range{};
+    D3D12_ROOT_PARAMETER shadow_srv_parameter{};
+    D3D12_DESCRIPTOR_RANGE shadow_sampler_range{};
+    D3D12_ROOT_PARAMETER shadow_sampler_parameter{};
+    D3D12_DESCRIPTOR_RANGE shadow_cbv_range{};
+    D3D12_ROOT_PARAMETER shadow_cbv_parameter{};
+    std::array<D3D12_ROOT_PARAMETER, 20> root_parameters{};
     UINT root_parameter_count = 0U;
+    UINT shadow_srv_root_index = std::numeric_limits<UINT>::max();
+    UINT shadow_sampler_root_index = std::numeric_limits<UINT>::max();
+    UINT shadow_cbv_root_index = std::numeric_limits<UINT>::max();
     if (draw_matrices != nullptr) {
         transform_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         transform_parameter.Constants.ShaderRegister = 0U;
@@ -1842,6 +1874,29 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
             damage_mask_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
             root_parameters[root_parameter_count++] = damage_mask_sampler_parameter;
         }
+        if (d3d12_pipeline_has_directional_shadow_receiver(*request.pipeline)) {
+            shadow_srv_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3U, 16U, 0U,
+                                D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+            shadow_srv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            shadow_srv_parameter.DescriptorTable = {1U, &shadow_srv_range};
+            shadow_srv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            shadow_srv_root_index = root_parameter_count;
+            root_parameters[root_parameter_count++] = shadow_srv_parameter;
+            shadow_sampler_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1U, 19U, 0U,
+                                    D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+            shadow_sampler_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            shadow_sampler_parameter.DescriptorTable = {1U, &shadow_sampler_range};
+            shadow_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            shadow_sampler_root_index = root_parameter_count;
+            root_parameters[root_parameter_count++] = shadow_sampler_parameter;
+            shadow_cbv_range = {D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1U, 20U, 0U,
+                                D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+            shadow_cbv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            shadow_cbv_parameter.DescriptorTable = {1U, &shadow_cbv_range};
+            shadow_cbv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            shadow_cbv_root_index = root_parameter_count;
+            root_parameters[root_parameter_count++] = shadow_cbv_parameter;
+        }
     }
     root_description.NumParameters = root_parameter_count;
     root_description.pParameters = root_parameters.data();
@@ -2004,6 +2059,22 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
         diagnostic.code = "triangle_execution_failed";
         return false;
     }
+    std::array<D3D12_RESOURCE_STATES, indexed_directional_shadow_cascade_count> shadow_states{};
+    if (material_binding.shadow_enabled) {
+        for (std::size_t cascade = 0U; cascade < indexed_directional_shadow_cascade_count; ++cascade) {
+            D3D12DepthAttachment* attachment = material_binding.shadow_attachments[cascade];
+            shadow_states[cascade] = attachment->state();
+            if (shadow_states[cascade] != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) {
+                D3D12_RESOURCE_BARRIER barrier{};
+                barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                barrier.Transition.pResource = attachment->resource();
+                barrier.Transition.StateBefore = shadow_states[cascade];
+                barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+                barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                list->ResourceBarrier(1U, &barrier);
+            }
+        }
+    }
     if (destination_state != D3D12_RESOURCE_STATE_RENDER_TARGET) {
         D3D12_RESOURCE_BARRIER barrier{};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -2124,6 +2195,15 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
             list->SetGraphicsRootDescriptorTable(damage_mask_root_index + 1U,
                                                   material_binding.damage_mask_sampler_gpu);
         }
+        if (material_binding.shadow_enabled &&
+            shadow_srv_root_index != std::numeric_limits<UINT>::max() &&
+            shadow_sampler_root_index != std::numeric_limits<UINT>::max() &&
+            shadow_cbv_root_index != std::numeric_limits<UINT>::max()) {
+            list->SetGraphicsRootDescriptorTable(shadow_srv_root_index, material_binding.shadow_srv_gpu);
+            list->SetGraphicsRootDescriptorTable(shadow_sampler_root_index,
+                                                  material_binding.shadow_sampler_gpu);
+            list->SetGraphicsRootDescriptorTable(shadow_cbv_root_index, material_binding.shadow_cbv_gpu);
+        }
     }
     if (draw_matrices != nullptr) {
         list->SetGraphicsRoot32BitConstants(
@@ -2150,6 +2230,19 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     list->RSSetScissorRects(1U, &scissor);
     if (geometry.indexed) list->DrawIndexedInstanced(geometry.index_count, 1U, 0U, 0, 0U);
     else list->DrawInstanced(request.vertex_count, 1U, 0U, 0U);
+    if (material_binding.shadow_enabled) {
+        for (std::size_t cascade = 0U; cascade < indexed_directional_shadow_cascade_count; ++cascade) {
+            if (shadow_states[cascade] != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) {
+                D3D12_RESOURCE_BARRIER barrier{};
+                barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                barrier.Transition.pResource = material_binding.shadow_attachments[cascade]->resource();
+                barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+                barrier.Transition.StateAfter = shadow_states[cascade];
+                barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                list->ResourceBarrier(1U, &barrier);
+            }
+        }
+    }
     const D3D12_RESOURCE_STATES final_state = texture_state(description.usage);
     if (description.samples > 1U) {
         D3D12_RESOURCE_BARRIER resolve_source{};
@@ -2232,6 +2325,11 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
         destination_state = drained ? final_state : D3D12_RESOURCE_STATE_COMMON;
         if (use_depth)
             depth_attachment->set_state(drained ? depth_draw_state : D3D12_RESOURCE_STATE_COMMON);
+        if (material_binding.shadow_enabled) {
+            for (std::size_t cascade = 0U; cascade < indexed_directional_shadow_cascade_count; ++cascade)
+                material_binding.shadow_attachments[cascade]->set_state(
+                    drained ? shadow_states[cascade] : D3D12_RESOURCE_STATE_COMMON);
+        }
         diagnostic = hresult_error("D3D12 triangle fence", result);
         diagnostic.code = result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET
                               ? "d3d12_device_removed" : "triangle_execution_failed";
@@ -2241,6 +2339,10 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     if (use_depth) {
         depth_attachment->set_state(depth_draw_state);
         if (clear_depth) depth_attachment->set_cleared();
+    }
+    if (material_binding.shadow_enabled) {
+        for (std::size_t cascade = 0U; cascade < indexed_directional_shadow_cascade_count; ++cascade)
+            material_binding.shadow_attachments[cascade]->set_state(shadow_states[cascade]);
     }
     void* mapped = nullptr;
     D3D12_RANGE read_range{0U, static_cast<SIZE_T>(readback_size)};
@@ -2331,6 +2433,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
     bool has_normal_detail_texture = false;
     bool has_damage_texture = false;
     bool has_damage_mask_texture = false;
+    bool has_shadow_receiver = false;
     for (const IndexedStaticMeshDrawRequest& request : batch.draws) {
         if (!request.pipeline->resources.empty()) {
             has_material_resources = true;
@@ -2350,6 +2453,8 @@ bool draw_indexed_static_mesh_batch_and_readback(
                                  d3d12_pipeline_has_damage_texture(*request.pipeline);
             has_damage_mask_texture = has_damage_mask_texture ||
                                       d3d12_pipeline_has_damage_mask_texture(*request.pipeline);
+            has_shadow_receiver = has_shadow_receiver ||
+                                  d3d12_pipeline_has_directional_shadow_receiver(*request.pipeline);
         }
     }
     const std::size_t material_descriptor_stride =
@@ -2360,6 +2465,13 @@ bool draw_indexed_static_mesh_batch_and_readback(
         static_cast<std::size_t>(has_detail_texture) +
         static_cast<std::size_t>(has_normal_detail_texture) +
         static_cast<std::size_t>(has_damage_texture) +
+        static_cast<std::size_t>(has_damage_mask_texture) +
+        4U * static_cast<std::size_t>(has_shadow_receiver);
+    const std::size_t shadow_descriptor_base =
+        1U + static_cast<std::size_t>(has_material_constants) +
+        static_cast<std::size_t>(has_frame_constants) + static_cast<std::size_t>(has_normal_texture) +
+        static_cast<std::size_t>(has_maps_texture) + static_cast<std::size_t>(has_detail_texture) +
+        static_cast<std::size_t>(has_normal_detail_texture) + static_cast<std::size_t>(has_damage_texture) +
         static_cast<std::size_t>(has_damage_mask_texture);
     if (has_material_resources &&
         (draws.size() > std::numeric_limits<std::size_t>::max() / material_descriptor_stride ||
@@ -2430,6 +2542,10 @@ bool draw_indexed_static_mesh_batch_and_readback(
                                                                    (has_normal_detail_texture ? 1U : 0U) +
                                                                    (has_damage_texture ? 1U : 0U) +
                                                                    (has_damage_mask_texture ? 1U : 0U)),
+                                                 static_cast<UINT>(descriptor_index +
+                                                                   (has_shadow_receiver ? shadow_descriptor_base : 0U)),
+                                                 static_cast<UINT>(descriptor_index +
+                                                                   (has_shadow_receiver ? shadow_descriptor_base + 3U : 0U)),
                                                  material_bindings[index], diagnostic))
                 return false;
         }
@@ -2437,6 +2553,9 @@ bool draw_indexed_static_mesh_batch_and_readback(
 
     std::vector<ComPtr<ID3D12RootSignature>> root_signatures;
     std::vector<ComPtr<ID3D12PipelineState>> pipelines;
+    std::vector<UINT> shadow_srv_root_indices(draws.size(), std::numeric_limits<UINT>::max());
+    std::vector<UINT> shadow_sampler_root_indices(draws.size(), std::numeric_limits<UINT>::max());
+    std::vector<UINT> shadow_cbv_root_indices(draws.size(), std::numeric_limits<UINT>::max());
     root_signatures.resize(draws.size());
     pipelines.resize(draws.size());
     for (std::size_t index = 0; index < draws.size(); ++index) {
@@ -2495,7 +2614,13 @@ bool draw_indexed_static_mesh_batch_and_readback(
         D3D12_ROOT_PARAMETER damage_mask_srv_parameter{};
         D3D12_DESCRIPTOR_RANGE damage_mask_sampler_range{};
         D3D12_ROOT_PARAMETER damage_mask_sampler_parameter{};
-        std::array<D3D12_ROOT_PARAMETER, 17> root_parameters{};
+        D3D12_DESCRIPTOR_RANGE shadow_srv_range{};
+        D3D12_ROOT_PARAMETER shadow_srv_parameter{};
+        D3D12_DESCRIPTOR_RANGE shadow_sampler_range{};
+        D3D12_ROOT_PARAMETER shadow_sampler_parameter{};
+        D3D12_DESCRIPTOR_RANGE shadow_cbv_range{};
+        D3D12_ROOT_PARAMETER shadow_cbv_parameter{};
+        std::array<D3D12_ROOT_PARAMETER, 20> root_parameters{};
         UINT root_parameter_count = 1U;
         root_parameters[0] = transform_parameter;
         if (!program.resources.empty()) {
@@ -2663,6 +2788,29 @@ bool draw_indexed_static_mesh_batch_and_readback(
                 damage_mask_sampler_parameter.DescriptorTable = {1U, &damage_mask_sampler_range};
                 damage_mask_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
                 root_parameters[root_parameter_count++] = damage_mask_sampler_parameter;
+            }
+            if (d3d12_pipeline_has_directional_shadow_receiver(program)) {
+                shadow_srv_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3U, 16U, 0U,
+                                    D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+                shadow_srv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                shadow_srv_parameter.DescriptorTable = {1U, &shadow_srv_range};
+                shadow_srv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                shadow_srv_root_indices[index] = root_parameter_count;
+                root_parameters[root_parameter_count++] = shadow_srv_parameter;
+                shadow_sampler_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1U, 19U, 0U,
+                                        D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+                shadow_sampler_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                shadow_sampler_parameter.DescriptorTable = {1U, &shadow_sampler_range};
+                shadow_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                shadow_sampler_root_indices[index] = root_parameter_count;
+                root_parameters[root_parameter_count++] = shadow_sampler_parameter;
+                shadow_cbv_range = {D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1U, 20U, 0U,
+                                    D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+                shadow_cbv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                shadow_cbv_parameter.DescriptorTable = {1U, &shadow_cbv_range};
+                shadow_cbv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                shadow_cbv_root_indices[index] = root_parameter_count;
+                root_parameters[root_parameter_count++] = shadow_cbv_parameter;
             }
         }
         D3D12_ROOT_SIGNATURE_DESC root_description{};
@@ -2833,6 +2981,28 @@ bool draw_indexed_static_mesh_batch_and_readback(
         diagnostic.code = "indexed_static_mesh_batch_execution_failed";
         return false;
     }
+    std::vector<D3D12DepthAttachment*> shadow_attachments;
+    std::vector<D3D12_RESOURCE_STATES> shadow_states;
+    for (const D3D12MaterialDescriptorBinding& binding : material_bindings) {
+        if (!binding.shadow_enabled) continue;
+        for (D3D12DepthAttachment* attachment : binding.shadow_attachments) {
+            if (std::find(shadow_attachments.begin(), shadow_attachments.end(), attachment) ==
+                shadow_attachments.end()) {
+                shadow_attachments.push_back(attachment);
+                shadow_states.push_back(attachment->state());
+            }
+        }
+    }
+    for (std::size_t shadow_index = 0U; shadow_index < shadow_attachments.size(); ++shadow_index) {
+        if (shadow_states[shadow_index] == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) continue;
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = shadow_attachments[shadow_index]->resource();
+        barrier.Transition.StateBefore = shadow_states[shadow_index];
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
+    }
     if (destination_state != D3D12_RESOURCE_STATE_RENDER_TARGET) {
         D3D12_RESOURCE_BARRIER barrier{};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -2952,6 +3122,15 @@ bool draw_indexed_static_mesh_batch_and_readback(
                 list->SetGraphicsRootDescriptorTable(damage_mask_root_index + 1U,
                                                       material_bindings[index].damage_mask_sampler_gpu);
             }
+            if (material_bindings[index].shadow_enabled &&
+                shadow_srv_root_indices[index] != std::numeric_limits<UINT>::max()) {
+                list->SetGraphicsRootDescriptorTable(shadow_srv_root_indices[index],
+                                                      material_bindings[index].shadow_srv_gpu);
+                list->SetGraphicsRootDescriptorTable(shadow_sampler_root_indices[index],
+                                                      material_bindings[index].shadow_sampler_gpu);
+                list->SetGraphicsRootDescriptorTable(shadow_cbv_root_indices[index],
+                                                      material_bindings[index].shadow_cbv_gpu);
+            }
         }
         list->SetPipelineState(pipelines[index].Get());
         list->IASetPrimitiveTopology(d3d12_pipeline_topology(draw.pipeline->raster.fill));
@@ -2971,6 +3150,16 @@ bool draw_indexed_static_mesh_batch_and_readback(
         list->RSSetViewports(1U, &viewport);
         list->RSSetScissorRects(1U, &scissor);
         list->DrawIndexedInstanced(draw.geometry.index_count, 1U, 0U, 0, 0U);
+    }
+    for (std::size_t shadow_index = 0U; shadow_index < shadow_attachments.size(); ++shadow_index) {
+        if (shadow_states[shadow_index] == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) continue;
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = shadow_attachments[shadow_index]->resource();
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        barrier.Transition.StateAfter = shadow_states[shadow_index];
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
     }
     const D3D12_RESOURCE_STATES final_state = texture_state(description.usage);
     if (description.samples > 1U) {
@@ -3054,6 +3243,9 @@ bool draw_indexed_static_mesh_batch_and_readback(
         destination_state = drained ? final_state : D3D12_RESOURCE_STATE_COMMON;
         if (use_depth)
             depth_attachment->set_state(drained ? depth_state : D3D12_RESOURCE_STATE_COMMON);
+        for (std::size_t shadow_index = 0U; shadow_index < shadow_attachments.size(); ++shadow_index)
+            shadow_attachments[shadow_index]->set_state(
+                drained ? shadow_states[shadow_index] : D3D12_RESOURCE_STATE_COMMON);
         diagnostic = hresult_error("D3D12 indexed batch fence", result);
         diagnostic.code = result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET
                               ? "d3d12_device_removed" : "indexed_static_mesh_batch_execution_failed";
@@ -3064,6 +3256,8 @@ bool draw_indexed_static_mesh_batch_and_readback(
         depth_attachment->set_state(depth_state);
         if (batch.clear_depth) depth_attachment->set_cleared();
     }
+    for (std::size_t shadow_index = 0U; shadow_index < shadow_attachments.size(); ++shadow_index)
+        shadow_attachments[shadow_index]->set_state(shadow_states[shadow_index]);
     void* mapped = nullptr;
     D3D12_RANGE read_range{0U, static_cast<SIZE_T>(readback_size)};
     result = readback->Map(0U, &read_range, &mapped);
@@ -3834,6 +4028,8 @@ bool prepare_d3d12_material_binding(
     UINT normal_detail_srv_index,
     UINT damage_srv_index,
     UINT damage_mask_srv_index,
+    UINT shadow_srv_index,
+    UINT shadow_cbv_index,
     D3D12MaterialDescriptorBinding& output,
     Diagnostic& diagnostic) {
     output = {};
@@ -3851,6 +4047,11 @@ bool prepare_d3d12_material_binding(
             request.damage_binding.texture != nullptr || request.damage_binding.sampler != nullptr ||
             request.damage_mask_binding.texture != nullptr ||
             request.damage_mask_binding.sampler != nullptr ||
+            std::any_of(request.directional_shadow_binding.maps.begin(),
+                        request.directional_shadow_binding.maps.end(),
+                        [](const DepthAttachment* map) { return map != nullptr; }) ||
+            request.directional_shadow_binding.sampler != nullptr ||
+            request.directional_shadow_binding.constants != nullptr ||
             request.material_binding.buffer != nullptr || request.material_binding.offset_bytes != 0U ||
             request.material_binding.range_bytes != 0U || request.frame_binding.buffer != nullptr ||
             request.frame_binding.offset_bytes != 0U || request.frame_binding.range_bytes != 0U) {
@@ -3880,6 +4081,7 @@ bool prepare_d3d12_material_binding(
     const bool has_normal_detail_texture = d3d12_pipeline_has_normal_detail_texture(*request.pipeline);
     const bool has_damage_texture = d3d12_pipeline_has_damage_texture(*request.pipeline);
     const bool has_damage_mask_texture = d3d12_pipeline_has_damage_mask_texture(*request.pipeline);
+    const bool has_shadow_receiver = d3d12_pipeline_has_directional_shadow_receiver(*request.pipeline);
     const D3D12Texture* normal_texture = nullptr;
     const D3D12Sampler* normal_sampler = nullptr;
     const D3D12Texture* maps_texture = nullptr;
@@ -3892,6 +4094,9 @@ bool prepare_d3d12_material_binding(
     const D3D12Sampler* damage_sampler = nullptr;
     const D3D12Texture* damage_mask_texture = nullptr;
     const D3D12Sampler* damage_mask_sampler = nullptr;
+    std::array<const D3D12DepthAttachment*, indexed_directional_shadow_cascade_count> shadow_attachments{};
+    const D3D12Sampler* shadow_sampler = nullptr;
+    const D3D12Buffer* shadow_constants = nullptr;
     if (has_normal_texture) {
         if (request.normal_binding.texture == nullptr || request.normal_binding.sampler == nullptr) {
             diagnostic = {"indexed_normal_binding_missing",
@@ -4000,6 +4205,88 @@ bool prepare_d3d12_material_binding(
         diagnostic = {"indexed_damage_layout_unsupported",
                       "The D3D12 damage ABI requires both damage and damage-mask bindings"};
         return false;
+    }
+    if (has_shadow_receiver) {
+        if (request.directional_shadow_binding.sampler == nullptr ||
+            request.directional_shadow_binding.constants == nullptr) {
+            diagnostic = {"indexed_directional_shadow_binding_missing",
+                          "D3D12 directional-shadow receiver requires maps, sampler, and constants"};
+            return false;
+        }
+        shadow_sampler = dynamic_cast<const D3D12Sampler*>(request.directional_shadow_binding.sampler);
+        shadow_constants = dynamic_cast<const D3D12Buffer*>(request.directional_shadow_binding.constants);
+        if (shadow_sampler == nullptr || shadow_constants == nullptr) {
+            diagnostic = {"indexed_directional_shadow_resource_type_unsupported",
+                          "The D3D12 directional-shadow receiver received an unknown resource handle"};
+            return false;
+        }
+        if (shadow_sampler->context() != context.get() || shadow_constants->context() != context.get()) {
+            diagnostic = {"indexed_directional_shadow_resource_context_mismatch",
+                          "D3D12 directional-shadow resources belong to another device"};
+            return false;
+        }
+        if (shadow_sampler->gpu_descriptor().ptr == 0U) {
+            diagnostic = {"indexed_directional_shadow_sampler_invalid",
+                          "D3D12 directional-shadow sampler has no shader-visible descriptor"};
+            return false;
+        }
+        for (std::size_t cascade = 0U; cascade < indexed_directional_shadow_cascade_count; ++cascade) {
+            shadow_attachments[cascade] =
+                dynamic_cast<const D3D12DepthAttachment*>(request.directional_shadow_binding.maps[cascade]);
+            if (shadow_attachments[cascade] == nullptr ||
+                shadow_attachments[cascade]->context() != context.get() ||
+                shadow_attachments[cascade]->resource() == nullptr ||
+                !shadow_attachments[cascade]->cleared() ||
+                shadow_attachments[cascade]->srv().ptr == 0U) {
+                diagnostic = {"indexed_directional_shadow_map_invalid",
+                              "D3D12 directional-shadow maps must be initialized shader-readable depth attachments"};
+                return false;
+            }
+        }
+        if (shadow_constants->resource() == nullptr ||
+            shadow_constants->info().description.usage != BufferUsage::uniform) {
+            diagnostic = {"indexed_directional_shadow_constants_usage_invalid",
+                          "D3D12 directional-shadow constants require an initialized uniform buffer"};
+            return false;
+        }
+        constexpr UINT required_buffer_state =
+            static_cast<UINT>(D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+        if ((static_cast<UINT>(shadow_constants->state()) & required_buffer_state) == 0U) {
+            diagnostic = {"indexed_directional_shadow_constants_state_invalid",
+                          "D3D12 directional-shadow constants are not in constant-buffer state"};
+            return false;
+        }
+        const std::uint64_t offset = request.directional_shadow_binding.constants_offset_bytes;
+        const std::uint64_t logical_range = request.directional_shadow_binding.constants_range_bytes;
+        constexpr std::uint64_t cbv_range = portable_directional_shadow_buffer_view_bytes;
+        const std::uint64_t buffer_size = shadow_constants->info().description.size_bytes;
+        if (offset % D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT != 0U ||
+            (logical_range != portable_directional_shadow_buffer_view_bytes &&
+             logical_range != stock_directional_shadow_buffer_view_bytes) ||
+            offset > buffer_size || cbv_range > buffer_size - offset) {
+            diagnostic = {"indexed_directional_shadow_constants_backing_range_invalid",
+                          "D3D12 directional-shadow CBVs require a bounded 256-byte backing range for the logical stock or portable view"};
+            return false;
+        }
+        const D3D12_RESOURCE_DESC resource_description = shadow_constants->resource()->GetDesc();
+        if (offset > resource_description.Width || cbv_range > resource_description.Width - offset) {
+            diagnostic = {"indexed_directional_shadow_constants_backing_range_invalid",
+                          "D3D12 directional-shadow CBV exceeds the native buffer resource"};
+            return false;
+        }
+        const UINT64 gpu_base = shadow_constants->resource()->GetGPUVirtualAddress();
+        if (gpu_base == 0U || gpu_base > std::numeric_limits<UINT64>::max() - offset) {
+            diagnostic = {"indexed_directional_shadow_constants_gpu_address_invalid",
+                          "D3D12 directional-shadow constants GPU address is unavailable or overflows"};
+            return false;
+        }
+        const UINT64 gpu_address = gpu_base + offset;
+        if (gpu_address % D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT != 0U ||
+            gpu_address > std::numeric_limits<UINT64>::max() - cbv_range) {
+            diagnostic = {"indexed_directional_shadow_constants_alignment_invalid",
+                          "D3D12 directional-shadow CBV address is not 256-byte aligned or overflows"};
+            return false;
+        }
     }
     if (texture->context() != context.get() || sampler->context() != context.get()) {
         diagnostic = {"indexed_resource_context_mismatch",
@@ -4134,7 +4421,11 @@ bool prepare_d3d12_material_binding(
         (has_detail_texture && detail_srv_index >= heap_description.NumDescriptors) ||
         (has_normal_detail_texture && normal_detail_srv_index >= heap_description.NumDescriptors) ||
         (has_damage_texture && damage_srv_index >= heap_description.NumDescriptors) ||
-        (has_damage_mask_texture && damage_mask_srv_index >= heap_description.NumDescriptors)) {
+        (has_damage_mask_texture && damage_mask_srv_index >= heap_description.NumDescriptors) ||
+        (has_shadow_receiver &&
+         (heap_description.NumDescriptors < 3U ||
+          shadow_srv_index > heap_description.NumDescriptors - 3U ||
+          shadow_cbv_index >= heap_description.NumDescriptors))) {
         diagnostic = {"indexed_resource_descriptor_slot_invalid",
                       "D3D12 material descriptor slot is outside its bounded shader-visible heap"};
         return false;
@@ -4313,7 +4604,9 @@ bool prepare_d3d12_material_binding(
         static_cast<UINT64>(detail_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
         static_cast<UINT64>(normal_detail_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
         static_cast<UINT64>(damage_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
-        static_cast<UINT64>(damage_mask_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size) {
+        static_cast<UINT64>(damage_mask_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
+        static_cast<UINT64>(shadow_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
+        static_cast<UINT64>(shadow_cbv_index) > std::numeric_limits<UINT64>::max() / descriptor_size) {
         diagnostic = {"indexed_resource_descriptor_offset_overflow",
                       "D3D12 material descriptor offset exceeds handle addressability"};
         return false;
@@ -4327,6 +4620,8 @@ bool prepare_d3d12_material_binding(
     const UINT64 normal_detail_srv_offset = static_cast<UINT64>(normal_detail_srv_index) * descriptor_size;
     const UINT64 damage_srv_offset = static_cast<UINT64>(damage_srv_index) * descriptor_size;
     const UINT64 damage_mask_srv_offset = static_cast<UINT64>(damage_mask_srv_index) * descriptor_size;
+    const UINT64 shadow_srv_offset = static_cast<UINT64>(shadow_srv_index) * descriptor_size;
+    const UINT64 shadow_cbv_offset = static_cast<UINT64>(shadow_cbv_index) * descriptor_size;
     if (srv_offset > std::numeric_limits<SIZE_T>::max() ||
         cbv_offset > std::numeric_limits<SIZE_T>::max() ||
         frame_cbv_offset > std::numeric_limits<SIZE_T>::max() ||
@@ -4335,7 +4630,9 @@ bool prepare_d3d12_material_binding(
         detail_srv_offset > std::numeric_limits<SIZE_T>::max() ||
         normal_detail_srv_offset > std::numeric_limits<SIZE_T>::max() ||
         damage_srv_offset > std::numeric_limits<SIZE_T>::max() ||
-        damage_mask_srv_offset > std::numeric_limits<SIZE_T>::max()) {
+        damage_mask_srv_offset > std::numeric_limits<SIZE_T>::max() ||
+        shadow_srv_offset > std::numeric_limits<SIZE_T>::max() ||
+        shadow_cbv_offset > std::numeric_limits<SIZE_T>::max()) {
         diagnostic = {"indexed_resource_descriptor_offset_overflow",
                       "D3D12 material descriptor offset exceeds handle addressability"};
         return false;
@@ -4531,6 +4828,63 @@ bool prepare_d3d12_material_binding(
             return false;
         output.damage_enabled = true;
         output.damage_mask_enabled = true;
+    }
+
+    if (has_shadow_receiver) {
+        D3D12_CPU_DESCRIPTOR_HANDLE shadow_cpu = srv_heap->GetCPUDescriptorHandleForHeapStart();
+        if (shadow_cpu.ptr > std::numeric_limits<SIZE_T>::max() - static_cast<SIZE_T>(shadow_srv_offset)) {
+            diagnostic = {"indexed_directional_shadow_descriptor_offset_overflow",
+                          "D3D12 directional-shadow SRV descriptor CPU handle overflows"};
+            return false;
+        }
+        shadow_cpu.ptr += static_cast<SIZE_T>(shadow_srv_offset);
+        D3D12_GPU_DESCRIPTOR_HANDLE shadow_gpu = srv_heap->GetGPUDescriptorHandleForHeapStart();
+        if (shadow_gpu.ptr > std::numeric_limits<UINT64>::max() - shadow_srv_offset) {
+            diagnostic = {"indexed_directional_shadow_descriptor_offset_overflow",
+                          "D3D12 directional-shadow SRV descriptor GPU handle overflows"};
+            return false;
+        }
+        shadow_gpu.ptr += shadow_srv_offset;
+        for (std::size_t cascade = 0U; cascade < indexed_directional_shadow_cascade_count; ++cascade) {
+            D3D12_CPU_DESCRIPTOR_HANDLE destination = shadow_cpu;
+            const UINT64 cascade_offset = static_cast<UINT64>(cascade) * descriptor_size;
+            if (destination.ptr > std::numeric_limits<SIZE_T>::max() - static_cast<SIZE_T>(cascade_offset)) {
+                diagnostic = {"indexed_directional_shadow_descriptor_offset_overflow",
+                              "D3D12 directional-shadow cascade descriptor CPU handle overflows"};
+                return false;
+            }
+            destination.ptr += static_cast<SIZE_T>(cascade_offset);
+            context->device->CopyDescriptorsSimple(1U, destination,
+                                                    shadow_attachments[cascade]->srv(),
+                                                    D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            output.shadow_attachments[cascade] =
+                const_cast<D3D12DepthAttachment*>(shadow_attachments[cascade]);
+        }
+        output.shadow_srv_gpu = shadow_gpu;
+        output.shadow_sampler_gpu = shadow_sampler->gpu_descriptor();
+        output.shadow_enabled = true;
+        D3D12_CPU_DESCRIPTOR_HANDLE shadow_cbv_cpu = srv_heap->GetCPUDescriptorHandleForHeapStart();
+        if (shadow_cbv_cpu.ptr > std::numeric_limits<SIZE_T>::max() - static_cast<SIZE_T>(shadow_cbv_offset)) {
+            diagnostic = {"indexed_directional_shadow_descriptor_offset_overflow",
+                          "D3D12 directional-shadow CBV descriptor CPU handle overflows"};
+            return false;
+        }
+        shadow_cbv_cpu.ptr += static_cast<SIZE_T>(shadow_cbv_offset);
+        D3D12_GPU_DESCRIPTOR_HANDLE shadow_cbv_gpu = srv_heap->GetGPUDescriptorHandleForHeapStart();
+        if (shadow_cbv_gpu.ptr > std::numeric_limits<UINT64>::max() - shadow_cbv_offset) {
+            diagnostic = {"indexed_directional_shadow_descriptor_offset_overflow",
+                          "D3D12 directional-shadow CBV descriptor GPU handle overflows"};
+            return false;
+        }
+        shadow_cbv_gpu.ptr += shadow_cbv_offset;
+        const UINT64 shadow_gpu_address =
+            shadow_constants->resource()->GetGPUVirtualAddress() +
+            request.directional_shadow_binding.constants_offset_bytes;
+        D3D12_CONSTANT_BUFFER_VIEW_DESC shadow_cbv{};
+        shadow_cbv.BufferLocation = shadow_gpu_address;
+        shadow_cbv.SizeInBytes = portable_directional_shadow_buffer_view_bytes;
+        context->device->CreateConstantBufferView(&shadow_cbv, shadow_cbv_cpu);
+        output.shadow_cbv_gpu = shadow_cbv_gpu;
     }
 
     if (has_material_constants) {
@@ -5209,13 +5563,6 @@ public:
             validate_indexed_static_mesh_draw_request(texture, request, diagnostic);
         if (validation != IndexedStaticMeshDrawStatus::ready)
             return {validation, std::move(diagnostic), {}};
-        if (request.pipeline != nullptr &&
-            pipeline_declares_directional_shadow_receiver(*request.pipeline)) {
-            return {IndexedStaticMeshDrawStatus::unsupported,
-                    {"d3d12_directional_shadow_receiver_staged",
-                     "D3D12 sampled D32 allocation is ready, but receiver descriptor execution requires a Windows/WARP verification build"},
-                    {}};
-        }
         if (texture.backend() != Backend::D3D12)
             return {IndexedStaticMeshDrawStatus::unsupported,
                     {"texture_backend_mismatch", "The texture belongs to another graphics backend"}, {}};
@@ -5266,17 +5613,6 @@ public:
             validate_indexed_static_mesh_batch_description(texture, batch, diagnostic);
         if (validation != IndexedStaticMeshBatchStatus::ready)
             return {validation, std::move(diagnostic), {}};
-        if (std::any_of(batch.draws.begin(), batch.draws.end(),
-                        [](const IndexedStaticMeshDrawRequest& request) {
-                            return request.pipeline != nullptr &&
-                                   pipeline_declares_directional_shadow_receiver(
-                                       *request.pipeline);
-                        })) {
-            return {IndexedStaticMeshBatchStatus::unsupported,
-                    {"d3d12_directional_shadow_receiver_staged",
-                     "D3D12 sampled D32 allocation is ready, but receiver descriptor execution requires a Windows/WARP verification build"},
-                    {}};
-        }
         if (texture.backend() != Backend::D3D12)
             return {IndexedStaticMeshBatchStatus::unsupported,
                     {"texture_backend_mismatch", "The texture belongs to another graphics backend"}, {}};
