@@ -14,6 +14,9 @@ namespace apex::platform {
 // so a path cannot become absolute when it crosses operating systems.
 // Drive/UNC roots, NUL bytes, empty components, and . or .. components are
 // rejected. A colon is rejected anywhere to avoid drive and NTFS ADS syntax.
+// Windows device names (for example CON, NUL, COM1, and LPT1, including
+// extensions) are rejected in every component for deterministic cross-platform
+// behavior.
 [[nodiscard]] bool isCapabilityRelativePath(std::string_view path) noexcept;
 
 } // namespace apex::platform

@@ -12,6 +12,39 @@ namespace {
   return value.find('\0') != std::string_view::npos;
 }
 
+[[nodiscard]] bool asciiEqualsIgnoreCase(const std::string_view value,
+                                          const std::string_view expected) noexcept {
+  if (value.size() != expected.size()) return false;
+  for (std::size_t index = 0; index < value.size(); ++index) {
+    const char actual = value[index] >= 'A' && value[index] <= 'Z'
+                            ? static_cast<char>(value[index] - 'A' + 'a')
+                            : value[index];
+    const char wanted = expected[index] >= 'A' && expected[index] <= 'Z'
+                            ? static_cast<char>(expected[index] - 'A' + 'a')
+                            : expected[index];
+    if (actual != wanted) return false;
+  }
+  return true;
+}
+
+[[nodiscard]] bool isWindowsDeviceName(const std::string_view component) noexcept {
+  const std::size_t dot = component.find('.');
+  std::size_t stemLength = dot == std::string_view::npos ? component.size() : dot;
+  while (stemLength > 0U &&
+         (component[stemLength - 1U] == ' ' || component[stemLength - 1U] == '.'))
+    --stemLength;
+  const std::string_view stem = component.substr(0, stemLength);
+  if (asciiEqualsIgnoreCase(stem, "CON") || asciiEqualsIgnoreCase(stem, "PRN") ||
+      asciiEqualsIgnoreCase(stem, "AUX") || asciiEqualsIgnoreCase(stem, "NUL") ||
+      asciiEqualsIgnoreCase(stem, "CONIN$") || asciiEqualsIgnoreCase(stem, "CONOUT$"))
+    return true;
+  if (stem.size() != 4U ||
+      !(asciiEqualsIgnoreCase(stem.substr(0, 3U), "COM") ||
+        asciiEqualsIgnoreCase(stem.substr(0, 3U), "LPT")))
+    return false;
+  return stem.back() >= '1' && stem.back() <= '9';
+}
+
 [[nodiscard]] bool parseIpv4Octet(const std::string_view value, std::uint8_t& output) noexcept {
   if (value.empty() || value.size() > 3 || (value.size() > 1 && value.front() == '0')) return false;
   unsigned number = 0;
@@ -118,7 +151,7 @@ bool isCapabilityRelativePath(const std::string_view path) noexcept {
     const std::size_t length = end == std::string_view::npos ? path.size() - start : end - start;
     const std::string_view component = path.substr(start, length);
     if (component.empty() || component == "." || component == ".." ||
-        component.find(':') != std::string_view::npos) return false;
+        component.find(':') != std::string_view::npos || isWindowsDeviceName(component)) return false;
     if (end == std::string_view::npos) return true;
     start = end + 1;
   }

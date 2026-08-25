@@ -41,8 +41,14 @@ void testCapabilityRelativePaths() {
            "", "/etc/passwd", "\\Windows\\system32", "//server/share/file",
            "\\\\server\\share\\file", "C:/asset.kn5", "C:\\asset.kn5", "C:asset.kn5",
            "car/../outside.kn5", "car/./body.kn5", "car//body.kn5", "car\\\\body.kn5",
-           "car/", "car\\", "/", ".", "..", "car:stream", "./car.kn5"}) {
-    require(!isCapabilityRelativePath(path), "unsafe capability path accepted");
+           "car/", "car\\", "/", ".", "..", "car:stream", "./car.kn5",
+           "CON", "NUL.txt", "folder/aux.log", "COM1", "lpt9.bin", "CONOUT$.log"}) {
+    require(!isCapabilityRelativePath(path), std::string("unsafe capability path accepted: ") + std::string(path));
+  }
+
+  for (const std::string_view path : {"container/file", "COM0.bin", "LPT10.txt",
+                                      "conifer/data", "auxiliary.log", "nulled/file"}) {
+    require(isCapabilityRelativePath(path), std::string("ordinary path rejected as a device name: ") + std::string(path));
   }
 
   const std::string embeddedNul("car/body\0evil.kn5", 17);
