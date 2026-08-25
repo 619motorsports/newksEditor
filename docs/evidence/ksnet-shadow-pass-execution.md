@@ -49,6 +49,21 @@ clears the target depth to `1.0`.
 `endShadowMapPass` unbinds the render targets. It binds the completed depth
 target for the level and uploads the level matrix.
 
+## Map allocation and lifetime
+
+`CameraShadowMapped::CameraShadowMapped` is at `0x1005d872`. It resizes the
+target and matrix vectors to exactly three entries. It then calls `0x1005e5c4`
+once to allocate all three targets.
+
+The allocation loop reads one width from `GraphicsManager + 0x2c`. It uses
+that value for both target dimensions. The installed `cfg/video.ini` sets
+`SHADOW_MAP_SIZE=2048`.
+
+`CameraShadowMapped::~CameraShadowMapped` is at `0x1005da89`. It deletes each
+target, then destroys both vectors. No other constructor or resize call site
+was found. This evidence supports three reusable maps for the camera lifetime.
+It does not prove a separate device-loss recovery path.
+
 ## Receiver resource ABI
 
 PDB/Ghidra identifies the exact host setters:
@@ -67,6 +82,12 @@ depth maps at `t6`, `t7`, and `t8`. It uses comparison sampler `s1`.
 The shader selects the cascades and does the 3x3 comparison PCF operations.
 The host setters only bind maps and upload matrices, bias, and reciprocal
 width.
+
+The constant-buffer write helper at `0x1004abeb` changes CPU bytes and marks
+the buffer dirty. `CBuffer::commit` at `0x1004ab88` performs the GPU update and
+clears that flag. The graphics manager commits this buffer at its next shared
+commit boundary. Therefore, each cascade updates receiver state before the
+later color draw. The exact outer managed dispatch order remains an inference.
 
 `setShadowMapTexture(level, nullptr)` clears texture stage `level + 6`. It does
 not write the texture size. A completed level binds its depth resource. It also

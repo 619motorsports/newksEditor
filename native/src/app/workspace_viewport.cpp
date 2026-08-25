@@ -110,6 +110,117 @@ using render::PipelineRenderTargetFormat;
     return WorkspaceViewportFrameStatus::execution_failed;
 }
 
+[[nodiscard]] WorkspaceViewportStatus shadowPreparationStatus(
+    render::DirectionalShadowMapStatus status) noexcept {
+    switch (status) {
+    case render::DirectionalShadowMapStatus::ready:
+        return WorkspaceViewportStatus::ready;
+    case render::DirectionalShadowMapStatus::invalid_request:
+        return WorkspaceViewportStatus::invalid;
+    case render::DirectionalShadowMapStatus::unsupported:
+        return WorkspaceViewportStatus::unsupported;
+    case render::DirectionalShadowMapStatus::allocation_failed:
+        return WorkspaceViewportStatus::allocation_failed;
+    }
+    return WorkspaceViewportStatus::invalid;
+}
+
+[[nodiscard]] WorkspaceViewportFrameStatus shadowFrameStatus(
+    render::DirectionalShadowMapStatus status) noexcept {
+    switch (status) {
+    case render::DirectionalShadowMapStatus::ready:
+        return WorkspaceViewportFrameStatus::ready;
+    case render::DirectionalShadowMapStatus::invalid_request:
+        return WorkspaceViewportFrameStatus::invalid;
+    case render::DirectionalShadowMapStatus::unsupported:
+        return WorkspaceViewportFrameStatus::unsupported;
+    case render::DirectionalShadowMapStatus::allocation_failed:
+        return WorkspaceViewportFrameStatus::execution_failed;
+    }
+    return WorkspaceViewportFrameStatus::execution_failed;
+}
+
+[[nodiscard]] WorkspaceViewportFrameStatus shadowDrawStatus(
+    render::StaticSceneDirectionalShadowStatus status) noexcept {
+    switch (status) {
+    case render::StaticSceneDirectionalShadowStatus::ready:
+    case render::StaticSceneDirectionalShadowStatus::partial:
+        return WorkspaceViewportFrameStatus::ready;
+    case render::StaticSceneDirectionalShadowStatus::invalid_request:
+        return WorkspaceViewportFrameStatus::invalid;
+    case render::StaticSceneDirectionalShadowStatus::unsupported:
+        return WorkspaceViewportFrameStatus::unsupported;
+    case render::StaticSceneDirectionalShadowStatus::execution_failed:
+        return WorkspaceViewportFrameStatus::execution_failed;
+    }
+    return WorkspaceViewportFrameStatus::execution_failed;
+}
+
+[[nodiscard]] bool validateShadowPrograms(
+    const WorkspaceViewportPrepareRequest& request,
+    render::Diagnostic& output_diagnostic) {
+    if (!request.directional_shadows.has_value()) return true;
+    const auto layout = request.directional_shadows->constants_layout;
+    if (layout != render::DirectionalShadowReceiverConstantsLayout::portable &&
+        layout != render::DirectionalShadowReceiverConstantsLayout::stock_ks_shadow_maps) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_shadow_constants_layout_invalid",
+            "Directional shadow constants require an explicit supported layout");
+        return false;
+    }
+
+    std::uint64_t total_shader_bytes = 0U;
+    const auto add_modules = [&](std::span<const render::PipelineShaderModule> modules) {
+        for (const auto& module : modules) {
+            const std::uint64_t size = module.bytes.size();
+            if (size > request.limits.material.scene.max_total_shader_bytes ||
+                total_shader_bytes >
+                    request.limits.material.scene.max_total_shader_bytes - size)
+                return false;
+            total_shader_bytes += size;
+        }
+        return true;
+    };
+    for (const auto& set : request.shader_modules) {
+        if (!add_modules(set.modules)) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_shadow_shader_budget",
+                "Material and shadow programs exceed the shared shader byte budget");
+            return false;
+        }
+    }
+    const std::array<const std::optional<render::PipelineProgram>*, 3U> programs = {
+        &request.directional_shadows->opaque_pipeline,
+        &request.directional_shadows->alpha_static_pipeline,
+        &request.directional_shadows->skinned_pipeline,
+    };
+    for (const auto* program : programs) {
+        if (!program->has_value()) continue;
+        const auto validation = render::validate_pipeline(
+            **program, request.limits.material.scene.pipeline);
+        if (!validation.valid) {
+            if (validation.diagnostics.empty()) {
+                output_diagnostic = diagnostic(
+                    "workspace_viewport_shadow_pipeline_invalid",
+                    "Directional shadow pipeline validation failed");
+            } else {
+                output_diagnostic = {
+                    "workspace_viewport_shadow_pipeline_" +
+                        validation.diagnostics.front().code,
+                    validation.diagnostics.front().message};
+            }
+            return false;
+        }
+        if (!add_modules((*program)->shaders)) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_shadow_shader_budget",
+                "Material and shadow programs exceed the shared shader byte budget");
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 bool WorkspaceViewportCameraController::apply(
@@ -254,9 +365,13 @@ WorkspaceViewport::WorkspaceViewport(
     std::unique_ptr<render::Texture> color,
     std::unique_ptr<render::DepthAttachment> depth,
     std::unique_ptr<render::StockSceneExecutionResult> execution,
+    std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps,
+    std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows,
     std::optional<LodCatalog> lod_catalog)
     : backend_(backend), presentation_(presentation), color_(std::move(color)),
       depth_(std::move(depth)), execution_(std::move(execution)),
+      shadow_maps_(std::move(shadow_maps)),
+      directional_shadows_(std::move(directional_shadows)),
       lod_catalog_(std::move(lod_catalog)) {}
 
 WorkspaceViewport::~WorkspaceViewport() = default;
@@ -337,6 +452,62 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
     frame.apply_skinning = request.apply_skinning;
     frame.frame_constants = request.frame_constants;
 
+    render::Diagnostic shadow_diagnostic;
+    if (directional_shadows_.has_value()) {
+        if (shadow_maps_ == nullptr) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_shadow_maps_missing",
+                "Prepared directional shadows require retained map resources");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        auto lighting = directional_shadows_->maps.lighting;
+        lighting.eye = request.camera.position;
+        lighting.target = {
+            request.camera.position[0] + request.camera.forward[0],
+            request.camera.position[1] + request.camera.forward[1],
+            request.camera.position[2] + request.camera.forward[2],
+        };
+        lighting.up = request.camera.up;
+        lighting.fov_radians = request.camera.fov_radians;
+        lighting.aspect = request.camera.aspect;
+        lighting.near_plane = request.camera.near_plane;
+        lighting.far_plane = request.camera.far_plane;
+        const auto refreshed = render::refresh_directional_shadow_maps(
+            *shadow_maps_, lighting);
+        if (!refreshed.ok()) {
+            output_diagnostic = refreshed.diagnostic;
+            return shadowFrameStatus(refreshed.status);
+        }
+
+        render::StaticSceneDirectionalShadowFrameDescription shadow_frame;
+        shadow_frame.maps = shadow_maps_.get();
+        shadow_frame.opaque_pipeline =
+            directional_shadows_->opaque_pipeline.has_value()
+                ? &*directional_shadows_->opaque_pipeline
+                : nullptr;
+        shadow_frame.alpha_static_pipeline =
+            directional_shadows_->alpha_static_pipeline.has_value()
+                ? &*directional_shadows_->alpha_static_pipeline
+                : nullptr;
+        shadow_frame.skinned_pipeline =
+            directional_shadows_->skinned_pipeline.has_value()
+                ? &*directional_shadows_->skinned_pipeline
+                : nullptr;
+        shadow_frame.refreshed_packets = request.refreshed_packets;
+        shadow_frame.packet_visibility = packet_visibility;
+        const auto shadowed =
+            execution_->resources->draw_opaque_directional_shadows(
+                device, shadow_frame);
+        if (!shadowed.ok()) {
+            output_diagnostic = shadowed.diagnostic;
+            return shadowDrawStatus(shadowed.status);
+        }
+        shadow_diagnostic = shadowed.diagnostic;
+        frame.directional_shadow_maps = shadow_maps_.get();
+        frame.directional_shadow_constants_layout =
+            directional_shadows_->constants_layout;
+    }
+
     const auto drawn = execution_->resources->draw_and_readback(
         device, *color_, frame);
     if (!drawn.ok()) {
@@ -344,7 +515,9 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
         return drawStatus(drawn.status);
     }
     const auto presented = device.present_texture(target, *color_);
-    output_diagnostic = presented.diagnostic;
+    output_diagnostic = presented.ok() && !shadow_diagnostic.code.empty()
+                            ? std::move(shadow_diagnostic)
+                            : presented.diagnostic;
     return frameStatus(presented.status);
 }
 
@@ -358,6 +531,20 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             result.diagnostic = diagnostic(
                 "workspace_viewport_multisample_unsupported",
                 "workspace presentation currently requires a single-sample color target");
+            return result;
+        }
+        if (request.directional_shadow_receiver !=
+            request.directional_shadows.has_value()) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_directional_shadow_configuration_invalid",
+                "The receiver selector and directional shadow configuration must be enabled together");
+            return result;
+        }
+        render::Diagnostic shadow_program_diagnostic;
+        if (!validateShadowPrograms(request, shadow_program_diagnostic)) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = std::move(shadow_program_diagnostic);
             return result;
         }
         render::Diagnostic target_diagnostic;
@@ -470,6 +657,18 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             return result;
         }
 
+        std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps;
+        if (request.directional_shadows.has_value()) {
+            auto prepared_maps = render::prepare_directional_shadow_maps(
+                device, request.directional_shadows->maps);
+            if (!prepared_maps.ok()) {
+                result.status = shadowPreparationStatus(prepared_maps.status);
+                result.diagnostic = std::move(prepared_maps.diagnostic);
+                return result;
+            }
+            shadow_maps = std::move(prepared_maps.resources);
+        }
+
         render::StockSceneExecutionRequest scene_request;
         scene_request.model = &document.assembly.model;
         scene_request.scene = &document.scene.snapshot;
@@ -554,6 +753,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         result.viewport = std::unique_ptr<WorkspaceViewport>(new WorkspaceViewport(
             device.info().backend, request.presentation, std::move(color.texture),
             std::move(depth.attachment), std::move(execution),
+            std::move(shadow_maps), request.directional_shadows,
             std::move(lod_catalog)));
         result.status = WorkspaceViewportStatus::ready;
         return result;

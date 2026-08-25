@@ -15,6 +15,101 @@ DirectionalShadowMapResult fail(DirectionalShadowMapStatus status,
     return {status, {std::move(code), std::move(message)}, nullptr};
 }
 
+struct DirectionalShadowCameraState {
+    DirectionalShadowResult metadata;
+    apex::scene::Vector3 receiver_position{};
+    std::array<CameraFrame, directional_shadow_cascade_count> cameras{};
+};
+
+[[nodiscard]] DirectionalShadowMapStatus build_camera_state(
+    Backend backend, const DirectionalShadowInput& lighting,
+    DirectionalShadowCameraState& state, Diagnostic& diagnostic) {
+    state.metadata = computeDirectionalShadowCascades(lighting);
+    if (state.metadata.map_size != lighting.map_size ||
+        state.metadata.cascades.size() != directional_shadow_cascade_count ||
+        state.metadata.splits.size() != directional_shadow_cascade_count) {
+        diagnostic = {"directional_shadow_cascade_contract_invalid",
+                      "Directional shadow computation must produce exactly three cascades"};
+        return DirectionalShadowMapStatus::invalid_request;
+    }
+    const CameraClipSpace clip_space = backend == Backend::Vulkan
+                                           ? CameraClipSpace::vulkan
+                                           : CameraClipSpace::d3d12;
+    state.receiver_position = lighting.eye;
+    for (float& value : state.receiver_position)
+        if (!std::isfinite(value)) value = 0.0F;
+    for (std::size_t index = 0U; index < directional_shadow_cascade_count; ++index) {
+        if (state.metadata.cascades[index].index != index) {
+            diagnostic = {"directional_shadow_cascade_index_invalid",
+                          "Directional shadow cascade indices must be ordered zero through two"};
+            return DirectionalShadowMapStatus::invalid_request;
+        }
+        const auto converted = convertDirectionalShadowCascadeMatrix(
+            state.metadata.cascades[index].matrix, clip_space);
+        if (!converted.ok()) {
+            diagnostic = {converted.code, converted.message};
+            return converted.status == DirectionalShadowClipSpaceStatus::unsupported
+                       ? DirectionalShadowMapStatus::unsupported
+                       : DirectionalShadowMapStatus::invalid_request;
+        }
+        CameraFrame camera;
+        camera.view_projection = converted.matrix;
+        camera.near_plane = state.metadata.cascades[index].near_plane;
+        camera.far_plane = state.metadata.cascades[index].far_plane;
+        camera.clip_space = clip_space;
+        state.cameras[index] = camera;
+    }
+    return DirectionalShadowMapStatus::ready;
+}
+
+[[nodiscard]] bool finite_vector(const apex::scene::Vector3& value) noexcept {
+    return std::all_of(value.begin(), value.end(),
+                       [](float component) { return std::isfinite(component); });
+}
+
+[[nodiscard]] bool valid_refresh_input(
+    const DirectionalShadowInput& lighting) noexcept {
+    if (!finite_vector(lighting.eye) || !finite_vector(lighting.target) ||
+        !finite_vector(lighting.up) || !finite_vector(lighting.sun_direction) ||
+        !std::isfinite(lighting.fov_radians) || !std::isfinite(lighting.aspect) ||
+        !std::isfinite(lighting.near_plane) || !std::isfinite(lighting.far_plane) ||
+        !std::isfinite(lighting.scene_radius) || !(lighting.fov_radians > 0.0F) ||
+        !(lighting.fov_radians < 3.14159265358979323846F) ||
+        !(lighting.aspect > 0.0F) || !(lighting.near_plane > 0.0F) ||
+        !(lighting.far_plane > lighting.near_plane) ||
+        !(lighting.scene_radius > 0.0F) || lighting.map_size == 0U)
+        return false;
+    double forward_length_squared = 0.0;
+    double up_length_squared = 0.0;
+    double light_length_squared = 0.0;
+    std::array<double, 3U> forward{};
+    for (std::size_t index = 0U; index < 3U; ++index) {
+        forward[index] = static_cast<double>(lighting.target[index]) -
+                         static_cast<double>(lighting.eye[index]);
+        forward_length_squared += forward[index] * forward[index];
+        up_length_squared += static_cast<double>(lighting.up[index]) *
+                             static_cast<double>(lighting.up[index]);
+        light_length_squared += static_cast<double>(lighting.sun_direction[index]) *
+                                static_cast<double>(lighting.sun_direction[index]);
+    }
+    const std::array<double, 3U> forward_cross_up = {
+        forward[1] * lighting.up[2] - forward[2] * lighting.up[1],
+        forward[2] * lighting.up[0] - forward[0] * lighting.up[2],
+        forward[0] * lighting.up[1] - forward[1] * lighting.up[0],
+    };
+    const double cross_length_squared =
+        forward_cross_up[0] * forward_cross_up[0] +
+        forward_cross_up[1] * forward_cross_up[1] +
+        forward_cross_up[2] * forward_cross_up[2];
+    if (!(forward_length_squared > 1.0e-12) || !(up_length_squared > 1.0e-12) ||
+        !(light_length_squared > 1.0e-12) || !(cross_length_squared > 1.0e-12))
+        return false;
+    return std::all_of(lighting.splits.begin(), lighting.splits.end(),
+                       [](float split) { return std::isfinite(split) && split > 0.0F; }) &&
+           lighting.splits[0] < lighting.splits[1] &&
+           lighting.splits[1] < lighting.splits[2];
+}
+
 } // namespace
 
 std::optional<std::size_t> select_directional_shadow_cascade(
@@ -94,44 +189,19 @@ DirectionalShadowMapResult prepare_directional_shadow_maps(
                     "directional_shadow_map_budget",
                     "Three directional shadow maps exceed the bounded byte budget");
     }
-    DirectionalShadowResult metadata =
-        computeDirectionalShadowCascades(request.lighting);
-    if (metadata.map_size != request.lighting.map_size ||
-        metadata.cascades.size() != directional_shadow_cascade_count ||
-        metadata.splits.size() != directional_shadow_cascade_count) {
-        return fail(DirectionalShadowMapStatus::invalid_request,
-                    "directional_shadow_cascade_contract_invalid",
-                    "Directional shadow computation must produce exactly three cascades");
-    }
-    const CameraClipSpace clip_space = device.info().backend == Backend::Vulkan
-                                           ? CameraClipSpace::vulkan
-                                           : CameraClipSpace::d3d12;
+    DirectionalShadowCameraState camera_state;
+    Diagnostic camera_diagnostic;
+    const auto camera_status = build_camera_state(
+        device.info().backend, request.lighting, camera_state, camera_diagnostic);
+    if (camera_status != DirectionalShadowMapStatus::ready)
+        return fail(camera_status, std::move(camera_diagnostic.code),
+                    std::move(camera_diagnostic.message));
     auto resources = std::make_unique<DirectionalShadowMapResources>();
     resources->backend_ = device.info().backend;
     resources->device_ = &device;
-    resources->metadata_ = std::move(metadata);
-    resources->receiver_position_ = request.lighting.eye;
-    for (float& value : resources->receiver_position_)
-        if (!std::isfinite(value)) value = 0.0F;
-    for (std::size_t index = 0U; index < directional_shadow_cascade_count; ++index) {
-        if (resources->metadata_.cascades[index].index != index)
-            return fail(DirectionalShadowMapStatus::invalid_request,
-                        "directional_shadow_cascade_index_invalid",
-                        "Directional shadow cascade indices must be ordered zero through two");
-        const auto converted = convertDirectionalShadowCascadeMatrix(
-            resources->metadata_.cascades[index].matrix, clip_space);
-        if (!converted.ok())
-            return fail(converted.status == DirectionalShadowClipSpaceStatus::unsupported
-                            ? DirectionalShadowMapStatus::unsupported
-                            : DirectionalShadowMapStatus::invalid_request,
-                        converted.code, converted.message);
-        CameraFrame camera;
-        camera.view_projection = converted.matrix;
-        camera.near_plane = resources->metadata_.cascades[index].near_plane;
-        camera.far_plane = resources->metadata_.cascades[index].far_plane;
-        camera.clip_space = clip_space;
-        resources->cameras_[index] = camera;
-    }
+    resources->metadata_ = std::move(camera_state.metadata);
+    resources->receiver_position_ = camera_state.receiver_position;
+    resources->cameras_ = camera_state.cameras;
     const DepthAttachmentDescription description{
         request.lighting.map_size, request.lighting.map_size, 1U,
         DepthAttachmentFormat::d32_float, true};
@@ -167,6 +237,42 @@ DirectionalShadowMapResult prepare_directional_shadow_maps(
     return fail(DirectionalShadowMapStatus::allocation_failed,
                 "directional_shadow_map_allocation_failed",
                 "Directional shadow preparation has insufficient memory");
+}
+
+DirectionalShadowMapRefreshResult refresh_directional_shadow_maps(
+    DirectionalShadowMapResources& resources,
+    const DirectionalShadowInput& lighting) try {
+    if (resources.backend_ != Backend::Vulkan &&
+        resources.backend_ != Backend::D3D12) {
+        return {DirectionalShadowMapStatus::unsupported,
+                {"directional_shadow_backend_unsupported",
+                 "Directional shadow maps require Vulkan or D3D12"}};
+    }
+    if (resources.device_ == nullptr ||
+        lighting.map_size != resources.metadata_.map_size) {
+        return {DirectionalShadowMapStatus::invalid_request,
+                {"directional_shadow_refresh_resource_mismatch",
+                 "Directional shadow refresh must keep the prepared map size and device"}};
+    }
+    if (!valid_refresh_input(lighting)) {
+        return {DirectionalShadowMapStatus::invalid_request,
+                {"directional_shadow_refresh_camera_invalid",
+                 "Directional shadow refresh requires finite camera and lighting values"}};
+    }
+    DirectionalShadowCameraState pending;
+    Diagnostic pending_diagnostic;
+    const auto pending_status = build_camera_state(
+        resources.backend_, lighting, pending, pending_diagnostic);
+    if (pending_status != DirectionalShadowMapStatus::ready)
+        return {pending_status, std::move(pending_diagnostic)};
+    resources.metadata_ = std::move(pending.metadata);
+    resources.receiver_position_ = pending.receiver_position;
+    resources.cameras_ = pending.cameras;
+    return {DirectionalShadowMapStatus::ready, {}};
+} catch (const std::bad_alloc&) {
+    return {DirectionalShadowMapStatus::allocation_failed,
+            {"directional_shadow_refresh_allocation_failed",
+             "Directional shadow refresh has insufficient memory"}};
 }
 
 const char* directional_shadow_map_status_name(

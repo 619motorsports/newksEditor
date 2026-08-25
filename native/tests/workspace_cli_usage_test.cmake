@@ -17,6 +17,24 @@ if(malformed_position EQUAL -1)
 endif()
 
 execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --directional-shadow-vertex shadow.spv
+  RESULT_VARIABLE detached_shadow_result
+  OUTPUT_VARIABLE detached_shadow_output
+  ERROR_VARIABLE detached_shadow_error
+)
+if(NOT detached_shadow_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached shadow shader returned ${detached_shadow_result}: ${detached_shadow_error}")
+endif()
+string(FIND "${detached_shadow_error}"
+  "shader modules require a workspace model" detached_shadow_position)
+if(detached_shadow_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached shadow shader was not diagnosed: ${detached_shadow_error}")
+endif()
+
+execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --kind track
   RESULT_VARIABLE kind_result
   OUTPUT_VARIABLE kind_output

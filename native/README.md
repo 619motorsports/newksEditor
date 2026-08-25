@@ -153,7 +153,8 @@ out/native/dev/native/apex-native --window vulkan --model car.kn5 \
   --animation animations/car_door_l.ksanim --animation-position 0.5 \
   --node-search door --selected-node 42 --isolate-selected --wireframe \
   --shader-family ksPerPixel --shader-vertex stock.vert.spv \
-  --shader-fragment stock.frag.spv
+  --shader-fragment receiver.frag.spv \
+  --directional-shadow-vertex shadow.vert.spv
 out/native/dev/native/apex-native --window vulkan \
   --workspace-root content/cars/example --manifest data/lods.ini \
   --kind carLods --lod-index 1 \
@@ -177,6 +178,14 @@ changes only the frame mask at a range boundary. `--lod-index` selects one
 manifest index and disables automatic selection. The stable catalog is a port
 optimization for live distance selection. The recovered editor loads and
 compiles one FBX for each LOD menu selection.
+
+`--directional-shadow-vertex` enables the viewport shadow schedule. The
+material modules must implement the receiver bindings selected by this flag.
+The viewport owns three fixed D32 maps and reuses them when the camera moves.
+It executes three caster passes before the receiver color pass and present.
+The CLI program covers opaque static casters. Alpha-tested and skinned casters
+stay staged until callers supply their explicit programs through the viewport
+API. The viewport reports staged branches instead of claiming exact output.
 
 Export a project through the native authoring service:
 

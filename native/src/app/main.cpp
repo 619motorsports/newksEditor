@@ -58,6 +58,7 @@ void usage(std::ostream& output) {
               "                       [--node-search <query>] [--selected-node <id> [--isolate-selected]]\n"
               "                       [--show-hidden] [--wireframe]\n"
               "                       [--shader-family <name> --shader-vertex <file> --shader-fragment <file>]\n"
+              "                       [--directional-shadow-vertex <file>]\n"
            << "  apex-native --inspect-kn5 <file>\n"
            << "  apex-native --inspect-dds <file>\n"
            << "  apex-native --inspect-acd <asset-directory-name> <file>\n"
@@ -511,6 +512,7 @@ struct WindowWorkspaceOptions {
     bool showHidden = false;
     bool wireframe = false;
     std::vector<WindowShaderSpec> shaders;
+    std::optional<std::filesystem::path> directionalShadowVertex;
 };
 
 struct LoadedWindowWorkspace {
@@ -521,6 +523,8 @@ struct LoadedWindowWorkspace {
     };
     std::vector<ShaderSet> shaderSets;
     std::vector<apex::render::StockMaterialShaderModules> descriptors;
+    std::optional<apex::app::WorkspaceViewportDirectionalShadowOptions>
+        directionalShadows;
     apex::app::WorkspaceSelectionState selection;
 };
 
@@ -680,6 +684,12 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             if (result.shaders.empty() || !result.shaders.back().fragment.empty())
                 throw std::runtime_error("--shader-fragment must follow one shader family once");
             result.shaders.back().fragment = require_value("--shader-fragment");
+        } else if (option == "--directional-shadow-vertex") {
+            if (result.directionalShadowVertex.has_value())
+                throw std::runtime_error(
+                    "duplicate --directional-shadow-vertex option");
+            result.directionalShadowVertex = std::filesystem::path(
+                require_value("--directional-shadow-vertex"));
         } else {
             throw std::runtime_error("unknown window option");
         }
@@ -704,8 +714,11 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
         }
     }
     if ((!result.model.has_value() && !result.workspaceRoot.has_value()) &&
-        (!result.shaders.empty()))
+        (!result.shaders.empty() || result.directionalShadowVertex.has_value()))
         throw std::runtime_error("shader modules require a workspace model");
+    if (result.directionalShadowVertex.has_value() && result.shaders.empty())
+        throw std::runtime_error(
+            "--directional-shadow-vertex requires receiver-capable material shader modules");
     if (result.rpmSpecified && !result.analogInstruments.has_value())
         throw std::runtime_error("--rpm requires --analog-instruments");
     if (result.analogInstruments.has_value() &&
@@ -894,11 +907,52 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
         }
         loaded.shaderSets.push_back(std::move(set));
     }
+    if (options.directionalShadowVertex.has_value()) {
+        auto shadow_bytes = read_file(*options.directionalShadowVertex);
+        if (shadow_bytes.size() > apex::render::max_shader_module_bytes)
+            throw std::runtime_error(
+                "the directional shadow module exceeds the native module budget");
+        if (shadow_bytes.size() > max_shader_bytes ||
+            shader_bytes > max_shader_bytes - shadow_bytes.size())
+            throw std::runtime_error(
+                "caller-supplied shader modules exceed the native shader budget");
+        shader_bytes += shadow_bytes.size();
+
+        apex::render::PipelineProgram pipeline;
+        pipeline.name = "workspace-opaque-directional-shadow";
+        pipeline.shaders.push_back({
+            apex::render::PipelineShaderStage::vertex, shader_format,
+            std::move(shadow_bytes)});
+        pipeline.vertex_layout.stride = 11U * sizeof(float);
+        pipeline.vertex_layout.attributes = {
+            {apex::render::PipelineVertexSemantic::position,
+             apex::render::PipelineVertexAttributeFormat::float32x3, 0U, 0U},
+            {apex::render::PipelineVertexSemantic::normal,
+             apex::render::PipelineVertexAttributeFormat::float32x3, 1U, 12U},
+            {apex::render::PipelineVertexSemantic::texcoord0,
+             apex::render::PipelineVertexAttributeFormat::float32x2, 2U, 24U},
+            {apex::render::PipelineVertexSemantic::tangent,
+             apex::render::PipelineVertexAttributeFormat::float32x3, 3U, 32U},
+        };
+        pipeline.targets.has_depth = true;
+        pipeline.targets.depth = {
+            apex::render::PipelineRenderTargetFormat::depth32_float, 1U};
+        pipeline.depth.test_enabled = true;
+        pipeline.depth.write_enabled = true;
+        pipeline.depth.compare = apex::render::PipelineCompareOperation::less;
+        pipeline.transform_contract =
+            apex::render::PipelineTransformContract::draw_matrices;
+        apex::app::WorkspaceViewportDirectionalShadowOptions shadows;
+        shadows.opaque_pipeline = std::move(pipeline);
+        loaded.directionalShadows = std::move(shadows);
+    }
     loaded.descriptors.reserve(loaded.shaderSets.size());
     for (std::size_t index = 0; index < loaded.shaderSets.size(); ++index) {
         loaded.shaderSets[index].descriptor = {
             apex::render::StockMaterialShaderKeyKind::shader_family,
             options.shaders[index].family, loaded.shaderSets[index].modules};
+        loaded.shaderSets[index].descriptor.directional_shadow_receiver =
+            loaded.directionalShadows.has_value();
         loaded.descriptors.push_back(loaded.shaderSets[index].descriptor);
     }
 }
@@ -994,6 +1048,12 @@ int run_window(int argc, char** argv) {
         request.packets.selected_node = loaded_workspace.selection.selected_node;
         request.packets.wireframe = loaded_workspace.selection.wireframe;
         request.wireframe = loaded_workspace.selection.wireframe;
+        if (loaded_workspace.directionalShadows.has_value()) {
+            request.directional_shadow_receiver = true;
+            request.directional_shadows = loaded_workspace.directionalShadows;
+            request.directional_shadows->maps.lighting.scene_radius = std::max(
+                1.0F, loaded_workspace.document->scene.snapshot.bounds_radius);
+        }
         if (loaded_workspace.document->assembly.workspace.kind == "carLods") {
             if (!loaded_workspace.document->scene.preview_bounds.has_value()) {
                 throw std::runtime_error(
@@ -1017,6 +1077,7 @@ int run_window(int argc, char** argv) {
 
     std::array<apex::platform::WindowEvent, 64U> events{};
     std::uint64_t frames = 0U;
+    bool reported_shadow_diagnostic = false;
     apex::app::PresentationRecreationController recreation;
     while (!window_result.window->close_requested() &&
            (frame_limit == 0U || frames < frame_limit)) {
@@ -1124,6 +1185,12 @@ int run_window(int argc, char** argv) {
             std::cerr << (viewport != nullptr ? "workspace frame: " : "presentation frame: ")
                       << frame_diagnostic.code << ": " << frame_diagnostic.message << '\n';
             return 1;
+        }
+        if (viewport != nullptr && !reported_shadow_diagnostic &&
+            !viewport_diagnostic.code.empty()) {
+            std::cerr << "workspace shadow: " << viewport_diagnostic.code
+                      << ": " << viewport_diagnostic.message << '\n';
+            reported_shadow_diagnostic = true;
         }
         recreation.record_successful_frame();
         ++frames;

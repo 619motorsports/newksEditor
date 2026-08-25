@@ -2886,6 +2886,40 @@ void retains_three_directional_maps_and_executes_only_opaque_static_casters() {
                 device.depth_batch_calls == calls_before_invalid,
             "refreshed shadow cull state cannot change after preparation");
 
+    DirectionalShadowInput refreshed_lighting = map_request.lighting;
+    refreshed_lighting.eye = {1.0F, 0.0F, 5.0F};
+    refreshed_lighting.target = {0.0F, 0.0F, 0.0F};
+    refreshed_lighting.far_plane = 100.0F;
+    const std::array<const DepthAttachment*, directional_shadow_cascade_count>
+        retained_attachments = {
+            &maps.resources->attachment(0U), &maps.resources->attachment(1U),
+            &maps.resources->attachment(2U)};
+    const auto initial_matrix = maps.resources->metadata().cascades[0U].matrix;
+    const auto refreshed_maps = refresh_directional_shadow_maps(
+        *maps.resources, refreshed_lighting);
+    require(refreshed_maps.ok() &&
+                maps.resources->metadata().cascades[0U].matrix != initial_matrix &&
+                &maps.resources->attachment(0U) == retained_attachments[0U] &&
+                &maps.resources->attachment(1U) == retained_attachments[1U] &&
+                &maps.resources->attachment(2U) == retained_attachments[2U] &&
+                device.depth_attachment_calls == directional_shadow_cascade_count,
+            "camera refresh reuses all three retained map allocations");
+
+    const auto stable_matrix = maps.resources->metadata().cascades[0U].matrix;
+    const auto stable_forward = maps.resources->metadata().forward;
+    refreshed_lighting.eye[0U] = std::numeric_limits<float>::quiet_NaN();
+    const auto invalid_refresh = refresh_directional_shadow_maps(
+        *maps.resources, refreshed_lighting);
+    require(!invalid_refresh.ok() &&
+                invalid_refresh.status ==
+                    DirectionalShadowMapStatus::invalid_request &&
+                invalid_refresh.diagnostic.code ==
+                    "directional_shadow_refresh_camera_invalid" &&
+                maps.resources->metadata().cascades[0U].matrix == stable_matrix &&
+                maps.resources->metadata().forward == stable_forward &&
+                device.depth_attachment_calls == directional_shadow_cascade_count,
+            "malformed camera refresh leaves retained cascade state unchanged");
+
     DirectionalShadowMapRequest oversized = map_request;
     oversized.lighting.map_size = max_directional_shadow_map_size + 1U;
     const auto rejected = prepare_directional_shadow_maps(device, oversized);

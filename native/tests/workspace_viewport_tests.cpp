@@ -114,6 +114,7 @@ public:
     IndexedStaticMeshBatchResult draw_indexed_static_mesh_batch_and_readback(
         Texture&, const IndexedStaticMeshBatchDescription& batch) override {
         ++draw_calls;
+        events.push_back("color");
         draw_counts.push_back(batch.draws.size());
         std::vector<apex::scene::NodeId> nodes;
         nodes.reserve(batch.draws.size());
@@ -122,6 +123,10 @@ public:
                                 ? apex::scene::invalid_node_id
                                 : draw.packet->node);
         draw_nodes.push_back(std::move(nodes));
+        if (!batch.draws.empty()) {
+            receiver_maps.push_back(
+                batch.draws.front().directional_shadow_binding.maps);
+        }
         if (fail_draw)
             return {IndexedStaticMeshBatchStatus::execution_failed,
                     {"fake_draw_failed", "injected draw failure"}, {}};
@@ -132,6 +137,22 @@ public:
             return {IndexedStaticMeshBatchStatus::unsupported,
                     {"fake_draw_unsupported", "injected unsupported draw"}, {}};
         return {IndexedStaticMeshBatchStatus::ready, {}, {}};
+    }
+
+    DepthOnlyIndexedStaticMeshBatchResult draw_depth_only_indexed_static_mesh_batch(
+        const DepthOnlyIndexedStaticMeshBatchDescription& batch) override {
+        ++depth_batch_calls;
+        events.push_back("shadow");
+        depth_targets.push_back(batch.depth_attachment);
+        depth_draw_counts.push_back(batch.draws.size());
+        depth_clear_values.push_back(batch.clear_depth ? batch.depth_clear_value
+                                                       : -1.0F);
+        if (fail_depth_batch_call != 0U &&
+            depth_batch_calls == fail_depth_batch_call) {
+            return {DepthOnlyIndexedStaticMeshBatchStatus::execution_failed,
+                    {"fake_shadow_failed", "injected shadow failure"}};
+        }
+        return {DepthOnlyIndexedStaticMeshBatchStatus::ready, {}};
     }
 
     SamplerResult create_sampler(const SamplerDescription& description) override {
@@ -146,6 +167,7 @@ public:
     PresentationFrameResult present_texture(
         PresentationTarget&, Texture&) override {
         ++present_calls;
+        events.push_back("present");
         if (fail_present)
             return {PresentationFrameStatus::execution_failed,
                     {"fake_present_failed", "injected present failure"}};
@@ -158,14 +180,22 @@ public:
     bool invalid_draw = false;
     bool unsupported_draw = false;
     bool fail_present = false;
+    std::size_t fail_depth_batch_call = 0U;
     std::size_t buffer_calls = 0U;
     std::size_t texture_calls = 0U;
     std::size_t depth_calls = 0U;
     std::size_t sampler_calls = 0U;
     std::size_t draw_calls = 0U;
+    std::size_t depth_batch_calls = 0U;
     std::size_t present_calls = 0U;
     std::vector<std::size_t> draw_counts;
     std::vector<std::vector<apex::scene::NodeId>> draw_nodes;
+    std::vector<std::string> events;
+    std::vector<const DepthAttachment*> depth_targets;
+    std::vector<std::size_t> depth_draw_counts;
+    std::vector<float> depth_clear_values;
+    std::vector<std::array<const DepthAttachment*,
+                           indexed_directional_shadow_cascade_count>> receiver_maps;
 
 private:
     DeviceInfo info_{Backend::Vulkan, "viewport fake", "unit", 1U, 0U, 0U,
@@ -384,6 +414,44 @@ WorkspaceViewportPrepareRequest request_for(const Fixture& fixture_value) {
     return request;
 }
 
+PipelineProgram opaque_shadow_pipeline(const Fixture& fixture_value) {
+    PipelineProgram pipeline;
+    pipeline.name = "viewport-opaque-directional-shadow";
+    pipeline.shaders = {fixture_value.modules.front()};
+    pipeline.vertex_layout.stride = 11U * sizeof(float);
+    pipeline.vertex_layout.attributes = {
+        {PipelineVertexSemantic::position,
+         PipelineVertexAttributeFormat::float32x3, 0U, 0U},
+        {PipelineVertexSemantic::normal,
+         PipelineVertexAttributeFormat::float32x3, 1U, 12U},
+        {PipelineVertexSemantic::texcoord0,
+         PipelineVertexAttributeFormat::float32x2, 2U, 24U},
+        {PipelineVertexSemantic::tangent,
+         PipelineVertexAttributeFormat::float32x3, 3U, 32U},
+    };
+    pipeline.targets.has_depth = true;
+    pipeline.targets.depth = {
+        PipelineRenderTargetFormat::depth32_float, 1U};
+    pipeline.depth.test_enabled = true;
+    pipeline.depth.write_enabled = true;
+    pipeline.depth.compare = PipelineCompareOperation::less;
+    pipeline.transform_contract = PipelineTransformContract::draw_matrices;
+    return pipeline;
+}
+
+CameraFrame valid_shadow_camera(float x = 0.0F) {
+    CameraFrameRequest request;
+    request.eye = {x, 0.0F, 5.0F};
+    request.target = {0.0F, 0.0F, 0.0F};
+    request.aspect = 1.0F;
+    request.near_plane = 0.01F;
+    request.far_plane = 100.0F;
+    request.clip_space = CameraClipSpace::vulkan;
+    const auto built = build_camera_frame(request);
+    require(built.ok(), "directional shadow test camera builds");
+    return *built.frame;
+}
+
 void camera_controller_matches_bounded_editor_gestures() {
     apex::app::WorkspaceViewportCameraController controller;
     const auto initial = controller.frame(1.0F, CameraClipSpace::vulkan);
@@ -503,6 +571,96 @@ void opens_and_draws() {
                 device.draw_calls == 2U && device.present_calls == 2U &&
                 device.draw_counts == std::vector<std::size_t>({1U, 0U}),
             "all-hidden viewport frame clears and presents without rebuilding resources");
+}
+
+void schedules_directional_shadows_before_color_and_reuses_maps() {
+    auto value = fixture();
+    value.module_set.directional_shadow_receiver = true;
+    auto request = request_for(value);
+    request.render.include_shadows = true;
+    request.directional_shadow_receiver = true;
+    apex::app::WorkspaceViewportDirectionalShadowOptions shadows;
+    shadows.maps.lighting.map_size = 32U;
+    shadows.opaque_pipeline = opaque_shadow_pipeline(value);
+    request.directional_shadows = shadows;
+
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok() && device.depth_calls == 4U,
+            "receiver preparation owns main depth and three shadow maps");
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera = valid_shadow_camera();
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    Diagnostic diagnostic;
+    require(prepared.viewport->drawAndPresent(
+                device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.events == std::vector<std::string>(
+                    {"shadow", "shadow", "shadow", "color", "present"}) &&
+                device.depth_draw_counts ==
+                    std::vector<std::size_t>({1U, 1U, 1U}) &&
+                device.depth_clear_values ==
+                    std::vector<float>({1.0F, 1.0F, 1.0F}) &&
+                device.receiver_maps.size() == 1U,
+            "viewport executes three cascades before receiver color and present");
+    for (std::size_t cascade = 0U;
+         cascade < directional_shadow_cascade_count; ++cascade) {
+        require(device.receiver_maps.front()[cascade] ==
+                    device.depth_targets[cascade],
+                "receiver samples the retained map written by its cascade");
+    }
+
+    const auto retained_targets = device.depth_targets;
+    frame.camera = valid_shadow_camera(1.0F);
+    require(prepared.viewport->drawAndPresent(
+                device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.depth_calls == 4U &&
+                std::equal(retained_targets.begin(), retained_targets.end(),
+                           device.depth_targets.begin() + 3U),
+            "camera movement refreshes cascade matrices and reuses native map allocations");
+
+    const auto color_before_failure = device.draw_calls;
+    const auto present_before_failure = device.present_calls;
+    device.fail_depth_batch_call = device.depth_batch_calls + 2U;
+    frame.camera = valid_shadow_camera(2.0F);
+    require(prepared.viewport->drawAndPresent(
+                device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::execution_failed &&
+                diagnostic.code == "fake_shadow_failed" &&
+                device.draw_calls == color_before_failure &&
+                device.present_calls == present_before_failure,
+            "cascade failure prevents receiver color and present");
+
+    device.fail_depth_batch_call = 0U;
+    const auto shadow_before_invalid = device.depth_batch_calls;
+    frame.camera.fov_radians = std::numeric_limits<float>::quiet_NaN();
+    require(prepared.viewport->drawAndPresent(
+                device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code == "directional_shadow_refresh_camera_invalid" &&
+                device.depth_batch_calls == shadow_before_invalid &&
+                device.draw_calls == color_before_failure &&
+                device.present_calls == present_before_failure,
+            "invalid shadow camera fails before drawing or presenting");
+
+    request.directional_shadows->opaque_pipeline.reset();
+    FakeDevice staged_device;
+    auto staged = apex::app::prepareWorkspaceViewport(
+        staged_device, value.document, request);
+    FakeTarget staged_target(request.presentation);
+    frame.camera = valid_shadow_camera();
+    require(staged.ok() && staged.viewport->drawAndPresent(
+                staged_device, staged_target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                diagnostic.code == "directional_shadow_all_casters_staged" &&
+                staged_device.depth_draw_counts ==
+                    std::vector<std::size_t>({0U, 0U, 0U}) &&
+                staged_device.draw_calls == 1U &&
+                staged_device.present_calls == 1U,
+            "staged caster branches remain labeled on a presented clear-map frame");
 }
 
 void accepts_track_and_car_lod_documents() {
@@ -659,6 +817,47 @@ void rejects_invalid_inputs() {
     FakeDevice device;
     auto request = request_for(value);
 
+    request.directional_shadow_receiver = true;
+    auto missing_shadow_configuration = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(!missing_shadow_configuration.ok() &&
+                missing_shadow_configuration.status ==
+                    apex::app::WorkspaceViewportStatus::invalid &&
+                missing_shadow_configuration.diagnostic.code ==
+                    "workspace_viewport_directional_shadow_configuration_invalid" &&
+                device.texture_calls == 0U && device.depth_calls == 0U,
+            "receiver without a shadow schedule fails before allocation");
+
+    request = request_for(value);
+    request.directional_shadows =
+        apex::app::WorkspaceViewportDirectionalShadowOptions{};
+    auto unexpected_shadow_configuration = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(!unexpected_shadow_configuration.ok() &&
+                unexpected_shadow_configuration.diagnostic.code ==
+                    "workspace_viewport_directional_shadow_configuration_invalid" &&
+                device.texture_calls == 0U && device.depth_calls == 0U,
+            "shadow schedule without receiver modules fails before allocation");
+
+    value.module_set.directional_shadow_receiver = true;
+    request = request_for(value);
+    request.directional_shadow_receiver = true;
+    apex::app::WorkspaceViewportDirectionalShadowOptions invalid_shadows;
+    invalid_shadows.opaque_pipeline = opaque_shadow_pipeline(value);
+    invalid_shadows.opaque_pipeline->name.assign(300U, 'x');
+    request.directional_shadows = invalid_shadows;
+    auto invalid_shadow_pipeline = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(!invalid_shadow_pipeline.ok() &&
+                invalid_shadow_pipeline.status ==
+                    apex::app::WorkspaceViewportStatus::invalid &&
+                invalid_shadow_pipeline.diagnostic.code ==
+                    "workspace_viewport_shadow_pipeline_name_limit" &&
+                device.texture_calls == 0U && device.depth_calls == 0U,
+            "over-limit shadow program fails before backend allocation");
+    value.module_set.directional_shadow_receiver = false;
+
+    request = request_for(value);
     request.shader_modules = {};
     auto missing_modules = apex::app::prepareWorkspaceViewport(
         device, value.document, request);
@@ -761,6 +960,7 @@ int main() {
         resolves_preview_state_without_mutating_document();
         camera_controller_matches_bounded_editor_gestures();
         camera_controller_supports_keyboard_translation();
+        schedules_directional_shadows_before_color_and_reuses_maps();
         rejects_invalid_inputs();
         rejects_frame_mismatch_and_preserves_present_atomicity();
         std::cout << "workspace_viewport_tests: ok\n";

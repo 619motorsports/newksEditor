@@ -152,6 +152,13 @@ remains unchanged and feature-complete.
   2/12/50 cascade boundaries and explicit 3x3 PCF. Both backends bind the three
   sampled-depth views, the nearest sampler, and the receiver constants. Both
   backends restore each retained map to its prior tracked state after the draw.
+  The workspace viewport now owns the same fixed three-map set for its lifetime.
+  It refreshes camera-bound matrices without reallocating the attachments.
+  Each frame runs the three caster passes before the receiver color pass.
+  Presentation occurs only after both operations succeed. The native shell
+  enables this path only with an explicit opaque depth vertex program and
+  receiver-capable material modules. Missing alpha-tested or skinned programs
+  remain labeled as staged.
   The D3D12 pixel fixture requires a Windows WARP verification build. Vulkan
   integrates the receiver with the bounded stock `ksPerPixel` facade. Extended
   material variants and recovered DXBC register packing remain staged. The

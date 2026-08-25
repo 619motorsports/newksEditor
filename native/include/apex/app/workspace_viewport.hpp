@@ -2,6 +2,7 @@
 
 #include "apex/app/workspace_session.hpp"
 #include "apex/render/device.hpp"
+#include "apex/render/directional_shadow.hpp"
 #include "apex/render/stock_scene_execution.hpp"
 
 #include <array>
@@ -47,6 +48,18 @@ struct WorkspaceViewportWorkspaceOptions {
     std::span<const std::string> driver_hidden_names{};
 };
 
+// Presence of this record enables the application shadow schedule. Programs
+// remain explicit because the viewport cannot infer a depth ABI from material
+// shader bytecode. Missing optional programs keep those caster branches staged.
+struct WorkspaceViewportDirectionalShadowOptions {
+    render::DirectionalShadowMapRequest maps{};
+    std::optional<render::PipelineProgram> opaque_pipeline;
+    std::optional<render::PipelineProgram> alpha_static_pipeline;
+    std::optional<render::PipelineProgram> skinned_pipeline;
+    render::DirectionalShadowReceiverConstantsLayout constants_layout =
+        render::DirectionalShadowReceiverConstantsLayout::portable;
+};
+
 struct WorkspaceViewportPrepareRequest {
     render::PresentationTargetDescription presentation{};
     // A presentation target is single-sample. This field is explicit so a
@@ -59,7 +72,11 @@ struct WorkspaceViewportPrepareRequest {
     bool evaluate_damage_preview = false;
     std::optional<bool> damage_broken_visible;
     bool wireframe = false;
+    // Keep this explicit receiver-module selector for existing callers. A
+    // true value requires directional_shadows so the viewport cannot prepare
+    // a receiver that has no maps or caster schedule.
     bool directional_shadow_receiver = false;
+    std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows;
     render::StockSceneExecutionLimits limits{};
     workspace::WorkspaceSceneLimits workspace_scene_limits{};
     WorkspaceViewportWorkspaceOptions workspace{};
@@ -171,6 +188,8 @@ private:
         std::unique_ptr<render::Texture> color,
         std::unique_ptr<render::DepthAttachment> depth,
         std::unique_ptr<render::StockSceneExecutionResult> execution,
+        std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps,
+        std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows,
         std::optional<LodCatalog> lod_catalog);
 
     render::Backend backend_ = render::Backend::Vulkan;
@@ -178,6 +197,8 @@ private:
     std::unique_ptr<render::Texture> color_;
     std::unique_ptr<render::DepthAttachment> depth_;
     std::unique_ptr<render::StockSceneExecutionResult> execution_;
+    std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps_;
+    std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows_;
     std::optional<LodCatalog> lod_catalog_;
 
     friend struct WorkspaceViewportPrepareResult;

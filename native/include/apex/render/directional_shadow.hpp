@@ -62,6 +62,7 @@ enum class DirectionalShadowMapStatus : std::uint8_t {
 };
 
 struct DirectionalShadowMapResult;
+struct DirectionalShadowMapRefreshResult;
 
 // Owns one fixed, backend-neutral D32 attachment for each recovered
 // directional cascade. It does not expose backend-native image handles.
@@ -90,6 +91,8 @@ private:
     friend struct DirectionalShadowMapResult;
     friend DirectionalShadowMapResult prepare_directional_shadow_maps(
         Device&, const DirectionalShadowMapRequest&);
+    friend DirectionalShadowMapRefreshResult refresh_directional_shadow_maps(
+        DirectionalShadowMapResources&, const DirectionalShadowInput&);
     friend class StaticSceneResources;
 };
 
@@ -103,8 +106,22 @@ struct DirectionalShadowMapResult {
     }
 };
 
+struct DirectionalShadowMapRefreshResult {
+    DirectionalShadowMapStatus status = DirectionalShadowMapStatus::unsupported;
+    Diagnostic diagnostic;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == DirectionalShadowMapStatus::ready;
+    }
+};
+
 [[nodiscard]] DirectionalShadowMapResult prepare_directional_shadow_maps(
     Device& device, const DirectionalShadowMapRequest& request);
+// Recompute the camera-bound cascade metadata without reallocating the three
+// attachments. The update commits only after all matrices pass validation.
+[[nodiscard]] DirectionalShadowMapRefreshResult refresh_directional_shadow_maps(
+    DirectionalShadowMapResources& resources,
+    const DirectionalShadowInput& lighting);
 [[nodiscard]] const char* directional_shadow_map_status_name(
     DirectionalShadowMapStatus status) noexcept;
 
