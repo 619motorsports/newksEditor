@@ -6072,6 +6072,17 @@ float4 main(float3 color : COLOR) : SV_Target { return float4(color, 1.0); }
         }
         return count;
     };
+    const auto count_magenta = [](std::span<const std::byte> rgba) {
+        std::size_t count = 0U;
+        for (std::size_t offset = 0U; offset + 3U < rgba.size(); offset += 4U) {
+            const auto red = std::to_integer<unsigned>(rgba[offset]);
+            const auto green = std::to_integer<unsigned>(rgba[offset + 1U]);
+            const auto blue = std::to_integer<unsigned>(rgba[offset + 2U]);
+            if (red > green && blue > green && red > 0U && blue > 0U)
+                ++count;
+        }
+        return count;
+    };
     PipelineProgram overlay_pipeline = make_overlay_pipeline(1U);
     OverlayLineDrawRequest overlay_request;
     overlay_request.pipeline = &overlay_pipeline;
@@ -6110,6 +6121,61 @@ float4 main(float3 color : COLOR) : SV_Target { return float4(color, 1.0); }
                             std::byte{255}) > 8U,
             "single-sample RGB overlay line pixels");
 
+    // The raw SplineEditor path inherits normal depth state and supplies RGB
+    // values of (3, 0, 3). Exercise that state on the production backend.
+    const std::array<OverlayLineVertex, 2U> ai_spline_vertices = {{
+        {{-0.9F, 0.0F, 0.5F}, {3.0F, 0.0F, 3.0F}},
+        {{0.9F, 0.0F, 0.5F}, {3.0F, 0.0F, 3.0F}},
+    }};
+    BufferDescription ai_spline_buffer_description =
+        overlay_buffer_description;
+    ai_spline_buffer_description.size_bytes = sizeof(ai_spline_vertices);
+    ai_spline_buffer_description.mutability = BufferMutability::immutable;
+    BufferResult ai_spline_buffer = device.device->create_buffer(
+        ai_spline_buffer_description,
+        std::as_bytes(std::span(ai_spline_vertices)));
+    require(ai_spline_buffer.ok(), "AI spline line vertex buffer creation");
+
+    const auto make_ai_spline_pipeline = [&](std::uint32_t samples) {
+        PipelineProgram pipeline = make_overlay_pipeline(samples);
+        pipeline.name = "native-ai-spline-line";
+        pipeline.targets.has_depth = true;
+        pipeline.targets.depth = {
+            PipelineRenderTargetFormat::depth32_float, samples};
+        pipeline.depth.test_enabled = true;
+        pipeline.depth.write_enabled = true;
+        pipeline.depth.compare = PipelineCompareOperation::less_or_equal;
+        return pipeline;
+    };
+    PipelineProgram ai_spline_pipeline = make_ai_spline_pipeline(1U);
+    DepthAttachmentResult ai_spline_depth =
+        device.device->create_depth_attachment({32U, 32U, 1U});
+    require(ai_spline_depth.ok(), "AI spline depth attachment creation");
+    OverlayLineDrawRequest ai_spline_request;
+    ai_spline_request.pipeline = &ai_spline_pipeline;
+    ai_spline_request.vertex_buffer = ai_spline_buffer.buffer.get();
+    ai_spline_request.vertex_count =
+        static_cast<std::uint32_t>(ai_spline_vertices.size());
+    const std::array ai_spline_requests = {ai_spline_request};
+    IndexedStaticMeshBatchDescription ai_spline_batch;
+    ai_spline_batch.depth_attachment = ai_spline_depth.attachment.get();
+    ai_spline_batch.clear_depth = true;
+    ai_spline_batch.depth_clear_value = 1.0F;
+    ai_spline_batch.overlay_draws = ai_spline_requests;
+    const auto ai_spline_visible =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *triangle_texture.texture, ai_spline_batch);
+    require(ai_spline_visible.ok() &&
+                count_magenta(ai_spline_visible.rgba8) > 8U,
+            "normal-depth raw AI spline pixels pass clear depth");
+    ai_spline_batch.depth_clear_value = 0.0F;
+    const auto ai_spline_occluded =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *triangle_texture.texture, ai_spline_batch);
+    require(ai_spline_occluded.ok() &&
+                count_magenta(ai_spline_occluded.rgba8) == 0U,
+            "normal-depth raw AI spline pixels fail nearer clear depth");
+
     IndexedStaticMeshBatchDescription appended_overlay_batch;
     appended_overlay_batch.draws = overlap_batch_draws;
     appended_overlay_batch.overlay_draws = overlay_requests;
@@ -6139,6 +6205,23 @@ float4 main(float3 color : COLOR) : SV_Target { return float4(color, 1.0); }
                 count_dominant_channel(overlay_msaa_result.rgba8, 1U) > 8U &&
                 count_dominant_channel(overlay_msaa_result.rgba8, 2U) > 8U,
             "four-sample RGB overlay survives the batch resolve");
+
+    PipelineProgram ai_spline_msaa_pipeline = make_ai_spline_pipeline(4U);
+    DepthAttachmentResult ai_spline_msaa_depth =
+        device.device->create_depth_attachment({32U, 32U, 4U});
+    require(ai_spline_msaa_depth.ok(),
+            "four-sample AI spline depth attachment creation");
+    ai_spline_request.pipeline = &ai_spline_msaa_pipeline;
+    const std::array ai_spline_msaa_requests = {ai_spline_request};
+    ai_spline_batch.depth_attachment = ai_spline_msaa_depth.attachment.get();
+    ai_spline_batch.depth_clear_value = 1.0F;
+    ai_spline_batch.overlay_draws = ai_spline_msaa_requests;
+    const auto ai_spline_msaa_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *overlay_msaa.texture, ai_spline_batch);
+    require(ai_spline_msaa_result.ok() &&
+                count_magenta(ai_spline_msaa_result.rgba8) > 8U,
+            "four-sample normal-depth raw AI spline survives resolve");
 
     PipelineProgram msaa_order_red_pipeline = batch_order_red_pipeline;
     msaa_order_red_pipeline.name = "batch-order-red-4x";
@@ -6199,17 +6282,6 @@ float4 main(float3 color : COLOR) : SV_Target { return float4(color, 1.0); }
     grid_request.matrices.view_projection[0] = 0.18F;
     grid_request.matrices.view_projection[9] = 0.18F;
     grid_request.matrices.view_projection[15] = 1.0F;
-    const auto count_magenta = [](std::span<const std::byte> rgba) {
-        std::size_t count = 0U;
-        for (std::size_t offset = 0U; offset + 3U < rgba.size(); offset += 4U) {
-            const auto red = std::to_integer<unsigned>(rgba[offset]);
-            const auto green = std::to_integer<unsigned>(rgba[offset + 1U]);
-            const auto blue = std::to_integer<unsigned>(rgba[offset + 2U]);
-            if (red > green && blue > green && red > 0U && blue > 0U)
-                ++count;
-        }
-        return count;
-    };
     const std::array grid_requests = {grid_request};
     overlay_batch.overlay_draws = grid_requests;
     const auto grid_result =

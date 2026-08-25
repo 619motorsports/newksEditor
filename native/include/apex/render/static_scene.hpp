@@ -150,6 +150,9 @@ struct StaticSceneFrameDescription {
     // packets. Both handles are required through this synchronous call.
     const PipelineProgram* selected_mesh_pipeline = nullptr;
     const Buffer* selected_mesh_color_buffer = nullptr;
+    // Recovered SCENE_FINISHED callback lines execute after opaque packets
+    // and the selected mesh, before the view axis and transparent packets.
+    std::span<const OverlayLineDrawRequest> scene_finished_overlay_draws{};
     // Recovered world-origin axis draws execute after opaque packets and the
     // selected mesh, but before transparent packets. The caller owns the
     // referenced pipeline and buffer through this synchronous call.

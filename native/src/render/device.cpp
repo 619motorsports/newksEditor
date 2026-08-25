@@ -2139,9 +2139,11 @@ IndexedStaticMeshBatchStatus validate_overlay_line_draw_request(
                       "Overlay lines require line-list topology with culling disabled"};
         return IndexedStaticMeshBatchStatus::invalid_request;
     }
-    if (pipeline.depth.test_enabled || pipeline.depth.write_enabled) {
+    if (pipeline.depth.test_enabled != pipeline.depth.write_enabled ||
+        (pipeline.depth.test_enabled &&
+         pipeline.depth.compare != PipelineCompareOperation::less_or_equal)) {
         diagnostic = {"overlay_line_depth_state_invalid",
-                      "Overlay line depth testing and writes must be disabled"};
+                      "Overlay lines require depth test/write both disabled, or normal less-or-equal depth test/write"};
         return IndexedStaticMeshBatchStatus::invalid_request;
     }
     if (pipeline.blend.enabled || pipeline.blend.alpha_to_coverage) {

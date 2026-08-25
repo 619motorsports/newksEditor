@@ -265,7 +265,10 @@ It rejects non-opaque passes and draws after the model and selected mesh.
 Its exact colors, depth changes, interpolation step, and line-strip helper are
 recorded in
 [`docs/evidence/ksnet-spline-editor-callback.md`](evidence/ksnet-spline-editor-callback.md).
-The native viewport does not implement this AI spline pass yet.
+The C++ viewport implements the raw primary AI spline on Vulkan and D3D12.
+It uses the recovered color, identity world matrix, normal depth, and callback
+phase. The backend-neutral line-list conversion is a labeled translation of
+the original OpenGL line strip. Interpolation and edit overlays remain staged.
 
 ### Native blurred-rim switch
 

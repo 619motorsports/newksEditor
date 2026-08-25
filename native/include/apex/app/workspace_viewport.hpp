@@ -1,5 +1,6 @@
 #pragma once
 
+#include "apex/app/workspace_ai_spline.hpp"
 #include "apex/app/workspace_session.hpp"
 #include "apex/render/device.hpp"
 #include "apex/render/directional_shadow.hpp"
@@ -108,6 +109,10 @@ struct WorkspaceViewportPrepareRequest {
     // The view axis, grid, and selected-node marker share this fixed
     // position/color line contract. Selection can omit its marker.
     std::optional<render::PipelineProgram> authoring_overlay_pipeline;
+    // Optional recovered raw SplineEditor pass. The geometry is copied to an
+    // immutable buffer during preparation and is not retained by reference.
+    const WorkspaceAiSplineGeometry* ai_spline_geometry = nullptr;
+    std::optional<render::PipelineProgram> ai_spline_pipeline;
     // Optional recovered magenta selected-mesh pass. The selected packet must
     // be static. This pipeline is independent of the line-overlay pipeline.
     std::optional<render::PipelineProgram> selected_mesh_pipeline;
@@ -247,6 +252,9 @@ private:
         std::unique_ptr<render::DepthAttachment> depth,
         std::unique_ptr<render::StockSceneExecutionResult> execution,
         std::optional<render::PipelineProgram> authoring_overlay_pipeline,
+        std::optional<render::PipelineProgram> ai_spline_pipeline,
+        std::unique_ptr<render::Buffer> ai_spline_buffer,
+        std::vector<WorkspaceAiSplineChunk> ai_spline_chunks,
         std::unique_ptr<render::Buffer> authoring_grid_buffer,
         bool grid_visible,
         std::unique_ptr<render::Buffer> view_axis_buffer,
@@ -266,6 +274,9 @@ private:
     std::unique_ptr<render::DepthAttachment> depth_;
     std::unique_ptr<render::StockSceneExecutionResult> execution_;
     std::optional<render::PipelineProgram> authoring_overlay_pipeline_;
+    std::optional<render::PipelineProgram> ai_spline_pipeline_;
+    std::unique_ptr<render::Buffer> ai_spline_buffer_;
+    std::vector<WorkspaceAiSplineChunk> ai_spline_chunks_;
     std::unique_ptr<render::Buffer> authoring_grid_buffer_;
     bool grid_visible_ = false;
     std::unique_ptr<render::Buffer> view_axis_buffer_;

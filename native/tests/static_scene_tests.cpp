@@ -803,6 +803,9 @@ void schedules_selected_and_view_axis_at_transparent_boundary() {
     FakeBuffer overlay_buffer(
         {6U * sizeof(OverlayLineVertex), BufferUsage::vertex,
          BufferMemory::host_visible, BufferMutability::immutable});
+    FakeBuffer scene_finished_buffer(
+        {6U * sizeof(OverlayLineVertex), BufferUsage::vertex,
+         BufferMemory::host_visible, BufferMutability::immutable});
     FakeBuffer late_overlay_buffer(
         {6U * sizeof(OverlayLineVertex), BufferUsage::vertex,
          BufferMemory::host_visible, BufferMutability::immutable});
@@ -813,8 +816,11 @@ void schedules_selected_and_view_axis_at_transparent_boundary() {
     view_axis.pipeline = &overlay_pipeline;
     view_axis.vertex_buffer = &overlay_buffer;
     view_axis.vertex_count = 6U;
+    OverlayLineDrawRequest scene_finished = view_axis;
+    scene_finished.vertex_buffer = &scene_finished_buffer;
     OverlayLineDrawRequest late_overlay = view_axis;
     late_overlay.vertex_buffer = &late_overlay_buffer;
+    const std::array scene_finished_draws = {scene_finished};
     const std::array view_axis_draws = {view_axis};
     const std::array late_overlay_draws = {late_overlay};
     const std::array<std::uint8_t, 3U> visible = {1U, 1U, 0U};
@@ -825,6 +831,7 @@ void schedules_selected_and_view_axis_at_transparent_boundary() {
     frame.packet_visibility = visible;
     frame.selected_mesh_pipeline = &selected_pipeline;
     frame.selected_mesh_color_buffer = &selected_color;
+    frame.scene_finished_overlay_draws = scene_finished_draws;
     frame.view_axis_draws = view_axis_draws;
     frame.overlay_draws = late_overlay_draws;
     const auto drawn = prepared.resources->draw_and_readback(
@@ -835,11 +842,13 @@ void schedules_selected_and_view_axis_at_transparent_boundary() {
     require(device.selected_positions == std::vector<std::uint32_t>({1U}) &&
                 device.overlay_positions ==
                     std::vector<std::uint32_t>({
-                        1U, std::numeric_limits<std::uint32_t>::max()}) &&
+                        1U, 1U,
+                        std::numeric_limits<std::uint32_t>::max()}) &&
                 device.overlay_buffers ==
-                    std::vector<const Buffer*>({&overlay_buffer,
+                    std::vector<const Buffer*>({&scene_finished_buffer,
+                                                &overlay_buffer,
                                                 &late_overlay_buffer}),
-            "selected mesh and view axis precede transparent geometry and late overlays");
+            "selected mesh, scene-finished lines, and view axis precede transparent geometry and late overlays");
 
     const std::size_t batches_before_invalid = device.batch_calls;
     frame.packet_visibility = {};

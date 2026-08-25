@@ -182,8 +182,9 @@ remains unchanged and feature-complete.
   line overlays. These overlays use non-indexed line lists and no material
   resources. Each overlay has a bounded scene position. Vulkan and D3D12 use
   the same backend-neutral order and resolve only after all overlays. The
-  portable frame order is opaque scene, selected mesh, world-origin view axis,
-  transparent scene, then the late grid and selected-node axis. The view-axis
+  portable frame order is opaque scene, selected mesh, raw AI spline,
+  world-origin view axis, transparent scene, then the late grid and
+  selected-node axis. The view-axis
   boundary is recovered. The single selected draw is a labeled portable
   mapping because native transparent-pass participation remains unresolved. The
   fixed grid contains 22 magenta segments on the
@@ -197,8 +198,12 @@ remains unchanged and feature-complete.
   the positive X, Y, and Z directions. It uses an identity world matrix,
   disabled depth, and the recovered RGB intensities of three.
   The same batch accepts one recovered selected-mesh draw. Opaque geometry
-  draws first. The selected mesh and view axis draw next. Transparent geometry
-  and late editor overlays follow in that order.
+  draws first. The selected mesh, raw AI spline, and view axis draw next.
+  Transparent geometry and late editor overlays follow in that order.
+  The optional raw AI spline uses the fixed line ABI with normal depth.
+  It uses version-7 points or the recovered retained version-2 points.
+  The line-list conversion keeps all source segments across bounded chunks.
+  This conversion is a labeled portable translation of the OpenGL line strip.
   The selected pass uses solid fill, front-face culling, opaque blend state,
   and disabled depth. It writes magenta RGB and the recovered fading alpha.
   The viewport submits the draw at 2000 ms with zero alpha. It stops the draw

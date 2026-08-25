@@ -2302,8 +2302,19 @@ void validates_overlay_line_batch_contract() {
     require(validate_overlay_line_draw_request(target, request, diagnostic) ==
                 IndexedStaticMeshBatchStatus::invalid_request &&
                 diagnostic.code == "overlay_line_depth_state_invalid",
-            "depth-tested editor overlay rejected");
+            "partial normal-depth editor overlay rejected");
+    pipeline.depth.write_enabled = true;
+    require(validate_overlay_line_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshBatchStatus::ready,
+            "normal-depth scene-finished line overlay accepted");
+    pipeline.depth.compare = PipelineCompareOperation::less;
+    require(validate_overlay_line_draw_request(target, request, diagnostic) ==
+                    IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "overlay_line_depth_state_invalid",
+            "non-native depth comparison rejected for line overlays");
     pipeline.depth.test_enabled = false;
+    pipeline.depth.write_enabled = false;
+    pipeline.depth.compare = PipelineCompareOperation::less_or_equal;
     pipeline.targets.has_depth = false;
     pipeline.targets.depth = {};
     pipeline.raster.fill = PipelineFillMode::solid;

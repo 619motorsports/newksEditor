@@ -1,5 +1,6 @@
 #include "apex/app/authoring_service.hpp"
 #include "apex/app/presentation_recreation.hpp"
+#include "apex/app/workspace_ai_spline.hpp"
 #include "apex/app/workspace_selection.hpp"
 #include "apex/app/workspace_shadow_programs.hpp"
 #include "apex/app/workspace_track_camera.hpp"
@@ -11,6 +12,7 @@
 #include "apex/domain/animation_preview.hpp"
 #include "apex/domain/track_data.hpp"
 #include "apex/formats/acd.hpp"
+#include "apex/formats/ai_spline.hpp"
 #include "apex/formats/dds.hpp"
 #include "apex/formats/ini.hpp"
 #include "apex/formats/kn5.hpp"
@@ -57,16 +59,17 @@ void usage(std::ostream& output) {
            << "  apex-native --window vulkan|d3d12 [--model <file>] [--workspace-root <dir> --manifest <file> --kind track|carLods]\n"
               "                       [--analog-instruments <file> [--rpm <value>]]\n"
               "                       [--animation <file> [--animation-position <value>]]\n"
-              "                       [--lod-index <index>]\n"
+           "                       [--lod-index <index>]\n"
               "                       [--track-camera-set <file> --track-camera-index <index>]\n"
               "                       [--track-camera-position <value>] [--track-camera-play]\n"
+           "                       [--ai-spline <file>]\n"
               "                       [--node-search <query>] [--selected-node <id> [--isolate-selected]]\n"
               "                       [--show-hidden] [--wireframe] [--grid] [--view-axis]\n"
               "                       [--weather <stock-id>] [--sun-heading <degrees>] [--sun-height <degrees>]\n"
               "                       [--shader-family <name> --shader-vertex <file> --shader-fragment <file>]\n"
               "                       [--authoring-overlay-vertex <file> --authoring-overlay-fragment <file>]\n"
               "                       [--selected-mesh-vertex <file> --selected-mesh-fragment <file>]\n"
-              "                       [--directional-shadow-vertex <file>]\n"
+           "                       [--directional-shadow-vertex <file>]\n"
               "                       [--directional-shadow-alpha-vertex <file> --directional-shadow-alpha-fragment <file>]\n"
               "                       [--directional-shadow-skinned-vertex <file>]\n"
            << "  apex-native --inspect-kn5 <file>\n"
@@ -545,6 +548,7 @@ struct WindowWorkspaceOptions {
     double trackCameraPosition = 0.0;
     bool trackCameraPositionSpecified = false;
     bool trackCameraPlay = false;
+    std::optional<std::filesystem::path> aiSpline;
     std::optional<std::string> nodeSearch;
     std::optional<apex::scene::NodeId> selectedNode;
     bool isolateSelected = false;
@@ -596,6 +600,7 @@ struct LoadedWindowWorkspace {
         std::vector<std::array<double, 3U>> splinePoints;
     };
     std::optional<TrackCamera> trackCamera;
+    std::optional<apex::app::WorkspaceAiSplineGeometry> aiSpline;
     apex::app::WorkspaceSelectionState selection;
     bool animationSkinningRequired = false;
 };
@@ -749,6 +754,11 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
                 throw std::runtime_error(
                     "duplicate --track-camera-play option");
             result.trackCameraPlay = true;
+        } else if (option == "--ai-spline") {
+            if (result.aiSpline.has_value())
+                throw std::runtime_error("duplicate --ai-spline option");
+            result.aiSpline =
+                std::filesystem::path(require_value("--ai-spline"));
         } else if (option == "--node-search") {
             if (result.nodeSearch.has_value())
                 throw std::runtime_error("duplicate --node-search option");
@@ -893,9 +903,9 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             "authoring-overlay vertex and fragment modules must be supplied together");
     if (result.authoringOverlayVertex.has_value() &&
         !result.selectedNode.has_value() && !result.gridVisible &&
-        !result.viewAxisVisible)
+        !result.viewAxisVisible && !result.aiSpline.has_value())
         throw std::runtime_error(
-            "authoring-overlay shader modules require --selected-node, --grid, or --view-axis");
+            "authoring-overlay shader modules require --selected-node, --grid, --view-axis, or --ai-spline");
     if (result.gridVisible && !result.authoringOverlayVertex.has_value())
         throw std::runtime_error(
             "--grid requires authoring-overlay shader modules");
@@ -954,6 +964,13 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
         !result.workspaceRoot.has_value())
         throw std::runtime_error(
             "track-camera options require a workspace model");
+    if (result.aiSpline.has_value() && !result.model.has_value() &&
+        !result.workspaceRoot.has_value())
+        throw std::runtime_error("--ai-spline requires a workspace model");
+    if (result.aiSpline.has_value() &&
+        !result.authoringOverlayVertex.has_value())
+        throw std::runtime_error(
+            "--ai-spline requires authoring-overlay shader modules");
     if (result.isolateSelected && !result.selectedNode.has_value())
         throw std::runtime_error("--isolate-selected requires --selected-node");
     const bool selection_options = result.nodeSearch.has_value() ||
@@ -1123,6 +1140,20 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
         std::cout << ", spline-points=" << preview.splinePoints.size()
                   << ", position=" << options.trackCameraPosition << '\n';
         loaded.trackCamera = std::move(preview);
+    }
+    if (options.aiSpline.has_value()) {
+        const auto bytes = read_file(*options.aiSpline);
+        const auto spline = apex::formats::parseAiSpline(
+            bytes, options.aiSpline->generic_string());
+        auto geometry = apex::app::buildWorkspaceAiSplineGeometry(spline);
+        if (!geometry.ok())
+            throw std::runtime_error(geometry.diagnostic.code + ": " +
+                                     geometry.diagnostic.message);
+        std::cout << "AI spline: version=" << spline.version
+                  << ", points=" << geometry.geometry.source_point_count
+                  << ", segments=" << geometry.geometry.vertices.size() / 2U
+                  << ", draws=" << geometry.geometry.chunks.size() << '\n';
+        loaded.aiSpline = std::move(geometry.geometry);
     }
     const bool selection_options = options.nodeSearch.has_value() ||
                                    options.selectedNode.has_value() ||
@@ -1443,7 +1474,11 @@ int run_window(int argc, char** argv) {
         request.wireframe = loaded_workspace.selection.wireframe;
         request.grid_visible = workspace_options.gridVisible;
         request.view_axis_visible = workspace_options.viewAxisVisible;
-        if (loaded_workspace.authoringOverlayModules.has_value()) {
+        const bool authoring_overlay_requested =
+            workspace_options.gridVisible || workspace_options.viewAxisVisible ||
+            workspace_options.selectedNode.has_value();
+        if (loaded_workspace.authoringOverlayModules.has_value() &&
+            authoring_overlay_requested) {
             apex::render::PipelineProgram pipeline;
             pipeline.name = "workspace-authoring-overlay";
             pipeline.shaders = *loaded_workspace.authoringOverlayModules;
@@ -1470,6 +1505,38 @@ int run_window(int argc, char** argv) {
             pipeline.transform_contract =
                 apex::render::PipelineTransformContract::draw_matrices;
             request.authoring_overlay_pipeline = std::move(pipeline);
+        }
+        if (loaded_workspace.aiSpline.has_value()) {
+            apex::render::PipelineProgram pipeline;
+            pipeline.name = "workspace-ai-spline-raw";
+            pipeline.shaders = *loaded_workspace.authoringOverlayModules;
+            pipeline.vertex_layout.stride =
+                sizeof(apex::render::OverlayLineVertex);
+            pipeline.vertex_layout.attributes = {
+                {apex::render::PipelineVertexSemantic::position,
+                 apex::render::PipelineVertexAttributeFormat::float32x3, 0U,
+                 0U},
+                {apex::render::PipelineVertexSemantic::color,
+                 apex::render::PipelineVertexAttributeFormat::float32x3, 1U,
+                 12U},
+            };
+            pipeline.targets.colors = {
+                {pipeline_color_format(request.presentation.format),
+                 request.color_samples}};
+            pipeline.targets.has_depth = true;
+            pipeline.targets.depth = {
+                apex::render::PipelineRenderTargetFormat::depth32_float,
+                request.color_samples};
+            pipeline.raster.cull = apex::render::PipelineCullMode::none;
+            pipeline.raster.fill = apex::render::PipelineFillMode::wireframe;
+            pipeline.depth.test_enabled = true;
+            pipeline.depth.write_enabled = true;
+            pipeline.depth.compare =
+                apex::render::PipelineCompareOperation::less_or_equal;
+            pipeline.transform_contract =
+                apex::render::PipelineTransformContract::draw_matrices;
+            request.ai_spline_geometry = &*loaded_workspace.aiSpline;
+            request.ai_spline_pipeline = std::move(pipeline);
         }
         if (loaded_workspace.selectedMeshModules.has_value()) {
             apex::render::PipelineProgram pipeline;

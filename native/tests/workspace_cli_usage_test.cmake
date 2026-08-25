@@ -11,6 +11,39 @@ execute_process(
 if(NOT malformed_result STREQUAL "1")
   message(FATAL_ERROR "unknown workspace-window option returned ${malformed_result}: ${malformed_error}")
 endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --ai-spline fast_lane.ai
+  RESULT_VARIABLE detached_ai_result
+  ERROR_VARIABLE detached_ai_error
+)
+if(NOT detached_ai_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached AI spline returned ${detached_ai_result}: ${detached_ai_error}")
+endif()
+string(FIND "${detached_ai_error}"
+  "--ai-spline requires a workspace model" detached_ai_position)
+if(detached_ai_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached AI spline was not diagnosed: ${detached_ai_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --ai-spline first.ai --ai-spline second.ai
+  RESULT_VARIABLE duplicate_ai_result
+  ERROR_VARIABLE duplicate_ai_error
+)
+if(NOT duplicate_ai_result STREQUAL "1")
+  message(FATAL_ERROR
+    "duplicate AI spline returned ${duplicate_ai_result}: ${duplicate_ai_error}")
+endif()
+string(FIND "${duplicate_ai_error}"
+  "duplicate --ai-spline option" duplicate_ai_position)
+if(duplicate_ai_position EQUAL -1)
+  message(FATAL_ERROR
+    "duplicate AI spline was not diagnosed: ${duplicate_ai_error}")
+endif()
 string(FIND "${malformed_error}" "unknown window option" malformed_position)
 if(malformed_position EQUAL -1)
   message(FATAL_ERROR "unknown workspace-window option was not diagnosed: ${malformed_error}")
@@ -224,6 +257,54 @@ endif()
 
 set(model "${APEX_SOURCE_DIR}/test/content/cars/619_gen6_arca_base/619_gen6_fusion13.kn5")
 set(track_cameras "${APEX_SOURCE_DIR}/test/content/tracks/sepang/data/cameras.ini")
+set(ai_spline "${APEX_SOURCE_DIR}/test/content/tracks/sepang/ai/fast_lane.ai")
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --ai-spline "${ai_spline}"
+  RESULT_VARIABLE ai_without_overlay_result
+  ERROR_VARIABLE ai_without_overlay_error
+)
+if(NOT ai_without_overlay_result STREQUAL "1")
+  message(FATAL_ERROR
+    "AI spline without overlay modules returned ${ai_without_overlay_result}: ${ai_without_overlay_error}")
+endif()
+string(FIND "${ai_without_overlay_error}"
+  "--ai-spline requires authoring-overlay shader modules"
+  ai_without_overlay_position)
+if(ai_without_overlay_position EQUAL -1)
+  message(FATAL_ERROR
+    "AI spline overlay requirement was not diagnosed: ${ai_without_overlay_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --ai-spline "${ai_spline}"
+          --shader-family fixture --shader-vertex missing.vert.spv
+          --shader-fragment missing.frag.spv
+          --authoring-overlay-vertex missing-overlay.vert.spv
+          --authoring-overlay-fragment missing-overlay.frag.spv
+  RESULT_VARIABLE ai_load_result
+  OUTPUT_VARIABLE ai_load_output
+  ERROR_VARIABLE ai_load_error
+)
+if(NOT ai_load_result STREQUAL "1")
+  message(FATAL_ERROR
+    "AI spline load probe returned ${ai_load_result}: ${ai_load_error}")
+endif()
+string(FIND "${ai_load_output}"
+  "AI spline: version=7, points=3536, segments=3535, draws=2"
+  ai_load_position)
+if(ai_load_position EQUAL -1)
+  message(FATAL_ERROR
+    "AI spline did not load before shader setup: ${ai_load_output}${ai_load_error}")
+endif()
+string(FIND "${ai_load_error}"
+  "cannot open missing.vert.spv" ai_shader_position)
+if(ai_shader_position EQUAL -1)
+  message(FATAL_ERROR
+    "AI spline probe did not reach shader setup: ${ai_load_error}")
+endif()
 
 execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
@@ -373,7 +454,7 @@ if(NOT detached_overlay_result STREQUAL "1")
     "detached overlay modules returned ${detached_overlay_result}: ${detached_overlay_error}")
 endif()
 string(FIND "${detached_overlay_error}"
-  "authoring-overlay shader modules require --selected-node, --grid, or --view-axis"
+  "authoring-overlay shader modules require --selected-node, --grid, --view-axis, or --ai-spline"
   detached_overlay_position)
 if(detached_overlay_position EQUAL -1)
   message(FATAL_ERROR

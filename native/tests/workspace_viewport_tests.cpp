@@ -140,6 +140,13 @@ public:
             overlay_matrices.push_back(overlay.matrices);
             overlay_buffers.push_back(overlay.vertex_buffer);
             overlay_scene_positions.push_back(overlay.scene_position);
+            overlay_vertex_offsets.push_back(overlay.vertex_offset_bytes);
+            overlay_vertex_counts.push_back(overlay.vertex_count);
+            overlay_depth_tests.push_back(overlay.pipeline != nullptr &&
+                                          overlay.pipeline->depth.test_enabled);
+            overlay_depth_writes.push_back(
+                overlay.pipeline != nullptr &&
+                overlay.pipeline->depth.write_enabled);
         }
         std::vector<apex::scene::NodeId> nodes;
         nodes.reserve(batch.draws.size());
@@ -224,6 +231,10 @@ public:
     std::vector<DrawMatrices> overlay_matrices;
     std::vector<const Buffer*> overlay_buffers;
     std::vector<std::uint32_t> overlay_scene_positions;
+    std::vector<std::uint64_t> overlay_vertex_offsets;
+    std::vector<std::uint32_t> overlay_vertex_counts;
+    std::vector<bool> overlay_depth_tests;
+    std::vector<bool> overlay_depth_writes;
     std::vector<std::vector<apex::scene::NodeId>> draw_nodes;
     std::vector<std::string> events;
     std::vector<const DepthAttachment*> depth_targets;
@@ -525,6 +536,17 @@ PipelineProgram authoring_overlay_pipeline(const Fixture& fixture_value,
     pipeline.depth.test_enabled = false;
     pipeline.depth.write_enabled = false;
     pipeline.transform_contract = PipelineTransformContract::draw_matrices;
+    return pipeline;
+}
+
+PipelineProgram ai_spline_pipeline(const Fixture& fixture_value,
+                                   std::uint32_t samples = 1U) {
+    PipelineProgram pipeline =
+        authoring_overlay_pipeline(fixture_value, samples);
+    pipeline.name = "viewport-ai-spline-raw";
+    pipeline.depth.test_enabled = true;
+    pipeline.depth.write_enabled = true;
+    pipeline.depth.compare = PipelineCompareOperation::less_or_equal;
     return pipeline;
 }
 
@@ -878,6 +900,102 @@ void draws_and_toggles_recovered_world_view_axis() {
                 device.overlay_scene_positions.back() ==
                     std::numeric_limits<std::uint32_t>::max(),
             "frame override hides the prepared view axis without hiding the grid");
+}
+
+void draws_raw_ai_spline_in_recovered_scene_phase() {
+    auto value = fixture();
+    apex::formats::AiSpline spline;
+    spline.version = 7U;
+    spline.points.resize(3U);
+    spline.points[0].position = {-1.0F, 0.0F, 0.0F};
+    spline.points[1].position = {0.0F, 0.0F, 0.0F};
+    spline.points[2].position = {1.0F, 0.0F, 0.0F};
+    const auto geometry = apex::app::buildWorkspaceAiSplineGeometry(spline);
+    require(geometry.ok(), "raw AI spline fixture converts");
+
+    auto ai_only_request = request_for(value);
+    ai_only_request.ai_spline_geometry = &geometry.geometry;
+    ai_only_request.ai_spline_pipeline = ai_spline_pipeline(value);
+    FakeDevice ai_only_device;
+    auto ai_only_prepared = apex::app::prepareWorkspaceViewport(
+        ai_only_device, value.document, ai_only_request);
+    require(ai_only_prepared.ok(),
+            "AI spline does not require unrelated authoring overlays");
+    FakeTarget ai_only_target(ai_only_request.presentation);
+    WorkspaceViewportFrameRequest ai_only_frame;
+    ai_only_frame.camera.clip_space = CameraClipSpace::vulkan;
+    ai_only_frame.frame_constants = KsPerPixelFrameConstants{};
+    Diagnostic ai_only_diagnostic;
+    require(ai_only_prepared.viewport->drawAndPresent(
+                ai_only_device, ai_only_target, ai_only_frame,
+                ai_only_diagnostic) == WorkspaceViewportFrameStatus::ready &&
+                ai_only_device.overlay_counts ==
+                    std::vector<std::size_t>({1U}),
+            "AI-only viewport submits one recovered raw spline draw");
+
+    auto request = request_for(value);
+    request.ai_spline_geometry = &geometry.geometry;
+    request.ai_spline_pipeline = ai_spline_pipeline(value);
+    request.authoring_overlay_pipeline = authoring_overlay_pipeline(value);
+    request.view_axis_visible = true;
+    request.grid_visible = true;
+    FakeDevice device;
+    auto prepared =
+        apex::app::prepareWorkspaceViewport(device, value.document, request);
+    require(prepared.ok(), "raw AI spline viewport preparation succeeds");
+
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.camera.view_projection[0] = 0.5F;
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    Diagnostic diagnostic;
+    require(
+        prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+            WorkspaceViewportFrameStatus::ready,
+        "raw AI spline frame draws");
+    require(device.overlay_counts == std::vector<std::size_t>({3U}) &&
+                device.overlay_scene_positions ==
+                    std::vector<std::uint32_t>(
+                        {1U, 1U, std::numeric_limits<std::uint32_t>::max()}),
+            "AI spline precedes the view axis and late grid at the recovered "
+            "boundary");
+    require(
+        device.overlay_vertex_offsets[0] == 0U &&
+            device.overlay_vertex_counts[0] == 4U &&
+            device.overlay_depth_tests[0] && device.overlay_depth_writes[0] &&
+            !device.overlay_depth_tests[1] && !device.overlay_depth_writes[1],
+        "AI spline keeps normal depth while authoring overlays stay depth-off");
+    require(device.overlay_matrices[0].world == apex::scene::identity_matrix &&
+                device.overlay_matrices[0].view_projection ==
+                    frame.camera.view_projection &&
+                device.overlay_buffers[0] != device.overlay_buffers[1] &&
+                device.overlay_buffers[1] != device.overlay_buffers[2],
+            "AI spline owns immutable geometry and uses the frame camera");
+
+    apex::formats::AiSpline maximum_spline;
+    maximum_spline.version = 7U;
+    maximum_spline.points.resize(
+        max_overlay_line_total_vertices / 2U + 1U);
+    const auto maximum_geometry =
+        apex::app::buildWorkspaceAiSplineGeometry(maximum_spline);
+    require(maximum_geometry.ok() &&
+                maximum_geometry.geometry.chunks.size() ==
+                    max_overlay_line_draws,
+            "maximum AI spline fixture consumes the complete line budget");
+    auto over_budget_request = request_for(value);
+    over_budget_request.ai_spline_geometry = &maximum_geometry.geometry;
+    over_budget_request.ai_spline_pipeline = ai_spline_pipeline(value);
+    over_budget_request.authoring_overlay_pipeline =
+        authoring_overlay_pipeline(value);
+    over_budget_request.grid_visible = true;
+    FakeDevice over_budget_device;
+    const auto over_budget = apex::app::prepareWorkspaceViewport(
+        over_budget_device, value.document, over_budget_request);
+    require(!over_budget.ok() &&
+                over_budget.diagnostic.code ==
+                    "workspace_viewport_overlay_budget_exceeded",
+            "AI spline and authoring overlays share one bounded budget");
 }
 
 void draws_selected_mesh_with_recovered_fade_boundary() {
@@ -1524,6 +1642,7 @@ int main() {
         draws_four_sample_viewport_through_retained_resolve();
         draws_selected_axis_inside_the_scene_batch();
         draws_and_toggles_recovered_world_view_axis();
+        draws_raw_ai_spline_in_recovered_scene_phase();
         draws_selected_mesh_with_recovered_fade_boundary();
         toggles_prepared_authoring_grid_per_frame();
         rejects_unbound_selection_axis_requests();
