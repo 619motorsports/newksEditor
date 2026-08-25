@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <set>
+#include <sstream>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
@@ -72,6 +74,17 @@ void finding(CarValidationReport& report, const CarValidationLimits& limits,
     else ++report.warnings;
     if (report.findings.size() >= limits.maxFindings) return;
     report.findings.push_back({severity, std::string(code), std::string(message), std::string(node)});
+}
+
+void lod_finding(CarLodValidationReport& report, const CarValidationLimits& limits,
+                 CarFindingSeverity severity, std::string_view code,
+                 std::string message, std::string_view file = {},
+                 std::string_view node = {}) {
+    if (severity == CarFindingSeverity::error) ++report.errors;
+    else ++report.warnings;
+    if (report.findings.size() >= limits.maxFindings) return;
+    report.findings.push_back({severity, std::string(code), std::move(message),
+                               std::string(file), std::string(node)});
 }
 
 [[nodiscard]] std::string upper_ascii(std::string_view value) {
@@ -313,6 +326,37 @@ struct InputCheck {
     return {visit->world[12], visit->world[13], visit->world[14]};
 }
 
+[[nodiscard]] std::vector<Visit> collect_lod_visits(const Node& root) {
+    constexpr Matrix identity = {
+        1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+        0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
+    std::vector<Visit> visits;
+    std::vector<Visit> stack;
+    stack.push_back({&root, 0U, identity});
+    while (!stack.empty()) {
+        const Visit current = stack.back();
+        stack.pop_back();
+        const Matrix world = multiply(current.world, current.node->transform);
+        visits.push_back({current.node, current.depth, world});
+        for (auto iterator = current.node->children.rbegin();
+             iterator != current.node->children.rend(); ++iterator)
+            stack.push_back({&*iterator, current.depth + 1U, world});
+    }
+    return visits;
+}
+
+[[nodiscard]] std::string joined_names(const std::vector<std::string>& names,
+                                       std::size_t maximum) {
+    std::ostringstream output;
+    const std::size_t count = std::min(names.size(), maximum);
+    for (std::size_t index = 0U; index < count; ++index) {
+        if (index != 0U) output << ", ";
+        output << names[index];
+    }
+    if (names.size() > count) output << " (+" << names.size() - count << ')';
+    return output.str();
+}
+
 [[nodiscard]] float transform_deviation(const std::vector<Visit>& visits) noexcept {
     constexpr apex::formats::Kn5Matrix4 identity = {
         1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
@@ -500,6 +544,230 @@ CarValidationReport audit_car_hierarchy(const apex::formats::Kn5File& model,
         if (front <= rear) finding(report, limits, CarFindingSeverity::error, "WHEEL_AXIS", "wheel pivots do not use +Z as the front direction");
     }
     finding(report, limits, CarFindingSeverity::warning, "LOD_METADATA_STAGED", "KN5 input has no workspace LOD metadata; this foundation audits the parsed hierarchy as LOD 0");
+    return report;
+}
+
+CarLodValidationReport audit_car_lod_hierarchies(
+    const apex::formats::Kn5File& merged_model,
+    std::span<const CarLodHierarchyInput> lods,
+    CarValidationLimits limits) {
+    CarLodValidationReport report;
+    if (lods.empty()) {
+        lod_finding(report, limits, CarFindingSeverity::error, "LOD_INPUT_EMPTY",
+                    "A car LOD audit needs at least one hierarchy root");
+        return report;
+    }
+    if (lods.size() > limits.maxLods) {
+        lod_finding(report, limits, CarFindingSeverity::error, "LOD_COUNT_LIMIT",
+                    "Car LOD count exceeds the validation limit");
+        return report;
+    }
+
+    CarValidationReport input_report;
+    const auto checked = validate_input(merged_model, input_report, limits, false);
+    if (!checked.safe) {
+        report.errors = input_report.errors;
+        report.warnings = input_report.warnings;
+        report.findings.reserve(input_report.findings.size());
+        for (const auto& source : input_report.findings)
+            report.findings.push_back({source.severity, source.code, source.message,
+                                       {}, source.node});
+        return report;
+    }
+
+    struct LodState {
+        CarLodHierarchyInput input;
+        std::vector<Visit> visits;
+    };
+    std::vector<LodState> states;
+    states.reserve(lods.size());
+    report.lods.reserve(lods.size());
+    std::set<std::size_t> root_indices;
+    std::set<std::uint32_t> lod_indices;
+    std::size_t total_lod_nodes = 0U;
+
+    for (const auto& input : lods) {
+        if (input.file.empty() || input.file.size() > limits.maxStringBytes ||
+            input.file.find('\0') != std::string_view::npos) {
+            lod_finding(report, limits, CarFindingSeverity::error,
+                        "LOD_FILE_INVALID",
+                        "Car LOD file name is empty, too large, or contains NUL");
+            continue;
+        }
+        if (input.root_child_index >= merged_model.root.children.size()) {
+            lod_finding(report, limits, CarFindingSeverity::error,
+                        "LOD_ROOT_INVALID",
+                        "Car LOD root index is outside the merged hierarchy",
+                        input.file);
+            continue;
+        }
+        if (!root_indices.insert(input.root_child_index).second) {
+            lod_finding(report, limits, CarFindingSeverity::error,
+                        "LOD_ROOT_DUPLICATE",
+                        "Car LOD inputs contain a duplicate hierarchy root",
+                        input.file);
+            continue;
+        }
+        if (!lod_indices.insert(input.index).second) {
+            lod_finding(report, limits, CarFindingSeverity::error,
+                        "LOD_INDEX_DUPLICATE",
+                        "Car LOD inputs contain a duplicate LOD index",
+                        input.file);
+            continue;
+        }
+
+        auto visits = collect_lod_visits(
+            merged_model.root.children[input.root_child_index]);
+        if (visits.size() > limits.maxNodes ||
+            total_lod_nodes > limits.maxNodes - visits.size()) {
+            lod_finding(report, limits, CarFindingSeverity::error,
+                        "LOD_NODE_LIMIT",
+                        "Aggregate car LOD hierarchy nodes exceed the validation limit",
+                        input.file);
+            continue;
+        }
+        total_lod_nodes += visits.size();
+
+        std::map<std::string, std::size_t> all_names;
+        std::map<std::string, std::size_t> hierarchy_names;
+        for (const auto& visit : visits) {
+            const auto key = upper_ascii(visit.node->name);
+            if (key.empty()) continue;
+            ++all_names[key];
+            if (visit.node->kind == "node") ++hierarchy_names[key];
+        }
+        CarLodHierarchySummary summary;
+        summary.index = input.index;
+        summary.file = input.file;
+        summary.nodes = visits.size();
+        summary.unique_names = all_names.size();
+
+        for (const auto name : kRequired) {
+            const auto* visit = first_named(visits, name);
+            if (visit == nullptr) {
+                lod_finding(report, limits, CarFindingSeverity::warning,
+                            "REQUIRED_NODE_MISSING",
+                            std::string(name) + " is missing from LOD " +
+                                std::to_string(input.index),
+                            input.file);
+                continue;
+            }
+            ++summary.required_nodes_present;
+            if (visit->node->kind != "node")
+                lod_finding(report, limits, CarFindingSeverity::error,
+                            "REQUIRED_NODE_KIND",
+                            std::string(name) + " must be a hierarchy node",
+                            input.file, visit->node->name);
+        }
+
+        std::vector<std::string> required_duplicates;
+        std::vector<std::string> other_duplicates;
+        for (const auto& [name, count] : hierarchy_names) {
+            if (count <= 1U) continue;
+            const bool required = std::find(kRequired.begin(), kRequired.end(),
+                                            std::string_view(name)) != kRequired.end();
+            (required ? required_duplicates : other_duplicates).push_back(name);
+        }
+        if (!required_duplicates.empty())
+            lod_finding(report, limits, CarFindingSeverity::warning,
+                        "REQUIRED_NODE_DUPLICATE",
+                        "LOD " + std::to_string(input.index) +
+                            " duplicates SDK-required hierarchy nodes: " +
+                            joined_names(required_duplicates, required_duplicates.size()),
+                        input.file);
+        if (!other_duplicates.empty())
+            lod_finding(report, limits, CarFindingSeverity::warning,
+                        "DUPLICATE_NODE_NAME",
+                        "LOD " + std::to_string(input.index) +
+                            " has duplicate hierarchy-node names: " +
+                            joined_names(other_duplicates, 12U),
+                        input.file);
+
+        for (const auto name : {std::string_view("COCKPIT_HR"),
+                                std::string_view("STEER_HR")}) {
+            const bool present = first_named(visits, name) != nullptr;
+            if (input.index == 0U && !present)
+                lod_finding(report, limits, CarFindingSeverity::warning,
+                            "RECOMMENDED_NODE_MISSING",
+                            std::string(name) + " is recommended for LOD 0",
+                            input.file);
+            if (input.index != 0U && present)
+                lod_finding(report, limits, CarFindingSeverity::warning,
+                            "HIGH_DETAIL_NODE_IN_REDUCED_LOD",
+                            std::string(name) + " must only be present in LOD 0",
+                            input.file, name);
+        }
+
+        for (const auto corner : kCorners) {
+            const auto* wheel = first_named(visits, "WHEEL_" + std::string(corner));
+            for (const auto prefix : {std::string_view("SUSP_"),
+                                      std::string_view("DISC_"),
+                                      std::string_view("RIM_")}) {
+                const auto* related = first_named(
+                    visits, std::string(prefix) + std::string(corner));
+                if (wheel != nullptr && related != nullptr &&
+                    distance(translation(wheel), translation(related)) > 0.05F)
+                    lod_finding(report, limits, CarFindingSeverity::warning,
+                                "PIVOT_OFFSET",
+                                std::string(prefix) + std::string(corner) +
+                                    " pivot is separated from its wheel",
+                                input.file, related->node->name);
+            }
+        }
+
+        const auto* left_front = first_named(visits, "WHEEL_LF");
+        const auto* left_rear = first_named(visits, "WHEEL_LR");
+        const auto* right_front = first_named(visits, "WHEEL_RF");
+        const auto* right_rear = first_named(visits, "WHEEL_RR");
+        if (left_front != nullptr && left_rear != nullptr &&
+            right_front != nullptr && right_rear != nullptr) {
+            const float left =
+                (translation(left_front)[0] + translation(left_rear)[0]) * 0.5F;
+            const float right =
+                (translation(right_front)[0] + translation(right_rear)[0]) * 0.5F;
+            const float front =
+                (translation(left_front)[2] + translation(right_front)[2]) * 0.5F;
+            const float rear =
+                (translation(left_rear)[2] + translation(right_rear)[2]) * 0.5F;
+            if (left <= right)
+                lod_finding(report, limits, CarFindingSeverity::error,
+                            "WHEEL_AXIS",
+                            "Wheel pivots do not use the expected left/right X orientation",
+                            input.file);
+            if (front <= rear)
+                lod_finding(report, limits, CarFindingSeverity::error,
+                            "WHEEL_AXIS",
+                            "Wheel pivots do not use +Z as the front direction",
+                            input.file);
+        }
+
+        report.lods.push_back(std::move(summary));
+        states.push_back({input, std::move(visits)});
+    }
+
+    if (states.size() > 1U) {
+        const auto reference = std::find_if(
+            states.begin(), states.end(),
+            [](const LodState& state) { return state.input.index == 0U; });
+        const LodState& reference_state =
+            reference == states.end() ? states.front() : *reference;
+        for (const auto& state : states) {
+            if (&state == &reference_state) continue;
+            for (const auto name : {std::string_view("WHEEL_LF"),
+                                    std::string_view("WHEEL_LR"),
+                                    std::string_view("WHEEL_RF"),
+                                    std::string_view("WHEEL_RR")}) {
+                const auto* expected = first_named(reference_state.visits, name);
+                const auto* actual = first_named(state.visits, name);
+                if (expected != nullptr && actual != nullptr &&
+                    distance(translation(expected), translation(actual)) > 0.05F)
+                    lod_finding(report, limits, CarFindingSeverity::warning,
+                                "LOD_PIVOT_MISMATCH",
+                                std::string(name) + " differs from LOD 0",
+                                state.input.file, actual->node->name);
+            }
+        }
+    }
     return report;
 }
 

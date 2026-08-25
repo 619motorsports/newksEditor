@@ -4,8 +4,11 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace apex::domain {
@@ -27,6 +30,7 @@ struct CarValidationLimits {
     std::size_t maxStringBytes = 1U * 1024U * 1024U;
     std::size_t maxTopologyVertices = 10'000'000;
     std::size_t maxTopologyEdges = 30'000'000;
+    std::size_t maxLods = 1024;
     std::size_t maxFindings = 10'000;
 };
 
@@ -77,11 +81,53 @@ struct CarValidationReport {
     [[nodiscard]] bool valid() const noexcept { return errors == 0; }
 };
 
+// Identifies one merged-workspace wrapper under Kn5File::root. The wrapper
+// transform is part of the audited hierarchy. Inputs borrow their file names
+// only for the duration of audit_car_lod_hierarchies().
+struct CarLodHierarchyInput {
+    std::size_t root_child_index = 0;
+    std::uint32_t index = 0;
+    std::string_view file;
+};
+
+struct CarLodHierarchySummary {
+    std::uint32_t index = 0;
+    std::string file;
+    std::size_t nodes = 0;
+    std::size_t unique_names = 0;
+    std::size_t required_nodes_present = 0;
+};
+
+struct CarLodValidationFinding {
+    CarFindingSeverity severity = CarFindingSeverity::warning;
+    std::string code;
+    std::string message;
+    std::string file;
+    std::string node;
+};
+
+struct CarLodValidationReport {
+    std::vector<CarLodHierarchySummary> lods;
+    std::vector<CarLodValidationFinding> findings;
+    std::size_t errors = 0;
+    std::size_t warnings = 0;
+
+    [[nodiscard]] bool valid() const noexcept { return errors == 0; }
+};
+
 // Audits SDK-required hierarchy and wheel/pivot conventions. KN5 does not
 // carry the browser workspace LOD annotations, so this audits the one parsed
 // hierarchy as LOD 0 and reports that omission explicitly.
 [[nodiscard]] CarValidationReport audit_car_hierarchy(
     const apex::formats::Kn5File& model, CarValidationLimits limits = {});
+
+// Audits every selected car-LOD wrapper in a previously merged KN5 model.
+// The complete merged model is validated once before any LOD result is
+// emitted. Root indices must be unique and refer to direct root children.
+[[nodiscard]] CarLodValidationReport audit_car_lod_hierarchies(
+    const apex::formats::Kn5File& merged_model,
+    std::span<const CarLodHierarchyInput> lods,
+    CarValidationLimits limits = {});
 
 // Audits a collision KN5, optionally comparing its world bounds with the
 // visual model. A null visual model is a valid request and skips that check.

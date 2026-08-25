@@ -1,14 +1,19 @@
 #include "apex/domain/car_validation.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 #include <string>
 
 namespace {
 using apex::domain::CarFindingSeverity;
+using apex::domain::CarLodHierarchyInput;
 using apex::domain::CarValidationLimits;
 using apex::formats::Kn5File;
 using apex::formats::Kn5Node;
@@ -61,6 +66,57 @@ bool has_code(const apex::domain::CarValidationReport& report, std::string_view 
     for (const auto& finding : report.findings)
         if (finding.code == code && finding.severity == severity) return true;
     return false;
+}
+
+bool has_lod_code(const apex::domain::CarLodValidationReport& report,
+                  std::string_view code, CarFindingSeverity severity) {
+    for (const auto& finding : report.findings)
+        if (finding.code == code && finding.severity == severity) return true;
+    return false;
+}
+
+Kn5Node car_lod_root(std::string name, std::string_view omitted = {},
+                     bool include_high_detail = true,
+                     float left_front_offset = 0.0F) {
+    Kn5Node root = node(std::move(name));
+    for (const auto required : {"SUSP_LF", "SUSP_LR", "SUSP_RF", "SUSP_RR",
+                                "WHEEL_LF", "WHEEL_LR", "WHEEL_RF", "WHEEL_RR",
+                                "COCKPIT_LR", "STEER_LR", "DISC_LF", "DISC_LR",
+                                "DISC_RF", "DISC_RR"}) {
+        if (std::string_view(required) == omitted) continue;
+        std::array<float, 3> position{};
+        const std::string text(required);
+        if (text.find("LF") != std::string::npos)
+            position = {1.0F + (text == "WHEEL_LF" ? left_front_offset : 0.0F),
+                        0.0F, 2.0F};
+        else if (text.find("LR") != std::string::npos) position = {1.0F, 0.0F, -2.0F};
+        else if (text.find("RF") != std::string::npos) position = {-1.0F, 0.0F, 2.0F};
+        else if (text.find("RR") != std::string::npos) position = {-1.0F, 0.0F, -2.0F};
+        root.children.push_back(node(text, position));
+    }
+    if (include_high_detail) {
+        root.children.push_back(node("COCKPIT_HR"));
+        root.children.push_back(node("STEER_HR"));
+    }
+    return root;
+}
+
+std::vector<std::uint8_t> read_fixture(std::string_view relative_path) {
+    const std::array<std::string_view, 3U> roots = {
+        "test/content/", "../test/content/", "../../test/content/"};
+    for (const auto root : roots) {
+        std::ifstream input(std::string(root) + std::string(relative_path),
+                            std::ios::binary | std::ios::ate);
+        if (!input) continue;
+        const auto end = input.tellg();
+        if (end < 0) continue;
+        std::vector<std::uint8_t> bytes(static_cast<std::size_t>(end));
+        input.seekg(0, std::ios::beg);
+        input.read(reinterpret_cast<char*>(bytes.data()),
+                   static_cast<std::streamsize>(bytes.size()));
+        if (input.good() || input.eof()) return bytes;
+    }
+    return {};
 }
 
 void audits_closed_collider_and_geometry() {
@@ -120,6 +176,117 @@ void audits_hierarchy_axes_and_pivots() {
     const auto mesh_name_report = apex::domain::audit_car_hierarchy(mesh_name);
     require(!has_code(mesh_name_report, "DUPLICATE_NODE_NAME", CarFindingSeverity::warning),
             "mesh names do not count as duplicate hierarchy nodes");
+}
+
+void audits_merged_car_lod_hierarchies() {
+    Kn5File merged;
+    merged.root = node("CAR_LODS");
+    Kn5Node lod0 = node("lod0.kn5");
+    lod0.children.push_back(car_lod_root("LOD0"));
+    merged.root.children.push_back(std::move(lod0));
+    Kn5Node lod1 = node("lod1.kn5");
+    lod1.children.push_back(car_lod_root("LOD1", "DISC_RR", true, 0.1F));
+    merged.root.children.push_back(std::move(lod1));
+
+    const std::array<CarLodHierarchyInput, 2U> inputs = {
+        CarLodHierarchyInput{0U, 0U, "lod0.kn5"},
+        CarLodHierarchyInput{1U, 1U, "lod1.kn5"}};
+    const auto report = apex::domain::audit_car_lod_hierarchies(merged, inputs);
+    require(report.valid() && report.lods.size() == 2U &&
+                report.lods[0].required_nodes_present == 14U &&
+                report.lods[1].required_nodes_present == 13U,
+            "merged car LOD summaries preserve manifest order");
+    require(has_lod_code(report, "REQUIRED_NODE_MISSING", CarFindingSeverity::warning) &&
+                has_lod_code(report, "HIGH_DETAIL_NODE_IN_REDUCED_LOD",
+                             CarFindingSeverity::warning) &&
+                has_lod_code(report, "PIVOT_OFFSET", CarFindingSeverity::warning) &&
+                has_lod_code(report, "LOD_PIVOT_MISMATCH", CarFindingSeverity::warning),
+            "merged car LOD findings match the reference workspace audit");
+    require(std::all_of(report.findings.begin(), report.findings.end(),
+                        [](const auto& finding) {
+                            return !finding.file.empty();
+                        }),
+            "merged car LOD findings retain source file attribution");
+
+    const std::array<CarLodHierarchyInput, 2U> duplicate_root = {
+        CarLodHierarchyInput{0U, 0U, "lod0.kn5"},
+        CarLodHierarchyInput{0U, 1U, "lod1.kn5"}};
+    const auto duplicate =
+        apex::domain::audit_car_lod_hierarchies(merged, duplicate_root);
+    require(!duplicate.valid() &&
+                has_lod_code(duplicate, "LOD_ROOT_DUPLICATE",
+                             CarFindingSeverity::error),
+            "duplicate merged LOD roots fail closed");
+
+    const std::array<CarLodHierarchyInput, 1U> invalid_root = {
+        CarLodHierarchyInput{9U, 0U, "missing.kn5"}};
+    const auto invalid =
+        apex::domain::audit_car_lod_hierarchies(merged, invalid_root);
+    require(!invalid.valid() &&
+                has_lod_code(invalid, "LOD_ROOT_INVALID", CarFindingSeverity::error),
+            "out-of-range merged LOD root fails closed");
+
+    CarValidationLimits limits;
+    limits.maxLods = 1U;
+    const auto bounded =
+        apex::domain::audit_car_lod_hierarchies(merged, inputs, limits);
+    require(!bounded.valid() &&
+                has_lod_code(bounded, "LOD_COUNT_LIMIT", CarFindingSeverity::error),
+            "merged car LOD count is bounded before hierarchy traversal");
+
+    Kn5File minimal;
+    minimal.root = node("");
+    minimal.root.children.push_back(node(""));
+    const std::string oversized_file(9U, 'x');
+    const std::array<CarLodHierarchyInput, 1U> oversized_input = {
+        CarLodHierarchyInput{0U, 0U, oversized_file}};
+    CarValidationLimits file_limits;
+    file_limits.maxStringBytes = 8U;
+    const auto invalid_file = apex::domain::audit_car_lod_hierarchies(
+        minimal, oversized_input, file_limits);
+    require(!invalid_file.valid() &&
+                has_lod_code(invalid_file, "LOD_FILE_INVALID",
+                             CarFindingSeverity::error) &&
+                invalid_file.findings.front().file.empty(),
+            "oversized LOD file names fail without copying unsafe text");
+}
+
+void audits_repository_car_lods() {
+    constexpr std::string_view base = "cars/619_gen6_arca_base/";
+    constexpr std::array<std::string_view, 4U> files = {
+        "619_gen6_fusion13.kn5", "619_gen6_fusion13_lod_b.kn5",
+        "619_gen6_fusion13_lod_c.kn5", "619_gen6_fusion13_lod_d.kn5"};
+    Kn5File merged;
+    merged.root = node("CAR_LODS");
+    std::array<CarLodHierarchyInput, files.size()> inputs{};
+    for (std::size_t index = 0U; index < files.size(); ++index) {
+        const auto bytes = read_fixture(std::string(base) + std::string(files[index]));
+        if (bytes.empty()) return;
+        apex::formats::Kn5ParseOptions options;
+        options.metadataOnly = true;
+        options.hierarchyOnly = true;
+        auto parsed = apex::formats::parseKn5(bytes, std::string(files[index]), options);
+        merged.materials.insert(merged.materials.end(),
+                                std::make_move_iterator(parsed.materials.begin()),
+                                std::make_move_iterator(parsed.materials.end()));
+        Kn5Node wrapper = node(std::string(files[index]));
+        wrapper.children.push_back(std::move(parsed.root));
+        merged.root.children.push_back(std::move(wrapper));
+        inputs[index] = {index, static_cast<std::uint32_t>(index), files[index]};
+    }
+
+    const auto report = apex::domain::audit_car_lod_hierarchies(merged, inputs);
+    require(report.valid() && report.lods.size() == files.size(),
+            "repository car LOD hierarchy audit succeeds (errors=" +
+                std::to_string(report.errors) + ", warnings=" +
+                std::to_string(report.warnings) + ", lods=" +
+                std::to_string(report.lods.size()) + ")");
+    const std::array<std::size_t, 4U> expected_required = {10U, 5U, 9U, 0U};
+    for (std::size_t index = 0U; index < expected_required.size(); ++index)
+        require(report.lods[index].required_nodes_present == expected_required[index],
+                "repository car LOD required-node counts match JavaScript");
+    require(report.errors == 0U && report.warnings == 40U,
+            "repository car LOD finding counts match JavaScript");
 }
 
 void rejects_malformed_indices_and_nonfinite_values() {
@@ -240,6 +407,8 @@ int main() {
     try {
         audits_closed_collider_and_geometry();
         audits_hierarchy_axes_and_pivots();
+        audits_merged_car_lod_hierarchies();
+        audits_repository_car_lods();
         rejects_malformed_indices_and_nonfinite_values();
         enforces_depth_and_geometry_budgets();
         std::cout << "Car validation tests passed\n";
