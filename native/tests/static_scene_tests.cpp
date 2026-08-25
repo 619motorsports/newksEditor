@@ -1671,6 +1671,18 @@ void owns_and_updates_frame_constant_record_for_mixed_packets() {
             "non-finite frame constants fail before update or recording");
 
     constants = KsPerPixelFrameConstants{};
+    constants.fog[0] = std::numeric_limits<float>::quiet_NaN();
+    frame.frame_constants = constants;
+    auto non_finite_fog =
+        prepared.resources->draw_and_readback(device, target, frame);
+    require(non_finite_fog.status ==
+                    IndexedStaticMeshBatchStatus::invalid_request &&
+                non_finite_fog.diagnostic.code ==
+                    "static_scene_frame_constants_non_finite" &&
+                device.update_calls == 0U && device.batch_calls == 0U,
+            "non-finite fog constants fail before update or recording");
+
+    constants = KsPerPixelFrameConstants{};
     constants.sun_direction = {0.0F, 0.0F, 0.0F, 0.0F};
     frame.frame_constants = constants;
     auto zero_direction = prepared.resources->draw_and_readback(device, target, frame);

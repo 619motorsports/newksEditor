@@ -184,8 +184,9 @@ remains unchanged and feature-complete.
   binding 3. D3D12 maps this record to `b3`.
   The first 64 bytes contain the sun direction, sun color, ambient color, and
   camera position. Static scenes derive the camera position from the active
-  `CameraFrame`. They own one bounded mutable record and update it before an
-  ordered batch.
+  `CameraFrame`. The next 64 bytes contain horizon, sky, and fog values.
+  A flag keeps fog disabled for older callers. Static scenes own one bounded
+  mutable record and update it before an ordered batch.
   Both backends execute the source-evidenced ambient, directional diffuse,
   direct Blinn specular, and emissive equation. Known-pixel tests cover
   specular enable and removal, light reversal, frame updates, and per-draw
@@ -195,10 +196,12 @@ remains unchanged and feature-complete.
   follows `public/app.js:2082` by applying shadow only to direct diffuse and
   specular light. A real stock-scene fixture produces `(3,40,18,255)` with
   zero-depth maps and `(16,116,34,255)` with one-depth maps. The fixture does
-  not include Fresnel, reflections, fog, alpha tests, normal maps, detail maps,
-  CSP lights, or overlays. The D3D12 receiver path is implemented. A Windows
-  SDK and WARP run must still verify it. This remains a bounded test ABI, not a
-  complete stock KN5 or CSP shader.
+  not include Fresnel, reflections, alpha tests, normal maps, detail maps, CSP
+  lights, or overlays. All portable material variants apply the production
+  WebGL distance-fog equation. A known-pixel test covers enabled fog. The
+  D3D12 receiver path is implemented. A Windows SDK and WARP run must still
+  verify it. This remains a bounded test ABI, not a complete stock KN5 or CSP
+  shader.
   A bounded resolver reads parsed KN5 values and typed CSP
   overrides. It preserves override precedence and WebGL emissive conversion.
   A second bounded ABI executes tangent-space `ksPerPixelNM`. It adds a normal
@@ -437,10 +440,13 @@ remains unchanged and feature-complete.
   portable WASD/QE keycodes to an application-owned camera controller. Motion
   translates the orbit target without exposing platform or backend types.
   The shell also evaluates one of the seven stock weather presets with bounded
-  sun angles. It uploads sun direction, sun color, and ambient color through
-  the existing portable frame record. Directional shadow refresh uses that
-  same sun direction. The default preset and angles match the production
-  renderer. Native sky, fog, and post-processing remain staged.
+  sun angles. It uploads sun, sky, horizon, and fog values through the 128-byte
+  portable frame record. Its first 64 bytes keep the earlier lighting layout.
+  The portable material modules apply the production WebGL distance-fog
+  equation after direct lighting. This behavior does not claim recovered stock
+  shader bytecode. Directional shadow refresh uses the same sun direction.
+  The default preset and angles match the production renderer. Native sky and
+  post-processing remain staged.
   Recovered `ksNet.dll` evidence supports the lighting record order.
   `GraphicsManager::updateLightingSetttings` at `0x10046c2c` writes sun
   direction at offset `0x00`, sun RGB at `0x30`, and ambient RGB at `0x40`.

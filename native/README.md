@@ -181,9 +181,11 @@ ASCII case-insensitive matching. It retains duplicate node names.
 The lighting options select one of the seven bounded stock weather presets and
 finite sun angles. The default is `5_light_clouds` at a 40-degree heading and
 55-degree height, as used by the production renderer. The native shell uploads
-the evaluated sun, sun color, and ambient color through the existing 64-byte
-frame record. It uses the same sun direction for directional shadow cascades.
-Sky, fog, and post-processing remain staged.
+the evaluated sun, sky, horizon, and fog values through the 128-byte portable
+frame record. The first 64 bytes stay compatible with the earlier lighting
+record. The portable material modules apply the production WebGL fog equation.
+Sky and post-processing remain staged. The shell uses the same sun direction
+for directional shadow cascades.
 KN5 conversion computes preview bounds from transformed visible vertices. A
 car-LOD workspace uses those bounds for initial framing and automatic range
 selection. The viewport prepares all car LOD packets once. Camera movement
@@ -293,9 +295,11 @@ Vulkan `ksPerPixel` receiver fixture applies the source-evidenced three-cascade
 selection and explicit 3x3 PCF to direct diffuse and specular light. A real
 stock-scene test proves fully shadowed `(3,40,18,255)` and fully lit
 `(16,116,34,255)` center pixels. The D3D12 receiver path is implemented, but
-it still requires a Windows SDK and WARP verification run. Fresnel,
-reflections, fog, and CSP lights remain staged. A bounded batch
-preflights all requests. It clears or loads attachments once and returns one
+it still requires a Windows SDK and WARP verification run. The portable
+material variants apply distance fog after direct lighting. This equation
+follows the production WebGL renderer and does not claim recovered stock
+shader bytecode. Fresnel, reflections, and CSP lights remain staged. A bounded
+batch preflights all requests. It clears or loads attachments once and returns one
 final readback. Draw-packet texture resources resolve by canonical name.
 An exact tangent-space extension adds `txNormal` at bindings 4 and 5. A second
 extension adds linear `txMaps` at bindings 6 and 7. D3D12 uses `t4`, `s5`,

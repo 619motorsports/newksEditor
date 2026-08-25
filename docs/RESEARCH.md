@@ -1072,9 +1072,9 @@ attenuated by `1/(1+distance^2*0.05)`. Atlas alpha is derivative-smoothed around
 distance fade does not multiply it. Instead, native direct light is scaled by
 `saturate(fade)*saturate(0.5+3*bladeY)`, while ambient alone is multiplied by
 `lerp(1,abs(toCamera.y)*0.5,TexDimming)`. Apex now carries all three generation
-outputs and uses this recovered color/coverage and available lighting core; its
-portable weather, shadow filtering, and fog remain the surrounding renderer
-integration rather than a claim of complete CSP lighting parity.
+outputs and uses this recovered color and coverage with the available lighting
+core. Portable weather, shadow filtering, and WebGL-based fog stay in the
+surrounding renderer integration. They do not prove complete CSP lighting parity.
 
 The public `GBUFFER_GRASSFX` material path defines the separate material-parameter
 target as `(ksDiffuse, ksAmbient, average(specularColor), specularExponent / 255)`.

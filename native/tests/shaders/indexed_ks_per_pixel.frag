@@ -17,7 +17,20 @@ layout(std140, set = 0, binding = 3) uniform KsPerPixelFrame {
     vec4 sun_color;
     vec4 ambient_color;
     vec4 camera_position;
+    vec4 horizon_color;
+    vec4 sky_color;
+    vec4 fog_color;
+    vec4 fog;
 } frame;
+
+vec3 applyFog(vec3 surfaceColor) {
+    if (frame.fog.z <= 0.5) return surfaceColor;
+    float amount = pow(
+        clamp(distance(frame.camera_position.xyz, fragmentWorld) /
+                  max(1.0, frame.fog.x), 0.0, 1.0),
+        max(0.05, frame.fog.y));
+    return mix(surfaceColor, frame.fog_color.rgb, amount);
+}
 
 void main() {
     vec3 texel = texture(sampler2D(diffuseTexture, diffuseSampler), fragmentTexcoord).rgb;
@@ -32,5 +45,5 @@ void main() {
     vec3 lit = texel * (frame.ambient_color.rgb * material.lighting.x +
                         frame.sun_color.rgb * material.lighting.y * ndl +
                         material.emissive.rgb) + spec;
-    color = vec4(lit, 1.0);
+    color = vec4(applyFog(lit), 1.0);
 }

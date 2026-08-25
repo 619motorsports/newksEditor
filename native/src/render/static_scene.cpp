@@ -120,6 +120,14 @@ bool finite_frame_constants(const KsPerPixelFrameConstants& constants) noexcept 
         if (!std::isfinite(value)) return false;
     for (const float value : constants.camera_position)
         if (!std::isfinite(value)) return false;
+    for (const float value : constants.horizon_color)
+        if (!std::isfinite(value)) return false;
+    for (const float value : constants.sky_color)
+        if (!std::isfinite(value)) return false;
+    for (const float value : constants.fog_color)
+        if (!std::isfinite(value)) return false;
+    for (const float value : constants.fog)
+        if (!std::isfinite(value)) return false;
     return true;
 }
 

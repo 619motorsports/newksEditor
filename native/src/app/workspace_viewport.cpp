@@ -228,7 +228,9 @@ using render::PipelineRenderTargetFormat;
                            [](float value) { return std::isfinite(value); });
     };
     return finite(constants.sun_direction) && finite(constants.sun_color) &&
-           finite(constants.ambient_color) && finite(constants.camera_position);
+           finite(constants.ambient_color) && finite(constants.camera_position) &&
+           finite(constants.horizon_color) && finite(constants.sky_color) &&
+           finite(constants.fog_color) && finite(constants.fog);
 }
 
 [[nodiscard]] bool nonzeroFrameSun(
@@ -286,7 +288,12 @@ WorkspaceViewportLightingResult evaluateWorkspaceViewportLighting(
     };
     if (!finite(result.evaluated.sun_direction) ||
         !finite(result.evaluated.sun_color) ||
-        !finite(result.evaluated.ambient_color)) {
+        !finite(result.evaluated.ambient_color) ||
+        !finite(result.evaluated.horizon_color) ||
+        !finite(result.evaluated.sky_color) ||
+        !finite(result.evaluated.fog_color) ||
+        !std::isfinite(result.evaluated.fog_distance) ||
+        !std::isfinite(result.evaluated.fog_blend)) {
         result.diagnostic = diagnostic(
             "workspace_viewport_lighting_result_invalid",
             "Evaluated weather lighting must contain only finite values");
@@ -302,6 +309,17 @@ WorkspaceViewportLightingResult evaluateWorkspaceViewportLighting(
         result.evaluated.ambient_color[0], result.evaluated.ambient_color[1],
         result.evaluated.ambient_color[2], 0.0F};
     result.frame_constants.camera_position = {};
+    result.frame_constants.horizon_color = {
+        result.evaluated.horizon_color[0], result.evaluated.horizon_color[1],
+        result.evaluated.horizon_color[2], 0.0F};
+    result.frame_constants.sky_color = {
+        result.evaluated.sky_color[0], result.evaluated.sky_color[1],
+        result.evaluated.sky_color[2], 0.0F};
+    result.frame_constants.fog_color = {
+        result.evaluated.fog_color[0], result.evaluated.fog_color[1],
+        result.evaluated.fog_color[2], 0.0F};
+    result.frame_constants.fog = {
+        result.evaluated.fog_distance, result.evaluated.fog_blend, 1.0F, 0.0F};
     result.status = WorkspaceViewportLightingStatus::ready;
     return result;
 } catch (const std::bad_alloc&) {

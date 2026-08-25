@@ -25,6 +25,10 @@ layout(std140, set = 0, binding = 3) uniform KsPerPixelFrame {
     vec4 sun_color;
     vec4 ambient_color;
     vec4 camera_position;
+    vec4 horizon_color;
+    vec4 sky_color;
+    vec4 fog_color;
+    vec4 fog;
 } frame;
 layout(set = 0, binding = 4) uniform texture2D normalTexture;
 layout(set = 0, binding = 5) uniform sampler normalSampler;
@@ -58,6 +62,11 @@ void main() {
                     frame.sun_color.rgb * material.lighting.y * ndl);
     vec3 spec = frame.sun_color.rgb *
                 (pow(max(dot(n, normalize(l + v)), 0.0), mappedPower) * mappedSpecular);
-    color = vec4(max(diffuse + spec + surface * material.emissive.rgb, vec3(0.0)),
-                 diffuseTexel.a);
+    vec3 lit = max(diffuse + spec + surface * material.emissive.rgb, vec3(0.0));
+    float fogAmount = frame.fog.z > 0.5
+        ? pow(clamp(distance(frame.camera_position.xyz, fragmentWorld) /
+                        max(1.0, frame.fog.x), 0.0, 1.0),
+              max(0.05, frame.fog.y))
+        : 0.0;
+    color = vec4(mix(lit, frame.fog_color.rgb, fogAmount), diffuseTexel.a);
 }

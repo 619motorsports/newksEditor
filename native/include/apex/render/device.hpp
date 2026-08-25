@@ -594,22 +594,28 @@ struct KsPerPixelMaterialConstants {
 static_assert(sizeof(KsPerPixelMaterialConstants) == 80U);
 static_assert(std::is_trivially_copyable_v<KsPerPixelMaterialConstants>);
 
-// Per-frame directional lighting values follow the production WebGL
-// ksPerPixel binder. Static-scene execution derives camera_position from its
-// CameraFrame so view-dependent lighting cannot use stale duplicate state.
+// Per-frame lighting values follow the production WebGL ksPerPixel binder.
+// Static-scene execution derives camera_position from its CameraFrame so
+// view-dependent lighting cannot use stale duplicate state. The first 64
+// bytes retain the original portable directional-lighting ABI.
 struct KsPerPixelFrameConstants {
     std::array<float, 4> sun_direction = {0.0F, 1.0F, 0.0F, 0.0F};
     std::array<float, 4> sun_color = {1.0F, 1.0F, 1.0F, 0.0F};
     std::array<float, 4> ambient_color = {0.2F, 0.2F, 0.2F, 0.0F};
     std::array<float, 4> camera_position = {0.0F, 0.0F, 0.0F, 0.0F};
+    std::array<float, 4> horizon_color = {0.0F, 0.0F, 0.0F, 0.0F};
+    std::array<float, 4> sky_color = {0.0F, 0.0F, 0.0F, 0.0F};
+    std::array<float, 4> fog_color = {0.0F, 0.0F, 0.0F, 0.0F};
+    // fogDistance, fogBlend, enabled, reserved.
+    std::array<float, 4> fog = {1.0F, 1.0F, 0.0F, 0.0F};
 };
 
-static_assert(sizeof(KsPerPixelFrameConstants) == 64U);
+static_assert(sizeof(KsPerPixelFrameConstants) == 128U);
 static_assert(std::is_trivially_copyable_v<KsPerPixelFrameConstants>);
 
 inline constexpr std::uint32_t portable_material_constant_bytes = 80U;
 inline constexpr std::uint32_t portable_material_buffer_view_bytes = 256U;
-inline constexpr std::uint32_t portable_frame_constant_bytes = 64U;
+inline constexpr std::uint32_t portable_frame_constant_bytes = 128U;
 inline constexpr std::uint32_t portable_frame_buffer_view_bytes = 256U;
 
 struct IndexedMaterialBufferBinding {

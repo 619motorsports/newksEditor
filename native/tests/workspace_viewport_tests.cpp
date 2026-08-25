@@ -505,9 +505,28 @@ void evaluates_bounded_workspace_lighting() {
                         default_lighting.evaluated.ambient_color[0],
                         default_lighting.evaluated.ambient_color[1],
                         default_lighting.evaluated.ambient_color[2], 0.0F} &&
+                default_lighting.frame_constants.horizon_color ==
+                    std::array<float, 4U>{
+                        default_lighting.evaluated.horizon_color[0],
+                        default_lighting.evaluated.horizon_color[1],
+                        default_lighting.evaluated.horizon_color[2], 0.0F} &&
+                default_lighting.frame_constants.sky_color ==
+                    std::array<float, 4U>{
+                        default_lighting.evaluated.sky_color[0],
+                        default_lighting.evaluated.sky_color[1],
+                        default_lighting.evaluated.sky_color[2], 0.0F} &&
+                default_lighting.frame_constants.fog_color ==
+                    std::array<float, 4U>{
+                        default_lighting.evaluated.fog_color[0],
+                        default_lighting.evaluated.fog_color[1],
+                        default_lighting.evaluated.fog_color[2], 0.0F} &&
+                default_lighting.frame_constants.fog ==
+                    std::array<float, 4U>{
+                        default_lighting.evaluated.fog_distance,
+                        default_lighting.evaluated.fog_blend, 1.0F, 0.0F} &&
                 default_lighting.frame_constants.camera_position ==
                     std::array<float, 4U>{},
-            "workspace lighting packs the source-matched 64-byte frame ABI");
+            "workspace lighting packs the source-matched atmosphere frame ABI");
 
     require(apex::app::evaluateWorkspaceViewportLighting(
                 {"3_clear", 120.0F, 35.0F}).ok(),
@@ -731,6 +750,10 @@ void schedules_directional_shadows_before_color_and_reuses_maps() {
     require(uploaded.sun_direction == lighting.frame_constants.sun_direction &&
                 uploaded.sun_color == lighting.frame_constants.sun_color &&
                 uploaded.ambient_color == lighting.frame_constants.ambient_color &&
+                uploaded.horizon_color == lighting.frame_constants.horizon_color &&
+                uploaded.sky_color == lighting.frame_constants.sky_color &&
+                uploaded.fog_color == lighting.frame_constants.fog_color &&
+                uploaded.fog == lighting.frame_constants.fog &&
                 uploaded.camera_position ==
                     std::array<float, 4U>{frame.camera.position[0],
                                           frame.camera.position[1],
@@ -792,6 +815,18 @@ void schedules_directional_shadows_before_color_and_reuses_maps() {
                 device.draw_calls == color_before_bad_lighting &&
                 device.present_calls == present_before_bad_lighting,
             "non-finite lighting fails before shadow, color, and present work");
+    invalid_constants = lighting.frame_constants;
+    invalid_constants.fog_color[1] =
+        std::numeric_limits<float>::quiet_NaN();
+    frame.frame_constants = invalid_constants;
+    require(prepared.viewport->drawAndPresent(
+                device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code == "static_scene_frame_constants_non_finite" &&
+                device.depth_batch_calls == shadow_before_bad_lighting &&
+                device.draw_calls == color_before_bad_lighting &&
+                device.present_calls == present_before_bad_lighting,
+            "non-finite fog lighting fails before shadow, color, and present work");
     invalid_constants = lighting.frame_constants;
     invalid_constants.sun_direction = {};
     frame.frame_constants = invalid_constants;
