@@ -244,8 +244,18 @@ remains unchanged and feature-complete.
   duplicate records apply once in first-seen order. Conflicting duplicates are
   rejected. The batch rebuilds and serializes the grid once, then creates one
   history revision. The `--set-ai-spline-points` command exposes this operation.
-  Primary, side, and selection geometry rebuild from the committed positions.
-  Live replacement of an existing viewport buffer remains staged.
+  One overlay builder rebuilds all enabled passes from one committed model.
+  The application retains this model with the owned overlay generation.
+  The viewport allocates all replacement buffers before it changes a pass.
+  A successful call replaces primary, interval, side, selection, and camber
+  resources as one generation. An error keeps the complete prior generation.
+  Replacement uses the device that prepared the viewport. The operation stays
+  on the render thread between synchronous frames. It uses the shared Vulkan
+  and D3D12 device API. A change to pass presence still recreates the viewport.
+  The current window loader creates this state once. It does not yet connect
+  point-edit input to the replacement call. A future edit controller must keep
+  a new model as pending state until the viewport accepts its overlay buffers.
+  If upload fails, the controller must retry or discard the pending model.
   Another version-7 option adds the recovered vertical camber lines after the
   side passes. Positive values are green. Other values are red.
   The selected pass uses solid fill, front-face culling, opaque blend state,

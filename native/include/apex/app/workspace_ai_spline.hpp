@@ -100,6 +100,41 @@ struct WorkspaceAiSplineResult {
     }
 };
 
+struct WorkspaceAiSplineOverlayRequest {
+    WorkspaceAiSplineDisplayMode mode = WorkspaceAiSplineDisplayMode::raw;
+    std::optional<WorkspaceAiSplineInterval> interval;
+    bool show_left = false;
+    bool show_right = false;
+    std::span<const std::uint32_t> selected_indices{};
+    bool show_camber = false;
+};
+
+// One owned generation of every enabled spline pass. Building this set from
+// one model snapshot prevents derived passes from observing mixed revisions.
+struct WorkspaceAiSplineOverlaySet {
+    WorkspaceAiSplineGeometry primary;
+    std::optional<WorkspaceAiSplineGeometry> interval;
+    std::optional<WorkspaceAiSplineGeometry> left;
+    std::optional<WorkspaceAiSplineGeometry> right;
+    std::optional<WorkspaceAiSplineGeometry> selection;
+    std::optional<WorkspaceAiSplineGeometry> camber;
+};
+
+struct WorkspaceAiSplineOverlayResult {
+    WorkspaceAiSplineStatus status = WorkspaceAiSplineStatus::invalid_source;
+    render::Diagnostic diagnostic;
+    WorkspaceAiSplineOverlaySet overlays;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == WorkspaceAiSplineStatus::ready;
+    }
+};
+
+[[nodiscard]] WorkspaceAiSplineOverlayResult
+buildWorkspaceAiSplineOverlays(
+    const formats::AiSpline& spline,
+    const WorkspaceAiSplineOverlayRequest& request);
+
 // Convert the recovered raw SplineEditor polyline to the backend-neutral
 // line-list ABI. Version 2 uses the points retained by the native AISpline
 // loader. The original <= 2 point early return and open-polyline behavior are

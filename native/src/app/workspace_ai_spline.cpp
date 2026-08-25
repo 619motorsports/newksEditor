@@ -727,22 +727,95 @@ WorkspaceAiSplineResult buildWorkspaceAiSplineSelectionGeometry(
     return build_selection_geometry(spline, selected_indices);
 }
 
-WorkspaceAiSplineResult buildWorkspaceAiSplineSelectionGeometry(
-    const formats::AiSpline& spline, std::uint32_t selected_index) {
+WorkspaceAiSplineResult
+buildWorkspaceAiSplineSelectionGeometry(const formats::AiSpline &spline,
+                                        std::uint32_t selected_index) {
     const std::array selected_indices = {selected_index};
     return build_selection_geometry(spline, selected_indices);
 }
 
-const char* workspace_ai_spline_display_mode_name(
+WorkspaceAiSplineOverlayResult
+buildWorkspaceAiSplineOverlays(const formats::AiSpline &spline,
+                               const WorkspaceAiSplineOverlayRequest &request) {
+    WorkspaceAiSplineOverlayResult result;
+    auto primary = buildWorkspaceAiSplineGeometry(spline, request.mode);
+    if (!primary.ok()) {
+        result.status = primary.status;
+        result.diagnostic = std::move(primary.diagnostic);
+        return result;
+    }
+    result.overlays.primary = std::move(primary.geometry);
+
+    if (request.interval.has_value()) {
+        auto interval =
+            buildWorkspaceAiSplineIntervalGeometry(spline, *request.interval);
+        if (!interval.ok()) {
+            result.status = interval.status;
+            result.diagnostic = std::move(interval.diagnostic);
+            result.overlays = {};
+            return result;
+        }
+        result.overlays.interval = std::move(interval.geometry);
+    }
+    if (request.show_left) {
+        auto left = buildWorkspaceAiSplineSideGeometry(
+            spline, WorkspaceAiSplineSide::left);
+        if (!left.ok()) {
+            result.status = left.status;
+            result.diagnostic = std::move(left.diagnostic);
+            result.overlays = {};
+            return result;
+        }
+        result.overlays.left = std::move(left.geometry);
+    }
+    if (request.show_right) {
+        auto right = buildWorkspaceAiSplineSideGeometry(
+            spline, WorkspaceAiSplineSide::right);
+        if (!right.ok()) {
+            result.status = right.status;
+            result.diagnostic = std::move(right.diagnostic);
+            result.overlays = {};
+            return result;
+        }
+        result.overlays.right = std::move(right.geometry);
+    }
+    if (!request.selected_indices.empty()) {
+        auto selection = buildWorkspaceAiSplineSelectionGeometry(
+            spline, request.selected_indices);
+        if (!selection.ok()) {
+            result.status = selection.status;
+            result.diagnostic = std::move(selection.diagnostic);
+            result.overlays = {};
+            return result;
+        }
+        result.overlays.selection = std::move(selection.geometry);
+    }
+    if (request.show_camber) {
+        auto camber = buildWorkspaceAiSplineCamberGeometry(spline);
+        if (!camber.ok()) {
+            result.status = camber.status;
+            result.diagnostic = std::move(camber.diagnostic);
+            result.overlays = {};
+            return result;
+        }
+        result.overlays.camber = std::move(camber.geometry);
+    }
+    result.status = WorkspaceAiSplineStatus::ready;
+    return result;
+}
+
+const char *workspace_ai_spline_display_mode_name(
     WorkspaceAiSplineDisplayMode mode) noexcept {
     switch (mode) {
-    case WorkspaceAiSplineDisplayMode::raw: return "raw";
-    case WorkspaceAiSplineDisplayMode::interpolated: return "interpolated";
+    case WorkspaceAiSplineDisplayMode::raw:
+        return "raw";
+    case WorkspaceAiSplineDisplayMode::interpolated:
+        return "interpolated";
     }
     return "unknown";
 }
 
-const char*
+const char *
 workspace_ai_spline_status_name(WorkspaceAiSplineStatus status) noexcept {
     switch (status) {
     case WorkspaceAiSplineStatus::ready:

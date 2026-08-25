@@ -41,15 +41,230 @@ using render::PipelineRenderTargetFormat;
     }
 }
 
-[[nodiscard]] render::CameraClipSpace expectedClipSpace(render::Backend backend) noexcept {
+[[nodiscard]] render::CameraClipSpace
+expectedClipSpace(render::Backend backend) noexcept {
     return backend == render::Backend::Vulkan ? render::CameraClipSpace::vulkan
-                                               : render::CameraClipSpace::d3d12;
+                                              : render::CameraClipSpace::d3d12;
 }
 
-[[nodiscard]] bool finite_vector(const apex::scene::Vector3& value) noexcept {
+[[nodiscard]] bool finite_vector(const apex::scene::Vector3 &value) noexcept {
     return std::all_of(value.begin(), value.end(), [](const float component) {
         return std::isfinite(component);
     });
+}
+
+[[nodiscard]] bool
+validateAiSplineGeometry(const WorkspaceAiSplineGeometry &geometry,
+                         const WorkspaceAiSplinePassKind kind,
+                         const WorkspaceAiSplineGeometry *primary,
+                         render::Diagnostic &output_diagnostic) {
+    std::size_t expected_first = 0U;
+    for (const WorkspaceAiSplineChunk &chunk : geometry.chunks) {
+        if (expected_first > geometry.vertices.size() ||
+            chunk.first_vertex != expected_first || chunk.vertex_count < 2U ||
+            chunk.vertex_count % 2U != 0U ||
+            chunk.vertex_count > render::max_overlay_line_vertices ||
+            static_cast<std::size_t>(chunk.vertex_count) >
+                geometry.vertices.size() - expected_first) {
+            output_diagnostic =
+                diagnostic("workspace_viewport_ai_spline_chunk_invalid",
+                           "AI spline chunks must cover complete bounded line "
+                           "pairs in order");
+            return false;
+        }
+        expected_first += chunk.vertex_count;
+    }
+
+    const std::size_t expected_vertices =
+        geometry.topology == WorkspaceAiSplineTopology::independent_lines
+            ? static_cast<std::size_t>(geometry.sample_point_count) * 2U
+        : geometry.topology == WorkspaceAiSplineTopology::polyline &&
+                geometry.sample_point_count > 2U
+            ? (static_cast<std::size_t>(geometry.sample_point_count) - 1U) * 2U
+            : 0U;
+    const bool selection_state_empty =
+        geometry.selected_point_count == 0U &&
+        !geometry.last_selected_index.has_value();
+    const bool primary_metadata_valid =
+        kind == WorkspaceAiSplinePassKind::primary &&
+        geometry.pass == WorkspaceAiSplinePassKind::primary &&
+        geometry.topology == WorkspaceAiSplineTopology::polyline &&
+        selection_state_empty &&
+        (geometry.mode == WorkspaceAiSplineDisplayMode::raw
+             ? geometry.sample_point_count == geometry.source_point_count
+             : geometry.mode == WorkspaceAiSplineDisplayMode::interpolated &&
+                   geometry.source_point_count >= 4U &&
+                   geometry.sample_point_count ==
+                       workspace_ai_spline_interpolated_sample_count);
+    const bool interval_metadata_valid =
+        kind == WorkspaceAiSplinePassKind::interval &&
+        geometry.pass == WorkspaceAiSplinePassKind::interval &&
+        geometry.topology == WorkspaceAiSplineTopology::polyline &&
+        geometry.mode == WorkspaceAiSplineDisplayMode::interpolated &&
+        selection_state_empty && geometry.source_point_count >= 4U &&
+        geometry.sample_point_count >= 1U &&
+        geometry.sample_point_count <=
+            workspace_ai_spline_interpolated_sample_count;
+    const bool side_metadata_valid =
+        (kind == WorkspaceAiSplinePassKind::left_side ||
+         kind == WorkspaceAiSplinePassKind::right_side) &&
+        geometry.pass == kind &&
+        geometry.topology == WorkspaceAiSplineTopology::polyline &&
+        geometry.mode == WorkspaceAiSplineDisplayMode::raw &&
+        selection_state_empty &&
+        geometry.sample_point_count <= geometry.source_point_count &&
+        geometry.source_point_count <=
+            render::max_overlay_line_total_vertices / 2U + 1U &&
+        primary != nullptr &&
+        geometry.source_point_count == primary->source_point_count;
+    const bool selection_metadata_valid =
+        kind == WorkspaceAiSplinePassKind::selection &&
+        geometry.pass == WorkspaceAiSplinePassKind::selection &&
+        geometry.topology == WorkspaceAiSplineTopology::independent_lines &&
+        geometry.mode == WorkspaceAiSplineDisplayMode::raw &&
+        geometry.selected_point_count >= 1U &&
+        geometry.selected_point_count <= geometry.source_point_count &&
+        geometry.last_selected_index.has_value() &&
+        *geometry.last_selected_index < geometry.source_point_count &&
+        geometry.sample_point_count >= geometry.selected_point_count &&
+        static_cast<std::size_t>(geometry.sample_point_count) <=
+            static_cast<std::size_t>(geometry.selected_point_count) * 3U &&
+        geometry.source_point_count <=
+            workspace_ai_spline_max_interpolation_control_points &&
+        primary != nullptr &&
+        geometry.source_point_count == primary->source_point_count;
+    const bool camber_metadata_valid =
+        kind == WorkspaceAiSplinePassKind::camber &&
+        geometry.pass == WorkspaceAiSplinePassKind::camber &&
+        geometry.topology == WorkspaceAiSplineTopology::independent_lines &&
+        geometry.mode == WorkspaceAiSplineDisplayMode::raw &&
+        selection_state_empty &&
+        geometry.sample_point_count == geometry.source_point_count &&
+        geometry.source_point_count <=
+            render::max_overlay_line_total_vertices / 2U &&
+        primary != nullptr &&
+        geometry.source_point_count == primary->source_point_count;
+    if (expected_first != geometry.vertices.size() ||
+        (geometry.vertices.empty() != geometry.chunks.empty()) ||
+        geometry.vertices.size() != expected_vertices ||
+        !(primary_metadata_valid || interval_metadata_valid ||
+          side_metadata_valid || selection_metadata_valid ||
+          camber_metadata_valid)) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_ai_spline_geometry_invalid",
+            "AI spline geometry does not match its display mode, sample "
+            "count, and chunk metadata");
+        return false;
+    }
+
+    const auto &expected_color = kind == WorkspaceAiSplinePassKind::primary
+                                     ? workspace_ai_spline_raw_color
+                                 : kind == WorkspaceAiSplinePassKind::interval
+                                     ? workspace_ai_spline_interval_color
+                                     : workspace_ai_spline_side_color;
+    for (const render::OverlayLineVertex &vertex : geometry.vertices) {
+        const bool color_valid =
+            kind == WorkspaceAiSplinePassKind::camber
+                ? vertex.color == workspace_ai_spline_camber_positive_color ||
+                      vertex.color ==
+                          workspace_ai_spline_camber_nonpositive_color
+            : kind == WorkspaceAiSplinePassKind::selection
+                ? vertex.color == workspace_ai_spline_selection_color ||
+                      vertex.color == workspace_ai_spline_selection_side_color
+                : vertex.color == expected_color;
+        if (!finite_vector(vertex.position) || !color_valid) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_ai_spline_vertex_invalid",
+                "AI spline vertices require finite positions and the "
+                "recovered pass color");
+            return false;
+        }
+    }
+
+    if (kind == WorkspaceAiSplinePassKind::selection) {
+        std::size_t center_count = 0U;
+        std::size_t side_count = 0U;
+        for (std::size_t vertex = 0U; vertex < geometry.vertices.size();
+             vertex += 2U) {
+            const auto &begin = geometry.vertices[vertex];
+            const auto &end = geometry.vertices[vertex + 1U];
+            const bool center =
+                begin.color == workspace_ai_spline_selection_color;
+            if (center) {
+                if (side_count != 0U && side_count != 2U) {
+                    output_diagnostic = diagnostic(
+                        "workspace_viewport_ai_spline_selection_line_invalid",
+                        "Each AI spline selection marker requires zero or two "
+                        "side lines");
+                    return false;
+                }
+                ++center_count;
+                side_count = 0U;
+            } else {
+                ++side_count;
+            }
+            const auto &line_color =
+                center ? workspace_ai_spline_selection_color
+                       : workspace_ai_spline_selection_side_color;
+            if (center_count == 0U || side_count > 2U ||
+                begin.color != line_color || end.color != line_color ||
+                begin.position[0] != end.position[0] ||
+                begin.position[2] != end.position[2] ||
+                end.position[1] !=
+                    begin.position[1] + workspace_ai_spline_selection_height) {
+                output_diagnostic = diagnostic(
+                    "workspace_viewport_ai_spline_selection_line_invalid",
+                    "AI spline selection lines must be vertical and use the "
+                    "recovered height and colors");
+                return false;
+            }
+        }
+        if ((side_count != 0U && side_count != 2U) ||
+            center_count != geometry.selected_point_count) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_ai_spline_selection_line_invalid",
+                "AI spline selection markers do not match the recovered line "
+                "groups");
+            return false;
+        }
+    }
+    if (kind == WorkspaceAiSplinePassKind::camber) {
+        for (std::size_t vertex = 0U; vertex < geometry.vertices.size();
+             vertex += 2U) {
+            const auto &begin = geometry.vertices[vertex];
+            const auto &end = geometry.vertices[vertex + 1U];
+            if (begin.color != end.color ||
+                begin.position[0] != end.position[0] ||
+                begin.position[2] != end.position[2] ||
+                end.position[1] < begin.position[1]) {
+                output_diagnostic = diagnostic(
+                    "workspace_viewport_ai_spline_camber_line_invalid",
+                    "AI spline camber lines must be vertical, upward, and one "
+                    "color");
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool
+validateAiSplineDepth(const render::PipelineProgram &pipeline,
+                      const WorkspaceAiSplinePassKind kind,
+                      render::Diagnostic &output_diagnostic) {
+    const bool valid =
+        kind != WorkspaceAiSplinePassKind::interval
+            ? pipeline.depth.test_enabled && pipeline.depth.write_enabled &&
+                  pipeline.depth.compare ==
+                      render::PipelineCompareOperation::less_or_equal
+            : !pipeline.depth.test_enabled && !pipeline.depth.write_enabled;
+    if (!valid) {
+        output_diagnostic =
+            diagnostic("workspace_viewport_ai_spline_depth_invalid",
+                       "AI spline pass depth state does not match "
+                       "the recovered spline-pass behavior");
+    }
+    return valid;
 }
 
 [[nodiscard]] bool finite_input_delta(const float value) noexcept {
@@ -58,9 +273,9 @@ using render::PipelineRenderTargetFormat;
     return std::isfinite(value) && std::abs(value) <= 100'000.0F;
 }
 
-[[nodiscard]] apex::scene::Vector3 orbit_position(
-    const apex::scene::Vector3& target, float yaw, float pitch,
-    float distance) noexcept {
+[[nodiscard]] apex::scene::Vector3
+orbit_position(const apex::scene::Vector3 &target, float yaw, float pitch,
+               float distance) noexcept {
     const float horizontal = distance * std::cos(pitch);
     return {
         target[0] + horizontal * std::sin(yaw),
@@ -69,8 +284,8 @@ using render::PipelineRenderTargetFormat;
     };
 }
 
-[[nodiscard]] WorkspaceViewportStatus preparationStatus(
-    render::StaticSceneResourceStatus status) noexcept {
+[[nodiscard]] WorkspaceViewportStatus
+preparationStatus(render::StaticSceneResourceStatus status) noexcept {
     switch (status) {
     case render::StaticSceneResourceStatus::ready:
         return WorkspaceViewportStatus::ready;
@@ -483,29 +698,53 @@ bool WorkspaceViewportCameraController::move(
     return true;
 }
 
-const char* workspace_viewport_status_name(WorkspaceViewportStatus status) noexcept {
+const char *
+workspace_viewport_status_name(WorkspaceViewportStatus status) noexcept {
     switch (status) {
-    case WorkspaceViewportStatus::ready: return "ready";
-    case WorkspaceViewportStatus::invalid: return "invalid";
-    case WorkspaceViewportStatus::unsupported: return "unsupported";
-    case WorkspaceViewportStatus::allocation_failed: return "allocation_failed";
+    case WorkspaceViewportStatus::ready:
+        return "ready";
+    case WorkspaceViewportStatus::invalid:
+        return "invalid";
+    case WorkspaceViewportStatus::unsupported:
+        return "unsupported";
+    case WorkspaceViewportStatus::allocation_failed:
+        return "allocation_failed";
     }
     return "unsupported";
 }
 
-const char* workspace_viewport_frame_status_name(
+const char *workspace_viewport_frame_status_name(
     WorkspaceViewportFrameStatus status) noexcept {
     switch (status) {
-    case WorkspaceViewportFrameStatus::ready: return "ready";
-    case WorkspaceViewportFrameStatus::invalid: return "invalid";
-    case WorkspaceViewportFrameStatus::unsupported: return "unsupported";
-    case WorkspaceViewportFrameStatus::execution_failed: return "execution_failed";
+    case WorkspaceViewportFrameStatus::ready:
+        return "ready";
+    case WorkspaceViewportFrameStatus::invalid:
+        return "invalid";
+    case WorkspaceViewportFrameStatus::unsupported:
+        return "unsupported";
+    case WorkspaceViewportFrameStatus::execution_failed:
+        return "execution_failed";
     }
     return "execution_failed";
 }
 
+const char *workspace_viewport_ai_spline_update_status_name(
+    WorkspaceViewportAiSplineUpdateStatus status) noexcept {
+    switch (status) {
+    case WorkspaceViewportAiSplineUpdateStatus::ready: return "ready";
+    case WorkspaceViewportAiSplineUpdateStatus::invalid: return "invalid";
+    case WorkspaceViewportAiSplineUpdateStatus::unsupported:
+        return "unsupported";
+    case WorkspaceViewportAiSplineUpdateStatus::allocation_failed:
+        return "allocation_failed";
+    case WorkspaceViewportAiSplineUpdateStatus::upload_failed:
+        return "upload_failed";
+    }
+    return "invalid";
+}
+
 WorkspaceViewport::WorkspaceViewport(
-    render::Backend backend,
+    render::Device *device, render::Backend backend,
     render::PresentationTargetDescription presentation,
     std::unique_ptr<render::Texture> color,
     std::unique_ptr<render::Texture> resolved_color,
@@ -514,19 +753,18 @@ WorkspaceViewport::WorkspaceViewport(
     std::optional<render::PipelineProgram> authoring_overlay_pipeline,
     std::array<AiSplinePassResources, workspace_ai_spline_pass_count>
         ai_spline_passes,
-    std::unique_ptr<render::Buffer> authoring_grid_buffer,
-    bool grid_visible,
-    std::unique_ptr<render::Buffer> view_axis_buffer,
-    bool view_axis_visible,
+    std::unique_ptr<render::Buffer> authoring_grid_buffer, bool grid_visible,
+    std::unique_ptr<render::Buffer> view_axis_buffer, bool view_axis_visible,
     std::unique_ptr<render::Buffer> selection_axis_buffer,
     std::optional<apex::scene::Matrix4> selection_axis_world,
     std::optional<render::PipelineProgram> selected_mesh_pipeline,
     std::unique_ptr<render::Buffer> selected_mesh_color_buffer,
     std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps,
-    std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows,
+    std::optional<WorkspaceViewportDirectionalShadowOptions>
+        directional_shadows,
     std::optional<LodCatalog> lod_catalog)
-    : backend_(backend), presentation_(presentation), color_(std::move(color)),
-      resolved_color_(std::move(resolved_color)),
+    : device_(device), backend_(backend), presentation_(presentation),
+      color_(std::move(color)), resolved_color_(std::move(resolved_color)),
       depth_(std::move(depth)), execution_(std::move(execution)),
       authoring_overlay_pipeline_(std::move(authoring_overlay_pipeline)),
       ai_spline_passes_(std::move(ai_spline_passes)),
@@ -544,49 +782,247 @@ WorkspaceViewport::WorkspaceViewport(
 
 WorkspaceViewport::~WorkspaceViewport() = default;
 
-WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
-    render::Device& device, render::PresentationTarget& target,
-    const WorkspaceViewportFrameRequest& request,
-    render::Diagnostic& output_diagnostic) {
+WorkspaceViewportAiSplineUpdateResult
+WorkspaceViewport::replaceAiSplineOverlaysBorrowed(
+    render::Device &device, const AiSplineUpdateRequest &request) {
+    WorkspaceViewportAiSplineUpdateResult result;
+    if (&device != device_ || device.info().backend != backend_) {
+        result.diagnostic =
+            diagnostic("workspace_viewport_ai_spline_update_device_mismatch",
+                       "AI spline overlays must use the device that prepared "
+                       "the viewport");
+        return result;
+    }
+
+    const std::array<const WorkspaceAiSplineGeometry *,
+                     workspace_ai_spline_pass_count>
+        geometries = {request.primary, request.interval,  request.left,
+                      request.right,   request.selection, request.camber};
+    constexpr std::array<WorkspaceAiSplinePassKind,
+                         workspace_ai_spline_pass_count>
+        kinds = {WorkspaceAiSplinePassKind::primary,
+                 WorkspaceAiSplinePassKind::interval,
+                 WorkspaceAiSplinePassKind::left_side,
+                 WorkspaceAiSplinePassKind::right_side,
+                 WorkspaceAiSplinePassKind::selection,
+                 WorkspaceAiSplinePassKind::camber};
+
+    for (std::size_t index = 0U; index < geometries.size(); ++index) {
+        if ((geometries[index] != nullptr) !=
+            ai_spline_passes_[index].pipeline.has_value()) {
+            result.diagnostic = diagnostic(
+                "workspace_viewport_ai_spline_update_configuration_invalid",
+                "AI spline replacement must preserve prepared pass presence");
+            return result;
+        }
+    }
+    if ((request.interval != nullptr || request.left != nullptr ||
+         request.right != nullptr || request.selection != nullptr ||
+         request.camber != nullptr) &&
+        request.primary == nullptr) {
+        result.diagnostic =
+            diagnostic("workspace_viewport_ai_spline_overlay_primary_missing",
+                       "AI spline overlays require the primary spline pass");
+        return result;
+    }
+
+    std::size_t ai_draw_count = 0U;
+    std::size_t ai_vertex_count = 0U;
+    for (const WorkspaceAiSplineGeometry *geometry : geometries) {
+        if (geometry == nullptr) continue;
+        if (geometry->chunks.size() >
+                render::max_overlay_line_draws - ai_draw_count ||
+            geometry->vertices.size() >
+                render::max_overlay_line_total_vertices - ai_vertex_count) {
+            result.diagnostic = diagnostic(
+                "workspace_viewport_ai_spline_limit",
+                "AI spline geometry exceeds the bounded line-render limits");
+            return result;
+        }
+        ai_draw_count += geometry->chunks.size();
+        ai_vertex_count += geometry->vertices.size();
+    }
+    const std::size_t authoring_draw_count =
+        static_cast<std::size_t>(authoring_grid_buffer_ != nullptr) +
+        static_cast<std::size_t>(view_axis_buffer_ != nullptr) +
+        static_cast<std::size_t>(selection_axis_buffer_ != nullptr);
+    const std::size_t authoring_vertex_count =
+        (authoring_grid_buffer_ != nullptr ? render::authoring_grid_vertex_count
+                                           : 0U) +
+        (view_axis_buffer_ != nullptr ? render::view_axis_vertex_count : 0U) +
+        (selection_axis_buffer_ != nullptr ? 6U : 0U);
+    if (ai_draw_count > render::max_overlay_line_draws - authoring_draw_count ||
+        ai_vertex_count >
+            render::max_overlay_line_total_vertices - authoring_vertex_count) {
+        result.diagnostic = diagnostic(
+            "workspace_viewport_overlay_budget_exceeded",
+            "AI spline and authoring overlays exceed the shared render budget");
+        return result;
+    }
+
+    for (std::size_t index = 0U; index < geometries.size(); ++index) {
+        if (geometries[index] == nullptr) continue;
+        if (!validateAiSplineGeometry(*geometries[index], kinds[index],
+                                      request.primary, result.diagnostic) ||
+            !validateAiSplineDepth(*ai_spline_passes_[index].pipeline,
+                                   kinds[index], result.diagnostic))
+            return result;
+    }
+
+    try {
+        std::array<AiSplinePassResources, workspace_ai_spline_pass_count>
+            candidate;
+        for (std::size_t index = 0U; index < geometries.size(); ++index) {
+            const WorkspaceAiSplineGeometry *geometry = geometries[index];
+            if (geometry == nullptr) continue;
+            candidate[index].pipeline = ai_spline_passes_[index].pipeline;
+            candidate[index].chunks = geometry->chunks;
+            if (geometry->vertices.empty()) continue;
+
+            render::BufferDescription description;
+            description.size_bytes =
+                geometry->vertices.size() * sizeof(render::OverlayLineVertex);
+            description.usage = render::BufferUsage::vertex;
+            description.memory = render::BufferMemory::host_visible;
+            description.mutability = render::BufferMutability::immutable;
+            auto buffer = device.create_buffer(
+                description, std::as_bytes(std::span(geometry->vertices)));
+            if (!buffer.ok()) {
+                result.status =
+                    buffer.status == render::BufferStatus::unsupported
+                        ? WorkspaceViewportAiSplineUpdateStatus::unsupported
+                    : buffer.status == render::BufferStatus::allocation_failed
+                        ? WorkspaceViewportAiSplineUpdateStatus::
+                              allocation_failed
+                    : buffer.status == render::BufferStatus::upload_failed
+                        ? WorkspaceViewportAiSplineUpdateStatus::upload_failed
+                        : WorkspaceViewportAiSplineUpdateStatus::invalid;
+                result.diagnostic = std::move(buffer.diagnostic);
+                return result;
+            }
+
+            std::array<render::OverlayLineDrawRequest,
+                       render::max_overlay_line_draws>
+                draws{};
+            for (std::size_t chunk = 0U; chunk < geometry->chunks.size();
+                 ++chunk) {
+                draws[chunk].pipeline = &*candidate[index].pipeline;
+                draws[chunk].vertex_buffer = buffer.buffer.get();
+                draws[chunk].vertex_offset_bytes =
+                    static_cast<std::uint64_t>(
+                        geometry->chunks[chunk].first_vertex) *
+                    sizeof(render::OverlayLineVertex);
+                draws[chunk].vertex_count =
+                    geometry->chunks[chunk].vertex_count;
+            }
+            render::IndexedStaticMeshBatchDescription batch;
+            batch.depth_attachment = depth_.get();
+            batch.overlay_draws =
+                std::span<const render::OverlayLineDrawRequest>(draws).first(
+                    geometry->chunks.size());
+            render::Diagnostic overlay_diagnostic;
+            const auto validation =
+                render::validate_indexed_static_mesh_batch_description(
+                    *color_, batch, overlay_diagnostic);
+            if (validation != render::IndexedStaticMeshBatchStatus::ready) {
+                result.status =
+                    validation ==
+                            render::IndexedStaticMeshBatchStatus::unsupported
+                        ? WorkspaceViewportAiSplineUpdateStatus::unsupported
+                        : WorkspaceViewportAiSplineUpdateStatus::invalid;
+                result.diagnostic = std::move(overlay_diagnostic);
+                return result;
+            }
+            candidate[index].buffer = std::move(buffer.buffer);
+        }
+        ai_spline_passes_.swap(candidate);
+        result.replaced_pass_count = static_cast<std::size_t>(
+            std::count_if(geometries.begin(), geometries.end(),
+                          [](const WorkspaceAiSplineGeometry *geometry) {
+                              return geometry != nullptr;
+                          }));
+        result.status = WorkspaceViewportAiSplineUpdateStatus::ready;
+        return result;
+    } catch (const std::bad_alloc &) {
+        result.status =
+            WorkspaceViewportAiSplineUpdateStatus::allocation_failed;
+        result.diagnostic =
+            diagnostic("workspace_viewport_ai_spline_update_allocation_failed",
+                       "AI spline overlay replacement exceeded available "
+                       "allocation capacity");
+        return result;
+    } catch (const std::exception &error) {
+        result.diagnostic = {"workspace_viewport_ai_spline_update_failed",
+                             error.what()};
+        return result;
+    }
+}
+
+WorkspaceViewportAiSplineUpdateResult
+WorkspaceViewport::replaceAiSplineOverlays(
+    render::Device &device, const WorkspaceAiSplineOverlaySet &overlays) {
+    AiSplineUpdateRequest request;
+    request.primary = &overlays.primary;
+    request.interval =
+        overlays.interval.has_value() ? &*overlays.interval : nullptr;
+    request.left = overlays.left.has_value() ? &*overlays.left : nullptr;
+    request.right = overlays.right.has_value() ? &*overlays.right : nullptr;
+    request.selection =
+        overlays.selection.has_value() ? &*overlays.selection : nullptr;
+    request.camber = overlays.camber.has_value() ? &*overlays.camber : nullptr;
+    return replaceAiSplineOverlaysBorrowed(device, request);
+}
+
+WorkspaceViewportFrameStatus
+WorkspaceViewport::drawAndPresent(render::Device &device,
+                                  render::PresentationTarget &target,
+                                  const WorkspaceViewportFrameRequest &request,
+                                  render::Diagnostic &output_diagnostic) {
     output_diagnostic = {};
-    if (device.info().backend != backend_ || target.backend() != backend_) {
+    if (&device != device_) {
         output_diagnostic = diagnostic(
-            "workspace_viewport_backend_mismatch",
-            "workspace viewport, device, and presentation target must use one backend");
+            "workspace_viewport_device_mismatch",
+            "workspace viewport must use the device that prepared it");
         return WorkspaceViewportFrameStatus::invalid;
     }
-    const auto& description = target.info().description;
+    if (device.info().backend != backend_ || target.backend() != backend_) {
+        output_diagnostic =
+            diagnostic("workspace_viewport_backend_mismatch",
+                       "workspace viewport, device, and "
+                       "presentation target must use one backend");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    const auto &description = target.info().description;
     if (description.width != presentation_.width ||
         description.height != presentation_.height ||
         description.format != presentation_.format) {
-        output_diagnostic = diagnostic(
-            "workspace_viewport_target_mismatch",
-            "presentation target dimensions and format must match viewport preparation");
+        output_diagnostic =
+            diagnostic("workspace_viewport_target_mismatch",
+                       "presentation target dimensions and format "
+                       "must match viewport preparation");
         return WorkspaceViewportFrameStatus::invalid;
     }
     if (request.camera.clip_space != expectedClipSpace(backend_)) {
-        output_diagnostic = diagnostic(
-            "workspace_viewport_camera_clip_space",
-            "camera clip space does not match the prepared backend");
+        output_diagnostic =
+            diagnostic("workspace_viewport_camera_clip_space",
+                       "camera clip space does not match the prepared backend");
         return WorkspaceViewportFrameStatus::invalid;
     }
     const bool grid_visible = request.grid_visible.value_or(grid_visible_);
-    if (grid_visible &&
-        (authoring_overlay_pipeline_ == std::nullopt ||
-         authoring_grid_buffer_ == nullptr)) {
-        output_diagnostic = diagnostic(
-            "workspace_viewport_grid_unprepared",
-            "A frame cannot show a grid that was not prepared");
+    if (grid_visible && (authoring_overlay_pipeline_ == std::nullopt ||
+                         authoring_grid_buffer_ == nullptr)) {
+        output_diagnostic =
+            diagnostic("workspace_viewport_grid_unprepared",
+                       "A frame cannot show a grid that was not prepared");
         return WorkspaceViewportFrameStatus::invalid;
     }
     const bool view_axis_visible =
         request.view_axis_visible.value_or(view_axis_visible_);
-    if (view_axis_visible &&
-        (authoring_overlay_pipeline_ == std::nullopt ||
-         view_axis_buffer_ == nullptr)) {
-        output_diagnostic = diagnostic(
-            "workspace_viewport_view_axis_unprepared",
-            "A frame cannot show a view axis that was not prepared");
+    if (view_axis_visible && (authoring_overlay_pipeline_ == std::nullopt ||
+                              view_axis_buffer_ == nullptr)) {
+        output_diagnostic =
+            diagnostic("workspace_viewport_view_axis_unprepared",
+                       "A frame cannot show a view axis that was not prepared");
         return WorkspaceViewportFrameStatus::invalid;
     }
     if (request.selection_axis_world.has_value() &&
@@ -601,11 +1037,11 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
 
     std::span<const std::uint8_t> packet_visibility = request.packet_visibility;
     if (request.packet_visibility.empty() && lod_catalog_.has_value()) {
-        auto& catalog = *lod_catalog_;
+        auto &catalog = *lod_catalog_;
         if (!finite_vector(request.camera.position)) {
-            output_diagnostic = diagnostic(
-                "workspace_viewport_lod_camera_invalid",
-                "Workspace LOD camera position must be finite");
+            output_diagnostic =
+                diagnostic("workspace_viewport_lod_camera_invalid",
+                           "Workspace LOD camera position must be finite");
             return WorkspaceViewportFrameStatus::invalid;
         }
         const double dx = static_cast<double>(request.camera.position[0]) -
@@ -617,17 +1053,19 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
         const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
         if (!std::isfinite(distance) ||
             distance > static_cast<double>(std::numeric_limits<float>::max())) {
-            output_diagnostic = diagnostic(
-                "workspace_viewport_lod_camera_invalid",
-                "Workspace LOD camera distance is outside the finite float range");
+            output_diagnostic =
+                diagnostic("workspace_viewport_lod_camera_invalid",
+                           "Workspace LOD camera distance is outside the "
+                           "finite float range");
             return WorkspaceViewportFrameStatus::invalid;
         }
         const float effective_distance = workspace::carLodDistance(
             static_cast<float>(distance), catalog.fov_degrees,
             catalog.distance_divisor, catalog.track_camera);
-        for (std::size_t index = 0U; index < catalog.file_for_packet.size(); ++index) {
+        for (std::size_t index = 0U; index < catalog.file_for_packet.size();
+             ++index) {
             const std::size_t file_index = catalog.file_for_packet[index];
-            const auto& lod = catalog.file_lods[file_index];
+            const auto &lod = catalog.file_lods[file_index];
             const bool workspace_visible = workspace::carLodVisible(
                 lod.has_value() ? &*lod : nullptr, effective_distance,
                 catalog.selected_index);
@@ -651,9 +1089,10 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
     frame.frame_constants = request.frame_constants;
     if (request.selected_mesh_elapsed_ms.has_value() &&
         !selected_mesh_pipeline_.has_value()) {
-        output_diagnostic = diagnostic(
-            "workspace_viewport_selected_mesh_unprepared",
-            "A selected-mesh elapsed time requires prepared highlight resources");
+        output_diagnostic =
+            diagnostic("workspace_viewport_selected_mesh_unprepared",
+                       "A selected-mesh elapsed time requires prepared "
+                       "highlight resources");
         return WorkspaceViewportFrameStatus::invalid;
     }
     if (selected_mesh_pipeline_.has_value()) {
@@ -664,19 +1103,22 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
             return WorkspaceViewportFrameStatus::invalid;
         }
         const auto now = std::chrono::steady_clock::now();
-        const auto elapsed_count = std::chrono::duration_cast<
-            std::chrono::milliseconds>(now - selected_mesh_touch_time_).count();
-        const std::uint32_t elapsed = request.selected_mesh_elapsed_ms.has_value()
-                                          ? *request.selected_mesh_elapsed_ms
-                                      : elapsed_count > render::selected_mesh_fade_milliseconds
-                                          ? render::selected_mesh_fade_milliseconds + 1U
-                                          : static_cast<std::uint32_t>(
-                                                std::max<std::int64_t>(0, elapsed_count));
+        const auto elapsed_count =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - selected_mesh_touch_time_)
+                .count();
+        const std::uint32_t elapsed =
+            request.selected_mesh_elapsed_ms.has_value()
+                ? *request.selected_mesh_elapsed_ms
+            : elapsed_count > render::selected_mesh_fade_milliseconds
+                ? render::selected_mesh_fade_milliseconds + 1U
+                : static_cast<std::uint32_t>(
+                      std::max<std::int64_t>(0, elapsed_count));
         const render::SelectedMeshHighlight highlight =
             render::evaluate_selected_mesh_highlight(elapsed);
         if (highlight.visible) {
-            const auto color_bytes = std::as_bytes(
-                std::span(&highlight.color, 1U));
+            const auto color_bytes =
+                std::as_bytes(std::span(&highlight.color, 1U));
             const auto updated = device.update_buffer(
                 *selected_mesh_color_buffer_, 0U, color_bytes);
             if (!updated.ok()) {
@@ -703,10 +1145,10 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
     std::array<render::OverlayLineDrawRequest, render::max_overlay_line_draws>
         scene_finished_draws{};
     std::size_t scene_finished_draw_count = 0U;
-    for (const AiSplinePassResources& pass : ai_spline_passes_) {
+    for (const AiSplinePassResources &pass : ai_spline_passes_) {
         if (pass.buffer != nullptr) {
-            for (const WorkspaceAiSplineChunk& chunk : pass.chunks) {
-                auto& draw = scene_finished_draws[scene_finished_draw_count++];
+            for (const WorkspaceAiSplineChunk &chunk : pass.chunks) {
+                auto &draw = scene_finished_draws[scene_finished_draw_count++];
                 draw.pipeline = &*pass.pipeline;
                 draw.vertex_buffer = pass.buffer.get();
                 draw.vertex_offset_bytes =
@@ -725,7 +1167,7 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
     std::array<render::OverlayLineDrawRequest, 1U> view_axis_draws{};
     std::size_t view_axis_draw_count = 0U;
     if (view_axis_visible) {
-        auto& axis = view_axis_draws[view_axis_draw_count++];
+        auto &axis = view_axis_draws[view_axis_draw_count++];
         axis.pipeline = &*authoring_overlay_pipeline_;
         axis.vertex_buffer = view_axis_buffer_.get();
         axis.vertex_count =
@@ -740,7 +1182,7 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
     std::array<render::OverlayLineDrawRequest, 2U> overlay_draws{};
     std::size_t overlay_count = 0U;
     if (grid_visible) {
-        auto& grid = overlay_draws[overlay_count++];
+        auto &grid = overlay_draws[overlay_count++];
         grid.pipeline = &*authoring_overlay_pipeline_;
         grid.vertex_buffer = authoring_grid_buffer_.get();
         grid.vertex_count =
@@ -749,7 +1191,8 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
         grid.matrices.view_projection = request.camera.view_projection;
     }
     if (authoring_overlay_pipeline_.has_value() &&
-        selection_axis_buffer_ != nullptr && selection_axis_world_.has_value()) {
+        selection_axis_buffer_ != nullptr &&
+        selection_axis_world_.has_value()) {
         const auto axis = render::build_selection_axis(
             request.selection_axis_world.value_or(*selection_axis_world_));
         if (!axis.ok()) {
@@ -757,8 +1200,8 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
             return WorkspaceViewportFrameStatus::invalid;
         }
         const auto bytes = std::as_bytes(std::span(axis.vertices));
-        const auto updated = device.update_buffer(
-            *selection_axis_buffer_, 0U, bytes);
+        const auto updated =
+            device.update_buffer(*selection_axis_buffer_, 0U, bytes);
         if (!updated.ok()) {
             output_diagnostic = updated.diagnostic;
             switch (updated.status) {
@@ -774,7 +1217,7 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
             }
             return WorkspaceViewportFrameStatus::execution_failed;
         }
-        auto& selection = overlay_draws[overlay_count++];
+        auto &selection = overlay_draws[overlay_count++];
         selection.pipeline = &*authoring_overlay_pipeline_;
         selection.vertex_buffer = selection_axis_buffer_.get();
         selection.vertex_count =
@@ -796,9 +1239,9 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
         }
         if (execution_->resources->owns_frame_constants() &&
             !request.frame_constants.has_value()) {
-            output_diagnostic = diagnostic(
-                "static_scene_frame_constants_missing",
-                "A prepared pipeline requires per-frame constants");
+            output_diagnostic =
+                diagnostic("static_scene_frame_constants_missing",
+                           "A prepared pipeline requires per-frame constants");
             return WorkspaceViewportFrameStatus::invalid;
         }
         if (request.frame_constants.has_value() &&
@@ -834,8 +1277,8 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
                 request.frame_constants->sun_direction[2],
             };
         }
-        const auto refreshed = render::refresh_directional_shadow_maps(
-            *shadow_maps_, lighting);
+        const auto refreshed =
+            render::refresh_directional_shadow_maps(*shadow_maps_, lighting);
         if (!refreshed.ok()) {
             output_diagnostic = refreshed.diagnostic;
             return shadowFrameStatus(refreshed.status);
@@ -870,15 +1313,14 @@ WorkspaceViewportFrameStatus WorkspaceViewport::drawAndPresent(
             directional_shadows_->constants_layout;
     }
 
-    const auto drawn = execution_->resources->draw_and_readback(
-        device, *color_, frame);
+    const auto drawn =
+        execution_->resources->draw_and_readback(device, *color_, frame);
     if (!drawn.ok()) {
         output_diagnostic = drawn.diagnostic;
         return drawStatus(drawn.status);
     }
-    render::Texture& presentation_color = resolved_color_ != nullptr
-                                              ? *resolved_color_
-                                              : *color_;
+    render::Texture &presentation_color =
+        resolved_color_ != nullptr ? *resolved_color_ : *color_;
     const auto presented = device.present_texture(target, presentation_color);
     output_diagnostic = presented.ok() && !shadow_diagnostic.code.empty()
                             ? std::move(shadow_diagnostic)
@@ -1254,32 +1696,31 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         const bool selection_axis_requested =
             request.packets.selected_node != apex::scene::invalid_node_id;
         struct AiSplinePassInput {
-            const WorkspaceAiSplineGeometry* geometry = nullptr;
-            const std::optional<render::PipelineProgram>* pipeline = nullptr;
-            WorkspaceAiSplinePassKind kind =
-                WorkspaceAiSplinePassKind::primary;
+            const WorkspaceAiSplineGeometry *geometry = nullptr;
+            const std::optional<render::PipelineProgram> *pipeline = nullptr;
+            WorkspaceAiSplinePassKind kind = WorkspaceAiSplinePassKind::primary;
         };
         const std::array<AiSplinePassInput, workspace_ai_spline_pass_count>
             ai_spline_inputs = {{
-            {request.ai_spline_geometry, &request.ai_spline_pipeline,
-             WorkspaceAiSplinePassKind::primary},
-            {request.ai_spline_interval_geometry,
-             &request.ai_spline_interval_pipeline,
-             WorkspaceAiSplinePassKind::interval},
-            {request.ai_spline_left_geometry,
-             &request.ai_spline_left_pipeline,
-             WorkspaceAiSplinePassKind::left_side},
-            {request.ai_spline_right_geometry,
-             &request.ai_spline_right_pipeline,
-             WorkspaceAiSplinePassKind::right_side},
-            {request.ai_spline_selection_geometry,
-             &request.ai_spline_selection_pipeline,
-             WorkspaceAiSplinePassKind::selection},
-            {request.ai_spline_camber_geometry,
-             &request.ai_spline_camber_pipeline,
-             WorkspaceAiSplinePassKind::camber},
-        }};
-        for (const AiSplinePassInput& input : ai_spline_inputs) {
+                {request.ai_spline_geometry, &request.ai_spline_pipeline,
+                 WorkspaceAiSplinePassKind::primary},
+                {request.ai_spline_interval_geometry,
+                 &request.ai_spline_interval_pipeline,
+                 WorkspaceAiSplinePassKind::interval},
+                {request.ai_spline_left_geometry,
+                 &request.ai_spline_left_pipeline,
+                 WorkspaceAiSplinePassKind::left_side},
+                {request.ai_spline_right_geometry,
+                 &request.ai_spline_right_pipeline,
+                 WorkspaceAiSplinePassKind::right_side},
+                {request.ai_spline_selection_geometry,
+                 &request.ai_spline_selection_pipeline,
+                 WorkspaceAiSplinePassKind::selection},
+                {request.ai_spline_camber_geometry,
+                 &request.ai_spline_camber_pipeline,
+                 WorkspaceAiSplinePassKind::camber},
+            }};
+        for (const AiSplinePassInput &input : ai_spline_inputs) {
             if ((input.geometry != nullptr) != input.pipeline->has_value()) {
                 result.status = WorkspaceViewportStatus::invalid;
                 result.diagnostic = diagnostic(
@@ -1310,258 +1751,49 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             (selection_axis_requested ? 6U : 0U);
         std::size_t ai_draw_count = 0U;
         std::size_t ai_vertex_count = 0U;
-        for (const AiSplinePassInput& input : ai_spline_inputs) {
-            if (input.geometry != nullptr) {
-                ai_draw_count += input.geometry->chunks.size();
-                ai_vertex_count += input.geometry->vertices.size();
-            }
-        }
-        if (ai_draw_count > render::max_overlay_line_draws ||
-            ai_vertex_count > render::max_overlay_line_total_vertices) {
-            result.status = WorkspaceViewportStatus::invalid;
-            result.diagnostic = diagnostic(
-                "workspace_viewport_ai_spline_limit",
-                "AI spline geometry exceeds the bounded line-render limits");
-            return result;
-        }
-        if (ai_draw_count + authoring_draw_count >
-                render::max_overlay_line_draws ||
-            ai_vertex_count + authoring_vertex_count >
-                render::max_overlay_line_total_vertices) {
-            result.status = WorkspaceViewportStatus::invalid;
-            result.diagnostic = diagnostic(
-                "workspace_viewport_overlay_budget_exceeded",
-                "AI spline and authoring overlays exceed the shared render budget");
-            return result;
-        }
-        for (std::size_t pass_index = 0U;
-             pass_index < ai_spline_inputs.size(); ++pass_index) {
-            const AiSplinePassInput& input = ai_spline_inputs[pass_index];
+        for (const AiSplinePassInput &input : ai_spline_inputs) {
             if (input.geometry == nullptr) continue;
-            const WorkspaceAiSplineGeometry& geometry = *input.geometry;
-            std::size_t expected_first = 0U;
-            for (const WorkspaceAiSplineChunk& chunk : geometry.chunks) {
-                if (chunk.first_vertex != expected_first ||
-                    chunk.vertex_count < 2U || chunk.vertex_count % 2U != 0U ||
-                    chunk.vertex_count > render::max_overlay_line_vertices ||
-                    static_cast<std::size_t>(chunk.vertex_count) >
-                        geometry.vertices.size() - expected_first) {
-                    result.status = WorkspaceViewportStatus::invalid;
-                    result.diagnostic = diagnostic(
-                        "workspace_viewport_ai_spline_chunk_invalid",
-                        "AI spline chunks must cover complete bounded line "
-                        "pairs in order");
-                    return result;
-                }
-                expected_first += chunk.vertex_count;
-            }
-            const std::size_t expected_vertices =
-                geometry.topology ==
-                        WorkspaceAiSplineTopology::independent_lines
-                    ? static_cast<std::size_t>(geometry.sample_point_count) *
-                          2U
-                    : geometry.topology == WorkspaceAiSplineTopology::polyline &&
-                              geometry.sample_point_count > 2U
-                          ? (static_cast<std::size_t>(
-                                 geometry.sample_point_count) - 1U) * 2U
-                          : 0U;
-            const bool selection_state_empty =
-                geometry.selected_point_count == 0U &&
-                !geometry.last_selected_index.has_value();
-            const bool primary_metadata_valid =
-                input.kind == WorkspaceAiSplinePassKind::primary &&
-                geometry.pass == WorkspaceAiSplinePassKind::primary &&
-                geometry.topology == WorkspaceAiSplineTopology::polyline &&
-                selection_state_empty &&
-                (geometry.mode == WorkspaceAiSplineDisplayMode::raw
-                     ? geometry.sample_point_count ==
-                           geometry.source_point_count
-                     : geometry.mode ==
-                               WorkspaceAiSplineDisplayMode::interpolated &&
-                           geometry.source_point_count >= 4U &&
-                           geometry.sample_point_count ==
-                               workspace_ai_spline_interpolated_sample_count);
-            const bool interval_metadata_valid =
-                input.kind == WorkspaceAiSplinePassKind::interval &&
-                geometry.pass == WorkspaceAiSplinePassKind::interval &&
-                geometry.topology == WorkspaceAiSplineTopology::polyline &&
-                geometry.mode == WorkspaceAiSplineDisplayMode::interpolated &&
-                selection_state_empty &&
-                geometry.source_point_count >= 4U &&
-                geometry.sample_point_count >= 1U &&
-                geometry.sample_point_count <=
-                    workspace_ai_spline_interpolated_sample_count;
-            const bool side_metadata_valid =
-                (input.kind == WorkspaceAiSplinePassKind::left_side ||
-                 input.kind == WorkspaceAiSplinePassKind::right_side) &&
-                geometry.pass == input.kind &&
-                geometry.topology == WorkspaceAiSplineTopology::polyline &&
-                geometry.mode == WorkspaceAiSplineDisplayMode::raw &&
-                selection_state_empty &&
-                geometry.sample_point_count <= geometry.source_point_count &&
-                geometry.source_point_count <=
-                    render::max_overlay_line_total_vertices / 2U + 1U &&
-                request.ai_spline_geometry != nullptr &&
-                geometry.source_point_count ==
-                    request.ai_spline_geometry->source_point_count;
-            const bool selection_metadata_valid =
-                input.kind == WorkspaceAiSplinePassKind::selection &&
-                geometry.pass == WorkspaceAiSplinePassKind::selection &&
-                geometry.topology ==
-                    WorkspaceAiSplineTopology::independent_lines &&
-                geometry.mode == WorkspaceAiSplineDisplayMode::raw &&
-                geometry.selected_point_count >= 1U &&
-                geometry.selected_point_count <=
-                    geometry.source_point_count &&
-                geometry.last_selected_index.has_value() &&
-                *geometry.last_selected_index <
-                    geometry.source_point_count &&
-                geometry.sample_point_count >=
-                    geometry.selected_point_count &&
-                static_cast<std::size_t>(geometry.sample_point_count) <=
-                    static_cast<std::size_t>(
-                        geometry.selected_point_count) * 3U &&
-                geometry.source_point_count <=
-                    workspace_ai_spline_max_interpolation_control_points &&
-                request.ai_spline_geometry != nullptr &&
-                geometry.source_point_count ==
-                    request.ai_spline_geometry->source_point_count;
-            const bool camber_metadata_valid =
-                input.kind == WorkspaceAiSplinePassKind::camber &&
-                geometry.pass == WorkspaceAiSplinePassKind::camber &&
-                geometry.topology ==
-                    WorkspaceAiSplineTopology::independent_lines &&
-                geometry.mode == WorkspaceAiSplineDisplayMode::raw &&
-                selection_state_empty &&
-                geometry.sample_point_count == geometry.source_point_count &&
-                geometry.source_point_count <=
-                    render::max_overlay_line_total_vertices / 2U &&
-                request.ai_spline_geometry != nullptr &&
-                geometry.source_point_count ==
-                    request.ai_spline_geometry->source_point_count;
-            if (expected_first != geometry.vertices.size() ||
-                (geometry.vertices.empty() != geometry.chunks.empty()) ||
-                geometry.vertices.size() != expected_vertices ||
-                !(primary_metadata_valid || interval_metadata_valid ||
-                  side_metadata_valid || selection_metadata_valid ||
-                  camber_metadata_valid)) {
+            if (input.geometry->chunks.size() >
+                    render::max_overlay_line_draws - ai_draw_count ||
+                input.geometry->vertices.size() >
+                    render::max_overlay_line_total_vertices -
+                        ai_vertex_count) {
                 result.status = WorkspaceViewportStatus::invalid;
                 result.diagnostic = diagnostic(
-                    "workspace_viewport_ai_spline_geometry_invalid",
-                    "AI spline geometry does not match its display mode, "
-                    "sample count, and chunk metadata");
+                    "workspace_viewport_ai_spline_limit",
+                    "AI spline geometry exceeds the bounded line-render "
+                    "limits");
                 return result;
             }
-            const auto& expected_color =
-                input.kind == WorkspaceAiSplinePassKind::primary
-                    ? workspace_ai_spline_raw_color
-                    : input.kind == WorkspaceAiSplinePassKind::interval
-                        ? workspace_ai_spline_interval_color
-                        : workspace_ai_spline_side_color;
-            for (const render::OverlayLineVertex& vertex : geometry.vertices) {
-                const bool color_valid =
-                    input.kind == WorkspaceAiSplinePassKind::camber
-                        ? vertex.color ==
-                                  workspace_ai_spline_camber_positive_color ||
-                              vertex.color ==
-                                  workspace_ai_spline_camber_nonpositive_color
-                        : input.kind == WorkspaceAiSplinePassKind::selection
-                            ? vertex.color ==
-                                      workspace_ai_spline_selection_color ||
-                                  vertex.color ==
-                                      workspace_ai_spline_selection_side_color
-                            : vertex.color == expected_color;
-                if (!finite_vector(vertex.position) ||
-                    !color_valid) {
-                    result.status = WorkspaceViewportStatus::invalid;
-                    result.diagnostic = diagnostic(
-                        "workspace_viewport_ai_spline_vertex_invalid",
-                        "AI spline vertices require finite positions and the "
-                        "recovered pass color");
-                    return result;
-                }
-            }
-            if (input.kind == WorkspaceAiSplinePassKind::selection) {
-                std::size_t center_count = 0U;
-                std::size_t side_count = 0U;
-                for (std::size_t vertex = 0U;
-                     vertex < geometry.vertices.size(); vertex += 2U) {
-                    const auto& begin = geometry.vertices[vertex];
-                    const auto& end = geometry.vertices[vertex + 1U];
-                    const bool center =
-                        begin.color == workspace_ai_spline_selection_color;
-                    if (center) {
-                        if (side_count != 0U && side_count != 2U) {
-                            result.status = WorkspaceViewportStatus::invalid;
-                            result.diagnostic = diagnostic(
-                                "workspace_viewport_ai_spline_selection_line_invalid",
-                                "Each AI spline selection marker requires zero or two side lines");
-                            return result;
-                        }
-                        ++center_count;
-                        side_count = 0U;
-                    } else {
-                        ++side_count;
-                    }
-                    const auto& line_color =
-                        center ? workspace_ai_spline_selection_color
-                               : workspace_ai_spline_selection_side_color;
-                    if (center_count == 0U || side_count > 2U ||
-                        begin.color != line_color || end.color != line_color ||
-                        begin.position[0] != end.position[0] ||
-                        begin.position[2] != end.position[2] ||
-                        end.position[1] !=
-                            begin.position[1] +
-                                workspace_ai_spline_selection_height) {
-                        result.status = WorkspaceViewportStatus::invalid;
-                        result.diagnostic = diagnostic(
-                            "workspace_viewport_ai_spline_selection_line_invalid",
-                            "AI spline selection lines must be vertical and use the recovered height and colors");
-                        return result;
-                    }
-                }
-                if ((side_count != 0U && side_count != 2U) ||
-                    center_count != geometry.selected_point_count) {
-                    result.status = WorkspaceViewportStatus::invalid;
-                    result.diagnostic = diagnostic(
-                        "workspace_viewport_ai_spline_selection_line_invalid",
-                        "AI spline selection markers do not match the recovered line groups");
-                    return result;
-                }
-            }
-            if (input.kind == WorkspaceAiSplinePassKind::camber) {
-                for (std::size_t vertex = 0U;
-                     vertex < geometry.vertices.size(); vertex += 2U) {
-                    const auto& begin = geometry.vertices[vertex];
-                    const auto& end = geometry.vertices[vertex + 1U];
-                    if (begin.color != end.color ||
-                        begin.position[0] != end.position[0] ||
-                        begin.position[2] != end.position[2] ||
-                        end.position[1] < begin.position[1]) {
-                        result.status = WorkspaceViewportStatus::invalid;
-                        result.diagnostic = diagnostic(
-                            "workspace_viewport_ai_spline_camber_line_invalid",
-                            "AI spline camber lines must be vertical, upward, and one color");
-                        return result;
-                    }
-                }
-            }
-            const render::PipelineProgram& pipeline =
-                **input.pipeline;
-            const bool depth_valid =
-                input.kind != WorkspaceAiSplinePassKind::interval
-                    ? pipeline.depth.test_enabled &&
-                          pipeline.depth.write_enabled &&
-                          pipeline.depth.compare ==
-                              render::PipelineCompareOperation::less_or_equal
-                    : !pipeline.depth.test_enabled &&
-                          !pipeline.depth.write_enabled;
-            if (!depth_valid) {
+            ai_draw_count += input.geometry->chunks.size();
+            ai_vertex_count += input.geometry->vertices.size();
+        }
+        if (ai_draw_count >
+                render::max_overlay_line_draws - authoring_draw_count ||
+            ai_vertex_count > render::max_overlay_line_total_vertices -
+                                  authoring_vertex_count) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic =
+                diagnostic("workspace_viewport_overlay_budget_exceeded",
+                           "AI spline and authoring overlays exceed the shared "
+                           "render budget");
+            return result;
+        }
+        for (std::size_t pass_index = 0U; pass_index < ai_spline_inputs.size();
+             ++pass_index) {
+            const AiSplinePassInput &input = ai_spline_inputs[pass_index];
+            if (input.geometry == nullptr) continue;
+            const WorkspaceAiSplineGeometry &geometry = *input.geometry;
+            if (!validateAiSplineGeometry(geometry, input.kind,
+                                          request.ai_spline_geometry,
+                                          result.diagnostic)) {
                 result.status = WorkspaceViewportStatus::invalid;
-                result.diagnostic =
-                    diagnostic("workspace_viewport_ai_spline_depth_invalid",
-                               "AI spline pass depth state does not match the "
-                               "recovered spline-pass behavior");
+                return result;
+            }
+            const render::PipelineProgram &pipeline = **input.pipeline;
+            if (!validateAiSplineDepth(pipeline, input.kind,
+                                       result.diagnostic)) {
+                result.status = WorkspaceViewportStatus::invalid;
                 return result;
             }
             if (!geometry.vertices.empty()) {
@@ -1617,8 +1849,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                     result.diagnostic = std::move(overlay_diagnostic);
                     return result;
                 }
-                ai_spline_passes[pass_index].buffer =
-                    std::move(buffer.buffer);
+                ai_spline_passes[pass_index].buffer = std::move(buffer.buffer);
             }
             ai_spline_passes[pass_index].pipeline = pipeline;
             ai_spline_passes[pass_index].chunks = geometry.chunks;
@@ -1765,7 +1996,8 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         }
 
         result.viewport = std::unique_ptr<WorkspaceViewport>(new WorkspaceViewport(
-            device.info().backend, request.presentation, std::move(color.texture),
+            &device, device.info().backend, request.presentation,
+            std::move(color.texture),
             std::move(resolved_color), std::move(depth.attachment),
             std::move(execution),
             std::move(authoring_overlay_pipeline),

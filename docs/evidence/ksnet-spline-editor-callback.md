@@ -102,6 +102,20 @@ uniqueness comes from `addIndex`.
 components in the selected 20-byte point. It does not change the stored length
 or tag. It does not recompute payload length or forward fields.
 
+`onNodeRender` submits the primary spline and selected markers before the
+movement loop. Thus, one movement becomes visible in these passes on the next
+render callback. The movement does not clear the cached side splines.
+
+The side-spline checks are at CIL offsets `0x01D9` through `0x01E8`.
+`onNodeRender` calls `computeLeftRightSplines` only when one side pointer is
+null. Direct point movement can therefore leave the cached native side splines
+stale.
+
+`refreshSplines` is at `0x1002E0A4`. It removes both side-spline objects and
+calls `computeLeftRightSplines`. Then it calls `AISpline.buildGrid`.
+`finishEditing` calls `refreshSplines` only when it applies five or more edit
+points. The shorter path changes no point and does not refresh derived state.
+
 The keyboard path supplies a local movement vector to `editSplineManual`.
 The method converts this vector with the cached horizontal forward direction.
 The C++ point-position API accepts an absolute position. This API is a
@@ -220,9 +234,30 @@ duplicate positions are an invalid safe-port input. The native selection vector
 cannot contain that state through `addIndex`.
 
 The `--set-ai-spline-points` command exposes this batch boundary. Current
-primary, side, and selection geometry builders consume the committed session
-model. Thus, rebuilt overlay geometry contains every committed batch position.
-Live replacement of retained GPU overlay buffers remains a separate step.
+primary, interval, side, selection, and camber builders consume one committed
+session model. This behavior is an explicit safe-port refresh boundary. It does
+not reproduce stale native side caches during a direct movement tick.
+
+The overlay-set builder publishes no partial set when one enabled pass fails.
+The prepared viewport then creates one immutable buffer for each enabled pass.
+It changes the retained generation only after all buffers pass validation and
+upload. An error leaves every prior buffer and draw chunk active.
+
+The update accepts only the device that prepared the viewport. It also keeps
+the prepared pass set and the shared authoring-overlay budget. The shared
+device contract contains no Vulkan or D3D12 types at this application boundary.
+The caller uses this synchronous operation on the render thread between draws.
+D3D12 can wait for idle resources when the old generation leaves ownership.
+The current native window creates this model and overlay set during load. It
+does not yet route point-edit input into the replacement operation. A future
+controller must keep an edited model pending until buffer replacement succeeds.
+An upload error keeps the visible generation and requires a retry or discard.
+
+The viewport test replaces all six passes after one committed batch edit. It
+releases the input set, then compares each owned buffer with the rebuilt bytes.
+It also rejects a forged overrun chunk and an over-limit aggregate. An injected
+third buffer upload error for a newer model keeps the prior six-buffer
+generation. Temporary buffers leave no retained allocation.
 
 The production WebGL source has no AI-spline load or render path. A source
 search found no AI-spline or `fast_lane.ai` identifiers. Thus, a direct WebGL

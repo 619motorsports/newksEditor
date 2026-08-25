@@ -628,12 +628,8 @@ struct LoadedWindowWorkspace {
             installedEditorSpline;
     };
     std::optional<TrackCamera> trackCamera;
-    std::optional<apex::app::WorkspaceAiSplineGeometry> aiSpline;
-    std::optional<apex::app::WorkspaceAiSplineGeometry> aiSplineInterval;
-    std::optional<apex::app::WorkspaceAiSplineGeometry> aiSplineLeft;
-    std::optional<apex::app::WorkspaceAiSplineGeometry> aiSplineRight;
-    std::optional<apex::app::WorkspaceAiSplineGeometry> aiSplineSelection;
-    std::optional<apex::app::WorkspaceAiSplineGeometry> aiSplineCamber;
+    std::optional<apex::formats::AiSpline> aiSplineModel;
+    std::optional<apex::app::WorkspaceAiSplineOverlaySet> aiSplineOverlays;
     apex::app::WorkspaceSelectionState selection;
     bool animationSkinningRequired = false;
 };
@@ -645,8 +641,8 @@ apex::app::WorkspaceSessionKind parse_workspace_kind(std::string_view value) {
     throw std::runtime_error("workspace kind must be track or carLods");
 }
 
-apex::app::TrackCameraPreviewMode parse_track_camera_mode(
-    std::string_view value) {
+apex::app::TrackCameraPreviewMode
+parse_track_camera_mode(std::string_view value) {
     if (value == "webgl")
         return apex::app::TrackCameraPreviewMode::webgl;
     if (value == "installed-editor")
@@ -1526,15 +1522,14 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
                 "--track-camera-play requires a camera with a resolved spline");
         } else if (options.trackCameraMode ==
                    apex::app::TrackCameraPreviewMode::installed_editor) {
-            throw std::runtime_error(
-                "installed-editor track-camera mode requires a resolved spline");
+            throw std::runtime_error("installed-editor track-camera mode "
+                                     "requires a resolved spline");
         }
         std::cout << "track camera: index=" << preview.camera.index
                   << ", name=";
         write_cli_text(std::cout, preview.camera.name);
         std::cout << ", spline-points=" << preview.rawSplinePoints.size()
-                  << ", position=" << options.trackCameraPosition
-                  << ", mode="
+                  << ", position=" << options.trackCameraPosition << ", mode="
                   << apex::app::track_camera_preview_mode_name(
                          options.trackCameraMode)
                   << '\n';
@@ -1542,93 +1537,77 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
     }
     if (options.aiSpline.has_value()) {
         const auto bytes = read_file(*options.aiSpline);
-        const auto spline = apex::formats::parseAiSpline(
+        auto spline = apex::formats::parseAiSpline(
             bytes, options.aiSpline->generic_string());
-        auto geometry = apex::app::buildWorkspaceAiSplineGeometry(
-            spline, options.aiSplineMode);
-        if (!geometry.ok())
-            throw std::runtime_error(geometry.diagnostic.code + ": " +
-                                     geometry.diagnostic.message);
+        apex::app::WorkspaceAiSplineOverlayRequest overlay_request;
+        overlay_request.mode = options.aiSplineMode;
+        overlay_request.interval = options.aiSplineInterval;
+        overlay_request.show_left = options.aiSplineShowLeft;
+        overlay_request.show_right = options.aiSplineShowRight;
+        overlay_request.selected_indices = options.aiSplineIndices;
+        overlay_request.show_camber = options.aiSplineShowCamber;
+        auto overlays =
+            apex::app::buildWorkspaceAiSplineOverlays(spline, overlay_request);
+        if (!overlays.ok())
+            throw std::runtime_error(overlays.diagnostic.code + ": " +
+                                     overlays.diagnostic.message);
         std::cout << "AI spline: version=" << spline.version
-                  << ", points=" << geometry.geometry.source_point_count
-                  << ", samples=" << geometry.geometry.sample_point_count
-                  << ", segments=" << geometry.geometry.vertices.size() / 2U
-                  << ", draws=" << geometry.geometry.chunks.size()
+                  << ", points=" << overlays.overlays.primary.source_point_count
+                  << ", samples="
+                  << overlays.overlays.primary.sample_point_count
+                  << ", segments="
+                  << overlays.overlays.primary.vertices.size() / 2U
+                  << ", draws=" << overlays.overlays.primary.chunks.size()
                   << ", mode="
                   << apex::app::workspace_ai_spline_display_mode_name(
-                         geometry.geometry.mode)
+                         overlays.overlays.primary.mode)
                   << '\n';
-        loaded.aiSpline = std::move(geometry.geometry);
-        if (options.aiSplineInterval.has_value()) {
-            auto interval =
-                apex::app::buildWorkspaceAiSplineIntervalGeometry(
-                    spline, *options.aiSplineInterval);
-            if (!interval.ok())
-                throw std::runtime_error(interval.diagnostic.code + ": " +
-                                         interval.diagnostic.message);
+        if (overlays.overlays.interval.has_value()) {
             std::cout << "AI spline interval: in="
                       << options.aiSplineInterval->begin
                       << ", out=" << options.aiSplineInterval->end
                       << ", samples="
-                      << interval.geometry.sample_point_count
+                      << overlays.overlays.interval->sample_point_count
                       << ", segments="
-                      << interval.geometry.vertices.size() / 2U
-                      << ", draws=" << interval.geometry.chunks.size()
+                      << overlays.overlays.interval->vertices.size() / 2U
+                      << ", draws=" << overlays.overlays.interval->chunks.size()
                       << '\n';
-            loaded.aiSplineInterval = std::move(interval.geometry);
         }
-        if (options.aiSplineShowLeft) {
-            auto side = apex::app::buildWorkspaceAiSplineSideGeometry(
-                spline, apex::app::WorkspaceAiSplineSide::left);
-            if (!side.ok())
-                throw std::runtime_error(side.diagnostic.code + ": " +
-                                         side.diagnostic.message);
+        if (overlays.overlays.left.has_value()) {
             std::cout << "AI spline left side: samples="
-                      << side.geometry.sample_point_count
-                      << ", segments=" << side.geometry.vertices.size() / 2U
-                      << ", draws=" << side.geometry.chunks.size() << '\n';
-            loaded.aiSplineLeft = std::move(side.geometry);
-        }
-        if (options.aiSplineShowRight) {
-            auto side = apex::app::buildWorkspaceAiSplineSideGeometry(
-                spline, apex::app::WorkspaceAiSplineSide::right);
-            if (!side.ok())
-                throw std::runtime_error(side.diagnostic.code + ": " +
-                                         side.diagnostic.message);
-            std::cout << "AI spline right side: samples="
-                      << side.geometry.sample_point_count
-                      << ", segments=" << side.geometry.vertices.size() / 2U
-                      << ", draws=" << side.geometry.chunks.size() << '\n';
-            loaded.aiSplineRight = std::move(side.geometry);
-        }
-        if (!options.aiSplineIndices.empty()) {
-            auto selection =
-                apex::app::buildWorkspaceAiSplineSelectionGeometry(
-                    spline, options.aiSplineIndices);
-            if (!selection.ok())
-                throw std::runtime_error(selection.diagnostic.code + ": " +
-                                         selection.diagnostic.message);
-            std::cout << "AI spline last selected index: index="
-                      << *selection.geometry.last_selected_index
-                      << ", lines="
-                      << selection.geometry.sample_point_count
-                      << ", draws=" << selection.geometry.chunks.size()
-                      << ", selected="
-                      << selection.geometry.selected_point_count
+                      << overlays.overlays.left->sample_point_count
+                      << ", segments="
+                      << overlays.overlays.left->vertices.size() / 2U
+                      << ", draws=" << overlays.overlays.left->chunks.size()
                       << '\n';
-            loaded.aiSplineSelection = std::move(selection.geometry);
         }
-        if (options.aiSplineShowCamber) {
-            auto camber = apex::app::buildWorkspaceAiSplineCamberGeometry(
-                spline);
-            if (!camber.ok())
-                throw std::runtime_error(camber.diagnostic.code + ": " +
-                                         camber.diagnostic.message);
+        if (overlays.overlays.right.has_value()) {
+            std::cout << "AI spline right side: samples="
+                      << overlays.overlays.right->sample_point_count
+                      << ", segments="
+                      << overlays.overlays.right->vertices.size() / 2U
+                      << ", draws=" << overlays.overlays.right->chunks.size()
+                      << '\n';
+        }
+        if (overlays.overlays.selection.has_value()) {
+            std::cout << "AI spline last selected index: index="
+                      << *overlays.overlays.selection->last_selected_index
+                      << ", lines="
+                      << overlays.overlays.selection->sample_point_count
+                      << ", draws="
+                      << overlays.overlays.selection->chunks.size()
+                      << ", selected="
+                      << overlays.overlays.selection->selected_point_count
+                      << '\n';
+        }
+        if (overlays.overlays.camber.has_value()) {
             std::cout << "AI spline camber: lines="
-                      << camber.geometry.sample_point_count
-                      << ", draws=" << camber.geometry.chunks.size() << '\n';
-            loaded.aiSplineCamber = std::move(camber.geometry);
+                      << overlays.overlays.camber->sample_point_count
+                      << ", draws=" << overlays.overlays.camber->chunks.size()
+                      << '\n';
         }
+        loaded.aiSplineModel = std::move(spline);
+        loaded.aiSplineOverlays = std::move(overlays.overlays);
     }
     const bool selection_options = options.nodeSearch.has_value() ||
                                    options.selectedNode.has_value() ||
@@ -1639,8 +1618,8 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
                             ? std::string_view(*options.nodeSearch)
                             : std::string_view{};
         request.collect_matches = options.nodeSearch.has_value();
-        request.selected_node = options.selectedNode.value_or(
-            apex::scene::invalid_node_id);
+        request.selected_node =
+            options.selectedNode.value_or(apex::scene::invalid_node_id);
         request.isolate_selected = options.isolateSelected;
         request.show_hidden = options.showHidden;
         request.wireframe = options.wireframe;
@@ -1657,10 +1636,9 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
         if (options.nodeSearch.has_value()) {
             std::cout << "hierarchy: matches=" << selection.matches.size()
                       << '\n';
-            for (const auto& match : selection.matches) {
+            for (const auto &match : selection.matches) {
                 std::cout << "node: id=" << match.node
-                          << ", depth=" << match.depth
-                          << ", kind="
+                          << ", depth=" << match.depth << ", kind="
                           << apex::app::workspace_selection_node_kind_name(
                                  match.kind)
                           << ", name=";
@@ -2009,7 +1987,8 @@ int run_window(int argc, char** argv) {
                 apex::render::PipelineTransformContract::draw_matrices;
             request.authoring_overlay_pipeline = std::move(pipeline);
         }
-        if (loaded_workspace.aiSpline.has_value()) {
+        if (loaded_workspace.aiSplineOverlays.has_value()) {
+            const auto &ai = *loaded_workspace.aiSplineOverlays;
             apex::render::PipelineProgram pipeline;
             pipeline.name = "workspace-ai-spline-raw";
             pipeline.shaders = *loaded_workspace.authoringOverlayModules;
@@ -2038,46 +2017,40 @@ int run_window(int argc, char** argv) {
                 apex::render::PipelineCompareOperation::less_or_equal;
             pipeline.transform_contract =
                 apex::render::PipelineTransformContract::draw_matrices;
-            request.ai_spline_geometry = &*loaded_workspace.aiSpline;
-            if (loaded_workspace.aiSplineInterval.has_value()) {
+            request.ai_spline_geometry = &ai.primary;
+            if (ai.interval.has_value()) {
                 auto interval_pipeline = pipeline;
                 interval_pipeline.name = "workspace-ai-spline-interval";
                 interval_pipeline.depth.test_enabled = false;
                 interval_pipeline.depth.write_enabled = false;
-                request.ai_spline_interval_geometry =
-                    &*loaded_workspace.aiSplineInterval;
+                request.ai_spline_interval_geometry = &*ai.interval;
                 request.ai_spline_interval_pipeline =
                     std::move(interval_pipeline);
             }
-            if (loaded_workspace.aiSplineLeft.has_value()) {
+            if (ai.left.has_value()) {
                 auto side_pipeline = pipeline;
                 side_pipeline.name = "workspace-ai-spline-left";
-                request.ai_spline_left_geometry =
-                    &*loaded_workspace.aiSplineLeft;
+                request.ai_spline_left_geometry = &*ai.left;
                 request.ai_spline_left_pipeline = std::move(side_pipeline);
             }
-            if (loaded_workspace.aiSplineRight.has_value()) {
+            if (ai.right.has_value()) {
                 auto side_pipeline = pipeline;
                 side_pipeline.name = "workspace-ai-spline-right";
-                request.ai_spline_right_geometry =
-                    &*loaded_workspace.aiSplineRight;
+                request.ai_spline_right_geometry = &*ai.right;
                 request.ai_spline_right_pipeline = std::move(side_pipeline);
             }
-            if (loaded_workspace.aiSplineSelection.has_value()) {
+            if (ai.selection.has_value()) {
                 auto selection_pipeline = pipeline;
                 selection_pipeline.name = "workspace-ai-spline-selection";
-                request.ai_spline_selection_geometry =
-                    &*loaded_workspace.aiSplineSelection;
+                request.ai_spline_selection_geometry = &*ai.selection;
                 request.ai_spline_selection_pipeline =
                     std::move(selection_pipeline);
             }
-            if (loaded_workspace.aiSplineCamber.has_value()) {
+            if (ai.camber.has_value()) {
                 auto camber_pipeline = pipeline;
                 camber_pipeline.name = "workspace-ai-spline-camber";
-                request.ai_spline_camber_geometry =
-                    &*loaded_workspace.aiSplineCamber;
-                request.ai_spline_camber_pipeline =
-                    std::move(camber_pipeline);
+                request.ai_spline_camber_geometry = &*ai.camber;
+                request.ai_spline_camber_pipeline = std::move(camber_pipeline);
             }
             request.ai_spline_pipeline = std::move(pipeline);
         }
@@ -2088,11 +2061,12 @@ int run_window(int argc, char** argv) {
             pipeline.vertex_layout.stride = 11U * sizeof(float);
             pipeline.vertex_layout.attributes = {
                 {apex::render::PipelineVertexSemantic::position,
-                 apex::render::PipelineVertexAttributeFormat::float32x3,
-                 0U, 0U},
+                 apex::render::PipelineVertexAttributeFormat::float32x3, 0U,
+                 0U},
             };
-            pipeline.targets.colors = {{pipeline_color_format(
-                request.presentation.format), request.color_samples}};
+            pipeline.targets.colors = {
+                {pipeline_color_format(request.presentation.format),
+                 request.color_samples}};
             pipeline.targets.has_depth = true;
             pipeline.targets.depth = {
                 apex::render::PipelineRenderTargetFormat::depth32_float,

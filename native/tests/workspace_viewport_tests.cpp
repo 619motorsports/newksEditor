@@ -1,16 +1,17 @@
 #include "apex/app/workspace_viewport.hpp"
 #include "apex/app/workspace_shadow_programs.hpp"
+#include "apex/authoring/ai_spline_session.hpp"
 #include "apex/render/view_axis.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cmath>
 #include <cstring>
 #include <iostream>
-#include <memory>
 #include <limits>
+#include <memory>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -24,51 +25,73 @@ using apex::app::WorkspaceViewportPrepareRequest;
 
 namespace {
 
-void require(bool condition, const char* message) {
+void require(bool condition, const char *message) {
     if (!condition) throw std::runtime_error(message);
 }
 
 class FakeBuffer final : public Buffer {
 public:
-    explicit FakeBuffer(BufferDescription description) : info_({description}) {}
+    FakeBuffer(BufferDescription description, std::span<const std::byte> bytes,
+               std::shared_ptr<std::size_t> live_count)
+        : info_({description}), bytes_(bytes.begin(), bytes.end()),
+          live_count_(std::move(live_count)) {
+        ++*live_count_;
+    }
+    ~FakeBuffer() override { --*live_count_; }
     Backend backend() const noexcept override { return Backend::Vulkan; }
-    const BufferInfo& info() const noexcept override { return info_; }
+    const BufferInfo &info() const noexcept override { return info_; }
+    [[nodiscard]] const std::vector<std::byte> &bytes() const noexcept {
+        return bytes_;
+    }
+
 private:
     BufferInfo info_{};
+    std::vector<std::byte> bytes_;
+    std::shared_ptr<std::size_t> live_count_;
 };
 
 class FakeTexture final : public Texture {
 public:
-    explicit FakeTexture(TextureDescription description) : info_({description}) {}
+    explicit FakeTexture(TextureDescription description)
+        : info_({description}) {}
     Backend backend() const noexcept override { return Backend::Vulkan; }
-    const TextureInfo& info() const noexcept override { return info_; }
+    const TextureInfo &info() const noexcept override { return info_; }
+
 private:
     TextureInfo info_{};
 };
 
 class FakeDepth final : public DepthAttachment {
 public:
-    explicit FakeDepth(DepthAttachmentDescription description) : info_({description}) {}
+    explicit FakeDepth(DepthAttachmentDescription description)
+        : info_({description}) {}
     Backend backend() const noexcept override { return Backend::Vulkan; }
-    const DepthAttachmentInfo& info() const noexcept override { return info_; }
+    const DepthAttachmentInfo &info() const noexcept override { return info_; }
+
 private:
     DepthAttachmentInfo info_{};
 };
 
 class FakeSampler final : public Sampler {
 public:
-    explicit FakeSampler(SamplerDescription description) : info_({description}) {}
+    explicit FakeSampler(SamplerDescription description)
+        : info_({description}) {}
     Backend backend() const noexcept override { return Backend::Vulkan; }
-    const SamplerInfo& info() const noexcept override { return info_; }
+    const SamplerInfo &info() const noexcept override { return info_; }
+
 private:
     SamplerInfo info_{};
 };
 
 class FakeTarget final : public PresentationTarget {
 public:
-    explicit FakeTarget(PresentationTargetDescription description) : info_({description}) {}
+    explicit FakeTarget(PresentationTargetDescription description)
+        : info_({description}) {}
     Backend backend() const noexcept override { return Backend::Vulkan; }
-    const PresentationTargetInfo& info() const noexcept override { return info_; }
+    const PresentationTargetInfo &info() const noexcept override {
+        return info_;
+    }
+
 private:
     PresentationTargetInfo info_{};
 };
@@ -76,28 +99,36 @@ private:
 class FakeDevice final : public Device {
 public:
     struct BufferUpdate {
-        Buffer* buffer = nullptr;
+        Buffer *buffer = nullptr;
         std::uint64_t offset = 0U;
         std::vector<std::byte> bytes;
     };
 
-    const DeviceInfo& info() const noexcept override { return info_; }
+    const DeviceInfo &info() const noexcept override { return info_; }
 
-    BufferResult create_buffer(const BufferDescription& description,
-                               std::span<const std::byte>) override {
+    BufferResult create_buffer(const BufferDescription &description,
+                               std::span<const std::byte> bytes) override {
         ++buffer_calls;
-        return {BufferStatus::ready, {}, std::make_unique<FakeBuffer>(description)};
+        if (fail_buffer_call == buffer_calls)
+            return {fail_buffer_status,
+                    {"fake_buffer_failed", "injected buffer failure"},
+                    nullptr};
+        return {BufferStatus::ready,
+                {},
+                std::make_unique<FakeBuffer>(description, bytes,
+                                             live_buffer_count)};
     }
 
-    BufferUpdateResult update_buffer(Buffer& buffer, std::uint64_t offset,
-                                     std::span<const std::byte> bytes) override {
+    BufferUpdateResult
+    update_buffer(Buffer &buffer, std::uint64_t offset,
+                  std::span<const std::byte> bytes) override {
         buffer_updates.push_back(
             {&buffer, offset, {bytes.begin(), bytes.end()}});
         return {BufferStatus::ready, {}};
     }
 
-    TextureResult create_texture(const TextureDescription& description,
-                                 const TextureUploadPlan&) override {
+    TextureResult create_texture(const TextureDescription &description,
+                                 const TextureUploadPlan &) override {
         ++texture_calls;
         auto texture = std::make_unique<FakeTexture>(description);
         created_texture_descriptions.push_back(description);
@@ -105,29 +136,35 @@ public:
         return {TextureStatus::ready, {}, std::move(texture)};
     }
 
-    TextureUpdateResult update_texture(Texture&, const TextureUploadPlan&) override {
+    TextureUpdateResult update_texture(Texture &,
+                                       const TextureUploadPlan &) override {
         return {TextureStatus::ready, {}};
     }
 
     DepthAttachmentResult create_depth_attachment(
-        const DepthAttachmentDescription& description) override {
+        const DepthAttachmentDescription &description) override {
         ++depth_calls;
         created_depth_descriptions.push_back(description);
-        return {DepthAttachmentStatus::ready, {}, std::make_unique<FakeDepth>(description)};
+        return {DepthAttachmentStatus::ready,
+                {},
+                std::make_unique<FakeDepth>(description)};
     }
 
-    TextureClearReadbackResult clear_texture_and_readback(
-        Texture&, const TextureClearReadbackRequest&) override {
+    TextureClearReadbackResult
+    clear_texture_and_readback(Texture &,
+                               const TextureClearReadbackRequest &) override {
         return {TextureReadbackStatus::unsupported, {"unused", "unused"}, {}};
     }
 
-    TriangleDrawResult draw_triangle_and_readback(
-        Texture&, const TriangleDrawRequest&) override {
+    TriangleDrawResult
+    draw_triangle_and_readback(Texture &,
+                               const TriangleDrawRequest &) override {
         return {TriangleDrawStatus::unsupported, {"unused", "unused"}, {}};
     }
 
     IndexedStaticMeshBatchResult draw_indexed_static_mesh_batch_and_readback(
-        Texture& texture, const IndexedStaticMeshBatchDescription& batch) override {
+        Texture &texture,
+        const IndexedStaticMeshBatchDescription &batch) override {
         ++draw_calls;
         events.push_back("color");
         draw_targets.push_back(&texture);
@@ -136,7 +173,7 @@ public:
         draw_counts.push_back(batch.draws.size());
         overlay_counts.push_back(batch.overlay_draws.size());
         selected_mesh_counts.push_back(batch.selected_mesh_draws.size());
-        for (const auto& overlay : batch.overlay_draws) {
+        for (const auto &overlay : batch.overlay_draws) {
             overlay_matrices.push_back(overlay.matrices);
             overlay_buffers.push_back(overlay.vertex_buffer);
             overlay_scene_positions.push_back(overlay.scene_position);
@@ -150,7 +187,7 @@ public:
         }
         std::vector<apex::scene::NodeId> nodes;
         nodes.reserve(batch.draws.size());
-        for (const auto& draw : batch.draws)
+        for (const auto &draw : batch.draws)
             nodes.push_back(draw.packet == nullptr
                                 ? apex::scene::invalid_node_id
                                 : draw.packet->node);
@@ -161,25 +198,30 @@ public:
         }
         if (fail_draw)
             return {IndexedStaticMeshBatchStatus::execution_failed,
-                    {"fake_draw_failed", "injected draw failure"}, {}};
+                    {"fake_draw_failed", "injected draw failure"},
+                    {}};
         if (invalid_draw)
             return {IndexedStaticMeshBatchStatus::invalid_request,
-                    {"fake_draw_invalid", "injected invalid draw"}, {}};
+                    {"fake_draw_invalid", "injected invalid draw"},
+                    {}};
         if (unsupported_draw)
             return {IndexedStaticMeshBatchStatus::unsupported,
-                    {"fake_draw_unsupported", "injected unsupported draw"}, {}};
+                    {"fake_draw_unsupported", "injected unsupported draw"},
+                    {}};
         return {IndexedStaticMeshBatchStatus::ready, {}, {}};
     }
 
-    DepthOnlyIndexedStaticMeshBatchResult draw_depth_only_indexed_static_mesh_batch(
-        const DepthOnlyIndexedStaticMeshBatchDescription& batch) override {
+    DepthOnlyIndexedStaticMeshBatchResult
+    draw_depth_only_indexed_static_mesh_batch(
+        const DepthOnlyIndexedStaticMeshBatchDescription &batch) override {
         ++depth_batch_calls;
         events.push_back("shadow");
         depth_targets.push_back(batch.depth_attachment);
         depth_draw_counts.push_back(batch.draws.size());
         depth_clear_values.push_back(batch.clear_depth ? batch.depth_clear_value
                                                        : -1.0F);
-        if (!batch.draws.empty() && batch.draws.front().camera_frame.has_value()) {
+        if (!batch.draws.empty() &&
+            batch.draws.front().camera_frame.has_value()) {
             depth_camera_matrices.push_back(
                 batch.draws.front().camera_frame->view_projection);
         }
@@ -191,17 +233,21 @@ public:
         return {DepthOnlyIndexedStaticMeshBatchStatus::ready, {}};
     }
 
-    SamplerResult create_sampler(const SamplerDescription& description) override {
+    SamplerResult
+    create_sampler(const SamplerDescription &description) override {
         ++sampler_calls;
-        return {SamplerStatus::ready, {}, std::make_unique<FakeSampler>(description)};
+        return {SamplerStatus::ready,
+                {},
+                std::make_unique<FakeSampler>(description)};
     }
 
-    ShaderModuleResult create_shader_module(const ShaderModuleDescription&) override {
+    ShaderModuleResult
+    create_shader_module(const ShaderModuleDescription &) override {
         return {ShaderModuleStatus::unsupported, {"unused", "unused"}, nullptr};
     }
 
-    PresentationFrameResult present_texture(
-        PresentationTarget&, Texture& texture) override {
+    PresentationFrameResult present_texture(PresentationTarget &,
+                                            Texture &texture) override {
         ++present_calls;
         events.push_back("present");
         presented_textures.push_back(&texture);
@@ -218,6 +264,8 @@ public:
     bool unsupported_draw = false;
     bool fail_present = false;
     std::size_t fail_depth_batch_call = 0U;
+    std::size_t fail_buffer_call = 0U;
+    BufferStatus fail_buffer_status = BufferStatus::allocation_failed;
     std::size_t buffer_calls = 0U;
     std::size_t texture_calls = 0U;
     std::size_t depth_calls = 0U;
@@ -229,7 +277,7 @@ public:
     std::vector<std::size_t> overlay_counts;
     std::vector<std::size_t> selected_mesh_counts;
     std::vector<DrawMatrices> overlay_matrices;
-    std::vector<const Buffer*> overlay_buffers;
+    std::vector<const Buffer *> overlay_buffers;
     std::vector<std::uint32_t> overlay_scene_positions;
     std::vector<std::uint64_t> overlay_vertex_offsets;
     std::vector<std::uint32_t> overlay_vertex_counts;
@@ -237,27 +285,30 @@ public:
     std::vector<bool> overlay_depth_writes;
     std::vector<std::vector<apex::scene::NodeId>> draw_nodes;
     std::vector<std::string> events;
-    std::vector<const DepthAttachment*> depth_targets;
+    std::vector<const DepthAttachment *> depth_targets;
     std::vector<std::size_t> depth_draw_counts;
     std::vector<float> depth_clear_values;
     std::vector<apex::scene::Matrix4> depth_camera_matrices;
     std::vector<BufferUpdate> buffer_updates;
-    std::vector<std::array<const DepthAttachment*,
-                           indexed_directional_shadow_cascade_count>> receiver_maps;
+    std::vector<std::array<const DepthAttachment *,
+                           indexed_directional_shadow_cascade_count>>
+        receiver_maps;
     std::vector<TextureDescription> created_texture_descriptions;
-    std::vector<Texture*> created_textures;
+    std::vector<Texture *> created_textures;
     std::vector<DepthAttachmentDescription> created_depth_descriptions;
-    std::vector<Texture*> resolve_targets;
+    std::vector<Texture *> resolve_targets;
     std::vector<bool> capture_requests;
-    std::vector<Texture*> presented_textures;
-    std::vector<Texture*> draw_targets;
+    std::vector<Texture *> presented_textures;
+    std::vector<Texture *> draw_targets;
+    std::shared_ptr<std::size_t> live_buffer_count =
+        std::make_shared<std::size_t>(0U);
 
 private:
-    DeviceInfo info_{Backend::Vulkan, "viewport fake", "unit", 1U, 0U, 0U,
-                     0U, 0U, true};
+    DeviceInfo info_{
+        Backend::Vulkan, "viewport fake", "unit", 1U, 0U, 0U, 0U, 0U, true};
 };
 
-void put32(std::vector<std::uint8_t>& bytes, std::size_t offset,
+void put32(std::vector<std::uint8_t> &bytes, std::size_t offset,
            std::uint32_t value) {
     bytes[offset] = static_cast<std::uint8_t>(value);
     bytes[offset + 1U] = static_cast<std::uint8_t>(value >> 8U);
@@ -1359,6 +1410,19 @@ void draws_recovered_ai_spline_camber_pass() {
     request.ai_spline_pipeline = ai_spline_pipeline(value);
     request.ai_spline_camber_geometry = &camber.geometry;
     request.ai_spline_camber_pipeline = ai_spline_camber_pipeline(value);
+
+    auto malformed_primary = primary.geometry;
+    malformed_primary.chunks = {{0U, 4U}, {4U, 4U}};
+    auto malformed_request = request;
+    malformed_request.ai_spline_geometry = &malformed_primary;
+    FakeDevice malformed_device;
+    const auto malformed_preparation = apex::app::prepareWorkspaceViewport(
+        malformed_device, value.document, malformed_request);
+    require(!malformed_preparation.ok() &&
+                malformed_preparation.diagnostic.code ==
+                    "workspace_viewport_ai_spline_chunk_invalid",
+            "preparation rejects chunks that overrun the vertex array");
+
     FakeDevice device;
     auto prepared = apex::app::prepareWorkspaceViewport(
         device, value.document, request);
@@ -1606,8 +1670,9 @@ void draws_recovered_ai_spline_selected_index_pass() {
     FakeDevice wrong_height_device;
     const auto wrong_height = apex::app::prepareWorkspaceViewport(
         wrong_height_device, value.document, wrong_height_request);
-    require(!wrong_height.ok() && wrong_height.diagnostic.code ==
-                "workspace_viewport_ai_spline_selection_line_invalid",
+    require(!wrong_height.ok() &&
+                wrong_height.diagnostic.code ==
+                    "workspace_viewport_ai_spline_selection_line_invalid",
             "selected-index markers reject an incorrect recovered height");
 
     auto incomplete_side_geometry = selection.geometry;
@@ -1622,8 +1687,9 @@ void draws_recovered_ai_spline_selected_index_pass() {
     FakeDevice incomplete_side_device;
     const auto incomplete_side = apex::app::prepareWorkspaceViewport(
         incomplete_side_device, value.document, incomplete_side_request);
-    require(!incomplete_side.ok() && incomplete_side.diagnostic.code ==
-                "workspace_viewport_ai_spline_selection_line_invalid",
+    require(!incomplete_side.ok() &&
+                incomplete_side.diagnostic.code ==
+                    "workspace_viewport_ai_spline_selection_line_invalid",
             "selected-index markers reject incomplete side-line groups");
 
     auto wrong_topology_geometry = selection.geometry;
@@ -1635,66 +1701,291 @@ void draws_recovered_ai_spline_selected_index_pass() {
     FakeDevice wrong_topology_device;
     const auto wrong_topology = apex::app::prepareWorkspaceViewport(
         wrong_topology_device, value.document, wrong_topology_request);
-    require(!wrong_topology.ok() && wrong_topology.diagnostic.code ==
-                "workspace_viewport_ai_spline_geometry_invalid",
+    require(!wrong_topology.ok() &&
+                wrong_topology.diagnostic.code ==
+                    "workspace_viewport_ai_spline_geometry_invalid",
             "selected-index markers reject polyline topology");
 
     auto wrong_state_geometry = selection.geometry;
     wrong_state_geometry.last_selected_index =
         wrong_state_geometry.source_point_count;
     auto wrong_state_request = request;
-    wrong_state_request.ai_spline_selection_geometry =
-        &wrong_state_geometry;
+    wrong_state_request.ai_spline_selection_geometry = &wrong_state_geometry;
     FakeDevice wrong_state_device;
     const auto wrong_state = apex::app::prepareWorkspaceViewport(
         wrong_state_device, value.document, wrong_state_request);
-    require(!wrong_state.ok() && wrong_state.diagnostic.code ==
-                "workspace_viewport_ai_spline_geometry_invalid",
+    require(!wrong_state.ok() &&
+                wrong_state.diagnostic.code ==
+                    "workspace_viewport_ai_spline_geometry_invalid",
             "selected-index markers reject an invalid last-selected index");
 }
 
-void draws_selected_mesh_with_recovered_fade_boundary() {
+void replaces_committed_ai_spline_overlays_atomically() {
     auto value = fixture();
+    apex::formats::AiSpline spline;
+    spline.source = "live-position.ai";
+    spline.version = 7U;
+    spline.points.resize(4U);
+    spline.points[0U].position = {0.0F, 0.0F, 0.0F};
+    spline.points[1U].position = {10.0F, 0.0F, 0.0F};
+    spline.points[2U].position = {20.0F, 5.0F, 5.0F};
+    spline.points[3U].position = {30.0F, 5.0F, 10.0F};
+    spline.payloads.resize(spline.points.size());
+    for (std::size_t index = 0U; index < spline.points.size(); ++index) {
+        spline.points[index].tag = static_cast<std::int32_t>(index);
+        spline.payloads[index].side0 = 1.0F;
+        spline.payloads[index].side1 = 2.0F;
+        spline.payloads[index].camber = index % 2U == 0U ? 0.01F : -0.01F;
+    }
+    const std::array<std::uint32_t, 2U> selected = {0U, 1U};
+    const auto primary = apex::app::buildWorkspaceAiSplineGeometry(spline);
+    const auto interval = apex::app::buildWorkspaceAiSplineIntervalGeometry(
+        spline, {0.25F, 0.2504F});
+    const auto left = apex::app::buildWorkspaceAiSplineSideGeometry(
+        spline, apex::app::WorkspaceAiSplineSide::left);
+    const auto right = apex::app::buildWorkspaceAiSplineSideGeometry(
+        spline, apex::app::WorkspaceAiSplineSide::right);
+    const auto selection =
+        apex::app::buildWorkspaceAiSplineSelectionGeometry(spline, selected);
+    const auto camber = apex::app::buildWorkspaceAiSplineCamberGeometry(spline);
+    require(primary.ok() && interval.ok() && left.ok() && right.ok() &&
+                selection.ok() && camber.ok(),
+            "initial live AI spline passes convert");
+
     auto request = request_for(value);
-    request.packets.selected_node = 1U;
-    request.selected_mesh_pipeline = selected_mesh_pipeline(value);
+    request.ai_spline_geometry = &primary.geometry;
+    request.ai_spline_pipeline = ai_spline_pipeline(value);
+    request.ai_spline_interval_geometry = &interval.geometry;
+    request.ai_spline_interval_pipeline = ai_spline_interval_pipeline(value);
+    request.ai_spline_left_geometry = &left.geometry;
+    request.ai_spline_left_pipeline = ai_spline_side_pipeline(value);
+    request.ai_spline_right_geometry = &right.geometry;
+    request.ai_spline_right_pipeline = ai_spline_side_pipeline(value);
+    request.ai_spline_selection_geometry = &selection.geometry;
+    request.ai_spline_selection_pipeline = ai_spline_camber_pipeline(value);
+    request.ai_spline_camber_geometry = &camber.geometry;
+    request.ai_spline_camber_pipeline = ai_spline_camber_pipeline(value);
     FakeDevice device;
-    auto prepared = apex::app::prepareWorkspaceViewport(
-        device, value.document, request);
-    require(prepared.ok(), "selected-mesh viewport preparation succeeds");
+    auto prepared =
+        apex::app::prepareWorkspaceViewport(device, value.document, request);
+    require(prepared.ok(), "all live AI spline passes prepare together");
 
     FakeTarget target(request.presentation);
     WorkspaceViewportFrameRequest frame;
     frame.camera.clip_space = CameraClipSpace::vulkan;
     frame.frame_constants = KsPerPixelFrameConstants{};
     Diagnostic diagnostic;
-    frame.selected_mesh_elapsed_ms = 0U;
-    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
-                WorkspaceViewportFrameStatus::ready,
-            "selected-mesh initial frame draws");
-    frame.selected_mesh_elapsed_ms = 2000U;
-    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
-                WorkspaceViewportFrameStatus::ready,
-            "selected-mesh zero-alpha boundary frame draws");
-    frame.selected_mesh_elapsed_ms = 2001U;
-    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
-                WorkspaceViewportFrameStatus::ready,
-            "selected-mesh expired frame draws scene only");
-    require(device.selected_mesh_counts ==
-                std::vector<std::size_t>({1U, 1U, 0U}),
-            "selected mesh remains scheduled at 2000 ms and expires after it");
+    require(
+        prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+            device.overlay_buffers.size() == 6U,
+        "initial live AI spline generation draws all passes");
+    const std::vector<const Buffer *> initial_buffers = device.overlay_buffers;
 
-    std::vector<std::array<float, 4U>> colors;
-    for (const auto& update : device.buffer_updates) {
-        if (update.bytes.size() != sizeof(std::array<float, 4U>)) continue;
-        std::array<float, 4U> color{};
-        std::memcpy(color.data(), update.bytes.data(), update.bytes.size());
-        colors.push_back(color);
+    const std::array<std::uint32_t, 1U> invalid_selected = {99U};
+    apex::app::WorkspaceAiSplineOverlayRequest invalid_overlay_request;
+    invalid_overlay_request.show_left = true;
+    invalid_overlay_request.selected_indices = invalid_selected;
+    const auto invalid_overlays = apex::app::buildWorkspaceAiSplineOverlays(
+        spline, invalid_overlay_request);
+    require(!invalid_overlays.ok() &&
+                invalid_overlays.diagnostic.code ==
+                    "workspace_ai_spline_selection_index_invalid" &&
+                invalid_overlays.overlays.primary.vertices.empty() &&
+                !invalid_overlays.overlays.left.has_value(),
+            "failed multi-pass build publishes no partial overlay generation");
+
+    apex::authoring::AiSplineSession session(spline);
+    const std::array<apex::authoring::AiSplinePointPositionEdit, 2U> edits{
+        apex::authoring::AiSplinePointPositionEdit{0U, {2.0F, 1.0F, 3.0F}},
+        apex::authoring::AiSplinePointPositionEdit{1U, {12.0F, 2.0F, 4.0F}},
+    };
+    const auto edited = session.setPointPositions(edits);
+    apex::app::WorkspaceAiSplineOverlayRequest overlay_request;
+    overlay_request.interval =
+        apex::app::WorkspaceAiSplineInterval{0.25F, 0.2504F};
+    overlay_request.show_left = true;
+    overlay_request.show_right = true;
+    overlay_request.selected_indices = selected;
+    overlay_request.show_camber = true;
+    auto updated = apex::app::buildWorkspaceAiSplineOverlays(
+        session.current(), overlay_request);
+    require(edited.ok() && edited.changed && updated.ok() &&
+                updated.overlays.interval.has_value() &&
+                updated.overlays.left.has_value() &&
+                updated.overlays.right.has_value() &&
+                updated.overlays.selection.has_value() &&
+                updated.overlays.camber.has_value(),
+            "one committed model rebuilds every enabled live pass");
+
+    const auto buffers_before_update = device.buffer_calls;
+    const auto replaced =
+        prepared.viewport->replaceAiSplineOverlays(device, updated.overlays);
+    require(replaced.ok() && replaced.replaced_pass_count == 6U &&
+                device.buffer_calls == buffers_before_update + 6U,
+            "live update allocates one complete immutable pass generation");
+
+    const std::array<const apex::app::WorkspaceAiSplineGeometry *, 6U>
+        updated_geometries = {
+            &updated.overlays.primary,    &*updated.overlays.interval,
+            &*updated.overlays.left,      &*updated.overlays.right,
+            &*updated.overlays.selection, &*updated.overlays.camber};
+    std::array<std::vector<std::byte>, 6U> updated_bytes;
+    for (std::size_t index = 0U; index < updated_geometries.size(); ++index) {
+        const auto bytes =
+            std::as_bytes(std::span(updated_geometries[index]->vertices));
+        updated_bytes[index] = {bytes.begin(), bytes.end()};
     }
-    require(colors.size() == 2U &&
-                colors[0] == std::array<float, 4U>{1.0F, 0.0F, 1.0F, 0.5F} &&
-                colors[1] == std::array<float, 4U>{1.0F, 0.0F, 1.0F, 0.0F},
-            "viewport uploads exact magenta fade colors before the selected pass");
+    updated.overlays = {};
+    require(
+        prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+            device.overlay_buffers.size() == 12U,
+        "next frame draws the committed live pass generation");
+    const std::vector<const Buffer *> committed_buffers(
+        device.overlay_buffers.end() - 6, device.overlay_buffers.end());
+    require(std::equal(initial_buffers.begin(), initial_buffers.end(),
+                       committed_buffers.begin(),
+                       [](const Buffer *before, const Buffer *after) {
+                           return before != after;
+                       }),
+            "live update replaces every retained AI spline buffer");
+    for (std::size_t index = 0U; index < committed_buffers.size(); ++index) {
+        const auto *buffer =
+            dynamic_cast<const FakeBuffer *>(committed_buffers[index]);
+        require(buffer != nullptr && buffer->bytes() == updated_bytes[index],
+                "live AI spline buffer owns bytes after input release");
+    }
+
+    const std::array<apex::authoring::AiSplinePointPositionEdit, 1U>
+        next_edits{apex::authoring::AiSplinePointPositionEdit{
+            2U, {22.0F, 7.0F, 8.0F}}};
+    const auto next_edited = session.setPointPositions(next_edits);
+    auto next = apex::app::buildWorkspaceAiSplineOverlays(session.current(),
+                                                           overlay_request);
+    require(next_edited.ok() && next_edited.changed && next.ok(),
+            "a newer model generation rebuilds every live pass");
+
+    auto malformed = next.overlays;
+    malformed.primary.chunks = {{0U, 4U}, {4U, 4U}};
+    const auto buffers_before_malformed = device.buffer_calls;
+    const auto malformed_update =
+        prepared.viewport->replaceAiSplineOverlays(device, malformed);
+    require(!malformed_update.ok() &&
+                malformed_update.diagnostic.code ==
+                    "workspace_viewport_ai_spline_chunk_invalid" &&
+                device.buffer_calls == buffers_before_malformed,
+            "live replacement rejects overrun chunks before allocation");
+
+    auto over_limit = next.overlays;
+    over_limit.primary.vertices.resize(
+        apex::render::max_overlay_line_total_vertices + 1U);
+    const auto over_limit_update =
+        prepared.viewport->replaceAiSplineOverlays(device, over_limit);
+    require(!over_limit_update.ok() &&
+                over_limit_update.diagnostic.code ==
+                    "workspace_viewport_ai_spline_limit" &&
+                device.buffer_calls == buffers_before_malformed,
+            "live replacement checks aggregate limits before allocation");
+
+    auto invalid = next.overlays;
+    invalid.primary.vertices.front().position[0] =
+        std::numeric_limits<float>::infinity();
+    const auto rejected =
+        prepared.viewport->replaceAiSplineOverlays(device, invalid);
+    require(!rejected.ok() && rejected.diagnostic.code ==
+                                  "workspace_viewport_ai_spline_vertex_invalid",
+            "non-finite live replacement is rejected before allocation");
+
+    const auto live_buffers_before_failure = *device.live_buffer_count;
+    device.fail_buffer_call = device.buffer_calls + 3U;
+    device.fail_buffer_status = BufferStatus::upload_failed;
+    const auto upload_failed =
+        prepared.viewport->replaceAiSplineOverlays(device, next.overlays);
+    require(!upload_failed.ok() &&
+                upload_failed.status ==
+                    apex::app::WorkspaceViewportAiSplineUpdateStatus::
+                        upload_failed &&
+                upload_failed.diagnostic.code == "fake_buffer_failed",
+            "mid-generation upload failure reports its exact status");
+    require(*device.live_buffer_count == live_buffers_before_failure,
+            "mid-generation failure releases only temporary buffers");
+    device.fail_buffer_call = 0U;
+
+    require(
+        prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+            WorkspaceViewportFrameStatus::ready,
+        "failed live replacements keep the viewport drawable");
+    const auto failed_frame_begin = device.overlay_buffers.end() - 6;
+    require(std::equal(committed_buffers.begin(), committed_buffers.end(),
+                       failed_frame_begin),
+            "newer-model upload failure retains the prior generation");
+
+    auto missing_pass = next.overlays;
+    missing_pass.camber.reset();
+    const auto mismatched =
+        prepared.viewport->replaceAiSplineOverlays(device, missing_pass);
+    require(!mismatched.ok() &&
+                mismatched.diagnostic.code ==
+                    "workspace_viewport_ai_spline_update_configuration_invalid",
+            "live replacement cannot detach a prepared pass");
+    FakeDevice foreign_device;
+    const auto foreign =
+        prepared.viewport->replaceAiSplineOverlays(foreign_device,
+                                                   next.overlays);
+    require(!foreign.ok() &&
+                foreign.diagnostic.code ==
+                    "workspace_viewport_ai_spline_update_device_mismatch" &&
+                foreign_device.buffer_calls == 0U,
+            "live replacement rejects a different same-backend device");
+}
+
+void draws_selected_mesh_with_recovered_fade_boundary() {
+  auto value = fixture();
+  auto request = request_for(value);
+  request.packets.selected_node = 1U;
+  request.selected_mesh_pipeline = selected_mesh_pipeline(value);
+  FakeDevice device;
+  auto prepared =
+      apex::app::prepareWorkspaceViewport(device, value.document, request);
+  require(prepared.ok(), "selected-mesh viewport preparation succeeds");
+
+  FakeTarget target(request.presentation);
+  WorkspaceViewportFrameRequest frame;
+  frame.camera.clip_space = CameraClipSpace::vulkan;
+  frame.frame_constants = KsPerPixelFrameConstants{};
+  Diagnostic diagnostic;
+  frame.selected_mesh_elapsed_ms = 0U;
+  require(
+      prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+          WorkspaceViewportFrameStatus::ready,
+      "selected-mesh initial frame draws");
+  frame.selected_mesh_elapsed_ms = 2000U;
+  require(
+      prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+          WorkspaceViewportFrameStatus::ready,
+      "selected-mesh zero-alpha boundary frame draws");
+  frame.selected_mesh_elapsed_ms = 2001U;
+  require(
+      prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+          WorkspaceViewportFrameStatus::ready,
+      "selected-mesh expired frame draws scene only");
+  require(device.selected_mesh_counts == std::vector<std::size_t>({1U, 1U, 0U}),
+          "selected mesh remains scheduled at 2000 ms and expires after it");
+
+  std::vector<std::array<float, 4U>> colors;
+  for (const auto &update : device.buffer_updates) {
+    if (update.bytes.size() != sizeof(std::array<float, 4U>))
+      continue;
+    std::array<float, 4U> color{};
+    std::memcpy(color.data(), update.bytes.data(), update.bytes.size());
+    colors.push_back(color);
+  }
+  require(
+      colors.size() == 2U &&
+          colors[0] == std::array<float, 4U>{1.0F, 0.0F, 1.0F, 0.5F} &&
+          colors[1] == std::array<float, 4U>{1.0F, 0.0F, 1.0F, 0.0F},
+      "viewport uploads exact magenta fade colors before the selected pass");
 }
 
 void toggles_prepared_authoring_grid_per_frame() {
@@ -2180,39 +2471,44 @@ void rejects_invalid_inputs() {
 
     invalid_shadows = {};
     invalid_shadows.skinned_pipeline = skinned_shadow_pipeline(value);
-    invalid_shadows.skinned_pipeline->vertex_layout.stride = 11U * sizeof(float);
+    invalid_shadows.skinned_pipeline->vertex_layout.stride =
+        11U * sizeof(float);
     invalid_shadows.skinned_pipeline->vertex_layout.attributes.resize(4U);
     request.directional_shadows = invalid_shadows;
-    auto malformed_skinned_shadow = apex::app::prepareWorkspaceViewport(
-        device, value.document, request);
+    auto malformed_skinned_shadow =
+        apex::app::prepareWorkspaceViewport(device, value.document, request);
     require(!malformed_skinned_shadow.ok() &&
                 malformed_skinned_shadow.diagnostic.code ==
-                    "workspace_viewport_shadow_depth_only_indexed_pipeline_vertex_layout_invalid" &&
+                    "workspace_viewport_shadow_depth_only_indexed_pipeline_"
+                    "vertex_layout_invalid" &&
                 device.texture_calls == 0U && device.depth_calls == 0U,
             "malformed skinned shadow stream fails before map allocation");
     value.module_set.directional_shadow_receiver = false;
 
     request = request_for(value);
     request.shader_modules = {};
-    auto missing_modules = apex::app::prepareWorkspaceViewport(
-        device, value.document, request);
+    auto missing_modules =
+        apex::app::prepareWorkspaceViewport(device, value.document, request);
     require(!missing_modules.ok() &&
-                missing_modules.status == apex::app::WorkspaceViewportStatus::unsupported &&
-                missing_modules.diagnostic.code == "stock_material_shader_module_missing" &&
+                missing_modules.status ==
+                    apex::app::WorkspaceViewportStatus::unsupported &&
+                missing_modules.diagnostic.code ==
+                    "stock_material_shader_module_missing" &&
                 !missing_modules.viewport,
             "missing caller shader modules fail without a viewport");
 
     auto malformed = value.document;
     malformed.scene.snapshot.root = apex::scene::invalid_node_id;
-    auto malformed_result = apex::app::prepareWorkspaceViewport(device, malformed, request);
-    require(!malformed_result.ok() &&
-                malformed_result.diagnostic.code == "workspace_viewport_document_invalid",
+    auto malformed_result =
+        apex::app::prepareWorkspaceViewport(device, malformed, request);
+    require(!malformed_result.ok() && malformed_result.diagnostic.code ==
+                                          "workspace_viewport_document_invalid",
             "malformed document fails before rendering");
 
     request = request_for(value);
     request.color_samples = 2U;
-    auto unsupported_samples = apex::app::prepareWorkspaceViewport(
-        device, value.document, request);
+    auto unsupported_samples =
+        apex::app::prepareWorkspaceViewport(device, value.document, request);
     require(!unsupported_samples.ok() &&
                 unsupported_samples.status ==
                     apex::app::WorkspaceViewportStatus::unsupported &&
@@ -2222,7 +2518,8 @@ void rejects_invalid_inputs() {
 
     request = request_for(value);
     request.limits.max_scene_nodes = 0U;
-    auto limited = apex::app::prepareWorkspaceViewport(device, value.document, request);
+    auto limited =
+        apex::app::prepareWorkspaceViewport(device, value.document, request);
     require(!limited.ok() &&
                 limited.status == apex::app::WorkspaceViewportStatus::invalid &&
                 !limited.viewport,
@@ -2233,7 +2530,8 @@ void rejects_frame_mismatch_and_preserves_present_atomicity() {
     auto value = fixture();
     auto request = request_for(value);
     FakeDevice device;
-    auto prepared = apex::app::prepareWorkspaceViewport(device, value.document, request);
+    auto prepared =
+        apex::app::prepareWorkspaceViewport(device, value.document, request);
     require(prepared.ok(), "viewport setup for frame rejection succeeds");
 
     PresentationTargetDescription wrong_description = request.presentation;
@@ -2243,16 +2541,29 @@ void rejects_frame_mismatch_and_preserves_present_atomicity() {
     frame.camera.clip_space = CameraClipSpace::vulkan;
     frame.frame_constants = KsPerPixelFrameConstants{};
     Diagnostic diagnostic;
-    auto status = prepared.viewport->drawAndPresent(device, wrong_target, frame, diagnostic);
+    FakeDevice foreign_device;
+    FakeTarget matching_target(request.presentation);
+    auto status = prepared.viewport->drawAndPresent(
+        foreign_device, matching_target, frame, diagnostic);
+    require(status == WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code == "workspace_viewport_device_mismatch" &&
+                foreign_device.draw_calls == 0U &&
+                foreign_device.present_calls == 0U,
+            "viewport rejects a different same-backend device");
+
+    status = prepared.viewport->drawAndPresent(device, wrong_target, frame,
+                                               diagnostic);
     require(status == WorkspaceViewportFrameStatus::invalid &&
                 diagnostic.code == "workspace_viewport_target_mismatch" &&
                 device.present_calls == 0U,
             "wrong target size fails before present");
 
-    PresentationTargetDescription wrong_format_description = request.presentation;
+    PresentationTargetDescription wrong_format_description =
+        request.presentation;
     wrong_format_description.format = TextureFormat::bgra8_unorm;
     FakeTarget wrong_format_target(wrong_format_description);
-    status = prepared.viewport->drawAndPresent(device, wrong_format_target, frame, diagnostic);
+    status = prepared.viewport->drawAndPresent(device, wrong_format_target,
+                                               frame, diagnostic);
     require(status == WorkspaceViewportFrameStatus::invalid &&
                 diagnostic.code == "workspace_viewport_target_mismatch" &&
                 device.present_calls == 0U,
@@ -2260,35 +2571,42 @@ void rejects_frame_mismatch_and_preserves_present_atomicity() {
 
     FakeTarget target(request.presentation);
     device.fail_draw = true;
-    status = prepared.viewport->drawAndPresent(device, target, frame, diagnostic);
+    status =
+        prepared.viewport->drawAndPresent(device, target, frame, diagnostic);
     require(status == WorkspaceViewportFrameStatus::execution_failed &&
-                diagnostic.code == "fake_draw_failed" && device.present_calls == 0U,
+                diagnostic.code == "fake_draw_failed" &&
+                device.present_calls == 0U,
             "draw failure never presents a partial frame");
 
     device.fail_draw = false;
     device.invalid_draw = true;
-    status = prepared.viewport->drawAndPresent(device, target, frame, diagnostic);
+    status =
+        prepared.viewport->drawAndPresent(device, target, frame, diagnostic);
     require(status == WorkspaceViewportFrameStatus::invalid &&
-                diagnostic.code == "fake_draw_invalid" && device.present_calls == 0U,
+                diagnostic.code == "fake_draw_invalid" &&
+                device.present_calls == 0U,
             "invalid draw status is preserved and never presented");
 
     device.invalid_draw = false;
     device.unsupported_draw = true;
-    status = prepared.viewport->drawAndPresent(device, target, frame, diagnostic);
+    status =
+        prepared.viewport->drawAndPresent(device, target, frame, diagnostic);
     require(status == WorkspaceViewportFrameStatus::unsupported &&
-                diagnostic.code == "fake_draw_unsupported" && device.present_calls == 0U,
+                diagnostic.code == "fake_draw_unsupported" &&
+                device.present_calls == 0U,
             "unsupported draw status is preserved and never presented");
 
     device.unsupported_draw = false;
     frame.camera.clip_space = CameraClipSpace::d3d12;
-    status = prepared.viewport->drawAndPresent(device, target, frame, diagnostic);
+    status =
+        prepared.viewport->drawAndPresent(device, target, frame, diagnostic);
     require(status == WorkspaceViewportFrameStatus::invalid &&
                 diagnostic.code == "workspace_viewport_camera_clip_space" &&
                 device.present_calls == 0U,
             "wrong backend camera convention fails before draw and present");
 }
 
-}  // namespace
+} // namespace
 
 int main() {
     try {
@@ -2301,6 +2619,7 @@ int main() {
         draws_recovered_ai_spline_side_passes();
         draws_recovered_ai_spline_selected_index_pass();
         draws_recovered_ai_spline_camber_pass();
+        replaces_committed_ai_spline_overlays_atomically();
         draws_selected_mesh_with_recovered_fade_boundary();
         toggles_prepared_authoring_grid_per_frame();
         rejects_unbound_selection_axis_requests();
@@ -2314,7 +2633,7 @@ int main() {
         rejects_frame_mismatch_and_preserves_present_atomicity();
         std::cout << "workspace_viewport_tests: ok\n";
         return 0;
-    } catch (const std::exception& error) {
+    } catch (const std::exception &error) {
         std::cerr << "workspace_viewport_tests: " << error.what() << '\n';
         return 1;
     }

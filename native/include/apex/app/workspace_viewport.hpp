@@ -177,6 +177,25 @@ struct WorkspaceViewportFrameRequest {
     std::optional<std::uint32_t> selected_mesh_elapsed_ms;
 };
 
+enum class WorkspaceViewportAiSplineUpdateStatus : std::uint8_t {
+    ready,
+    invalid,
+    unsupported,
+    allocation_failed,
+    upload_failed,
+};
+
+struct WorkspaceViewportAiSplineUpdateResult {
+    WorkspaceViewportAiSplineUpdateStatus status =
+        WorkspaceViewportAiSplineUpdateStatus::invalid;
+    render::Diagnostic diagnostic;
+    std::size_t replaced_pass_count = 0U;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == WorkspaceViewportAiSplineUpdateStatus::ready;
+    }
+};
+
 // The editor's browser viewport uses an orbit target, yaw/pitch, and distance
 // state. This controller keeps that state in the application layer so SDL,
 // Vulkan, and D3D12 code do not acquire camera-gesture semantics.
@@ -249,7 +268,23 @@ public:
         const WorkspaceViewportFrameRequest& request,
         render::Diagnostic& diagnostic);
 
+    // Allocate every replacement buffer before changing retained resources.
+    // A failed call leaves every previously visible pass unchanged.
+    // Call this synchronous operation on the render thread, between draws.
+    [[nodiscard]] WorkspaceViewportAiSplineUpdateResult
+    replaceAiSplineOverlays(render::Device& device,
+                            const WorkspaceAiSplineOverlaySet& overlays);
+
 private:
+    struct AiSplineUpdateRequest {
+        const WorkspaceAiSplineGeometry* primary = nullptr;
+        const WorkspaceAiSplineGeometry* interval = nullptr;
+        const WorkspaceAiSplineGeometry* left = nullptr;
+        const WorkspaceAiSplineGeometry* right = nullptr;
+        const WorkspaceAiSplineGeometry* selection = nullptr;
+        const WorkspaceAiSplineGeometry* camber = nullptr;
+    };
+
     struct LodCatalog {
         apex::scene::Vector3 bounds_center{};
         std::optional<std::uint32_t> selected_index;
@@ -267,8 +302,12 @@ private:
         std::vector<WorkspaceAiSplineChunk> chunks;
     };
 
+    [[nodiscard]] WorkspaceViewportAiSplineUpdateResult
+    replaceAiSplineOverlaysBorrowed(render::Device& device,
+                                    const AiSplineUpdateRequest& request);
+
     WorkspaceViewport(
-        render::Backend backend,
+        render::Device* device, render::Backend backend,
         render::PresentationTargetDescription presentation,
         std::unique_ptr<render::Texture> color,
         std::unique_ptr<render::Texture> resolved_color,
@@ -289,6 +328,7 @@ private:
         std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows,
         std::optional<LodCatalog> lod_catalog);
 
+    render::Device* device_ = nullptr;
     render::Backend backend_ = render::Backend::Vulkan;
     render::PresentationTargetDescription presentation_{};
     std::unique_ptr<render::Texture> color_;
@@ -337,5 +377,8 @@ struct WorkspaceViewportPrepareResult {
 
 [[nodiscard]] const char* workspace_viewport_frame_status_name(
     WorkspaceViewportFrameStatus status) noexcept;
+
+[[nodiscard]] const char* workspace_viewport_ai_spline_update_status_name(
+    WorkspaceViewportAiSplineUpdateStatus status) noexcept;
 
 }  // namespace apex::app
