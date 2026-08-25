@@ -8,7 +8,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -164,6 +166,16 @@ void plansCompressedEdgesAndMips() {
                 bc4EdgePlan.plan->subresources[0].rowPitch == 16U &&
                 bc4EdgePlan.plan->subresources[0].size == 16U,
             "BC4 edge pitches");
+
+    const auto bc6Edge = dx10(5, 3, 95, 32);
+    const auto bc6EdgePlan = buildDdsUploadPlan(bc6Edge, "bc6h-edge.dds");
+    require(bc6EdgePlan.ok() && bc6EdgePlan.plan->mapping.format == TextureFormat::bc6h_ufloat &&
+                bc6EdgePlan.plan->subresources.size() == 1U &&
+                bc6EdgePlan.plan->subresources[0].blocksWide == 2U &&
+                bc6EdgePlan.plan->subresources[0].blocksHigh == 1U &&
+                bc6EdgePlan.plan->subresources[0].rowPitch == 32U &&
+                bc6EdgePlan.plan->subresources[0].size == 32U,
+            "BC6H edge pitches");
 }
 
 void plansRawPitches() {
@@ -226,6 +238,12 @@ void rejectsMalformedPayloadAndLimits() {
                 shortBc4Plan.diagnostic.code == "truncated_payload" &&
                 shortBc4Plan.diagnostic.offset == 148U,
             "truncated BC4 edge payload");
+    const auto shortBc6 = dx10(5, 3, 95, 16);
+    const auto shortBc6Plan = buildDdsUploadPlan(shortBc6, "bc6h-short.dds");
+    require(!shortBc6Plan.ok() && shortBc6Plan.status == TextureUploadStatus::invalid &&
+                shortBc6Plan.diagnostic.code == "truncated_payload" &&
+                shortBc6Plan.diagnostic.offset == 148U,
+            "truncated BC6H edge payload");
     const auto attributed = buildDdsUploadPlan(shortBc, "cars/body.dds");
     require(attributed.diagnostic.source == "cars/body.dds" && attributed.diagnostic.offset == 128u,
             "upload diagnostic source attribution");
@@ -343,11 +361,13 @@ void rejectsUnsupportedDx10LayoutsAndInvalidBits() {
             "non-byte-aligned bit depth rejection");
 
     const auto bc6 = apex::formats::inspectDds(dx10(4, 4, 95, 16u));
-    require(bc6.has_value(), "BC6H descriptor for GPU rejection");
+    require(bc6.has_value(), "BC6H descriptor for direct upload");
     const auto bc6Plan = buildDdsUploadPlan(dx10(4, 4, 95, 16u), *bc6, "bc6h.dds");
-    require(bc6Plan.status == TextureUploadStatus::unsupported &&
-                bc6Plan.diagnostic.code == "gpu_required" && !bc6Plan.plan.has_value(),
-            "BC6H upload remains explicitly GPU-required");
+    require(bc6Plan.ok() && bc6Plan.plan->mapping.format == TextureFormat::bc6h_ufloat &&
+                bc6Plan.plan->subresources.size() == 1U &&
+                bc6Plan.plan->subresources.front().rowPitch == 16U &&
+                bc6Plan.plan->subresources.front().size == 16U,
+            "BC6H direct upload plan");
 }
 
 void rejectsUnsupportedWithoutApproximation() {
@@ -452,6 +472,56 @@ void plansPortableDecodedTextureResources() {
             "generic texture planner applies the decoded-output limit to PNG");
 }
 
+std::vector<std::uint8_t> readRepositoryJpeg() {
+    constexpr std::array<std::string_view, 3> roots = {
+        "test/content", "../test/content", "../../test/content"};
+    for (const auto root : roots) {
+        std::ifstream file(std::string(root) +
+                               "/cars/619_gen6_arca_base/skins/default/preview.jpg",
+                           std::ios::binary | std::ios::ate);
+        if (!file) continue;
+        const auto end = file.tellg();
+        if (end < 0) continue;
+        std::vector<std::uint8_t> bytes(static_cast<std::size_t>(end));
+        file.seekg(0, std::ios::beg);
+        file.read(reinterpret_cast<char*>(bytes.data()),
+                  static_cast<std::streamsize>(bytes.size()));
+        if (file.good() || file.eof()) return bytes;
+    }
+    return {};
+}
+
+void plansPortableJpegResources() {
+    const auto jpeg = readRepositoryJpeg();
+    if (jpeg.empty()) return;
+    const auto decoded = plan_decoded_texture_payload(jpeg, "preview.jpg");
+    if (!decoded.ok()) {
+        require(decoded.status == TextureUploadStatus::unsupported,
+                "JPEG decode failure is explicit when the optional decoder is unavailable");
+        return;
+    }
+    require(decoded.plan.description.width == 1022U &&
+                decoded.plan.description.height == 575U &&
+                decoded.plan.levels.size() == 1U &&
+                decoded.plan.levels.front().pixels.size() == 1022U * 575U * 4U,
+            "restored LFS JPEG decodes to bounded RGBA8 pixels");
+
+    for (const auto length : {std::size_t{0U}, std::size_t{1U}, std::size_t{2U},
+                              std::size_t{3U}, jpeg.size() - 1U}) {
+        const auto truncated = std::span<const std::uint8_t>(jpeg.data(), length);
+        const auto result = plan_decoded_texture_payload(truncated, "truncated.jpg");
+        require(!result.ok() &&
+                    (result.status == TextureUploadStatus::invalid ||
+                     result.status == TextureUploadStatus::unsupported),
+                "truncated JPEG is rejected without a partial plan");
+    }
+    apex::core::ParseLimits limits;
+    limits.maxOutputBytes = 1024U;
+    const auto limited = plan_decoded_texture_payload(jpeg, "limited.jpg", limits);
+    require(!limited.ok() && limited.diagnostic.code == "output_too_large",
+            "JPEG decoded-output budget is enforced before allocation");
+}
+
 void rejectsOversizedUploadSubresourceLists() {
     const std::array<std::byte, 4> pixel = {
         std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
@@ -479,6 +549,7 @@ int main() {
         rejectsUnsupportedDx10LayoutsAndInvalidBits();
         rejectsUnsupportedWithoutApproximation();
         plansPortableDecodedTextureResources();
+        plansPortableJpegResources();
         rejectsOversizedUploadSubresourceLists();
         std::cout << "texture upload tests passed\n";
         return 0;
