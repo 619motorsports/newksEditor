@@ -2748,3 +2748,40 @@ A second packaged check removed GrassFX and kept one RainFX soaking surface. Its
 negative-input and disabled captures both produced `22fa65aa1df02d53`. This proves
 that snow input does not extrapolate the wet-material approximation. Visual inspection
 of the snow capture showed the expected white tips and green roots.
+
+## ksEditor AI spline v7 evidence
+
+The inspected `ksNet.dll` and PDB hashes are the same binaries listed in the RPM
+section. PDB-backed Ghidra analysis resolves `AISpline::loadFast` at `0x1006959b`,
+`AISpline::loadVersion6` at `0x1006968f`, `AISpline::loadVersion7` at
+`0x10069aec`, and `AISpline::save` at `0x1006a3b9`. The editor chooses the legacy
+loader for versions below 7 and always writes version 7.
+
+Version 7 starts with four little-endian 32-bit words: version, spline-point
+count, lap time, and a reserved zero. Each spline point is the PDB-backed
+20-byte `SplinePoint`: three float32 coordinates, float32 point length, and a
+signed 32-bit tag. A 32-bit payload count follows the point array.
+
+The writer emits 72 bytes per payload in this order: speed, gas, brake, lateral
+G, radius, two side distances, camber, direction, three normal components,
+length, three forward-vector components, one reserved zero word, and grade.
+All values except the reserved word are float32. The native in-memory
+`AISplinePayload` is 80 bytes and also contains grip, distance-from-corner, and
+pit-lane fields, but `AISpline::save` does not write those fields in this block.
+
+`InterpolatingSpline::saveGrid` at `0x10037294` then writes a 32-bit presence
+flag. A present grid contains two float32 three-vectors for maximum and minimum
+extents, a 32-bit neighbor count, a float32 sampling density, and a 32-bit row
+count. Each row starts with a 32-bit cell count. Each cell starts with a 32-bit
+index count followed by that many 32-bit spline-point indices. The corresponding
+loader is at `0x10036e52`. A native parser must bound every count and aggregate
+allocation before reproducing this loader.
+
+The installed Imola `ai/fast_lane.ai` has SHA-256
+`aff2862f2194e2d3919d8eb0a4ae4485259228de06e52f70b8bbc89330c4d220`.
+It contains 3,166 points, 3,166 payloads, and a present grid. The installed
+`ai/pit_lane.ai` has SHA-256
+`2021fb12003b170519886ea34823126e22cfd04ded8de65ed76cf9ec149d5f4d`.
+It contains 1,094 points and payloads followed by a zero grid-presence word.
+These fixtures confirm the recovered strides and offsets. Version 2 remains a
+separate legacy layout and is not inferred from the version 7 records.
