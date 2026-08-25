@@ -200,6 +200,29 @@ struct KsPerPixelMaterialResolveResult {
     }
 };
 
+enum class StockShadowCasterMaterialResolveStatus : std::uint8_t {
+    ready,
+    invalid_input,
+};
+
+struct StockShadowCasterMaterialResolveResult {
+    StockShadowCasterMaterialResolveStatus status =
+        StockShadowCasterMaterialResolveStatus::invalid_input;
+    StockShadowCasterMaterialConstants constants{};
+    MaterialBindingDiagnostic diagnostic;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == StockShadowCasterMaterialResolveStatus::ready;
+    }
+};
+
+// Resolve the recovered 32-byte ksShadowGenAT cbMaterial record. The four
+// lighting values and emissive normalization use the same KN5/CSP precedence
+// rules as the portable ksPerPixel resolver. A missing ksAlphaRef is kept at
+// zero because the stock shadow ABI does not establish a package default.
+[[nodiscard]] StockShadowCasterMaterialResolveResult
+resolve_stock_shadow_caster_material_constants(const MaterialBinding& binding);
+
 // Resolve the bounded ksPerPixel material-value subset. ksPerPixelNM and the
 // tangent-space ksPerPixelMultiMap families (including their alpha-tested AT
 // variants) are accepted only for tangent-space normals with Fresnel

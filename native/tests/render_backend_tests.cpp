@@ -178,6 +178,24 @@ std::vector<std::uint8_t> executable_sampled_fragment_shader() {
     return result;
 }
 
+std::vector<std::uint8_t> executable_shadow_alpha_fragment_shader() {
+    // Generated from tests/shaders/indexed_shadow_alpha.frag with glslang
+    // 16.4.0. The bindings and 32-byte record match the recovered stock
+    // t0/s1/b4 contract. This fixture is not stock shader bytecode.
+    // Source SHA-256: cf8aefec8e4fcf1190b6c0dc29a83e04fd2c6c280cf139f192c9babdb1ee69be
+    // SPIR-V SHA-256: 75da36a968d5f8fede40947b5d7f24598d95bbb56069588874b1eeac1a072c06
+    constexpr std::string_view hex =
+        "03022307000001000b000800260000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00060004000000040000006d61696e00000000130000001000030004000000070000004700040009000000210000000000000047000400090000002200000000000000470004000d0000002100000001000000470004000d000000220000000000000047000400130000001e00000000000000470003001a00000002000000480005001a000000000000002300000000000000480005001a000000010000002300000010000000470004001c0000002100000004000000470004001c00000022000000000000001300020002000000210003000300000002000000160003000600000020000000190009000700000006000000010000000000000000000000000000000100000000000000200004000800000000000000070000003b0004000800000009000000000000001a0002000b000000200004000c000000000000000b0000003b0004000c0000000d000000000000001b0003000f0000000700000017000400110000000600000002000000200004001200000001000000110000003b00040012000000130000000100000017000400150000000600000004000000150004001700000020000000000000002b0004001700000018000000030000001e0004001a0000001500000015000000200004001b000000020000001a0000003b0004001b0000001c00000002000000150004001d00000020000000010000002b0004001d0000001e00000001000000200004001f000000020000000600000014000200220000003600050002000000040000000000000003000000f8000200050000003d000400070000000a000000090000003d0004000b0000000e0000000d000000560005000f000000100000000a0000000e0000003d00040011000000140000001300000057000500150000001600000010000000140000005100050006000000190000001600000003000000410006001f000000200000001c0000001e000000180000003d000400060000002100000020000000b800050022000000230000001900000021000000f70003002500000000000000fa000400230000002400000025000000f800020024000000fc000100f800020025000000fd00010038000100";
+    require(hex.size() % 2U == 0U,
+            "embedded alpha shadow shader hex alignment");
+    std::vector<std::uint8_t> result(hex.size() / 2U);
+    for (std::size_t index = 0U; index < result.size(); ++index)
+        result[index] = static_cast<std::uint8_t>(
+            (hex_digit(hex[index * 2U]) << 4U) |
+            hex_digit(hex[index * 2U + 1U]));
+    return result;
+}
+
 std::vector<std::uint8_t> executable_directional_shadow_receiver_fragment_shader() {
     // Generated from tests/shaders/indexed_directional_shadow_receiver.frag
     // with glslang 16.4.0. This proves the portable sampled-D32 ABI; it is
@@ -2245,6 +2263,119 @@ bool contract_backend(apex::render::Backend backend) {
                 sampled_result.rgba8[2] == std::byte{0} &&
                 sampled_result.rgba8[3] == std::byte{255},
             "portable diffuse outside pixel retains clear color");
+
+    // Execute the recovered alpha-shadow resource contract with explicit
+    // translated shaders. The stock locations are t0, s1, and a 32-byte b4
+    // material record whose final float is ksAlphaRef.
+    const std::array<std::byte, 4U> transparent_shadow_pixel = {
+        std::byte{255}, std::byte{255}, std::byte{255}, std::byte{0}};
+    const TextureUploadPlan transparent_shadow_uploads{{
+        TextureUpload{0U, 0U, 1U, 1U, 4U, transparent_shadow_pixel}}};
+    TextureResult transparent_shadow_texture = device.device->create_texture(
+        diffuse_description, transparent_shadow_uploads);
+    require(transparent_shadow_texture.ok(),
+            "alpha shadow transparent texture upload");
+    StockShadowCasterMaterialConstants shadow_material;
+    shadow_material.emissive_and_alpha_ref[3] = 0.5F;
+    std::array<std::byte, stock_shadow_caster_buffer_alignment>
+        shadow_material_bytes{};
+    std::memcpy(shadow_material_bytes.data(), &shadow_material,
+                sizeof(shadow_material));
+    const BufferDescription shadow_material_description{
+        shadow_material_bytes.size(), BufferUsage::uniform,
+        BufferMemory::host_visible, BufferMutability::immutable};
+    BufferResult shadow_material_buffer = device.device->create_buffer(
+        shadow_material_description, shadow_material_bytes);
+    require(shadow_material_buffer.ok(),
+            "alpha shadow material buffer upload");
+
+    PipelineProgram alpha_shadow_pipeline = sampled_pipeline;
+    alpha_shadow_pipeline.name = "stock-contract-alpha-directional-caster";
+    alpha_shadow_pipeline.targets.colors.clear();
+    alpha_shadow_pipeline.targets.has_depth = true;
+    alpha_shadow_pipeline.targets.depth = {
+        PipelineRenderTargetFormat::depth32_float, 1U};
+    alpha_shadow_pipeline.depth.test_enabled = true;
+    alpha_shadow_pipeline.depth.write_enabled = true;
+    alpha_shadow_pipeline.depth.compare = PipelineCompareOperation::less;
+    alpha_shadow_pipeline.resources.push_back(
+        {PipelineResourceKind::uniform_buffer, 0U, 4U, "cbMaterial"});
+    if (backend == Backend::Vulkan) {
+        alpha_shadow_pipeline.shaders[1].bytes =
+            executable_shadow_alpha_fragment_shader();
+    } else {
+#if defined(_WIN32)
+        constexpr std::string_view alpha_shadow_fragment_source =
+            "Texture2D txDiffuse : register(t0);"
+            "SamplerState samLinearShadow : register(s1);"
+            "cbuffer cbMaterial : register(b4) {"
+            "float4 lighting; float4 emissiveAndAlphaRef; };"
+            "void main(float4 position : SV_Position, float2 texcoord : TEXCOORD0) {"
+            "clip(txDiffuse.Sample(samLinearShadow, texcoord).a - "
+            "emissiveAndAlphaRef.w); }";
+        alpha_shadow_pipeline.shaders[1].bytes = executable_d3d_shader(
+            alpha_shadow_fragment_source, "ps_5_0");
+#else
+        require(false,
+                "D3D12 alpha shadow shader test requires Windows D3DCompile");
+#endif
+    }
+    DrawPacket alpha_shadow_packet = sampled_packet;
+    alpha_shadow_packet.flags.depth_test = true;
+    alpha_shadow_packet.flags.depth_write = true;
+    alpha_shadow_packet.material_profile.shadow_alpha_tested = true;
+    DepthOnlyIndexedStaticMeshDrawRequest alpha_shadow_request;
+    alpha_shadow_request.packet = &alpha_shadow_packet;
+    alpha_shadow_request.pipeline = &alpha_shadow_pipeline;
+    alpha_shadow_request.vertex_buffer = sampled_upload.upload->vertex_buffer.get();
+    alpha_shadow_request.index_buffer = sampled_upload.upload->index_buffer.get();
+    alpha_shadow_request.camera_frame = *indexed_camera.frame;
+    alpha_shadow_request.clear_depth = true;
+    alpha_shadow_request.material_mode =
+        DepthOnlyIndexedStaticMeshDrawRequest::MaterialMode::stock_alpha_tested;
+    alpha_shadow_request.resource_authority =
+        IndexedResourceAuthority::explicit_bindings;
+    alpha_shadow_request.alpha_tested_material_binding = {
+        shadow_material_buffer.buffer.get(), 0U,
+        stock_shadow_caster_material_bytes};
+
+    DepthAttachmentResult discarded_shadow_attachment =
+        device.device->create_depth_attachment(depth_readback_description);
+    require(discarded_shadow_attachment.ok(),
+            "discarded alpha shadow attachment creation");
+    alpha_shadow_request.alpha_tested_diffuse_binding = {
+        transparent_shadow_texture.texture.get(), sampler.sampler.get()};
+    const auto discarded_shadow =
+        device.device->draw_depth_only_indexed_static_mesh(
+            *discarded_shadow_attachment.attachment, alpha_shadow_request);
+    require(discarded_shadow.ok(), "transparent alpha shadow caster draw");
+    const auto discarded_shadow_depth = device.device->read_depth_attachment(
+        *discarded_shadow_attachment.attachment,
+        {depth_readback_description.width, depth_readback_description.height});
+    require(discarded_shadow_depth.ok() &&
+                discarded_shadow_depth.depth[16U *
+                                                   depth_readback_description.width +
+                                               16U] > 0.99F,
+            "alpha below ksAlphaRef preserves clear depth");
+
+    DepthAttachmentResult accepted_shadow_attachment =
+        device.device->create_depth_attachment(depth_readback_description);
+    require(accepted_shadow_attachment.ok(),
+            "accepted alpha shadow attachment creation");
+    alpha_shadow_request.alpha_tested_diffuse_binding = {
+        diffuse_texture.texture.get(), sampler.sampler.get()};
+    const auto accepted_shadow =
+        device.device->draw_depth_only_indexed_static_mesh(
+            *accepted_shadow_attachment.attachment, alpha_shadow_request);
+    require(accepted_shadow.ok(), "opaque alpha shadow caster draw");
+    const auto accepted_shadow_depth = device.device->read_depth_attachment(
+        *accepted_shadow_attachment.attachment,
+        {depth_readback_description.width, depth_readback_description.height});
+    require(accepted_shadow_depth.ok() &&
+                accepted_shadow_depth.depth[16U *
+                                                  depth_readback_description.width +
+                                              16U] < 0.99F,
+            "alpha at or above ksAlphaRef writes caster depth");
 
     if (backend == Backend::Vulkan || backend == Backend::D3D12) {
         constexpr std::array<float, directional_shadow_cascade_count>

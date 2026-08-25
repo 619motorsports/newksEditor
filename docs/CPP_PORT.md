@@ -120,21 +120,26 @@ remains unchanged and feature-complete.
   indexed draws. Both backends read initialized, single-sample D32 attachments
   through a bounded synchronous API. This readback is execution evidence. It
   is not a sampled shadow-map or receiver path. Both backends also implement a
-  resource-free, depth-only indexed pass. The pass requires a vertex-only
-  backend shader, an 11-float static mesh, draw matrices, and one single-sample
-  D32 target. It rejects material resources, fragment shaders, blending,
-  skinning, and multisample depth. A Vulkan SwiftShader test clears D32, draws
-  indexed geometry without a color target, and reads back changed depth inside
-  the triangle and the clear value outside it. The D3D12 implementation uses a
+  resource-free, depth-only indexed pass. The opaque pass requires a
+  vertex-only backend shader, an 11-float static mesh, draw matrices, and one
+  single-sample D32 target. It rejects material resources, fragment shaders,
+  blending, skinning, and multisample depth. A Vulkan SwiftShader test clears
+  D32 and draws indexed geometry without a color target. It reads back changed
+  depth inside the triangle and the clear value outside it. The D3D12 implementation uses a
   zero-render-target pipeline and is part of the Windows WARP test path. This
   is the bounded opaque-caster execution seam. A backend-neutral owner now
   retains exactly three single-sample D32 maps. It also retains the three
   cascade matrices and converts them from WebGL clip space for each backend.
   The static-scene adapter selects `cast_shadows` packets from its retained
-  geometry. It executes only opaque static casters, in packet order, for all
-  three cascades. It reports alpha-tested and skinned casters as staged. It
-  also reports the missing recovered `doubleFaceShadow` cull state. The
-  portable cull state is not exact `ksShadowGen` behavior. A real SwiftShader
+  geometry. It executes opaque and alpha-tested static casters, in packet
+  order, for all three cascades. Alpha-tested execution requires an explicit
+  caller shader and the recovered `ksShadowGenAT` bindings. The pixel ABI uses
+  diffuse texture `t0`, sampler `s1`, and a 32-byte material record at `b4`.
+  The record stores `ksAlphaRef` at byte offset 28. The adapter owns one
+  aligned record for each used alpha-tested material. It rejects malformed
+  resource tables, material values, and buffer budgets before drawing.
+  Alpha-tested skinned casters remain staged. The adapter applies the
+  recovered `doubleFaceShadow` cull rule. A real SwiftShader
   test reads all three maps and finds caster depth and clear depth in each map.
   The SwiftShader fixture also executes the portable receiver ABI and samples
   all three retained maps. Bounded reference tests cover the source-evidenced
@@ -177,9 +182,9 @@ remains unchanged and feature-complete.
   specular light. A real stock-scene fixture produces `(3,40,18,255)` with
   zero-depth maps and `(16,116,34,255)` with one-depth maps. The fixture does
   not include Fresnel, reflections, fog, alpha tests, normal maps, detail maps,
-  CSP lights, or overlays. D3D12 receiver execution remains staged pending a
-  WARP verification. This remains a bounded test ABI, not a complete stock KN5
-  or CSP shader.
+  CSP lights, or overlays. The D3D12 receiver path is implemented. A Windows
+  SDK and WARP run must still verify it. This remains a bounded test ABI, not a
+  complete stock KN5 or CSP shader.
   A bounded resolver reads parsed KN5 values and typed CSP
   overrides. It preserves override precedence and WebGL emissive conversion.
   A second bounded ABI executes tangent-space `ksPerPixelNM`. It adds a normal

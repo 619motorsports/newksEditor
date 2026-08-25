@@ -226,6 +226,41 @@ void add_default(std::map<std::string, MaterialPropertyValue>& properties,
     return value;
 }
 
+[[nodiscard]] std::array<float, 4> resolve_emissive(
+    const MaterialBinding& binding) {
+    const MaterialPropertyValue* emissive =
+        find_material_property(binding, "ksEmissive");
+    if (emissive == nullptr) return {0.0F, 0.0F, 0.0F, 0.0F};
+
+    std::array<float, 3> color{};
+    float strength = 1.0F;
+    if (emissive->source == MaterialPropertySource::csp) {
+        switch (emissive->arity) {
+        case MaterialPropertyValue::Arity::scalar:
+            color = {emissive->scalar, emissive->scalar, emissive->scalar};
+            break;
+        case MaterialPropertyValue::Arity::vector2:
+            color = {emissive->vector2[0], emissive->vector2[1], 0.0F};
+            break;
+        case MaterialPropertyValue::Arity::vector3:
+            color = emissive->vector3;
+            break;
+        case MaterialPropertyValue::Arity::vector4:
+            color = {emissive->vector4[0], emissive->vector4[1], emissive->vector4[2]};
+            strength = emissive->vector4[3];
+            break;
+        }
+    } else {
+        // public/app.js reads KN5 ksemissive from value3, which has no
+        // fourth strength component.
+        color = emissive->vector3;
+    }
+    if (std::max({color[0], color[1], color[2]}) > 16.0F)
+        for (float& component : color) component /= 255.0F;
+    return {color[0] * strength, color[1] * strength, color[2] * strength,
+            0.0F};
+}
+
 } // namespace
 
 MaterialPropertyOverride MaterialPropertyOverride::scalar_value(float value) noexcept {
@@ -540,38 +575,7 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
         result.constants.damage_zones = damage_zones->vector4;
     }
 
-    const MaterialPropertyValue* emissive = find_material_property(binding, "ksEmissive");
-    if (emissive == nullptr) {
-        result.constants.emissive = {0.0F, 0.0F, 0.0F, 0.0F};
-    } else {
-        std::array<float, 3> color{};
-        float strength = 1.0F;
-        if (emissive->source == MaterialPropertySource::csp) {
-            switch (emissive->arity) {
-            case MaterialPropertyValue::Arity::scalar:
-                color = {emissive->scalar, emissive->scalar, emissive->scalar};
-                break;
-            case MaterialPropertyValue::Arity::vector2:
-                color = {emissive->vector2[0], emissive->vector2[1], 0.0F};
-                break;
-            case MaterialPropertyValue::Arity::vector3:
-                color = emissive->vector3;
-                break;
-            case MaterialPropertyValue::Arity::vector4:
-                color = {emissive->vector4[0], emissive->vector4[1], emissive->vector4[2]};
-                strength = emissive->vector4[3];
-                break;
-            }
-        } else {
-            // public/app.js reads KN5 ksemissive from value3, which has no
-            // fourth strength component.
-            color = emissive->vector3;
-        }
-        if (std::max({color[0], color[1], color[2]}) > 16.0F)
-            for (float& component : color) component /= 255.0F;
-        result.constants.emissive = {color[0] * strength, color[1] * strength,
-                                     color[2] * strength, 0.0F};
-    }
+    result.constants.emissive = resolve_emissive(binding);
 
     if (options.capture_pass && options.alpha_to_coverage)
         result.constants.fresnel[3] = std::max(
@@ -658,6 +662,51 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
     }
 
     result.status = KsPerPixelMaterialResolveStatus::ready;
+    return result;
+}
+
+StockShadowCasterMaterialResolveResult
+resolve_stock_shadow_caster_material_constants(const MaterialBinding& binding) {
+    StockShadowCasterMaterialResolveResult result;
+    result.constants.lighting = {
+        material_scalar(binding, "ksAmbient", 0.35F),
+        material_scalar(binding, "ksDiffuse", 0.80F),
+        material_scalar(binding, "ksSpecular", 0.20F),
+        material_scalar(binding, "ksSpecularEXP", 30.0F),
+    };
+    result.constants.emissive_and_alpha_ref = resolve_emissive(binding);
+
+    // build_material_binding adds a renderer default for the reflection
+    // capture path. That default is not part of the recovered shadow-caster
+    // ABI, so only authored KN5/CSP values participate here.
+    const MaterialPropertyValue* alpha_ref =
+        find_material_property(binding, "ksAlphaRef");
+    if (alpha_ref != nullptr &&
+        alpha_ref->source != MaterialPropertySource::default_value)
+        result.constants.emissive_and_alpha_ref[3] = alpha_ref->scalar;
+
+    const auto finite = [](const auto& values) {
+        return std::all_of(values.begin(), values.end(),
+                           [](float value) { return std::isfinite(value); });
+    };
+    if (!finite(result.constants.lighting) ||
+        !finite(result.constants.emissive_and_alpha_ref)) {
+        result.status = StockShadowCasterMaterialResolveStatus::invalid_input;
+        result.diagnostic = {
+            "non_finite_constants", "StockShadowCasterMaterialConstants",
+            "Resolved stock shadow caster constants must contain only finite values"};
+        return result;
+    }
+    const float alpha_ref_value = result.constants.emissive_and_alpha_ref[3];
+    if (alpha_ref_value < 0.0F || alpha_ref_value > 1.0F) {
+        result.status = StockShadowCasterMaterialResolveStatus::invalid_input;
+        result.diagnostic = {
+            "ks_alpha_ref_range", "ksAlphaRef",
+            "The stock shadow caster alpha reference must be within [0, 1]"};
+        return result;
+    }
+
+    result.status = StockShadowCasterMaterialResolveStatus::ready;
     return result;
 }
 

@@ -275,6 +275,13 @@ public:
             captured.push_back(draw.packet->node);
             depth_camera_matrices.push_back(draw.camera_frame->view_projection);
             depth_culls.push_back(draw.pipeline->raster.cull);
+            depth_material_modes.push_back(draw.material_mode);
+            depth_alpha_textures.push_back(draw.alpha_tested_diffuse_binding.texture);
+            depth_alpha_samplers.push_back(draw.alpha_tested_diffuse_binding.sampler);
+            depth_alpha_material_buffers.push_back(
+                draw.alpha_tested_material_binding.buffer);
+            depth_alpha_material_ranges.push_back(
+                draw.alpha_tested_material_binding.range_bytes);
         }
         depth_nodes.push_back(std::move(captured));
         if (fail_depth_batch_call != 0U && depth_batch_calls == fail_depth_batch_call)
@@ -349,6 +356,12 @@ public:
     std::vector<std::vector<apex::scene::NodeId>> depth_nodes;
     std::vector<apex::scene::Matrix4> depth_camera_matrices;
     std::vector<PipelineCullMode> depth_culls;
+    std::vector<DepthOnlyIndexedStaticMeshDrawRequest::MaterialMode>
+        depth_material_modes;
+    std::vector<const Texture*> depth_alpha_textures;
+    std::vector<const Sampler*> depth_alpha_samplers;
+    std::vector<const Buffer*> depth_alpha_material_buffers;
+    std::vector<std::uint32_t> depth_alpha_material_ranges;
 
 private:
     DeviceInfo info_{Backend::Vulkan, "recording", "test", 1U, 0U, 0U, 0U, 0U, true};
@@ -2620,7 +2633,9 @@ void retains_three_directional_maps_and_executes_only_opaque_static_casters() {
     }
     RecordingDevice device;
     auto prepared = prepare_static_scene_resources(device, request_for(value));
-    require(prepared.ok(), "directional shadow fixture retains its scene geometry");
+    require(prepared.ok(),
+            "directional shadow fixture retains its scene geometry: " +
+                prepared.diagnostic.code + " " + prepared.diagnostic.message);
 
     DirectionalShadowMapRequest map_request;
     map_request.lighting.map_size = 32U;
@@ -2881,6 +2896,154 @@ void retains_three_directional_maps_and_executes_only_opaque_static_casters() {
                 std::string(static_scene_directional_shadow_status_name(
                     StaticSceneDirectionalShadowStatus::partial)) == "partial",
             "directional shadow status names are stable");
+}
+
+void executes_explicit_alpha_directional_casters_with_owned_constants() {
+    Fixture value = fixture();
+    for (DrawPacket& packet : value.packets) {
+        packet.flags.cast_shadows = true;
+        packet.flags.depth_test = true;
+        packet.flags.depth_write = true;
+    }
+    value.packets[2].flags.cast_shadows = false;
+    value.packets[1].material_profile.shadow_alpha_tested = true;
+    value.second_pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "txDiffuse"},
+        {PipelineResourceKind::sampler, 0U, 1U, "sampDiffuse"}};
+    for (PipelineProgram* pipeline :
+         std::array<PipelineProgram*, 2U>{&value.first_pipeline,
+                                          &value.second_pipeline}) {
+        pipeline->targets.has_depth = true;
+        pipeline->targets.depth = {PipelineRenderTargetFormat::depth32_float, 1U};
+        pipeline->depth.test_enabled = true;
+        pipeline->depth.write_enabled = true;
+        pipeline->depth.compare = PipelineCompareOperation::less;
+    }
+    value.model.textures.push_back({true, "alpha.dds", 4U, {}, {}});
+    value.packets[1].resources = {{"txDiffuse", 0U, 0U, "alpha.dds"}};
+
+    PipelineProgram alpha_pipeline = value.second_pipeline;
+    alpha_pipeline.name = "portable-alpha-directional-caster";
+    alpha_pipeline.targets.colors.clear();
+    alpha_pipeline.targets.has_depth = true;
+    alpha_pipeline.targets.depth = {PipelineRenderTargetFormat::depth32_float, 1U};
+    alpha_pipeline.depth.test_enabled = true;
+    alpha_pipeline.depth.write_enabled = true;
+    alpha_pipeline.depth.compare = PipelineCompareOperation::less;
+    alpha_pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "txDiffuse"},
+        {PipelineResourceKind::sampler, 0U, 1U, "sampDiffuse"},
+        {PipelineResourceKind::uniform_buffer, 0U, 4U, "ksShadowCasterMaterial"},
+    };
+    std::array<StockShadowCasterMaterialConstants, 2U> shadow_constants{};
+    shadow_constants[1].emissive_and_alpha_ref[3] = 0.5F;
+
+    const std::array<StockShadowCasterMaterialConstants, 1U>
+        short_shadow_constants{};
+    RecordingDevice malformed_device;
+    auto malformed_request = request_for(value);
+    malformed_request.stock_shadow_constants_by_material =
+        short_shadow_constants;
+    const auto malformed_table = prepare_static_scene_resources(
+        malformed_device, malformed_request);
+    require(!malformed_table.ok() &&
+                malformed_table.diagnostic.code ==
+                    "static_scene_shadow_material_table_invalid" &&
+                malformed_device.buffer_calls == 0U,
+            "a truncated stock shadow material table fails before allocation");
+
+    auto invalid_shadow_constants = shadow_constants;
+    invalid_shadow_constants[1].emissive_and_alpha_ref[3] = 1.01F;
+    malformed_request = request_for(value);
+    malformed_request.stock_shadow_constants_by_material =
+        invalid_shadow_constants;
+    const auto invalid_alpha = prepare_static_scene_resources(
+        malformed_device, malformed_request);
+    require(!invalid_alpha.ok() &&
+                invalid_alpha.diagnostic.code ==
+                    "static_scene_shadow_material_constant_invalid" &&
+                malformed_device.buffer_calls == 0U,
+            "an out-of-range stock shadow alpha value fails before allocation");
+
+    malformed_request = request_for(value);
+    malformed_request.stock_shadow_constants_by_material = shadow_constants;
+    malformed_request.limits.max_total_material_constant_bytes =
+        stock_shadow_caster_buffer_alignment - 1U;
+    const auto truncated_budget = prepare_static_scene_resources(
+        malformed_device, malformed_request);
+    require(!truncated_budget.ok() &&
+                truncated_budget.diagnostic.code ==
+                    "static_scene_shadow_material_constant_aggregate_limit" &&
+                malformed_device.buffer_calls == 0U,
+            "a truncated stock shadow buffer budget fails before allocation");
+
+    RecordingDevice device;
+    auto request = request_for(value);
+    request.stock_shadow_constants_by_material = shadow_constants;
+    auto prepared = prepare_static_scene_resources(device, request);
+    require(prepared.ok() && prepared.resources->owned_material_constant_count() == 0U,
+            "alpha shadow preparation succeeds without inventing portable color constants");
+
+    DirectionalShadowMapRequest map_request;
+    map_request.lighting.map_size = 32U;
+    const auto maps = prepare_directional_shadow_maps(device, map_request);
+    require(maps.ok(), "alpha shadow fixture retains its three maps");
+    const TextureDescription texture_description{
+        1U, 1U, 1U, 1U, TextureFormat::rgba8_unorm, TextureUsage::sampled,
+        TextureMemory::device_local, TextureMutability::immutable, 1U};
+    FakeTexture alpha_texture(texture_description);
+    FakeSampler alpha_sampler;
+    const std::array<const Texture*, 1U> textures = {&alpha_texture};
+    const std::array<const Sampler*, 1U> samplers = {&alpha_sampler};
+    const std::array<std::uint8_t, 3U> only_alpha = {0U, 1U, 0U};
+    StaticSceneDirectionalShadowFrameDescription frame;
+    frame.maps = maps.resources.get();
+    frame.alpha_static_pipeline = &alpha_pipeline;
+    frame.packet_visibility = only_alpha;
+    frame.textures_by_global_index = textures;
+    frame.samplers_by_global_index = samplers;
+    const auto drawn = prepared.resources->draw_opaque_directional_shadows(device, frame);
+    require(drawn.ok() && drawn.status == StaticSceneDirectionalShadowStatus::ready &&
+                drawn.selected_casters == 1U && drawn.opaque_casters == 0U &&
+                drawn.alpha_tested_casters == 1U && drawn.staged_alpha_tested == 0U &&
+                drawn.cascades_completed == directional_shadow_cascade_count &&
+                device.depth_nodes.size() == directional_shadow_cascade_count &&
+                std::all_of(device.depth_nodes.begin(), device.depth_nodes.end(),
+                            [](const auto& nodes) {
+                                return nodes ==
+                                       std::vector<apex::scene::NodeId>({2U});
+                            }),
+            "alpha-only shadow frames execute with no opaque pipeline");
+    require(device.depth_material_modes.size() == directional_shadow_cascade_count &&
+                std::all_of(device.depth_material_modes.begin(),
+                            device.depth_material_modes.end(),
+                            [](auto mode) {
+                                return mode == DepthOnlyIndexedStaticMeshDrawRequest::MaterialMode::stock_alpha_tested;
+                            }) &&
+                device.depth_alpha_textures.front() == &alpha_texture &&
+                device.depth_alpha_samplers.front() == &alpha_sampler &&
+                device.depth_alpha_material_buffers.front() != nullptr &&
+                device.depth_alpha_material_ranges.front() == stock_shadow_caster_material_bytes,
+            "alpha shadow draws retain explicit texture, sampler, and logical 32-byte material view");
+
+    frame.alpha_static_pipeline = nullptr;
+    const std::size_t calls_before_staged = device.depth_batch_calls;
+    const auto staged = prepared.resources->draw_opaque_directional_shadows(device, frame);
+    require(staged.ok() && staged.status == StaticSceneDirectionalShadowStatus::partial &&
+                staged.staged_alpha_tested == 1U &&
+                device.depth_batch_calls == calls_before_staged + directional_shadow_cascade_count &&
+                device.depth_nodes.back().empty(),
+            "missing alpha pipeline stages the caster and clears every cascade");
+
+    const std::array<std::uint8_t, 3U> only_opaque = {1U, 0U, 0U};
+    frame.packet_visibility = only_opaque;
+    const auto missing_opaque = prepared.resources->draw_opaque_directional_shadows(device, frame);
+    require(missing_opaque.ok() && missing_opaque.status == StaticSceneDirectionalShadowStatus::partial &&
+                missing_opaque.selected_casters == 1U && missing_opaque.opaque_casters == 0U &&
+                missing_opaque.staged_casters.size() == 1U &&
+                missing_opaque.staged_casters.front().code ==
+                    "directional_shadow_caster_shader_staged",
+            "missing opaque pipeline stages opaque casters without dereferencing it");
 }
 
 void binds_retained_directional_maps_through_static_scene_frames() {
@@ -3146,6 +3309,7 @@ int main() {
         propagates_embedded_resource_failures();
         propagates_upload_and_batch_failures();
         retains_three_directional_maps_and_executes_only_opaque_static_casters();
+        executes_explicit_alpha_directional_casters_with_owned_constants();
         binds_retained_directional_maps_through_static_scene_frames();
         require(std::string(static_scene_resource_status_name(StaticSceneResourceStatus::ready)) ==
                     "ready",

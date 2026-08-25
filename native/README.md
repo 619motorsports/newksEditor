@@ -265,8 +265,9 @@ prove specular enable and removal and per-draw record selection. An optional
 Vulkan `ksPerPixel` receiver fixture applies the source-evidenced three-cascade
 selection and explicit 3x3 PCF to direct diffuse and specular light. A real
 stock-scene test proves fully shadowed `(3,40,18,255)` and fully lit
-`(16,116,34,255)` center pixels. Fresnel, reflections, fog, D3D12 receiver
-execution, and CSP lights remain staged. A bounded batch
+`(16,116,34,255)` center pixels. The D3D12 receiver path is implemented, but
+it still requires a Windows SDK and WARP verification run. Fresnel,
+reflections, fog, and CSP lights remain staged. A bounded batch
 preflights all requests. It clears or loads attachments once and returns one
 final readback. Draw-packet texture resources resolve by canonical name.
 An exact tangent-space extension adds `txNormal` at bindings 4 and 5. A second
@@ -305,6 +306,13 @@ ordered draw instances. It submits one batch with caller-supplied SPIR-V or
 DXIL pipelines. A constants-enabled pipeline requires an explicit table in
 final material order. The adapter validates this table before allocation. It
 owns one 256-byte buffer per used material and reuses it for duplicate packets.
+The adapter also executes static alpha-tested directional-shadow casters when
+the caller supplies a compatible pipeline. The recovered `ksShadowGenAT`
+pixel ABI uses diffuse texture `t0`, sampler `s1`, and material buffer `b4`.
+The material record is 32 bytes. It stores `ksAlphaRef` at byte offset 28.
+Preparation owns one aligned record per used alpha-tested material. It rejects
+short tables, invalid alpha values, and insufficient byte budgets before
+allocation. Alpha-tested skinned casters remain staged.
 Each frame can supply a byte visibility mask in stable packet order. An empty
 mask keeps all packets visible. Other masks must match the packet count and use
 only zero or one. Hidden packets do not draw or update skinned geometry. An

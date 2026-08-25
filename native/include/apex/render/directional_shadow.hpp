@@ -21,9 +21,9 @@ inline constexpr std::uint64_t max_directional_shadow_map_bytes =
 
 // Evidence note: the recovered stock MaterialFilterSM::apply path uses
 // back-face culling when doubleFaceShadow is false (the stock default) and
-// disables culling when it is true. This helper is limited to the opaque
-// static-caster path; alpha-tested and skinned casters remain staged until
-// their stock programs are recovered.
+// disables culling when it is true. Alpha-tested execution remains an
+// explicit caller-shader contract; this API never translates stock shader
+// containers.
 [[nodiscard]] constexpr PipelineCullMode stock_directional_shadow_cull_mode(
     bool double_face_shadow) noexcept {
     return double_face_shadow ? PipelineCullMode::none : PipelineCullMode::back;
@@ -117,6 +117,9 @@ struct DirectionalShadowCasterReport {
 struct StaticSceneDirectionalShadowFrameDescription {
     DirectionalShadowMapResources* maps = nullptr;
     const PipelineProgram* opaque_pipeline = nullptr;
+    // Explicit caller-supplied ksShadowGenAT-compatible pipeline. It must
+    // consume t0/s1/b4 as validated by the device depth contract.
+    const PipelineProgram* alpha_static_pipeline = nullptr;
     std::span<const DrawPacket> refreshed_packets{};
     // Uses the same prepared-packet byte-mask contract as the color frame.
     // Hidden packets are not selected or skinned as shadow casters.
@@ -125,6 +128,11 @@ struct StaticSceneDirectionalShadowFrameDescription {
     // skinned geometry. A missing pipeline keeps skinned casters staged; this
     // seam does not infer or synthesize a stock ksShadowGen shader.
     const PipelineProgram* skinned_pipeline = nullptr;
+    // Non-owning tables are required only for caller_tables preparation. The
+    // embedded_kn5 path uses the textures and sampler retained by the static
+    // scene resources.
+    std::span<const Texture* const> textures_by_global_index{};
+    std::span<const Sampler* const> samplers_by_global_index{};
 };
 
 enum class StaticSceneDirectionalShadowStatus : std::uint8_t {
@@ -141,6 +149,7 @@ struct StaticSceneDirectionalShadowResult {
     Diagnostic diagnostic;
     std::size_t selected_casters = 0U;
     std::size_t opaque_casters = 0U;
+    std::size_t alpha_tested_casters = 0U;
     std::size_t skinned_casters = 0U;
     std::size_t staged_alpha_tested = 0U;
     std::size_t staged_skinned = 0U;

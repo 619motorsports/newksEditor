@@ -376,6 +376,75 @@ void resolves_ks_per_pixel_csp_precedence_and_alpha_capture() {
             "capture alpha-to-coverage applies the production minimum alpha reference");
 }
 
+void resolves_stock_shadow_caster_material_constants() {
+    Kn5Material material;
+    material.shader = "ksPerPixelAT";
+    material.properties = {
+        {"ksAmbient", 0.42F, {}, {}, {}},
+        {"ksDiffuse", 0.63F, {}, {}, {}},
+        {"ksSpecular", 0.17F, {}, {}, {}},
+        {"ksSpecularEXP", 47.0F, {}, {}, {}},
+        {"ksEmissive", 0.0F, {}, {32.0F, 64.0F, 128.0F}, {}},
+    };
+    const auto default_alpha = resolve_stock_shadow_caster_material_constants(
+        build_material_binding(material, 0));
+    require(default_alpha.ok() &&
+                default_alpha.constants.lighting ==
+                    std::array<float, 4>{0.42F, 0.63F, 0.17F, 47.0F} &&
+                default_alpha.constants.emissive_and_alpha_ref ==
+                    std::array<float, 4>{32.0F / 255.0F, 64.0F / 255.0F,
+                                         128.0F / 255.0F, 0.0F},
+            "stock shadow constants preserve KN5 values and use zero alpha fallback");
+
+    material.properties.push_back({"ksAlphaRef", 0.2F, {}, {}, {}});
+    MaterialBindingOverrides overrides;
+    overrides.properties.emplace(
+        "ksDiffuse", MaterialPropertyOverride::scalar_value(0.9F));
+    overrides.properties.emplace(
+        "ksEmissive",
+        MaterialPropertyOverride::vector4_value({64.0F, 128.0F, 192.0F, 0.5F}));
+    overrides.properties.emplace(
+        "ksAlphaRef", MaterialPropertyOverride::scalar_value(0.75F));
+    const auto overridden = resolve_stock_shadow_caster_material_constants(
+        build_material_binding(material, 0, &overrides));
+    require(overridden.ok() && overridden.constants.lighting[1] == 0.9F &&
+                overridden.constants.emissive_and_alpha_ref ==
+                    std::array<float, 4>{64.0F / 255.0F * 0.5F,
+                                         128.0F / 255.0F * 0.5F,
+                                         192.0F / 255.0F * 0.5F, 0.75F},
+            "stock shadow constants preserve CSP precedence and emissive strength");
+}
+
+void rejects_invalid_stock_shadow_caster_alpha_reference() {
+    Kn5Material material;
+    material.shader = "ksPerPixelAT";
+    material.properties.push_back({"ksAlphaRef", 0.5F, {}, {}, {}});
+
+    MaterialBinding non_finite = build_material_binding(material, 0);
+    non_finite.properties.at("ksalpharef").scalar =
+        std::numeric_limits<float>::quiet_NaN();
+    const auto non_finite_result =
+        resolve_stock_shadow_caster_material_constants(non_finite);
+    require(!non_finite_result.ok() &&
+                non_finite_result.status ==
+                    StockShadowCasterMaterialResolveStatus::invalid_input &&
+                non_finite_result.diagnostic.code == "non_finite_constants",
+            "stock shadow constants reject non-finite alpha reference");
+
+    for (const float value : {-0.001F, 1.001F}) {
+        MaterialBinding out_of_range = build_material_binding(material, 0);
+        out_of_range.properties.at("ksalpharef").scalar = value;
+        const auto result =
+            resolve_stock_shadow_caster_material_constants(out_of_range);
+        require(!result.ok() &&
+                    result.status ==
+                        StockShadowCasterMaterialResolveStatus::invalid_input &&
+                    result.diagnostic.code == "ks_alpha_ref_range" &&
+                    result.diagnostic.field == "ksAlphaRef",
+                "stock shadow constants reject alpha references outside [0, 1]");
+    }
+}
+
 void rejects_invalid_ks_per_pixel_constants() {
     Kn5Material material;
     material.shader = "ksPerPixel";
@@ -727,6 +796,8 @@ int main() {
         resolves_ks_per_pixel_defaults_and_kn5_values();
         adapts_the_bounded_kn5_parser_model();
         resolves_ks_per_pixel_csp_precedence_and_alpha_capture();
+        resolves_stock_shadow_caster_material_constants();
+        rejects_invalid_stock_shadow_caster_alpha_reference();
         rejects_invalid_ks_per_pixel_constants();
         resolves_bounded_tangent_space_nm_variant();
         resolves_bounded_base_multimap_families();

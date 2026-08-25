@@ -74,6 +74,11 @@ struct StaticScenePrepareRequest {
     // declares the portable constants binding requires the complete table.
     // Preparation copies each used value into an owned 256-byte GPU record.
     std::span<const KsPerPixelMaterialConstants> material_constants_by_material{};
+    // Explicit resolved ksShadowGenAT material records, indexed by final
+    // material ID. The source host record is 32 bytes; preparation owns one
+    // 256-byte aligned uniform allocation for each used alpha caster.
+    std::span<const StockShadowCasterMaterialConstants>
+        stock_shadow_constants_by_material{};
     StaticSceneTextureAuthority texture_authority =
         StaticSceneTextureAuthority::caller_tables;
     StaticSceneResourceLimits limits{};
@@ -176,8 +181,9 @@ public:
 
     // Execute retained opaque static casters and, when an explicit skinned
     // depth pipeline is supplied, CPU-skinned casters into the fixed
-    // three-map directional-shadow set. Alpha-tested casters remain staged.
-    // The pass does not infer a stock ksShadowGen shader.
+    // three-map directional-shadow set. Alpha-tested static casters execute
+    // only with an explicit caller-supplied alpha pipeline and bindings;
+    // otherwise they remain staged. The pass does not infer a stock shader.
     [[nodiscard]] StaticSceneDirectionalShadowResult
     draw_opaque_directional_shadows(
         Device& device,
@@ -209,8 +215,10 @@ private:
     std::vector<std::size_t> pipeline_for_packet_;
     std::vector<PacketTextureIndices> textures_for_packet_;
     std::vector<std::size_t> material_constant_for_packet_;
+    std::vector<std::size_t> stock_shadow_constant_for_material_;
     std::vector<std::unique_ptr<Texture>> owned_textures_;
     std::vector<std::unique_ptr<Buffer>> owned_material_constants_;
+    std::vector<std::unique_ptr<Buffer>> owned_stock_shadow_constants_;
     std::unique_ptr<Buffer> owned_frame_constants_;
     std::unique_ptr<Buffer> owned_directional_shadow_constants_;
     std::unique_ptr<Sampler> owned_directional_shadow_sampler_;

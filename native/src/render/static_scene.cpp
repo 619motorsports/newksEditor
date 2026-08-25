@@ -101,6 +101,16 @@ bool finite_material_constants(const KsPerPixelMaterialConstants& constants) noe
     return true;
 }
 
+bool finite_stock_shadow_constants(
+    const StockShadowCasterMaterialConstants& constants) noexcept {
+    for (const float value : constants.lighting)
+        if (!std::isfinite(value)) return false;
+    for (const float value : constants.emissive_and_alpha_ref)
+        if (!std::isfinite(value)) return false;
+    return constants.emissive_and_alpha_ref[3] >= 0.0F &&
+           constants.emissive_and_alpha_ref[3] <= 1.0F;
+}
+
 bool finite_frame_constants(const KsPerPixelFrameConstants& constants) noexcept {
     for (const float value : constants.sun_direction)
         if (!std::isfinite(value)) return false;
@@ -405,6 +415,11 @@ StaticSceneResourceResult prepare_static_scene_resources(
         (!material_pipeline_table && !packet_pipeline_table))
         return fail(StaticSceneResourceStatus::invalid_request, "static_scene_material_table_invalid",
                     "Model and scene material tables must match, with one complete pipeline authority");
+    if (!request.stock_shadow_constants_by_material.empty() &&
+        request.stock_shadow_constants_by_material.size() != model.materials.size())
+        return fail(StaticSceneResourceStatus::invalid_request,
+                    "static_scene_shadow_material_table_invalid",
+                    "The stock shadow material table must match the final material table");
     if (model.textures.size() > limits.max_textures ||
         model.textures.size() > static_cast<std::size_t>(
             std::numeric_limits<std::uint32_t>::max()))
@@ -431,7 +446,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
         !charge(request.packets.size(),
                 sizeof(DrawPacket) + 4U * sizeof(std::size_t) +
                     sizeof(StaticSceneResources::PacketTextureIndices)) ||
-        !charge(model.materials.size(), 2U * sizeof(std::size_t)) ||
+        !charge(model.materials.size(), 3U * sizeof(std::size_t)) ||
         !charge(request.packets.size(),
                 4U * sizeof(std::size_t) + 2U * sizeof(const formats::Kn5Node*)) ||
         !charge(request.packets.size(), 4U * sizeof(void*)) ||
@@ -466,7 +481,13 @@ StaticSceneResourceResult prepare_static_scene_resources(
         !charge(request.packets.size(), sizeof(PipelineProgram)) ||
         !charge(std::min(request.packets.size(),
                          limits.max_material_constant_buffers),
-                sizeof(KsPerPixelMaterialConstants)))
+                sizeof(KsPerPixelMaterialConstants)) ||
+        !charge(std::min({request.packets.size(), model.materials.size(),
+                          limits.max_material_constant_buffers}),
+                sizeof(StockShadowCasterMaterialConstants)) ||
+        !charge(std::min({request.packets.size(), model.materials.size(),
+                          limits.max_material_constant_buffers}),
+                sizeof(std::unique_ptr<Buffer>)))
         return preparation_limit();
 
     std::map<TextureScopeKey, std::optional<std::uint32_t>> unique_texture_indices;
@@ -510,12 +531,15 @@ StaticSceneResourceResult prepare_static_scene_resources(
                                                            invalid_resource_index);
     std::vector<std::size_t> material_constant_for_packet(request.packets.size(),
                                                           invalid_resource_index);
+    std::vector<std::size_t> stock_shadow_constant_for_material(
+        model.materials.size(), invalid_resource_index);
     std::vector<const formats::Kn5Node*> unique_meshes;
     std::vector<std::size_t> representative_packets;
     std::vector<const formats::Kn5Node*> skinned_meshes;
     std::vector<std::size_t> skinned_packet_indices;
     std::vector<PipelineProgram> pipelines;
     std::vector<KsPerPixelMaterialConstants> material_constants;
+    std::vector<StockShadowCasterMaterialConstants> stock_shadow_constants;
     unique_meshes.reserve(request.packets.size());
     representative_packets.reserve(request.packets.size());
     skinned_meshes.reserve(request.packets.size());
@@ -523,11 +547,14 @@ StaticSceneResourceResult prepare_static_scene_resources(
     pipelines.reserve(request.packets.size());
     material_constants.reserve(std::min(request.packets.size(),
                                         limits.max_material_constant_buffers));
+    stock_shadow_constants.reserve(std::min(request.packets.size(),
+                                            limits.max_material_constant_buffers));
 
     std::uint64_t total_vertex_bytes = 0U;
     std::uint64_t total_index_bytes = 0U;
     std::uint64_t total_shader_bytes = 0U;
     std::uint64_t total_material_constant_bytes = 0U;
+    std::uint64_t total_shadow_material_constant_bytes = 0U;
     std::uint64_t total_update_bytes = 0U;
     std::uint64_t validation_bytes = 0U;
     std::optional<bool> batch_has_depth;
@@ -883,6 +910,36 @@ StaticSceneResourceResult prepare_static_scene_resources(
                         "static_scene_mixed_color_samples_unsupported",
                         "One ordered static-scene batch requires one color-target sample count");
         batch_color_samples = color_samples;
+
+        if (packet.material_profile.shadow_alpha_tested &&
+            !request.stock_shadow_constants_by_material.empty() &&
+            stock_shadow_constant_for_material[material_index] == invalid_resource_index) {
+            if (limits.max_material_constant_buffers == 0U ||
+                limits.max_total_material_constant_bytes == 0U)
+                return fail(StaticSceneResourceStatus::invalid_request,
+                            "static_scene_shadow_material_constant_limits_invalid",
+                            "Stock shadow material-constant limits must be nonzero for alpha casters");
+            if (stock_shadow_constants.size() >= limits.max_material_constant_buffers)
+                return fail(StaticSceneResourceStatus::invalid_request,
+                            "static_scene_shadow_material_constant_count_limit",
+                            "Used alpha materials exceed the constant-buffer count limit");
+            if (!checked_add(stock_shadow_caster_buffer_alignment,
+                             total_shadow_material_constant_bytes) ||
+                total_shadow_material_constant_bytes >
+                    limits.max_total_material_constant_bytes)
+                return fail(StaticSceneResourceStatus::invalid_request,
+                            "static_scene_shadow_material_constant_aggregate_limit",
+                            "Used alpha shadow constants exceed the aggregate buffer limit");
+            const auto& constants =
+                request.stock_shadow_constants_by_material[material_index];
+            if (!finite_stock_shadow_constants(constants))
+                return fail(StaticSceneResourceStatus::invalid_request,
+                            "static_scene_shadow_material_constant_invalid",
+                            "A stock shadow alpha constant is non-finite or outside [0, 1]");
+            stock_shadow_constant_for_material[material_index] =
+                stock_shadow_constants.size();
+            stock_shadow_constants.push_back(constants);
+        }
         if (packet_pipeline_table) {
             const auto existing_pipeline = packet_pipeline_indices.find(pipeline);
             if (existing_pipeline != packet_pipeline_indices.end()) {
@@ -1077,6 +1134,8 @@ StaticSceneResourceResult prepare_static_scene_resources(
     resources->textures_for_packet_ = std::move(textures_for_packet);
     resources->material_constant_for_packet_ =
         std::move(material_constant_for_packet);
+    resources->stock_shadow_constant_for_material_ =
+        std::move(stock_shadow_constant_for_material);
     resources->texture_count_ = model.textures.size();
     resources->texture_authority_ = request.texture_authority;
     for (const StaticSceneResources::PacketTextureIndices& indices :
@@ -1101,6 +1160,18 @@ StaticSceneResourceResult prepare_static_scene_resources(
         if (!buffer.ok())
             return {map_buffer_status(buffer.status), std::move(buffer.diagnostic), nullptr};
         resources->owned_material_constants_.push_back(std::move(buffer.buffer));
+    }
+    resources->owned_stock_shadow_constants_.reserve(stock_shadow_constants.size());
+    for (const StockShadowCasterMaterialConstants& constants : stock_shadow_constants) {
+        std::array<std::byte, stock_shadow_caster_buffer_alignment> bytes{};
+        std::memcpy(bytes.data(), &constants, sizeof(constants));
+        const BufferDescription description{
+            bytes.size(), BufferUsage::uniform, BufferMemory::device_local,
+            BufferMutability::immutable};
+        BufferResult buffer = device.create_buffer(description, bytes);
+        if (!buffer.ok())
+            return {map_buffer_status(buffer.status), std::move(buffer.diagnostic), nullptr};
+        resources->owned_stock_shadow_constants_.push_back(std::move(buffer.buffer));
     }
     if (requires_frame_constants) {
         std::array<std::byte, portable_frame_buffer_view_bytes> bytes{};
@@ -1707,10 +1778,10 @@ StaticSceneResources::draw_opaque_directional_shadows(
         result.diagnostic = {std::move(code), std::move(message)};
         return result;
     };
-    if (frame.maps == nullptr || frame.opaque_pipeline == nullptr)
+    if (frame.maps == nullptr)
         return fail(StaticSceneDirectionalShadowStatus::invalid_request,
                     "directional_shadow_frame_handle_missing",
-                    "Directional shadow execution requires map and pipeline handles");
+                    "Directional shadow execution requires map handles");
     DirectionalShadowMapResources& maps = *frame.maps;
     if (&device != device_ || &device != maps.device_ ||
         device.info().backend != backend_ || maps.backend_ != backend_)
@@ -1750,6 +1821,35 @@ StaticSceneResources::draw_opaque_directional_shadows(
     const auto packet_visible = [&](std::size_t index) {
         return frame.packet_visibility.empty() || frame.packet_visibility[index] != 0U;
     };
+    const auto alpha_material_buffer = [&](std::size_t index) -> const Buffer* {
+        if (index >= stock_shadow_constant_for_material_.size()) return nullptr;
+        const std::size_t material_index =
+            stock_shadow_constant_for_material_[index];
+        if (material_index == invalid_resource_index ||
+            material_index >= owned_stock_shadow_constants_.size())
+            return nullptr;
+        return owned_stock_shadow_constants_[material_index].get();
+    };
+    const auto alpha_diffuse_binding =
+        [&](std::size_t index) -> IndexedSampledTextureBinding {
+        if (index >= textures_for_packet_.size()) return {};
+        const std::uint32_t raw = textures_for_packet_[index].diffuse;
+        if (raw == invalid_draw_texture_index) return {};
+        const std::size_t texture_index = static_cast<std::size_t>(raw);
+        if (texture_authority_ == StaticSceneTextureAuthority::embedded_kn5) {
+            if (texture_index >= owned_textures_.size() ||
+                owned_textures_[texture_index] == nullptr || owned_sampler_ == nullptr)
+                return {};
+            return {owned_textures_[texture_index].get(), owned_sampler_.get()};
+        }
+        if (texture_index >= frame.textures_by_global_index.size() ||
+            texture_index >= frame.samplers_by_global_index.size() ||
+            frame.textures_by_global_index[texture_index] == nullptr ||
+            frame.samplers_by_global_index[texture_index] == nullptr)
+            return {};
+        return {frame.textures_by_global_index[texture_index],
+                frame.samplers_by_global_index[texture_index]};
+    };
     for (std::size_t index = 0U; index < packets_.size(); ++index) {
         const DrawPacket& packet = packet_for_frame(index);
         if (!same_prepared_draw_contract(packets_[index], packet) ||
@@ -1761,6 +1861,7 @@ StaticSceneResources::draw_opaque_directional_shadows(
 
     StaticSceneDirectionalShadowResult result;
     std::vector<std::size_t> executable_indices;
+    std::vector<std::uint8_t> alpha_shadow_packets(packets_.size(), 0U);
     executable_indices.reserve(packets_.size());
     result.staged_casters.reserve(packets_.size());
     for (std::size_t index = 0U; index < packets_.size(); ++index) {
@@ -1769,6 +1870,13 @@ StaticSceneResources::draw_opaque_directional_shadows(
         if (!packet.flags.cast_shadows) continue;
         ++result.selected_casters;
         if (packet.primitive == DrawPrimitiveKind::skinned_mesh) {
+            if (packet.material_profile.shadow_alpha_tested) {
+                ++result.staged_alpha_tested;
+                result.staged_casters.push_back({
+                    "directional_shadow_caster_alpha_skinning_staged", packet.node,
+                    packet.material});
+                continue;
+            }
             if (frame.skinned_pipeline == nullptr) {
                 ++result.staged_skinned;
                 result.staged_casters.push_back({
@@ -1786,12 +1894,45 @@ StaticSceneResources::draw_opaque_directional_shadows(
             ++result.skinned_casters;
             continue;
         }
-        if (packet.material_profile.shadow_alpha_tested ||
-            packet.flags.transparent || packet.flags.blend_enabled ||
+        if (packet.material_profile.shadow_alpha_tested) {
+            // The recovered stock host forces opaque blending for alpha
+            // shadow casters. Serialized A2C is therefore not a reason to
+            // stage an otherwise explicit alpha-tested shadow contract;
+            // transparent/blended packets remain staged.
+            if (packet.flags.transparent || packet.flags.blend_enabled ||
+                !packet.flags.depth_test || !packet.flags.depth_write ||
+                frame.alpha_static_pipeline == nullptr ||
+                alpha_material_buffer(static_cast<std::size_t>(packet.material)) == nullptr ||
+                alpha_diffuse_binding(index).texture == nullptr ||
+                alpha_diffuse_binding(index).sampler == nullptr) {
+                ++result.staged_alpha_tested;
+                result.staged_casters.push_back({
+                    "directional_shadow_caster_alpha_test_staged", packet.node,
+                    packet.material});
+                continue;
+            }
+            if (index >= upload_for_packet_.size() ||
+                upload_for_packet_[index] >= uploads_.size() ||
+                uploads_[upload_for_packet_[index]] == nullptr)
+                return fail(StaticSceneDirectionalShadowStatus::invalid_request,
+                            "directional_shadow_caster_geometry_invalid",
+                            "An alpha-tested shadow caster has no retained static geometry");
+            alpha_shadow_packets[index] = 1U;
+            executable_indices.push_back(index);
+            ++result.alpha_tested_casters;
+            continue;
+        }
+        if (packet.flags.transparent || packet.flags.blend_enabled ||
             packet.flags.alpha_to_coverage) {
             ++result.staged_alpha_tested;
             result.staged_casters.push_back({
                 "directional_shadow_caster_alpha_test_staged", packet.node,
+                packet.material});
+            continue;
+        }
+        if (frame.opaque_pipeline == nullptr) {
+            result.staged_casters.push_back({
+                "directional_shadow_caster_shader_staged", packet.node,
                 packet.material});
             continue;
         }
@@ -1854,11 +1995,30 @@ StaticSceneResources::draw_opaque_directional_shadows(
     // The packet flag is an explicit, bounded handoff for the recovered
     // doubleFaceShadow rule. KN5 parsing leaves it at the stock default
     // (false/back cull); callers with source-evidenced overrides may set it.
-    PipelineProgram back_cull_pipeline = *frame.opaque_pipeline;
-    back_cull_pipeline.raster.cull =
-        stock_directional_shadow_cull_mode(false);
-    PipelineProgram double_face_pipeline = back_cull_pipeline;
-    double_face_pipeline.raster.cull = stock_directional_shadow_cull_mode(true);
+    PipelineProgram back_cull_pipeline;
+    PipelineProgram double_face_pipeline;
+    if (result.opaque_casters != 0U) {
+        if (frame.opaque_pipeline == nullptr)
+            return fail(StaticSceneDirectionalShadowStatus::invalid_request,
+                        "directional_shadow_opaque_pipeline_missing",
+                        "Executable opaque shadow casters require an opaque pipeline");
+        back_cull_pipeline = *frame.opaque_pipeline;
+        back_cull_pipeline.raster.cull =
+            stock_directional_shadow_cull_mode(false);
+        double_face_pipeline = back_cull_pipeline;
+        double_face_pipeline.raster.cull = stock_directional_shadow_cull_mode(true);
+    }
+    PipelineProgram alpha_back_cull_pipeline;
+    PipelineProgram alpha_double_face_pipeline;
+    if (std::any_of(alpha_shadow_packets.begin(), alpha_shadow_packets.end(),
+                    [](std::uint8_t value) { return value != 0U; })) {
+        alpha_back_cull_pipeline = *frame.alpha_static_pipeline;
+        alpha_back_cull_pipeline.raster.cull =
+            stock_directional_shadow_cull_mode(false);
+        alpha_double_face_pipeline = alpha_back_cull_pipeline;
+        alpha_double_face_pipeline.raster.cull =
+            stock_directional_shadow_cull_mode(true);
+    }
     PipelineProgram skinned_back_cull_pipeline;
     PipelineProgram skinned_double_face_pipeline;
     if (result.skinned_casters != 0U) {
@@ -1918,9 +2078,26 @@ StaticSceneResources::draw_opaque_directional_shadows(
                 draw.index_buffer = upload.index_buffer.get();
             } else {
                 const StaticMeshUpload& upload = *uploads_[upload_for_packet_[index]];
-                draw.pipeline = packet.flags.double_face_shadow
-                                    ? &double_face_pipeline
-                                    : &back_cull_pipeline;
+                if (alpha_shadow_packets[index]) {
+                    draw.pipeline = packet.flags.double_face_shadow
+                                        ? &alpha_double_face_pipeline
+                                        : &alpha_back_cull_pipeline;
+                    draw.material_mode =
+                        DepthOnlyIndexedStaticMeshDrawRequest::MaterialMode::
+                            stock_alpha_tested;
+                    draw.resource_authority =
+                        IndexedResourceAuthority::explicit_bindings;
+                    draw.alpha_tested_diffuse_binding =
+                        alpha_diffuse_binding(index);
+                    draw.alpha_tested_material_binding = {
+                        alpha_material_buffer(
+                            static_cast<std::size_t>(packet.material)),
+                        0U, stock_shadow_caster_material_bytes};
+                } else {
+                    draw.pipeline = packet.flags.double_face_shadow
+                                        ? &double_face_pipeline
+                                        : &back_cull_pipeline;
+                }
                 draw.vertex_buffer = upload.vertex_buffer.get();
                 draw.index_buffer = upload.index_buffer.get();
             }
@@ -1979,8 +2156,8 @@ StaticSceneResources::draw_opaque_directional_shadows(
                         : StaticSceneDirectionalShadowStatus::partial;
     result.diagnostic = result.status == StaticSceneDirectionalShadowStatus::partial
                             ? Diagnostic{
-                                  "directional_shadow_portable_opaque_partial",
-                                  "Opaque static casters executed; recovered alpha, skinning, or shadow-cull behavior remains staged"}
+                                  "directional_shadow_partial",
+                                  "Executable shadow casters completed. One or more selected casters remain staged"}
                             : Diagnostic{};
     return result;
 } catch (const std::bad_alloc&) {

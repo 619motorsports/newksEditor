@@ -177,6 +177,33 @@ DepthOnlyIndexedStaticMeshDrawRequest depth_only_request_fixture(
             camera, false, 1.0F};
 }
 
+PipelineProgram alpha_tested_depth_only_pipeline_fixture() {
+    PipelineProgram pipeline = depth_only_pipeline_fixture();
+    pipeline.name = "indexed-alpha-tested-depth-contract";
+    pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 4U, "shadowMaterial"},
+    };
+    pipeline.shaders.push_back({PipelineShaderStage::fragment,
+                                PipelineShaderFormat::spirv, shader_fixture()});
+    return pipeline;
+}
+
+DepthOnlyIndexedStaticMeshDrawRequest alpha_tested_depth_only_request_fixture(
+    const DrawPacket& packet, const PipelineProgram& pipeline,
+    FakeBuffer& vertices, FakeBuffer& indices, FakeTexture& diffuse,
+    FakeSampler& sampler, FakeBuffer& material) {
+    auto request = depth_only_request_fixture(packet, pipeline, vertices, indices);
+    request.material_mode =
+        DepthOnlyIndexedStaticMeshDrawRequest::MaterialMode::stock_alpha_tested;
+    request.resource_authority = IndexedResourceAuthority::explicit_bindings;
+    request.alpha_tested_diffuse_binding = {&diffuse, &sampler};
+    request.alpha_tested_material_binding = {
+        &material, 256U, stock_shadow_caster_material_bytes};
+    return request;
+}
+
 void accepts_bounded_static_indexed_contract() {
     PipelineProgram pipeline = pipeline_fixture();
     DrawPacket packet = packet_fixture();
@@ -1714,6 +1741,179 @@ void validates_depth_only_indexed_contract() {
             "clear-only depth batch initializes an empty caster map");
 }
 
+void validates_alpha_tested_depth_only_contract() {
+    PipelineProgram pipeline = alpha_tested_depth_only_pipeline_fixture();
+    DrawPacket packet = packet_fixture();
+    packet.flags.depth_test = true;
+    packet.flags.depth_write = true;
+    FakeDepthAttachment depth(Backend::Vulkan,
+                              {16U, 16U, 1U, DepthAttachmentFormat::d32_float});
+    FakeTexture diffuse(Backend::Vulkan, sampled_description());
+    FakeSampler sampler(Backend::Vulkan);
+    FakeBuffer material(Backend::Vulkan,
+                        {512U, BufferUsage::uniform, BufferMemory::host_visible,
+                         BufferMutability::mutable_data});
+    FakeBuffer vertices(Backend::Vulkan, {132U, BufferUsage::vertex,
+                                          BufferMemory::device_local,
+                                          BufferMutability::immutable});
+    FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index,
+                                         BufferMemory::device_local,
+                                         BufferMutability::immutable});
+    auto request = alpha_tested_depth_only_request_fixture(
+        packet, pipeline, vertices, indices, diffuse, sampler, material);
+    Diagnostic diagnostic;
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::ready,
+            "valid alpha-tested depth-only contract accepted");
+
+    request.resource_authority = IndexedResourceAuthority::packet_contract;
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "depth_only_indexed_alpha_tested_resource_authority_required",
+            "alpha-tested depth-only resources require explicit authority");
+    request.resource_authority = IndexedResourceAuthority::explicit_bindings;
+
+    request.alpha_tested_diffuse_binding.texture = nullptr;
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "depth_only_indexed_alpha_tested_binding_missing",
+            "missing alpha-tested diffuse binding rejected");
+    request.alpha_tested_diffuse_binding = {&diffuse, &sampler};
+
+    FakeTexture foreign_diffuse(Backend::D3D12, sampled_description());
+    request.alpha_tested_diffuse_binding.texture = &foreign_diffuse;
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "depth_only_indexed_alpha_tested_backend_mismatch",
+            "foreign alpha-tested texture rejected");
+    request.alpha_tested_diffuse_binding.texture = &diffuse;
+
+    TextureDescription not_sampled = sampled_description();
+    not_sampled.usage = TextureUsage::transfer_source;
+    FakeTexture not_sampled_diffuse(Backend::Vulkan, not_sampled);
+    request.alpha_tested_diffuse_binding.texture = &not_sampled_diffuse;
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "depth_only_indexed_alpha_tested_texture_usage_invalid",
+            "non-sampled alpha-tested texture rejected");
+    request.alpha_tested_diffuse_binding.texture = &diffuse;
+
+    TextureDescription mutable_diffuse_description = sampled_description();
+    mutable_diffuse_description.mutability = TextureMutability::mutable_data;
+    FakeTexture mutable_diffuse(Backend::Vulkan, mutable_diffuse_description);
+    request.alpha_tested_diffuse_binding.texture = &mutable_diffuse;
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "depth_only_indexed_alpha_tested_texture_description_invalid",
+            "mutable alpha-tested texture rejected");
+    request.alpha_tested_diffuse_binding.texture = &diffuse;
+
+    TextureDescription unsupported_format = sampled_description();
+    unsupported_format.format = TextureFormat::r32_sfloat;
+    FakeTexture unsupported_diffuse(Backend::Vulkan, unsupported_format);
+    request.alpha_tested_diffuse_binding.texture = &unsupported_diffuse;
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "depth_only_indexed_alpha_tested_texture_description_invalid",
+            "unsupported alpha-tested texture format rejected");
+    request.alpha_tested_diffuse_binding.texture = &diffuse;
+
+    SamplerDescription invalid_sampler_description;
+    invalid_sampler_description.max_lod = -1.0F;
+    FakeSampler invalid_sampler(Backend::Vulkan, invalid_sampler_description);
+    request.alpha_tested_diffuse_binding.sampler = &invalid_sampler;
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code ==
+                    "depth_only_indexed_alpha_tested_sampler_lod_invalid",
+            "malformed alpha-tested sampler rejected");
+    request.alpha_tested_diffuse_binding.sampler = &sampler;
+
+    request.alpha_tested_material_binding.range_bytes = stock_shadow_caster_material_bytes - 1U;
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "depth_only_indexed_alpha_tested_material_alignment_invalid",
+            "short alpha-tested material range rejected");
+    request.alpha_tested_material_binding.range_bytes = stock_shadow_caster_material_bytes;
+    request.alpha_tested_material_binding.offset_bytes = 1U;
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "depth_only_indexed_alpha_tested_material_alignment_invalid",
+            "unaligned alpha-tested material offset rejected");
+    request.alpha_tested_material_binding.offset_bytes = 256U;
+
+    FakeBuffer short_material(Backend::Vulkan,
+                              {256U, BufferUsage::uniform, BufferMemory::host_visible,
+                               BufferMutability::mutable_data});
+    request.alpha_tested_material_binding.buffer = &short_material;
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "depth_only_indexed_alpha_tested_material_range_invalid",
+            "out-of-range alpha-tested material view rejected");
+    request.alpha_tested_material_binding.buffer = &material;
+
+    FakeBuffer wrong_material_usage(Backend::Vulkan,
+                                    {512U, BufferUsage::vertex,
+                                     BufferMemory::host_visible,
+                                     BufferMutability::mutable_data});
+    request.alpha_tested_material_binding.buffer = &wrong_material_usage;
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "depth_only_indexed_alpha_tested_material_usage_invalid",
+            "non-uniform alpha-tested material buffer rejected");
+    request.alpha_tested_material_binding.buffer = &material;
+
+    pipeline.resources.pop_back();
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "depth_only_indexed_pipeline_state_invalid",
+            "incomplete alpha-tested resource declaration rejected");
+    pipeline = alpha_tested_depth_only_pipeline_fixture();
+    request.pipeline = &pipeline;
+
+    pipeline.shaders.pop_back();
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "depth_only_indexed_shader_pair_invalid",
+            "alpha-tested vertex-only pipeline rejected");
+    pipeline = alpha_tested_depth_only_pipeline_fixture();
+    request.pipeline = &pipeline;
+
+    DrawPacket skinned_packet = skinned_packet_fixture();
+    skinned_packet.flags.depth_test = true;
+    skinned_packet.flags.depth_write = true;
+    PipelineProgram skinned_pipeline = alpha_tested_depth_only_pipeline_fixture();
+    skinned_pipeline.vertex_layout.stride = 19U * sizeof(float);
+    FakeBuffer skinned_vertices(Backend::Vulkan,
+                                {228U, BufferUsage::vertex, BufferMemory::device_local,
+                                 BufferMutability::mutable_data});
+    auto skinned_request = alpha_tested_depth_only_request_fixture(
+        skinned_packet, skinned_pipeline, skinned_vertices, indices, diffuse, sampler,
+        material);
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, skinned_request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "depth_only_indexed_alpha_tested_static_only",
+            "skinned alpha-tested depth-only draw rejected");
+
+    request.material_mode = DepthOnlyIndexedStaticMeshDrawRequest::MaterialMode::opaque;
+    pipeline = depth_only_pipeline_fixture();
+    request.pipeline = &pipeline;
+    request.resource_authority = IndexedResourceAuthority::explicit_bindings;
+    request.alpha_tested_diffuse_binding = {&diffuse, &sampler};
+    request.alpha_tested_material_binding = {
+        &material, 256U, stock_shadow_caster_material_bytes};
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "depth_only_indexed_resource_binding_unexpected",
+            "opaque depth-only draw rejects alpha resource authority");
+    request.resource_authority = IndexedResourceAuthority::packet_contract;
+    request.alpha_tested_diffuse_binding = {};
+    request.alpha_tested_material_binding = {};
+    require(validate_depth_only_indexed_static_mesh_draw_request(depth, request, diagnostic) ==
+                DepthOnlyIndexedStaticMeshDrawStatus::ready,
+            "opaque depth-only contract remains resource-free");
+}
+
 void rejects_invalid_depth_contract() {
     PipelineProgram pipeline = pipeline_fixture();
     pipeline.targets.has_depth = true;
@@ -2051,6 +2251,7 @@ int main() {
         validates_portable_damage_dust_alpha_contract();
         rejects_invalid_depth_attachment_descriptions();
         validates_depth_only_indexed_contract();
+        validates_alpha_tested_depth_only_contract();
         rejects_invalid_depth_contract();
         validates_ordered_indexed_batch_contract();
         rejects_static_indexed_limits_and_ownership();

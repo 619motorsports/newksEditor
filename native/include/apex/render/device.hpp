@@ -472,6 +472,32 @@ struct IndexedSampledTextureBinding {
     const Sampler* sampler = nullptr;
 };
 
+// Recovered stock ksShadowGenAT cbMaterial packing. The installed pixel
+// shader reads ksAlphaRef from byte offset 28 of a 32-byte b4 record.
+struct StockShadowCasterMaterialConstants {
+    // ksAmbient, ksDiffuse, ksSpecular, ksSpecularEXP.
+    std::array<float, 4> lighting{};
+    // ksEmissive RGB and ksAlphaRef.
+    std::array<float, 4> emissive_and_alpha_ref{};
+};
+
+static_assert(sizeof(StockShadowCasterMaterialConstants) == 32U);
+static_assert(offsetof(StockShadowCasterMaterialConstants,
+                       emissive_and_alpha_ref) == 16U);
+static_assert(std::is_trivially_copyable_v<StockShadowCasterMaterialConstants>);
+
+inline constexpr std::uint32_t stock_shadow_caster_material_bytes = 32U;
+inline constexpr std::uint32_t stock_shadow_caster_buffer_alignment = 256U;
+
+struct StockShadowCasterMaterialBinding {
+    // Non-owning. Keep this buffer alive until the synchronous draw returns.
+    // The explicit alpha-tested pipeline declares set 0/binding 4. D3D12
+    // maps that binding to b4, which matches the recovered stock shader.
+    const Buffer* buffer = nullptr;
+    std::uint64_t offset_bytes = 0U;
+    std::uint32_t range_bytes = 0U;
+};
+
 inline constexpr std::size_t indexed_directional_shadow_cascade_count = 3U;
 
 // Portable receiver packing. This is source-evidenced behavior carried by a
@@ -758,6 +784,17 @@ struct DepthOnlyIndexedStaticMeshDrawRequest {
     std::optional<CameraFrame> camera_frame;
     bool clear_depth = false;
     float depth_clear_value = 1.0F;
+    // The opaque mode preserves the resource-free vertex-only contract. The
+    // alpha-tested mode requires caller shader authority for t0/s1/b4 and a
+    // vertex-plus-fragment pipeline. It does not infer stock shader modules.
+    enum class MaterialMode : std::uint8_t {
+        opaque,
+        stock_alpha_tested,
+    } material_mode = MaterialMode::opaque;
+    IndexedResourceAuthority resource_authority =
+        IndexedResourceAuthority::packet_contract;
+    IndexedSampledTextureBinding alpha_tested_diffuse_binding{};
+    StockShadowCasterMaterialBinding alpha_tested_material_binding{};
 };
 
 enum class DepthOnlyIndexedStaticMeshDrawStatus : std::uint8_t {

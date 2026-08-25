@@ -1,6 +1,7 @@
 #include "backend_internal.hpp"
 #include "apex/render/draw_packet.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -10,6 +11,7 @@
 #include <mutex>
 #include <span>
 #include <utility>
+#include <vector>
 
 #if defined(APEX_HAS_D3D12) && APEX_HAS_D3D12 && defined(_WIN32)
 #    define NOMINMAX
@@ -165,6 +167,19 @@ struct D3D12Context {
 };
 
 class D3D12DepthAttachment;
+class D3D12Texture;
+class D3D12Sampler;
+
+[[nodiscard]] D3D12_RESOURCE_STATES d3d12_texture_state(
+    const D3D12Texture& texture) noexcept;
+[[nodiscard]] ID3D12Resource* d3d12_texture_resource(
+    const D3D12Texture& texture) noexcept;
+[[nodiscard]] const TextureDescription& d3d12_texture_description(
+    const D3D12Texture& texture) noexcept;
+[[nodiscard]] D3D12_GPU_DESCRIPTOR_HANDLE d3d12_sampler_gpu(
+    const D3D12Sampler& sampler) noexcept;
+void d3d12_texture_set_state(D3D12Texture& texture,
+                             D3D12_RESOURCE_STATES state) noexcept;
 
 struct D3D12MaterialDescriptorBinding {
     // Keep the per-draw SRV heap alive until the synchronous fence completes.
@@ -1464,6 +1479,13 @@ struct D3D12IndexedBatchDraw {
     D3D12GeometryDescriptor geometry{};
     const PipelineProgram* pipeline = nullptr;
     DrawMatrices matrices{};
+    bool alpha_tested = false;
+    D3D12Texture* alpha_texture = nullptr;
+    D3D12Sampler* alpha_sampler = nullptr;
+    D3D12Buffer* alpha_material = nullptr;
+    UINT64 alpha_material_offset = 0U;
+    D3D12_GPU_DESCRIPTOR_HANDLE alpha_srv_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE alpha_sampler_gpu{};
 };
 
 bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
@@ -3385,7 +3407,7 @@ bool execute_d3d12_depth_only_indexed_static_mesh_batch(
     const std::shared_ptr<D3D12Context>& context,
     D3D12DepthAttachment& depth_attachment,
     const DepthOnlyIndexedStaticMeshBatchDescription& batch,
-    std::span<const D3D12IndexedBatchDraw> draws,
+    std::span<D3D12IndexedBatchDraw> draws,
     Diagnostic& diagnostic) {
     const DepthAttachmentDescription& description = depth_attachment.info().description;
     if (description.width > static_cast<std::uint32_t>(std::numeric_limits<LONG>::max()) ||
@@ -3406,9 +3428,88 @@ bool execute_d3d12_depth_only_indexed_static_mesh_batch(
     HRESULT result = S_OK;
     std::vector<ComPtr<ID3D12RootSignature>> root_signatures(draws.size());
     std::vector<ComPtr<ID3D12PipelineState>> pipelines(draws.size());
+    bool has_alpha_tested_draw = false;
+    for (const D3D12IndexedBatchDraw& draw : draws)
+        has_alpha_tested_draw = has_alpha_tested_draw || draw.alpha_tested;
+    ComPtr<ID3D12DescriptorHeap> alpha_srv_heap;
+    const UINT descriptor_size = context->device->GetDescriptorHandleIncrementSize(
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    if (has_alpha_tested_draw) {
+        D3D12_DESCRIPTOR_HEAP_DESC heap_description{};
+        heap_description.NumDescriptors = 0U;
+        for (const D3D12IndexedBatchDraw& draw : draws)
+            heap_description.NumDescriptors += draw.alpha_tested ? 1U : 0U;
+        heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        result = context->device->CreateDescriptorHeap(&heap_description,
+                                                       IID_PPV_ARGS(&alpha_srv_heap));
+        if (FAILED(result)) {
+            diagnostic = hresult_error("CreateDescriptorHeap(depth-only alpha)", result);
+            diagnostic.code = "depth_only_indexed_descriptor_heap_failed";
+            return false;
+        }
+        UINT descriptor_index = 0U;
+        for (D3D12IndexedBatchDraw& draw : draws) {
+            if (!draw.alpha_tested) continue;
+            if (draw.alpha_texture == nullptr || draw.alpha_sampler == nullptr ||
+                draw.alpha_material == nullptr) {
+                diagnostic = {"depth_only_indexed_alpha_binding_missing",
+                              "D3D12 alpha-tested depth draws require diffuse, sampler, and material bindings"};
+                return false;
+            }
+            const TextureDescription& texture_description =
+                d3d12_texture_description(*draw.alpha_texture);
+            const DXGI_FORMAT format = dxgi_texture_format(texture_description.format);
+            if (format == DXGI_FORMAT_UNKNOWN || texture_description.width == 0U ||
+                texture_description.height == 0U || texture_description.mip_levels == 0U ||
+                texture_description.array_layers != 1U ||
+                (static_cast<std::uint32_t>(texture_description.usage) &
+                 static_cast<std::uint32_t>(TextureUsage::sampled)) == 0U) {
+                diagnostic = {"depth_only_indexed_alpha_texture_unsupported",
+                              "D3D12 alpha-tested diffuse requires a nonempty one-layer sampled texture"};
+                return false;
+            }
+            const D3D12_RESOURCE_DESC material_description =
+                draw.alpha_material->resource()->GetDesc();
+            const UINT64 material_offset = draw.alpha_material_offset;
+            const D3D12_GPU_VIRTUAL_ADDRESS material_address =
+                draw.alpha_material->resource()->GetGPUVirtualAddress();
+            if ((material_offset % stock_shadow_caster_buffer_alignment) != 0U ||
+                (material_address % stock_shadow_caster_buffer_alignment) != 0U ||
+                material_offset > material_description.Width ||
+                stock_shadow_caster_material_bytes >
+                    material_description.Width - material_offset ||
+                (static_cast<UINT>(draw.alpha_material->state()) &
+                 static_cast<UINT>(D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER)) == 0U) {
+                diagnostic = {"depth_only_indexed_alpha_material_invalid",
+                              "D3D12 alpha-tested material CBV is outside its aligned constant buffer"};
+                return false;
+            }
+            D3D12_CPU_DESCRIPTOR_HANDLE cpu =
+                alpha_srv_heap->GetCPUDescriptorHandleForHeapStart();
+            cpu.ptr += static_cast<SIZE_T>(descriptor_index) * descriptor_size;
+            D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+            srv.Format = format;
+            srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srv.Texture2D.MostDetailedMip = 0U;
+            srv.Texture2D.MipLevels = texture_description.mip_levels;
+            srv.Texture2D.PlaneSlice = 0U;
+            srv.Texture2D.ResourceMinLODClamp = 0.0F;
+            context->device->CreateShaderResourceView(
+                d3d12_texture_resource(*draw.alpha_texture), &srv, cpu);
+            D3D12_GPU_DESCRIPTOR_HANDLE gpu =
+                alpha_srv_heap->GetGPUDescriptorHandleForHeapStart();
+            gpu.ptr += static_cast<UINT64>(descriptor_index) * descriptor_size;
+            draw.alpha_srv_gpu = gpu;
+            draw.alpha_sampler_gpu = d3d12_sampler_gpu(*draw.alpha_sampler);
+            ++descriptor_index;
+        }
+    }
     for (std::size_t index = 0U; index < draws.size(); ++index) {
         const PipelineProgram& program = *draws[index].pipeline;
         const PipelineShaderModule* vertex_shader = nullptr;
+        const PipelineShaderModule* fragment_shader = nullptr;
         for (const PipelineShaderModule& shader : program.shaders) {
             if (shader.format != PipelineShaderFormat::dxil) {
                 diagnostic = {"depth_only_indexed_shader_format_unsupported",
@@ -3416,24 +3517,57 @@ bool execute_d3d12_depth_only_indexed_static_mesh_batch(
                 return false;
             }
             if (shader.stage == PipelineShaderStage::vertex) vertex_shader = &shader;
+            if (shader.stage == PipelineShaderStage::fragment) fragment_shader = &shader;
         }
-        if (vertex_shader == nullptr || program.shaders.size() != 1U) {
+        if (vertex_shader == nullptr ||
+            (!draws[index].alpha_tested && program.shaders.size() != 1U) ||
+            (draws[index].alpha_tested &&
+             (program.shaders.size() != 2U || fragment_shader == nullptr))) {
             diagnostic = {"depth_only_indexed_shader_pair_invalid",
-                          "D3D12 depth-only execution requires one vertex shader and no pixel shader"};
+                          draws[index].alpha_tested
+                              ? "D3D12 alpha-tested depth execution requires one vertex and one pixel shader"
+                              : "D3D12 depth-only execution requires one vertex shader and no pixel shader"};
             return false;
         }
 
-        D3D12_ROOT_PARAMETER transform_parameter{};
+        std::array<D3D12_ROOT_PARAMETER, 4U> root_parameters{};
+        D3D12_ROOT_PARAMETER& transform_parameter = root_parameters[0];
         transform_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         transform_parameter.Constants.ShaderRegister = 0U;
         transform_parameter.Constants.RegisterSpace = 0U;
         transform_parameter.Constants.Num32BitValues =
             static_cast<UINT>(sizeof(DrawMatrices) / sizeof(std::uint32_t));
         transform_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+        D3D12_DESCRIPTOR_RANGE alpha_srv_range{};
+        D3D12_DESCRIPTOR_RANGE alpha_sampler_range{};
+        if (draws[index].alpha_tested) {
+            alpha_srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            alpha_srv_range.NumDescriptors = 1U;
+            alpha_srv_range.BaseShaderRegister = 0U;
+            alpha_srv_range.RegisterSpace = 0U;
+            alpha_srv_range.OffsetInDescriptorsFromTableStart = 0U;
+            root_parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            root_parameters[1].DescriptorTable.NumDescriptorRanges = 1U;
+            root_parameters[1].DescriptorTable.pDescriptorRanges = &alpha_srv_range;
+            root_parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            alpha_sampler_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+            alpha_sampler_range.NumDescriptors = 1U;
+            alpha_sampler_range.BaseShaderRegister = 1U;
+            alpha_sampler_range.RegisterSpace = 0U;
+            alpha_sampler_range.OffsetInDescriptorsFromTableStart = 0U;
+            root_parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            root_parameters[2].DescriptorTable.NumDescriptorRanges = 1U;
+            root_parameters[2].DescriptorTable.pDescriptorRanges = &alpha_sampler_range;
+            root_parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            root_parameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            root_parameters[3].Descriptor.ShaderRegister = 4U;
+            root_parameters[3].Descriptor.RegisterSpace = 0U;
+            root_parameters[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        }
         D3D12_ROOT_SIGNATURE_DESC root_description{};
         root_description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-        root_description.NumParameters = 1U;
-        root_description.pParameters = &transform_parameter;
+        root_description.NumParameters = draws[index].alpha_tested ? 4U : 1U;
+        root_description.pParameters = root_parameters.data();
         ComPtr<ID3DBlob> root_blob;
         ComPtr<ID3DBlob> root_error;
         result = D3D12SerializeRootSignature(&root_description, D3D_ROOT_SIGNATURE_VERSION_1,
@@ -3468,7 +3602,10 @@ bool execute_d3d12_depth_only_indexed_static_mesh_batch(
         D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_description{};
         pipeline_description.pRootSignature = root_signatures[index].Get();
         pipeline_description.VS = {vertex_shader->bytes.data(), vertex_shader->bytes.size()};
-        pipeline_description.PS = {nullptr, 0U};
+        pipeline_description.PS = draws[index].alpha_tested
+                                      ? D3D12_SHADER_BYTECODE{fragment_shader->bytes.data(),
+                                                              fragment_shader->bytes.size()}
+                                      : D3D12_SHADER_BYTECODE{nullptr, 0U};
         pipeline_description.InputLayout = {input_elements.data(),
                                             static_cast<UINT>(input_elements.size())};
         pipeline_description.PrimitiveTopologyType =
@@ -3516,6 +3653,33 @@ bool execute_d3d12_depth_only_indexed_static_mesh_batch(
         diagnostic.code = "depth_only_indexed_execution_failed";
         return false;
     }
+    struct AlphaTextureState {
+        D3D12Texture* texture = nullptr;
+        D3D12_RESOURCE_STATES original = D3D12_RESOURCE_STATE_COMMON;
+        D3D12_RESOURCE_STATES current = D3D12_RESOURCE_STATE_COMMON;
+    };
+    std::vector<AlphaTextureState> alpha_texture_states;
+    for (const D3D12IndexedBatchDraw& draw : draws) {
+        if (!draw.alpha_tested || draw.alpha_texture == nullptr) continue;
+        bool known = false;
+        for (const AlphaTextureState& state : alpha_texture_states) {
+            if (state.texture == draw.alpha_texture) {
+                known = true;
+                break;
+            }
+        }
+        if (!known) {
+            const D3D12_RESOURCE_STATES state =
+                d3d12_texture_state(*draw.alpha_texture);
+            alpha_texture_states.push_back({draw.alpha_texture, state, state});
+        }
+    }
+    const auto restore_alpha_texture_states = [&](bool drained) noexcept {
+        for (const AlphaTextureState& state : alpha_texture_states)
+            d3d12_texture_set_state(
+                *state.texture,
+                drained ? state.original : D3D12_RESOURCE_STATE_COMMON);
+    };
     D3D12_RESOURCE_STATES depth_state = depth_attachment.state();
     if (depth_state != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
         D3D12_RESOURCE_BARRIER barrier{};
@@ -3532,12 +3696,41 @@ bool execute_d3d12_depth_only_indexed_static_mesh_batch(
         list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, batch.depth_clear_value,
                                     0U, 0U, nullptr);
     list->OMSetRenderTargets(0U, nullptr, FALSE, &dsv);
+    if (has_alpha_tested_draw) {
+        ID3D12DescriptorHeap* descriptor_heaps[] = {
+            alpha_srv_heap.Get(), context->sampler_heap.Get()};
+        list->SetDescriptorHeaps(2U, descriptor_heaps);
+    }
     for (std::size_t index = 0U; index < draws.size(); ++index) {
         const D3D12IndexedBatchDraw& draw = draws[index];
+        if (draw.alpha_tested && draw.alpha_texture != nullptr) {
+            for (AlphaTextureState& state : alpha_texture_states) {
+                if (state.texture != draw.alpha_texture ||
+                    state.current == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+                    continue;
+                D3D12_RESOURCE_BARRIER barrier{};
+                barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                barrier.Transition.pResource =
+                    d3d12_texture_resource(*draw.alpha_texture);
+                barrier.Transition.StateBefore = state.current;
+                barrier.Transition.StateAfter =
+                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+                barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                list->ResourceBarrier(1U, &barrier);
+                state.current = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            }
+        }
         list->SetGraphicsRootSignature(root_signatures[index].Get());
         list->SetGraphicsRoot32BitConstants(
             0U, static_cast<UINT>(sizeof(DrawMatrices) / sizeof(std::uint32_t)),
             &draw.matrices, 0U);
+        if (draw.alpha_tested) {
+            list->SetGraphicsRootDescriptorTable(1U, draw.alpha_srv_gpu);
+            list->SetGraphicsRootDescriptorTable(2U, draw.alpha_sampler_gpu);
+            list->SetGraphicsRootConstantBufferView(
+                3U, draw.alpha_material->resource()->GetGPUVirtualAddress() +
+                        draw.alpha_material_offset);
+        }
         list->SetPipelineState(pipelines[index].Get());
         list->IASetPrimitiveTopology(d3d12_pipeline_topology(draw.pipeline->raster.fill));
         D3D12_VERTEX_BUFFER_VIEW vertex_view{};
@@ -3559,6 +3752,16 @@ bool execute_d3d12_depth_only_indexed_static_mesh_batch(
         list->RSSetViewports(1U, &viewport);
         list->RSSetScissorRects(1U, &scissor);
         list->DrawIndexedInstanced(draw.geometry.index_count, 1U, 0U, 0, 0U);
+    }
+    for (const AlphaTextureState& state : alpha_texture_states) {
+        if (state.current == state.original) continue;
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = d3d12_texture_resource(*state.texture);
+        barrier.Transition.StateBefore = state.current;
+        barrier.Transition.StateAfter = state.original;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
     }
     result = list->Close();
     if (FAILED(result)) {
@@ -3592,6 +3795,7 @@ bool execute_d3d12_depth_only_indexed_static_mesh_batch(
     if (FAILED(result)) {
         const bool drained = context->wait_idle();
         depth_attachment.set_state(drained ? depth_state : D3D12_RESOURCE_STATE_COMMON);
+        restore_alpha_texture_states(drained);
         diagnostic = hresult_error("D3D12 depth-only batch fence", result);
         diagnostic.code = result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET
                               ? "d3d12_device_removed"
@@ -3599,6 +3803,7 @@ bool execute_d3d12_depth_only_indexed_static_mesh_batch(
         return false;
     }
     depth_attachment.set_state(depth_state);
+    restore_alpha_texture_states(true);
     if (batch.clear_depth) depth_attachment.set_cleared();
     diagnostic = {};
     return true;
@@ -3623,6 +3828,7 @@ public:
     [[nodiscard]] ID3D12Resource* resource() const noexcept { return resource_.Get(); }
     [[nodiscard]] D3D12_RESOURCE_STATES state() const noexcept { return state_; }
     [[nodiscard]] bool initialized() const noexcept { return initialized_; }
+    void set_state(D3D12_RESOURCE_STATES state) noexcept { state_ = state; }
 
     bool upload(const TextureUploadPlan& uploads, Diagnostic& diagnostic) {
         const bool uploaded = execute_texture_upload(context_, resource_.Get(), info_.description, uploads,
@@ -3692,6 +3898,26 @@ private:
     D3D12_RESOURCE_STATES state_;
     bool initialized_ = false;
 };
+
+D3D12_RESOURCE_STATES d3d12_texture_state(
+    const D3D12Texture& texture) noexcept {
+    return texture.state();
+}
+
+ID3D12Resource* d3d12_texture_resource(
+    const D3D12Texture& texture) noexcept {
+    return texture.resource();
+}
+
+const TextureDescription& d3d12_texture_description(
+    const D3D12Texture& texture) noexcept {
+    return texture.info().description;
+}
+
+void d3d12_texture_set_state(D3D12Texture& texture,
+                             D3D12_RESOURCE_STATES state) noexcept {
+    texture.set_state(state);
+}
 
 class D3D12PresentationTarget final : public PresentationTarget {
 public:
@@ -4014,6 +4240,11 @@ private:
     D3D12_GPU_DESCRIPTOR_HANDLE gpu_descriptor_{};
     SamplerInfo info_;
 };
+
+D3D12_GPU_DESCRIPTOR_HANDLE d3d12_sampler_gpu(
+    const D3D12Sampler& sampler) noexcept {
+    return sampler.gpu_descriptor();
+}
 
 bool prepare_d3d12_material_binding(
     const std::shared_ptr<D3D12Context>& context,
@@ -5814,6 +6045,34 @@ public:
             draw.geometry.index_size = static_cast<UINT>(index_bytes);
             draw.geometry.index_count = request.packet->index_count;
             draw.geometry.indexed = true;
+            draw.alpha_tested = request.material_mode ==
+                                DepthOnlyIndexedStaticMeshDrawRequest::MaterialMode::stock_alpha_tested;
+            if (draw.alpha_tested) {
+                const auto* alpha_texture = dynamic_cast<const D3D12Texture*>(
+                    request.alpha_tested_diffuse_binding.texture);
+                const auto* alpha_sampler = dynamic_cast<const D3D12Sampler*>(
+                    request.alpha_tested_diffuse_binding.sampler);
+                const auto* alpha_material = dynamic_cast<const D3D12Buffer*>(
+                    request.alpha_tested_material_binding.buffer);
+                if (alpha_texture == nullptr || alpha_sampler == nullptr ||
+                    alpha_material == nullptr || alpha_texture->context() != context ||
+                    alpha_sampler->context() != context ||
+                    alpha_material->context() != context) {
+                    return {DepthOnlyIndexedStaticMeshBatchStatus::unsupported,
+                            {"depth_only_indexed_alpha_context_mismatch",
+                             "D3D12 alpha-tested resources belong to another device"}};
+                }
+                if (!alpha_texture->initialized()) {
+                    return {DepthOnlyIndexedStaticMeshBatchStatus::invalid_request,
+                            {"depth_only_indexed_alpha_texture_uninitialized",
+                             "The D3D12 alpha-tested diffuse texture has no uploaded data"}};
+                }
+                draw.alpha_texture = const_cast<D3D12Texture*>(alpha_texture);
+                draw.alpha_sampler = const_cast<D3D12Sampler*>(alpha_sampler);
+                draw.alpha_material = const_cast<D3D12Buffer*>(alpha_material);
+                draw.alpha_material_offset =
+                    request.alpha_tested_material_binding.offset_bytes;
+            }
             draws.push_back(draw);
         }
         if (!execute_d3d12_depth_only_indexed_static_mesh_batch(
