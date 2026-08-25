@@ -2680,6 +2680,28 @@ void retains_three_directional_maps_and_executes_only_opaque_static_casters() {
             "all-hidden shadow frame clears each retained cascade without draws");
     frame.packet_visibility = {};
 
+    const std::array<std::uint8_t, 3U> show_only_alpha_shadow_packet = {
+        0U, 1U, 0U};
+    frame.packet_visibility = show_only_alpha_shadow_packet;
+    const std::size_t shadow_calls_before_staged_only = device.depth_batch_calls;
+    const auto staged_only_shadows =
+        prepared.resources->draw_opaque_directional_shadows(device, frame);
+    require(staged_only_shadows.ok() &&
+                staged_only_shadows.status ==
+                    StaticSceneDirectionalShadowStatus::partial &&
+                staged_only_shadows.diagnostic.code ==
+                    "directional_shadow_all_casters_staged" &&
+                staged_only_shadows.selected_casters == 1U &&
+                staged_only_shadows.staged_alpha_tested == 1U &&
+                staged_only_shadows.cascades_completed ==
+                    directional_shadow_cascade_count &&
+                device.depth_batch_calls ==
+                    shadow_calls_before_staged_only +
+                        directional_shadow_cascade_count &&
+                device.depth_nodes.back().empty(),
+            "an all-staged alpha frame clears every cascade instead of retaining stale depth");
+    frame.packet_visibility = {};
+
     value.packets[0].flags.double_face_shadow = true;
     RecordingDevice double_face_device;
     auto double_face_prepared =

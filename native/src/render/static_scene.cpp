@@ -1810,7 +1810,7 @@ StaticSceneResources::draw_opaque_directional_shadows(
         executable_indices.push_back(index);
         ++result.opaque_casters;
     }
-    if (result.selected_casters == 0U) {
+    const auto clear_all_maps = [&]() -> std::optional<StaticSceneDirectionalShadowResult> {
         for (std::size_t cascade = 0U;
              cascade < directional_shadow_cascade_count; ++cascade) {
             const DepthOnlyIndexedStaticMeshBatchDescription batch{
@@ -1829,15 +1829,25 @@ StaticSceneResources::draw_opaque_directional_shadows(
                     cleared.diagnostic.code, cleared.diagnostic.message);
             ++result.cascades_completed;
         }
+        return std::nullopt;
+    };
+    if (result.selected_casters == 0U) {
+        if (auto failure = clear_all_maps(); failure.has_value())
+            return std::move(*failure);
         result.status = StaticSceneDirectionalShadowStatus::ready;
         result.diagnostic = {"directional_shadow_no_casters",
                              "The scene selected no casters; all three maps contain clear depth"};
         return result;
     }
     if (executable_indices.empty()) {
-        result.status = StaticSceneDirectionalShadowStatus::unsupported;
+        // A staged-only frame must not expose depth left by an earlier frame.
+        // Clear every retained cascade even though no selected caster has an
+        // executable program yet.
+        if (auto failure = clear_all_maps(); failure.has_value())
+            return std::move(*failure);
+        result.status = StaticSceneDirectionalShadowStatus::partial;
         result.diagnostic = {"directional_shadow_all_casters_staged",
-                             "All selected directional shadow casters require staged programs"};
+                             "All selected directional shadow casters require staged programs; all three maps contain clear depth"};
         return result;
     }
 
