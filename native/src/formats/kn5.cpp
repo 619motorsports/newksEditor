@@ -155,7 +155,8 @@ void validateMeshIndices(const Kn5Node& node, std::size_t vertexCount, std::size
 }
 
 Kn5Node readNode(ByteReader& reader, std::size_t depth, std::size_t materialCount,
-                 std::size_t& nodeCount, NativeAllocationBudget& budget) {
+                 std::size_t& nodeCount, NativeAllocationBudget& budget,
+                 bool hierarchyOnly) {
     if (depth > kMaxDepth) fail("Scene hierarchy is too deep", reader.offset());
     if (nodeCount == kMaxElements) fail("Too many scene nodes", reader.offset());
     ++nodeCount;
@@ -202,21 +203,39 @@ Kn5Node readNode(ByteReader& reader, std::size_t depth, std::size_t materialCoun
         node.vertexStride = type == 2 ? 11 : 19;
         const auto vertexValues = apex::core::checkedMultiply(
             vertexCount, node.vertexStride, "KN5", "vertex data", vertexOffset, "vertex");
-        budget.reserve(node.vertices, vertexValues, vertexOffset, "vertex values");
-        for (std::size_t index = 0; index < vertexValues; ++index)
-            node.vertices.push_back(reader.f32(type == 2 ? "vertex data" : "skinned vertex data"));
+        if (hierarchyOnly) {
+            const auto vertexBytes = apex::core::checkedMultiply(
+                vertexValues, sizeof(float), "KN5", "vertex data", vertexOffset,
+                "vertex value");
+            reader.advance(vertexBytes,
+                           type == 2 ? "vertex data" : "skinned vertex data");
+        } else {
+            budget.reserve(node.vertices, vertexValues, vertexOffset, "vertex values");
+            for (std::size_t index = 0; index < vertexValues; ++index)
+                node.vertices.push_back(
+                    reader.f32(type == 2 ? "vertex data" : "skinned vertex data"));
+        }
 
         meshIndexOffset = reader.offset();
         const auto indexCount = reader.u32("index count");
         checkCount(reader, indexCount, sizeof(std::uint16_t), "index", meshIndexOffset);
-        budget.reserve(node.indices, indexCount, meshIndexOffset, "mesh indices");
-        for (std::uint32_t index = 0; index < indexCount; ++index) {
-            const auto low = reader.u8("index");
-            const auto high = reader.u8("index");
-            node.indices.push_back(static_cast<std::uint16_t>(low) |
-                                   static_cast<std::uint16_t>(static_cast<std::uint16_t>(high) << 8u));
+        if (hierarchyOnly) {
+            const auto indexBytes = apex::core::checkedMultiply(
+                static_cast<std::size_t>(indexCount), sizeof(std::uint16_t), "KN5",
+                "index data", meshIndexOffset, "index");
+            reader.advance(indexBytes, "index data");
+        } else {
+            budget.reserve(node.indices, indexCount, meshIndexOffset, "mesh indices");
+            for (std::uint32_t index = 0; index < indexCount; ++index) {
+                const auto low = reader.u8("index");
+                const auto high = reader.u8("index");
+                node.indices.push_back(
+                    static_cast<std::uint16_t>(low) |
+                    static_cast<std::uint16_t>(
+                        static_cast<std::uint16_t>(high) << 8u));
+            }
+            validateMeshIndices(node, vertexCount, meshIndexOffset);
         }
-        validateMeshIndices(node, vertexCount, meshIndexOffset);
         const auto materialOffset = reader.offset();
         node.materialId = reader.u32("material ID");
         if (static_cast<std::size_t>(node.materialId) >= materialCount)
@@ -236,7 +255,8 @@ Kn5Node readNode(ByteReader& reader, std::size_t depth, std::size_t materialCoun
 
     budget.reserve(node.children, childCount, childOffset, "node children");
     for (std::uint32_t index = 0; index < childCount; ++index)
-        node.children.push_back(readNode(reader, depth + 1, materialCount, nodeCount, budget));
+        node.children.push_back(readNode(reader, depth + 1, materialCount, nodeCount,
+                                         budget, hierarchyOnly));
     return node;
 }
 
@@ -430,7 +450,8 @@ Kn5File parseKn5(std::span<const std::uint8_t> bytes, std::string source,
         for (std::uint32_t index = 0; index < materialCount; ++index)
             file.materials.push_back(readMaterial(reader, version, budget));
         std::size_t nodeCount = 0;
-        file.root = readNode(reader, 0, file.materials.size(), nodeCount, budget);
+        file.root = readNode(reader, 0, file.materials.size(), nodeCount, budget,
+                             options.hierarchyOnly);
         file.bytesRead = reader.offset();
         if (reader.offset() < bytes.size())
             file.encryption = inspectKn5EncryptionWithBudget(bytes, reader.offset(), budget);

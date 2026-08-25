@@ -235,6 +235,58 @@ void test_v4_v5_headers_and_metadata_only() {
     require(parsed.bytesRead == parsed.byteLength, "metadata-only consumption");
 }
 
+void test_bounded_hierarchy_only_geometry_skip() {
+    auto nonFinite = scene();
+    const auto meshName = findBytes(nonFinite, "mesh");
+    const auto vertexCountOffset = meshName + 12U;
+    const auto vertexDataOffset = vertexCountOffset + 4U;
+    put32At(nonFinite, vertexDataOffset + 8U * sizeof(float), 0x7fc00000U);
+    requireError([&] { (void)apex::formats::parseKn5(nonFinite); },
+                 "full parse rejects non-finite vertex payload");
+
+    apex::formats::Kn5ParseOptions options;
+    options.metadataOnly = true;
+    options.hierarchyOnly = true;
+    const auto hierarchy = apex::formats::parseKn5(
+        nonFinite, "hierarchy-only.kn5", options);
+    const auto rows = apex::formats::walkKn5(hierarchy.root);
+    require(rows.size() == 3U && rows[1].node->vertices.empty() &&
+                rows[1].node->indices.empty() && rows[1].node->vertexStride == 11U &&
+                rows[2].node->vertices.empty() && rows[2].node->indices.empty() &&
+                rows[2].node->vertexStride == 19U,
+            "hierarchy-only parse preserves nodes and omits geometry payloads");
+    require(hierarchy.bytesRead == hierarchy.byteLength,
+            "hierarchy-only parse consumes the bounded container");
+
+    auto truncatedVertex = scene();
+    truncatedVertex.resize(vertexDataOffset + 43U);
+    requireError(
+        [&] {
+            (void)apex::formats::parseKn5(
+                truncatedVertex, "truncated-vertex.kn5", options);
+        },
+        "hierarchy-only parse rejects truncated vertex payload");
+
+    const auto indexCountOffset = vertexDataOffset + 3U * 44U;
+    auto truncatedIndex = scene();
+    truncatedIndex.resize(indexCountOffset + 4U + 1U);
+    requireError(
+        [&] {
+            (void)apex::formats::parseKn5(
+                truncatedIndex, "truncated-index.kn5", options);
+        },
+        "hierarchy-only parse rejects truncated index payload");
+
+    auto malformedCount = scene();
+    put32At(malformedCount, vertexCountOffset, 0xffffffffU);
+    requireError(
+        [&] {
+            (void)apex::formats::parseKn5(
+                malformedCount, "malformed-count.kn5", options);
+        },
+        "hierarchy-only parse rejects hostile vertex count");
+}
+
 void test_encryption_diagnosis() {
     const auto bytes = encryptedScene();
     const auto parsed = apex::formats::parseKn5(bytes);
@@ -436,6 +488,7 @@ int main() {
     try {
         test_v6_scene_and_visibility();
         test_v4_v5_headers_and_metadata_only();
+        test_bounded_hierarchy_only_geometry_skip();
         test_encryption_diagnosis();
         test_every_truncated_prefix();
         test_malformed_bounds();

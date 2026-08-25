@@ -104,6 +104,9 @@ inline constexpr std::size_t default_kn5_native_object_bytes =
 
 struct Kn5ParseOptions {
     bool metadataOnly = false;
+    // Preserve the hierarchy and mesh metadata, but do not materialize or
+    // decode vertex and index payloads. Counts and byte ranges remain bounded.
+    bool hierarchyOnly = false;
     apex::core::ParseLimits limits{};
     // Bounds aggregate native allocations made while materializing the KN5
     // object graph. This is separate from maxInputBytes because a small
