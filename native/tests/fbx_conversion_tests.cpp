@@ -172,6 +172,41 @@ void convertsStaticGeometryTransformsAndMaterials() {
             "FBX material metadata");
 }
 
+void ignoresDisplayLayerMembershipEdges() {
+    auto document = fixture();
+    document.roots[0].children.push_back(node("CollectionExclusive", {
+        std::int64_t(400), std::string("DisplayLayer::WHEEL_DUMMIES"), std::string("DisplayLayer")}));
+    document.roots[0].children.push_back(node("Deformer", {
+        std::int64_t(401), std::string("SubDeformer::BoneCluster"), std::string("Cluster")}));
+    document.roots[1].children.push_back(node("C", {
+        std::string("OO"), std::int64_t(200), std::int64_t(400)}));
+    document.roots[1].children.push_back(node("C", {
+        std::string("OO"), std::int64_t(200), std::int64_t(0)}));
+    document.roots[1].children.push_back(node("C", {
+        std::string("OO"), std::int64_t(200), std::int64_t(401)}));
+    document.roots[1].children.push_back(node("C", {
+        std::string("OO"), std::int64_t(200), std::int64_t(400)}));
+    const auto result = apex::formats::convertFbxScene(document);
+    require(result.snapshot.nodes.size() == 2u && result.snapshot.nodes[1].parent == 0u &&
+                std::any_of(result.diagnostics.begin(), result.diagnostics.end(),
+                            [](const auto& diagnostic) { return diagnostic.code == "unsupported_skinning"; }),
+            "FBX display-layer and skin-cluster edges do not become model parents");
+
+    auto malformed = fixture();
+    malformed.roots[0].children.push_back(node("CollectionExclusive", {
+        std::int64_t(400), std::string("DisplayLayer::WHEEL_DUMMIES"), std::string("DisplayLayer")}));
+    malformed.roots[1].children.push_back(node("C", {
+        std::string("OO"), std::int64_t(200), std::int64_t(300)}));
+    expectsError([&] { (void)apex::formats::convertFbxScene(malformed); }, "invalid_reference");
+
+    auto duplicateParent = fixture();
+    duplicateParent.roots[1].children.push_back(node("C", {
+        std::string("OO"), std::int64_t(200), std::int64_t(0)}));
+    duplicateParent.roots[1].children.push_back(node("C", {
+        std::string("OO"), std::int64_t(200), std::int64_t(0)}));
+    expectsError([&] { (void)apex::formats::convertFbxScene(duplicateParent); }, "invalid_hierarchy");
+}
+
 void convertsUvSeamsAndFlipsV() {
     const auto result = apex::formats::convertFbxScene(seamFixture());
     require(result.meshes.size() == 1u && result.meshes[0].positions.size() == 18u &&
@@ -507,6 +542,7 @@ int main() {
     try {
         convertsParsedAsciiTriangle();
         convertsStaticGeometryTransformsAndMaterials();
+        ignoresDisplayLayerMembershipEdges();
         convertsUvSeamsAndFlipsV();
         convertsBoundedLinearAnimationToKsanimV2();
         rejectsMalformedAnimationCurvesAndUnsupportedInterpolation();

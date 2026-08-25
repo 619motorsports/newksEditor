@@ -1296,7 +1296,11 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
         const auto source = byId.at(link.source);
         const auto sourceName = records[source].node->name;
         if (link.kind == "OO" && sourceName == "Model") {
-            const auto targetName = link.target == 0 ? std::string("Root") : records[byId.at(link.target)].node->name;
+            const std::string_view targetName = link.target == 0 ? "Root" : records[byId.at(link.target)].node->name;
+            // FBX display layers own models through OO edges, while skin
+            // clusters use OO edges from a bone Model to a Deformer. These
+            // are membership/attribute edges rather than hierarchy edges.
+            if (targetName == "Collection" || targetName == "CollectionExclusive" || targetName == "Deformer") continue;
             if (targetName == "Model" || link.target == 0) {
                 if (parent.contains(link.source)) fail("invalid_hierarchy", "FBX model has multiple parents", "Connections");
                 chargeAssociativeNode(budget, sizeof(std::pair<const std::int64_t, std::int64_t>), "scene/parents");
@@ -1456,7 +1460,7 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
                 self(self, childId, id, world, depth + 1u, childPath(path, static_cast<std::size_t>(childId), limits));
         visiting.erase(modelId);
     };
-    for (const auto modelIndex : modelIndexes) if (!parent.contains(records[modelIndex].id)) {
+    for (const auto modelIndex : modelIndexes) if (!parent.contains(records[modelIndex].id) || parent.at(records[modelIndex].id) == 0) {
         const auto modelPath = boundedPath("Models/" + std::to_string(records[modelIndex].id), limits);
         budget.add(modelPath.size(), "model paths");
         append(append, records[modelIndex].id, 0u, scene::identity_matrix, 0u, modelPath);
