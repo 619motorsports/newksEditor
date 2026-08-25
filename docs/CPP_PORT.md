@@ -437,11 +437,12 @@ remains unchanged and feature-complete.
   these maps through the portable receiver ABI. D3D12 creates typeless depth
   resources and sampled views, but descriptor execution remains staged pending
   WARP verification. The
-  device API directly uploads immutable, one-layer BC1, BC3, BC5, and BC7 sampled
+  device API directly uploads immutable, one-layer BC1, BC3, BC4 UNORM, BC5, and BC7 sampled
   textures. The upload path validates compressed block rows before allocation.
   Vulkan and D3D12 query format support before image creation. The generic
-  device API accepts BC5 uploads. The normal-map ABI remains RGBA8/BGRA8 because
-  its shader reads RGB and does not reconstruct BC5 Z.
+  device API accepts BC4 UNORM and BC5 uploads. BC4 is scalar and remains outside
+  the RGB material bindings. The normal-map ABI remains RGBA8/BGRA8 because its
+  shader reads RGB and does not reconstruct BC5 Z.
   The embedded static-scene path still uses its exact CPU decode.
   The static-scene path requires explicit backend shader bytecode. The bounded
   material handoff selects modules by material or shader family. It derives

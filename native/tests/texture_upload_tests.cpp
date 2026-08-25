@@ -154,6 +154,16 @@ void plansCompressedEdgesAndMips() {
                 chainPlan.plan->subresources[0].rowCount == 2u && chainPlan.plan->subresources[1].offset == 192u &&
                 chainPlan.plan->subresources[1].size == 16u && chainPlan.plan->subresources[2].offset == 208u &&
                 chainPlan.plan->subresources[2].size == 16u, "BC5 mip offsets and pitches");
+
+    const auto bc4Edge = dx10(5, 3, 80, 16);
+    const auto bc4EdgePlan = buildDdsUploadPlan(bc4Edge, "bc4-edge.dds");
+    require(bc4EdgePlan.ok() && bc4EdgePlan.plan->mapping.format == TextureFormat::bc4_unorm &&
+                bc4EdgePlan.plan->subresources.size() == 1U &&
+                bc4EdgePlan.plan->subresources[0].blocksWide == 2U &&
+                bc4EdgePlan.plan->subresources[0].blocksHigh == 1U &&
+                bc4EdgePlan.plan->subresources[0].rowPitch == 16U &&
+                bc4EdgePlan.plan->subresources[0].size == 16U,
+            "BC4 edge pitches");
 }
 
 void plansRawPitches() {
@@ -210,6 +220,12 @@ void rejectsMalformedPayloadAndLimits() {
                 shortBc5Plan.diagnostic.code == "truncated_payload" &&
                 shortBc5Plan.diagnostic.offset == 148U,
             "truncated BC5 edge payload");
+    const auto shortBc4 = dx10(5, 3, 80, 8);
+    const auto shortBc4Plan = buildDdsUploadPlan(shortBc4, "bc4-short.dds");
+    require(!shortBc4Plan.ok() && shortBc4Plan.status == TextureUploadStatus::invalid &&
+                shortBc4Plan.diagnostic.code == "truncated_payload" &&
+                shortBc4Plan.diagnostic.offset == 148U,
+            "truncated BC4 edge payload");
     const auto attributed = buildDdsUploadPlan(shortBc, "cars/body.dds");
     require(attributed.diagnostic.source == "cars/body.dds" && attributed.diagnostic.offset == 128u,
             "upload diagnostic source attribution");

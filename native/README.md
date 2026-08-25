@@ -170,11 +170,12 @@ The current backends initialize devices and create/upload buffers and bounded
 2D textures, samplers, and immutable shader modules. They execute bounded
 RGBA8/BGRA8 texture clears and canonical RGBA8 readback. They also validate a
 pipeline and execute fixed and indexed R16 static-mesh draws with readback.
-The device API uploads immutable, one-layer BC1, BC3, BC5, and BC7 sampled textures.
+The device API uploads immutable, one-layer BC1, BC3, BC4, BC5, and BC7 sampled textures.
 The owned static-scene path uploads bounded PNG decodes as RGBA8 UNORM.
 It validates each block row before allocation. Vulkan and D3D12 query format
-support before they create a compressed image. BC2, BC4, and BC6H remain
-outside this direct-upload path.
+support before they create a compressed image. BC2, BC4 SNORM, and BC6H remain
+outside this direct-upload path. BC4 UNORM is a scalar generic texture and is
+not admitted to the existing RGB material bindings.
 The indexed path validates 11-float KN5 static geometry before allocation.
 It uploads immutable vertex and R16 index buffers. The adapter rejects
 malformed geometry, non-finite values, invalid packet ranges, and unsafe

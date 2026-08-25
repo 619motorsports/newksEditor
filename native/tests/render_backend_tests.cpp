@@ -779,6 +779,12 @@ void contract_texture_limits() {
                 bc5_info.block_bytes == 16U && !bc5_info.srgb &&
                 texture_format_is_compressed(TextureFormat::bc5_unorm),
             "BC5 texture metadata");
+    const auto bc4_info = texture_format_info(TextureFormat::bc4_unorm);
+    require(bc4_info.classification == TextureFormatClass::block_compressed &&
+                bc4_info.block_width == 4U && bc4_info.block_height == 4U &&
+                bc4_info.block_bytes == 8U && !bc4_info.srgb &&
+                texture_format_is_compressed(TextureFormat::bc4_unorm),
+            "BC4 texture metadata");
 
     // BC uploads use logical texture dimensions but a block-row footprint.
     // A 5x3 image has two 4x4 blocks across and one block row. Keep these
@@ -828,6 +834,7 @@ void contract_texture_limits() {
     check_bc_upload(TextureFormat::bc1_srgb, 8U, "BC1 sRGB");
     check_bc_upload(TextureFormat::bc3_unorm, 16U, "BC3");
     check_bc_upload(TextureFormat::bc3_srgb, 16U, "BC3 sRGB");
+    check_bc_upload(TextureFormat::bc4_unorm, 8U, "BC4");
     check_bc_upload(TextureFormat::bc5_unorm, 16U, "BC5");
     check_bc_upload(TextureFormat::bc7_unorm, 16U, "BC7");
     check_bc_upload(TextureFormat::bc7_srgb, 16U, "BC7 sRGB");
@@ -2342,6 +2349,26 @@ bool contract_backend(apex::render::Backend backend) {
         // BC5 support is adapter-dependent, like BC7.
     } else {
         require(bc5_texture.ok(), "BC5 generic sampled texture creation");
+    }
+
+    // BC4 is admitted to the generic block upload API as a scalar texture.
+    // The existing diffuse/maps shader ABIs require RGB-capable resources, so
+    // keep this as an exact creation/capability check instead of inventing a
+    // scalar-to-color binding conversion.
+    const std::array<std::uint8_t, 8> bc4_block = {
+        0x80U, 0x80U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U};
+    const TextureDescription bc4_description{
+        4U, 4U, 1U, 1U, TextureFormat::bc4_unorm, TextureUsage::sampled,
+        TextureMemory::device_local, TextureMutability::immutable};
+    const TextureUploadPlan bc4_uploads{{
+        TextureUpload{0U, 0U, 4U, 4U, 8U, std::as_bytes(std::span(bc4_block))}}};
+    TextureResult bc4_texture = device.device->create_texture(bc4_description, bc4_uploads);
+    if (!bc4_texture.ok() && bc4_texture.status == TextureStatus::unsupported &&
+        (bc4_texture.diagnostic.code == "vulkan_compressed_format_unsupported" ||
+         bc4_texture.diagnostic.code == "d3d12_texture_format_unsupported")) {
+        // BC4 support is adapter-dependent and must remain an explicit result.
+    } else {
+        require(bc4_texture.ok(), "BC4 generic sampled texture creation");
     }
 
     if (backend == Backend::D3D12) {

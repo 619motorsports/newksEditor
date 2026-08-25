@@ -87,7 +87,7 @@ TextureStatus validate_texture_block_upload_contract(const TextureDescription& d
     if (description.samples != 1U || description.mutability != TextureMutability::immutable ||
         description.array_layers != 1U || description.usage != TextureUsage::sampled) {
         diagnostic = {"texture_compressed_upload_unsupported",
-                      "BC1, BC3, BC5, and BC7 uploads require one-layer, one-sample immutable sampled texture resources"};
+                      "BC1, BC3, BC4, BC5, and BC7 uploads require one-layer, one-sample immutable sampled texture resources"};
         return TextureStatus::unsupported;
     }
     return TextureStatus::ready;
@@ -441,7 +441,7 @@ TextureStatus validate_texture_description(const TextureDescription& description
         initial_uploads.subresources.size() !=
             static_cast<std::size_t>(description.mip_levels) * description.array_layers) {
         diagnostic = {"texture_compressed_upload_incomplete",
-                      "Immutable BC1, BC3, BC5, and BC7 textures require one upload for every subresource"};
+                      "Immutable BC1, BC3, BC4, BC5, and BC7 textures require one upload for every subresource"};
         return TextureStatus::invalid_description;
     }
     constexpr auto max_size_t = static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max());
