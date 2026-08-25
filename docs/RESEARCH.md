@@ -3006,9 +3006,39 @@ Imola fast lane also round-trips when that fixture exists.
 
 The original managed save wrapper calls `buildGrid` before `AISpline::save`.
 It writes directly to the destination and ignores stream errors. The C++
-writer returns owned bytes and does not write a file. Grid rebuild and a safe
-filesystem save command remain staged. Version-2 output also remains staged
-because the current model does not invent version-7 payloads.
+writer returns owned bytes and does not write a file. The new CLI writes a
+payload-only candidate through an exclusive temporary file. It does not replace
+an existing destination. This edit preserves the grid because point positions
+do not change. Grid rebuild remains staged for future point edits. Version-2
+output also remains staged because the model does not invent version-7 payloads.
+
+## ksEditor AI spline waypoint payload evidence
+
+`ksGraphics.getCurrentWaypointInfo` has token `0x060003ba` and RVA `0x1f6f0`.
+`ksGraphics.setWaypointInfo` has token `0x060003bc` and RVA `0x1f848`.
+Both methods require exactly one selected spline point. The setter ignores its
+integer argument. The UI commit callback passes zero for this argument.
+
+The UI object maps six fields to the native runtime payload. These fields are
+radius, two side distances, camber, length, and grade. Their runtime offsets
+are 4, 12, 16, 20, 52, and 64 bytes. The getter converts camber from radians
+with `57.295780181884766F`. The setter converts degrees with
+`0.01745299994945526F`.
+
+The setter treats each nonzero field in the first object as a replacement.
+Zero means unchanged, so this object cannot set a field to zero. The setter
+then adds every field in the additive object. It does not clamp values or make
+sure that values are finite.
+
+`AISpline::payloadAtSplineIndex` at `0x1006a318` and the setter at
+`0x1006a657` resolve a point through `Spline::wrapIndex` and `Spline::tagAt`.
+The safe C++ adapter uses strict point bounds. It also validates the signed tag,
+all finite values, the complete candidate, and the output limit. An error
+returns no candidate bytes and does not change the input spline.
+
+The `--edit-ai-spline` command exposes the recovered replacement and additive
+objects for one point. It accepts camber in degrees and writes radians. It
+preserves the parsed grid and refuses to replace an existing output file.
 
 ## ksEditor AI spline selection evidence
 

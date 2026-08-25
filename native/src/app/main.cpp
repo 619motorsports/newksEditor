@@ -6,6 +6,7 @@
 #include "apex/app/workspace_track_camera.hpp"
 #include "apex/app/workspace_viewport.hpp"
 #include "apex/assets/asset_source.hpp"
+#include "apex/authoring/ai_spline.hpp"
 #include "apex/core/parse_error.hpp"
 #include "apex/core/parse_limits.hpp"
 #include "apex/domain/analog_instruments.hpp"
@@ -81,6 +82,11 @@ void usage(std::ostream& output) {
            << "  apex-native --inspect-ini <file>\n"
            << "  apex-native --inspect-vao <file>\n"
            << "  apex-native --inspect-ksanim <file>\n"
+           << "  apex-native --edit-ai-spline <input.ai> <output.ai> --index <point-index>\n"
+              "                       [--set-radius <value>] [--set-side0 <value>] [--set-side1 <value>]\n"
+              "                       [--set-camber-degrees <value>] [--set-length <value>] [--set-grade <value>]\n"
+              "                       [--add-radius <value>] [--add-side0 <value>] [--add-side1 <value>]\n"
+              "                       [--add-camber-degrees <value>] [--add-length <value>] [--add-grade <value>]\n"
            << "  apex-native --export-project kn5|csp <source.kn5> <project.apex.json> <output>\n"
            << "  apex-native --export-project collider|damage|bottom-colliders|surfaces|models|lods <source.kn5> "
               "<project.apex.json> <secondary-input> <output>\n";
@@ -662,6 +668,102 @@ double parse_finite_number(std::string_view value, std::string_view label) {
         throw std::runtime_error(std::string(label) + " must be a finite number");
     }
     return result;
+}
+
+void write_cli_text(std::ostream& output, std::string_view value);
+
+float parse_finite_float(std::string_view value, std::string_view label) {
+    const double parsed = parse_finite_number(value, label);
+    const float result = static_cast<float>(parsed);
+    if (!std::isfinite(result))
+        throw std::runtime_error(std::string(label) + " is outside the finite float range");
+    return result;
+}
+
+int edit_ai_spline(int argc, char** argv) {
+    if (argc < 6)
+        throw std::runtime_error("invalid --edit-ai-spline arguments");
+
+    const std::filesystem::path input_path = argv[2];
+    const std::filesystem::path output_path = argv[3];
+    std::optional<std::uint32_t> point_index;
+    apex::authoring::AiSplineWaypointEdit edit;
+    std::unordered_set<std::string> specified;
+    std::size_t edit_field_count = 0U;
+
+    auto set_field = [&](std::string_view option, std::string_view value,
+                         float& field) {
+        const std::string owned_option(option);
+        if (!specified.insert(owned_option).second)
+            throw std::runtime_error("duplicate " + owned_option + " option");
+        field = parse_finite_float(value, owned_option);
+        ++edit_field_count;
+    };
+
+    for (int argument = 4; argument < argc; ++argument) {
+        const std::string_view option = argv[argument];
+        if (argument + 1 >= argc)
+            throw std::runtime_error(std::string(option) + " requires a value");
+        const std::string_view value = argv[++argument];
+        if (option == "--index") {
+            if (point_index.has_value())
+                throw std::runtime_error("duplicate --index option");
+            point_index = parse_unsigned_index(value, "AI spline point index");
+        } else if (option == "--set-radius") {
+            set_field(option, value, edit.replacement.radius);
+        } else if (option == "--set-side0") {
+            set_field(option, value, edit.replacement.side0);
+        } else if (option == "--set-side1") {
+            set_field(option, value, edit.replacement.side1);
+        } else if (option == "--set-camber-degrees") {
+            set_field(option, value, edit.replacement.camberDegrees);
+        } else if (option == "--set-length") {
+            set_field(option, value, edit.replacement.length);
+        } else if (option == "--set-grade") {
+            set_field(option, value, edit.replacement.grade);
+        } else if (option == "--add-radius") {
+            set_field(option, value, edit.additive.radius);
+        } else if (option == "--add-side0") {
+            set_field(option, value, edit.additive.side0);
+        } else if (option == "--add-side1") {
+            set_field(option, value, edit.additive.side1);
+        } else if (option == "--add-camber-degrees") {
+            set_field(option, value, edit.additive.camberDegrees);
+        } else if (option == "--add-length") {
+            set_field(option, value, edit.additive.length);
+        } else if (option == "--add-grade") {
+            set_field(option, value, edit.additive.grade);
+        } else {
+            throw std::runtime_error("unknown --edit-ai-spline option: " +
+                                     std::string(option));
+        }
+    }
+
+    if (!point_index.has_value())
+        throw std::runtime_error("--edit-ai-spline requires --index");
+    if (edit_field_count == 0U)
+        throw std::runtime_error("--edit-ai-spline requires at least one edit field");
+
+    const auto input_bytes = read_file(input_path);
+    const auto spline = apex::formats::parseAiSpline(input_bytes, input_path.string());
+    const std::array<std::uint32_t, 1> selection{*point_index};
+    const auto result = apex::authoring::applyAiSplineWaypointEdit(
+        spline, selection, edit);
+    if (!result.ok()) {
+        if (result.diagnostics.empty())
+            throw std::runtime_error("AI spline waypoint edit failed");
+        const auto& diagnostic = result.diagnostics.back();
+        throw std::runtime_error(diagnostic.code + ": " + diagnostic.message);
+    }
+
+    write_file_exclusive(output_path, result.bytes);
+    std::cout << "AI spline waypoint edited: point=" << result.pointIndex
+              << ", payload=" << result.payloadIndex
+              << ", changed=" << (result.changed ? "yes" : "no")
+              << ", output=";
+    write_cli_text(std::cout, output_path.string());
+    std::cout << '\n';
+    return 0;
 }
 
 void write_cli_text(std::ostream& output, std::string_view value) {
@@ -2039,6 +2141,13 @@ int run_window(int argc, char** argv) {
 
 int main(int argc, char** argv) {
     try {
+        if (argc >= 2 && std::string_view(argv[1]) == "--edit-ai-spline") {
+            if (argc < 6) {
+                usage(std::cerr);
+                return 2;
+            }
+            return edit_ai_spline(argc, argv);
+        }
         if (argc >= 2 && std::string_view(argv[1]) == "--export-project") {
             if (argc < 3) {
                 usage(std::cerr);

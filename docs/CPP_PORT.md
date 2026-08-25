@@ -213,14 +213,18 @@ remains unchanged and feature-complete.
   passes. These raw passes follow the interval and use normal depth.
   Repeated version-7 index options add recovered yellow center markers and
   optional cyan width markers. The port keeps insertion order and ignores
-  duplicate indices. The last unique index supplies the normalized UI return.
-  This pass follows the side passes and uses normal depth. The native first-
-  selected mutable edit path remains staged.
+  duplicate indices. The port records the last unique index for UI adapters.
+  This pass follows the side passes and uses normal depth.
   The format library writes the exact `AISpline::save` version-7 record
   layout. The writer emits zero reserved words and preserves a valid grid.
   It rejects version 2 because the port has not recovered the conversion of
-  legacy records into version-7 payloads. The filesystem save command and
-  grid rebuild remain staged.
+  legacy records into version-7 payloads. A separate authoring adapter ports
+  the recovered six-field waypoint edit for one selected point. It resolves
+  the payload through the point tag. It applies each nonzero replacement, then
+  each additive value. Camber values use degrees at this boundary and radians
+  in the file. The adapter returns a validated candidate and owned bytes.
+  The CLI writes these bytes without replacing an existing file. Payload-only
+  edits preserve the valid grid. Point edits and grid rebuild remain staged.
   Another version-7 option adds the recovered vertical camber lines after the
   side passes. Positive values are green. Other values are red.
   The selected pass uses solid fill, front-face culling, opaque blend state,

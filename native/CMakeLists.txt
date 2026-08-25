@@ -93,6 +93,7 @@ if(JPEG_FOUND)
 endif()
 
 add_library(apex_authoring STATIC
+  src/authoring/ai_spline.cpp
   src/authoring/geometry.cpp
   src/authoring/project.cpp
   src/authoring/project_bake.cpp
@@ -257,6 +258,16 @@ add_test(NAME apex_native_cli_usage
 )
 set_tests_properties(apex_native_cli_usage PROPERTIES LABELS "unit;security")
 
+add_test(NAME apex_native_ai_spline_edit_cli
+  COMMAND ${CMAKE_COMMAND}
+    "-DAPEX_NATIVE_COMMAND=$<TARGET_FILE:apex_native_app>"
+    "-DAPEX_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+    "-DAPEX_BINARY_DIR=${CMAKE_BINARY_DIR}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ai_spline_edit_cli_test.cmake"
+)
+set_tests_properties(apex_native_ai_spline_edit_cli
+  PROPERTIES LABELS "unit;malformed;security")
+
 add_test(NAME apex_native_workspace_cli
   COMMAND ${CMAKE_COMMAND}
     "-DAPEX_NATIVE_COMMAND=$<TARGET_FILE:apex_native_app>"
@@ -309,6 +320,7 @@ apex_add_native_test(acd_tests.cpp acd_tests ApexEditor::Formats)
 apex_add_native_test(ini_tests.cpp ini_tests ApexEditor::Formats)
 apex_add_native_test(vao_tests.cpp vao_tests ApexEditor::Formats)
 apex_add_native_test(authoring_project_tests.cpp authoring_project_tests ApexEditor::Authoring)
+apex_add_native_test(ai_spline_authoring_tests.cpp ai_spline_authoring_tests ApexEditor::Authoring)
 apex_add_native_test(authoring_service_tests.cpp authoring_service_tests ApexEditor::App)
 apex_add_native_test(presentation_recreation_tests.cpp presentation_recreation_tests ApexEditor::App)
 apex_add_native_test(workspace_selection_tests.cpp workspace_selection_tests ApexEditor::App)
@@ -406,6 +418,7 @@ foreach(parser_test IN ITEMS ai_spline_tests kn5_tests kn5_write_tests dds_tests
   endif()
 endforeach()
 foreach(boundary_test IN ITEMS authoring_project_tests project_bake_tests geometry_bake_tests project_io_tests
+                               ai_spline_authoring_tests
                                authoring_service_tests project_workspace_tests workspace_selection_tests
                                asset_index_tests asset_source_tests csp_config_model_tests
                                csp_material_evaluator_tests car_damage_tests secondary_asset_tests car_validation_tests

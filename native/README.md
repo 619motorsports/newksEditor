@@ -75,6 +75,11 @@ The track-data library writes bounded `surfaces.ini` files. These writers use
 deterministic field order and reject unsafe text, duplicate identities,
 non-finite values, and output that exceeds its limit.
 
+The AI-spline authoring adapter derives a version-7 candidate from one selected
+point. The point tag selects the payload record. The adapter edits the six
+fields that the installed editor exposes. It returns owned bytes after full
+writer validation. An error returns no candidate and does not change the input.
+
 The application workspace session accepts caller-granted model and manifest
 bytes, or resolves a manifest and its model references through the bounded
 `AssetSource`. It atomically returns an assembled workspace, a renderer-
@@ -147,6 +152,8 @@ out/native/dev/native/apex-native --inspect-acd car_directory data.acd
 out/native/dev/native/apex-native --inspect-ini ext_config.ini
 out/native/dev/native/apex-native --inspect-vao car.vao-patch
 out/native/dev/native/apex-native --inspect-ksanim animation.ksanim
+out/native/dev/native/apex-native --edit-ai-spline fast_lane.ai edited.ai \
+  --index 42 --set-radius 20 --add-camber-degrees -0.5
 out/native/dev/native/apex-native --window vulkan --frames 300
 out/native/dev/native/apex-native --window vulkan --model car.kn5 \
   --analog-instruments data/analog_instruments.ini --rpm 6000 \
@@ -226,6 +233,17 @@ It writes zero reserved words and preserves a valid optional grid.
 The function rejects version 2 because the port does not invent version-7
 payloads. It also rejects invalid tags, grid indices, non-finite values, and
 output that exceeds the configured limits.
+`--edit-ai-spline` edits one version-7 point and writes a new file.
+The command does not replace an existing output file.
+The point tag selects the payload, as in the installed editor.
+The command supports radius, side distances, camber, length, and grade.
+Use a `--set-*` option for the recovered replacement object.
+Use an `--add-*` option for the recovered additive object.
+Camber option values use degrees. The file stores camber in radians.
+A zero `--set-*` value means unchanged. This native sentinel cannot set a
+field to zero. An additive value can make the result zero.
+The command preserves the spatial grid because payload edits do not move points.
+Point-position edits remain staged until the port can rebuild the grid.
 The default `raw` mode draws the recovered raw magenta spline.
 `--ai-spline-mode interpolated` draws the recovered Catmull-Rom curve.
 This mode recomputes the native arc-length table and ignores stored point
@@ -241,8 +259,8 @@ The side options are independent and off by default. They require version-7
 payloads and use cyan with normal depth.
 `--ai-spline-index <index>` draws a recovered selected-point marker.
 Repeat this option to select more points. The CLI keeps insertion order and
-ignores duplicate indices. The last unique index supplies the normalized UI
-return in the native editor.
+ignores duplicate indices. The CLI records the last unique index. Native UI
+code uses that index to calculate its normalized return value.
 Each zero-based index refers to the retained point array. Each center line is
 yellow and 40 units high. If the left width is nonzero, the marker also has
 two cyan width lines. This option uses normal depth and requires version-7
@@ -253,7 +271,8 @@ the absolute camber value times 1,000. This option uses normal depth and
 requires version-7 payloads.
 The Vulkan and D3D12 line list is a labeled translation of the OpenGL line
 strip. The translation keeps all segments at portable chunk boundaries.
-The option does not enable the native first-selected mutable edit path.
+The marker option does not start a mutable edit. Use `--edit-ai-spline` for the
+recovered single-selection payload edit.
 The old `--selection-axis-vertex` and `--selection-axis-fragment` names remain aliases.
 The grid starts hidden. `--grid` shows the recovered 10 m magenta grid.
 The view axis starts hidden. `--view-axis` shows the recovered one-meter

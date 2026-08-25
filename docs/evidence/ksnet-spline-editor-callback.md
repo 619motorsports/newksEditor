@@ -140,7 +140,18 @@ which matches the two installed-editor checkboxes.
 Each `--ai-spline-index <index>` adds one recovered selected-point marker.
 Repeated options model `addIndex`: they keep insertion order and ignore
 duplicate indices. The CLI reports the last selected index. The native
-first-selected mutable edit path remains staged.
+normalized UI calculation uses that last index. Marker selection does not edit
+payloads.
+
+`getCurrentWaypointInfo` and `setWaypointInfo` require exactly one selected
+point. The edit resolves the payload through the point tag. It exposes radius,
+two side distances, camber, length, and grade. Camber uses degrees in the UI
+and radians in the payload.
+
+The first edit object uses zero as an unchanged sentinel. Each nonzero field
+replaces its payload field. The second object adds all fields after replacement.
+The C++ `--edit-ai-spline` command ports this order. It adds strict bounds,
+finite-value validation, complete writer validation, and exclusive output.
 
 `--ai-spline-show-camber` enables the independent camber pass. This option
 also requires version-7 payloads and starts off. Spline edit controls remain
@@ -153,9 +164,9 @@ version 7. It writes zero for the header and payload reserved words.
 
 The native save method truncates the destination directly. It does not use a
 temporary file or inspect stream errors. The UI reports success after the
-call. The C++ format writer implements only the recovered byte layout. It
-returns owned bytes and leaves grid rebuild and filesystem policy to a later
-authoring layer.
+call. The C++ format writer implements the recovered byte layout. The CLI uses
+a temporary file and does not replace an existing destination. Payload-only
+edits preserve the parsed grid. Point edits still require a grid rebuild.
 
 The production WebGL source has no AI-spline load or render path. A source
 search found no AI-spline or `fast_lane.ai` identifiers. Thus, a direct WebGL
@@ -165,6 +176,8 @@ production WebGL suite passed 380 tests. It skipped 34 installed-fixture tests.
 SwiftShader executes the native line passes at 1x and 4x MSAA. The pixel test
 checks magenta and cyan depth rejection. It also checks blue depth-off output.
 The test checks red and green camber lines with normal depth.
-The sanitizer-enabled native suite passed all 75 tests with SwiftShader.
+The previous sanitizer-enabled suite passed 75 tests with SwiftShader. This
+increment passed 76 sanitizer tests. The explicit Vulkan target skipped because
+this preset found no physical device.
 The D3D12 code uses the same batch contract. A Windows WARP test remains
 necessary for D3D12 execution evidence.
