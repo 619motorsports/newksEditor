@@ -86,8 +86,10 @@ The separate `ApexEditor::AppRender` target consumes that document and caller-
 supplied executable shader modules. It prepares the bounded stock-scene path,
 owns single-sample color and D32 targets, and presents only after a successful
 draw through the neutral device API. It uses embedded KN5 textures and applies
-workspace LOD and preview resolution without changing the document. Multisample
-presentation and stock-container shader translation remain explicit gaps.
+workspace LOD and preview resolution without changing the document. It keeps
+one packet catalog for all car LODs. A frame mask changes the active LOD without
+new graphics resources. Multisample presentation and stock-container shader
+translation remain explicit gaps.
 The shell maps left-drag orbit, middle-drag pan, wheel zoom, and WASD/QE
 camera translation through a backend-neutral application controller.
 The application service can bind immutable track-model or car-LOD manifest
@@ -170,8 +172,11 @@ wireframe through the backend-neutral viewport request. Search uses bounded
 ASCII case-insensitive matching. It retains duplicate node names.
 KN5 conversion computes preview bounds from transformed visible vertices. A
 car-LOD workspace uses those bounds for initial framing and automatic range
-selection. Camera movement prepares new resources only after a range change.
-`--lod-index` selects one manifest index and disables automatic selection.
+selection. The viewport prepares all car LOD packets once. Camera movement
+changes only the frame mask at a range boundary. `--lod-index` selects one
+manifest index and disables automatic selection. The stable catalog is a port
+optimization for live distance selection. The recovered editor loads and
+compiles one FBX for each LOD menu selection.
 
 Export a project through the native authoring service:
 
@@ -331,13 +336,16 @@ bounded workspace adapter
 maps files to merged scene roots in source order. It attaches file and
 auxiliary labels without partial mutation. KN5 conversion supplies the exact
 transformed preview AABB for authored visible geometry. A bounded LOD resolver
-uses the production half-open ranges and FOV formula. The resolver gives
-excluded roots to the stock-scene facade. Isolation bypasses these exclusions
-and authored visibility. A second bounded resolver supplies cockpit, rim, and
-driver preview state without changing the scene. It uses exact cockpit and rim names. Driver
+uses the production half-open ranges and FOV formula. The viewport maps each
+prepared packet to its workspace file root. It owns a copy of the LOD metadata
+for each file. An empty frame mask selects packets from the camera distance.
+A nonempty caller mask remains authoritative. Isolation bypasses authored
+visibility and the automatic workspace LOD mask. A second bounded resolver
+supplies cockpit, rim, and driver preview state without changing the scene. It
+uses exact cockpit and rim names. Driver
 hidden names are trimmed, matched with ASCII case ignored, and limited to driver
 subtrees. Show-hidden bypasses authored and preview state. It does not bypass
-driver suppression, workspace LOD exclusions, or mesh LOD. Isolation bypasses
+driver suppression, the workspace LOD mask, or mesh LOD. Isolation bypasses
 visibility and subtree filters. It still applies the selected mesh LOD range.
 The workspace-file contract follows `itemPreviewVisible()` and the draw filter
 in `public/app.js`. It does not claim recovered ksNet per-mesh culling parity.

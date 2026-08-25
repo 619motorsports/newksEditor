@@ -76,6 +76,7 @@ public:
 
     BufferResult create_buffer(const BufferDescription& description,
                                std::span<const std::byte>) override {
+        ++buffer_calls;
         return {BufferStatus::ready, {}, std::make_unique<FakeBuffer>(description)};
     }
 
@@ -114,6 +115,13 @@ public:
         Texture&, const IndexedStaticMeshBatchDescription& batch) override {
         ++draw_calls;
         draw_counts.push_back(batch.draws.size());
+        std::vector<apex::scene::NodeId> nodes;
+        nodes.reserve(batch.draws.size());
+        for (const auto& draw : batch.draws)
+            nodes.push_back(draw.packet == nullptr
+                                ? apex::scene::invalid_node_id
+                                : draw.packet->node);
+        draw_nodes.push_back(std::move(nodes));
         if (fail_draw)
             return {IndexedStaticMeshBatchStatus::execution_failed,
                     {"fake_draw_failed", "injected draw failure"}, {}};
@@ -127,6 +135,7 @@ public:
     }
 
     SamplerResult create_sampler(const SamplerDescription& description) override {
+        ++sampler_calls;
         return {SamplerStatus::ready, {}, std::make_unique<FakeSampler>(description)};
     }
 
@@ -149,11 +158,14 @@ public:
     bool invalid_draw = false;
     bool unsupported_draw = false;
     bool fail_present = false;
+    std::size_t buffer_calls = 0U;
     std::size_t texture_calls = 0U;
     std::size_t depth_calls = 0U;
+    std::size_t sampler_calls = 0U;
     std::size_t draw_calls = 0U;
     std::size_t present_calls = 0U;
     std::vector<std::size_t> draw_counts;
+    std::vector<std::vector<apex::scene::NodeId>> draw_nodes;
 
 private:
     DeviceInfo info_{Backend::Vulkan, "viewport fake", "unit", 1U, 0U, 0U,
@@ -295,6 +307,10 @@ Fixture car_lod_fixture() {
     lod1_mesh.name = "BODY_LOD1";
     lod1_mesh.children.front().name = "HIDDEN_LOD1";
     model.root.children.push_back(std::move(lod1_mesh));
+    apex::formats::Kn5Node auxiliary_mesh = model.root.children.front();
+    auxiliary_mesh.name = "AUXILIARY";
+    auxiliary_mesh.children.front().name = "HIDDEN_AUXILIARY";
+    model.root.children.push_back(std::move(auxiliary_mesh));
 
     auto& scene = result.document.scene.snapshot;
     const auto root_id = scene.root;
@@ -316,6 +332,20 @@ Fixture car_lod_fixture() {
     lod1_hidden.name = "HIDDEN_LOD1";
     lod1_hidden.workspace_auxiliary = "driver";
     (void)scene.add_node(std::move(lod1_hidden), lod1_id);
+    apex::scene::SceneNode auxiliary_scene_mesh;
+    auxiliary_scene_mesh.name = "AUXILIARY";
+    auxiliary_scene_mesh.kind = apex::scene::NodeKind::mesh;
+    auxiliary_scene_mesh.material = 0U;
+    auxiliary_scene_mesh.renderable = true;
+    auxiliary_scene_mesh.visible = true;
+    auxiliary_scene_mesh.active = true;
+    auxiliary_scene_mesh.cast_shadows = true;
+    auxiliary_scene_mesh.workspace_file = "auxiliary.kn5";
+    auxiliary_scene_mesh.parent = root_id;
+    const auto auxiliary_id = scene.add_node(std::move(auxiliary_scene_mesh), root_id);
+    apex::scene::SceneNode auxiliary_hidden;
+    auxiliary_hidden.name = "HIDDEN_AUXILIARY";
+    (void)scene.add_node(std::move(auxiliary_hidden), auxiliary_id);
 
     auto& workspace = result.document.assembly.workspace;
     workspace.kind = "carLods";
@@ -332,8 +362,12 @@ Fixture car_lod_fixture() {
     lod1_file.lod = apex::workspace::CarLodManifest{
         1U, "lod1.kn5", 15.0F, 1'000'000.0F, "LOD_1", 2U};
     workspace.files.push_back(std::move(lod1_file));
+    apex::workspace::WorkspaceFile auxiliary_file;
+    auxiliary_file.name = "auxiliary.kn5";
+    auxiliary_file.size = 1U;
+    workspace.files.push_back(std::move(auxiliary_file));
     scene.workspace_kind = "carLods";
-    result.document.sceneBinding.file_root_nodes = {1U, lod1_id};
+    result.document.sceneBinding.file_root_nodes = {1U, lod1_id, auxiliary_id};
     return result;
 }
 
@@ -494,38 +528,106 @@ void selects_car_lod_roots_at_viewport_boundary() {
     const auto authored_workspace_files = value.document.assembly.workspace.files.size();
     const bool authored_lod0_active = value.document.scene.snapshot.nodes[1U].active;
 
-    const auto prepare_at = [&](float distance,
-                                std::optional<std::uint32_t> selected_index = std::nullopt) {
-        auto request = request_for(value);
-        request.render.camera_position = {0.0F, 0.0F, distance};
-        request.workspace.lod_bounds_center = apex::scene::Vector3{0.0F, 0.0F, 0.0F};
-        request.workspace.lod_fov_degrees = 60.0F;
-        request.workspace.lod_index = selected_index;
-        FakeDevice device;
-        return apex::app::prepareWorkspaceViewport(device, value.document, request);
-    };
+    auto request = request_for(value);
+    request.render.camera_position = {0.0F, 0.0F, 5.0F};
+    request.workspace.lod_bounds_center = apex::scene::Vector3{0.0F, 0.0F, 0.0F};
+    request.workspace.lod_fov_degrees = 60.0F;
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(device, value.document, request);
+    require(prepared.ok() && prepared.viewport->renderPlan().items.size() == 3U &&
+                prepared.viewport->preparation().resources->draw_count() == 3U,
+            "one viewport preparation retains every car LOD packet");
+    const auto prepared_buffers = device.buffer_calls;
+    const auto prepared_textures = device.texture_calls;
+    const auto prepared_depth = device.depth_calls;
+    const auto prepared_samplers = device.sampler_calls;
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    Diagnostic diagnostic;
+    const auto lod0_node = value.document.sceneBinding.file_root_nodes[0U];
+    const auto lod1_node = value.document.sceneBinding.file_root_nodes[1U];
+    const auto auxiliary_node = value.document.sceneBinding.file_root_nodes[2U];
 
-    for (const auto& [distance, expected_file] :
-         std::array<std::pair<float, const char*>, 3U>{
-             std::pair{14.999F, "lod0.kn5"},
-             std::pair{15.0F, "lod1.kn5"},
-             std::pair{15.001F, "lod1.kn5"}}) {
-        auto prepared = prepare_at(distance);
-        require(prepared.ok() && prepared.viewport->renderPlan().items.size() == 1U &&
-                    prepared.viewport->renderPlan().items.front().workspace_file == expected_file,
-                "viewport uses the half-open car LOD boundary");
+    for (const auto& [distance, expected_node] :
+         std::array<std::pair<float, apex::scene::NodeId>, 3U>{
+             std::pair{14.999F, lod0_node},
+             std::pair{15.0F, lod1_node},
+             std::pair{15.001F, lod1_node}}) {
+        frame.camera.position = {0.0F, 0.0F, distance};
+        const auto status = prepared.viewport->drawAndPresent(
+            device, target, frame, diagnostic);
+        require(status == WorkspaceViewportFrameStatus::ready &&
+                    device.draw_nodes.back() ==
+                        std::vector<apex::scene::NodeId>{expected_node,
+                                                         auxiliary_node},
+                "frame-time mask selects one car LOD and keeps auxiliary geometry");
     }
+    require(device.buffer_calls == prepared_buffers &&
+                device.texture_calls == prepared_textures &&
+                device.depth_calls == prepared_depth &&
+                device.sampler_calls == prepared_samplers,
+            "car LOD boundary changes reuse the prepared graphics resources");
 
-    auto forced = prepare_at(30.0F, 0U);
-    require(forced.ok() && forced.viewport->renderPlan().items.size() == 1U &&
-                forced.viewport->renderPlan().items.front().workspace_file == "lod0.kn5",
+    const std::array<std::uint8_t, 3U> explicit_lod1 = {0U, 1U, 0U};
+    frame.camera.position = {0.0F, 0.0F, 5.0F};
+    frame.packet_visibility = explicit_lod1;
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.draw_nodes.back() ==
+                    std::vector<apex::scene::NodeId>{lod1_node},
+            "an explicit packet mask remains authoritative for a car LOD viewport");
+
+    auto forced_request = request;
+    forced_request.workspace.lod_index = 0U;
+    FakeDevice forced_device;
+    auto forced = apex::app::prepareWorkspaceViewport(
+        forced_device, value.document, forced_request);
+    FakeTarget forced_target(request.presentation);
+    frame.packet_visibility = {};
+    frame.camera.position = {0.0F, 0.0F, 30.0F};
+    require(forced.ok() && forced.viewport->drawAndPresent(
+                forced_device, forced_target, frame, diagnostic) ==
+                    WorkspaceViewportFrameStatus::ready &&
+                forced_device.draw_nodes.back() ==
+                    std::vector<apex::scene::NodeId>{lod0_node, auxiliary_node},
             "explicit viewport LOD index overrides camera distance");
 
-    auto unknown = prepare_at(30.0F, 99U);
+    auto isolated_request = request;
+    isolated_request.render.isolated = true;
+    isolated_request.render.isolated_node = lod0_node;
+    FakeDevice isolated_device;
+    auto isolated = apex::app::prepareWorkspaceViewport(
+        isolated_device, value.document, isolated_request);
+    FakeTarget isolated_target(request.presentation);
+    require(isolated.ok() && isolated.viewport->drawAndPresent(
+                isolated_device, isolated_target, frame, diagnostic) ==
+                    WorkspaceViewportFrameStatus::ready &&
+                isolated_device.draw_nodes.back() ==
+                    std::vector<apex::scene::NodeId>{lod0_node},
+            "exact mesh isolation bypasses the automatic workspace LOD mask");
+
+    auto unknown_request = request;
+    unknown_request.workspace.lod_index = 99U;
+    FakeDevice unknown_device;
+    auto unknown = apex::app::prepareWorkspaceViewport(
+        unknown_device, value.document, unknown_request);
     require(!unknown.ok() && !unknown.viewport &&
                 unknown.status == apex::app::WorkspaceViewportStatus::invalid &&
-                unknown.diagnostic.code == "INVALID_LOD_SELECTION",
+                unknown.diagnostic.code == "INVALID_LOD_SELECTION" &&
+                unknown_device.texture_calls == 0U && unknown_device.depth_calls == 0U,
             "unknown viewport LOD index fails without a partial viewport");
+
+    const auto draw_calls_before_invalid = device.draw_calls;
+    const auto present_calls_before_invalid = device.present_calls;
+    frame.camera.position[0U] = std::numeric_limits<float>::quiet_NaN();
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code == "workspace_viewport_lod_camera_invalid" &&
+                device.draw_calls == draw_calls_before_invalid &&
+                device.present_calls == present_calls_before_invalid,
+            "non-finite frame LOD camera fails before drawing or presenting");
 
     require(value.document.scene.snapshot.nodes[value.document.scene.snapshot.root].children ==
                 authored_root_children &&

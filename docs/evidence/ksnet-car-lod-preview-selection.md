@@ -148,3 +148,44 @@ The loader must not infer `MESH_FLAG_NO_CULL`, initial `inPvs`, or LOD values
 from this culling pass. The next exact target is an external call site or an
 inline expansion from a build that contains submission code. Until then, the
 backend-neutral predicate must continue to require these fields as inputs.
+
+## Editor preview resource lifetime
+
+The managed editor prepares one car LOD file per preview. Each of the four LOD
+menu handlers builds one FBX path. The handler then calls
+`Form1.loadFBXFile(path, false)`. This method is at RVA `0x48d0` in
+`ksEditor.exe`. It creates a new `FormProgress` and calls `Editor.loadFBX`
+once. Then it closes the progress form. This path has no loop over
+`carProjectModel.Lods`. It also has no runtime distance selection.
+
+`Editor` constructs one `ksGraphics` instance and keeps it in a field. Its
+constructor is at RVA `0x2c12`. `Editor.loadFBX` is at RVA `0x315c`. The
+editor reuses this wrapper across menu loads. This reuse does not prove reuse
+of the loaded model.
+
+`ksNet.ksGraphics.loadFBX` is at RVA `0x25830`. It allocates a new
+`0xd4`-byte native `Model` at IL offset `0x17`. It runs `Model.{ctor}` at
+`0x46` and calls `Model.load` at `0xb9`. Then it calls
+`GraphicsManager.compile` at `0x10a`. An indirect call at `0x15e` gives the
+model to the persistent `sceneGraph`. The method then calls `initLayers` and
+`reorderNodes`.
+
+The installed PDB names three native model routines. `Model::Model` is at
+`0x100621cb`. `Model::load` is at `0x1006225f`. `Model::~Model` is at
+`0x10062223`, with the ksNet image base at `0x10000000`. `ksGraphics` creates
+the `sceneGraph` once in `initSceneGraph`. This method is at RVA `0x25490`.
+The constructor at RVA `0x26824` calls it. `loadFBX` does not create a new
+wrapper graph.
+
+Thus, an original-editor LOD selection crosses a load boundary. The editor
+imports, prepares, and compiles one file again. Then it gives the model to the
+scene graph. The original preview does not keep all LODs ready for a frame-time
+visibility switch.
+
+The evidence does not identify the indirect scene-graph method at IL `0x15e`.
+It also does not prove when the previous root is replaced or destroyed.
+`ksGraphics.loadFBX` contains no explicit call to `Model::~Model`. Thus, the
+native ownership and reclamation point remain unresolved.
+
+The Apex stable packet catalog is a port optimization for live distance
+selection. It is not a claim of exact original-editor resource behavior.

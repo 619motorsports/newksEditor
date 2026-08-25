@@ -140,6 +140,12 @@ class StaticSceneResources final {
 public:
     [[nodiscard]] Backend backend() const noexcept { return backend_; }
     [[nodiscard]] std::size_t draw_count() const noexcept { return packets_.size(); }
+    // The returned view remains valid for this resource object's lifetime.
+    // Callers can inspect stable packet identity but must supply refreshed
+    // frame state through draw_and_readback.
+    [[nodiscard]] std::span<const DrawPacket> prepared_packets() const noexcept {
+        return packets_;
+    }
     [[nodiscard]] std::size_t unique_pipeline_count() const noexcept {
         return pipelines_.size();
     }

@@ -275,16 +275,20 @@ remains unchanged and feature-complete.
   file and auxiliary labels without partial mutation. KN5 conversion computes
   the exact transformed AABB for authored preview-visible vertices. A bounded
   resolver implements half-open workspace LOD ranges and the production FOV
-  formula. The resolver passes excluded roots to the stock-scene facade. The
-  native shell selects from the live camera or a validated `--lod-index`.
-  Camera movement prepares a replacement only when the active range changes.
+  formula. The viewport prepares one stable packet catalog for all car LODs.
+  Each frame derives a packet mask from the live camera. A validated
+  `--lod-index` supplies a fixed selection. Camera movement does not replace
+  graphics resources at a range boundary. This stable catalog is a port
+  optimization for the current live-distance feature. It is not exact stock
+  editor behavior. The recovered editor loads and compiles one FBX for each
+  LOD menu selection.
   A second bounded resolver
   implements cockpit F3, rim F1, and driver cockpit-hidden state. It does not
   change authored node flags. Show-hidden bypasses authored and preview state.
-  It keeps driver suppression, workspace LOD exclusions, and mesh LOD. Exact
-  mesh isolation bypasses visibility and subtree filters. It keeps the selected
-  mesh LOD range. These workspace-file rules follow `itemPreviewVisible()` and
-  the draw filter in `public/app.js`. They do not claim parity with recovered
+  It keeps driver suppression, the workspace LOD mask, and mesh LOD. Exact
+  mesh isolation bypasses visibility, subtree filters, and the workspace LOD
+  mask. It keeps the selected mesh LOD range. These workspace-file rules follow
+  `itemPreviewVisible()` and the draw filter in `public/app.js`. They do not claim parity with recovered
   ksNet per-mesh culling. The cockpit pair follows `src/cockpit-preview.js`.
   A separate bounded predicate implements the recovered ksNet per-mesh rule.
   It includes the FOV scale, radius floor, inclusive limits, PVS input, and
@@ -397,8 +401,9 @@ remains unchanged and feature-complete.
   document through the bounded stock-scene facade, owns neutral single-sample
   color and D32 targets, and presents the completed color attachment through
   the backend-neutral device API. It accepts caller-supplied SPIR-V or DXIL
-  modules and embedded KN5 textures. Workspace LOD and cockpit/rim preview
-  state are resolved into render options without mutating the session. The
+  modules and embedded KN5 textures. The bridge prepares all car LOD packets
+  once. It selects them with a frame mask and does not change the session.
+  The bridge resolves cockpit and rim preview state during preparation. The
   bridge rejects unresolved multisample presentation and never presents after
   a failed draw. The native shell maps bounded SDL mouse gestures and
   portable WASD/QE keycodes to an application-owned camera controller. Motion
@@ -569,10 +574,11 @@ Both captures loaded all 63 textures and all 158 stock profiles. WebGL
 reported no errors. The selected wheel changed from 1,164 to 212 triangles.
 This gate proves production LOD selection. Native workspace LOD/FOV selection
 uses the same half-open ranges and FOV formula. Native tests cover automatic,
-forced, overlapping, gapped, auxiliary, and track-camera cases. The
-stock-scene facade consumes the resolved root exclusions. KN5 conversion now
-supplies the production preview AABB from transformed, preview-visible
-vertices. Real LFS tests also reject the lower LOD with a non-finite vertex.
+forced, overlapping, gapped, auxiliary, and track-camera cases. The native
+viewport retains all prepared car LOD packets. It selects packets with a
+frame-time byte mask and keeps their order stable. KN5 conversion supplies the
+production preview AABB from transformed, preview-visible vertices. Real LFS
+tests also reject the lower LOD with a non-finite vertex.
 The failed open returns no partial workspace and reports the exact source
 offset.
 

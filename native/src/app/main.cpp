@@ -972,34 +972,10 @@ int run_window(int argc, char** argv) {
                 static_cast<float>(description.height),
             clip_space);
     };
-    auto resolve_current_lods = [&](const apex::render::CameraFrame& camera)
-        -> std::optional<apex::workspace::WorkspaceLodResolution> {
-        if (!loaded_workspace.document.has_value() ||
-            loaded_workspace.document->assembly.workspace.kind != "carLods") {
-            return std::nullopt;
-        }
-        if (!loaded_workspace.document->scene.preview_bounds.has_value()) {
-            throw std::runtime_error(
-                "carLods workspace has no preview-visible geometry bounds");
-        }
-        apex::workspace::WorkspaceLodResolutionRequest request;
-        request.workspace = &loaded_workspace.document->assembly.workspace;
-        request.scene = &loaded_workspace.document->scene.snapshot;
-        request.file_root_nodes =
-            loaded_workspace.document->sceneBinding.file_root_nodes;
-        request.bounds_center =
-            loaded_workspace.document->scene.preview_bounds->center;
-        request.camera_position = camera.position;
-        request.selected_index = workspace_options.lodIndex;
-        return apex::workspace::resolveWorkspaceLod(request);
-    };
-
     std::unique_ptr<apex::app::WorkspaceViewport> viewport;
-    std::vector<std::uint32_t> active_lod_indices;
     auto prepare_viewport = [&]() {
         if (!loaded_workspace.document.has_value()) {
             viewport.reset();
-            active_lod_indices.clear();
             return true;
         }
         const auto camera = current_camera();
@@ -1008,7 +984,6 @@ int run_window(int argc, char** argv) {
                       << camera.message << '\n';
             return false;
         }
-        const auto lod = resolve_current_lods(*camera.frame);
         apex::app::WorkspaceViewportPrepareRequest request;
         request.presentation = target_result.target->info().description;
         request.shader_modules = loaded_workspace.descriptors;
@@ -1019,7 +994,11 @@ int run_window(int argc, char** argv) {
         request.packets.selected_node = loaded_workspace.selection.selected_node;
         request.packets.wireframe = loaded_workspace.selection.wireframe;
         request.wireframe = loaded_workspace.selection.wireframe;
-        if (lod.has_value()) {
+        if (loaded_workspace.document->assembly.workspace.kind == "carLods") {
+            if (!loaded_workspace.document->scene.preview_bounds.has_value()) {
+                throw std::runtime_error(
+                    "carLods workspace has no preview-visible geometry bounds");
+            }
             request.workspace.lod_bounds_center =
                 loaded_workspace.document->scene.preview_bounds->center;
             request.workspace.lod_index = workspace_options.lodIndex;
@@ -1032,9 +1011,6 @@ int run_window(int argc, char** argv) {
             return false;
         }
         viewport = std::move(prepared.viewport);
-        active_lod_indices = lod.has_value()
-                                 ? std::move(lod->active_indices)
-                                 : std::vector<std::uint32_t>{};
         return true;
     };
     if (!prepare_viewport()) return 1;
@@ -1045,7 +1021,6 @@ int run_window(int argc, char** argv) {
     while (!window_result.window->close_requested() &&
            (frame_limit == 0U || frames < frame_limit)) {
         bool resized = false;
-        bool camera_changed = false;
         const auto event_count = window_result.window->poll_events(events);
         for (std::size_t index = 0U; index < event_count; ++index) {
             if (events[index].type == apex::platform::WindowEventType::pixel_size_changed)
@@ -1054,8 +1029,7 @@ int run_window(int argc, char** argv) {
             case apex::platform::WindowEventType::key_down:
                 if (const auto movement = workspace_camera_move_for_key(
                         events[index].key); movement.has_value()) {
-                    camera_changed = camera_controller.move(*movement) ||
-                                     camera_changed;
+                    (void)camera_controller.move(*movement);
                 }
                 break;
             case apex::platform::WindowEventType::mouse_button_down:
@@ -1075,16 +1049,14 @@ int run_window(int argc, char** argv) {
                     0.0F, 0.0F});
                 break;
             case apex::platform::WindowEventType::mouse_motion:
-                camera_changed = camera_controller.apply({
+                (void)camera_controller.apply({
                     apex::app::WorkspaceViewportCameraGesture::drag,
-                    events[index].x_relative, events[index].y_relative}) ||
-                                 camera_changed;
+                    events[index].x_relative, events[index].y_relative});
                 break;
             case apex::platform::WindowEventType::mouse_wheel:
-                camera_changed = camera_controller.apply({
+                (void)camera_controller.apply({
                     apex::app::WorkspaceViewportCameraGesture::wheel,
-                    events[index].x_relative, events[index].y_relative}) ||
-                                 camera_changed;
+                    events[index].x_relative, events[index].y_relative});
                 break;
             default:
                 break;
@@ -1107,21 +1079,6 @@ int run_window(int argc, char** argv) {
                 return 1;
             }
             if (!prepare_viewport()) return 1;
-        }
-        if (camera_changed && !workspace_options.lodIndex.has_value() &&
-            loaded_workspace.document.has_value() &&
-            loaded_workspace.document->assembly.workspace.kind == "carLods") {
-            const auto camera = current_camera();
-            if (!camera.ok()) {
-                std::cerr << "workspace camera: " << camera.code << ": "
-                          << camera.message << '\n';
-                return 1;
-            }
-            const auto lod = resolve_current_lods(*camera.frame);
-            if (lod.has_value() && lod->active_indices != active_lod_indices &&
-                !prepare_viewport()) {
-                return 1;
-            }
         }
         apex::render::PresentationFrameResult blank_frame;
         apex::app::WorkspaceViewportFrameStatus viewport_status =

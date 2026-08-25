@@ -11,6 +11,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace apex::app {
 
@@ -72,7 +73,9 @@ struct WorkspaceViewportFrameRequest {
     float depth_clear_value = 1.0F;
     std::span<const render::DrawPacket> refreshed_packets{};
     // Optional stable prepared-packet visibility mask. See the static-scene
-    // frame contract for count and value requirements.
+    // frame contract for count and value requirements. A nonempty mask is
+    // authoritative. An empty mask lets a prepared car-LOD catalog derive
+    // visibility from the frame camera.
     std::span<const std::uint8_t> packet_visibility{};
     bool apply_skinning = false;
     std::optional<render::KsPerPixelFrameConstants> frame_constants;
@@ -151,18 +154,31 @@ public:
         render::Diagnostic& diagnostic);
 
 private:
+    struct LodCatalog {
+        apex::scene::Vector3 bounds_center{};
+        std::optional<std::uint32_t> selected_index;
+        float fov_degrees = 45.0F;
+        float distance_divisor = 1.0F;
+        bool track_camera = false;
+        std::vector<std::optional<workspace::CarLodManifest>> file_lods;
+        std::vector<std::size_t> file_for_packet;
+        std::vector<std::uint8_t> frame_visibility;
+    };
+
     WorkspaceViewport(
         render::Backend backend,
         render::PresentationTargetDescription presentation,
         std::unique_ptr<render::Texture> color,
         std::unique_ptr<render::DepthAttachment> depth,
-        std::unique_ptr<render::StockSceneExecutionResult> execution);
+        std::unique_ptr<render::StockSceneExecutionResult> execution,
+        std::optional<LodCatalog> lod_catalog);
 
     render::Backend backend_ = render::Backend::Vulkan;
     render::PresentationTargetDescription presentation_{};
     std::unique_ptr<render::Texture> color_;
     std::unique_ptr<render::DepthAttachment> depth_;
     std::unique_ptr<render::StockSceneExecutionResult> execution_;
+    std::optional<LodCatalog> lod_catalog_;
 
     friend struct WorkspaceViewportPrepareResult;
     friend WorkspaceViewportPrepareResult prepareWorkspaceViewport(
