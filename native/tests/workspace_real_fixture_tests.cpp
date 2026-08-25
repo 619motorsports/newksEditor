@@ -143,11 +143,12 @@ private:
 };
 
 std::vector<std::uint8_t> read_fixture() {
-    constexpr std::array<const char*, 4U> paths = {
+    constexpr std::array<const char*, 5U> paths = {
         "test/content/cars/619_gen6_arca_base/619_gen6_fusion13.kn5",
         "../test/content/cars/619_gen6_arca_base/619_gen6_fusion13.kn5",
         "../../test/content/cars/619_gen6_arca_base/619_gen6_fusion13.kn5",
-        "../../../test/content/cars/619_gen6_arca_base/619_gen6_fusion13.kn5"};
+        "../../../test/content/cars/619_gen6_arca_base/619_gen6_fusion13.kn5",
+        "../../../../test/content/cars/619_gen6_arca_base/619_gen6_fusion13.kn5"};
     for (const char* path : paths) {
         std::ifstream input(path, std::ios::binary | std::ios::ate);
         if (!input) continue;
