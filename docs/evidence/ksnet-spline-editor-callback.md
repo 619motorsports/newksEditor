@@ -179,7 +179,11 @@ The native save method truncates the destination directly. It does not use a
 temporary file or inspect stream errors. The UI reports success after the
 call. The C++ format writer implements the recovered byte layout. The CLI uses
 a temporary file and does not replace an existing destination. Payload edits
-preserve the parsed grid. Point edits require the recovered grid-builder port.
+preserve the parsed grid.
+
+The format layer now includes a bounded port of `AISpline.buildGrid`. The port
+reproduces the checked-in native pit-lane grid byte for byte. Point edits remain
+staged until the session can rebuild and commit the grid as one operation.
 
 The production WebGL source has no AI-spline load or render path. A source
 search found no AI-spline or `fast_lane.ai` identifiers. Thus, a direct WebGL

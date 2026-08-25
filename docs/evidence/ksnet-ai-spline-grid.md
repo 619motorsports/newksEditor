@@ -26,6 +26,7 @@ to 10.
 
 The method scans all 20-byte spline points. It calculates X and Z bounds only.
 It subtracts `350.0F` from each minimum. It adds `350.0F` to each maximum.
+These bound operations use scalar single-precision arithmetic.
 
 The grid dimensions use these expressions:
 
@@ -37,16 +38,24 @@ nz = int((maxZ - minZ) / samplingDensity)
 The positive float conversion truncates toward zero. Each X index creates one
 outer row. Each Z index creates one cell in that row.
 
-Each cell samples its center:
+Each cell samples its center with double-precision intermediate values:
 
 ```text
-x = minX + (xIndex + 0.5F) * samplingDensity
-z = minZ + (zIndex + 0.5F) * samplingDensity
+x = float(double(minX) + (double(xIndex) + 0.5) * double(samplingDensity))
+z = float(double(minZ) + (double(zIndex) + 0.5) * double(samplingDensity))
 ```
 
-`Spline::closestPointIndicesFlat` is at `0x1003375d`. It scans all points and
-sorts them by Euclidean distance from `{x, 0, z}`. It returns at most 10 point
-indices. A spline with fewer points returns all available indices.
+`Spline::closestPointIndicesFlat` is at `0x1003375d`. It scans all points.
+The distance uses the X and Z components and ignores Y. The method uses
+single-precision subtraction, multiplication, addition, and square root.
+
+Each temporary record contains the source index and the distance. The method
+uses `std::sort` with a distance-only comparator. It then copies 10 records.
+The DLL links to the Visual C++ 2013 standard library. The inlined sort code
+matches that library's median, partition, and insertion-sort implementation.
+
+The C++ port includes this recovered sort implementation. This code gives the
+same equal-distance order on all supported standard libraries.
 
 The native maximum initializer contains the bit value `0x00800000`. This value
 is a small positive float, not zero. The port must preserve this edge-case
@@ -57,6 +66,13 @@ behavior and label it as recovered native behavior.
 The checked-in `pit_lane_with_grid.ai` fixture has 4,329 points. Its grid has
 185 X rows and 163 Z cells in each row. Each cell contains 10 indices.
 
-The native method has no useful allocation bounds. The C++ port must reject
-non-finite coordinates and invalid dimensions. It must bound rows, cells, and
-all neighbor indices before allocation.
+The native method has no useful allocation bounds. It also reads outside the
+temporary array when the spline has fewer than 10 points. An empty spline can
+produce invalid dimensions from the initial extremes.
+
+The C++ port rejects empty splines. It returns all available indices for a
+spline with fewer than 10 points. This behavior is an intentional safety
+difference. The grid metadata keeps the native neighbor count of 10.
+
+The C++ port rejects non-finite coordinates and invalid dimensions. It bounds
+rows, cells, indices, distance work, and memory before allocation.

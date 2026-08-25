@@ -230,8 +230,10 @@ remains unchanged and feature-complete.
   records from the backup. Camber inversion uses raw selection order in the library.
   The CLI ignores duplicate indices, as the native selection method does.
   The CLI writes validated session bytes without replacing an existing file.
-  Payload edits preserve the valid grid. The recovered grid builder remains
-  staged for point edits.
+  Payload edits preserve the valid grid. A bounded format-layer builder ports
+  the recovered grid algorithm. It reproduces the checked-in native pit-lane
+  fixture byte for byte. Point edits remain staged until their session boundary
+  uses this builder atomically.
   Another version-7 option adds the recovered vertical camber lines after the
   side passes. Positive values are green. Other values are red.
   The selected pass uses solid fill, front-face culling, opaque blend state,

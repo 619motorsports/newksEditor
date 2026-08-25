@@ -69,6 +69,7 @@ target_link_libraries(apex_core PUBLIC ApexEditor::Native)
 
 add_library(apex_formats STATIC
   src/formats/ai_spline.cpp
+  src/formats/ai_spline_grid.cpp
   src/formats/ai_spline_write.cpp
   src/formats/acd.cpp
   src/formats/bc7.cpp
@@ -306,6 +307,7 @@ endfunction()
 
 apex_add_native_test(ksanim_tests.cpp ksanim_tests ApexEditor::Formats)
 apex_add_native_test(ai_spline_tests.cpp ai_spline_tests ApexEditor::Formats)
+apex_add_native_test(ai_spline_grid_tests.cpp ai_spline_grid_tests ApexEditor::Formats)
 apex_add_native_test(javascript_number_tests.cpp javascript_number_tests ApexEditor::Core)
 apex_add_native_test(sha256_tests.cpp sha256_tests ApexEditor::Core)
 apex_add_native_test(knh_tests.cpp knh_tests ApexEditor::Formats)
