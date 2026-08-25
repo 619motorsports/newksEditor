@@ -143,6 +143,22 @@ captures hashed to `afa6b58d63432335` and `7b86ac9436a1cc24`. All 80 textures lo
 both captures returned WebGL error zero, and the browser log contained no errors.
 The grid remained visible through the car, which confirms the recovered depth-off state.
 
+Ghidra identifies `GLRenderer.color3f` at `0x10047453`. The function writes alpha
+one with the magenta RGB value. `GLRenderer.end` at `0x100474bf` submits primitive
+type zero through the native line-list path. `GraphicsManager.beginScene` at
+`0x10044cfd` selects opaque blend mode. The grid block does not change that mode.
+
+The C++ viewport stores the 44 vertices in one immutable buffer. It submits the
+grid before the selected-node axis in the same scene batch. The Vulkan pixel test
+covers both 1x and 4x targets. The 4x test confirms that the final resolve contains
+the grid. The D3D12 path uses the same validated request and command-list order.
+
+A second production Chrome check used the Gen6 fixture with `CHASSIS` selected.
+The grid-on, selection-cleared, and grid-off captures hashed to
+`a9b8425c2a9a0dee`, `5409745d0815742f`, and `8e34e54dbbbf740c`.
+All 63 textures loaded. Each frame returned WebGL error zero, and the browser
+log contained no errors.
+
 ### Native view-axis marker
 
 The supporting IL opcodes, PDB-guided native decompilation excerpts, and
@@ -201,6 +217,23 @@ A second production Chrome check used the Gen6 fixture and selected `CHASSIS`.
 The selected and cleared captures hashed to `9525187a02419663` and
 `8e34e54dbbbf740c`. All 63 textures loaded. Both frames returned WebGL error
 zero, and the browser log contained no errors.
+
+### Native selected-mesh highlight
+
+The installed selected-mesh object, shader ABI, hashes, and disassembly are
+checked in at
+[`docs/evidence/ksnet-selected-mesh.md`](evidence/ksnet-selected-mesh.md).
+
+`SelectedMesh.render` has token `0x060000F6` and RVA `0x2D360`. It uses a
+separate static-mesh shader and disables depth for its draw. The pixel shader
+returns `ksSelectedMeshColor` from constant buffer `b5`. The initial value is
+magenta RGBA `(1, 0, 1, 0.5)`. Its alpha decreases linearly to zero during
+2000 ms. The renderer then restores normal depth.
+
+The current WebGL orange 28-percent material tint is a preview approximation.
+It does not reproduce this recovered pass. A faithful C++ implementation needs
+a separate selected-mesh draw contract. The exact blend and cull states remain
+unresolved and must not be labeled as exact.
 
 ### Native blurred-rim switch
 

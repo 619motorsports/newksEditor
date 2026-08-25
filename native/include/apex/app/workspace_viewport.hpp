@@ -104,9 +104,12 @@ struct WorkspaceViewportPrepareRequest {
     bool evaluate_damage_preview = false;
     std::optional<bool> damage_broken_visible;
     bool wireframe = false;
-    // A selected node is rendered only when the caller supplies executable
-    // backend modules for this fixed position/color line contract.
-    std::optional<render::PipelineProgram> selection_axis_pipeline;
+    // Grid and selected-node markers share this fixed position/color line
+    // contract. A selected node can still drive filtering without a marker.
+    std::optional<render::PipelineProgram> authoring_overlay_pipeline;
+    // Prepare and show the recovered 10 m authoring grid. The native default
+    // is false. A true value requires authoring_overlay_pipeline.
+    bool grid_visible = false;
     // Keep this explicit receiver-module selector for existing callers. A
     // true value requires directional_shadows so the viewport cannot prepare
     // a receiver that has no maps or caster schedule.
@@ -131,6 +134,9 @@ struct WorkspaceViewportFrameRequest {
     std::span<const std::uint8_t> packet_visibility{};
     bool apply_skinning = false;
     std::optional<render::KsPerPixelFrameConstants> frame_constants;
+    // Override the prepared grid state. A true value requires grid resources
+    // to have been requested during viewport preparation.
+    std::optional<bool> grid_visible;
     // Override the prepared selected-node world transform for an animated
     // frame. Supplying this without a prepared selection axis is invalid.
     std::optional<apex::scene::Matrix4> selection_axis_world;
@@ -227,7 +233,9 @@ private:
         std::unique_ptr<render::Texture> resolved_color,
         std::unique_ptr<render::DepthAttachment> depth,
         std::unique_ptr<render::StockSceneExecutionResult> execution,
-        std::optional<render::PipelineProgram> selection_axis_pipeline,
+        std::optional<render::PipelineProgram> authoring_overlay_pipeline,
+        std::unique_ptr<render::Buffer> authoring_grid_buffer,
+        bool grid_visible,
         std::unique_ptr<render::Buffer> selection_axis_buffer,
         std::optional<apex::scene::Matrix4> selection_axis_world,
         std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps,
@@ -240,7 +248,9 @@ private:
     std::unique_ptr<render::Texture> resolved_color_;
     std::unique_ptr<render::DepthAttachment> depth_;
     std::unique_ptr<render::StockSceneExecutionResult> execution_;
-    std::optional<render::PipelineProgram> selection_axis_pipeline_;
+    std::optional<render::PipelineProgram> authoring_overlay_pipeline_;
+    std::unique_ptr<render::Buffer> authoring_grid_buffer_;
+    bool grid_visible_ = false;
     std::unique_ptr<render::Buffer> selection_axis_buffer_;
     std::optional<apex::scene::Matrix4> selection_axis_world_;
     std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps_;

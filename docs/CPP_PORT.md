@@ -177,12 +177,15 @@ remains unchanged and feature-complete.
   one final readback. The batch also accepts bounded position-and-color
   line overlays. These overlays use non-indexed line lists and no material
   resources. Vulkan and D3D12 draw them after the scene and before the final
-  resolve. The workspace viewport uses this path for the selected-node RGB
-  axis. The native helper matches the recovered normalized X, Y, and negative-Z
-  directions. Each segment is one meter long. A frame can update the selected
-  world transform before the draw. Callers must supply the explicit SPIR-V or
-  DXIL shader pair. A validated SwiftShader test covers 1x and 4x output.
-  The 4x output proves that the RGB lines are present in the resolved image.
+  resolve. The workspace viewport uses this path for the authoring grid and
+  selected-node RGB axis. The fixed grid contains 22 magenta segments on the
+  XZ plane. It covers 10 m at 1 m intervals. The grid starts hidden and remains
+  a viewport state. The axis helper matches the recovered normalized X, Y, and
+  negative-Z directions. Each axis segment is one meter long. A frame can update
+  the grid state and selected world transform before the draw. Callers must
+  supply the explicit SPIR-V or DXIL shader pair. A validated SwiftShader test
+  covers 1x and 4x output. The 4x output proves that both overlays reach the
+  resolved image.
   The backend also executes one explicitly authorized portable diffuse pair.
   The pair uses a sampled image at set 0, binding 0,
   and a sampler at set 0, binding 1. An optional uniform at binding 2 carries

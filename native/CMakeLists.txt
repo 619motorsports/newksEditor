@@ -183,6 +183,7 @@ else()
 endif()
 
 add_library(apex_render STATIC
+  src/render/authoring_grid.cpp
   src/render/camera.cpp
   src/render/csp_node_state.cpp
   src/render/damage_preview.cpp
@@ -321,6 +322,7 @@ apex_add_native_test(secondary_asset_tests.cpp secondary_asset_tests ApexEditor:
 apex_add_native_test(car_validation_tests.cpp car_validation_tests ApexEditor::Domain)
 apex_add_native_test(analog_instruments_tests.cpp analog_instruments_tests ApexEditor::Domain)
 apex_add_native_test(animation_preview_tests.cpp animation_preview_tests ApexEditor::Domain)
+apex_add_native_test(authoring_grid_tests.cpp authoring_grid_tests ApexEditor::Render)
 apex_add_native_test(driver_tests.cpp driver_tests ApexEditor::Domain)
 apex_add_native_test(skin_metadata_tests.cpp skin_metadata_tests ApexEditor::Domain)
 apex_add_native_test(track_data_tests.cpp track_data_tests ApexEditor::Domain)
@@ -419,7 +421,7 @@ if(TEST render_backend_tests)
       ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")
   endif()
 endif()
-foreach(render_test IN ITEMS camera_tests bmp_texture_tests csp_node_state_tests damage_preview_tests external_texture_authority_tests draw_packet_tests frame_plan_tests indexed_draw_tests selection_axis_tests static_mesh_upload_tests skinned_mesh_upload_tests static_scene_tests stock_material_execution_tests stock_scene_execution_tests workspace_real_fixture_tests lighting_tests material_binding_tests
+foreach(render_test IN ITEMS authoring_grid_tests camera_tests bmp_texture_tests csp_node_state_tests damage_preview_tests external_texture_authority_tests draw_packet_tests frame_plan_tests indexed_draw_tests selection_axis_tests static_mesh_upload_tests skinned_mesh_upload_tests static_scene_tests stock_material_execution_tests stock_scene_execution_tests workspace_real_fixture_tests lighting_tests material_binding_tests
                              material_profile_tests pipeline_tests render_plan_tests texture_upload_tests)
   if(TEST ${render_test})
     set_tests_properties(${render_test} PROPERTIES LABELS "unit;render")

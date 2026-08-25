@@ -1,5 +1,6 @@
 #include "apex/assets/asset_source.hpp"
 #include "apex/formats/acd.hpp"
+#include "apex/render/authoring_grid.hpp"
 #include "apex/render/device.hpp"
 #include "apex/render/draw_packet.hpp"
 #include "apex/render/external_texture_authority.hpp"
@@ -5948,6 +5949,51 @@ float4 main(float3 color : COLOR) : SV_Target { return float4(color, 1.0); }
                 count_dominant_channel(overlay_msaa_result.rgba8, 1U) > 8U &&
                 count_dominant_channel(overlay_msaa_result.rgba8, 2U) > 8U,
             "four-sample RGB overlay survives the batch resolve");
+
+    const auto grid_vertices = build_authoring_grid();
+    BufferDescription grid_buffer_description = overlay_buffer_description;
+    grid_buffer_description.size_bytes = sizeof(grid_vertices);
+    grid_buffer_description.mutability = BufferMutability::immutable;
+    BufferResult grid_buffer = device.device->create_buffer(
+        grid_buffer_description, std::as_bytes(std::span(grid_vertices)));
+    require(grid_buffer.ok(), "authoring grid vertex buffer creation");
+    OverlayLineDrawRequest grid_request;
+    grid_request.pipeline = &overlay_pipeline;
+    grid_request.vertex_buffer = grid_buffer.buffer.get();
+    grid_request.vertex_count =
+        static_cast<std::uint32_t>(grid_vertices.size());
+    grid_request.matrices.view_projection = {};
+    grid_request.matrices.view_projection[0] = 0.18F;
+    grid_request.matrices.view_projection[9] = 0.18F;
+    grid_request.matrices.view_projection[15] = 1.0F;
+    const auto count_magenta = [](std::span<const std::byte> rgba) {
+        std::size_t count = 0U;
+        for (std::size_t offset = 0U; offset + 3U < rgba.size(); offset += 4U) {
+            const auto red = std::to_integer<unsigned>(rgba[offset]);
+            const auto green = std::to_integer<unsigned>(rgba[offset + 1U]);
+            const auto blue = std::to_integer<unsigned>(rgba[offset + 2U]);
+            if (red > green && blue > green && red > 0U && blue > 0U)
+                ++count;
+        }
+        return count;
+    };
+    const std::array grid_requests = {grid_request};
+    overlay_batch.overlay_draws = grid_requests;
+    const auto grid_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *triangle_texture.texture, overlay_batch);
+    require(grid_result.ok() && count_magenta(grid_result.rgba8) > 100U,
+            "single-sample recovered magenta authoring grid pixels");
+
+    grid_request.pipeline = &overlay_msaa_pipeline;
+    const std::array grid_msaa_requests = {grid_request};
+    overlay_batch.overlay_draws = grid_msaa_requests;
+    const auto grid_msaa_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *overlay_msaa.texture, overlay_batch);
+    require(grid_msaa_result.ok() &&
+                count_magenta(grid_msaa_result.rgba8) > 100U,
+            "four-sample recovered grid survives the batch resolve");
 
     const TextureDescription bgra_description{3U, 2U, 1U, 1U, TextureFormat::bgra8_unorm,
                                                TextureUsage::color_attachment | TextureUsage::transfer_source,

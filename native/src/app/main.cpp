@@ -56,10 +56,10 @@ void usage(std::ostream& output) {
               "                       [--animation <file> [--animation-position <value>]]\n"
               "                       [--lod-index <index>]\n"
               "                       [--node-search <query>] [--selected-node <id> [--isolate-selected]]\n"
-              "                       [--show-hidden] [--wireframe]\n"
+              "                       [--show-hidden] [--wireframe] [--grid]\n"
               "                       [--weather <stock-id>] [--sun-heading <degrees>] [--sun-height <degrees>]\n"
               "                       [--shader-family <name> --shader-vertex <file> --shader-fragment <file>]\n"
-              "                       [--selection-axis-vertex <file> --selection-axis-fragment <file>]\n"
+              "                       [--authoring-overlay-vertex <file> --authoring-overlay-fragment <file>]\n"
               "                       [--directional-shadow-vertex <file>]\n"
            << "  apex-native --inspect-kn5 <file>\n"
            << "  apex-native --inspect-dds <file>\n"
@@ -530,6 +530,7 @@ struct WindowWorkspaceOptions {
     bool isolateSelected = false;
     bool showHidden = false;
     bool wireframe = false;
+    bool gridVisible = false;
     std::string weather;
     bool weatherSpecified = false;
     double sunHeading = apex::app::workspace_viewport_default_sun_heading_degrees;
@@ -537,8 +538,8 @@ struct WindowWorkspaceOptions {
     double sunHeight = apex::app::workspace_viewport_default_sun_height_degrees;
     bool sunHeightSpecified = false;
     std::vector<WindowShaderSpec> shaders;
-    std::optional<std::filesystem::path> selectionAxisVertex;
-    std::optional<std::filesystem::path> selectionAxisFragment;
+    std::optional<std::filesystem::path> authoringOverlayVertex;
+    std::optional<std::filesystem::path> authoringOverlayFragment;
     std::optional<std::filesystem::path> directionalShadowVertex;
 };
 
@@ -551,7 +552,7 @@ struct LoadedWindowWorkspace {
     std::vector<ShaderSet> shaderSets;
     std::vector<apex::render::StockMaterialShaderModules> descriptors;
     std::optional<std::vector<apex::render::PipelineShaderModule>>
-        selectionAxisModules;
+        authoringOverlayModules;
     std::optional<apex::app::WorkspaceViewportDirectionalShadowOptions>
         directionalShadows;
     apex::app::WorkspaceSelectionState selection;
@@ -702,6 +703,10 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             if (result.wireframe)
                 throw std::runtime_error("duplicate --wireframe option");
             result.wireframe = true;
+        } else if (option == "--grid") {
+            if (result.gridVisible)
+                throw std::runtime_error("duplicate --grid option");
+            result.gridVisible = true;
         } else if (option == "--weather") {
             if (result.weatherSpecified)
                 throw std::runtime_error("duplicate --weather option");
@@ -737,18 +742,20 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
                     "duplicate --directional-shadow-vertex option");
             result.directionalShadowVertex = std::filesystem::path(
                 require_value("--directional-shadow-vertex"));
-        } else if (option == "--selection-axis-vertex") {
-            if (result.selectionAxisVertex.has_value())
+        } else if (option == "--selection-axis-vertex" ||
+                   option == "--authoring-overlay-vertex") {
+            if (result.authoringOverlayVertex.has_value())
                 throw std::runtime_error(
-                    "duplicate --selection-axis-vertex option");
-            result.selectionAxisVertex = std::filesystem::path(
-                require_value("--selection-axis-vertex"));
-        } else if (option == "--selection-axis-fragment") {
-            if (result.selectionAxisFragment.has_value())
+                    "duplicate authoring-overlay vertex option");
+            result.authoringOverlayVertex = std::filesystem::path(
+                require_value(option));
+        } else if (option == "--selection-axis-fragment" ||
+                   option == "--authoring-overlay-fragment") {
+            if (result.authoringOverlayFragment.has_value())
                 throw std::runtime_error(
-                    "duplicate --selection-axis-fragment option");
-            result.selectionAxisFragment = std::filesystem::path(
-                require_value("--selection-axis-fragment"));
+                    "duplicate authoring-overlay fragment option");
+            result.authoringOverlayFragment = std::filesystem::path(
+                require_value(option));
         } else {
             throw std::runtime_error("unknown window option");
         }
@@ -774,16 +781,20 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
     }
     if ((!result.model.has_value() && !result.workspaceRoot.has_value()) &&
         (!result.shaders.empty() || result.directionalShadowVertex.has_value() ||
-         result.selectionAxisVertex.has_value() ||
-         result.selectionAxisFragment.has_value()))
+         result.authoringOverlayVertex.has_value() ||
+         result.authoringOverlayFragment.has_value()))
         throw std::runtime_error("shader modules require a workspace model");
-    if (result.selectionAxisVertex.has_value() !=
-        result.selectionAxisFragment.has_value())
+    if (result.authoringOverlayVertex.has_value() !=
+        result.authoringOverlayFragment.has_value())
         throw std::runtime_error(
-            "selection-axis vertex and fragment modules must be supplied together");
-    if (result.selectionAxisVertex.has_value() && !result.selectedNode.has_value())
+            "authoring-overlay vertex and fragment modules must be supplied together");
+    if (result.authoringOverlayVertex.has_value() &&
+        !result.selectedNode.has_value() && !result.gridVisible)
         throw std::runtime_error(
-            "selection-axis shader modules require --selected-node");
+            "authoring-overlay shader modules require --selected-node or --grid");
+    if (result.gridVisible && !result.authoringOverlayVertex.has_value())
+        throw std::runtime_error(
+            "--grid requires authoring-overlay shader modules");
     if (result.directionalShadowVertex.has_value() && result.shaders.empty())
         throw std::runtime_error(
             "--directional-shadow-vertex requires receiver-capable material shader modules");
@@ -806,7 +817,8 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
         throw std::runtime_error("--isolate-selected requires --selected-node");
     const bool selection_options = result.nodeSearch.has_value() ||
                                    result.selectedNode.has_value() ||
-                                   result.showHidden || result.wireframe;
+                                   result.showHidden || result.wireframe ||
+                                   result.gridVisible;
     if (selection_options && !result.model.has_value() &&
         !result.workspaceRoot.has_value())
         throw std::runtime_error("hierarchy options require a workspace model");
@@ -982,25 +994,25 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
         }
         loaded.shaderSets.push_back(std::move(set));
     }
-    if (options.selectionAxisVertex.has_value()) {
+    if (options.authoringOverlayVertex.has_value()) {
         std::vector<apex::render::PipelineShaderModule> modules;
         modules.push_back({apex::render::PipelineShaderStage::vertex,
                            shader_format,
-                           read_file(*options.selectionAxisVertex)});
+                           read_file(*options.authoringOverlayVertex)});
         modules.push_back({apex::render::PipelineShaderStage::fragment,
                            shader_format,
-                           read_file(*options.selectionAxisFragment)});
+                           read_file(*options.authoringOverlayFragment)});
         for (const auto& module : modules) {
             if (module.bytes.size() > apex::render::max_shader_module_bytes)
                 throw std::runtime_error(
-                    "a selection-axis module exceeds the native module budget");
+                    "an authoring-overlay module exceeds the native module budget");
             if (module.bytes.size() > max_shader_bytes ||
                 shader_bytes > max_shader_bytes - module.bytes.size())
                 throw std::runtime_error(
                     "caller-supplied shader modules exceed the native shader budget");
             shader_bytes += module.bytes.size();
         }
-        loaded.selectionAxisModules = std::move(modules);
+        loaded.authoringOverlayModules = std::move(modules);
     }
     if (options.directionalShadowVertex.has_value()) {
         auto shadow_bytes = read_file(*options.directionalShadowVertex);
@@ -1152,10 +1164,11 @@ int run_window(int argc, char** argv) {
         request.packets.selected_node = loaded_workspace.selection.selected_node;
         request.packets.wireframe = loaded_workspace.selection.wireframe;
         request.wireframe = loaded_workspace.selection.wireframe;
-        if (loaded_workspace.selectionAxisModules.has_value()) {
+        request.grid_visible = workspace_options.gridVisible;
+        if (loaded_workspace.authoringOverlayModules.has_value()) {
             apex::render::PipelineProgram pipeline;
-            pipeline.name = "workspace-selection-axis";
-            pipeline.shaders = *loaded_workspace.selectionAxisModules;
+            pipeline.name = "workspace-authoring-overlay";
+            pipeline.shaders = *loaded_workspace.authoringOverlayModules;
             pipeline.vertex_layout.stride =
                 sizeof(apex::render::OverlayLineVertex);
             pipeline.vertex_layout.attributes = {
@@ -1178,7 +1191,7 @@ int run_window(int argc, char** argv) {
             pipeline.depth.write_enabled = false;
             pipeline.transform_contract =
                 apex::render::PipelineTransformContract::draw_matrices;
-            request.selection_axis_pipeline = std::move(pipeline);
+            request.authoring_overlay_pipeline = std::move(pipeline);
         }
         if (loaded_workspace.directionalShadows.has_value()) {
             request.directional_shadow_receiver = true;
@@ -1293,7 +1306,7 @@ int run_window(int argc, char** argv) {
             frame_request.frame_constants = workspace_lighting.frame_constants;
             frame_request.apply_skinning =
                 loaded_workspace.animationSkinningRequired;
-            if (loaded_workspace.selectionAxisModules.has_value() &&
+            if (loaded_workspace.authoringOverlayModules.has_value() &&
                 loaded_workspace.selection.selected_node !=
                     apex::scene::invalid_node_id) {
                 frame_request.selection_axis_world =

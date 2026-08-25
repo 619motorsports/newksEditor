@@ -133,9 +133,9 @@ public:
         capture_requests.push_back(batch.capture_rgba8);
         draw_counts.push_back(batch.draws.size());
         overlay_counts.push_back(batch.overlay_draws.size());
-        if (!batch.overlay_draws.empty()) {
-            overlay_matrices.push_back(batch.overlay_draws.front().matrices);
-            overlay_buffers.push_back(batch.overlay_draws.front().vertex_buffer);
+        for (const auto& overlay : batch.overlay_draws) {
+            overlay_matrices.push_back(overlay.matrices);
+            overlay_buffers.push_back(overlay.vertex_buffer);
         }
         std::vector<apex::scene::NodeId> nodes;
         nodes.reserve(batch.draws.size());
@@ -477,10 +477,10 @@ PipelineProgram opaque_shadow_pipeline(const Fixture& fixture_value) {
     return pipeline;
 }
 
-PipelineProgram selection_axis_pipeline(const Fixture& fixture_value,
-                                        std::uint32_t samples = 1U) {
+PipelineProgram authoring_overlay_pipeline(const Fixture& fixture_value,
+                                           std::uint32_t samples = 1U) {
     PipelineProgram pipeline;
-    pipeline.name = "viewport-selection-axis";
+    pipeline.name = "viewport-authoring-overlay";
     pipeline.shaders = fixture_value.modules;
     pipeline.vertex_layout.stride = sizeof(OverlayLineVertex);
     pipeline.vertex_layout.attributes = {
@@ -740,7 +740,8 @@ void draws_selected_axis_inside_the_scene_batch() {
     auto value = fixture();
     auto request = request_for(value);
     request.packets.selected_node = 1U;
-    request.selection_axis_pipeline = selection_axis_pipeline(value);
+    request.authoring_overlay_pipeline = authoring_overlay_pipeline(value);
+    request.grid_visible = true;
     value.document.scene.snapshot.nodes[1U].transform[12] = 2.0F;
     FakeDevice device;
     auto prepared = apex::app::prepareWorkspaceViewport(
@@ -759,14 +760,14 @@ void draws_selected_axis_inside_the_scene_batch() {
         device, target, frame, diagnostic);
     require(status == WorkspaceViewportFrameStatus::ready &&
                 device.draw_calls == 1U && device.present_calls == 1U &&
-                device.overlay_counts == std::vector<std::size_t>({1U}) &&
+                device.overlay_counts == std::vector<std::size_t>({2U}) &&
                 device.events ==
                     std::vector<std::string>({"color", "present"}),
-            "selection axis is one overlay in the scene draw batch");
-    require(device.overlay_matrices.size() == 1U &&
-                device.overlay_matrices.front().world ==
+            "grid and selection axis share the scene draw batch");
+    require(device.overlay_matrices.size() == 2U &&
+                device.overlay_matrices[1].world ==
                     apex::scene::identity_matrix &&
-                device.overlay_matrices.front().view_projection ==
+                device.overlay_matrices[1].view_projection ==
                     frame.camera.view_projection,
             "axis draw uses world-space vertices and the frame camera");
     const auto axis_update = std::find_if(
@@ -776,6 +777,9 @@ void draws_selected_axis_inside_the_scene_batch() {
         });
     require(axis_update != device.buffer_updates.end(),
             "axis uploads exactly six position-color vertices");
+    require(device.overlay_buffers.size() == 2U &&
+                device.overlay_buffers[1] == axis_update->buffer,
+            "recovered grid is ordered before the selected-node axis");
     std::array<OverlayLineVertex, 6U> vertices{};
     std::memcpy(vertices.data(), axis_update->bytes.data(),
                 sizeof(vertices));
@@ -785,10 +789,37 @@ void draws_selected_axis_inside_the_scene_batch() {
             "animated frame override rebuilds normalized RGB axis geometry");
 }
 
+void toggles_prepared_authoring_grid_per_frame() {
+    auto value = fixture();
+    auto request = request_for(value);
+    request.authoring_overlay_pipeline = authoring_overlay_pipeline(value);
+    request.grid_visible = true;
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok(), "grid-only viewport preparation succeeds");
+
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    Diagnostic diagnostic;
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.overlay_counts == std::vector<std::size_t>({1U}),
+            "prepared grid is visible by default");
+    frame.grid_visible = false;
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.overlay_counts ==
+                    std::vector<std::size_t>({1U, 0U}),
+            "frame override hides the prepared grid without rebuilding resources");
+}
+
 void rejects_unbound_selection_axis_requests() {
     auto value = fixture();
     auto request = request_for(value);
-    request.selection_axis_pipeline = selection_axis_pipeline(value);
+    request.authoring_overlay_pipeline = authoring_overlay_pipeline(value);
     FakeDevice device;
     auto prepared = apex::app::prepareWorkspaceViewport(
         device, value.document, request);
@@ -798,7 +829,7 @@ void rejects_unbound_selection_axis_requests() {
                     "workspace_viewport_selection_axis_node_invalid",
             "selection-axis preparation requires a valid selected node");
 
-    request.selection_axis_pipeline.reset();
+    request.authoring_overlay_pipeline.reset();
     prepared = apex::app::prepareWorkspaceViewport(
         device, value.document, request);
     require(prepared.ok(), "ordinary viewport preparation succeeds");
@@ -815,6 +846,25 @@ void rejects_unbound_selection_axis_requests() {
                     "workspace_viewport_selection_axis_unprepared" &&
                 device.draw_calls == 0U && device.present_calls == 0U,
             "frame axis override requires prepared axis resources");
+
+    auto grid_request = request_for(value);
+    grid_request.grid_visible = true;
+    auto missing_grid_pipeline = apex::app::prepareWorkspaceViewport(
+        device, value.document, grid_request);
+    require(!missing_grid_pipeline.ok() &&
+                missing_grid_pipeline.diagnostic.code ==
+                    "workspace_viewport_grid_pipeline_missing",
+            "visible grid requires explicit executable overlay modules");
+
+    frame.selection_axis_world.reset();
+    frame.grid_visible = true;
+    diagnostic = {};
+    const auto grid_status = prepared.viewport->drawAndPresent(
+        device, target, frame, diagnostic);
+    require(grid_status == WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code == "workspace_viewport_grid_unprepared" &&
+                device.draw_calls == 0U && device.present_calls == 0U,
+            "frame cannot enable an unprepared grid");
 }
 
 void schedules_directional_shadows_before_color_and_reuses_maps() {
@@ -1293,6 +1343,7 @@ int main() {
         opens_and_draws();
         draws_four_sample_viewport_through_retained_resolve();
         draws_selected_axis_inside_the_scene_batch();
+        toggles_prepared_authoring_grid_per_frame();
         rejects_unbound_selection_axis_requests();
         accepts_track_and_car_lod_documents();
         selects_car_lod_roots_at_viewport_boundary();

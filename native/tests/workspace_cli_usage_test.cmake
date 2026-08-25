@@ -97,6 +97,60 @@ if(kind_position EQUAL -1)
 endif()
 
 set(model "${APEX_SOURCE_DIR}/test/content/cars/619_gen6_arca_base/619_gen6_fusion13.kn5")
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}" --grid
+  RESULT_VARIABLE grid_without_modules_result
+  ERROR_VARIABLE grid_without_modules_error
+)
+if(NOT grid_without_modules_result STREQUAL "1")
+  message(FATAL_ERROR
+    "grid without modules returned ${grid_without_modules_result}: ${grid_without_modules_error}")
+endif()
+string(FIND "${grid_without_modules_error}"
+  "--grid requires authoring-overlay shader modules" grid_without_modules_position)
+if(grid_without_modules_position EQUAL -1)
+  message(FATAL_ERROR
+    "grid without modules was not diagnosed: ${grid_without_modules_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --authoring-overlay-vertex overlay.vert.spv
+          --authoring-overlay-fragment overlay.frag.spv
+  RESULT_VARIABLE detached_overlay_result
+  ERROR_VARIABLE detached_overlay_error
+)
+if(NOT detached_overlay_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached overlay modules returned ${detached_overlay_result}: ${detached_overlay_error}")
+endif()
+string(FIND "${detached_overlay_error}"
+  "authoring-overlay shader modules require --selected-node or --grid"
+  detached_overlay_position)
+if(detached_overlay_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached overlay modules were not diagnosed: ${detached_overlay_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --grid --selection-axis-vertex overlay.vert.spv
+  RESULT_VARIABLE incomplete_overlay_result
+  ERROR_VARIABLE incomplete_overlay_error
+)
+if(NOT incomplete_overlay_result STREQUAL "1")
+  message(FATAL_ERROR
+    "incomplete overlay modules returned ${incomplete_overlay_result}: ${incomplete_overlay_error}")
+endif()
+string(FIND "${incomplete_overlay_error}"
+  "authoring-overlay vertex and fragment modules must be supplied together"
+  incomplete_overlay_position)
+if(incomplete_overlay_position EQUAL -1)
+  message(FATAL_ERROR
+    "incomplete overlay modules were not diagnosed: ${incomplete_overlay_error}")
+endif()
+
 execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
           --weather missing

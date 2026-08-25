@@ -100,3 +100,16 @@ IL_0a44: ble.s     2556
 
 This establishes the exact 22-segment, 10 m square, magenta XZ-plane grid and
 its depth-disabled rendering state.
+
+## Native renderer confirmation
+
+PDB-guided Ghidra analysis identifies these native functions:
+
+- `GLRenderer.begin` at `0x10047437` accepts primitive type zero.
+- `GLRenderer.color3f` at `0x10047453` writes RGB and alpha one.
+- `GLRenderer.end` at `0x100474bf` maps type zero to the line-list wrapper.
+- `GraphicsManager.beginScene` at `0x10044cfd` selects opaque blend mode zero.
+
+The grid block does not change the blend mode or line width. Thus, it uses opaque
+one-pixel lines with RGBA `(1, 0, 1, 1)`. The native draw order is grid first and
+selected-node axis second. The method restores normal depth after both overlays.
