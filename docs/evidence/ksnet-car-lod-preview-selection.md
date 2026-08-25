@@ -105,3 +105,46 @@ The inspected evidence does not recover which loader populates each LOD file's
 `lodIns`/`lodOuts`, how multiple car LOD files are submitted together, or the
 initial values of those fields for a newly loaded model. Those remain staged
 targets rather than assumptions.
+
+## Submission ABI and unresolved producer
+
+The PDB gives the public submission signature, but it does not give an emitted
+body. Type `0x1549F` is a `thiscall void PvsProcessor::submitMesh(Mesh*)`
+method. The `PvsProcessor` field-list type is `0x154A6`. The argument-list type
+is `0x5CDC`.
+
+The field list identifies the submission arrays. It also gives the bounded
+capacity, `MAX_MESH_ENTRIES = 4096`. This signature is the exact ABI target for
+a future loader or render-traversal port. It does not make an unchecked
+`Mesh*` safe.
+
+The PDB module record is `Release\\PvsProcessor.obj`. Its emitted records include
+`begin`, `doDistanceAndLod`, `doExclusion`, and `doFrustumCulling`. They also
+include `doRenderCalls`, `doRenderClassic`, `end`, and the draw-call helpers.
+They contain no `S_GPROC32` or `S_THUNK32` record for `submitMesh`.
+
+The method can be inline, or its producer can be in another translation unit.
+The installed `ksNet.dll` does not expose a recoverable address for this
+method. A direct `.text` search found constructor clearing at `0x1004496c`. It
+also found reads in the named culling and render methods. It found no isolated
+write-side submission body.
+
+The per-frame call envelope is exact. PDB symbol
+`CameraShadowMapped::renderPass` starts at `0x1005e681`. Disassembly calls
+`PvsProcessor::begin` at `0x1005e782`. It then traverses the scene through the
+callback at `0x100618af`. Other passes use a root virtual `render` call at
+`0x1005e7e2` or `0x1005e89a`.
+
+Each pass calls `PvsProcessor::end`. The call is at `0x1005e7a2`, `0x1005e7f1`,
+or `0x1005e8a9`. `Node::render` at `0x1003f5dc` visits only active children.
+`Mesh::render` at `0x100494ff` dispatches `IMeshRenderFilter::isVisible` and the
+material filter. Neither function contains a named `submitMesh` call.
+
+Thus, root traversal between `begin` and `end` bounds per-frame submission. The
+exact producer remains unresolved. Assignments to `meshPtrs`, `flags`,
+`layers`, `bounds`, `lodIns`, `lodOuts`, and `inPvs` also remain unresolved.
+
+The loader must not infer `MESH_FLAG_NO_CULL`, initial `inPvs`, or LOD values
+from this culling pass. The next exact target is an external call site or an
+inline expansion from a build that contains submission code. Until then, the
+backend-neutral predicate must continue to require these fields as inputs.
