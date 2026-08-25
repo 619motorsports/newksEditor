@@ -839,6 +839,78 @@ struct AnimationBase {
     std::array<float, 3> scale{1.0F, 1.0F, 1.0F};
 };
 
+bool isNativeAnimationModel(const ObjectRecord& record) {
+    if (record.node->name != "Model") return false;
+    // FBX SDK 2014's loadAnimationNode accepts eSkeleton, eMesh, and eNull
+    // (numeric attribute types 3, 4, and 1). FBX Model records spell these
+    // types LimbNode, Mesh, and Null respectively.
+    return record.type == "LimbNode" || record.type == "Mesh" || record.type == "Null";
+}
+
+std::vector<std::int64_t> nativeAnimationModelOrder(
+    const std::vector<ObjectRecord>& records,
+    const std::map<std::int64_t, std::size_t>& byId,
+    const std::vector<std::size_t>& modelIndexes,
+    const std::vector<Link>& links,
+    const FbxConversionLimits& limits,
+    Budget& budget) {
+    std::map<std::int64_t, std::vector<std::int64_t>> children;
+    std::set<std::int64_t> parented;
+    for (const auto& link : links) {
+        if (link.kind != "OO") continue;
+        const auto source = byId.at(link.source);
+        if (records[source].node->name != "Model") continue;
+        if (link.target != 0 && records[byId.at(link.target)].node->name != "Model") continue;
+        appendMappedVector(children, link.target, link.source, budget,
+                           "animation hierarchy");
+        (void)insertSet(parented, link.source, budget, "animation hierarchy parents");
+    }
+
+    std::vector<std::int64_t> roots;
+    budget.add(checkedMultiply(modelIndexes.size(), sizeof(std::int64_t),
+                               "animation hierarchy roots"),
+               "animation hierarchy roots");
+    roots.reserve(modelIndexes.size());
+    if (const auto root = children.find(0); root != children.end())
+        roots = root->second;
+    for (const auto modelIndex : modelIndexes) {
+        const auto modelId = records[modelIndex].id;
+        if (!parented.contains(modelId)) roots.push_back(modelId);
+    }
+
+    struct Pending { std::int64_t id = 0; std::size_t depth = 0; };
+    std::vector<Pending> pending;
+    budget.add(checkedMultiply(modelIndexes.size(), sizeof(Pending),
+                               "animation hierarchy traversal"),
+               "animation hierarchy traversal");
+    pending.reserve(modelIndexes.size());
+    for (auto iterator = roots.rbegin(); iterator != roots.rend(); ++iterator)
+        pending.push_back({*iterator, 0});
+
+    std::vector<std::int64_t> result;
+    result.reserve(modelIndexes.size());
+    budget.add(checkedMultiply(modelIndexes.size(), sizeof(std::int64_t),
+                               "animation selected model IDs"),
+               "animation selected model IDs");
+    while (!pending.empty()) {
+        const auto current = pending.back();
+        pending.pop_back();
+        if (current.depth > limits.max_depth)
+            fail("depth_limit", "FBX animation hierarchy exceeds its limit", "animation");
+        const auto& record = records[byId.at(current.id)];
+        if (isNativeAnimationModel(record)) {
+            if (result.size() >= limits.max_animation_tracks)
+                fail("animation_track_limit", "FBX animation output track count exceeds its limit", "animation");
+            result.push_back(current.id);
+        }
+        const auto child = children.find(current.id);
+        if (child == children.end()) continue;
+        for (auto iterator = child->second.rbegin(); iterator != child->second.rend(); ++iterator)
+            pending.push_back({*iterator, current.depth + 1u});
+    }
+    return result;
+}
+
 AnimationBase animationBase(const FbxNode& model, std::string_view path) {
     AnimationBase base;
     for (const auto& group : model.children) {
@@ -887,6 +959,7 @@ KsAnimationFrame animationFrame(const std::array<float, 3>& translation,
 
 void extractAnimations(const std::vector<ObjectRecord>& records,
                        const std::map<std::int64_t, std::size_t>& byId,
+                       const std::vector<std::size_t>& modelIndexes,
                        const std::vector<Link>& links, const FbxConversionLimits& limits,
                        FbxSceneConversion& result, Budget& budget, DiagnosticBudget& diagnostics) {
     if (limits.max_animation_frames < 100u)
@@ -922,6 +995,8 @@ void extractAnimations(const std::vector<ObjectRecord>& records,
     const auto clipCapacity = std::min(stacks.size(), limits.max_animation_clips);
     budget.add(checkedMultiply(clipCapacity, sizeof(FbxAnimationClip), "animation clips"), "animation clips");
     result.animations.reserve(clipCapacity);
+    const auto animationModelIds = nativeAnimationModelOrder(
+        records, byId, modelIndexes, links, limits, budget);
 
     std::map<std::int64_t, std::vector<std::int64_t>> stackLayers;
     std::map<std::int64_t, std::int64_t> layerForNode;
@@ -1013,11 +1088,6 @@ void extractAnimations(const std::vector<ObjectRecord>& records,
                 }
             }
         }
-        if (selectedNodes.empty()) {
-            addDiagnostic(result, diagnostics, FbxConversionSeverity::warning, "unsupported_animation",
-                          "FBX animation stack has no connected curve nodes", stackPath);
-            continue;
-        }
         std::map<std::pair<std::int64_t, std::string_view>, AnimationBinding> bindings;
         std::map<std::int64_t, AnimationCurveData> curveData;
         std::int64_t minimumTime = std::numeric_limits<std::int64_t>::max();
@@ -1094,7 +1164,8 @@ void extractAnimations(const std::vector<ObjectRecord>& records,
             start = startNumber;
             stop = stopNumber;
         }
-        if (start >= stop || minimumTime == std::numeric_limits<std::int64_t>::max()) {
+        if (start >= stop ||
+            (minimumTime == std::numeric_limits<std::int64_t>::max() && !hasStart)) {
             addDiagnostic(result, diagnostics, FbxConversionSeverity::warning, "unsupported_animation",
                           "FBX animation stack has no positive supported time span", stackPath);
             continue;
@@ -1105,15 +1176,7 @@ void extractAnimations(const std::vector<ObjectRecord>& records,
             result.complete = false;
             continue;
         }
-        if (bindings.empty()) continue;
-        std::set<std::int64_t> modelIds;
-        for (const auto& [key, binding] : bindings) {
-            (void)key;
-            (void)insertSet(modelIds, binding.model, budget,
-                            "animation output model IDs");
-        }
-        if (modelIds.size() > limits.max_animation_tracks)
-            fail("animation_track_limit", "FBX animation output track count exceeds its limit", stackPath);
+        if (animationModelIds.empty()) continue;
         FbxAnimationClip clip;
         budget.add(checkedMultiply(2u, stackRecord.name.size(), stackPath), stackPath);
         clip.name = stackRecord.name;
@@ -1124,9 +1187,9 @@ void extractAnimations(const std::vector<ObjectRecord>& records,
         clip.animation.source = clip.name;
         clip.animation.version = 2;
         clip.animation.frameCount = 100u;
-        budget.add(checkedMultiply(modelIds.size(), sizeof(KsAnimationTrack), stackPath), stackPath);
-        clip.animation.tracks.reserve(modelIds.size());
-        for (const auto modelId : modelIds) {
+        budget.add(checkedMultiply(animationModelIds.size(), sizeof(KsAnimationTrack), stackPath), stackPath);
+        clip.animation.tracks.reserve(animationModelIds.size());
+        for (const auto modelId : animationModelIds) {
             const auto modelPath = stackPath + "/Model/" + std::to_string(modelId);
             const auto* model = objectNode(records, byId, modelId, modelPath);
             const auto base = animationBase(*model, modelPath);
@@ -1296,7 +1359,13 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
         const auto source = byId.at(link.source);
         const auto sourceName = records[source].node->name;
         if (link.kind == "OO" && sourceName == "Model") {
-            const std::string_view targetName = link.target == 0 ? "Root" : records[byId.at(link.target)].node->name;
+            // Keep both conditional operands as views. A mixed literal/string
+            // conditional would materialize a temporary std::string and leave
+            // this view dangling before the classification below.
+            const std::string_view targetName =
+                link.target == 0
+                    ? std::string_view{"Root"}
+                    : std::string_view{records[byId.at(link.target)].node->name};
             // FBX display layers own models through OO edges, while skin
             // clusters use OO edges from a bone Model to a Deformer. These
             // are membership/attribute edges rather than hierarchy edges.
@@ -1466,7 +1535,7 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
         append(append, records[modelIndex].id, 0u, scene::identity_matrix, 0u, modelPath);
     }
     for (const auto modelIndex : modelIndexes) if (!emitted.contains(records[modelIndex].id)) fail("invalid_hierarchy", "FBX model hierarchy has an unreachable cycle", "Models");
-    extractAnimations(records, byId, links, limits, result, budget, diagnostics);
+    extractAnimations(records, byId, modelIndexes, links, limits, result, budget, diagnostics);
     if (result.animations.empty()) {
         bool hasAnimationRecord = false;
         std::vector<const FbxNode*> pending;

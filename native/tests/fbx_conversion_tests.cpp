@@ -116,6 +116,35 @@ FbxDocument animationFixture() {
     return document;
 }
 
+FbxDocument animationSelectionFixture() {
+    auto document = animationFixture();
+    auto& objects = document.roots[0];
+    auto& connections = document.roots[1];
+    // Keep the dynamic Triangle first, then put two static eligible Models
+    // under it. The Camera is a Model record, but native loadAnimationNode
+    // does not emit a track for eCamera attributes.
+    objects.children.push_back(node("Model", {
+        std::int64_t(201), std::string("Model::StaticNull"), std::string("Null")}));
+    objects.children.push_back(node("Model", {
+        std::int64_t(202), std::string("Model::Camera"), std::string("Camera")}));
+    objects.children.push_back(node("Model", {
+        std::int64_t(203), std::string("Model::StaticLimb"), std::string("LimbNode")}));
+    connections.children.push_back(node("C", {std::string("OO"), std::int64_t(200), std::int64_t(0)}));
+    connections.children.push_back(node("C", {std::string("OO"), std::int64_t(201), std::int64_t(200)}));
+    connections.children.push_back(node("C", {std::string("OO"), std::int64_t(203), std::int64_t(201)}));
+    connections.children.push_back(node("C", {std::string("OO"), std::int64_t(202), std::int64_t(0)}));
+    return document;
+}
+
+FbxDocument staticAnimationFixture() {
+    auto document = fixture();
+    document.roots[0].children.push_back(node("AnimationStack", {
+        std::int64_t(500), std::string("AnimationStack::Static Take"), std::string("AnimationStack")}, {
+        propertyNode("LocalStart", {std::int64_t(0)}),
+        propertyNode("LocalStop", {std::int64_t(100)})}));
+    return document;
+}
+
 std::string asciiTriangle() {
     return "FBXVersion: 7400\nObjects: {\n"
            " Model: 200, \"Model::Triangle\", \"Mesh\" { }\n"
@@ -251,6 +280,43 @@ void convertsBoundedLinearAnimationToKsanimV2() {
     require(negativeResult.animations.size() == 1u &&
                 negativeResult.animations.front().animation.tracks.front().frames.size() == 100u,
             "FBX animation preserves valid signed timeline ticks");
+}
+
+void selectsNativeAnimationModelsInHierarchyOrder() {
+    const auto result = apex::formats::convertFbxScene(animationSelectionFixture());
+    require(result.animations.size() == 1u, "FBX selection fixture converts one clip");
+    const auto& clip = result.animations.front();
+    require(clip.source_track_count == 1u && clip.animation.tracks.size() == 3u,
+            "FBX animation keeps curve count but emits all eligible hierarchy models");
+    require(clip.animation.tracks[0].name == "Triangle" &&
+                clip.animation.tracks[1].name == "StaticNull" &&
+                clip.animation.tracks[2].name == "StaticLimb",
+            "FBX animation tracks follow native ordered hierarchy traversal");
+    for (const auto& track : clip.animation.tracks)
+        require(track.frames.size() == 100u, "FBX static and animated tracks use native frame count");
+    require(clip.animation.tracks[1].frames.front().position ==
+                std::array<float, 3>{0.0F, 0.0F, 0.0F} &&
+                clip.animation.tracks[2].frames.front().position ==
+                    std::array<float, 3>{0.0F, 0.0F, 0.0F},
+            "FBX static eligible Models receive bounded base-transform frames");
+
+    auto limits = apex::formats::FbxConversionLimits{};
+    limits.max_animation_tracks = 2u;
+    expectsError([&] { (void)apex::formats::convertFbxScene(animationSelectionFixture(), limits); },
+                 "animation_track_limit");
+}
+
+void emitsBoundedStaticAnimationWithoutCurves() {
+    const auto result = apex::formats::convertFbxScene(staticAnimationFixture());
+    require(result.animations.size() == 1u, "FBX bounded stack without curves converts a clip");
+    const auto& clip = result.animations.front();
+    require(clip.source_track_count == 0u && clip.animation.tracks.size() == 1u &&
+                clip.animation.tracks.front().frames.size() == 100u &&
+                !clip.animation.tracks.front().animated,
+            "FBX animation emits a static base-transform track without curve records");
+    require(clip.animation.tracks.front().frames.front().position ==
+                std::array<float, 3>{1.0F, 2.0F, 3.0F},
+            "FBX curve-free animation preserves the Model base transform");
 }
 
 void rejectsMalformedAnimationCurvesAndUnsupportedInterpolation() {
@@ -545,6 +611,8 @@ int main() {
         ignoresDisplayLayerMembershipEdges();
         convertsUvSeamsAndFlipsV();
         convertsBoundedLinearAnimationToKsanimV2();
+        selectsNativeAnimationModelsInHierarchyOrder();
+        emitsBoundedStaticAnimationWithoutCurves();
         rejectsMalformedAnimationCurvesAndUnsupportedInterpolation();
         rejectsInvalidReferencesIndicesAndNonFiniteValues();
         rejectsMalformedAndUnsupportedUvLayers();

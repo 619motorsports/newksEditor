@@ -2622,9 +2622,11 @@ Native pivot evaluation, non-linear interpolation, skinning, and the full SDK ob
 selection rule remain outside this C++ slice. The installed GT40 fixture uses the
 32-bit FBX 7.3 leaf-record form with no per-leaf null record; the native DOM parser
 now accepts that form and still requires the enclosing end offsets and root
-terminator. Full native scene conversion remains separately blocked by an existing
-unsupported parent-connection diagnostic, so no native conversion count is claimed
-from that fixture.
+terminator. Native conversion now classifies its 112 display-layer membership
+edges, eight Model-to-Deformer skin ownership edges, and explicit root edges without
+turning them into scene parents. The fixture reaches 42 converted meshes; animation
+export remains explicitly unavailable because its sampled curves do not meet the
+native bridge's explicit-linear interpolation boundary.
 
 Apex uses the [Three.js FBXLoader](https://threejs.org/docs/pages/FBXLoader.html) for
 portable FBX decoding. The adapter applies the recovered ksEditor rules after the
