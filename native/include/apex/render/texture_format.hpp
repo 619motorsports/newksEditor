@@ -99,6 +99,8 @@ struct TextureFormatInfo {
     case TextureFormat::bc3_srgb:
     case TextureFormat::bc4_unorm:
     case TextureFormat::bc5_unorm:
+    case TextureFormat::bc6h_ufloat:
+    case TextureFormat::bc6h_sfloat:
     case TextureFormat::bc7_unorm:
     case TextureFormat::bc7_srgb:
         return true;

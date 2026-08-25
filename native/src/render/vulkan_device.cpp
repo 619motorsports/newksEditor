@@ -786,6 +786,10 @@ VkFormat vk_texture_format(TextureFormat format) {
         return VK_FORMAT_BC4_UNORM_BLOCK;
     case TextureFormat::bc5_unorm:
         return VK_FORMAT_BC5_UNORM_BLOCK;
+    case TextureFormat::bc6h_ufloat:
+        return VK_FORMAT_BC6H_UFLOAT_BLOCK;
+    case TextureFormat::bc6h_sfloat:
+        return VK_FORMAT_BC6H_SFLOAT_BLOCK;
     case TextureFormat::bc7_unorm:
         return VK_FORMAT_BC7_UNORM_BLOCK;
     case TextureFormat::bc7_srgb:
@@ -800,6 +804,7 @@ bool vk_supported_block_upload_format(TextureFormat format) noexcept {
            format == TextureFormat::bc3_unorm || format == TextureFormat::bc3_srgb ||
            format == TextureFormat::bc4_unorm ||
            format == TextureFormat::bc5_unorm ||
+           format == TextureFormat::bc6h_ufloat || format == TextureFormat::bc6h_sfloat ||
            format == TextureFormat::bc7_unorm || format == TextureFormat::bc7_srgb;
 }
 
@@ -810,7 +815,7 @@ bool validate_vulkan_texture_format_capabilities(const std::shared_ptr<VulkanCon
     if (!vk_supported_block_upload_format(description.format)) return true;
     if (description.samples != 1U) {
         diagnostic = {"vulkan_compressed_samples_unsupported",
-                      "Vulkan BC1, BC3, BC4, BC5, and BC7 uploads require a single-sample texture"};
+                      "Vulkan BC1, BC3, BC4, BC5, BC6H, and BC7 uploads require a single-sample texture"};
         return false;
     }
     VkFormatProperties properties{};
@@ -827,7 +832,7 @@ bool validate_vulkan_texture_format_capabilities(const std::shared_ptr<VulkanCon
         required |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
     if ((properties.optimalTilingFeatures & required) != required) {
         diagnostic = {"vulkan_compressed_format_unsupported",
-                      "The Vulkan device does not support the requested BC1, BC3, BC4, BC5, or BC7 texture usage"};
+                      "The Vulkan device does not support the requested BC1, BC3, BC4, BC5, BC6H, or BC7 texture usage"};
         return false;
     }
     return true;

@@ -102,6 +102,22 @@ void preservesByteExactV2AnimationAndSamples() {
     require(std::abs((*sampleKsAnimationTrack(track, 1))[12] - 20) < 1e-5f, "endpoint sample");
 }
 
+void derivesNativeAnimatedFlagFromAllV2FrameWords() {
+    const auto bytes = version2({
+        {"STATIC", {frame({1, 2, 3}, {0, 0, 0, 1}, {2, 3, 4}),
+                     frame({1, 2, 3}, {0, 0, 0, 1}, {2, 3, 4})}},
+        {"SCALE", {frame({1, 2, 3}, {0, 0, 0, 1}, {2, 3, 4}),
+                    frame({1, 2, 3}, {0, 0, 0, 1}, {2, 3, 5})}},
+    });
+    const auto parsed = parseKsAnimation(bytes, "animated-flag.ksanim");
+    require(!parsed.tracks[0].animated, "native flag remains clear for identical 40-byte frames");
+    require(parsed.tracks[1].animated, "native flag sees a scale-only 40-byte difference");
+
+    const auto sampled = sampleKsAnimation(parsed, 0.5F);
+    require(sampled.size() == 1 && sampled.front().first == "SCALE",
+            "native playback binding skips tracks whose flag remains clear");
+}
+
 void preservesFirstTrackFrameCountWhenItIsZero() {
     const auto bytes = version2({{"EMPTY", {}}, {"NODE", {frame({0, 0, 0})}}});
     const auto parsed = parseKsAnimation(bytes, "zero-first.ksanim");
@@ -184,6 +200,7 @@ int main() {
     try {
         parsesVersion2AndSerializesNativeLayout();
         preservesByteExactV2AnimationAndSamples();
+        derivesNativeAnimatedFlagFromAllV2FrameWords();
         preservesFirstTrackFrameCountWhenItIsZero();
         decomposesVersion1Matrix();
         rejectsMalformedValues();

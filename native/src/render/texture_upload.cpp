@@ -179,11 +179,6 @@ constexpr std::uint32_t DXGI_FORMAT_BC7_UNORM_SRGB = 99u;
     return static_cast<std::uint8_t>(std::clamp(std::floor(scaled + 0.5), 0.0, 255.0));
 }
 
-[[nodiscard]] bool isBc6(apex::formats::DdsFormat format) noexcept {
-    return format == apex::formats::DdsFormat::BC6HUf16 ||
-           format == apex::formats::DdsFormat::BC6HSf16;
-}
-
 } // namespace
 
 const char* textureFormatName(TextureFormat format) noexcept {
@@ -312,10 +307,6 @@ DdsUploadPlanResult buildDdsUploadPlan(std::span<const std::uint8_t> bytes,
     if (!formatResult.ok())
         return planFailure(TextureUploadStatus::unsupported, formatResult.diagnostic.code,
                            formatResult.diagnostic.message, formatResult.diagnostic.offset, source);
-    if (isBc6(descriptor.format))
-        return planFailure(TextureUploadStatus::unsupported, "gpu_required",
-                           "BC6H upload requires a backend-native compressed texture path",
-                           descriptor.dataOffset, source);
     if (bytes.size() > limits.maxInputBytes)
         return planFailure(TextureUploadStatus::invalid, "input_too_large", "DDS input exceeds configured size limit", 0, source);
     if (descriptor.width == 0u || descriptor.height == 0u || descriptor.width > MAX_DIMENSION ||

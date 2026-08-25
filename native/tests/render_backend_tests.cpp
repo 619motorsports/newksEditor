@@ -785,6 +785,12 @@ void contract_texture_limits() {
                 bc4_info.block_bytes == 8U && !bc4_info.srgb &&
                 texture_format_is_compressed(TextureFormat::bc4_unorm),
             "BC4 texture metadata");
+    const auto bc6_info = texture_format_info(TextureFormat::bc6h_sfloat);
+    require(bc6_info.classification == TextureFormatClass::block_compressed &&
+                bc6_info.block_width == 4U && bc6_info.block_height == 4U &&
+                bc6_info.block_bytes == 16U && !bc6_info.srgb &&
+                bc6_info.signed_channels && texture_format_is_compressed(TextureFormat::bc6h_sfloat),
+            "BC6H texture metadata");
 
     // BC uploads use logical texture dimensions but a block-row footprint.
     // A 5x3 image has two 4x4 blocks across and one block row. Keep these
@@ -836,6 +842,8 @@ void contract_texture_limits() {
     check_bc_upload(TextureFormat::bc3_srgb, 16U, "BC3 sRGB");
     check_bc_upload(TextureFormat::bc4_unorm, 8U, "BC4");
     check_bc_upload(TextureFormat::bc5_unorm, 16U, "BC5");
+    check_bc_upload(TextureFormat::bc6h_ufloat, 16U, "BC6H UF16");
+    check_bc_upload(TextureFormat::bc6h_sfloat, 16U, "BC6H SF16");
     check_bc_upload(TextureFormat::bc7_unorm, 16U, "BC7");
     check_bc_upload(TextureFormat::bc7_srgb, 16U, "BC7 sRGB");
 
@@ -871,7 +879,7 @@ void contract_texture_limits() {
     require(validate_texture_description(description, empty, diagnostic) == TextureStatus::unsupported,
             "unknown texture format rejected");
     require(diagnostic.code == "texture_format_unknown", "unknown texture format diagnostic");
-    description.format = TextureFormat::bc6h_ufloat;
+    description.format = TextureFormat::bc2_unorm;
     require(validate_texture_description(description, empty, diagnostic) == TextureStatus::unsupported,
             "unsupported compressed texture format rejected explicitly");
     require(diagnostic.code == "texture_compressed_format_unsupported",
@@ -2369,6 +2377,38 @@ bool contract_backend(apex::render::Backend backend) {
         // BC4 support is adapter-dependent and must remain an explicit result.
     } else {
         require(bc4_texture.ok(), "BC4 generic sampled texture creation");
+    }
+
+    // BC6H UF16/SF16 are HDR scalar/vector formats. They are exact generic
+    // sampled resources only; the existing RGB material bindings do not claim
+    // HDR decode or color-space behavior for them.
+    const std::array<std::uint8_t, 16> bc6h_block{};
+    const TextureDescription bc6h_description{
+        4U, 4U, 1U, 1U, TextureFormat::bc6h_ufloat, TextureUsage::sampled,
+        TextureMemory::device_local, TextureMutability::immutable};
+    const TextureUploadPlan bc6h_uploads{{
+        TextureUpload{0U, 0U, 4U, 4U, 16U, std::as_bytes(std::span(bc6h_block))}}};
+    TextureResult bc6h_texture = device.device->create_texture(bc6h_description, bc6h_uploads);
+    if (!bc6h_texture.ok() && bc6h_texture.status == TextureStatus::unsupported &&
+        (bc6h_texture.diagnostic.code == "vulkan_compressed_format_unsupported" ||
+         bc6h_texture.diagnostic.code == "d3d12_texture_format_unsupported")) {
+        // BC6H support is adapter-dependent and must remain an explicit result.
+    } else {
+        require(bc6h_texture.ok(), "BC6H UF16 generic sampled texture creation");
+    }
+    const TextureDescription bc6h_sfloat_description{
+        4U, 4U, 1U, 1U, TextureFormat::bc6h_sfloat, TextureUsage::sampled,
+        TextureMemory::device_local, TextureMutability::immutable};
+    const TextureUploadPlan bc6h_sfloat_uploads{{
+        TextureUpload{0U, 0U, 4U, 4U, 16U, std::as_bytes(std::span(bc6h_block))}}};
+    TextureResult bc6h_sfloat_texture = device.device->create_texture(
+        bc6h_sfloat_description, bc6h_sfloat_uploads);
+    if (!bc6h_sfloat_texture.ok() && bc6h_sfloat_texture.status == TextureStatus::unsupported &&
+        (bc6h_sfloat_texture.diagnostic.code == "vulkan_compressed_format_unsupported" ||
+         bc6h_sfloat_texture.diagnostic.code == "d3d12_texture_format_unsupported")) {
+        // BC6H support is adapter-dependent and must remain an explicit result.
+    } else {
+        require(bc6h_sfloat_texture.ok(), "BC6H SF16 generic sampled texture creation");
     }
 
     if (backend == Backend::D3D12) {

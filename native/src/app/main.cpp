@@ -5,7 +5,6 @@
 #include "apex/core/parse_error.hpp"
 #include "apex/core/parse_limits.hpp"
 #include "apex/domain/analog_instruments.hpp"
-#include "apex/domain/animation_preview.hpp"
 #include "apex/formats/acd.hpp"
 #include "apex/formats/dds.hpp"
 #include "apex/formats/ini.hpp"
@@ -52,7 +51,6 @@ void usage(std::ostream& output) {
            << "  apex-native --window vulkan|d3d12 [--frames <count>] [--validation]\n"
            << "  apex-native --window vulkan|d3d12 [--model <file>] [--workspace-root <dir> --manifest <file> --kind track|carLods]\n"
               "                       [--analog-instruments <file> [--rpm <value>]]\n"
-              "                       [--animation <file> [--animation-position <value>]]\n"
               "                       [--shader-family <name> --shader-vertex <file> --shader-fragment <file>]\n"
            << "  apex-native --inspect-kn5 <file>\n"
            << "  apex-native --inspect-dds <file>\n"
@@ -475,9 +473,6 @@ struct WindowWorkspaceOptions {
     std::optional<std::filesystem::path> analogInstruments;
     double rpm = 1'000.0;
     bool rpmSpecified = false;
-    std::optional<std::filesystem::path> animation;
-    double animationPosition = 0.0;
-    bool animationPositionSpecified = false;
     std::vector<WindowShaderSpec> shaders;
 };
 
@@ -582,16 +577,6 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             if (result.rpmSpecified) throw std::runtime_error("duplicate --rpm option");
             result.rpm = parse_finite_number(require_value("--rpm"), "RPM value");
             result.rpmSpecified = true;
-        } else if (option == "--animation") {
-            if (result.animation.has_value())
-                throw std::runtime_error("duplicate --animation option");
-            result.animation = std::filesystem::path(require_value("--animation"));
-        } else if (option == "--animation-position") {
-            if (result.animationPositionSpecified)
-                throw std::runtime_error("duplicate --animation-position option");
-            result.animationPosition = parse_finite_number(
-                require_value("--animation-position"), "animation position");
-            result.animationPositionSpecified = true;
         } else if (option == "--shader-family") {
             const auto family = std::string(require_value("--shader-family"));
             if (family.empty()) throw std::runtime_error("shader family cannot be empty");
@@ -635,11 +620,6 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
     if (result.analogInstruments.has_value() &&
         !result.model.has_value() && !result.workspaceRoot.has_value())
         throw std::runtime_error("--analog-instruments requires a workspace model");
-    if (result.animationPositionSpecified && !result.animation.has_value())
-        throw std::runtime_error("--animation-position requires --animation");
-    if (result.animation.has_value() &&
-        !result.model.has_value() && !result.workspaceRoot.has_value())
-        throw std::runtime_error("--animation requires a workspace model");
     return result;
 }
 
@@ -677,7 +657,6 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
         throw std::runtime_error("workspace open failed");
     }
     loaded.document = std::move(opened.document);
-    bool model_changed = false;
     if (options.analogInstruments.has_value()) {
         const auto bytes = read_file(*options.analogInstruments);
         const auto text = std::string_view(
@@ -699,36 +678,14 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
                 std::string("analog RPM node binding is ") +
                 apex::domain::analog_rpm_binding_status_name(applied.status));
         }
-        model_changed = true;
-        std::cout << "analog RPM: node=" << applied.object_name
-                  << ", matches=" << applied.matches
-                  << ", rpm=" << applied.rpm << '\n';
-    }
-    if (options.animation.has_value()) {
-        const auto bytes = read_file(*options.animation);
-        const auto animation = apex::formats::parseKsAnimation(
-            bytes, options.animation->generic_string());
-        const auto clamped_position = static_cast<float>(
-            std::clamp(options.animationPosition, 0.0, 1.0));
-        const auto applied = apex::domain::apply_animation_preview(
-            loaded.document->assembly.model, animation, clamped_position);
-        for (const auto& item : applied.diagnostics) {
-            std::cerr << item.code << " [" << item.source
-                      << "]: " << item.message << '\n';
-        }
-        model_changed = applied.matched_nodes > 0U || model_changed;
-        std::cout << "animation: tracks=" << applied.tracks
-                  << ", animated=" << applied.animated_tracks
-                  << ", matched-tracks=" << applied.matched_tracks
-                  << ", matched-nodes=" << applied.matched_nodes
-                  << ", position=" << applied.position << '\n';
-    }
-    if (model_changed) {
         loaded.document->scene = apex::scene::convertKn5Scene(
             loaded.document->assembly.model);
         loaded.document->sceneBinding = apex::workspace::bindWorkspaceScene(
             loaded.document->scene.snapshot,
             loaded.document->assembly.workspace);
+        std::cout << "analog RPM: node=" << applied.object_name
+                  << ", matches=" << applied.matches
+                  << ", rpm=" << applied.rpm << '\n';
     }
     if (options.shaders.empty())
         throw std::runtime_error("workspace rendering requires caller-supplied shader modules");
