@@ -236,6 +236,37 @@ void ignoresDisplayLayerMembershipEdges() {
     expectsError([&] { (void)apex::formats::convertFbxScene(duplicateParent); }, "invalid_hierarchy");
 }
 
+void handlesConstraintPoConnectionsStrictly() {
+    auto valid = fixture();
+    valid.roots[0].children.push_back(node("Constraint", {
+        std::int64_t(400), std::string("Constraint::Drive"), std::string("Constraint")}));
+    valid.roots[1].children.push_back(node("C", {
+        std::string("PO"), std::int64_t(400), std::string("Constrained Object"), std::int64_t(200)}));
+    const auto result = apex::formats::convertFbxScene(valid);
+    require(result.snapshot.nodes.size() == 2u,
+            "Constraint PO ownership does not alter the model hierarchy");
+
+    auto truncated = valid;
+    truncated.roots[1].children.back().properties[0].values.pop_back();
+    expectsError([&] { (void)apex::formats::convertFbxScene(truncated); }, "invalid_connection");
+
+    auto nonStringProperty = valid;
+    nonStringProperty.roots[1].children.back().properties[0].values[2] = std::int64_t(7);
+    expectsError([&] { (void)apex::formats::convertFbxScene(nonStringProperty); }, "invalid_connection");
+
+    auto unknownTarget = valid;
+    unknownTarget.roots[1].children.back().properties[0].values[3] = std::int64_t(9999);
+    expectsError([&] { (void)apex::formats::convertFbxScene(unknownTarget); }, "invalid_reference");
+
+    auto wrongType = valid;
+    wrongType.roots[1].children.back().properties[0].values[3] = std::int64_t(100);
+    expectsError([&] { (void)apex::formats::convertFbxScene(wrongType); }, "unsupported_connection");
+
+    auto wrongProperty = valid;
+    wrongProperty.roots[1].children.back().properties[0].values[2] = std::string("Other");
+    expectsError([&] { (void)apex::formats::convertFbxScene(wrongProperty); }, "unsupported_connection");
+}
+
 void convertsUvSeamsAndFlipsV() {
     const auto result = apex::formats::convertFbxScene(seamFixture());
     require(result.meshes.size() == 1u && result.meshes[0].positions.size() == 18u &&
@@ -609,6 +640,7 @@ int main() {
         convertsParsedAsciiTriangle();
         convertsStaticGeometryTransformsAndMaterials();
         ignoresDisplayLayerMembershipEdges();
+        handlesConstraintPoConnectionsStrictly();
         convertsUvSeamsAndFlipsV();
         convertsBoundedLinearAnimationToKsanimV2();
         selectsNativeAnimationModelsInHierarchyOrder();

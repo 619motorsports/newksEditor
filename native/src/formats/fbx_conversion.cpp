@@ -1335,11 +1335,21 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
             const auto flattened = values(node, &budget, path);
             if (node.name != "C" || flattened.size() < 3u || stringValue(flattened[0]) == nullptr)
                 fail("invalid_connection", "FBX connection record is malformed", path);
-            std::int64_t sourceId = 0, targetId = 0;
-            if (!integerValue(flattened[1], sourceId) || !integerValue(flattened[2], targetId))
-                fail("invalid_reference", "FBX connection IDs are invalid", path);
             const auto* kindValue = stringValue(flattened[0]);
-            const auto* propertyValue = flattened.size() > 3u ? stringValue(flattened[3]) : nullptr;
+            const bool propertyBeforeTarget = *kindValue == "PO";
+            const std::size_t targetIndex = propertyBeforeTarget ? 3u : 2u;
+            if ((propertyBeforeTarget && flattened.size() != 4u) ||
+                (!propertyBeforeTarget && flattened.size() > 4u))
+                fail("invalid_connection", "FBX connection record has an invalid value count", path);
+            std::int64_t sourceId = 0, targetId = 0;
+            if (flattened.size() <= targetIndex || !integerValue(flattened[1], sourceId) ||
+                !integerValue(flattened[targetIndex], targetId))
+                fail("invalid_reference", "FBX connection IDs are invalid", path);
+            const auto* propertyValue = propertyBeforeTarget ? stringValue(flattened[2]) :
+                                         flattened.size() > 3u ? stringValue(flattened[3]) : nullptr;
+            if ((propertyBeforeTarget && propertyValue == nullptr) ||
+                (!propertyBeforeTarget && flattened.size() > 3u && propertyValue == nullptr))
+                fail("invalid_connection", "FBX connection property is not a string", path);
             const auto kindBytes = kindValue->size();
             const auto propertyBytes = propertyValue == nullptr ? std::size_t{0u} : propertyValue->size();
             budget.add(checkedAdd(kindBytes, propertyBytes, path), path);
@@ -1355,6 +1365,14 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
     std::map<std::int64_t, std::int64_t> materialForModel;
     std::set<std::int64_t> referencedGeometry;
     for (const auto& link : links) {
+        if (link.kind == "PO") {
+            const auto source = byId.at(link.source);
+            const auto target = link.target == 0 ? nullptr : &records[byId.at(link.target)];
+            if (records[source].node->name == "Constraint" && target != nullptr &&
+                target->node->name == "Model" && link.property == "Constrained Object")
+                continue;
+            fail("unsupported_connection", "FBX PO connection is outside the supported Constraint ownership subset", "Connections");
+        }
         if (link.kind != "OO" && link.kind != "OP") continue;
         const auto source = byId.at(link.source);
         const auto sourceName = records[source].node->name;
