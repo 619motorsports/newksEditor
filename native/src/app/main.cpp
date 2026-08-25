@@ -91,6 +91,7 @@ void usage(std::ostream& output) {
               "                       [--add-camber-degrees <value>] [--add-length <value>] [--add-grade <value>]\n"
            << "  apex-native --invert-ai-spline <input.ai> <output.ai> --index <point-index> [--index <point-index> ...]\n"
            << "  apex-native --set-ai-spline-point <input.ai> <output.ai> --index <point-index> --position <x> <y> <z>\n"
+           << "  apex-native --set-ai-spline-points <input.ai> <output.ai> --point <point-index> <x> <y> <z> [--point ...]\n"
            << "  apex-native --export-project kn5|csp <source.kn5> <project.apex.json> <output>\n"
            << "  apex-native --export-project collider|damage|bottom-colliders|surfaces|models|lods <source.kn5> "
               "<project.apex.json> <secondary-input> <output>\n";
@@ -868,6 +869,57 @@ int set_ai_spline_point(int argc, char** argv) {
 
     write_file_exclusive(output_path, session.currentBytes());
     std::cout << "AI spline point position set: point=" << *result.pointIndex
+              << ", changed=" << (result.changed ? "yes" : "no")
+              << ", grid=" << (result.changed ? "rebuilt" : "preserved")
+              << ", output=";
+    write_cli_text(std::cout, output_path.string());
+    std::cout << '\n';
+    return 0;
+}
+
+int set_ai_spline_points(int argc, char** argv) {
+    if (argc < 9)
+        throw std::runtime_error("invalid --set-ai-spline-points arguments");
+
+    const std::filesystem::path input_path = argv[2];
+    const std::filesystem::path output_path = argv[3];
+    std::vector<apex::authoring::AiSplinePointPositionEdit> edits;
+    for (int argument = 4; argument < argc; ++argument) {
+        const std::string_view option = argv[argument];
+        if (option != "--point")
+            throw std::runtime_error("unknown --set-ai-spline-points option: " +
+                                     std::string(option));
+        if (argument + 4 >= argc)
+            throw std::runtime_error("--point requires an index, x, y, and z");
+        if (edits.size() >= apex::authoring::aiSplineMaxSelectionEntries)
+            throw std::runtime_error(
+                "AI spline point-position edit count exceeds its entry limit");
+        apex::authoring::AiSplinePointPositionEdit edit;
+        edit.pointIndex =
+            parse_unsigned_index(argv[++argument], "AI spline point index");
+        edit.position = {
+            parse_finite_float(argv[++argument], "AI spline point x"),
+            parse_finite_float(argv[++argument], "AI spline point y"),
+            parse_finite_float(argv[++argument], "AI spline point z")};
+        edits.push_back(edit);
+    }
+
+    const auto input_bytes = read_file(input_path);
+    auto spline =
+        apex::formats::parseAiSpline(input_bytes, input_path.string());
+    apex::authoring::AiSplineSession session(std::move(spline));
+    const auto result = session.setPointPositions(edits);
+    if (!result.ok()) {
+        if (result.diagnostics.empty())
+            throw std::runtime_error("AI spline point-position batch failed");
+        const auto& diagnostic = result.diagnostics.back();
+        throw std::runtime_error(diagnostic.code + ": " + diagnostic.message);
+    }
+
+    write_file_exclusive(output_path, session.currentBytes());
+    std::cout << "AI spline point positions set: requested=" << edits.size()
+              << ", applied=" << result.applied
+              << ", last-point=" << *result.pointIndex
               << ", changed=" << (result.changed ? "yes" : "no")
               << ", grid=" << (result.changed ? "rebuilt" : "preserved")
               << ", output=";
@@ -2271,6 +2323,14 @@ int main(int argc, char** argv) {
                 return 2;
             }
             return set_ai_spline_point(argc, argv);
+        }
+        if (argc >= 2 &&
+            std::string_view(argv[1]) == "--set-ai-spline-points") {
+            if (argc < 9) {
+                usage(std::cerr);
+                return 2;
+            }
+            return set_ai_spline_points(argc, argv);
         }
         if (argc >= 2 && std::string_view(argv[1]) == "--export-project") {
             if (argc < 3) {

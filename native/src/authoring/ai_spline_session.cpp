@@ -314,8 +314,14 @@ AiSplineSessionResult AiSplineSession::invertSelectedCamber(
 AiSplineSessionResult
 AiSplineSession::setPointPosition(std::uint32_t pointIndex,
                                   const std::array<float, 3>& position) {
+    const std::array<AiSplinePointPositionEdit, 1U> edits{
+        AiSplinePointPositionEdit{pointIndex, position}};
+    return setPointPositions(edits);
+}
+
+AiSplineSessionResult AiSplineSession::setPointPositions(
+    std::span<const AiSplinePointPositionEdit> edits) {
     AiSplineSessionResult result;
-    result.pointIndex = pointIndex;
     result.revision = revision_;
     if (current_->spline.version != 7U) {
         fail(result, AiSplineWaypointStatus::unsupported, "UNSUPPORTED_VERSION",
@@ -323,28 +329,66 @@ AiSplineSession::setPointPosition(std::uint32_t pointIndex,
              "AI spline point-position editing supports version 7 only");
         return result;
     }
-    if (static_cast<std::size_t>(pointIndex) >=
-        current_->spline.points.size()) {
-        fail(result, AiSplineWaypointStatus::invalid, "POINT_INDEX_INVALID",
+    if (edits.size() > limits_.maxSelectionEntries) {
+        fail(result, AiSplineWaypointStatus::invalid, "SELECTION_LIMIT",
              current_->spline.source,
-             "selected AI spline point is outside the point array");
+             "AI spline point-position edit count exceeds its entry limit");
         return result;
     }
-    for (const float coordinate : position) {
-        if (!std::isfinite(coordinate)) {
-            fail(result, AiSplineWaypointStatus::invalid, "NON_FINITE_POSITION",
-                 current_->spline.source,
-                 "AI spline point position must contain finite values");
-            return result;
-        }
-    }
-    if (samePosition(current_->spline.points[pointIndex].position, position)) {
-        result.applied = 1U;
+    if (edits.empty()) {
         result.status = AiSplineWaypointStatus::ok;
         return result;
     }
 
     try {
+        constexpr std::size_t unseen = std::numeric_limits<std::size_t>::max();
+        std::vector<std::size_t> editForPoint(current_->spline.points.size(),
+                                              unseen);
+        std::vector<AiSplinePointPositionEdit> uniqueEdits;
+        uniqueEdits.reserve(edits.size());
+        for (const auto& edit : edits) {
+            result.pointIndex = edit.pointIndex;
+            const auto point = static_cast<std::size_t>(edit.pointIndex);
+            if (point >= current_->spline.points.size()) {
+                fail(result, AiSplineWaypointStatus::invalid,
+                     "POINT_INDEX_INVALID", current_->spline.source,
+                     "selected AI spline point is outside the point array");
+                return result;
+            }
+            for (const float coordinate : edit.position) {
+                if (!std::isfinite(coordinate)) {
+                    fail(result, AiSplineWaypointStatus::invalid,
+                         "NON_FINITE_POSITION", current_->spline.source,
+                         "AI spline point position must contain finite values");
+                    return result;
+                }
+            }
+            const auto existing = editForPoint[point];
+            if (existing == unseen) {
+                editForPoint[point] = uniqueEdits.size();
+                uniqueEdits.push_back(edit);
+            } else if (!samePosition(uniqueEdits[existing].position,
+                                     edit.position)) {
+                fail(result, AiSplineWaypointStatus::invalid,
+                     "POINT_EDIT_CONFLICT", current_->spline.source,
+                     "duplicate AI spline point edits have different "
+                     "positions");
+                return result;
+            }
+        }
+        result.pointIndex = uniqueEdits.back().pointIndex;
+        const bool changed = std::any_of(
+            uniqueEdits.begin(), uniqueEdits.end(), [&](const auto& edit) {
+                return !samePosition(
+                    current_->spline.points[edit.pointIndex].position,
+                    edit.position);
+            });
+        if (!changed) {
+            result.applied = uniqueEdits.size();
+            result.status = AiSplineWaypointStatus::ok;
+            return result;
+        }
+
         const auto effectiveNeighbors =
             std::min<std::size_t>(10U, current_->spline.points.size());
         if (effectiveNeighbors > limits_.write.maxGridIndicesPerCell) {
@@ -354,12 +398,14 @@ AiSplineSession::setPointPosition(std::uint32_t pointIndex,
             return result;
         }
         auto candidate = current_->spline;
-        candidate.points[pointIndex].position = position;
+        for (const auto& edit : uniqueEdits)
+            candidate.points[edit.pointIndex].position = edit.position;
         candidate.grid =
             formats::buildAiSplineGrid(candidate, sessionGridLimits(limits_));
         auto bytes = formats::serializeAiSpline(candidate, limits_.write);
         auto next = makeSnapshot(std::move(candidate), std::move(bytes));
-        return commitSnapshot(std::move(next), 1U, pointIndex);
+        return commitSnapshot(std::move(next), uniqueEdits.size(),
+                              uniqueEdits.back().pointIndex);
     } catch (const formats::AiSplineGridBuildError& error) {
         fail(result, statusForGridError(error), error.code(),
              current_->spline.source, error.what());

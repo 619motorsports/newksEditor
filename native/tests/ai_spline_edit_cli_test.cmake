@@ -13,9 +13,11 @@ set(point_input
 set(point_output "${APEX_BINARY_DIR}/ai spline point output.ai")
 set(point_roundtrip "${APEX_BINARY_DIR}/ai spline point roundtrip.ai")
 set(point_invalid "${APEX_BINARY_DIR}/ai spline point invalid.ai")
+set(point_truncated "${APEX_BINARY_DIR}/ai spline point truncated.ai")
 file(REMOVE "${output}" "${roundtrip_output}" "${invert_output}"
      "${invert_roundtrip}" "${point_output}" "${point_roundtrip}"
-     "${point_invalid}")
+     "${point_invalid}" "${point_truncated}")
+file(WRITE "${point_truncated}" "x")
 
 execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --edit-ai-spline "${input}" "${output}"
@@ -124,23 +126,29 @@ if(NOT input_hash STREQUAL invert_roundtrip_hash)
 endif()
 
 execute_process(
-  COMMAND "${APEX_NATIVE_COMMAND}" --set-ai-spline-point "${point_input}"
-          "${point_output}" --index 0 --position 375.941 3.949335 72.81585
+  COMMAND "${APEX_NATIVE_COMMAND}" --set-ai-spline-points "${point_input}"
+          "${point_output}"
+          --point 0 375.941 3.949335 72.81585
+          --point 1 376.5 4 74
+          --point 0 375.941 3.949335 72.81585
   RESULT_VARIABLE point_result
   OUTPUT_VARIABLE point_standard_output
   ERROR_VARIABLE point_standard_error
 )
 if(NOT point_result STREQUAL "0" OR NOT EXISTS "${point_output}")
   message(FATAL_ERROR
-    "AI spline point movement failed; stderr: ${point_standard_error}")
+    "AI spline point batch failed; stderr: ${point_standard_error}")
 endif()
-string(FIND "${point_standard_output}" "point=0" moved_point_position)
+string(FIND "${point_standard_output}" "requested=3" requested_position)
+string(FIND "${point_standard_output}" "applied=2" applied_position)
+string(FIND "${point_standard_output}" "last-point=1" moved_point_position)
 string(FIND "${point_standard_output}" "changed=yes" point_changed_position)
 string(FIND "${point_standard_output}" "grid=rebuilt" grid_rebuilt_position)
-if(moved_point_position EQUAL -1 OR point_changed_position EQUAL -1 OR
+if(requested_position EQUAL -1 OR applied_position EQUAL -1 OR
+   moved_point_position EQUAL -1 OR point_changed_position EQUAL -1 OR
    grid_rebuilt_position EQUAL -1)
   message(FATAL_ERROR
-    "AI spline point movement did not report its point, change, and grid")
+    "AI spline point batch did not report its unique points, change, and grid")
 endif()
 
 execute_process(
@@ -196,6 +204,25 @@ if(point_temporary_files)
 endif()
 
 execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --set-ai-spline-points "${point_input}"
+          "${point_invalid}"
+          --point 0 375.941 3.949335 72.81585
+          --point 0 376.941 3.949335 72.81585
+  RESULT_VARIABLE point_conflict_result
+  ERROR_VARIABLE point_conflict_error
+)
+if(NOT point_conflict_result STREQUAL "1" OR EXISTS "${point_invalid}")
+  message(FATAL_ERROR
+    "conflicting duplicate AI spline point batch was not rejected")
+endif()
+string(FIND "${point_conflict_error}" "POINT_EDIT_CONFLICT"
+       point_conflict_position)
+if(point_conflict_position EQUAL -1)
+  message(FATAL_ERROR
+    "conflicting duplicate AI spline point rejection did not report its cause")
+endif()
+
+execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --set-ai-spline-point "${point_input}"
           "${point_invalid}" --index 0 --position nan 0 0
   RESULT_VARIABLE point_invalid_result
@@ -210,6 +237,18 @@ if(point_invalid_position EQUAL -1)
     "non-finite AI spline point rejection did not report its cause")
 endif()
 
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --set-ai-spline-points
+          "${point_truncated}" "${point_invalid}"
+          --point 0 1 2 3
+  RESULT_VARIABLE point_truncated_result
+  ERROR_VARIABLE point_truncated_error
+)
+if(NOT point_truncated_result STREQUAL "1" OR EXISTS "${point_invalid}")
+  message(FATAL_ERROR
+    "truncated AI spline point batch input was not rejected; stderr: ${point_truncated_error}")
+endif()
+
 file(REMOVE "${output}" "${roundtrip_output}" "${invert_output}"
      "${invert_roundtrip}" "${point_output}" "${point_roundtrip}"
-     "${point_invalid}")
+     "${point_invalid}" "${point_truncated}")

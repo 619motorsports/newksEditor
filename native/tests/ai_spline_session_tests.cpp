@@ -12,6 +12,7 @@
 
 namespace {
 
+using apex::authoring::AiSplinePointPositionEdit;
 using apex::authoring::AiSplineSession;
 using apex::authoring::AiSplineSessionLimits;
 using apex::authoring::AiSplineWaypointEdit;
@@ -296,6 +297,60 @@ void rebuildsGridWhenMovedPointDefaultsAreRestored() {
             "selected point reset participates in complete history");
 }
 
+void movesMultiplePointPositionsInOneRevision() {
+    AiSplineSession session(movableFixture());
+    const auto baselineBytes = session.currentBytes();
+    const auto baselineGrid = *session.current().grid;
+    const auto baselinePoint0 = session.current().points[0U];
+    const auto baselinePoint2 = session.current().points[2U];
+    const std::array<float, 3> point2Position{901.0F, 10.0F, 11.0F};
+    const std::array<float, 3> point0Position{401.0F, 2.0F, 3.0F};
+    const std::array<AiSplinePointPositionEdit, 3U> edits{
+        AiSplinePointPositionEdit{2U, point2Position},
+        AiSplinePointPositionEdit{0U, point0Position},
+        AiSplinePointPositionEdit{2U, point2Position},
+    };
+    const auto moved = session.setPointPositions(edits);
+    require(moved.ok() && moved.changed && moved.applied == 2U &&
+                moved.pointIndex == 0U && moved.revision == 1U &&
+                session.undoCount() == 1U,
+            "batch position edit commits unique points in one revision");
+    require(session.current().points[0U].position == point0Position &&
+                session.current().points[2U].position == point2Position &&
+                session.current().points[0U].length == baselinePoint0.length &&
+                session.current().points[0U].tag == baselinePoint0.tag &&
+                session.current().points[2U].length == baselinePoint2.length &&
+                session.current().points[2U].tag == baselinePoint2.tag &&
+                !sameGrid(*session.current().grid, baselineGrid),
+            "batch position edit preserves metadata and rebuilds one grid");
+
+    auto restoredCandidate = session.current();
+    restoredCandidate.points[0U] = baselinePoint0;
+    restoredCandidate.points[2U] = baselinePoint2;
+    restoredCandidate.grid = baselineGrid;
+    require(apex::formats::serializeAiSpline(restoredCandidate) ==
+                baselineBytes,
+            "batch position edit preserves all other source records");
+    require(session.undo().ok() && session.currentBytes() == baselineBytes &&
+                session.redo().ok() &&
+                session.current().points[0U].position == point0Position &&
+                session.current().points[2U].position == point2Position,
+            "batch position edit restores all points and grid through history");
+
+    const auto revision = session.revision();
+    const auto bytes = session.currentBytes();
+    const auto noChange = session.setPointPositions(edits);
+    require(noChange.ok() && !noChange.changed && noChange.applied == 2U &&
+                noChange.revision == revision &&
+                session.currentBytes() == bytes && session.undoCount() == 1U,
+            "all-identical batch preserves bytes and history");
+    const std::array<AiSplinePointPositionEdit, 0U> empty{};
+    const auto emptyResult = session.setPointPositions(empty);
+    require(emptyResult.ok() && !emptyResult.changed &&
+                emptyResult.applied == 0U && emptyResult.revision == revision,
+            "empty batch is a valid no-op");
+}
+
 void keepsPointPositionFailuresAtomic() {
     AiSplineSession session(movableFixture());
     const auto before = session.currentBytes();
@@ -383,6 +438,53 @@ void keepsPointPositionFailuresAtomic() {
                 modelHistoryLimited.currentBytes() == noGridBytes &&
                 !modelHistoryLimited.canUndo(),
             "large point-position model cannot make history asymmetric");
+
+    const std::array<AiSplinePointPositionEdit, 2U> conflicting{
+        AiSplinePointPositionEdit{0U, {101.0F, 2.0F, 3.0F}},
+        AiSplinePointPositionEdit{0U, {102.0F, 2.0F, 3.0F}},
+    };
+    const auto conflict = session.setPointPositions(conflicting);
+    require(!conflict.ok() &&
+                conflict.diagnostics.back().code == "POINT_EDIT_CONFLICT" &&
+                session.currentBytes() == before && !session.canUndo(),
+            "conflicting duplicate point edits are atomic");
+
+    const std::array<AiSplinePointPositionEdit, 2U> invalidLater{
+        AiSplinePointPositionEdit{0U, {101.0F, 2.0F, 3.0F}},
+        AiSplinePointPositionEdit{99U, {1.0F, 2.0F, 3.0F}},
+    };
+    const auto invalidLaterResult = session.setPointPositions(invalidLater);
+    require(!invalidLaterResult.ok() &&
+                invalidLaterResult.diagnostics.back().code ==
+                    "POINT_INDEX_INVALID" &&
+                invalidLaterResult.pointIndex == 99U &&
+                session.currentBytes() == before && !session.canUndo(),
+            "later invalid batch point is rejected before mutation");
+
+    const std::array<AiSplinePointPositionEdit, 2U> nonFiniteLater{
+        AiSplinePointPositionEdit{0U, {101.0F, 2.0F, 3.0F}},
+        AiSplinePointPositionEdit{
+            1U, {5.0F, std::numeric_limits<float>::infinity(), 7.0F}},
+    };
+    const auto nonFiniteLaterResult = session.setPointPositions(nonFiniteLater);
+    require(!nonFiniteLaterResult.ok() &&
+                nonFiniteLaterResult.diagnostics.back().code ==
+                    "NON_FINITE_POSITION" &&
+                session.currentBytes() == before && !session.canUndo(),
+            "later non-finite batch position is rejected before mutation");
+
+    AiSplineSessionLimits batchSelectionLimits;
+    batchSelectionLimits.maxSelectionEntries = 1U;
+    AiSplineSession selectionLimited(movableFixture(), batchSelectionLimits);
+    const auto selectionLimitedBefore = selectionLimited.currentBytes();
+    const auto selectionLimitedResult =
+        selectionLimited.setPointPositions(invalidLater);
+    require(!selectionLimitedResult.ok() &&
+                selectionLimitedResult.diagnostics.back().code ==
+                    "SELECTION_LIMIT" &&
+                selectionLimited.currentBytes() == selectionLimitedBefore &&
+                !selectionLimited.canUndo(),
+            "batch position edit count is bounded before validation");
 }
 
 void keepsFailuresAtomic() {
@@ -548,6 +650,7 @@ int main() {
         restoresSelectedRecordsFromLoadBaseline();
         movesPointPositionsWithDerivedGridHistory();
         rebuildsGridWhenMovedPointDefaultsAreRestored();
+        movesMultiplePointPositionsInOneRevision();
         keepsFailuresAtomic();
         keepsPointPositionFailuresAtomic();
         boundsHistoryAndClearsRedo();

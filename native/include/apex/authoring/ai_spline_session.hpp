@@ -26,6 +26,11 @@ struct AiSplineSessionLimits {
     formats::AiSplineWriteLimits write{};
 };
 
+struct AiSplinePointPositionEdit {
+    std::uint32_t pointIndex = 0U;
+    std::array<float, 3> position{};
+};
+
 struct AiSplineSessionResult {
     AiSplineWaypointStatus status = AiSplineWaypointStatus::failed;
     std::vector<AiSplineWaypointDiagnostic> diagnostics;
@@ -75,6 +80,11 @@ public:
     [[nodiscard]] AiSplineSessionResult
     setPointPosition(std::uint32_t pointIndex,
                      const std::array<float, 3>& position);
+    // Set multiple absolute positions as one validated revision. Duplicate
+    // indices with the same position are applied once in first-seen order.
+    // Conflicting duplicates are rejected before the candidate is changed.
+    [[nodiscard]] AiSplineSessionResult
+    setPointPositions(std::span<const AiSplinePointPositionEdit> edits);
     // Restore selected records from the load-time backup in raw vector order.
     // A point-count mismatch restores the complete native backup instead.
     [[nodiscard]] AiSplineSessionResult restoreSelectedDefaults(

@@ -1,6 +1,7 @@
 #include "apex/app/workspace_ai_spline.hpp"
 #include "apex/authoring/ai_spline_session.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -673,11 +674,64 @@ void rebuildsCamberGeometryFromEditedSessionState() {
             "unselected camber geometry remains unchanged");
 }
 
+void rebuildsVisibleGeometryFromBatchPositionState() {
+    apex::formats::AiSpline spline;
+    spline.source = "position-session.ai";
+    spline.version = 7U;
+    spline.points = {point(0.0F, 10.0F, 0.0F), point(10.0F, 20.0F, 0.0F),
+                     point(20.0F, 30.0F, 0.0F)};
+    spline.payloads.resize(3U);
+    for (std::size_t index = 0U; index < spline.points.size(); ++index) {
+        spline.points[index].tag = static_cast<std::int32_t>(index);
+        spline.payloads[index].side0 = 1.0F;
+        spline.payloads[index].side1 = 2.0F;
+    }
+    apex::authoring::AiSplineSession session(std::move(spline));
+    const auto before = apex::app::buildWorkspaceAiSplineGeometry(
+        session.current(), apex::app::WorkspaceAiSplineDisplayMode::raw);
+    const auto sideBefore = apex::app::buildWorkspaceAiSplineSideGeometry(
+        session.current(), apex::app::WorkspaceAiSplineSide::right);
+    const std::array<apex::authoring::AiSplinePointPositionEdit, 2U> edits{
+        apex::authoring::AiSplinePointPositionEdit{0U, {1.0F, 11.0F, 2.0F}},
+        apex::authoring::AiSplinePointPositionEdit{1U, {11.0F, 21.0F, 2.0F}},
+    };
+    const auto edited = session.setPointPositions(edits);
+    const auto after = apex::app::buildWorkspaceAiSplineGeometry(
+        session.current(), apex::app::WorkspaceAiSplineDisplayMode::raw);
+    const std::array<std::uint32_t, 2U> selection{0U, 1U};
+    const auto selected = apex::app::buildWorkspaceAiSplineSelectionGeometry(
+        session.current(), selection);
+    const auto sideAfter = apex::app::buildWorkspaceAiSplineSideGeometry(
+        session.current(), apex::app::WorkspaceAiSplineSide::right);
+    require(before.ok() && sideBefore.ok() && edited.ok() && edited.changed &&
+                after.ok() && after.geometry.vertices.size() >= 2U &&
+                selected.ok() && selected.geometry.vertices.size() == 12U &&
+                sideAfter.ok() && !sideBefore.geometry.vertices.empty() &&
+                !sideAfter.geometry.vertices.empty(),
+            "batch position state rebuilds all visible spline geometry");
+    require(after.geometry.vertices[0U].position == edits[0U].position &&
+                after.geometry.vertices[1U].position == edits[1U].position &&
+                selected.geometry.vertices[0U].position == edits[0U].position &&
+                selected.geometry.vertices[6U].position == edits[1U].position,
+            "primary and selected overlays use committed batch positions");
+    require(sideBefore.geometry.vertices[0U].position !=
+                    sideAfter.geometry.vertices[0U].position &&
+                std::all_of(sideAfter.geometry.vertices.begin(),
+                            sideAfter.geometry.vertices.end(),
+                            [](const auto& vertex) {
+                                return std::all_of(
+                                    vertex.position.begin(),
+                                    vertex.position.end(), [](float value) {
+                                        return std::isfinite(value);
+                                    });
+                            }),
+            "side overlay rebuild uses finite committed batch positions");
+}
+
 void buildsRecoveredCurrentIndexMarker() {
     apex::formats::AiSpline spline;
     spline.version = 7U;
-    spline.points = {point(0.0F, 10.0F, 0.0F),
-                     point(10.0F, 20.0F, 0.0F),
+    spline.points = {point(0.0F, 10.0F, 0.0F), point(10.0F, 20.0F, 0.0F),
                      point(20.0F, 30.0F, 0.0F)};
     spline.points[0U].tag = 2;
     spline.points[1U].tag = 0;
@@ -1035,6 +1089,7 @@ int main() {
         rejectsUnsafeSideSplineSources();
         buildsRecoveredCamberGeometry();
         rebuildsCamberGeometryFromEditedSessionState();
+        rebuildsVisibleGeometryFromBatchPositionState();
         rejectsUnsafeCamberSources();
         buildsRecoveredCurrentIndexMarker();
         buildsRecoveredSelectedIndexMarkers();

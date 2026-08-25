@@ -93,6 +93,11 @@ does not have a special movement role. During mutable editing, the method calls
 each selected point once. The movable edit point uses a separate edit-point
 vector.
 
+The CIL iterator loop spans offsets `0x02C1` through `0x0324`. It compares the
+current pointer with the vector end, calls `editSplineManual`, advances four
+bytes, and repeats. The method itself does not remove duplicates. Normal
+uniqueness comes from `addIndex`.
+
 `Spline::setPointAt` is at `0x1003408C`. It writes only the three position
 components in the selected 20-byte point. It does not change the stored length
 or tag. It does not recompute payload length or forward fields.
@@ -203,6 +208,21 @@ The `--set-ai-spline-point` command exposes the absolute-position session API.
 The command rejects non-finite values and invalid indices. It writes only a
 fully rebuilt and validated candidate. An identical position is a byte-stable
 no-op and preserves the parsed grid.
+
+The session also accepts an ordered batch of absolute point positions. This
+operation is a deterministic authoring boundary, not a keyboard or mouse-drag
+emulation. It validates all records before it changes a candidate. Then it
+rebuilds the grid once and creates one history revision.
+
+The batch keeps first-seen selection order. Identical duplicate point records
+apply once, which follows the native `addIndex` uniqueness rule. Conflicting
+duplicate positions are an invalid safe-port input. The native selection vector
+cannot contain that state through `addIndex`.
+
+The `--set-ai-spline-points` command exposes this batch boundary. Current
+primary, side, and selection geometry builders consume the committed session
+model. Thus, rebuilt overlay geometry contains every committed batch position.
+Live replacement of retained GPU overlay buffers remains a separate step.
 
 The production WebGL source has no AI-spline load or render path. A source
 search found no AI-spline or `fast_lane.ai` identifiers. Thus, a direct WebGL

@@ -239,7 +239,13 @@ remains unchanged and feature-complete.
   participate in the same bounded undo or redo revision. Selected reset also
   rebuilds the grid when it restores a point position. The
   `--set-ai-spline-point` command exposes this boundary without replacing an
-  existing output file.
+  existing output file. A batch operation accepts ordered point-position
+  records. It validates all records before it changes one candidate. Identical
+  duplicate records apply once in first-seen order. Conflicting duplicates are
+  rejected. The batch rebuilds and serializes the grid once, then creates one
+  history revision. The `--set-ai-spline-points` command exposes this operation.
+  Primary, side, and selection geometry rebuild from the committed positions.
+  Live replacement of an existing viewport buffer remains staged.
   Another version-7 option adds the recovered vertical camber lines after the
   side passes. Positive values are green. Other values are red.
   The selected pass uses solid fill, front-face culling, opaque blend state,
