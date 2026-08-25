@@ -45,6 +45,7 @@ enum class WindowEventType : std::uint8_t {
     mouse_button_down,
     mouse_button_up,
     mouse_motion,
+    mouse_wheel,
 };
 
 struct WindowEvent {

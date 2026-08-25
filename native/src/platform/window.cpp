@@ -322,6 +322,13 @@ std::size_t Window::poll_events(std::span<WindowEvent> events) noexcept {
             translated.y_relative = event.motion.yrel;
             relevant = true;
             break;
+        case SDL_EVENT_MOUSE_WHEEL:
+            if (event.wheel.windowID != implementation_->id) break;
+            translated.type = WindowEventType::mouse_wheel;
+            translated.x_relative = event.wheel.x;
+            translated.y_relative = event.wheel.y;
+            relevant = true;
+            break;
         default:
             break;
         }

@@ -3,6 +3,7 @@
 #include "apex/core/parse_error.hpp"
 #include "apex/workspace/workspace_scene.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <new>
 #include <utility>
@@ -37,6 +38,29 @@ using render::PipelineRenderTargetFormat;
 [[nodiscard]] render::CameraClipSpace expectedClipSpace(render::Backend backend) noexcept {
     return backend == render::Backend::Vulkan ? render::CameraClipSpace::vulkan
                                                : render::CameraClipSpace::d3d12;
+}
+
+[[nodiscard]] bool finite_vector(const apex::scene::Vector3& value) noexcept {
+    return std::all_of(value.begin(), value.end(), [](const float component) {
+        return std::isfinite(component);
+    });
+}
+
+[[nodiscard]] bool finite_input_delta(const float value) noexcept {
+    // SDL normally supplies small deltas, but keep the application seam
+    // bounded when a caller supplies synthetic or hostile event data.
+    return std::isfinite(value) && std::abs(value) <= 100'000.0F;
+}
+
+[[nodiscard]] apex::scene::Vector3 orbit_position(
+    const apex::scene::Vector3& target, float yaw, float pitch,
+    float distance) noexcept {
+    const float horizontal = distance * std::cos(pitch);
+    return {
+        target[0] + horizontal * std::sin(yaw),
+        target[1] + distance * std::sin(pitch),
+        target[2] + horizontal * std::cos(yaw),
+    };
 }
 
 [[nodiscard]] WorkspaceViewportStatus preparationStatus(
@@ -86,6 +110,78 @@ using render::PipelineRenderTargetFormat;
 }
 
 }  // namespace
+
+bool WorkspaceViewportCameraController::apply(
+    const WorkspaceViewportCameraInput& input) noexcept {
+    switch (input.gesture) {
+    case WorkspaceViewportCameraGesture::begin_orbit:
+        dragging_ = true;
+        panning_ = false;
+        return true;
+    case WorkspaceViewportCameraGesture::begin_pan:
+        dragging_ = true;
+        panning_ = true;
+        return true;
+    case WorkspaceViewportCameraGesture::end_drag:
+        dragging_ = false;
+        panning_ = false;
+        return true;
+    case WorkspaceViewportCameraGesture::drag:
+        if (!dragging_ || !finite_input_delta(input.x_delta) ||
+            !finite_input_delta(input.y_delta) || !finite_vector(target) ||
+            !std::isfinite(yaw) || !std::isfinite(pitch) ||
+            !std::isfinite(distance) || !(distance >= 0.02F && distance <= 1.0e7F))
+            return false;
+        if (panning_) {
+            const float scale = distance * 0.0015F;
+            auto next_target = target;
+            next_target[0] -= input.x_delta * scale * std::cos(yaw);
+            next_target[2] += input.x_delta * scale * std::sin(yaw);
+            next_target[1] += input.y_delta * scale;
+            if (!finite_vector(next_target)) return false;
+            target = next_target;
+        } else {
+            const float next_yaw = yaw - input.x_delta * 0.006F;
+            const float next_pitch = std::clamp(
+                pitch - input.y_delta * 0.006F, -1.5F, 1.5F);
+            if (!std::isfinite(next_yaw) || !std::isfinite(next_pitch)) return false;
+            yaw = next_yaw;
+            pitch = next_pitch;
+        }
+        return true;
+    case WorkspaceViewportCameraGesture::wheel:
+        if (!finite_input_delta(input.y_delta) || !finite_vector(target) ||
+            !std::isfinite(yaw) || !std::isfinite(pitch) ||
+            !std::isfinite(distance) || !(distance >= 0.02F && distance <= 1.0e7F))
+            return false;
+        {
+            const float next_distance = std::clamp(
+                distance * std::exp(input.y_delta * 0.001F), 0.02F, 1.0e7F);
+            if (!std::isfinite(next_distance)) return false;
+            distance = next_distance;
+        }
+        return true;
+    }
+    return false;
+}
+
+render::CameraFrameResult WorkspaceViewportCameraController::frame(
+    const float aspect, const render::CameraClipSpace clip_space) const {
+    if (!finite_vector(target) || !std::isfinite(yaw) || !std::isfinite(pitch) ||
+        !std::isfinite(distance) || !(distance >= 0.02F && distance <= 1.0e7F)) {
+        return {std::nullopt, "workspace_viewport_camera_invalid",
+                "workspace viewport camera state is outside its finite bounds"};
+    }
+    render::CameraFrameRequest request;
+    request.eye = orbit_position(target, yaw, pitch, distance);
+    request.target = target;
+    request.up = {0.0F, 1.0F, 0.0F};
+    request.aspect = aspect;
+    request.near_plane = std::max(0.01F, distance / 10'000.0F);
+    request.far_plane = std::max(100.0F, distance * 10.0F);
+    request.clip_space = clip_space;
+    return render::build_camera_frame(request);
+}
 
 const char* workspace_viewport_status_name(WorkspaceViewportStatus status) noexcept {
     switch (status) {

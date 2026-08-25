@@ -725,6 +725,7 @@ int run_window(int argc, char** argv) {
     if (!prepare_viewport()) return 1;
 
     std::array<apex::platform::WindowEvent, 64U> events{};
+    apex::app::WorkspaceViewportCameraController camera_controller;
     std::uint64_t frames = 0U;
     apex::app::PresentationRecreationController recreation;
     while (!window_result.window->close_requested() &&
@@ -734,6 +735,36 @@ int run_window(int argc, char** argv) {
         for (std::size_t index = 0U; index < event_count; ++index) {
             if (events[index].type == apex::platform::WindowEventType::pixel_size_changed)
                 resized = true;
+            switch (events[index].type) {
+            case apex::platform::WindowEventType::mouse_button_down:
+                if (events[index].button == 1U) {
+                    (void)camera_controller.apply({
+                        apex::app::WorkspaceViewportCameraGesture::begin_orbit,
+                        0.0F, 0.0F});
+                } else if (events[index].button == 2U) {
+                    (void)camera_controller.apply({
+                        apex::app::WorkspaceViewportCameraGesture::begin_pan,
+                        0.0F, 0.0F});
+                }
+                break;
+            case apex::platform::WindowEventType::mouse_button_up:
+                (void)camera_controller.apply({
+                    apex::app::WorkspaceViewportCameraGesture::end_drag,
+                    0.0F, 0.0F});
+                break;
+            case apex::platform::WindowEventType::mouse_motion:
+                (void)camera_controller.apply({
+                    apex::app::WorkspaceViewportCameraGesture::drag,
+                    events[index].x_relative, events[index].y_relative});
+                break;
+            case apex::platform::WindowEventType::mouse_wheel:
+                (void)camera_controller.apply({
+                    apex::app::WorkspaceViewportCameraGesture::wheel,
+                    events[index].x_relative, events[index].y_relative});
+                break;
+            default:
+                break;
+            }
         }
         if (window_result.window->close_requested()) break;
         const auto pixel_width = window_result.window->pixel_width();
@@ -758,13 +789,11 @@ int run_window(int argc, char** argv) {
             apex::app::WorkspaceViewportFrameStatus::ready;
         apex::render::Diagnostic viewport_diagnostic;
         if (viewport != nullptr) {
-            apex::render::CameraFrameRequest camera_request;
-            camera_request.aspect = static_cast<float>(pixel_width) /
-                                     static_cast<float>(pixel_height);
-            camera_request.clip_space = backend == apex::render::Backend::Vulkan
-                                             ? apex::render::CameraClipSpace::vulkan
-                                             : apex::render::CameraClipSpace::d3d12;
-            const auto camera = apex::render::build_camera_frame(camera_request);
+            const auto camera = camera_controller.frame(
+                static_cast<float>(pixel_width) / static_cast<float>(pixel_height),
+                backend == apex::render::Backend::Vulkan
+                    ? apex::render::CameraClipSpace::vulkan
+                    : apex::render::CameraClipSpace::d3d12);
             if (!camera.ok()) {
                 std::cerr << "workspace camera: " << camera.code << ": "
                           << camera.message << '\n';

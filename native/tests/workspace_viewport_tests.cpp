@@ -4,8 +4,10 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
 #include <iostream>
 #include <memory>
+#include <limits>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -297,6 +299,65 @@ WorkspaceViewportPrepareRequest request_for(const Fixture& fixture_value) {
     return request;
 }
 
+void camera_controller_matches_bounded_editor_gestures() {
+    apex::app::WorkspaceViewportCameraController controller;
+    const auto initial = controller.frame(1.0F, CameraClipSpace::vulkan);
+    require(initial.ok(), "default viewport camera builds for Vulkan");
+    require(std::abs(initial.frame->position[0] - 3.025F) < 0.01F &&
+                std::abs(initial.frame->position[1] - 1.714F) < 0.01F &&
+                std::abs(initial.frame->position[2] - 3.593F) < 0.01F,
+            "default viewport camera retains the browser orbit state");
+
+    require(controller.apply({
+                apex::app::WorkspaceViewportCameraGesture::begin_orbit,
+                0.0F, 0.0F}),
+            "orbit gesture starts");
+    require(controller.apply({
+                apex::app::WorkspaceViewportCameraGesture::drag, 10.0F, -5.0F}),
+            "orbit drag updates camera state");
+    const auto orbited = controller.frame(2.0F, CameraClipSpace::d3d12);
+    require(orbited.ok() && orbited.frame->clip_space == CameraClipSpace::d3d12 &&
+                orbited.frame->position != initial.frame->position,
+            "orbit drag produces a backend-neutral camera frame");
+    require(controller.apply({
+                apex::app::WorkspaceViewportCameraGesture::end_drag,
+                0.0F, 0.0F}),
+            "orbit gesture ends");
+    const auto stopped = controller.frame(2.0F, CameraClipSpace::d3d12);
+    require(!controller.apply({
+                apex::app::WorkspaceViewportCameraGesture::drag, 10.0F, 10.0F}) &&
+                stopped.frame->position == controller.frame(
+                    2.0F, CameraClipSpace::d3d12).frame->position,
+            "drag after release does not mutate camera state");
+
+    require(controller.apply({
+                apex::app::WorkspaceViewportCameraGesture::begin_pan,
+                0.0F, 0.0F}),
+            "pan gesture starts");
+    const auto before_pan = controller.target;
+    require(controller.apply({
+                apex::app::WorkspaceViewportCameraGesture::drag, 20.0F, -10.0F}) &&
+                controller.target != before_pan,
+            "pan drag updates the orbit target");
+    (void)controller.apply({apex::app::WorkspaceViewportCameraGesture::end_drag,
+                            0.0F, 0.0F});
+
+    const float before_zoom = controller.distance;
+    require(controller.apply({apex::app::WorkspaceViewportCameraGesture::wheel,
+                              0.0F, 20.0F}) && controller.distance > before_zoom,
+            "wheel gesture zooms out");
+    require(controller.apply({apex::app::WorkspaceViewportCameraGesture::wheel,
+                              0.0F, 100'000.0F}) &&
+                controller.distance == 1.0e7F,
+            "wheel gesture is clamped to its bounded distance");
+    const float bounded_distance = controller.distance;
+    require(!controller.apply({
+                apex::app::WorkspaceViewportCameraGesture::wheel, 0.0F,
+                std::numeric_limits<float>::quiet_NaN()}) &&
+                controller.distance == bounded_distance,
+            "non-finite wheel input is rejected atomically");
+}
+
 void opens_and_draws() {
     auto value = fixture();
     auto request = request_for(value);
@@ -455,6 +516,7 @@ int main() {
         opens_and_draws();
         accepts_track_and_car_lod_documents();
         resolves_preview_state_without_mutating_document();
+        camera_controller_matches_bounded_editor_gestures();
         rejects_invalid_inputs();
         rejects_frame_mismatch_and_preserves_present_atomicity();
         std::cout << "workspace_viewport_tests: ok\n";

@@ -75,6 +75,41 @@ struct WorkspaceViewportFrameRequest {
     std::optional<render::KsPerPixelFrameConstants> frame_constants;
 };
 
+// The editor's browser viewport uses an orbit target, yaw/pitch, and distance
+// state. This controller keeps that state in the application layer so SDL,
+// Vulkan, and D3D12 code do not acquire camera-gesture semantics.
+enum class WorkspaceViewportCameraGesture : std::uint8_t {
+    begin_orbit,
+    begin_pan,
+    end_drag,
+    drag,
+    wheel,
+};
+
+struct WorkspaceViewportCameraInput {
+    WorkspaceViewportCameraGesture gesture =
+        WorkspaceViewportCameraGesture::end_drag;
+    float x_delta = 0.0F;
+    float y_delta = 0.0F;
+};
+
+class WorkspaceViewportCameraController final {
+public:
+    // These defaults match the browser editor's initial orbit state.
+    apex::scene::Vector3 target = {0.0F, 0.0F, 0.0F};
+    float yaw = 0.7F;
+    float pitch = 0.35F;
+    float distance = 5.0F;
+
+    [[nodiscard]] bool apply(const WorkspaceViewportCameraInput& input) noexcept;
+    [[nodiscard]] render::CameraFrameResult frame(
+        float aspect, render::CameraClipSpace clip_space) const;
+
+private:
+    bool dragging_ = false;
+    bool panning_ = false;
+};
+
 class WorkspaceViewport final {
 public:
     WorkspaceViewport(const WorkspaceViewport&) = delete;
