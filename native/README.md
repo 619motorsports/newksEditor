@@ -229,9 +229,13 @@ The spline uses normal depth and the recovered scene-finished phase.
 `--ai-spline-interval <in> <out>` adds the recovered blue interval.
 The values must be finite, ordered, and from zero to one.
 The interval always uses interpolation and disables depth tests and writes.
+`--ai-spline-show-left` shows the recovered left side spline.
+`--ai-spline-show-right` shows the recovered right side spline.
+The side options are independent and off by default. They require version-7
+payloads and use cyan with normal depth.
 The Vulkan and D3D12 line list is a labeled translation of the OpenGL line
 strip. The translation keeps all segments at portable chunk boundaries.
-The option does not enable side splines, camber, or editing.
+The option does not enable camber or editing.
 The old `--selection-axis-vertex` and `--selection-axis-fragment` names remain aliases.
 The grid starts hidden. `--grid` shows the recovered 10 m magenta grid.
 The view axis starts hidden. `--view-axis` shows the recovered one-meter

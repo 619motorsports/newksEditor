@@ -14,6 +14,8 @@ inline constexpr std::array<float, 3U> workspace_ai_spline_raw_color = {
     3.0F, 0.0F, 3.0F};
 inline constexpr std::array<float, 3U> workspace_ai_spline_interval_color = {
     0.0F, 0.0F, 3.0F};
+inline constexpr std::array<float, 3U> workspace_ai_spline_side_color = {
+    0.0F, 3.0F, 3.0F};
 inline constexpr float workspace_ai_spline_interpolation_step = 0.0002F;
 inline constexpr std::uint32_t
     workspace_ai_spline_interpolated_sample_count = 5'001U;
@@ -28,6 +30,13 @@ enum class WorkspaceAiSplineDisplayMode : std::uint8_t {
 enum class WorkspaceAiSplinePassKind : std::uint8_t {
     primary,
     interval,
+    left_side,
+    right_side,
+};
+
+enum class WorkspaceAiSplineSide : std::uint8_t {
+    left,
+    right,
 };
 
 struct WorkspaceAiSplineInterval {
@@ -82,6 +91,13 @@ buildWorkspaceAiSplineGeometry(
 // the inclusive range [0, 1].
 [[nodiscard]] WorkspaceAiSplineResult buildWorkspaceAiSplineIntervalGeometry(
     const formats::AiSpline& spline, WorkspaceAiSplineInterval interval);
+
+// Build one recovered version-7 side spline. The installed editor uses the
+// horizontal cross(tangent, up) basis and skips both side points when the
+// left width is zero. Side splines remain raw, even when the primary display
+// uses interpolation.
+[[nodiscard]] WorkspaceAiSplineResult buildWorkspaceAiSplineSideGeometry(
+    const formats::AiSpline& spline, WorkspaceAiSplineSide side);
 
 [[nodiscard]] const char* workspace_ai_spline_display_mode_name(
     WorkspaceAiSplineDisplayMode mode) noexcept;

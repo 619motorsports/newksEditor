@@ -512,7 +512,7 @@ WorkspaceViewport::WorkspaceViewport(
     std::unique_ptr<render::DepthAttachment> depth,
     std::unique_ptr<render::StockSceneExecutionResult> execution,
     std::optional<render::PipelineProgram> authoring_overlay_pipeline,
-    std::array<AiSplinePassResources, 2U> ai_spline_passes,
+    std::array<AiSplinePassResources, 4U> ai_spline_passes,
     std::unique_ptr<render::Buffer> authoring_grid_buffer,
     bool grid_visible,
     std::unique_ptr<render::Buffer> view_axis_buffer,
@@ -1243,7 +1243,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         }
 
         std::optional<render::PipelineProgram> authoring_overlay_pipeline;
-        std::array<WorkspaceViewport::AiSplinePassResources, 2U>
+        std::array<WorkspaceViewport::AiSplinePassResources, 4U>
             ai_spline_passes;
         std::unique_ptr<render::Buffer> authoring_grid_buffer;
         std::unique_ptr<render::Buffer> view_axis_buffer;
@@ -1257,12 +1257,18 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             WorkspaceAiSplinePassKind kind =
                 WorkspaceAiSplinePassKind::primary;
         };
-        const std::array<AiSplinePassInput, 2U> ai_spline_inputs = {{
+        const std::array<AiSplinePassInput, 4U> ai_spline_inputs = {{
             {request.ai_spline_geometry, &request.ai_spline_pipeline,
              WorkspaceAiSplinePassKind::primary},
             {request.ai_spline_interval_geometry,
              &request.ai_spline_interval_pipeline,
              WorkspaceAiSplinePassKind::interval},
+            {request.ai_spline_left_geometry,
+             &request.ai_spline_left_pipeline,
+             WorkspaceAiSplinePassKind::left_side},
+            {request.ai_spline_right_geometry,
+             &request.ai_spline_right_pipeline,
+             WorkspaceAiSplinePassKind::right_side},
         }};
         for (const AiSplinePassInput& input : ai_spline_inputs) {
             if ((input.geometry != nullptr) != input.pipeline->has_value()) {
@@ -1273,12 +1279,14 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 return result;
             }
         }
-        if (request.ai_spline_interval_geometry != nullptr &&
+        if ((request.ai_spline_interval_geometry != nullptr ||
+             request.ai_spline_left_geometry != nullptr ||
+             request.ai_spline_right_geometry != nullptr) &&
             request.ai_spline_geometry == nullptr) {
             result.status = WorkspaceViewportStatus::invalid;
             result.diagnostic = diagnostic(
-                "workspace_viewport_ai_spline_interval_primary_missing",
-                "The AI spline interval requires the primary spline pass");
+                "workspace_viewport_ai_spline_overlay_primary_missing",
+                "AI spline overlays require the primary spline pass");
             return result;
         }
         const std::size_t authoring_draw_count =
@@ -1360,10 +1368,22 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 geometry.sample_point_count >= 1U &&
                 geometry.sample_point_count <=
                     workspace_ai_spline_interpolated_sample_count;
+            const bool side_metadata_valid =
+                (input.kind == WorkspaceAiSplinePassKind::left_side ||
+                 input.kind == WorkspaceAiSplinePassKind::right_side) &&
+                geometry.pass == input.kind &&
+                geometry.mode == WorkspaceAiSplineDisplayMode::raw &&
+                geometry.sample_point_count <= geometry.source_point_count &&
+                geometry.source_point_count <=
+                    render::max_overlay_line_total_vertices / 2U + 1U &&
+                request.ai_spline_geometry != nullptr &&
+                geometry.source_point_count ==
+                    request.ai_spline_geometry->source_point_count;
             if (expected_first != geometry.vertices.size() ||
                 (geometry.vertices.empty() != geometry.chunks.empty()) ||
                 geometry.vertices.size() != expected_vertices ||
-                !(primary_metadata_valid || interval_metadata_valid)) {
+                !(primary_metadata_valid || interval_metadata_valid ||
+                  side_metadata_valid)) {
                 result.status = WorkspaceViewportStatus::invalid;
                 result.diagnostic = diagnostic(
                     "workspace_viewport_ai_spline_geometry_invalid",
@@ -1374,7 +1394,9 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             const auto& expected_color =
                 input.kind == WorkspaceAiSplinePassKind::primary
                     ? workspace_ai_spline_raw_color
-                    : workspace_ai_spline_interval_color;
+                    : input.kind == WorkspaceAiSplinePassKind::interval
+                        ? workspace_ai_spline_interval_color
+                        : workspace_ai_spline_side_color;
             for (const render::OverlayLineVertex& vertex : geometry.vertices) {
                 if (!finite_vector(vertex.position) ||
                     vertex.color != expected_color) {
@@ -1389,7 +1411,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             const render::PipelineProgram& pipeline =
                 **input.pipeline;
             const bool depth_valid =
-                input.kind == WorkspaceAiSplinePassKind::primary
+                input.kind != WorkspaceAiSplinePassKind::interval
                     ? pipeline.depth.test_enabled &&
                           pipeline.depth.write_enabled &&
                           pipeline.depth.compare ==
@@ -1401,7 +1423,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 result.diagnostic =
                     diagnostic("workspace_viewport_ai_spline_depth_invalid",
                                "AI spline pass depth state does not match the "
-                               "recovered primary or interval behavior");
+                               "recovered spline-pass behavior");
                 return result;
             }
             if (!geometry.vertices.empty()) {

@@ -272,7 +272,9 @@ Both modes use the recovered magenta color, identity matrix, normal depth, and
 callback phase. An optional normalized interval adds the recovered blue pass.
 This pass always uses interpolation and disables depth tests and writes.
 The backend-neutral line-list conversion is a labeled translation of the
-original OpenGL line strip. Side-spline, camber, and edit overlays remain staged.
+original OpenGL line strip. Independent version-7 side options add the
+recovered cyan raw splines. These passes use normal depth after the interval.
+Camber and edit overlays remain staged.
 
 ### Native blurred-rim switch
 

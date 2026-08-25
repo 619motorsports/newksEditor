@@ -375,6 +375,201 @@ void rejectsUnsafeInterpolatedIntervals() {
     }
 }
 
+void buildsRecoveredSideSplineGeometry() {
+    const auto side_fixture = [](bool closed) {
+        apex::formats::AiSpline spline;
+        spline.version = 7U;
+        spline.points = {
+            point(0.0F, 0.0F, 0.0F), point(10.0F, 0.0F, 0.0F),
+            point(10.0F, 0.0F, 10.0F),
+            point(closed ? 20.0F : 100.0F, 0.0F, 10.0F)};
+        spline.payloads.resize(spline.points.size());
+        for (std::size_t index = 0U; index < spline.payloads.size(); ++index) {
+            spline.points[index].tag = static_cast<std::int32_t>(index);
+            auto& payload = spline.payloads[index];
+            payload.side0 = 1.0F;
+            payload.side1 = 2.0F;
+        }
+        return spline;
+    };
+    const auto require_position = [](const auto& geometry,
+                                     std::size_t sample,
+                                     std::array<float, 3U> expected,
+                                     const char* message) {
+        const auto& actual = sampled_vertex(geometry, sample).position;
+        for (std::size_t axis = 0U; axis < expected.size(); ++axis)
+            require_near(actual[axis], expected[axis], message);
+    };
+
+    const auto open = side_fixture(false);
+    const auto left = apex::app::buildWorkspaceAiSplineSideGeometry(
+        open, apex::app::WorkspaceAiSplineSide::left);
+    require(left.ok() &&
+                left.geometry.pass ==
+                    apex::app::WorkspaceAiSplinePassKind::left_side &&
+                left.geometry.sample_point_count == 4U &&
+                left.geometry.vertices.size() == 6U &&
+                left.geometry.chunks.size() == 1U &&
+                left.geometry.chunks[0].vertex_count == 6U,
+            "open left side metadata mismatch");
+    require_position(left.geometry, 0U, {0.0F, 0.0F, -1.0F},
+                     "open left first offset mismatch");
+    require_position(left.geometry, 1U, {11.0F, 0.0F, 0.0F},
+                     "open left turn offset mismatch");
+    require_position(left.geometry, 2U, {10.0F, 0.0F, 9.0F},
+                     "open left second turn offset mismatch");
+    require_position(left.geometry, 3U, {100.0F, 0.0F, 10.0F},
+                     "open left final clamp mismatch");
+    for (const auto& vertex : left.geometry.vertices)
+        require(vertex.color == apex::app::workspace_ai_spline_side_color,
+                "left side color mismatch");
+
+    const auto right = apex::app::buildWorkspaceAiSplineSideGeometry(
+        open, apex::app::WorkspaceAiSplineSide::right);
+    require(right.ok() &&
+                right.geometry.pass ==
+                    apex::app::WorkspaceAiSplinePassKind::right_side &&
+                right.geometry.sample_point_count == 4U &&
+                right.geometry.vertices.size() == 6U,
+            "open right side metadata mismatch");
+    require_position(right.geometry, 0U, {0.0F, 0.0F, 2.0F},
+                     "open right first offset mismatch");
+    require_position(right.geometry, 1U, {8.0F, 0.0F, 0.0F},
+                     "open right turn offset mismatch");
+    require_position(right.geometry, 2U, {10.0F, 0.0F, 12.0F},
+                     "open right second turn offset mismatch");
+    require_position(right.geometry, 3U, {100.0F, 0.0F, 10.0F},
+                     "open right final clamp mismatch");
+
+    auto tagged = open;
+    tagged.points[0U].tag = 1;
+    tagged.points[1U].tag = 0;
+    tagged.payloads[1U].side0 = 3.0F;
+    const auto tagged_left =
+        apex::app::buildWorkspaceAiSplineSideGeometry(
+            tagged, apex::app::WorkspaceAiSplineSide::left);
+    require(tagged_left.ok(), "tagged side geometry must convert");
+    require_position(tagged_left.geometry, 0U, {0.0F, 0.0F, -3.0F},
+                     "side payload tag mapping mismatch");
+    require_position(tagged_left.geometry, 1U, {11.0F, 0.0F, 0.0F},
+                     "side payload remap mismatch");
+
+    auto skipped = open;
+    skipped.payloads[2U].side0 = 0.0F;
+    skipped.payloads[2U].side1 = 99.0F;
+    const auto skipped_left =
+        apex::app::buildWorkspaceAiSplineSideGeometry(
+            skipped, apex::app::WorkspaceAiSplineSide::left);
+    const auto skipped_right =
+        apex::app::buildWorkspaceAiSplineSideGeometry(
+            skipped, apex::app::WorkspaceAiSplineSide::right);
+    require(skipped_left.ok() && skipped_right.ok() &&
+                skipped_left.geometry.sample_point_count == 3U &&
+                skipped_right.geometry.sample_point_count == 3U &&
+                skipped_left.geometry.vertices.size() == 4U &&
+                skipped_right.geometry.vertices.size() == 4U,
+            "zero side0 must skip both side points");
+    require_position(skipped_left.geometry, 0U, {0.0F, 0.0F, -1.0F},
+                     "skipped left first offset mismatch");
+    require_position(skipped_left.geometry, 1U, {11.0F, 0.0F, 0.0F},
+                     "skipped left turn offset mismatch");
+    require_position(skipped_left.geometry, 2U, {100.0F, 0.0F, 10.0F},
+                     "skipped left final offset mismatch");
+    require_position(skipped_right.geometry, 0U, {0.0F, 0.0F, 2.0F},
+                     "skipped right first offset mismatch");
+    require_position(skipped_right.geometry, 1U, {8.0F, 0.0F, 0.0F},
+                     "skipped right turn offset mismatch");
+    require_position(skipped_right.geometry, 2U, {100.0F, 0.0F, 10.0F},
+                     "skipped right final offset mismatch");
+
+    const auto closed = side_fixture(true);
+    const auto closed_left = apex::app::buildWorkspaceAiSplineSideGeometry(
+        closed, apex::app::WorkspaceAiSplineSide::left);
+    const auto closed_right = apex::app::buildWorkspaceAiSplineSideGeometry(
+        closed, apex::app::WorkspaceAiSplineSide::right);
+    require(closed_left.ok() && closed_right.ok() &&
+                closed_left.geometry.sample_point_count == 4U &&
+                closed_right.geometry.sample_point_count == 4U,
+            "closed side geometry metadata mismatch");
+    require_position(closed_left.geometry, 3U,
+                     {19.552786F, 0.0F, 10.894427F},
+                     "closed left final wrap mismatch");
+    require_position(closed_right.geometry, 3U,
+                     {20.894428F, 0.0F, 8.211146F},
+                     "closed right final wrap mismatch");
+}
+
+void rejectsUnsafeSideSplineSources() {
+    apex::formats::AiSpline v2;
+    v2.version = 2U;
+    v2.legacyV2Records.resize(3U);
+    v2.nativeRetainedIndices = {0U, 1U, 2U};
+    auto result = apex::app::buildWorkspaceAiSplineSideGeometry(
+        v2, apex::app::WorkspaceAiSplineSide::left);
+    require(!result.ok() &&
+                result.diagnostic.code ==
+                    "workspace_ai_spline_side_version_unsupported",
+            "version-2 side geometry must be rejected");
+
+    apex::formats::AiSpline missing_payload;
+    missing_payload.version = 7U;
+    missing_payload.points = {point(0.0F, 0.0F, 0.0F),
+                              point(1.0F, 0.0F, 0.0F),
+                              point(2.0F, 0.0F, 0.0F)};
+    missing_payload.payloads.resize(2U);
+    result = apex::app::buildWorkspaceAiSplineSideGeometry(
+        missing_payload, apex::app::WorkspaceAiSplineSide::right);
+    require(!result.ok() &&
+                result.diagnostic.code ==
+                    "workspace_ai_spline_side_payload_count_invalid",
+            "side geometry must validate payload count");
+
+    auto invalid_tag = missing_payload;
+    invalid_tag.payloads.resize(invalid_tag.points.size());
+    invalid_tag.points[0U].tag = -1;
+    result = apex::app::buildWorkspaceAiSplineSideGeometry(
+        invalid_tag, apex::app::WorkspaceAiSplineSide::left);
+    require(!result.ok() &&
+                result.diagnostic.code ==
+                    "workspace_ai_spline_side_payload_index_invalid",
+            "side geometry must validate payload tags");
+
+    apex::formats::AiSpline overflow;
+    overflow.version = 7U;
+    overflow.points = {point(3.0e38F, 0.0F, 0.0F),
+                       point(3.0e38F, 0.0F, 10.0F),
+                       point(3.0e38F, 0.0F, 20.0F)};
+    overflow.payloads.resize(overflow.points.size());
+    overflow.payloads[0U].side0 = std::numeric_limits<float>::max();
+    result = apex::app::buildWorkspaceAiSplineSideGeometry(
+        overflow, apex::app::WorkspaceAiSplineSide::left);
+    require(!result.ok() &&
+                result.diagnostic.code ==
+                    "workspace_ai_spline_side_derived_non_finite",
+            "non-finite derived side point must be rejected");
+
+    apex::formats::AiSpline invalid_side;
+    invalid_side.version = 7U;
+    result = apex::app::buildWorkspaceAiSplineSideGeometry(
+        invalid_side, static_cast<apex::app::WorkspaceAiSplineSide>(255U));
+    require(!result.ok() &&
+                result.diagnostic.code == "workspace_ai_spline_side_invalid",
+            "unknown side selection must be rejected");
+
+    apex::formats::AiSpline oversized;
+    oversized.version = 7U;
+    oversized.points.resize(
+        apex::render::max_overlay_line_total_vertices / 2U + 2U);
+    oversized.payloads.resize(oversized.points.size());
+    result = apex::app::buildWorkspaceAiSplineSideGeometry(
+        oversized, apex::app::WorkspaceAiSplineSide::left);
+    require(!result.ok() &&
+                result.status == apex::app::WorkspaceAiSplineStatus::limit_exceeded &&
+                result.diagnostic.code ==
+                    "workspace_ai_spline_side_vertex_limit",
+            "side geometry source bound must be enforced");
+}
+
 } // namespace
 
 int main() {
@@ -390,6 +585,8 @@ int main() {
         rejectsUnsafeInterpolatedSources();
         buildsRecoveredInterpolatedInterval();
         rejectsUnsafeInterpolatedIntervals();
+        buildsRecoveredSideSplineGeometry();
+        rejectsUnsafeSideSplineSources();
     } catch (const std::exception& error) {
         std::cerr << "workspace_ai_spline_tests: " << error.what() << '\n';
         return 1;

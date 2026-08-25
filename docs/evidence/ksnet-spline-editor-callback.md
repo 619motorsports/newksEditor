@@ -45,13 +45,43 @@ It samples from `inPoint` through `outPoint` with the same float increment.
 The helper uses `(0, 0, 3, 1)` and depth mode 2 (`eDepthOff`).
 It restores depth mode 0 (`eDepthNormal`) after the draw.
 
-The callback creates a wrapped horizontal direction cache. It creates the left
-and right splines only when the left spline exists and the right spline is
-null. Enabled side splines use `(0, 3, 3, 1)` and the raw line-strip helper.
+The callback creates a wrapped horizontal direction cache. It rebuilds both
+side splines if either cached side spline is null.
+
+`SplineEditor.computeLeftRightSplines` has token `0x0600010E` and RVA
+`0x2DDB8`. For each point, it gets the next point through `Spline.wrapIndex`.
+An open spline clamps the final index. A closed spline wraps the final index to
+zero. `Spline.isClosed` uses the recovered 75 m endpoint threshold.
+
+The helper gets each payload through `AISpline.payloadAtSplineIndex`. This
+method uses the point tag as the payload index. The safe adapter rejects a tag
+that is outside the payload array.
+
+The helper forces the point delta onto the XZ plane and normalizes it. It then
+uses `cross(delta, (0, 1, 0))` as the side basis. The left point subtracts the
+basis times `payload.sides[0]`. The right point adds the basis times
+`payload.sides[1]`.
+
+If `payload.sides[0]` is zero, the helper skips both generated points for that
+index. A zero right width does not skip the right point. The generated splines
+use tag zero and remain open. Enabled side splines use `(0, 3, 3, 1)`, an
+identity matrix, normal depth, and the raw line-strip helper.
 
 The callback then processes the selected indices and the current movable edit
 point. If more than four edit points exist, it draws a temporary interpolating
 spline in `(0, 3, 0, 1)`. It draws camber data only when that mode is active.
+
+`SplineEditor.renderCamberOnSpline` has token `0x0600010C` and RVA `0x2E8C0`.
+It draws one vertical line for each point. The line height is
+`abs(payload.camber) * 1000`.
+
+Positive camber uses `(0, 3, 0, 1)`. Zero and negative camber use
+`(3, 0, 0, 1)`. The helper changes neither the matrix nor the depth mode.
+It gets each payload through the point-tag mapping.
+
+If selected indices exist, the helper copies the last selected camber into
+`currentCamber`. Otherwise, it sets `currentCamber` to zero. This state does
+not change the number of rendered lines.
 
 `GLRenderer::spline` is at `0x100479E8` and PDB location `0001:289256`.
 It returns when the point count is two or less. Otherwise, it emits open line
@@ -81,15 +111,20 @@ version-7 files. It requires a workspace model and the authoring-overlay shader
 pair. Raw mode remains the default. `--ai-spline-mode interpolated` enables the
 recovered interpolated primary path. `--ai-spline-interval <in> <out>` adds the
 recovered blue interval. The safe adapter requires a finite, ordered range from
-zero to one. Side splines, camber, and edit controls remain staged.
+zero to one.
+
+`--ai-spline-show-left` and `--ai-spline-show-right` enable independent side
+passes. Both options require version-7 payloads. The default state is off,
+which matches the two installed-editor checkboxes. Camber and edit controls
+remain staged.
 
 The production WebGL source has no AI-spline load or render path. A source
 search found no AI-spline or `fast_lane.ai` identifiers. Thus, a direct WebGL
 visual comparison is not possible for this native-only feature. The complete
 production WebGL suite passed 380 tests. It skipped 34 installed-fixture tests.
 
-SwiftShader executes both native line passes at 1x and 4x MSAA. The pixel test
-checks magenta depth rejection and blue depth-off rendering through an occluder.
+SwiftShader executes the native line passes at 1x and 4x MSAA. The pixel test
+checks magenta and cyan depth rejection. It also checks blue depth-off output.
 The sanitizer-enabled native suite passed all 75 tests with SwiftShader.
 The D3D12 code uses the same batch contract. A Windows WARP test remains
 necessary for D3D12 execution evidence.

@@ -147,6 +147,39 @@ if(duplicate_ai_interval_position EQUAL -1)
   message(FATAL_ERROR
     "duplicate AI interval was not diagnosed: ${duplicate_ai_interval_error}")
 endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --ai-spline-show-left
+  RESULT_VARIABLE detached_ai_side_result
+  ERROR_VARIABLE detached_ai_side_error
+)
+if(NOT detached_ai_side_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached AI side returned ${detached_ai_side_result}: ${detached_ai_side_error}")
+endif()
+string(FIND "${detached_ai_side_error}"
+  "AI spline side overlays require --ai-spline" detached_ai_side_position)
+if(detached_ai_side_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached AI side was not diagnosed: ${detached_ai_side_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --ai-spline-show-right --ai-spline-show-right
+  RESULT_VARIABLE duplicate_ai_side_result
+  ERROR_VARIABLE duplicate_ai_side_error
+)
+if(NOT duplicate_ai_side_result STREQUAL "1")
+  message(FATAL_ERROR
+    "duplicate AI side returned ${duplicate_ai_side_result}: ${duplicate_ai_side_error}")
+endif()
+string(FIND "${duplicate_ai_side_error}"
+  "duplicate --ai-spline-show-right option" duplicate_ai_side_position)
+if(duplicate_ai_side_position EQUAL -1)
+  message(FATAL_ERROR
+    "duplicate AI side was not diagnosed: ${duplicate_ai_side_error}")
+endif()
 string(FIND "${malformed_error}" "unknown window option" malformed_position)
 if(malformed_position EQUAL -1)
   message(FATAL_ERROR "unknown workspace-window option was not diagnosed: ${malformed_error}")
@@ -513,6 +546,39 @@ string(FIND "${interval_ai_load_error}"
 if(interval_ai_shader_position EQUAL -1)
   message(FATAL_ERROR
     "AI interval probe did not reach shader setup: ${interval_ai_load_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --ai-spline "${ai_spline}"
+          --ai-spline-show-left --ai-spline-show-right
+          --shader-family fixture --shader-vertex missing.vert.spv
+          --shader-fragment missing.frag.spv
+          --authoring-overlay-vertex missing-overlay.vert.spv
+          --authoring-overlay-fragment missing-overlay.frag.spv
+  RESULT_VARIABLE side_ai_load_result
+  OUTPUT_VARIABLE side_ai_load_output
+  ERROR_VARIABLE side_ai_load_error
+)
+if(NOT side_ai_load_result STREQUAL "1")
+  message(FATAL_ERROR
+    "AI side load probe returned ${side_ai_load_result}: ${side_ai_load_error}")
+endif()
+string(FIND "${side_ai_load_output}"
+  "AI spline left side: samples=3536, segments=3535, draws=2"
+  left_ai_load_position)
+string(FIND "${side_ai_load_output}"
+  "AI spline right side: samples=3536, segments=3535, draws=2"
+  right_ai_load_position)
+if(left_ai_load_position EQUAL -1 OR right_ai_load_position EQUAL -1)
+  message(FATAL_ERROR
+    "AI sides did not load before shader setup: ${side_ai_load_output}${side_ai_load_error}")
+endif()
+string(FIND "${side_ai_load_error}"
+  "cannot open missing.vert.spv" side_ai_shader_position)
+if(side_ai_shader_position EQUAL -1)
+  message(FATAL_ERROR
+    "AI side probe did not reach shader setup: ${side_ai_load_error}")
 endif()
 
 execute_process(

@@ -559,6 +559,13 @@ PipelineProgram ai_spline_interval_pipeline(const Fixture& fixture_value,
     return pipeline;
 }
 
+PipelineProgram ai_spline_side_pipeline(const Fixture& fixture_value,
+                                         std::uint32_t samples = 1U) {
+    PipelineProgram pipeline = ai_spline_pipeline(fixture_value, samples);
+    pipeline.name = "viewport-ai-spline-side";
+    return pipeline;
+}
+
 PipelineProgram selected_mesh_pipeline(const Fixture& fixture_value,
                                        std::uint32_t samples = 1U) {
     PipelineProgram pipeline;
@@ -1126,8 +1133,8 @@ void draws_raw_ai_spline_in_recovered_scene_phase() {
         missing_primary_device, value.document, missing_primary_request);
     require(!missing_primary.ok() &&
                 missing_primary.diagnostic.code ==
-                    "workspace_viewport_ai_spline_interval_primary_missing",
-            "interval pass cannot be detached from the primary spline");
+                    "workspace_viewport_ai_spline_overlay_primary_missing",
+            "AI spline overlays cannot be detached from the primary spline");
 
     auto interval_budget_request = request_for(value);
     interval_budget_request.ai_spline_geometry = &maximum_geometry.geometry;
@@ -1142,6 +1149,150 @@ void draws_raw_ai_spline_in_recovered_scene_phase() {
                 interval_budget.diagnostic.code ==
                     "workspace_viewport_ai_spline_limit",
             "primary and interval passes share the bounded AI spline budget");
+}
+
+void draws_recovered_ai_spline_side_passes() {
+    auto value = fixture();
+    apex::formats::AiSpline spline;
+    spline.version = 7U;
+    spline.points.resize(4U);
+    spline.points[0].position = {0.0F, 0.0F, 0.0F};
+    spline.points[1].position = {100.0F, 0.0F, 0.0F};
+    spline.points[2].position = {200.0F, 0.0F, 100.0F};
+    spline.points[3].position = {300.0F, 0.0F, 100.0F};
+    spline.payloads.resize(spline.points.size());
+    for (auto& payload : spline.payloads) {
+        payload.side0 = 4.0F;
+        payload.side1 = 6.0F;
+    }
+    const auto left = apex::app::buildWorkspaceAiSplineSideGeometry(
+        spline, apex::app::WorkspaceAiSplineSide::left);
+    const auto right = apex::app::buildWorkspaceAiSplineSideGeometry(
+        spline, apex::app::WorkspaceAiSplineSide::right);
+    require(left.ok() && right.ok(), "side AI spline fixtures convert");
+    require(left.geometry.pass ==
+                    apex::app::WorkspaceAiSplinePassKind::left_side &&
+                right.geometry.pass ==
+                    apex::app::WorkspaceAiSplinePassKind::right_side &&
+                left.geometry.mode ==
+                    apex::app::WorkspaceAiSplineDisplayMode::raw &&
+                right.geometry.mode ==
+                    apex::app::WorkspaceAiSplineDisplayMode::raw,
+            "side passes retain raw left/right metadata");
+    require(left.geometry.vertices.size() == 6U &&
+                right.geometry.vertices.size() == 6U,
+            "side passes retain all source segments");
+    for (const auto& vertex : left.geometry.vertices)
+        require(vertex.color == apex::app::workspace_ai_spline_side_color,
+                "left side uses the recovered cyan color");
+    for (const auto& vertex : right.geometry.vertices)
+        require(vertex.color == apex::app::workspace_ai_spline_side_color,
+                "right side uses the recovered cyan color");
+
+    const auto primary = apex::app::buildWorkspaceAiSplineGeometry(spline);
+    require(primary.ok(), "side viewport primary fixture converts");
+    auto request = request_for(value);
+    request.ai_spline_geometry = &primary.geometry;
+    request.ai_spline_pipeline = ai_spline_pipeline(value);
+    request.ai_spline_left_geometry = &left.geometry;
+    request.ai_spline_left_pipeline = ai_spline_side_pipeline(value);
+    request.ai_spline_right_geometry = &right.geometry;
+    request.ai_spline_right_pipeline = ai_spline_side_pipeline(value);
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok(), "left and right side passes prepare");
+
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    Diagnostic diagnostic;
+    require(prepared.viewport->drawAndPresent(
+                device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.overlay_counts == std::vector<std::size_t>({3U}) &&
+                device.overlay_vertex_counts ==
+                    std::vector<std::uint32_t>({6U, 6U, 6U}) &&
+                device.overlay_depth_tests ==
+                    std::vector<bool>({true, true, true}) &&
+                device.overlay_depth_writes ==
+                    std::vector<bool>({true, true, true}),
+            "side passes draw after the primary in normal depth mode");
+    require(device.overlay_buffers.size() == 3U &&
+                device.overlay_buffers[0] != device.overlay_buffers[1] &&
+                device.overlay_buffers[1] != device.overlay_buffers[2] &&
+                device.overlay_buffers[0] != device.overlay_buffers[2],
+            "primary, left, and right side passes retain submission order");
+
+    auto missing_primary_request = request_for(value);
+    missing_primary_request.ai_spline_left_geometry = &left.geometry;
+    missing_primary_request.ai_spline_left_pipeline =
+        ai_spline_side_pipeline(value);
+    FakeDevice missing_primary_device;
+    const auto missing_primary = apex::app::prepareWorkspaceViewport(
+        missing_primary_device, value.document, missing_primary_request);
+    require(!missing_primary.ok() &&
+                missing_primary.diagnostic.code ==
+                    "workspace_viewport_ai_spline_overlay_primary_missing",
+            "side pass cannot be detached from the primary spline");
+
+    auto wrong_color_geometry = left.geometry;
+    wrong_color_geometry.vertices.front().color =
+        apex::app::workspace_ai_spline_raw_color;
+    auto wrong_color_request = request;
+    wrong_color_request.ai_spline_left_geometry = &wrong_color_geometry;
+    FakeDevice wrong_color_device;
+    const auto wrong_color = apex::app::prepareWorkspaceViewport(
+        wrong_color_device, value.document, wrong_color_request);
+    require(!wrong_color.ok() &&
+                wrong_color.diagnostic.code ==
+                    "workspace_viewport_ai_spline_vertex_invalid",
+            "side pass rejects a non-cyan vertex");
+
+    auto wrong_depth_request = request;
+    wrong_depth_request.ai_spline_left_pipeline =
+        ai_spline_interval_pipeline(value);
+    FakeDevice wrong_depth_device;
+    const auto wrong_depth = apex::app::prepareWorkspaceViewport(
+        wrong_depth_device, value.document, wrong_depth_request);
+    require(!wrong_depth.ok() &&
+                wrong_depth.diagnostic.code ==
+                    "workspace_viewport_ai_spline_depth_invalid",
+            "side pass rejects a depth-off pipeline");
+
+    auto wrong_pass_geometry = left.geometry;
+    wrong_pass_geometry.pass = apex::app::WorkspaceAiSplinePassKind::right_side;
+    auto wrong_pass_request = request;
+    wrong_pass_request.ai_spline_left_geometry = &wrong_pass_geometry;
+    FakeDevice wrong_pass_device;
+    const auto wrong_pass = apex::app::prepareWorkspaceViewport(
+        wrong_pass_device, value.document, wrong_pass_request);
+    require(!wrong_pass.ok() &&
+                wrong_pass.diagnostic.code ==
+                    "workspace_viewport_ai_spline_geometry_invalid",
+            "left side input rejects right-side metadata");
+
+    apex::formats::AiSpline maximum_spline;
+    maximum_spline.version = 7U;
+    maximum_spline.points.resize(
+        max_overlay_line_total_vertices / 2U + 1U);
+    const auto maximum_geometry =
+        apex::app::buildWorkspaceAiSplineGeometry(maximum_spline);
+    require(maximum_geometry.ok(), "maximum primary fixture converts");
+    auto over_budget_request = request_for(value);
+    over_budget_request.ai_spline_geometry = &maximum_geometry.geometry;
+    over_budget_request.ai_spline_pipeline = ai_spline_pipeline(value);
+    over_budget_request.ai_spline_left_geometry = &left.geometry;
+    over_budget_request.ai_spline_left_pipeline =
+        ai_spline_side_pipeline(value);
+    FakeDevice over_budget_device;
+    const auto over_budget = apex::app::prepareWorkspaceViewport(
+        over_budget_device, value.document, over_budget_request);
+    require(!over_budget.ok() &&
+                over_budget.diagnostic.code ==
+                    "workspace_viewport_ai_spline_limit",
+            "side passes share the bounded AI spline aggregate budget");
 }
 
 void draws_selected_mesh_with_recovered_fade_boundary() {
@@ -1789,6 +1940,7 @@ int main() {
         draws_selected_axis_inside_the_scene_batch();
         draws_and_toggles_recovered_world_view_axis();
         draws_raw_ai_spline_in_recovered_scene_phase();
+        draws_recovered_ai_spline_side_passes();
         draws_selected_mesh_with_recovered_fade_boundary();
         toggles_prepared_authoring_grid_per_frame();
         rejects_unbound_selection_axis_requests();

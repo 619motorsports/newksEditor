@@ -6083,6 +6083,17 @@ float4 main(float3 color : COLOR) : SV_Target { return float4(color, 1.0); }
         }
         return count;
     };
+    const auto count_cyan = [](std::span<const std::byte> rgba) {
+        std::size_t count = 0U;
+        for (std::size_t offset = 0U; offset + 3U < rgba.size(); offset += 4U) {
+            const auto red = std::to_integer<unsigned>(rgba[offset]);
+            const auto green = std::to_integer<unsigned>(rgba[offset + 1U]);
+            const auto blue = std::to_integer<unsigned>(rgba[offset + 2U]);
+            if (green > red && blue > red && green > 0U && blue > 0U)
+                ++count;
+        }
+        return count;
+    };
     PipelineProgram overlay_pipeline = make_overlay_pipeline(1U);
     OverlayLineDrawRequest overlay_request;
     overlay_request.pipeline = &overlay_pipeline;
@@ -6205,6 +6216,34 @@ float4 main(float3 color : COLOR) : SV_Target { return float4(color, 1.0); }
                 count_dominant_channel(ai_interval_visible.rgba8, 2U) > 8U,
             "depth-off blue AI spline interval passes nearer clear depth");
 
+    // Recovered left and right side splines are cyan raw passes. They inherit
+    // normal depth after the interval restores that state.
+    const std::array<OverlayLineVertex, 2U> ai_side_vertices = {{
+        {{-0.9F, -0.3F, 0.5F}, {0.0F, 3.0F, 3.0F}},
+        {{0.9F, -0.3F, 0.5F}, {0.0F, 3.0F, 3.0F}},
+    }};
+    ai_spline_buffer_description.size_bytes = sizeof(ai_side_vertices);
+    BufferResult ai_side_buffer = device.device->create_buffer(
+        ai_spline_buffer_description,
+        std::as_bytes(std::span(ai_side_vertices)));
+    require(ai_side_buffer.ok(), "AI spline side vertex buffer creation");
+    OverlayLineDrawRequest ai_side_request = ai_spline_request;
+    ai_side_request.vertex_buffer = ai_side_buffer.buffer.get();
+    const std::array ai_side_requests = {ai_side_request};
+    ai_spline_batch.depth_clear_value = 1.0F;
+    ai_spline_batch.overlay_draws = ai_side_requests;
+    const auto ai_side_visible =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *triangle_texture.texture, ai_spline_batch);
+    require(ai_side_visible.ok() && count_cyan(ai_side_visible.rgba8) > 8U,
+            "normal-depth cyan AI spline side passes clear depth");
+    ai_spline_batch.depth_clear_value = 0.0F;
+    const auto ai_side_occluded =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *triangle_texture.texture, ai_spline_batch);
+    require(ai_side_occluded.ok() && count_cyan(ai_side_occluded.rgba8) == 0U,
+            "normal-depth cyan AI spline side fails nearer clear depth");
+
     IndexedStaticMeshBatchDescription appended_overlay_batch;
     appended_overlay_batch.draws = overlap_batch_draws;
     appended_overlay_batch.overlay_draws = overlay_requests;
@@ -6251,6 +6290,17 @@ float4 main(float3 color : COLOR) : SV_Target { return float4(color, 1.0); }
     require(ai_spline_msaa_result.ok() &&
                 count_magenta(ai_spline_msaa_result.rgba8) > 8U,
             "four-sample normal-depth raw AI spline survives resolve");
+
+    ai_side_request.pipeline = &ai_spline_msaa_pipeline;
+    const std::array ai_side_msaa_requests = {ai_side_request};
+    ai_spline_batch.depth_clear_value = 1.0F;
+    ai_spline_batch.overlay_draws = ai_side_msaa_requests;
+    const auto ai_side_msaa_result =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *overlay_msaa.texture, ai_spline_batch);
+    require(ai_side_msaa_result.ok() &&
+                count_cyan(ai_side_msaa_result.rgba8) > 8U,
+            "four-sample normal-depth cyan AI spline side survives resolve");
 
     PipelineProgram ai_interval_msaa_pipeline =
         make_ai_spline_pipeline(4U);

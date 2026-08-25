@@ -209,6 +209,8 @@ remains unchanged and feature-complete.
   samples in three bounded draws. Raw mode remains the default.
   An optional normalized interval adds the recovered blue interpolated pass.
   This pass follows the primary spline and disables depth tests and writes.
+  Independent version-7 options add the recovered cyan left and right side
+  passes. These raw passes follow the interval and use normal depth.
   The selected pass uses solid fill, front-face culling, opaque blend state,
   and disabled depth. It writes magenta RGB and the recovered fading alpha.
   The viewport submits the draw at 2000 ms with zero alpha. It stops the draw

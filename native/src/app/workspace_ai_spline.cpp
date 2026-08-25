@@ -241,6 +241,141 @@ WorkspaceAiSplineResult build_geometry(
     }
 }
 
+WorkspaceAiSplineResult build_side_geometry(
+    const formats::AiSpline& spline, WorkspaceAiSplineSide side) {
+    WorkspaceAiSplineResult result;
+    try {
+        if (side != WorkspaceAiSplineSide::left &&
+            side != WorkspaceAiSplineSide::right) {
+            result.status = WorkspaceAiSplineStatus::invalid_source;
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_side_invalid",
+                "AI spline side selection is invalid");
+            return result;
+        }
+        if (spline.version != 7U) {
+            result.status = WorkspaceAiSplineStatus::invalid_source;
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_side_version_unsupported",
+                "AI spline side overlays require version-7 payloads");
+            return result;
+        }
+        if (spline.points.size() != spline.payloads.size()) {
+            result.status = WorkspaceAiSplineStatus::invalid_source;
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_side_payload_count_invalid",
+                "AI spline side overlays require one payload per point");
+            return result;
+        }
+        if (spline.points.size() >
+            render::max_overlay_line_total_vertices / 2U + 1U) {
+            result.status = WorkspaceAiSplineStatus::limit_exceeded;
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_side_vertex_limit",
+                "AI spline side geometry exceeds the bounded overlay vertex limit");
+            return result;
+        }
+
+        result.geometry.source_point_count =
+            static_cast<std::uint32_t>(spline.points.size());
+        result.geometry.mode = WorkspaceAiSplineDisplayMode::raw;
+        result.geometry.pass = side == WorkspaceAiSplineSide::left
+                                   ? WorkspaceAiSplinePassKind::left_side
+                                   : WorkspaceAiSplinePassKind::right_side;
+
+        std::vector<std::array<float, 3U>> positions;
+        positions.reserve(spline.points.size());
+        const bool closed =
+            spline.points.size() >= 2U &&
+            installedEditorSplinePointDistance(spline.points.back().position,
+                                               spline.points.front().position) <=
+                installed_editor_spline_closure_distance;
+        for (std::size_t index = 0U; index < spline.points.size(); ++index) {
+            const auto& source_point = spline.points[index];
+            const auto& point = source_point.position;
+            if (source_point.tag < 0 ||
+                static_cast<std::size_t>(source_point.tag) >=
+                    spline.payloads.size()) {
+                result.status = WorkspaceAiSplineStatus::invalid_source;
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_side_payload_index_invalid",
+                    "AI spline side point tag is outside the payload array");
+                return result;
+            }
+            const auto& payload =
+                spline.payloads[static_cast<std::size_t>(source_point.tag)];
+            if (!finite_position(point) || !std::isfinite(payload.side0) ||
+                !std::isfinite(payload.side1)) {
+                result.status = WorkspaceAiSplineStatus::invalid_source;
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_side_source_non_finite",
+                    "AI spline side overlays require finite points and widths");
+                return result;
+            }
+            if (payload.side0 == 0.0F) continue;
+
+            const std::size_t next_index =
+                index + 1U < spline.points.size()
+                    ? index + 1U
+                    : (closed && !spline.points.empty() ? 0U : index);
+            const auto& next = spline.points[next_index].position;
+            if (!finite_position(next)) {
+                result.status = WorkspaceAiSplineStatus::invalid_source;
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_side_source_non_finite",
+                    "AI spline side overlays require finite points and widths");
+                return result;
+            }
+            float delta_x = next[0] - point[0];
+            float delta_z = next[2] - point[2];
+            const float length =
+                std::sqrt(delta_x * delta_x + delta_z * delta_z);
+            if (length != 0.0F) {
+                delta_x /= length;
+                delta_z /= length;
+            }
+            const std::array<float, 3U> lateral = {-delta_z, 0.0F, delta_x};
+            const float width = side == WorkspaceAiSplineSide::left
+                                    ? -payload.side0
+                                    : payload.side1;
+            std::array<float, 3U> generated = {
+                point[0] + lateral[0] * width,
+                point[1] + lateral[1] * width,
+                point[2] + lateral[2] * width,
+            };
+            if (!finite_position(generated)) {
+                result.status = WorkspaceAiSplineStatus::invalid_source;
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_side_derived_non_finite",
+                    "AI spline side offset produced a non-finite point");
+                return result;
+            }
+            positions.push_back(generated);
+        }
+        build_line_list(result.geometry, positions,
+                        workspace_ai_spline_side_color);
+        if (result.geometry.chunks.size() > render::max_overlay_line_draws ||
+            result.geometry.vertices.size() >
+                render::max_overlay_line_total_vertices) {
+            result.status = WorkspaceAiSplineStatus::limit_exceeded;
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_side_draw_limit",
+                "AI spline side geometry exceeds the bounded overlay draw limit");
+            result.geometry = {};
+            return result;
+        }
+        result.status = WorkspaceAiSplineStatus::ready;
+        return result;
+    } catch (const std::bad_alloc&) {
+        result.status = WorkspaceAiSplineStatus::allocation_failed;
+        result.diagnostic = diagnostic(
+            "workspace_ai_spline_allocation_failed",
+            "AI spline geometry exceeded available allocation capacity");
+        result.geometry = {};
+        return result;
+    }
+}
+
 } // namespace
 
 WorkspaceAiSplineResult
@@ -254,6 +389,11 @@ WorkspaceAiSplineResult buildWorkspaceAiSplineIntervalGeometry(
     const formats::AiSpline& spline, WorkspaceAiSplineInterval interval) {
     return build_geometry(spline, WorkspaceAiSplineDisplayMode::interpolated,
                           WorkspaceAiSplinePassKind::interval, interval);
+}
+
+WorkspaceAiSplineResult buildWorkspaceAiSplineSideGeometry(
+    const formats::AiSpline& spline, WorkspaceAiSplineSide side) {
+    return build_side_geometry(spline, side);
 }
 
 const char* workspace_ai_spline_display_mode_name(

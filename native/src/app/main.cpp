@@ -64,6 +64,7 @@ void usage(std::ostream& output) {
               "                       [--track-camera-position <value>] [--track-camera-play]\n"
               "                       [--track-camera-mode webgl|installed-editor]\n"
               "                       [--ai-spline <file> [--ai-spline-mode raw|interpolated] [--ai-spline-interval <in> <out>]]\n"
+              "                       [--ai-spline-show-left] [--ai-spline-show-right]\n"
               "                       [--node-search <query>] [--selected-node <id> [--isolate-selected]]\n"
               "                       [--show-hidden] [--wireframe] [--grid] [--view-axis]\n"
               "                       [--weather <stock-id>] [--sun-heading <degrees>] [--sun-height <degrees>]\n"
@@ -557,6 +558,8 @@ struct WindowWorkspaceOptions {
         apex::app::WorkspaceAiSplineDisplayMode::raw;
     bool aiSplineModeSpecified = false;
     std::optional<apex::app::WorkspaceAiSplineInterval> aiSplineInterval;
+    bool aiSplineShowLeft = false;
+    bool aiSplineShowRight = false;
     std::optional<std::string> nodeSearch;
     std::optional<apex::scene::NodeId> selectedNode;
     bool isolateSelected = false;
@@ -613,6 +616,8 @@ struct LoadedWindowWorkspace {
     std::optional<TrackCamera> trackCamera;
     std::optional<apex::app::WorkspaceAiSplineGeometry> aiSpline;
     std::optional<apex::app::WorkspaceAiSplineGeometry> aiSplineInterval;
+    std::optional<apex::app::WorkspaceAiSplineGeometry> aiSplineLeft;
+    std::optional<apex::app::WorkspaceAiSplineGeometry> aiSplineRight;
     apex::app::WorkspaceSelectionState selection;
     bool animationSkinningRequired = false;
 };
@@ -820,6 +825,16 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
                     "AI spline interval must be ordered and from zero to one");
             result.aiSplineInterval = {
                 static_cast<float>(begin), static_cast<float>(end)};
+        } else if (option == "--ai-spline-show-left") {
+            if (result.aiSplineShowLeft)
+                throw std::runtime_error(
+                    "duplicate --ai-spline-show-left option");
+            result.aiSplineShowLeft = true;
+        } else if (option == "--ai-spline-show-right") {
+            if (result.aiSplineShowRight)
+                throw std::runtime_error(
+                    "duplicate --ai-spline-show-right option");
+            result.aiSplineShowRight = true;
         } else if (option == "--node-search") {
             if (result.nodeSearch.has_value())
                 throw std::runtime_error("duplicate --node-search option");
@@ -1042,6 +1057,10 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
     if (result.aiSplineInterval.has_value() && !result.aiSpline.has_value())
         throw std::runtime_error(
             "--ai-spline-interval requires --ai-spline");
+    if ((result.aiSplineShowLeft || result.aiSplineShowRight) &&
+        !result.aiSpline.has_value())
+        throw std::runtime_error(
+            "AI spline side overlays require --ai-spline");
     if (result.isolateSelected && !result.selectedNode.has_value())
         throw std::runtime_error("--isolate-selected requires --selected-node");
     const bool selection_options = result.nodeSearch.has_value() ||
@@ -1270,6 +1289,30 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
                       << ", draws=" << interval.geometry.chunks.size()
                       << '\n';
             loaded.aiSplineInterval = std::move(interval.geometry);
+        }
+        if (options.aiSplineShowLeft) {
+            auto side = apex::app::buildWorkspaceAiSplineSideGeometry(
+                spline, apex::app::WorkspaceAiSplineSide::left);
+            if (!side.ok())
+                throw std::runtime_error(side.diagnostic.code + ": " +
+                                         side.diagnostic.message);
+            std::cout << "AI spline left side: samples="
+                      << side.geometry.sample_point_count
+                      << ", segments=" << side.geometry.vertices.size() / 2U
+                      << ", draws=" << side.geometry.chunks.size() << '\n';
+            loaded.aiSplineLeft = std::move(side.geometry);
+        }
+        if (options.aiSplineShowRight) {
+            auto side = apex::app::buildWorkspaceAiSplineSideGeometry(
+                spline, apex::app::WorkspaceAiSplineSide::right);
+            if (!side.ok())
+                throw std::runtime_error(side.diagnostic.code + ": " +
+                                         side.diagnostic.message);
+            std::cout << "AI spline right side: samples="
+                      << side.geometry.sample_point_count
+                      << ", segments=" << side.geometry.vertices.size() / 2U
+                      << ", draws=" << side.geometry.chunks.size() << '\n';
+            loaded.aiSplineRight = std::move(side.geometry);
         }
     }
     const bool selection_options = options.nodeSearch.has_value() ||
@@ -1690,6 +1733,20 @@ int run_window(int argc, char** argv) {
                     &*loaded_workspace.aiSplineInterval;
                 request.ai_spline_interval_pipeline =
                     std::move(interval_pipeline);
+            }
+            if (loaded_workspace.aiSplineLeft.has_value()) {
+                auto side_pipeline = pipeline;
+                side_pipeline.name = "workspace-ai-spline-left";
+                request.ai_spline_left_geometry =
+                    &*loaded_workspace.aiSplineLeft;
+                request.ai_spline_left_pipeline = std::move(side_pipeline);
+            }
+            if (loaded_workspace.aiSplineRight.has_value()) {
+                auto side_pipeline = pipeline;
+                side_pipeline.name = "workspace-ai-spline-right";
+                request.ai_spline_right_geometry =
+                    &*loaded_workspace.aiSplineRight;
+                request.ai_spline_right_pipeline = std::move(side_pipeline);
             }
             request.ai_spline_pipeline = std::move(pipeline);
         }
