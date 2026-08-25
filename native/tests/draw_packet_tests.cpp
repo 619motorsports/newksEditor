@@ -415,6 +415,99 @@ void carries_a_fixed_animation_pose_into_cpu_skinning() {
             "fixed animation pose changes the CPU-skinned vertex stream");
 }
 
+void keeps_selected_body_packet_on_animated_parent_handoff() {
+    auto model = static_model();
+    model.root.transform = identity();
+    auto body = std::move(model.root.children.front());
+    body.transform = identity();
+    const auto source_body_name = body.name;
+    const auto source_body_material = body.materialId;
+    const auto source_body_vertices = body.vertices;
+    model.root.children.clear();
+
+    apex::formats::Kn5Node animated_parent;
+    animated_parent.type = 1U;
+    animated_parent.kind = "node";
+    animated_parent.name = "AnimatedParent";
+    animated_parent.active = true;
+    animated_parent.visible = true;
+    animated_parent.transform = identity();
+    animated_parent.children.push_back(std::move(body));
+    model.root.children.push_back(std::move(animated_parent));
+
+    apex::formats::KsAnimation animation;
+    animation.source = "parent.ksanim";
+    animation.version = 2U;
+    animation.frameCount = 3U;
+    apex::formats::KsAnimationTrack parent_track;
+    parent_track.name = "AnimatedParent";
+    parent_track.animated = true;
+    parent_track.frames = {
+        {{0, 0, 0, 1}, {0, 0, 0}, {1, 1, 1}},
+        {{0, 0, 0, 1}, {4, 0, 0}, {1, 1, 1}},
+        {{0, 0, 0, 1}, {0, 0, 0}, {1, 1, 1}},
+    };
+    animation.tracks.push_back(std::move(parent_track));
+
+    const auto animation_bytes = apex::formats::serializeKsAnimation(animation);
+    const auto parsed_animation = apex::formats::parseKsAnimation(
+        animation_bytes, "parent.ksanim");
+    require(parsed_animation.version == 2U && parsed_animation.frameCount == 3U &&
+                parsed_animation.tracks.size() == 1U &&
+                parsed_animation.tracks.front().name == "AnimatedParent",
+            "animated parent fixture survives KSANIM v2 serialization and parsing");
+
+    const auto applied = apex::domain::apply_animation_preview(
+        model, parsed_animation, 0.5F);
+    require(applied.position == 0.5F && applied.matched_nodes == 1U &&
+                applied.matched_tracks == 1U,
+            "animated parent pose is sampled and applied at the midpoint");
+    require(model.root.children.front().transform[12] == 2.0F,
+            "midpoint animation updates only the animated parent transform");
+    require(model.root.children.front().children.front().name == source_body_name &&
+                model.root.children.front().children.front().materialId == source_body_material &&
+                model.root.children.front().children.front().vertices == source_body_vertices,
+            "animation handoff preserves Body mesh identity and source geometry");
+
+    const auto converted = apex::scene::convertKn5Scene(model);
+    apex::scene::NodeId selected_body_id = apex::scene::invalid_node_id;
+    const apex::scene::SceneNode* selected_body = nullptr;
+    for (const auto& node : converted.snapshot.nodes) {
+        if (node.name == "BODY") {
+            selected_body_id = node.id;
+            selected_body = &node;
+            break;
+        }
+    }
+    require(selected_body != nullptr && selected_body_id != apex::scene::invalid_node_id,
+            "Body selection resolves to the converted scene node");
+
+    apex::render::RenderPlan plan;
+    plan.items.push_back({selected_body_id, selected_body->material, 0, 2.0F,
+                          false, false, true, {}, {}, {0, 1, 2}});
+    apex::render::DrawPacketOptions options;
+    options.selected_node = selected_body_id;
+    const auto packets = apex::render::build_draw_packets(
+        model, converted.snapshot, plan, options);
+    require(packets.supported && packets.packets.size() == 1U,
+            "selected Body survives animated-parent packet construction");
+
+    const auto& packet = packets.packets.front();
+    require(packet.node == selected_body_id && packet.flags.selected &&
+                std::abs(packet.world_matrix[12] - 2.0F) < 1.0e-6F,
+            "selected Body packet carries the animated parent world translation");
+    require(packet.material == selected_body->material &&
+                packet.material_profile.shader == model.materials[packet.material].shader &&
+                packet.vertex_count == source_body_vertices.size() / 11U &&
+                packet.vertex_stride_floats == 11U,
+            "selected Body packet retains stable material and mesh identity");
+    require(packet.resources.size() == 1U && packet.resources.front().slot == "txDiffuse" &&
+                packet.resources.front().bind_point == 21U &&
+                packet.resources.front().texture_index == 0U &&
+                packet.resources.front().texture == "body_d.dds",
+            "selected Body packet retains stable texture resource identity");
+}
+
 void validates_layout_resource_identity_and_metadata_limits() {
     auto layout_model = static_model("ksSkinnedMesh");
     auto layout_scene = static_scene();
@@ -526,6 +619,7 @@ int main() {
         palette_skinning_overload_matches_kn5_helper_and_rejects_malformed_streams();
         builds_validated_skinned_packet_with_bone_palette();
         carries_a_fixed_animation_pose_into_cpu_skinning();
+        keeps_selected_body_packet_on_animated_parent_handoff();
         validates_layout_resource_identity_and_metadata_limits();
         cpu_skinning_matches_rotation_nonuniform_scale_and_inverse_bind();
         rejects_invalid_geometry_and_limits_before_packet_growth();
