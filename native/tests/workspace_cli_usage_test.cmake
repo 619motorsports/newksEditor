@@ -190,6 +190,41 @@ if(malformed_ai_index_position EQUAL -1)
   message(FATAL_ERROR
     "malformed AI index was not diagnosed: ${malformed_ai_index_error}")
 endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --ai-spline-edit-point 0 1 2 3
+  RESULT_VARIABLE detached_ai_edit_result
+  ERROR_VARIABLE detached_ai_edit_error
+)
+if(NOT detached_ai_edit_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached AI edit returned ${detached_ai_edit_result}: ${detached_ai_edit_error}")
+endif()
+string(FIND "${detached_ai_edit_error}"
+  "AI spline overlays require --ai-spline" detached_ai_edit_position)
+if(detached_ai_edit_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached AI edit was not diagnosed: ${detached_ai_edit_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --ai-spline-edit-point 0 nan 2 3
+  RESULT_VARIABLE nonfinite_ai_edit_result
+  ERROR_VARIABLE nonfinite_ai_edit_error
+)
+if(NOT nonfinite_ai_edit_result STREQUAL "1")
+  message(FATAL_ERROR
+    "non-finite AI edit returned ${nonfinite_ai_edit_result}: ${nonfinite_ai_edit_error}")
+endif()
+string(FIND "${nonfinite_ai_edit_error}"
+  "AI spline edit X must be a finite number" nonfinite_ai_edit_position)
+if(nonfinite_ai_edit_position EQUAL -1)
+  message(FATAL_ERROR
+    "non-finite AI edit was not diagnosed: ${nonfinite_ai_edit_error}")
+endif()
+
 string(FIND "${detached_ai_side_error}"
   "AI spline overlays require --ai-spline" detached_ai_side_position)
 if(detached_ai_side_position EQUAL -1)

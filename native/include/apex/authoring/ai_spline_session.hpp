@@ -57,6 +57,8 @@ public:
                              AiSplineSessionLimits limits = {});
 
     [[nodiscard]] const formats::AiSpline& baseline() const noexcept;
+    [[nodiscard]] const std::vector<std::uint8_t>&
+    baselineBytes() const noexcept;
     [[nodiscard]] const formats::AiSpline& current() const noexcept;
     [[nodiscard]] const std::vector<std::uint8_t>&
     currentBytes() const noexcept;

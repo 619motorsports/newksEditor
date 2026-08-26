@@ -1,6 +1,7 @@
 #include "apex/app/authoring_service.hpp"
 #include "apex/app/presentation_recreation.hpp"
 #include "apex/app/workspace_ai_spline.hpp"
+#include "apex/app/workspace_ai_spline_controller.hpp"
 #include "apex/app/workspace_selection.hpp"
 #include "apex/app/workspace_shadow_programs.hpp"
 #include "apex/app/workspace_track_camera.hpp"
@@ -69,6 +70,7 @@ void usage(std::ostream& output) {
               "                       [--track-camera-mode webgl|installed-editor]\n"
               "                       [--ai-spline <file> [--ai-spline-mode raw|interpolated] [--ai-spline-interval <in> <out>]]\n"
               "                       [--ai-spline-show-left] [--ai-spline-show-right] [--ai-spline-index <index> ...] [--ai-spline-show-camber]\n"
+              "                       [--ai-spline-edit-point <index> <x> <y> <z> ...]\n"
               "                       [--node-search <query>] [--selected-node <id> [--isolate-selected]]\n"
               "                       [--show-hidden] [--wireframe] [--grid] [--view-axis]\n"
               "                       [--weather <stock-id>] [--sun-heading <degrees>] [--sun-height <degrees>]\n"
@@ -574,6 +576,7 @@ struct WindowWorkspaceOptions {
     bool aiSplineShowRight = false;
     std::vector<std::uint32_t> aiSplineIndices;
     bool aiSplineShowCamber = false;
+    std::vector<apex::authoring::AiSplinePointPositionEdit> aiSplineEdits;
     std::optional<std::string> nodeSearch;
     std::optional<apex::scene::NodeId> selectedNode;
     bool isolateSelected = false;
@@ -628,10 +631,21 @@ struct LoadedWindowWorkspace {
             installedEditorSpline;
     };
     std::optional<TrackCamera> trackCamera;
-    std::optional<apex::formats::AiSpline> aiSplineModel;
-    std::optional<apex::app::WorkspaceAiSplineOverlaySet> aiSplineOverlays;
+    std::unique_ptr<apex::app::WorkspaceAiSplineController>
+        aiSplineController;
+    std::optional<apex::app::WorkspaceAiSplineOverlaySet>
+        readOnlyAiSplineOverlays;
     apex::app::WorkspaceSelectionState selection;
     bool animationSkinningRequired = false;
+
+    [[nodiscard]] const apex::app::WorkspaceAiSplineOverlaySet*
+    aiSplineOverlays() const noexcept {
+        if (aiSplineController != nullptr)
+            return &aiSplineController->overlays();
+        return readOnlyAiSplineOverlays.has_value()
+                   ? &*readOnlyAiSplineOverlays
+                   : nullptr;
+    }
 };
 
 apex::app::WorkspaceSessionKind parse_workspace_kind(std::string_view value) {
@@ -1116,6 +1130,23 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
                 throw std::runtime_error(
                     "duplicate --ai-spline-show-camber option");
             result.aiSplineShowCamber = true;
+        } else if (option == "--ai-spline-edit-point") {
+            if (result.aiSplineEdits.size() >=
+                apex::authoring::aiSplineMaxSelectionEntries)
+                throw std::runtime_error(
+                    "AI spline edit count exceeds its bounded limit");
+            apex::authoring::AiSplinePointPositionEdit edit;
+            edit.pointIndex = parse_unsigned_index(
+                require_value("--ai-spline-edit-point"),
+                "AI spline edit point index");
+            edit.position = {
+                parse_finite_float(require_value("--ai-spline-edit-point"),
+                                   "AI spline edit X"),
+                parse_finite_float(require_value("--ai-spline-edit-point"),
+                                   "AI spline edit Y"),
+                parse_finite_float(require_value("--ai-spline-edit-point"),
+                                   "AI spline edit Z")};
+            result.aiSplineEdits.push_back(edit);
         } else if (option == "--node-search") {
             if (result.nodeSearch.has_value())
                 throw std::runtime_error("duplicate --node-search option");
@@ -1340,7 +1371,7 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             "--ai-spline-interval requires --ai-spline");
     if ((result.aiSplineShowLeft || result.aiSplineShowRight ||
          !result.aiSplineIndices.empty() ||
-         result.aiSplineShowCamber) &&
+         result.aiSplineShowCamber || !result.aiSplineEdits.empty()) &&
         !result.aiSpline.has_value())
         throw std::runtime_error(
             "AI spline overlays require --ai-spline");
@@ -1539,75 +1570,107 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
         const auto bytes = read_file(*options.aiSpline);
         auto spline = apex::formats::parseAiSpline(
             bytes, options.aiSpline->generic_string());
-        apex::app::WorkspaceAiSplineOverlayRequest overlay_request;
-        overlay_request.mode = options.aiSplineMode;
-        overlay_request.interval = options.aiSplineInterval;
-        overlay_request.show_left = options.aiSplineShowLeft;
-        overlay_request.show_right = options.aiSplineShowRight;
-        overlay_request.selected_indices = options.aiSplineIndices;
-        overlay_request.show_camber = options.aiSplineShowCamber;
-        auto overlays =
-            apex::app::buildWorkspaceAiSplineOverlays(spline, overlay_request);
-        if (!overlays.ok())
-            throw std::runtime_error(overlays.diagnostic.code + ": " +
-                                     overlays.diagnostic.message);
-        std::cout << "AI spline: version=" << spline.version
-                  << ", points=" << overlays.overlays.primary.source_point_count
+        const auto version = spline.version;
+        const apex::app::WorkspaceAiSplineOverlaySet* overlay_set = nullptr;
+        bool read_only = version != 7U;
+        if (version == 7U) {
+            apex::app::WorkspaceAiSplineControllerConfiguration configuration;
+            configuration.mode = options.aiSplineMode;
+            configuration.interval = options.aiSplineInterval;
+            configuration.showLeft = options.aiSplineShowLeft;
+            configuration.showRight = options.aiSplineShowRight;
+            configuration.selectedIndices = options.aiSplineIndices;
+            configuration.showCamber = options.aiSplineShowCamber;
+            auto created = apex::app::WorkspaceAiSplineController::create(
+                spline, std::move(configuration));
+            if (created.ok()) {
+                loaded.aiSplineController = std::move(created.controller);
+                overlay_set = &loaded.aiSplineController->overlays();
+            } else if (!options.aiSplineEdits.empty()) {
+                throw std::runtime_error(created.diagnostic.code + ": " +
+                                         created.diagnostic.message);
+            } else {
+                std::cerr << "AI spline edit disabled: "
+                          << created.diagnostic.code << ": "
+                          << created.diagnostic.message << '\n';
+                read_only = true;
+            }
+        }
+        if (read_only) {
+            if (!options.aiSplineEdits.empty())
+                throw std::runtime_error(
+                    "--ai-spline-edit-point requires version 7");
+            apex::app::WorkspaceAiSplineOverlayRequest overlay_request;
+            overlay_request.mode = options.aiSplineMode;
+            overlay_request.interval = options.aiSplineInterval;
+            overlay_request.show_left = options.aiSplineShowLeft;
+            overlay_request.show_right = options.aiSplineShowRight;
+            overlay_request.selected_indices = options.aiSplineIndices;
+            overlay_request.show_camber = options.aiSplineShowCamber;
+            auto built = apex::app::buildWorkspaceAiSplineOverlays(
+                spline, overlay_request);
+            if (!built.ok())
+                throw std::runtime_error(built.diagnostic.code + ": " +
+                                         built.diagnostic.message);
+            loaded.readOnlyAiSplineOverlays = std::move(built.overlays);
+            overlay_set = &*loaded.readOnlyAiSplineOverlays;
+        }
+        const auto& overlays = *overlay_set;
+        std::cout << "AI spline: version=" << version
+                  << ", points=" << overlays.primary.source_point_count
                   << ", samples="
-                  << overlays.overlays.primary.sample_point_count
+                  << overlays.primary.sample_point_count
                   << ", segments="
-                  << overlays.overlays.primary.vertices.size() / 2U
-                  << ", draws=" << overlays.overlays.primary.chunks.size()
+                  << overlays.primary.vertices.size() / 2U
+                  << ", draws=" << overlays.primary.chunks.size()
                   << ", mode="
                   << apex::app::workspace_ai_spline_display_mode_name(
-                         overlays.overlays.primary.mode)
+                         overlays.primary.mode)
                   << '\n';
-        if (overlays.overlays.interval.has_value()) {
+        if (overlays.interval.has_value()) {
             std::cout << "AI spline interval: in="
                       << options.aiSplineInterval->begin
                       << ", out=" << options.aiSplineInterval->end
                       << ", samples="
-                      << overlays.overlays.interval->sample_point_count
+                      << overlays.interval->sample_point_count
                       << ", segments="
-                      << overlays.overlays.interval->vertices.size() / 2U
-                      << ", draws=" << overlays.overlays.interval->chunks.size()
+                      << overlays.interval->vertices.size() / 2U
+                      << ", draws=" << overlays.interval->chunks.size()
                       << '\n';
         }
-        if (overlays.overlays.left.has_value()) {
+        if (overlays.left.has_value()) {
             std::cout << "AI spline left side: samples="
-                      << overlays.overlays.left->sample_point_count
+                      << overlays.left->sample_point_count
                       << ", segments="
-                      << overlays.overlays.left->vertices.size() / 2U
-                      << ", draws=" << overlays.overlays.left->chunks.size()
+                      << overlays.left->vertices.size() / 2U
+                      << ", draws=" << overlays.left->chunks.size()
                       << '\n';
         }
-        if (overlays.overlays.right.has_value()) {
+        if (overlays.right.has_value()) {
             std::cout << "AI spline right side: samples="
-                      << overlays.overlays.right->sample_point_count
+                      << overlays.right->sample_point_count
                       << ", segments="
-                      << overlays.overlays.right->vertices.size() / 2U
-                      << ", draws=" << overlays.overlays.right->chunks.size()
+                      << overlays.right->vertices.size() / 2U
+                      << ", draws=" << overlays.right->chunks.size()
                       << '\n';
         }
-        if (overlays.overlays.selection.has_value()) {
+        if (overlays.selection.has_value()) {
             std::cout << "AI spline last selected index: index="
-                      << *overlays.overlays.selection->last_selected_index
+                      << *overlays.selection->last_selected_index
                       << ", lines="
-                      << overlays.overlays.selection->sample_point_count
+                      << overlays.selection->sample_point_count
                       << ", draws="
-                      << overlays.overlays.selection->chunks.size()
+                      << overlays.selection->chunks.size()
                       << ", selected="
-                      << overlays.overlays.selection->selected_point_count
+                      << overlays.selection->selected_point_count
                       << '\n';
         }
-        if (overlays.overlays.camber.has_value()) {
+        if (overlays.camber.has_value()) {
             std::cout << "AI spline camber: lines="
-                      << overlays.overlays.camber->sample_point_count
-                      << ", draws=" << overlays.overlays.camber->chunks.size()
+                      << overlays.camber->sample_point_count
+                      << ", draws=" << overlays.camber->chunks.size()
                       << '\n';
         }
-        loaded.aiSplineModel = std::move(spline);
-        loaded.aiSplineOverlays = std::move(overlays.overlays);
     }
     const bool selection_options = options.nodeSearch.has_value() ||
                                    options.selectedNode.has_value() ||
@@ -1987,8 +2050,12 @@ int run_window(int argc, char** argv) {
                 apex::render::PipelineTransformContract::draw_matrices;
             request.authoring_overlay_pipeline = std::move(pipeline);
         }
-        if (loaded_workspace.aiSplineOverlays.has_value()) {
-            const auto &ai = *loaded_workspace.aiSplineOverlays;
+        if (const auto* ai_overlays = loaded_workspace.aiSplineOverlays();
+            ai_overlays != nullptr) {
+            const auto& ai = *ai_overlays;
+            if (loaded_workspace.aiSplineController != nullptr)
+                request.ai_spline_generation =
+                    loaded_workspace.aiSplineController->revision();
             apex::render::PipelineProgram pipeline;
             pipeline.name = "workspace-ai-spline-raw";
             pipeline.shaders = *loaded_workspace.authoringOverlayModules;
@@ -2108,6 +2175,29 @@ int run_window(int argc, char** argv) {
         return true;
     };
     if (!prepare_viewport()) return 1;
+    if (!workspace_options.aiSplineEdits.empty()) {
+        if (loaded_workspace.aiSplineController == nullptr ||
+            viewport == nullptr) {
+            std::cerr << "AI spline live edit: unavailable\n";
+            return 1;
+        }
+        const auto edited =
+            loaded_workspace.aiSplineController->setPointPositions(
+                *device_result.device, *viewport,
+                workspace_options.aiSplineEdits,
+                loaded_workspace.aiSplineController->revision());
+        if (!edited.ok()) {
+            std::cerr << "AI spline live edit: " << edited.diagnostic.code
+                      << ": " << edited.diagnostic.message << '\n';
+            return 1;
+        }
+        std::cout << "AI spline live edit: status="
+                  << apex::app::workspace_ai_spline_controller_status_name(
+                         edited.status)
+                  << ", revision=" << edited.revision
+                  << ", points=" << edited.applied
+                  << ", passes=" << edited.replacedPassCount << '\n';
+    }
     if (workspace_options.trackCameraPlay)
         track_camera_playback_started = std::chrono::steady_clock::now();
 

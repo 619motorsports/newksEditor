@@ -1,3 +1,4 @@
+#include "apex/app/workspace_ai_spline_controller.hpp"
 #include "apex/app/workspace_viewport.hpp"
 #include "apex/app/workspace_shadow_programs.hpp"
 #include "apex/authoring/ai_spline_session.hpp"
@@ -32,13 +33,13 @@ void require(bool condition, const char *message) {
 class FakeBuffer final : public Buffer {
 public:
     FakeBuffer(BufferDescription description, std::span<const std::byte> bytes,
-               std::shared_ptr<std::size_t> live_count)
+               std::shared_ptr<std::size_t> live_count, Backend backend)
         : info_({description}), bytes_(bytes.begin(), bytes.end()),
-          live_count_(std::move(live_count)) {
+          live_count_(std::move(live_count)), backend_(backend) {
         ++*live_count_;
     }
     ~FakeBuffer() override { --*live_count_; }
-    Backend backend() const noexcept override { return Backend::Vulkan; }
+    Backend backend() const noexcept override { return backend_; }
     const BufferInfo &info() const noexcept override { return info_; }
     [[nodiscard]] const std::vector<std::byte> &bytes() const noexcept {
         return bytes_;
@@ -48,56 +49,66 @@ private:
     BufferInfo info_{};
     std::vector<std::byte> bytes_;
     std::shared_ptr<std::size_t> live_count_;
+    Backend backend_ = Backend::Vulkan;
 };
 
 class FakeTexture final : public Texture {
 public:
-    explicit FakeTexture(TextureDescription description)
-        : info_({description}) {}
-    Backend backend() const noexcept override { return Backend::Vulkan; }
+    explicit FakeTexture(TextureDescription description, Backend backend)
+        : info_({description}), backend_(backend) {}
+    Backend backend() const noexcept override { return backend_; }
     const TextureInfo &info() const noexcept override { return info_; }
 
 private:
     TextureInfo info_{};
+    Backend backend_ = Backend::Vulkan;
 };
 
 class FakeDepth final : public DepthAttachment {
 public:
-    explicit FakeDepth(DepthAttachmentDescription description)
-        : info_({description}) {}
-    Backend backend() const noexcept override { return Backend::Vulkan; }
+    explicit FakeDepth(DepthAttachmentDescription description, Backend backend)
+        : info_({description}), backend_(backend) {}
+    Backend backend() const noexcept override { return backend_; }
     const DepthAttachmentInfo &info() const noexcept override { return info_; }
 
 private:
     DepthAttachmentInfo info_{};
+    Backend backend_ = Backend::Vulkan;
 };
 
 class FakeSampler final : public Sampler {
 public:
-    explicit FakeSampler(SamplerDescription description)
-        : info_({description}) {}
-    Backend backend() const noexcept override { return Backend::Vulkan; }
+    explicit FakeSampler(SamplerDescription description, Backend backend)
+        : info_({description}), backend_(backend) {}
+    Backend backend() const noexcept override { return backend_; }
     const SamplerInfo &info() const noexcept override { return info_; }
 
 private:
     SamplerInfo info_{};
+    Backend backend_ = Backend::Vulkan;
 };
 
 class FakeTarget final : public PresentationTarget {
 public:
-    explicit FakeTarget(PresentationTargetDescription description)
-        : info_({description}) {}
-    Backend backend() const noexcept override { return Backend::Vulkan; }
+    explicit FakeTarget(PresentationTargetDescription description,
+                        Backend backend = Backend::Vulkan)
+        : info_({description}), backend_(backend) {}
+    Backend backend() const noexcept override { return backend_; }
     const PresentationTargetInfo &info() const noexcept override {
         return info_;
     }
 
 private:
     PresentationTargetInfo info_{};
+    Backend backend_ = Backend::Vulkan;
 };
 
 class FakeDevice final : public Device {
 public:
+    explicit FakeDevice(Backend backend = Backend::Vulkan)
+        : info_{backend, "viewport fake", "unit", 1U, 0U, 0U, 0U, 0U,
+                true} {}
+
     struct BufferUpdate {
         Buffer *buffer = nullptr;
         std::uint64_t offset = 0U;
@@ -116,7 +127,8 @@ public:
         return {BufferStatus::ready,
                 {},
                 std::make_unique<FakeBuffer>(description, bytes,
-                                             live_buffer_count)};
+                                             live_buffer_count,
+                                             info_.backend)};
     }
 
     BufferUpdateResult
@@ -130,7 +142,8 @@ public:
     TextureResult create_texture(const TextureDescription &description,
                                  const TextureUploadPlan &) override {
         ++texture_calls;
-        auto texture = std::make_unique<FakeTexture>(description);
+        auto texture =
+            std::make_unique<FakeTexture>(description, info_.backend);
         created_texture_descriptions.push_back(description);
         created_textures.push_back(texture.get());
         return {TextureStatus::ready, {}, std::move(texture)};
@@ -147,7 +160,7 @@ public:
         created_depth_descriptions.push_back(description);
         return {DepthAttachmentStatus::ready,
                 {},
-                std::make_unique<FakeDepth>(description)};
+                std::make_unique<FakeDepth>(description, info_.backend)};
     }
 
     TextureClearReadbackResult
@@ -238,7 +251,7 @@ public:
         ++sampler_calls;
         return {SamplerStatus::ready,
                 {},
-                std::make_unique<FakeSampler>(description)};
+                std::make_unique<FakeSampler>(description, info_.backend)};
     }
 
     ShaderModuleResult
@@ -304,8 +317,7 @@ public:
         std::make_shared<std::size_t>(0U);
 
 private:
-    DeviceInfo info_{
-        Backend::Vulkan, "viewport fake", "unit", 1U, 0U, 0U, 0U, 0U, true};
+    DeviceInfo info_{};
 };
 
 void put32(std::vector<std::uint8_t> &bytes, std::size_t offset,
@@ -314,6 +326,18 @@ void put32(std::vector<std::uint8_t> &bytes, std::size_t offset,
     bytes[offset + 1U] = static_cast<std::uint8_t>(value >> 8U);
     bytes[offset + 2U] = static_cast<std::uint8_t>(value >> 16U);
     bytes[offset + 3U] = static_cast<std::uint8_t>(value >> 24U);
+}
+
+std::vector<std::uint8_t> dxbc_shader_bytes() {
+    std::vector<std::uint8_t> bytes(48U, 0U);
+    put32(bytes, 0U, 0x43425844U);
+    put32(bytes, 20U, 1U);
+    put32(bytes, 24U, static_cast<std::uint32_t>(bytes.size()));
+    put32(bytes, 28U, 1U);
+    put32(bytes, 32U, 36U);
+    put32(bytes, 36U, 0x58454853U);
+    put32(bytes, 40U, 4U);
+    return bytes;
 }
 
 std::vector<std::uint8_t> diffuse_dds() {
@@ -1940,6 +1964,390 @@ void replaces_committed_ai_spline_overlays_atomically() {
             "live replacement rejects a different same-backend device");
 }
 
+void publishes_ai_spline_controller_transactions() {
+    auto value = fixture();
+    apex::formats::AiSpline spline;
+    spline.source = "controller-position.ai";
+    spline.version = 7U;
+    spline.points.resize(4U);
+    spline.points[0U].position = {0.0F, 0.0F, 0.0F};
+    spline.points[1U].position = {10.0F, 0.0F, 0.0F};
+    spline.points[2U].position = {20.0F, 5.0F, 5.0F};
+    spline.points[3U].position = {30.0F, 5.0F, 10.0F};
+    spline.payloads.resize(spline.points.size());
+    for (std::size_t index = 0U; index < spline.points.size(); ++index) {
+        spline.points[index].tag = static_cast<std::int32_t>(index);
+        spline.payloads[index].side0 = 1.0F;
+        spline.payloads[index].side1 = 2.0F;
+        spline.payloads[index].camber =
+            index % 2U == 0U ? 0.01F : -0.01F;
+    }
+    apex::app::WorkspaceAiSplineControllerConfiguration configuration;
+    configuration.interval =
+        apex::app::WorkspaceAiSplineInterval{0.25F, 0.2504F};
+    configuration.showLeft = true;
+    configuration.showRight = true;
+    configuration.selectedIndices = {0U, 1U, 0U, 1U};
+    configuration.showCamber = true;
+    auto created = apex::app::WorkspaceAiSplineController::create(
+        std::move(spline), std::move(configuration));
+    require(created.ok() && created.controller->revision() == 0U &&
+                !created.controller->dirty() &&
+                created.controller->configuration().selectedIndices ==
+                    std::vector<std::uint32_t>({0U, 1U}),
+            "AI spline controller owns one canonical clean generation");
+    auto controller = std::move(created.controller);
+    const auto baselineBytes = controller->currentBytes();
+
+    const auto& overlays = controller->overlays();
+    auto request = request_for(value);
+    request.ai_spline_geometry = &overlays.primary;
+    request.ai_spline_generation = controller->revision();
+    request.ai_spline_pipeline = ai_spline_pipeline(value);
+    request.ai_spline_interval_geometry = &*overlays.interval;
+    request.ai_spline_interval_pipeline = ai_spline_interval_pipeline(value);
+    request.ai_spline_left_geometry = &*overlays.left;
+    request.ai_spline_left_pipeline = ai_spline_side_pipeline(value);
+    request.ai_spline_right_geometry = &*overlays.right;
+    request.ai_spline_right_pipeline = ai_spline_side_pipeline(value);
+    request.ai_spline_selection_geometry = &*overlays.selection;
+    request.ai_spline_selection_pipeline = ai_spline_camber_pipeline(value);
+    request.ai_spline_camber_geometry = &*overlays.camber;
+    request.ai_spline_camber_pipeline = ai_spline_camber_pipeline(value);
+    FakeDevice device;
+    auto prepared =
+        apex::app::prepareWorkspaceViewport(device, value.document, request);
+    require(prepared.ok(), "controller AI spline viewport prepares");
+    auto unboundRequest = request;
+    unboundRequest.ai_spline_generation.reset();
+    auto unbound = apex::app::prepareWorkspaceViewport(
+        device, value.document, unboundRequest);
+    require(unbound.ok(), "untracked AI spline viewport prepares");
+
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    Diagnostic diagnostic;
+    auto drawControllerGeneration = [&]() {
+        const auto previousCount = device.overlay_buffers.size();
+        require(prepared.viewport->drawAndPresent(device, target, frame,
+                                                  diagnostic) ==
+                        WorkspaceViewportFrameStatus::ready &&
+                    device.overlay_buffers.size() == previousCount + 6U,
+                "controller generation draws all prepared passes");
+        std::vector<const Buffer*> buffers(device.overlay_buffers.end() - 6,
+                                           device.overlay_buffers.end());
+        const auto* primary = dynamic_cast<const FakeBuffer*>(buffers.front());
+        const auto expected = std::as_bytes(
+            std::span(controller->overlays().primary.vertices));
+        require(primary != nullptr &&
+                    primary->bytes() ==
+                        std::vector<std::byte>(expected.begin(), expected.end()),
+                "drawn primary bytes match the controller generation");
+        return buffers;
+    };
+    const auto baselineBuffers = drawControllerGeneration();
+    const auto initialBufferCalls = device.buffer_calls;
+
+    const std::array<apex::authoring::AiSplinePointPositionEdit, 1U> noOp{
+        apex::authoring::AiSplinePointPositionEdit{0U, {0.0F, 0.0F, 0.0F}}};
+    const auto callsBeforeBindingCheck = device.buffer_calls;
+    const auto unboundEdit = controller->setPointPositions(
+        device, *unbound.viewport, noOp, controller->revision());
+    require(!unboundEdit.ok() &&
+                unboundEdit.diagnostic.code ==
+                    "workspace_ai_spline_controller_viewport_generation_mismatch" &&
+                device.buffer_calls == callsBeforeBindingCheck,
+            "controller rejects a viewport without its visible revision");
+    const auto unchanged = controller->setPointPositions(
+        device, *prepared.viewport, noOp, controller->revision());
+    require(unchanged.ok() && !unchanged.changed &&
+                unchanged.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::unchanged &&
+                controller->revision() == 0U && !controller->dirty() &&
+                device.buffer_calls == initialBufferCalls,
+            "no-op edit changes no session or viewport state");
+
+    const std::array<apex::authoring::AiSplinePointPositionEdit, 1U> edit{
+        apex::authoring::AiSplinePointPositionEdit{0U, {2.0F, 1.0F, 3.0F}}};
+    const auto stale = controller->setPointPositions(
+        device, *prepared.viewport, edit, 99U);
+    require(!stale.ok() &&
+                stale.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::
+                        stale_revision &&
+                stale.diagnostic.code ==
+                    "workspace_ai_spline_controller_revision_stale" &&
+                device.buffer_calls == initialBufferCalls,
+            "stale edit revision fails before candidate allocation");
+
+    const auto changed = controller->setPointPositions(
+        device, *prepared.viewport, edit, 0U);
+    require(changed.ok() && changed.changed && changed.revision == 1U &&
+                changed.replacedPassCount == 6U &&
+                controller->revision() == 1U && controller->dirty() &&
+                prepared.viewport->aiSplineGeneration() == 1U &&
+                controller->current().points[0U].position == edit[0U].position,
+            "controller commits the model only after all passes upload");
+    require(
+        prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+            device.overlay_buffers.size() == 12U,
+        "next frame draws the controller's edited generation");
+    const std::vector<const Buffer*> editedBuffers(
+        device.overlay_buffers.end() - 6, device.overlay_buffers.end());
+    require(std::equal(baselineBuffers.begin(), baselineBuffers.end(),
+                       editedBuffers.begin(),
+                       [](const Buffer* before, const Buffer* after) {
+                           return before != after;
+                       }),
+            "controller edit replaces every prepared pass");
+
+    const std::array<apex::authoring::AiSplinePointPositionEdit, 1U> nextEdit{
+        apex::authoring::AiSplinePointPositionEdit{1U, {12.0F, 2.0F, 4.0F}}};
+    const auto liveBeforeFailure = *device.live_buffer_count;
+    device.fail_buffer_call = device.buffer_calls + 3U;
+    device.fail_buffer_status = BufferStatus::upload_failed;
+    const auto failed = controller->setPointPositions(
+        device, *prepared.viewport, nextEdit, 1U);
+    require(!failed.ok() &&
+                failed.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::
+                        viewport_failed &&
+                failed.diagnostic.code == "fake_buffer_failed" &&
+                controller->revision() == 1U && controller->dirty() &&
+                controller->current().points[1U].position ==
+                    std::array<float, 3U>{10.0F, 0.0F, 0.0F} &&
+                *device.live_buffer_count == liveBeforeFailure,
+            "failed upload leaves model and visible generation at revision one");
+    device.fail_buffer_call = 0U;
+    require(
+        prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready,
+        "viewport remains drawable after controller publication failure");
+    require(std::equal(editedBuffers.begin(), editedBuffers.end(),
+                       device.overlay_buffers.end() - 6),
+            "failed controller publication retains all edited buffers");
+
+    device.fail_buffer_call = device.buffer_calls + 1U;
+    device.fail_buffer_status = BufferStatus::allocation_failed;
+    const auto allocationFailed = controller->setPointPositions(
+        device, *prepared.viewport, nextEdit, 1U);
+    require(!allocationFailed.ok() &&
+                allocationFailed.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::
+                        allocation_failed &&
+                controller->revision() == 1U,
+            "controller preserves an exact allocation-failure status");
+    device.fail_buffer_call = 0U;
+
+    const std::array<apex::authoring::AiSplinePointPositionEdit, 2U> conflict{
+        apex::authoring::AiSplinePointPositionEdit{1U, {1.0F, 2.0F, 3.0F}},
+        apex::authoring::AiSplinePointPositionEdit{1U, {4.0F, 5.0F, 6.0F}},
+    };
+    const auto callsBeforeConflict = device.buffer_calls;
+    const auto conflicted = controller->setPointPositions(
+        device, *prepared.viewport, conflict, 1U);
+    require(!conflicted.ok() &&
+                conflicted.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::
+                        invalid_edit &&
+                conflicted.diagnostic.code == "POINT_EDIT_CONFLICT" &&
+                controller->revision() == 1U &&
+                device.buffer_calls == callsBeforeConflict,
+            "invalid candidate fails before overlay allocation");
+
+    const auto retried = controller->setPointPositions(
+        device, *prepared.viewport, nextEdit, controller->revision());
+    require(retried.ok() && retried.changed && retried.revision == 2U &&
+                controller->current().points[1U].position ==
+                    nextEdit[0U].position,
+            "controller rebuilds and publishes a discarded candidate on retry");
+    const auto retryBuffers = drawControllerGeneration();
+    const auto returnedToEdited =
+        controller->undo(device, *prepared.viewport, controller->revision());
+    require(returnedToEdited.ok() && returnedToEdited.revision == 3U &&
+                controller->dirty() &&
+                controller->current().points[0U].position == edit[0U].position &&
+                controller->current().points[1U].position ==
+                    std::array<float, 3U>{10.0F, 0.0F, 0.0F},
+            "first undo returns from the retried candidate to revision B");
+    const auto returnedBuffers = drawControllerGeneration();
+    require(std::equal(retryBuffers.begin(), retryBuffers.end(),
+                       returnedBuffers.begin(),
+                       [](const Buffer* before, const Buffer* after) {
+                           return before != after;
+                       }),
+            "next frame draws the successful retry undo");
+
+    const auto undone =
+        controller->undo(device, *prepared.viewport, controller->revision());
+    require(undone.ok() && undone.changed && undone.revision == 4U &&
+                !controller->dirty() && controller->canRedo() &&
+                prepared.viewport->aiSplineGeneration() == 4U &&
+                controller->current().points[0U].position ==
+                    std::array<float, 3U>{0.0F, 0.0F, 0.0F},
+            "transactional undo publishes baseline and clears dirty state");
+    const auto undoBuffers = drawControllerGeneration();
+    require(std::equal(returnedBuffers.begin(), returnedBuffers.end(),
+                       undoBuffers.begin(),
+                       [](const Buffer* before, const Buffer* after) {
+                           return before != after;
+                       }),
+            "next frame draws the undo generation");
+    const auto redone =
+        controller->redo(device, *prepared.viewport, controller->revision());
+    require(redone.ok() && redone.changed && redone.revision == 5U &&
+                controller->dirty() &&
+                prepared.viewport->aiSplineGeneration() == 5U &&
+                controller->current().points[0U].position == edit[0U].position,
+            "transactional redo republishes the edited generation");
+    const auto redoBuffers = drawControllerGeneration();
+    require(std::equal(undoBuffers.begin(), undoBuffers.end(),
+                       redoBuffers.begin(),
+                       [](const Buffer* before, const Buffer* after) {
+                           return before != after;
+                       }),
+            "next frame draws the redo generation");
+    const auto restored = controller->restoreBaseline(
+        device, *prepared.viewport, controller->revision());
+    require(restored.ok() && restored.changed && restored.revision == 6U &&
+                !controller->dirty() &&
+                prepared.viewport->aiSplineGeneration() == 6U &&
+                controller->currentBytes() == baselineBytes,
+            "transactional reset publishes the baseline and clears dirty");
+    const auto resetBuffers = drawControllerGeneration();
+    require(std::equal(redoBuffers.begin(), redoBuffers.end(),
+                       resetBuffers.begin(),
+                       [](const Buffer* before, const Buffer* after) {
+                           return before != after;
+                       }),
+            "next frame draws the reset generation");
+}
+
+void rejects_unsafe_ai_spline_controller_candidates() {
+    apex::formats::AiSpline legacy;
+    legacy.source = "legacy-controller.ai";
+    legacy.version = 2U;
+    const auto legacyController =
+        apex::app::WorkspaceAiSplineController::create(std::move(legacy), {});
+    require(!legacyController.ok() &&
+                legacyController.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::unsupported,
+            "version-2 AI spline remains a read-only viewport source");
+
+    apex::formats::AiSpline spline;
+    spline.source = "unsafe-controller.ai";
+    spline.version = 7U;
+    spline.points.resize(4U);
+    spline.payloads.resize(4U);
+    for (std::size_t index = 0U; index < spline.points.size(); ++index) {
+        spline.points[index].position = {
+            static_cast<float>(index) * 100.0F, 0.0F, 0.0F};
+        spline.points[index].tag = static_cast<std::int32_t>(index);
+    }
+    apex::app::WorkspaceAiSplineControllerConfiguration invalidSelection;
+    invalidSelection.selectedIndices = {99U};
+    const auto rejectedSelection =
+        apex::app::WorkspaceAiSplineController::create(spline,
+                                                        invalidSelection);
+    require(!rejectedSelection.ok() &&
+                rejectedSelection.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::
+                        overlay_failed &&
+                rejectedSelection.diagnostic.code ==
+                    "workspace_ai_spline_selection_index_invalid",
+            "controller creation rejects an invalid selected index");
+    apex::app::WorkspaceAiSplineControllerConfiguration configuration;
+    configuration.mode =
+        apex::app::WorkspaceAiSplineDisplayMode::interpolated;
+    auto created = apex::app::WorkspaceAiSplineController::create(
+        std::move(spline), std::move(configuration));
+    require(created.ok(), "interpolated controller baseline builds");
+    auto controller = std::move(created.controller);
+
+    auto value = fixture();
+    auto request = request_for(value);
+    request.ai_spline_geometry = &controller->overlays().primary;
+    request.ai_spline_generation = controller->revision();
+    request.ai_spline_pipeline = ai_spline_pipeline(value);
+    FakeDevice device;
+    auto prepared =
+        apex::app::prepareWorkspaceViewport(device, value.document, request);
+    require(prepared.ok(), "interpolated controller viewport prepares");
+    const auto bufferCalls = device.buffer_calls;
+    const auto bytes = controller->currentBytes();
+
+    const std::array<apex::authoring::AiSplinePointPositionEdit, 1U> edit{
+        apex::authoring::AiSplinePointPositionEdit{3U, {0.0F, 0.0F, 0.0F}}};
+    const auto rejected = controller->setPointPositions(
+        device, *prepared.viewport, edit, controller->revision());
+    require(!rejected.ok() &&
+                rejected.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::
+                        overlay_failed &&
+                controller->revision() == 0U && !controller->dirty() &&
+                controller->currentBytes() == bytes &&
+                device.buffer_calls == bufferCalls,
+            "unsafe derived geometry cannot commit a model candidate");
+}
+
+void publishes_controller_through_d3d12_metadata_contract() {
+    apex::formats::AiSpline spline;
+    spline.source = "d3d12-controller.ai";
+    spline.version = 7U;
+    spline.points.resize(4U);
+    spline.payloads.resize(4U);
+    for (std::size_t index = 0U; index < spline.points.size(); ++index) {
+        spline.points[index].position = {
+            static_cast<float>(index) * 100.0F, 0.0F, 0.0F};
+        spline.points[index].tag = static_cast<std::int32_t>(index);
+    }
+    auto created = apex::app::WorkspaceAiSplineController::create(
+        std::move(spline), {});
+    require(created.ok(), "D3D12 contract controller creates");
+    auto controller = std::move(created.controller);
+
+    auto value = fixture();
+    for (auto& module : value.modules) {
+        module.format = PipelineShaderFormat::dxil;
+        module.bytes = dxbc_shader_bytes();
+    }
+    auto request = request_for(value);
+    request.ai_spline_geometry = &controller->overlays().primary;
+    request.ai_spline_generation = controller->revision();
+    request.ai_spline_pipeline = ai_spline_pipeline(value);
+    FakeDevice device(Backend::D3D12);
+    auto prepared =
+        apex::app::prepareWorkspaceViewport(device, value.document, request);
+    if (!prepared.ok())
+        throw std::runtime_error(
+            "D3D12 contract preparation failed: " +
+            prepared.diagnostic.code + ": " + prepared.diagnostic.message);
+    require(prepared.ok() &&
+                prepared.viewport->backend() == Backend::D3D12,
+            "D3D12 contract viewport prepares the controller baseline");
+
+    const std::array<apex::authoring::AiSplinePointPositionEdit, 1U> edit{
+        apex::authoring::AiSplinePointPositionEdit{1U, {110.0F, 5.0F, 2.0F}}};
+    const auto changed = controller->setPointPositions(
+        device, *prepared.viewport, edit, controller->revision());
+    require(changed.ok() && changed.changed && changed.replacedPassCount == 1U,
+            "D3D12 contract accepts one atomic controller generation");
+
+    FakeTarget target(request.presentation, Backend::D3D12);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera.clip_space = CameraClipSpace::d3d12;
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    Diagnostic diagnostic;
+    require(
+        prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+            device.overlay_buffers.size() == 1U,
+        "D3D12 contract draws the accepted controller generation");
+}
+
 void draws_selected_mesh_with_recovered_fade_boundary() {
   auto value = fixture();
   auto request = request_for(value);
@@ -2620,6 +3028,9 @@ int main() {
         draws_recovered_ai_spline_selected_index_pass();
         draws_recovered_ai_spline_camber_pass();
         replaces_committed_ai_spline_overlays_atomically();
+        publishes_ai_spline_controller_transactions();
+        rejects_unsafe_ai_spline_controller_candidates();
+        publishes_controller_through_d3d12_metadata_contract();
         draws_selected_mesh_with_recovered_fade_boundary();
         toggles_prepared_authoring_grid_per_frame();
         rejects_unbound_selection_axis_requests();

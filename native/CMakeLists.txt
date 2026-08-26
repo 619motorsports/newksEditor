@@ -224,6 +224,7 @@ target_link_libraries(apex_render
 add_library(apex_app_render STATIC
   src/app/installed_editor_spline.cpp
   src/app/workspace_ai_spline.cpp
+  src/app/workspace_ai_spline_controller.cpp
   src/app/workspace_shadow_programs.cpp
   src/app/workspace_track_camera.cpp
   src/app/workspace_viewport.cpp

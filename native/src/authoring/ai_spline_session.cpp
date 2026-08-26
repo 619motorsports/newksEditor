@@ -126,6 +126,11 @@ const formats::AiSpline& AiSplineSession::baseline() const noexcept {
     return baseline_->spline;
 }
 
+const std::vector<std::uint8_t>&
+AiSplineSession::baselineBytes() const noexcept {
+    return baseline_->bytes;
+}
+
 const formats::AiSpline& AiSplineSession::current() const noexcept {
     return current_->spline;
 }

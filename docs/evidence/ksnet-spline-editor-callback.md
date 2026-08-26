@@ -85,6 +85,8 @@ The `selectedIndices` field is a `std::vector<int>` at offset 52.
 `SplineEditor.addIndex` is at `0x10024BFC`. It ignores an existing index and
 appends each new index. Thus, the vector keeps insertion order without
 duplicates. `getSelectedIndices` is at `0x1001F6A8` and returns a copy.
+`setCurrentPoint` tests virtual key 17 before its forward range-selection path.
+This key is Control. Shift is virtual key 16.
 
 `onNodeRender` has method RVA `0x2F754` and execution VA `0x1002F760`.
 It calls `showCurrentSplineIndexInfo` for each selected index. The first entry
@@ -120,6 +122,46 @@ The keyboard path supplies a local movement vector to `editSplineManual`.
 The method converts this vector with the cached horizontal forward direction.
 The C++ point-position API accepts an absolute position. This API is a
 deterministic authoring boundary, not an emulation of the keyboard path.
+
+`onNodeRender` builds the forward cache only when its vector is empty. For each
+point, it normalizes the horizontal direction to the next wrapped point.
+Direct movement does not clear this cache. `refreshSplines` also leaves it
+unchanged. Only `resampleSpline` token `0x0600002F` clears the cache.
+
+`mat44f.setFromHeadingUp` has token `0x06000058` and RVA `0x20B14`.
+The global `transform` has token `0x06000101` and RVA `0x2D84C`.
+`editSplineManual` calls both helpers with the cached heading and world up.
+It passes `false` for homogeneous division. Neither input is normalized.
+For horizontal heading `(hx, 0, hz)`, local movement `(dx, dy, dz)` produces:
+
+```text
+world.x = -hz * dx - hx * dz
+world.y = dy
+world.z =  hx * dx - hz * dz
+```
+
+Thus, Numpad 8 moves along the cached forward direction. Numpad 2 moves in the
+opposite direction. Duplicate XZ points produce a zero cached heading.
+
+`btEditSpline_Click` is at `ksEditor.exe` RVA `0x695C`. Entry calls
+`ksGraphics.startEditingSpline` and clears the selected-index vector. Exit calls
+`ksGraphics.finishEditingSpline`. Entry does not enable point movement.
+
+`cbUnlockSplineEditClicked` is at RVA `0x68B5`. It calls
+`ksGraphics.allowSplineEdit` and controls a separate movement flag. The render
+callback tests this flag, but it does not test the edit-mode flag.
+Finish and cancel do not clear the movement flag or the selected indices.
+
+`movePointByKeyboard` has token `0x06000110` and execution VA `0x1002DFF4`.
+It polls these numeric-keypad virtual keys through `GetAsyncKeyState`:
+
+- Numpad 8 and 2 change local Z.
+- Numpad 4 and 6 change local X.
+- Numpad 9 and 3 change local Y.
+- Control changes the speed from `0.1 * deltaT` to `1.0 * deltaT`.
+
+Each direction uses an independent test. Thus, concurrent keys combine their
+movement. The nonzero return test makes held-key movement level-triggered.
 
 `SplineEditor.renderCamberOnSpline` has token `0x0600010C` and RVA `0x2E8C0`.
 It draws one vertical line for each point. The line height is
@@ -248,16 +290,34 @@ the prepared pass set and the shared authoring-overlay budget. The shared
 device contract contains no Vulkan or D3D12 types at this application boundary.
 The caller uses this synchronous operation on the render thread between draws.
 D3D12 can wait for idle resources when the old generation leaves ownership.
-The current native window creates this model and overlay set during load. It
-does not yet route point-edit input into the replacement operation. A future
-controller must keep an edited model pending until buffer replacement succeeds.
-An upload error keeps the visible generation and requires a retry or discard.
+The native port now owns version-7 models in a transactional controller. The
+controller copies the current session and applies the edit to this copy. It
+then builds all enabled overlays and allocates the complete next state.
+
+The viewport receives the candidate buffers before the controller changes its
+state. After a successful upload, one no-throw pointer swap publishes the model
+and overlay set. An upload error keeps the model revision and visible buffers.
+The viewport also compares the expected visible revision before replacement.
+
+The native window option
+`--ai-spline-edit-point <index> <x> <y> <z>` exposes this render-thread path.
+Repeated options form one bounded batch after viewport preparation. The first
+frame uses the accepted generation. The window does not yet track frame time,
+focus changes, or recovered numeric-keypad state. It does not yet emulate
+`allowSplineEdit`.
+
+Dirty state compares the current canonical bytes with the baseline bytes.
+Transactional undo, redo, and baseline reset use the same publication path.
+An unsafe version-7 authoring baseline stays on the read-only viewer path.
 
 The viewport test replaces all six passes after one committed batch edit. It
 releases the input set, then compares each owned buffer with the rebuilt bytes.
 It also rejects a forged overrun chunk and an over-limit aggregate. An injected
-third buffer upload error for a newer model keeps the prior six-buffer
-generation. Temporary buffers leave no retained allocation.
+third buffer upload error keeps the controller and viewport at the prior
+revision. The test also covers stale revisions, no-op edits, undo, redo, and
+baseline reset. Temporary buffers leave no retained allocation.
+A D3D12 fake checks the shared metadata and clip-space contract. It does not
+run a D3D12 queue, fence, or resource destructor.
 
 The production WebGL source has no AI-spline load or render path. A source
 search found no AI-spline or `fast_lane.ai` identifiers. Thus, a direct WebGL
@@ -267,8 +327,9 @@ production WebGL suite passed 380 tests. It skipped 34 installed-fixture tests.
 SwiftShader executes the native line passes at 1x and 4x MSAA. The pixel test
 checks magenta and cyan depth rejection. It also checks blue depth-off output.
 The test checks red and green camber lines with normal depth.
-The current native suite passed 78 tests. The explicit Vulkan target found no
-physical device and skipped. All AI-spline tests passed with the sanitizers.
+The current native suite discovered 79 tests. It passed 77 tests and skipped
+two unavailable fixture targets. The affected controller test passed with GCC
+and Clang sanitizers.
 The complete sanitizer run reported one 183-byte NVIDIA driver leak after the
 platform-window test. The D3D12 code uses the same batch contract. A Windows
 WARP test remains necessary for D3D12 execution evidence.

@@ -753,6 +753,7 @@ WorkspaceViewport::WorkspaceViewport(
     std::optional<render::PipelineProgram> authoring_overlay_pipeline,
     std::array<AiSplinePassResources, workspace_ai_spline_pass_count>
         ai_spline_passes,
+    std::optional<std::uint64_t> ai_spline_generation,
     std::unique_ptr<render::Buffer> authoring_grid_buffer, bool grid_visible,
     std::unique_ptr<render::Buffer> view_axis_buffer, bool view_axis_visible,
     std::unique_ptr<render::Buffer> selection_axis_buffer,
@@ -768,6 +769,7 @@ WorkspaceViewport::WorkspaceViewport(
       depth_(std::move(depth)), execution_(std::move(execution)),
       authoring_overlay_pipeline_(std::move(authoring_overlay_pipeline)),
       ai_spline_passes_(std::move(ai_spline_passes)),
+      ai_spline_generation_(ai_spline_generation),
       authoring_grid_buffer_(std::move(authoring_grid_buffer)),
       grid_visible_(grid_visible),
       view_axis_buffer_(std::move(view_axis_buffer)),
@@ -784,13 +786,28 @@ WorkspaceViewport::~WorkspaceViewport() = default;
 
 WorkspaceViewportAiSplineUpdateResult
 WorkspaceViewport::replaceAiSplineOverlaysBorrowed(
-    render::Device &device, const AiSplineUpdateRequest &request) {
+    render::Device &device, const AiSplineUpdateRequest &request,
+    std::optional<WorkspaceViewportAiSplineGenerationTransition> generation) {
     WorkspaceViewportAiSplineUpdateResult result;
     if (&device != device_ || device.info().backend != backend_) {
         result.diagnostic =
             diagnostic("workspace_viewport_ai_spline_update_device_mismatch",
                        "AI spline overlays must use the device that prepared "
                        "the viewport");
+        return result;
+    }
+    if (ai_spline_generation_.has_value() != generation.has_value()) {
+        result.diagnostic = diagnostic(
+            "workspace_viewport_ai_spline_generation_required",
+            "AI spline replacement must preserve controller generation "
+            "tracking");
+        return result;
+    }
+    if (generation.has_value() &&
+        generation->expected != *ai_spline_generation_) {
+        result.diagnostic = diagnostic(
+            "workspace_viewport_ai_spline_generation_stale",
+            "AI spline replacement expected a different visible generation");
         return result;
     }
 
@@ -936,6 +953,8 @@ WorkspaceViewport::replaceAiSplineOverlaysBorrowed(
             candidate[index].buffer = std::move(buffer.buffer);
         }
         ai_spline_passes_.swap(candidate);
+        if (generation.has_value())
+            ai_spline_generation_ = generation->replacement;
         result.replaced_pass_count = static_cast<std::size_t>(
             std::count_if(geometries.begin(), geometries.end(),
                           [](const WorkspaceAiSplineGeometry *geometry) {
@@ -960,7 +979,8 @@ WorkspaceViewport::replaceAiSplineOverlaysBorrowed(
 
 WorkspaceViewportAiSplineUpdateResult
 WorkspaceViewport::replaceAiSplineOverlays(
-    render::Device &device, const WorkspaceAiSplineOverlaySet &overlays) {
+    render::Device &device, const WorkspaceAiSplineOverlaySet &overlays,
+    std::optional<WorkspaceViewportAiSplineGenerationTransition> generation) {
     AiSplineUpdateRequest request;
     request.primary = &overlays.primary;
     request.interval =
@@ -970,7 +990,7 @@ WorkspaceViewport::replaceAiSplineOverlays(
     request.selection =
         overlays.selection.has_value() ? &*overlays.selection : nullptr;
     request.camber = overlays.camber.has_value() ? &*overlays.camber : nullptr;
-    return replaceAiSplineOverlaysBorrowed(device, request);
+    return replaceAiSplineOverlaysBorrowed(device, request, generation);
 }
 
 WorkspaceViewportFrameStatus
@@ -1729,6 +1749,14 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 return result;
             }
         }
+        if (request.ai_spline_generation.has_value() &&
+            request.ai_spline_geometry == nullptr) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_ai_spline_generation_without_geometry",
+                "AI spline generation tracking requires a primary pass");
+            return result;
+        }
         if ((request.ai_spline_interval_geometry != nullptr ||
              request.ai_spline_left_geometry != nullptr ||
              request.ai_spline_right_geometry != nullptr ||
@@ -2002,6 +2030,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             std::move(execution),
             std::move(authoring_overlay_pipeline),
             std::move(ai_spline_passes),
+            request.ai_spline_generation,
             std::move(authoring_grid_buffer), request.grid_visible,
             std::move(view_axis_buffer), request.view_axis_visible,
             std::move(selection_axis_buffer),

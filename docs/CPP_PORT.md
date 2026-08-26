@@ -244,18 +244,29 @@ remains unchanged and feature-complete.
   duplicate records apply once in first-seen order. Conflicting duplicates are
   rejected. The batch rebuilds and serializes the grid once, then creates one
   history revision. The `--set-ai-spline-points` command exposes this operation.
-  One overlay builder rebuilds all enabled passes from one committed model.
-  The application retains this model with the owned overlay generation.
+  One overlay builder rebuilds all enabled passes from one model candidate.
+  A transactional controller owns the version-7 session and visible overlays.
   The viewport allocates all replacement buffers before it changes a pass.
   A successful call replaces primary, interval, side, selection, and camber
   resources as one generation. An error keeps the complete prior generation.
   Replacement uses the device that prepared the viewport. The operation stays
   on the render thread between synchronous frames. It uses the shared Vulkan
   and D3D12 device API. A change to pass presence still recreates the viewport.
-  The current window loader creates this state once. It does not yet connect
-  point-edit input to the replacement call. A future edit controller must keep
-  a new model as pending state until the viewport accepts its overlay buffers.
-  If upload fails, the controller must retry or discard the pending model.
+  The controller edits a copied session and builds a complete next state.
+  It publishes the model only after the viewport accepts all candidate buffers.
+  An error keeps the prior model revision and the prior visible generation.
+  The viewport binds each controller update to its expected visible revision.
+  Transactional undo, redo, and baseline reset use the same publication path.
+  Dirty state compares canonical current bytes with canonical baseline bytes.
+  The native window option `--ai-spline-edit-point` applies one scripted batch
+  after viewport setup.
+  The first frame uses the accepted model and all derived passes.
+  Unsafe authoring baselines retain the read-only viewer path.
+  The original editor polls Numpad 8, 2, 4, 6, 9, and 3 each frame.
+  Control changes its movement scale from `0.1 * deltaT` to `1.0 * deltaT`.
+  It transforms local movement with a cached horizontal forward vector.
+  The port does not yet connect this held-key input, frame time, or focus state
+  to the controller.
   Another version-7 option adds the recovered vertical camber lines after the
   side passes. Positive values are green. Other values are red.
   The selected pass uses solid fill, front-face culling, opaque blend state,

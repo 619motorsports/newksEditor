@@ -114,6 +114,9 @@ struct WorkspaceViewportPrepareRequest {
     // by reference.
     const WorkspaceAiSplineGeometry* ai_spline_geometry = nullptr;
     std::optional<render::PipelineProgram> ai_spline_pipeline;
+    // A controller supplies its model revision here. Geometry-only callers
+    // leave this empty and use untracked replacement calls.
+    std::optional<std::uint64_t> ai_spline_generation;
     // Optional recovered interpolated in/out overlay. This is a second blue,
     // depth-off pass and must be supplied with the primary spline pass.
     const WorkspaceAiSplineGeometry* ai_spline_interval_geometry = nullptr;
@@ -196,6 +199,11 @@ struct WorkspaceViewportAiSplineUpdateResult {
     }
 };
 
+struct WorkspaceViewportAiSplineGenerationTransition {
+    std::uint64_t expected = 0U;
+    std::uint64_t replacement = 0U;
+};
+
 // The editor's browser viewport uses an orbit target, yaw/pitch, and distance
 // state. This controller keeps that state in the application layer so SDL,
 // Vulkan, and D3D12 code do not acquire camera-gesture semantics.
@@ -260,6 +268,10 @@ public:
     [[nodiscard]] const render::StockSceneExecutionResult& preparation() const noexcept {
         return *execution_;
     }
+    [[nodiscard]] std::optional<std::uint64_t>
+    aiSplineGeneration() const noexcept {
+        return ai_spline_generation_;
+    }
 
     // Draw is synchronous. If draw fails, present_texture is not called.
     // The target must have the dimensions and format supplied at preparation.
@@ -273,7 +285,10 @@ public:
     // Call this synchronous operation on the render thread, between draws.
     [[nodiscard]] WorkspaceViewportAiSplineUpdateResult
     replaceAiSplineOverlays(render::Device& device,
-                            const WorkspaceAiSplineOverlaySet& overlays);
+                            const WorkspaceAiSplineOverlaySet& overlays,
+                            std::optional<
+                                WorkspaceViewportAiSplineGenerationTransition>
+                                generation = std::nullopt);
 
 private:
     struct AiSplineUpdateRequest {
@@ -304,7 +319,10 @@ private:
 
     [[nodiscard]] WorkspaceViewportAiSplineUpdateResult
     replaceAiSplineOverlaysBorrowed(render::Device& device,
-                                    const AiSplineUpdateRequest& request);
+                                    const AiSplineUpdateRequest& request,
+                                    std::optional<
+                                        WorkspaceViewportAiSplineGenerationTransition>
+                                        generation);
 
     WorkspaceViewport(
         render::Device* device, render::Backend backend,
@@ -316,6 +334,7 @@ private:
         std::optional<render::PipelineProgram> authoring_overlay_pipeline,
         std::array<AiSplinePassResources, workspace_ai_spline_pass_count>
             ai_spline_passes,
+        std::optional<std::uint64_t> ai_spline_generation,
         std::unique_ptr<render::Buffer> authoring_grid_buffer,
         bool grid_visible,
         std::unique_ptr<render::Buffer> view_axis_buffer,
@@ -338,6 +357,7 @@ private:
     std::optional<render::PipelineProgram> authoring_overlay_pipeline_;
     std::array<AiSplinePassResources, workspace_ai_spline_pass_count>
         ai_spline_passes_;
+    std::optional<std::uint64_t> ai_spline_generation_;
     std::unique_ptr<render::Buffer> authoring_grid_buffer_;
     bool grid_visible_ = false;
     std::unique_ptr<render::Buffer> view_axis_buffer_;
