@@ -218,6 +218,23 @@ void parsesBoundedEmbeddedContent() {
                     .properties[0].values[0]) ==
                 std::vector<std::uint8_t>{0u, 1u, 2u, 0xffu},
             "ASCII embedded Content accepts the exporter trailing comma");
+    for (const bool final_comma : {false, true}) {
+        const std::string chunks =
+            "FBXVersion: 7400\nObjects: {\n"
+            " Video: 600, \"Video::Paint\", \"Clip\" {\n"
+            "  Content: ,\n"
+            "   \"AAEC\",\n"
+            "   \"/w==\"" +
+            std::string(final_comma ? "," : "") + "\n }\n}\n";
+        const auto chunkedDocument = apex::formats::parseFbx({
+            reinterpret_cast<const std::uint8_t*>(chunks.data()),
+            chunks.size()});
+        require(std::get<std::vector<std::uint8_t>>(
+                    chunkedDocument.roots[1].children[0].children[0]
+                        .properties[0].values[0]) ==
+                    std::vector<std::uint8_t>{0u, 1u, 2u, 0xffu},
+                "ASCII embedded Content joins bounded exporter chunks");
+    }
     auto sameLine = asciiEmbeddedContent();
     const auto continuation = sameLine.find(",\n   \"");
     require(continuation != std::string::npos,
@@ -258,6 +275,28 @@ void rejectsMalformedEmbeddedContent() {
             missing.size()});
     }, "embedded_content", FbxStage::ascii_tokens);
 
+    const std::string payload_eof =
+        "FBXVersion: 7400\nObjects: {\n"
+        " Video: 600, \"Video::Paint\", \"Clip\" {\n"
+        "  Content: ,";
+    expectsFbxError([&] {
+        (void)apex::formats::parseFbx({
+            reinterpret_cast<const std::uint8_t*>(payload_eof.data()),
+            payload_eof.size()});
+    }, "truncated", FbxStage::ascii_tokens);
+
+    const std::string unquoted_chunk =
+        "FBXVersion: 7400\nObjects: {\n"
+        " Video: 600, \"Video::Paint\", \"Clip\" {\n"
+        "  Content: ,\n"
+        "   \"AAEC\",\n"
+        "   /w==\n }\n}\n";
+    expectsFbxError([&] {
+        (void)apex::formats::parseFbx({
+            reinterpret_cast<const std::uint8_t*>(unquoted_chunk.data()),
+            unquoted_chunk.size()});
+    }, "syntax", FbxStage::ascii_dom);
+
     auto rawLimits = apex::formats::FbxLimits{};
     rawLimits.maxRawPropertyBytes = 3u;
     const auto valid = asciiEmbeddedContent();
@@ -266,6 +305,14 @@ void rejectsMalformedEmbeddedContent() {
             reinterpret_cast<const std::uint8_t*>(valid.data()), valid.size()},
             "embedded.fbx", rawLimits);
     }, "token_limit", FbxStage::ascii_tokens);
+
+    rawLimits.maxRawPropertyBytes = 4u;
+    const auto decoded_over_limit = asciiEmbeddedContent("AAECAwQ=");
+    expectsFbxError([&] {
+        (void)apex::formats::parseFbx({
+            reinterpret_cast<const std::uint8_t*>(decoded_over_limit.data()),
+            decoded_over_limit.size()}, "embedded.fbx", rawLimits);
+    }, "raw_property_limit", FbxStage::ascii_dom);
 
     auto binary = binaryRawProperty();
     // Raw property length starts after the 27-byte file header, 13-byte node

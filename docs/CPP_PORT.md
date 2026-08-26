@@ -566,11 +566,15 @@ remains unchanged and feature-complete.
   The UV path expands seams and negates V like `src/fbx-import.js`. The native
   shell can apply one converted clip at a fixed normalized position. It rejects
   malformed or over-budget data. The converter retains bounded binary and ASCII
-  `Video.Content` payloads. This path matches the WebGL importer, not ksEditor.
+  `Video.Content` payloads. The ASCII parser joins comma-terminated quoted
+  chunks before Base64 decoding. One encoded-byte limit covers the combined
+  payload. This path matches the WebGL importer, not ksEditor.
   It converts the first skin deformer with bounded clusters, four source-order
   influences, and inverted `TransformLink` matrices. It diagnoses non-linear
   animation, `Image` records, unsupported layer mappings, and advanced
   transform semantics.
+  The FBX adapter publishes copied texture bytes as owned model payloads. The
+  Vulkan and D3D12 handoffs consume this explicit authority.
   The conversion budget includes temporary vectors, maps, sets, child lists,
   flattened property views, copied strings, and output containers.
   A bounded VAO binder matches decoded records to mesh views. It uses exact

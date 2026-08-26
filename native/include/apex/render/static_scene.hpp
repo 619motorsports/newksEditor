@@ -5,6 +5,7 @@
 #include "apex/render/kn5_scene_node_map.hpp"
 #include "apex/render/directional_shadow.hpp"
 #include "apex/render/skinned_mesh_upload.hpp"
+#include "apex/render/texture_payload_authority.hpp"
 #include "apex/render/static_mesh_upload.hpp"
 #include "apex/scene/scene.hpp"
 
@@ -49,14 +50,6 @@ struct StaticSceneResourceLimits {
     // Bounds host-side tables and deep copies that preparation retains or
     // creates. Texture source bytes and decoded pixels have separate limits.
     std::uint64_t max_preparation_bytes = 512ULL * 1024ULL * 1024ULL;
-};
-
-enum class StaticSceneTextureAuthority : std::uint8_t {
-    // The frame supplies non-owning tables in final KN5 texture order.
-    caller_tables,
-    // Preparation decodes used embedded KN5 DDS payloads and owns the created
-    // texture resources plus one linear/repeat sampler.
-    embedded_kn5,
 };
 
 struct StaticScenePrepareRequest {
@@ -143,7 +136,7 @@ struct StaticSceneFrameDescription {
     // txNormal, txMaps, txDetail, txNormalDetail, txDamage, or txDamageMask,
     // both lengths must equal the final texture count.
     // Used entries must remain alive through the synchronous draw; unused
-    // entries can be null. The embedded_kn5 authority ignores these tables
+    // entries can be null. The owned-model authority ignores these tables
     // and uses owned resources.
     std::span<const Texture* const> textures_by_global_index{};
     std::span<const Sampler* const> samplers_by_global_index{};

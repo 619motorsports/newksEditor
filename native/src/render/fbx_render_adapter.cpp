@@ -379,6 +379,8 @@ public:
         result.status = staged_ ? FbxRenderAdapterStatus::staged
                                 : FbxRenderAdapterStatus::ready;
         result.accounted_model_bytes = budget_.used();
+        result.texture_authority =
+            TexturePayloadAuthority::owned_model_payloads;
         result.model = std::move(model_);
         result.scene = std::move(converted);
         result.diagnostics = std::move(diagnostics_);

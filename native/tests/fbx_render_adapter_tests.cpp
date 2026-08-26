@@ -233,7 +233,9 @@ void buildsOwnedSkinnedScene() {
     const auto result = apex::render::build_fbx_render_scene(
         conversion, &authority, "skin.fbx");
     require(result.status == FbxRenderAdapterStatus::ready &&
-                result.gpu_renderable() && result.model->materials.size() == 2U,
+                result.gpu_renderable() && result.model->materials.size() == 2U &&
+                result.texture_authority ==
+                    apex::render::StaticSceneTextureAuthority::owned_model_payloads,
             "complete textured FBX skin conversion is ready");
     const auto& mesh = result.model->root.children[0].children[0];
     require(mesh.type == 3U && mesh.kind == "skinnedMesh" &&

@@ -22,39 +22,48 @@ void require(bool condition, const char* message) {
 
 class FakeBuffer final : public Buffer {
 public:
-    explicit FakeBuffer(BufferDescription description) : info_{{description}} {}
-    Backend backend() const noexcept override { return Backend::Vulkan; }
+    FakeBuffer(BufferDescription description, Backend backend)
+        : info_{{description}}, backend_(backend) {}
+    Backend backend() const noexcept override { return backend_; }
     const BufferInfo& info() const noexcept override { return info_; }
 private:
     BufferInfo info_{};
+    Backend backend_ = Backend::Vulkan;
 };
 
 class FakeTexture final : public Texture {
 public:
-    explicit FakeTexture(TextureDescription description) : info_{{description}} {}
-    Backend backend() const noexcept override { return Backend::Vulkan; }
+    FakeTexture(TextureDescription description, Backend backend)
+        : info_{{description}}, backend_(backend) {}
+    Backend backend() const noexcept override { return backend_; }
     const TextureInfo& info() const noexcept override { return info_; }
 private:
     TextureInfo info_{};
+    Backend backend_ = Backend::Vulkan;
 };
 
 class FakeSampler final : public Sampler {
 public:
-    explicit FakeSampler(SamplerDescription description) : info_{{description}} {}
-    Backend backend() const noexcept override { return Backend::Vulkan; }
+    FakeSampler(SamplerDescription description, Backend backend)
+        : info_{{description}}, backend_(backend) {}
+    Backend backend() const noexcept override { return backend_; }
     const SamplerInfo& info() const noexcept override { return info_; }
 private:
     SamplerInfo info_{};
+    Backend backend_ = Backend::Vulkan;
 };
 
 class FakeDevice final : public Device {
 public:
+    explicit FakeDevice(Backend backend = Backend::Vulkan)
+        : info_{backend, "fake", "unit", 1U, 0U, 0U, 0U, 0U, true} {}
     const DeviceInfo& info() const noexcept override { return info_; }
     BufferResult create_buffer(const BufferDescription& description,
                                std::span<const std::byte> initial_data) override {
         ++buffer_calls;
         initial_buffers.emplace_back(initial_data.begin(), initial_data.end());
-        return {BufferStatus::ready, {}, std::make_unique<FakeBuffer>(description)};
+        return {BufferStatus::ready, {},
+                std::make_unique<FakeBuffer>(description, info_.backend)};
     }
     BufferUpdateResult update_buffer(Buffer&, std::uint64_t,
                                      std::span<const std::byte>) override {
@@ -62,7 +71,8 @@ public:
     }
     TextureResult create_texture(const TextureDescription& description,
                                  const TextureUploadPlan&) override {
-        return {TextureStatus::ready, {}, std::make_unique<FakeTexture>(description)};
+        return {TextureStatus::ready, {},
+                std::make_unique<FakeTexture>(description, info_.backend)};
     }
     TextureUpdateResult update_texture(Texture&, const TextureUploadPlan&) override {
         return {TextureStatus::ready, {}};
@@ -75,7 +85,8 @@ public:
         return {TriangleDrawStatus::unsupported, {"unused", "unused"}, {}};
     }
     SamplerResult create_sampler(const SamplerDescription& description) override {
-        return {SamplerStatus::ready, {}, std::make_unique<FakeSampler>(description)};
+        return {SamplerStatus::ready, {},
+                std::make_unique<FakeSampler>(description, info_.backend)};
     }
     ShaderModuleResult create_shader_module(const ShaderModuleDescription&) override {
         return {ShaderModuleStatus::unsupported, {"unused", "unused"}, nullptr};
@@ -85,7 +96,7 @@ public:
     std::size_t buffer_calls = 0U;
     std::vector<std::vector<std::byte>> initial_buffers;
 private:
-    DeviceInfo info_{Backend::Vulkan, "fake", "unit", 1U, 0U, 0U, 0U, 0U, true};
+    DeviceInfo info_{};
 };
 
 std::vector<std::uint8_t> spirv_fixture() {
@@ -104,6 +115,35 @@ std::vector<std::uint8_t> spirv_fixture() {
     return result;
 }
 
+std::vector<std::uint8_t> minimal_spirv_fixture() {
+    return {0x03U, 0x02U, 0x23U, 0x07U, 0x00U, 0x00U, 0x01U,
+            0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x01U, 0x00U,
+            0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U};
+}
+
+std::vector<std::uint8_t> dxbc_fixture(std::size_t storage_bytes = 44U) {
+    require(storage_bytes >= 44U, "DXBC fixture storage is large enough");
+    std::vector<std::uint8_t> result(storage_bytes, 0U);
+    const auto put = [&](std::size_t offset, std::uint32_t value) {
+        for (std::size_t byte = 0U; byte < sizeof(value); ++byte)
+            result[offset + byte] =
+                static_cast<std::uint8_t>(value >> (byte * 8U));
+    };
+    put(0U, 0x43425844U);  // DXBC
+    put(24U, 44U);
+    put(28U, 1U);
+    put(32U, 36U);
+    put(36U, 0x58454853U);  // SHEX
+    put(40U, 0U);
+    return result;
+}
+
+std::vector<std::uint8_t> shader_fixture(Backend backend, bool large) {
+    if (backend == Backend::Vulkan)
+        return large ? spirv_fixture() : minimal_spirv_fixture();
+    return dxbc_fixture(large ? 80U : 44U);
+}
+
 struct Fixture {
     apex::formats::Kn5File model;
     apex::scene::SceneSnapshot scene;
@@ -112,7 +152,7 @@ struct Fixture {
     StockMaterialShaderModules module_set;
 };
 
-Fixture fixture(std::string shader) {
+Fixture fixture(std::string shader, Backend backend = Backend::Vulkan) {
     Fixture result;
     const bool skinned = shader == "ksSkinnedMesh";
     result.model.materials.resize(1U);
@@ -187,9 +227,12 @@ Fixture fixture(std::string shader) {
         packet.resources.push_back({slots[index], static_cast<std::uint32_t>(index),
                                     static_cast<std::uint32_t>(index), std::string("texture_") + std::to_string(index)});
     result.packets.push_back(std::move(packet));
-    const std::vector<std::uint8_t> bytes = spirv_fixture();
-    result.modules = {{PipelineShaderStage::vertex, PipelineShaderFormat::spirv, bytes},
-                      {PipelineShaderStage::fragment, PipelineShaderFormat::spirv, bytes}};
+    const std::vector<std::uint8_t> bytes = shader_fixture(backend, false);
+    const auto format = backend == Backend::Vulkan
+                            ? PipelineShaderFormat::spirv
+                            : PipelineShaderFormat::dxil;
+    result.modules = {{PipelineShaderStage::vertex, format, bytes},
+                      {PipelineShaderStage::fragment, format, bytes}};
     result.module_set = {StockMaterialShaderKeyKind::shader_family, material.shader, result.modules};
     return result;
 }
@@ -377,6 +420,48 @@ void test_success_and_a2c() {
             "target sample mismatch must be rejected before backend allocation");
 }
 
+void test_skinned_cross_backend_family_authority() {
+    for (const Backend backend : {Backend::Vulkan, Backend::D3D12}) {
+        FakeDevice device(backend);
+        Fixture family = fixture("ksSkinnedMesh", backend);
+        Fixture named = fixture("ksSkinnedMesh", backend);
+        for (auto& module : named.modules)
+            module.bytes = shader_fixture(backend, true);
+        named.module_set.key_kind =
+            StockMaterialShaderKeyKind::material_name;
+        named.module_set.key = "seat_material";
+
+        const std::array<StockMaterialShaderModules, 2U> sets = {
+            named.module_set, family.module_set};
+        auto request = request_for(family);
+        request.shader_modules = sets;
+        request.limits.scene.pipeline.max_total_shader_bytes = 100U;
+        const auto result = prepare_stock_material_execution(device, request);
+        require(result.ok() && result.resources->backend() == backend &&
+                    result.resources->draw_count() == 1U &&
+                    result.resources->unique_geometry_count() == 1U &&
+                    result.resources->prepared_packets().size() == 1U &&
+                    result.resources->prepared_packets()[0].primitive ==
+                        DrawPrimitiveKind::skinned_mesh &&
+                    result.resources->prepared_packets()[0]
+                            .vertex_stride_floats == 19U,
+                "skinned family modules pass Vulkan and D3D12 preflight");
+
+        FakeDevice wrong_format_device(backend);
+        Fixture wrong_format = fixture(
+            "ksSkinnedMesh", backend == Backend::Vulkan
+                                 ? Backend::D3D12
+                                 : Backend::Vulkan);
+        const auto wrong = prepare_stock_material_execution(
+            wrong_format_device, request_for(wrong_format));
+        require(wrong.status == StaticSceneResourceStatus::invalid_request &&
+                    wrong.diagnostic.code ==
+                        "stock_material_shader_module_format" &&
+                    wrong_format_device.buffer_calls == 0U,
+                "skinned module format rejects before backend allocation");
+    }
+}
+
 void test_preflight_failures() {
     FakeDevice device;
     Fixture no_module = fixture("ksPerPixel");
@@ -539,6 +624,7 @@ void test_directional_shadow_receiver_module_opt_in() {
 int main() {
     try {
         test_success_and_a2c();
+        test_skinned_cross_backend_family_authority();
         test_preflight_failures();
         test_directional_shadow_receiver_module_opt_in();
     } catch (const std::exception& error) {

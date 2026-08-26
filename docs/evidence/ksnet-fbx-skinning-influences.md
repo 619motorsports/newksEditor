@@ -89,6 +89,11 @@ Related functions are:
 After a skinned batch is built, the importer changes its material shader to
 `ksSkinnedMesh`. The call is in the finalizer lambda at `0x10041E77`.
 
+`FBXImporter::findExistingMaterial` at `0x100070D0` reuses materials by exact,
+case-sensitive name. Static and skinned batches can therefore share one
+`Material` object. The skinned finalizer mutates that shared object. A static
+batch can observe the `ksSkinnedMesh` shader change.
+
 ## Safe C++ translation
 
 The C++ converter retains the first skin deformer and all its clusters in
@@ -98,8 +103,8 @@ out-of-range control points, duplicate bone names, negative or non-finite
 weights, singular matrices, and limit violations. It keeps control-point
 weights across UV and normal seam expansion.
 
-The render adapter emits the same 19-float layout. It copies the material into
-an isolated `ksSkinnedMesh` entry, so a static batch that uses the same source
-material does not change. Vulkan and D3D12 use the existing shared CPU-skinned
-scene path. The port adds explicit bone and influence limits because the native
-import path does not validate those values.
+The render adapter emits the same 19-float layout. It creates an isolated
+`ksSkinnedMesh` material. This safety divergence prevents a shared static batch
+from receiving a skinned vertex ABI. Vulkan and D3D12 use the shared CPU skin
+path. The port adds bone and influence limits because the native importer does
+not validate those values.

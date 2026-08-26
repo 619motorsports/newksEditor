@@ -389,19 +389,21 @@ StaticSceneResourceResult prepare_static_scene_resources(
         return fail(StaticSceneResourceStatus::invalid_request, "static_scene_request_missing",
                     "Static-scene preparation requires a model and scene");
     if (request.texture_authority != StaticSceneTextureAuthority::caller_tables &&
-        request.texture_authority != StaticSceneTextureAuthority::embedded_kn5)
+        request.texture_authority !=
+            StaticSceneTextureAuthority::owned_model_payloads)
         return fail(StaticSceneResourceStatus::invalid_request,
                     "static_scene_texture_authority_invalid",
                     "The static-scene texture authority is invalid");
     const auto& model = *request.model;
     const auto& scene = *request.scene;
     const auto& limits = request.limits;
-    const bool embedded_textures =
-        request.texture_authority == StaticSceneTextureAuthority::embedded_kn5;
+    const bool owned_model_textures =
+        request.texture_authority ==
+            StaticSceneTextureAuthority::owned_model_payloads;
     if (limits.max_draws == 0U || limits.max_draws > max_indexed_static_mesh_batch_draws ||
         limits.max_materials == 0U || limits.max_textures == 0U ||
         limits.max_resource_string_bytes == 0U ||
-        (embedded_textures &&
+        (owned_model_textures &&
          (limits.texture_decode.maxInputBytes == 0U ||
           limits.texture_decode.maxOutputBytes == 0U ||
           limits.max_total_texture_source_bytes == 0U ||
@@ -460,7 +462,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
         !charge(request.packets.size(),
                 4U * sizeof(std::size_t) + 2U * sizeof(const formats::Kn5Node*)) ||
         !charge(request.packets.size(), 4U * sizeof(void*)) ||
-        (embedded_textures &&
+        (owned_model_textures &&
          (!charge(model.textures.size(),
                   sizeof(std::optional<DecodedTexturePlan>) + 2U * sizeof(bool)) ||
           !charge(model.textures.size(), sizeof(std::unique_ptr<Texture>)))))
@@ -1036,7 +1038,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
             "The directional-shadow receiver buffer exceeds the static-scene aggregate limit");
 
     std::vector<std::optional<DecodedTexturePlan>> decoded_textures;
-    if (embedded_textures) {
+    if (owned_model_textures) {
         decoded_textures.resize(model.textures.size());
         std::vector<bool> maps_texture_indices(model.textures.size(), false);
         std::vector<bool> normal_detail_texture_indices(model.textures.size(), false);
@@ -1228,7 +1230,8 @@ StaticSceneResourceResult prepare_static_scene_resources(
         resources->owned_directional_shadow_sampler_ = std::move(sampler.sampler);
     }
     if (resources->has_texture_resources_ &&
-        request.texture_authority == StaticSceneTextureAuthority::embedded_kn5) {
+        request.texture_authority ==
+            StaticSceneTextureAuthority::owned_model_payloads) {
         resources->owned_textures_.resize(resources->texture_count_);
         for (std::size_t index = 0U; index < decoded_textures.size(); ++index) {
             if (!decoded_textures[index].has_value()) continue;
@@ -1262,7 +1265,8 @@ StaticSceneResourceResult prepare_static_scene_resources(
         resources->skinned_uploads_.push_back(std::move(uploaded.upload));
     }
     if (resources->has_texture_resources_ &&
-        request.texture_authority == StaticSceneTextureAuthority::embedded_kn5) {
+        request.texture_authority ==
+            StaticSceneTextureAuthority::owned_model_payloads) {
         SamplerDescription sampler_description;
         Diagnostic sampler_diagnostic;
         const SamplerStatus sampler_validation =
@@ -1330,7 +1334,8 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
                 {"static_scene_device_mismatch",
                  "Static-scene resources require their preparing device and backend"}, {}};
     if (texture_authority_ != StaticSceneTextureAuthority::caller_tables &&
-        texture_authority_ != StaticSceneTextureAuthority::embedded_kn5)
+        texture_authority_ !=
+            StaticSceneTextureAuthority::owned_model_payloads)
         return {IndexedStaticMeshBatchStatus::invalid_request,
                 {"static_scene_texture_authority_invalid",
                  "The prepared static-scene texture authority is invalid"}, {}};
@@ -1668,7 +1673,8 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
             IndexedSampledTextureBinding binding;
             if (raw_index == invalid_draw_texture_index) return binding;
             const std::size_t resource_index = static_cast<std::size_t>(raw_index);
-            if (texture_authority_ == StaticSceneTextureAuthority::embedded_kn5) {
+            if (texture_authority_ ==
+                StaticSceneTextureAuthority::owned_model_payloads) {
                 if (resource_index >= owned_textures_.size() ||
                     owned_textures_[resource_index] == nullptr || owned_sampler_ == nullptr) {
                     resource_failure = IndexedStaticMeshBatchResult{
@@ -2040,7 +2046,8 @@ StaticSceneResources::draw_opaque_directional_shadows(
         const std::uint32_t raw = textures_for_packet_[index].diffuse;
         if (raw == invalid_draw_texture_index) return {};
         const std::size_t texture_index = static_cast<std::size_t>(raw);
-        if (texture_authority_ == StaticSceneTextureAuthority::embedded_kn5) {
+        if (texture_authority_ ==
+            StaticSceneTextureAuthority::owned_model_payloads) {
             if (texture_index >= owned_textures_.size() ||
                 owned_textures_[texture_index] == nullptr || owned_sampler_ == nullptr)
                 return {};

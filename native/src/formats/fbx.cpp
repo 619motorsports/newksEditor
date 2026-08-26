@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <string_view>
 #include <utility>
 
@@ -359,6 +360,10 @@ std::vector<Token> tokenizeAscii(std::span<const std::uint8_t> bytes, const FbxL
     std::size_t aggregateBytes = tokenStorage;
     std::size_t lineTokenBegin = 0u;
     bool continuedContentPayload = false;
+    std::optional<std::size_t> continuedContentToken;
+    bool continuedLineHasPayload = false;
+    bool continuedLineCreatedToken = false;
+    bool continuedLineHasComma = false;
     const auto maxRawTokenBytes =
         maximumBase64Bytes(limits.maxRawPropertyBytes);
     const auto push = [&](TokenKind kind, std::size_t at, std::string value) {
@@ -398,34 +403,54 @@ std::vector<Token> tokenizeAscii(std::span<const std::uint8_t> bytes, const FbxL
                tokens[lineTokenBegin].text == "Content" &&
                tokens[lineTokenBegin + 1u].kind == TokenKind::colon;
     };
-    const auto finishLine = [&](std::size_t at) {
+    const auto finishLine = [&](std::size_t at, bool eof = false) {
         if (continuedContentPayload) {
-            const bool rawOnly =
-                tokens.size() == lineTokenBegin + 1u &&
-                tokens[lineTokenBegin].kind == TokenKind::raw_string;
-            const bool rawWithComma =
-                tokens.size() == lineTokenBegin + 2u &&
-                tokens[lineTokenBegin].kind == TokenKind::raw_string &&
-                tokens[lineTokenBegin + 1u].kind == TokenKind::comma;
-            if (!rawOnly && !rawWithComma)
-                fail(FbxStage::ascii_tokens, "embedded_content",
+            const auto expected =
+                lineTokenBegin + (continuedLineCreatedToken ? 1u : 0u);
+            if (!continuedLineHasPayload || tokens.size() != expected)
+                fail(FbxStage::ascii_tokens,
+                     eof ? "truncated" : "embedded_content",
                      "FBX ASCII embedded Content requires one quoted base64 line",
                      at);
-            continuedContentPayload = false;
+            if (!continuedLineHasComma) {
+                continuedContentPayload = false;
+                continuedContentToken.reset();
+            }
         } else if (contentCommaPrefix()) {
             continuedContentPayload = true;
         }
-        push(TokenKind::line_end, at, {});
+        if (!continuedContentPayload || !continuedLineHasComma)
+            push(TokenKind::line_end, at, {});
         lineTokenBegin = tokens.size();
+        continuedLineHasPayload = false;
+        continuedLineCreatedToken = false;
+        continuedLineHasComma = false;
     };
     while (index < bytes.size()) {
         const auto c = static_cast<char>(bytes[index]);
         if (c == '\r' || c == '\n') { const auto at=index++; if (c=='\r' && index<bytes.size() && bytes[index]=='\n') ++index; finishLine(at); continue; }
         if (c == ' ' || c == '\t' || c == '\f' || c == '\v') { ++index; continue; }
+        if (continuedContentPayload && continuedContentToken.has_value() &&
+            !continuedLineHasPayload && c != '"' && c != ';') {
+            // A comma on the previous chunk can either continue the payload
+            // or terminate it. A non-quoted next line selects termination.
+            continuedContentPayload = false;
+            continuedContentToken.reset();
+            push(TokenKind::line_end, index, {});
+            lineTokenBegin = tokens.size();
+        }
         if (static_cast<unsigned char>(c) < 0x20u) fail(FbxStage::ascii_tokens, "control", "unsupported ASCII control character", index);
         if (c == ';') { while (index<bytes.size() && bytes[index]!='\n' && bytes[index]!='\r') ++index; continue; }
         if (c == '/') { if (index+1u<bytes.size() && bytes[index+1u]=='/') { while(index<bytes.size()&&bytes[index]!='\n'&&bytes[index]!='\r')++index; continue; } }
-        if (c == ':' || c == ',' || c == '{' || c == '}') { push(c==':'?TokenKind::colon:c==','?TokenKind::comma:c=='{'?TokenKind::open:TokenKind::close,index,{}); ++index; continue; }
+        if (c == ':' || c == ',' || c == '{' || c == '}') {
+            if (c == ',' && continuedContentPayload &&
+                continuedLineHasPayload && !continuedLineHasComma) {
+                continuedLineHasComma = true;
+                ++index;
+                continue;
+            }
+            push(c==':'?TokenKind::colon:c==','?TokenKind::comma:c=='{'?TokenKind::open:TokenKind::close,index,{}); ++index; continue;
+        }
         if (c == '"') {
             const auto at=index++;
             const bool rawString = continuedContentPayload ||
@@ -467,8 +492,38 @@ std::vector<Token> tokenizeAscii(std::span<const std::uint8_t> bytes, const FbxL
                 if (value.size() > maxStringBytes) fail(FbxStage::ascii_tokens, "token_limit", "FBX ASCII string exceeds its limit", at);
             }
             if (index > bytes.size() || (index == bytes.size() && (bytes[index-1u] != '"'))) fail(FbxStage::ascii_tokens, "truncated", "unterminated FBX ASCII string", at);
-            push(rawString ? TokenKind::raw_string : TokenKind::string, at,
-                 std::move(value));
+            if (continuedContentPayload) {
+                if (continuedLineHasPayload)
+                    fail(FbxStage::ascii_tokens, "embedded_content",
+                         "FBX ASCII embedded Content has multiple chunks on one line",
+                         at);
+                if (!continuedContentToken.has_value()) {
+                    push(TokenKind::raw_string, at, std::move(value));
+                    continuedContentToken = tokens.size() - 1u;
+                    continuedLineCreatedToken = true;
+                } else {
+                    auto& payload = tokens[*continuedContentToken].text;
+                    const auto combined = addSize(
+                        payload.size(), value.size(), at,
+                        FbxStage::ascii_tokens);
+                    if (combined > maxRawTokenBytes)
+                        fail(FbxStage::ascii_tokens, "token_limit",
+                             "FBX ASCII embedded Content exceeds its encoded byte limit",
+                             at);
+                    aggregateBytes = addSize(
+                        aggregateBytes, value.size(), at,
+                        FbxStage::ascii_tokens);
+                    if (aggregateBytes > limits.maxAggregateBytes)
+                        fail(FbxStage::ascii_tokens, "allocation_limit",
+                             "FBX ASCII token bytes exceed the aggregate limit",
+                             at);
+                    payload.append(value);
+                }
+                continuedLineHasPayload = true;
+            } else {
+                push(rawString ? TokenKind::raw_string : TokenKind::string,
+                     at, std::move(value));
+            }
             continue;
         }
         const auto at=index; while (index<bytes.size()) { const auto current=static_cast<char>(bytes[index]); if (current==' '||current=='\t'||current=='\r'||current=='\n'||current==':'||current==','||current=='{'||current=='}'||current==';') break; if (static_cast<unsigned char>(current) < 0x20u) fail(FbxStage::ascii_tokens, "control", "unsupported ASCII control character", index); ++index; }
@@ -476,18 +531,17 @@ std::vector<Token> tokenizeAscii(std::span<const std::uint8_t> bytes, const FbxL
         const bool number = !value.empty() && (std::isdigit(static_cast<unsigned char>(value.front()))!=0 || value.front()=='-' || value.front()=='+' || value.front()=='.');
         push(number?TokenKind::number:TokenKind::word, at, value);
     }
+    if (!continuedContentPayload && contentCommaPrefix())
+        fail(FbxStage::ascii_tokens, "truncated",
+             "truncated FBX ASCII embedded Content", bytes.size());
     if (continuedContentPayload) {
-        const bool rawOnly =
-            tokens.size() == lineTokenBegin + 1u &&
-            tokens[lineTokenBegin].kind == TokenKind::raw_string;
-        const bool rawWithComma =
-            tokens.size() == lineTokenBegin + 2u &&
-            tokens[lineTokenBegin].kind == TokenKind::raw_string &&
-            tokens[lineTokenBegin + 1u].kind == TokenKind::comma;
-        if (!rawOnly && !rawWithComma)
-            fail(FbxStage::ascii_tokens, "truncated",
-                 "truncated FBX ASCII embedded Content", bytes.size());
-        continuedContentPayload = false;
+        if (!continuedLineHasPayload && continuedContentToken.has_value()) {
+            continuedContentPayload = false;
+            continuedContentToken.reset();
+            push(TokenKind::line_end, bytes.size(), {});
+        } else {
+            finishLine(bytes.size(), true);
+        }
     }
     tokens.push_back({TokenKind::end, {}, bytes.size()}); return tokens;
 }

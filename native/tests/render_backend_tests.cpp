@@ -5162,8 +5162,7 @@ bool contract_backend(apex::render::Backend backend) {
     fbx_stock_request.scene = &fbx_adapter.scene->snapshot;
     fbx_stock_request.shader_modules = stock_shader_modules;
     fbx_stock_request.targets = ks_pipeline.targets;
-    fbx_stock_request.texture_authority =
-        StaticSceneTextureAuthority::embedded_kn5;
+    fbx_stock_request.texture_authority = fbx_adapter.texture_authority;
     const auto fbx_stock_result = prepare_stock_scene_execution(
         *device.device, fbx_stock_request);
     require(fbx_stock_result.ok() &&
@@ -5188,6 +5187,80 @@ bool contract_backend(apex::render::Backend backend) {
     require(fbx_visible_pixel,
             "ready FBX produces visible real-backend color output");
 
+    std::string skinned_fbx_text = fbx_text;
+    const auto skinned_objects_end =
+        skinned_fbx_text.find("}\nConnections: {");
+    require(skinned_objects_end != std::string::npos,
+            "real-backend FBX fixture has an Objects terminator");
+    skinned_fbx_text.insert(
+        skinned_objects_end,
+        " Model: 600, \"Model::Bone0\", \"LimbNode\" { }\n"
+        " Deformer: 700, \"Deformer::Skin\", \"Skin\" { }\n"
+        " Deformer: 800, \"SubDeformer::Bone0\", \"Cluster\" {\n"
+        "  Indexes: *3 { a: 0,1,2 }\n"
+        "  Weights: *3 { a: 1.0,1.0,1.0 }\n"
+        "  TransformLink: *16 { a: 1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,0.0,1.0 }\n"
+        " }\n");
+    const auto skinned_connections_end = skinned_fbx_text.rfind("}\n");
+    require(skinned_connections_end != std::string::npos,
+            "real-backend FBX fixture has a Connections terminator");
+    skinned_fbx_text.insert(
+        skinned_connections_end,
+        " C: \"OO\", 700, 100\n"
+        " C: \"OO\", 800, 700\n"
+        " C: \"OO\", 600, 800\n");
+    const auto skinned_fbx_bytes = std::span<const std::uint8_t>(
+        reinterpret_cast<const std::uint8_t*>(skinned_fbx_text.data()),
+        skinned_fbx_text.size());
+    const auto skinned_fbx_document = apex::formats::parseFbx(
+        skinned_fbx_bytes, "real-backend-skinned-triangle.fbx");
+    const auto skinned_fbx_conversion =
+        apex::formats::convertFbxScene(skinned_fbx_document);
+    require(skinned_fbx_conversion.complete &&
+                skinned_fbx_conversion.meshes.size() == 1U &&
+                skinned_fbx_conversion.meshes[0].skin.has_value(),
+            "real-backend serialized FBX skin converts completely");
+    const auto skinned_fbx_textures =
+        apex::render::resolve_fbx_external_texture_authority(
+            skinned_fbx_conversion, "real-backend-skinned-fbx", fbx_source);
+    require(skinned_fbx_textures.ok(),
+            "real-backend FBX skin resolves its explicit texture grant");
+    const auto skinned_fbx_adapter =
+        apex::render::build_fbx_render_scene(
+            skinned_fbx_conversion, &skinned_fbx_textures,
+            "real-backend-skinned-triangle.fbx");
+    require(skinned_fbx_adapter.gpu_renderable(),
+            "real-backend FBX skin builds a ready owned model");
+    const std::array<StockMaterialShaderModules, 2U> skinned_shader_modules = {
+        stock_shader_modules[0],
+        StockMaterialShaderModules{
+            StockMaterialShaderKeyKind::shader_family,
+            "ksSkinnedMesh",
+            std::span<const PipelineShaderModule>(ks_pipeline.shaders),
+        }};
+    StockSceneExecutionRequest skinned_fbx_request = fbx_stock_request;
+    skinned_fbx_request.model = &*skinned_fbx_adapter.model;
+    skinned_fbx_request.scene = &skinned_fbx_adapter.scene->snapshot;
+    skinned_fbx_request.shader_modules = skinned_shader_modules;
+    skinned_fbx_request.texture_authority =
+        skinned_fbx_adapter.texture_authority;
+    const auto skinned_fbx_stock = prepare_stock_scene_execution(
+        *device.device, skinned_fbx_request);
+    require(skinned_fbx_stock.ok() &&
+                skinned_fbx_stock.resources->owned_texture_count() == 1U &&
+                skinned_fbx_stock.resources->prepared_packets().size() == 1U &&
+                skinned_fbx_stock.resources->prepared_packets()[0].primitive ==
+                    DrawPrimitiveKind::skinned_mesh,
+            "serialized FBX skin reaches shared real-backend preparation");
+    StaticSceneFrameDescription skinned_fbx_frame = stock_frame;
+    skinned_fbx_frame.apply_skinning = true;
+    const auto skinned_fbx_draw =
+        skinned_fbx_stock.resources->draw_and_readback(
+            *device.device, *triangle_texture.texture, skinned_fbx_frame);
+    require(skinned_fbx_draw.ok() &&
+                skinned_fbx_draw.rgba8 == fbx_draw_result.rgba8,
+            "FBX bind pose matches static geometry on the real backend");
+
     auto embedded_fbx_conversion = fbx_conversion;
     embedded_fbx_conversion.embedded_images.push_back(
         {500, "embedded.png",
@@ -5203,6 +5276,8 @@ bool contract_backend(apex::render::Backend backend) {
     StockSceneExecutionRequest embedded_fbx_request = fbx_stock_request;
     embedded_fbx_request.model = &*embedded_fbx_adapter.model;
     embedded_fbx_request.scene = &embedded_fbx_adapter.scene->snapshot;
+    embedded_fbx_request.texture_authority =
+        embedded_fbx_adapter.texture_authority;
     const auto embedded_fbx_stock = prepare_stock_scene_execution(
         *device.device, embedded_fbx_request);
     require(embedded_fbx_stock.ok() &&

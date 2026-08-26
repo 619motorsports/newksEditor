@@ -4,6 +4,7 @@
 #include "apex/formats/kn5.hpp"
 #include "apex/core/parse_limits.hpp"
 #include "apex/render/fbx_external_texture_authority.hpp"
+#include "apex/render/texture_payload_authority.hpp"
 #include "apex/scene/kn5_scene.hpp"
 
 #include <cstddef>
@@ -65,6 +66,11 @@ struct FbxRenderAdapterResult {
     // Conservative byte charge for the canonical model and bounded adapter
     // metadata. Application composition uses this instead of source FBX size.
     std::size_t accounted_model_bytes = 0U;
+    // Every published texture payload is copied into model->textures. Pass
+    // this value to the shared static-scene or stock-scene handoff so both
+    // backends decode and own the copied bytes.
+    TexturePayloadAuthority texture_authority =
+        TexturePayloadAuthority::caller_tables;
 
     [[nodiscard]] bool ok() const noexcept {
         return (status == FbxRenderAdapterStatus::ready ||

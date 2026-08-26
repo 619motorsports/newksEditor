@@ -26,6 +26,8 @@ matches the production importer by negating V. It also retains bounded raw
 `Video.Content` data from binary and ASCII FBX files. It rejects count mismatches,
 non-finite values, truncated blocks, invalid UV indices, and input or output
 that exceeds the configured budgets.
+The ASCII parser joins quoted `Video.Content` chunks across comma-terminated
+lines. One combined encoded-byte limit applies before Base64 decoding.
 
 The VAO core binds decoded records to non-owning mesh views. It uses the exact
 name, vertex count, and first-position gate from `src/vao-patch.js`. It binds
@@ -663,6 +665,8 @@ file handle, grant, source path, or GPU object. Missing textures and unsupported
 source behavior produce a staged model. A staged model cannot enter a GPU
 backend. Malformed hierarchy, geometry, material, texture, and limit data fail
 atomically and do not publish a partial model.
+The adapter result marks these copied bytes as owned model payloads. Callers
+pass this authority to the shared Vulkan or D3D12 scene preparation path.
 
 For a supported skin, the adapter emits the recovered 19-float skinned vertex
 layout and the inverted `TransformLink` matrices. It gives each skinned source
@@ -705,11 +709,10 @@ the bounded explicit-linear bridge. Real-time playback, pivot evaluation, and
 non-linear interpolation remain unsupported. Skinned FBX meshes use the
 recovered cluster matrices. A fixed animation position can update linked bones
 through the shared CPU skin path.
-The optional real-backend contract test also carries one supported ASCII FBX
-through parsing, external-texture authority, the canonical adapter, and the
-stock-scene draw/readback path. It requires visible color output on Vulkan and
-D3D12. Hosts without a usable Vulkan device or Windows WARP skip that runtime
-contract with an actionable backend diagnostic.
+The optional real-backend contract test carries static and skinned ASCII FBX
+files through parsing, texture authority, the adapter, and draw readback. It
+requires visible color output on Vulkan and D3D12. Hosts without Vulkan or
+Windows WARP skip this contract with a backend diagnostic.
 
 The strict Linux build detects the Vulkan SDK. The runtime test uses a software
 Vulkan device when an ICD is available. CI defines the same Vulkan test. The

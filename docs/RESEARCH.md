@@ -652,8 +652,9 @@ UNORM pixels. Embedded KN5 and explicitly granted external payloads retain
 owned source bytes and use the backend-neutral texture plan. Malformed,
 truncated, dimension, compressed/decompressed, aggregate, failure-atomicity,
 and real Vulkan sampled-pixel tests cover this path. Embedded FBX `Video.Content`
-uses this planner for DDS, PNG, JPEG, and BMP data. WebP and unsupported PNG
-modes remain staged in the C++ port.
+uses this planner for DDS, PNG, JPEG, and BMP data. The ASCII parser joins
+comma-terminated quoted chunks before Base64 decoding. WebP and unsupported
+PNG modes remain staged in the C++ port.
 
 A wider follow-up sample found 49 DX10 BC7 images. Modern WebGL implementations can
 upload those blocks through `EXT_texture_compression_bptc`; BC6H uses the same path,
@@ -2815,16 +2816,25 @@ It also sets `ksSpecularEXP` to 1. For recognized surface materials, it reads
 the first component of the ambient, diffuse, and specular colors. Values of
 `ksSpecularEXP` that are less than 1 become 10.
 
+`FBXImporter::findExistingMaterial` at `0x100070D0` compares exact material
+names. Distinct FBX material pointers with one name share one native `Material`
+object. The static and skinned finalizers also share this object. The skinned
+finalizer changes its shader to `ksSkinnedMesh` at `0x10041F97`.
+
+The C++ adapter isolates the skinned material copy. This safety divergence
+prevents a static mesh from receiving a shader with an incompatible vertex ABI.
+
 The native importer sends these color components to `Material::setVar(float)`
 at `0x100408B6`. It does not create a one-pixel texture. `Material::setTexture`
 at `0x1004082B` binds an existing texture. The native buffer path at
 `0x10041300` receives bytes from the KN5 loader only.
 
-ksEditor loops through all 32 entries in `FbxLayerElement::sTextureChannelNames`.
-It accepts only `FbxFileTexture` objects and reduces each path to a basename.
-It searches the configured folders and the automatic sibling `texture` folder.
-The first file found fills `txDiffuse`. Later channels cannot replace this resource.
-The importer never requests `txNormal`.
+ksEditor checks eight texture channels, from `DiffuseColor` through
+`SpecularFactor`. It accepts only `FbxFileTexture` objects and reduces each path
+to a basename. `ResourceStore::getTexture` at `0x10041239` searches configured
+folders and the automatic sibling `texture` folder. The first file found fills
+`txDiffuse`. Later channels cannot replace this resource. A missing file stays
+null. The importer never requests `txNormal`.
 
 The WebGL and FBX adapters use a separate compatibility path for missing image
 files and CSP color resources. This path creates a 132-byte legacy BGRA8 DDS.

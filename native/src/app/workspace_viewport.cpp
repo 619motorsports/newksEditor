@@ -2016,7 +2016,8 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             PipelineRenderTargetFormat::depth32_float, request.color_samples};
         scene_request.wireframe = request.wireframe;
         scene_request.directional_shadow_receiver = request.directional_shadow_receiver;
-        scene_request.texture_authority = render::StaticSceneTextureAuthority::embedded_kn5;
+        scene_request.texture_authority =
+            render::StaticSceneTextureAuthority::owned_model_payloads;
         scene_request.limits = request.limits;
         auto execution = std::make_unique<render::StockSceneExecutionResult>(
             render::prepare_stock_scene_execution(device, scene_request));

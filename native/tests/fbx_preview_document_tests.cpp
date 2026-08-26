@@ -1,6 +1,7 @@
 #include "apex/app/fbx_preview_document.hpp"
 
 #include "apex/formats/acd.hpp"
+#include "apex/render/draw_packet.hpp"
 
 #include <algorithm>
 #include <array>
@@ -298,6 +299,58 @@ std::string ascii_embedded_fbx(std::string_view base64) {
     return text;
 }
 
+std::string ascii_skinned_fbx() {
+    auto text = ascii_fbx();
+    constexpr std::string_view mesh_model =
+        " Model: 200, \"Model::Triangle\", \"Mesh\" { }\n";
+    const auto mesh_model_at = text.find(mesh_model);
+    require(mesh_model_at != std::string::npos,
+            "ASCII FBX fixture has its mesh Model");
+    text.replace(
+        mesh_model_at, mesh_model.size(),
+        " Model: 200, \"Model::Triangle\", \"Mesh\" {\n"
+        "  Properties70: {\n"
+        "   P: \"GeometricTranslation\", \"GeometricTranslation\", \"\", \"A\", 3.0,0.0,0.0\n"
+        "  }\n"
+        " }\n");
+
+    const auto objects_end = text.find("}\nConnections: {");
+    require(objects_end != std::string::npos,
+            "ASCII FBX fixture has an Objects terminator");
+    text.insert(
+        objects_end,
+        " Model: 600, \"Model::Bone0\", \"LimbNode\" {\n"
+        "  Properties70: {\n"
+        "   P: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A\", 2.0,0.0,0.0\n"
+        "  }\n"
+        " }\n"
+        " Deformer: 700, \"Deformer::Skin\", \"Skin\" { }\n"
+        " Deformer: 800, \"SubDeformer::Bone0\", \"Cluster\" {\n"
+        "  Indexes: *3 { a: 0,1,2 }\n"
+        "  Weights: *3 { a: 1.0,1.0,1.0 }\n"
+        "  Transform: *1 { a: 7.0 }\n"
+        "  TransformLink: *16 { a: 1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,0.0,1.0,0.0,2.0,0.0,0.0,1.0 }\n"
+        " }\n");
+    const auto connections_end = text.rfind("}\n");
+    require(connections_end != std::string::npos,
+            "ASCII FBX fixture has a Connections terminator");
+    text.insert(
+        connections_end,
+        " C: \"OO\", 700, 100\n"
+        " C: \"OO\", 800, 700\n"
+        " C: \"OO\", 600, 800\n");
+    return text;
+}
+
+const apex::formats::Kn5Node* find_skinned_node(
+    const apex::formats::Kn5Node& node) {
+    if (node.kind == "skinnedMesh") return &node;
+    for (const auto& child : node.children)
+        if (const auto* found = find_skinned_node(child); found != nullptr)
+            return found;
+    return nullptr;
+}
+
 std::vector<std::uint8_t> binary_embedded_fbx(
     std::span<const std::uint8_t> png) {
     BinaryNode normal;
@@ -448,6 +501,58 @@ void opens_ready_owned_workspace_document() {
     require(model.textures[0].data ==
                 rgba8_dds({10U, 20U, 30U, 255U}),
             "source replacement cannot mutate the published document");
+}
+
+void opens_skinned_ascii_through_workspace_packets() {
+    const auto text = ascii_skinned_fbx();
+    auto source = source_with({
+        entry("texture/paint.dds", rgba8_dds({10U, 20U, 30U, 255U}))});
+    const auto result = apex::app::open_fbx_preview_document(
+        request_for(text, &source));
+    if (!result.gpu_renderable()) {
+        std::cerr << "skinned fixture status="
+                  << apex::app::fbx_preview_document_status_name(result.status)
+                  << '\n';
+        for (const auto& diagnostic : result.diagnostics)
+            std::cerr << diagnostic.code << " [" << diagnostic.path
+                      << "]: " << diagnostic.message << '\n';
+    }
+    require(result.status == apex::app::FbxPreviewDocumentStatus::ready &&
+                result.gpu_renderable() && result.document.has_value(),
+            "serialized ASCII FBX skin becomes a ready workspace document");
+
+    const auto& model = result.document->assembly.model;
+    const auto* mesh = find_skinned_node(model.root);
+    constexpr apex::formats::Kn5Matrix4 inverse_bind = {
+        1.0F, 0.0F, 0.0F, 0.0F,
+        0.0F, 1.0F, 0.0F, 0.0F,
+        0.0F, 0.0F, 1.0F, 0.0F,
+        -2.0F, 0.0F, 0.0F, 1.0F};
+    require(mesh != nullptr && mesh->type == 3U &&
+                mesh->vertexStride == 19U && mesh->vertices.size() == 57U &&
+                mesh->bones.size() == 1U && mesh->bones[0].name == "Bone0" &&
+                mesh->bones[0].transform == inverse_bind &&
+                mesh->vertices[0] == 3.0F && mesh->vertices[11] == 1.0F &&
+                mesh->vertices[15] == 0.0F &&
+                model.materials[mesh->materialId].shader == "ksSkinnedMesh",
+            "parser, converter, adapter, and workspace retain the skin ABI");
+
+    const auto packets = apex::render::build_draw_packets(
+        model, result.document->scene.snapshot,
+        apex::render::DrawPacketOptions{},
+        apex::render::DrawPacketLimits{});
+    require(packets.supported && packets.packets.size() == 1U &&
+                packets.packets[0].primitive ==
+                    apex::render::DrawPrimitiveKind::skinned_mesh &&
+                packets.packets[0].bone_palette.size() == 1U &&
+                packets.packets[0].bone_palette[0] ==
+                    apex::scene::identity_matrix &&
+                std::any_of(
+                    packets.unsupported_effects.begin(),
+                    packets.unsupported_effects.end(), [](const auto& value) {
+                        return value.code == "skinning_execution_staged";
+                    }),
+            "bind pose resolves to identity through workspace draw packets");
 }
 
 void stages_incomplete_resources_without_backend_readiness() {
@@ -611,6 +716,21 @@ void rejects_malformed_input_and_authority_atomically() {
                 apex::app::FbxPreviewDocumentStatus::invalid_request &&
                 !invalid.document.has_value(),
             "ambiguous authorized texture names fail atomically");
+
+    auto malformed_skin = ascii_skinned_fbx();
+    constexpr std::string_view weights =
+        "  Weights: *3 { a: 1.0,1.0,1.0 }";
+    const auto weights_at = malformed_skin.find(weights);
+    require(weights_at != std::string::npos,
+            "ASCII skin fixture has its weight array");
+    malformed_skin.replace(weights_at, weights.size(),
+                           "  Weights: *2 { a: 1.0,1.0 }");
+    invalid = apex::app::open_fbx_preview_document(
+        request_for(malformed_skin));
+    require(invalid.status ==
+                apex::app::FbxPreviewDocumentStatus::invalid_request &&
+                !invalid.document.has_value(),
+            "mismatched serialized skin arrays publish no partial document");
 }
 
 void enforces_composition_limits() {
@@ -653,6 +773,7 @@ void enforces_composition_limits() {
 int main() {
     try {
         opens_ready_owned_workspace_document();
+        opens_skinned_ascii_through_workspace_packets();
         stages_incomplete_resources_without_backend_readiness();
         opens_embedded_content_without_external_authority();
         opens_binary_embedded_content_end_to_end();
