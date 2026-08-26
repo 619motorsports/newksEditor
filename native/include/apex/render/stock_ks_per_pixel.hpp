@@ -251,6 +251,110 @@ inline constexpr std::array<StockKsPerPixelVertexElement, 4U>
         {StockKsPerPixelVertexSemantic::tangent, 32U, 3U},
     }};
 
+enum class StockShaderSignatureSystemValue : std::uint8_t {
+    none = 0U,
+    position = 1U,
+};
+
+enum class StockShaderSignatureComponentType : std::uint8_t {
+    float32 = 3U,
+};
+
+struct StockShaderSignatureParameter {
+    std::string_view semantic;
+    std::uint32_t semantic_index = 0U;
+    StockShaderSignatureSystemValue system_value =
+        StockShaderSignatureSystemValue::none;
+    StockShaderSignatureComponentType component_type =
+        StockShaderSignatureComponentType::float32;
+    std::uint32_t shader_register = 0U;
+    std::uint8_t component_mask = 0U;
+    // This is the raw ISGN or OSGN read/write-mask byte. Its interpretation
+    // depends on the signature direction.
+    std::uint8_t read_write_mask = 0U;
+};
+
+inline constexpr std::array<StockShaderSignatureParameter, 4U>
+    stock_ks_per_pixel_vertex_input_signature = {{
+        {"POSITION", 0U, StockShaderSignatureSystemValue::none,
+         StockShaderSignatureComponentType::float32, 0U, 0x0fU, 0x0fU},
+        {"NORMAL", 0U, StockShaderSignatureSystemValue::none,
+         StockShaderSignatureComponentType::float32, 1U, 0x07U, 0x07U},
+        {"TEXCOORD", 0U, StockShaderSignatureSystemValue::none,
+         StockShaderSignatureComponentType::float32, 2U, 0x03U, 0x03U},
+        {"TANGENT", 0U, StockShaderSignatureSystemValue::none,
+         StockShaderSignatureComponentType::float32, 3U, 0x07U, 0x00U},
+    }};
+
+inline constexpr std::array<StockShaderSignatureParameter, 8U>
+    stock_ks_per_pixel_vertex_output_signature = {{
+        {"SV_POSITION", 0U, StockShaderSignatureSystemValue::position,
+         StockShaderSignatureComponentType::float32, 0U, 0x0fU, 0x00U},
+        {"TEXCOORD", 0U, StockShaderSignatureSystemValue::none,
+         StockShaderSignatureComponentType::float32, 1U, 0x07U, 0x08U},
+        {"TEXCOORD", 1U, StockShaderSignatureSystemValue::none,
+         StockShaderSignatureComponentType::float32, 2U, 0x07U, 0x08U},
+        {"TEXCOORD", 2U, StockShaderSignatureSystemValue::none,
+         StockShaderSignatureComponentType::float32, 3U, 0x03U, 0x0cU},
+        {"TEXCOORD", 6U, StockShaderSignatureSystemValue::none,
+         StockShaderSignatureComponentType::float32, 3U, 0x04U, 0x0bU},
+        {"TEXCOORD", 3U, StockShaderSignatureSystemValue::none,
+         StockShaderSignatureComponentType::float32, 4U, 0x0fU, 0x00U},
+        {"TEXCOORD", 4U, StockShaderSignatureSystemValue::none,
+         StockShaderSignatureComponentType::float32, 5U, 0x0fU, 0x00U},
+        {"TEXCOORD", 5U, StockShaderSignatureSystemValue::none,
+         StockShaderSignatureComponentType::float32, 6U, 0x0fU, 0x00U},
+    }};
+
+inline constexpr std::array<StockShaderSignatureParameter, 8U>
+    stock_ks_per_pixel_fragment_input_signature = {{
+        {"SV_POSITION", 0U, StockShaderSignatureSystemValue::position,
+         StockShaderSignatureComponentType::float32, 0U, 0x0fU, 0x00U},
+        {"TEXCOORD", 0U, StockShaderSignatureSystemValue::none,
+         StockShaderSignatureComponentType::float32, 1U, 0x07U, 0x07U},
+        {"TEXCOORD", 1U, StockShaderSignatureSystemValue::none,
+         StockShaderSignatureComponentType::float32, 2U, 0x07U, 0x07U},
+        {"TEXCOORD", 2U, StockShaderSignatureSystemValue::none,
+         StockShaderSignatureComponentType::float32, 3U, 0x03U, 0x03U},
+        {"TEXCOORD", 6U, StockShaderSignatureSystemValue::none,
+         StockShaderSignatureComponentType::float32, 3U, 0x04U, 0x04U},
+        {"TEXCOORD", 3U, StockShaderSignatureSystemValue::none,
+         StockShaderSignatureComponentType::float32, 4U, 0x0fU, 0x07U},
+        {"TEXCOORD", 4U, StockShaderSignatureSystemValue::none,
+         StockShaderSignatureComponentType::float32, 5U, 0x0fU, 0x07U},
+        {"TEXCOORD", 5U, StockShaderSignatureSystemValue::none,
+         StockShaderSignatureComponentType::float32, 6U, 0x0fU, 0x07U},
+    }};
+
+inline constexpr std::array<StockShaderSignatureParameter, 1U>
+    stock_ks_per_pixel_fragment_output_signature = {{
+        {"SV_TARGET", 0U, StockShaderSignatureSystemValue::none,
+         StockShaderSignatureComponentType::float32, 0U, 0x0fU, 0x00U},
+    }};
+
+inline constexpr bool stock_ks_per_pixel_stage_interface_is_consistent = [] {
+    if (stock_ks_per_pixel_vertex_output_signature.size() !=
+        stock_ks_per_pixel_fragment_input_signature.size())
+        return false;
+    for (std::size_t index = 0U;
+         index < stock_ks_per_pixel_vertex_output_signature.size(); ++index) {
+        const auto& output =
+            stock_ks_per_pixel_vertex_output_signature[index];
+        const auto& input =
+            stock_ks_per_pixel_fragment_input_signature[index];
+        if (output.semantic != input.semantic ||
+            output.semantic_index != input.semantic_index ||
+            output.system_value != input.system_value ||
+            output.component_type != input.component_type ||
+            output.shader_register != input.shader_register ||
+            output.component_mask != input.component_mask)
+            return false;
+    }
+    return true;
+}();
+
+static_assert(stock_ks_per_pixel_stage_interface_is_consistent);
+
 enum class StockKsPerPixelSamplerFilter : std::uint8_t {
     anisotropic,
     comparison_min_mag_linear_mip_point,
@@ -498,6 +602,46 @@ enum class StockKsPerPixelReflectionStatus : std::uint8_t {
 [[nodiscard]] StockKsPerPixelReflectionStatus
 validate_stock_ks_per_pixel_reflection(
     const StockShaderContainer& container) noexcept;
+
+enum class StockKsPerPixelSignatureStatus : std::uint8_t {
+    ready,
+    invalid_stage_container,
+    missing_signature,
+    duplicate_signature,
+    truncated_signature_header,
+    count_mismatch,
+    table_out_of_bounds,
+    invalid_name,
+    parameter_mismatch,
+};
+
+[[nodiscard]] const char* stock_ks_per_pixel_signature_status_name(
+    StockKsPerPixelSignatureStatus status) noexcept;
+
+// Validate the exact SM 4.0 input, inter-stage, and color-output signatures.
+// This check does not translate the DXBC program for Vulkan.
+[[nodiscard]] StockKsPerPixelSignatureStatus
+validate_stock_ks_per_pixel_signatures(
+    const StockShaderContainer& container) noexcept;
+
+enum class StockKsPerPixelNativeProgramStatus : std::uint8_t {
+    ready,
+    invalid_variant,
+    container_shape_mismatch,
+    reflection_mismatch,
+    signature_mismatch,
+};
+
+[[nodiscard]] const char* stock_ks_per_pixel_native_program_status_name(
+    StockKsPerPixelNativeProgramStatus status) noexcept;
+
+// This is the complete allocation gate for the installed native DXBC family.
+// Backend code must select this ABI explicitly before it consumes the exact
+// register, signature, vertex, and sampler contracts above.
+[[nodiscard]] StockKsPerPixelNativeProgramStatus
+validate_stock_ks_per_pixel_native_program(
+    const StockShaderContainer& container,
+    StockKsPerPixelVariant variant) noexcept;
 
 struct StockKsPerPixelPixelInput {
     std::array<float, 3U> interpolated_normal{};

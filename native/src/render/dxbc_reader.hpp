@@ -10,6 +10,8 @@ inline constexpr std::uint32_t dxbc_tag_shdr = 0x52444853U;
 inline constexpr std::uint32_t dxbc_tag_shex = 0x58454853U;
 inline constexpr std::uint32_t dxbc_tag_dxil = 0x4c495844U;
 inline constexpr std::uint32_t dxbc_tag_rdef = 0x46454452U;
+inline constexpr std::uint32_t dxbc_tag_isgn = 0x4e475349U;
+inline constexpr std::uint32_t dxbc_tag_osgn = 0x4e47534fU;
 
 enum class DxbcReaderStatus : std::uint8_t {
     ready,

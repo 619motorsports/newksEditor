@@ -168,6 +168,161 @@ StockShaderContainer reflected_container_fixture() {
     return container;
 }
 
+std::vector<std::uint8_t> signature_payload_fixture(
+    std::span<const StockShaderSignatureParameter> parameters) {
+    constexpr std::size_t header_bytes = 8U;
+    constexpr std::size_t parameter_stride = 24U;
+    const std::size_t table_end =
+        header_bytes + parameters.size() * parameter_stride;
+    std::vector<std::uint8_t> payload(table_end, 0U);
+    put_u32(payload, 0U, static_cast<std::uint32_t>(parameters.size()));
+    put_u32(payload, 4U, static_cast<std::uint32_t>(header_bytes));
+    for (std::size_t index = 0U; index < parameters.size(); ++index) {
+        const StockShaderSignatureParameter& parameter = parameters[index];
+        const std::size_t offset = header_bytes + index * parameter_stride;
+        const std::uint32_t name_offset =
+            static_cast<std::uint32_t>(payload.size());
+        payload.insert(payload.end(), parameter.semantic.begin(),
+                       parameter.semantic.end());
+        payload.push_back(0U);
+        put_u32(payload, offset, name_offset);
+        put_u32(payload, offset + 4U, parameter.semantic_index);
+        put_u32(payload, offset + 8U,
+                static_cast<std::uint32_t>(parameter.system_value));
+        put_u32(payload, offset + 12U,
+                static_cast<std::uint32_t>(parameter.component_type));
+        put_u32(payload, offset + 16U, parameter.shader_register);
+        payload[offset + 20U] = parameter.component_mask;
+        payload[offset + 21U] = parameter.read_write_mask;
+    }
+    return payload;
+}
+
+std::vector<std::uint8_t> signature_stage_fixture(bool vertex) {
+    const std::span<const StockShaderSignatureParameter> input =
+        vertex ? std::span<const StockShaderSignatureParameter>(
+                     stock_ks_per_pixel_vertex_input_signature)
+               : std::span<const StockShaderSignatureParameter>(
+                     stock_ks_per_pixel_fragment_input_signature);
+    const std::span<const StockShaderSignatureParameter> output =
+        vertex ? std::span<const StockShaderSignatureParameter>(
+                     stock_ks_per_pixel_vertex_output_signature)
+               : std::span<const StockShaderSignatureParameter>(
+                     stock_ks_per_pixel_fragment_output_signature);
+    const std::vector<std::uint8_t> input_payload =
+        signature_payload_fixture(input);
+    const std::vector<std::uint8_t> output_payload =
+        signature_payload_fixture(output);
+    const std::array<std::uint8_t, 4U> program = {
+        0x40U, 0U, static_cast<std::uint8_t>(vertex ? 1U : 0U), 0U};
+
+    constexpr std::size_t table_end = 44U;
+    std::vector<std::uint8_t> stage(table_end, 0U);
+    stage[0U] = 'D';
+    stage[1U] = 'X';
+    stage[2U] = 'B';
+    stage[3U] = 'C';
+    put_u32(stage, 20U, 1U);
+    put_u32(stage, 28U, 3U);
+    const auto add_chunk = [&](std::size_t table_index, std::uint32_t tag,
+                               std::span<const std::uint8_t> payload) {
+        const std::size_t offset = stage.size();
+        put_u32(stage, 32U + table_index * 4U,
+                static_cast<std::uint32_t>(offset));
+        stage.resize(offset + 8U + payload.size());
+        put_u32(stage, offset, tag);
+        put_u32(stage, offset + 4U,
+                static_cast<std::uint32_t>(payload.size()));
+        std::copy(payload.begin(), payload.end(), stage.data() + offset + 8U);
+    };
+    add_chunk(0U, 0x4e475349U, input_payload);
+    add_chunk(1U, 0x4e47534fU, output_payload);
+    add_chunk(2U, 0x52444853U, program);
+    put_u32(stage, 24U, static_cast<std::uint32_t>(stage.size()));
+    return stage;
+}
+
+StockShaderContainer signature_container_fixture() {
+    StockShaderContainer container;
+    container.header = {2U, false, "mesh", 0U, 0U, 0U};
+    container.vertex_metadata = {4U, 0U, 3U};
+    container.pixel_metadata = {4U, 0U, 3U};
+    container.vertex_shader = signature_stage_fixture(true);
+    container.pixel_shader = signature_stage_fixture(false);
+    container.header.vertex_bytes =
+        static_cast<std::uint32_t>(container.vertex_shader.size());
+    container.header.pixel_bytes =
+        static_cast<std::uint32_t>(container.pixel_shader.size());
+    return container;
+}
+
+std::vector<std::uint8_t> complete_native_stage_fixture(bool vertex) {
+    const std::vector<std::uint8_t> rdef_stage =
+        rdef_stage_fixture(vertex);
+    const std::uint32_t rdef_bytes = get_u32(rdef_stage, 44U);
+    const std::span<const std::uint8_t> rdef_payload(
+        rdef_stage.data() + 48U, rdef_bytes);
+    const std::span<const StockShaderSignatureParameter> input =
+        vertex ? std::span<const StockShaderSignatureParameter>(
+                     stock_ks_per_pixel_vertex_input_signature)
+               : std::span<const StockShaderSignatureParameter>(
+                     stock_ks_per_pixel_fragment_input_signature);
+    const std::span<const StockShaderSignatureParameter> output =
+        vertex ? std::span<const StockShaderSignatureParameter>(
+                     stock_ks_per_pixel_vertex_output_signature)
+               : std::span<const StockShaderSignatureParameter>(
+                     stock_ks_per_pixel_fragment_output_signature);
+    const std::vector<std::uint8_t> input_payload =
+        signature_payload_fixture(input);
+    const std::vector<std::uint8_t> output_payload =
+        signature_payload_fixture(output);
+    const std::array<std::uint8_t, 4U> program = {
+        0x40U, 0U, static_cast<std::uint8_t>(vertex ? 1U : 0U), 0U};
+
+    constexpr std::size_t table_end = 48U;
+    std::vector<std::uint8_t> stage(table_end, 0U);
+    stage[0U] = 'D';
+    stage[1U] = 'X';
+    stage[2U] = 'B';
+    stage[3U] = 'C';
+    put_u32(stage, 20U, 1U);
+    put_u32(stage, 28U, 4U);
+    const auto add_chunk = [&](std::size_t table_index, std::uint32_t tag,
+                               std::span<const std::uint8_t> payload) {
+        const std::size_t offset = stage.size();
+        put_u32(stage, 32U + table_index * 4U,
+                static_cast<std::uint32_t>(offset));
+        stage.resize(offset + 8U + payload.size());
+        put_u32(stage, offset, tag);
+        put_u32(stage, offset + 4U,
+                static_cast<std::uint32_t>(payload.size()));
+        std::copy(payload.begin(), payload.end(), stage.data() + offset + 8U);
+    };
+    add_chunk(0U, 0x46454452U, rdef_payload);
+    add_chunk(1U, 0x4e475349U, input_payload);
+    add_chunk(2U, 0x4e47534fU, output_payload);
+    add_chunk(3U, 0x52444853U, program);
+    put_u32(stage, 24U, static_cast<std::uint32_t>(stage.size()));
+    return stage;
+}
+
+StockShaderContainer complete_native_container_fixture(
+    StockKsPerPixelVariant variant = StockKsPerPixelVariant::base) {
+    StockShaderContainer container;
+    container.header = {
+        2U, variant == StockKsPerPixelVariant::alpha_to_coverage,
+        "mesh", 0U, 0U, 0U};
+    container.vertex_metadata = {4U, 0U, 4U};
+    container.pixel_metadata = {4U, 0U, 4U};
+    container.vertex_shader = complete_native_stage_fixture(true);
+    container.pixel_shader = complete_native_stage_fixture(false);
+    container.header.vertex_bytes =
+        static_cast<std::uint32_t>(container.vertex_shader.size());
+    container.header.pixel_bytes =
+        static_cast<std::uint32_t>(container.pixel_shader.size());
+    return container;
+}
+
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
@@ -649,6 +804,175 @@ void validates_bounded_rdef_resource_contract() {
             "truncated DXBC stage is rejected before RDEF access");
 }
 
+void validates_exact_bounded_stage_signatures() {
+    require(stock_ks_per_pixel_stage_interface_is_consistent,
+            "vertex output and fragment input linkage is consistent");
+    require(stock_ks_per_pixel_vertex_input_signature.size() == 4U &&
+                stock_ks_per_pixel_vertex_output_signature.size() == 8U &&
+                stock_ks_per_pixel_fragment_input_signature.size() == 8U &&
+                stock_ks_per_pixel_fragment_output_signature.size() == 1U,
+            "exact stock signature counts are public");
+    require(stock_ks_per_pixel_vertex_input_signature[3U].semantic ==
+                    "TANGENT" &&
+                stock_ks_per_pixel_vertex_input_signature[3U]
+                        .read_write_mask == 0U &&
+                stock_ks_per_pixel_fragment_output_signature[0U].semantic ==
+                    "SV_TARGET" &&
+                stock_ks_per_pixel_fragment_output_signature[0U]
+                        .system_value ==
+                    StockShaderSignatureSystemValue::none,
+            "native unused tangent and raw SV_TARGET metadata are retained");
+
+    const auto container = signature_container_fixture();
+    require(validate_stock_ks_per_pixel_signatures(container) ==
+                StockKsPerPixelSignatureStatus::ready,
+            "synthetic exact stock signatures accepted");
+
+    const std::uint32_t input_bytes =
+        get_u32(container.vertex_shader, 48U);
+    for (std::uint32_t prefix = 0U; prefix < input_bytes; ++prefix) {
+        auto truncated = container;
+        put_u32(truncated.vertex_shader, 48U, prefix);
+        require(validate_stock_ks_per_pixel_signatures(truncated) !=
+                    StockKsPerPixelSignatureStatus::ready,
+                "every truncated signature payload is rejected");
+    }
+
+    auto malformed = container;
+    put_u32(malformed.vertex_shader, 44U, 0x54415453U);
+    require(validate_stock_ks_per_pixel_signatures(malformed) ==
+                StockKsPerPixelSignatureStatus::missing_signature,
+            "missing ISGN chunk rejected");
+
+    malformed = container;
+    const std::size_t output_chunk =
+        get_u32(malformed.vertex_shader, 36U);
+    put_u32(malformed.vertex_shader, output_chunk, 0x4e475349U);
+    require(validate_stock_ks_per_pixel_signatures(malformed) ==
+                StockKsPerPixelSignatureStatus::duplicate_signature,
+            "duplicate ISGN chunk rejected");
+
+    constexpr std::size_t input_payload = 52U;
+    malformed = container;
+    put_u32(malformed.vertex_shader, input_payload + 4U, 4U);
+    require(validate_stock_ks_per_pixel_signatures(malformed) ==
+                StockKsPerPixelSignatureStatus::table_out_of_bounds,
+            "signature table before its header rejected");
+
+    malformed = container;
+    put_u32(malformed.vertex_shader, input_payload + 4U, 16U);
+    require(validate_stock_ks_per_pixel_signatures(malformed) ==
+                StockKsPerPixelSignatureStatus::parameter_mismatch,
+            "non-native signature record offset rejected");
+
+    malformed = container;
+    put_u32(malformed.vertex_shader, input_payload + 4U, input_bytes + 1U);
+    require(validate_stock_ks_per_pixel_signatures(malformed) ==
+                StockKsPerPixelSignatureStatus::table_out_of_bounds,
+            "signature record offset past the payload rejected");
+
+    malformed = container;
+    put_u32(malformed.vertex_shader, input_payload,
+            std::numeric_limits<std::uint32_t>::max());
+    require(validate_stock_ks_per_pixel_signatures(malformed) ==
+                StockKsPerPixelSignatureStatus::count_mismatch,
+            "overflow-sized signature count rejected before multiplication");
+
+    malformed = container;
+    put_u32(malformed.vertex_shader, input_payload + 8U, 0U);
+    require(validate_stock_ks_per_pixel_signatures(malformed) ==
+                StockKsPerPixelSignatureStatus::invalid_name,
+            "signature name inside the record table rejected");
+
+    malformed = container;
+    put_u32(malformed.vertex_shader, input_payload + 8U, input_bytes);
+    require(validate_stock_ks_per_pixel_signatures(malformed) ==
+                StockKsPerPixelSignatureStatus::invalid_name,
+            "signature name at the payload end rejected");
+
+    malformed = container;
+    put_u32(malformed.vertex_shader, input_payload + 8U, input_bytes - 1U);
+    malformed.vertex_shader[input_payload + input_bytes - 1U] = 'X';
+    require(validate_stock_ks_per_pixel_signatures(malformed) ==
+                StockKsPerPixelSignatureStatus::invalid_name,
+            "unterminated signature name rejected");
+
+    malformed = container;
+    malformed.vertex_shader[input_payload + 8U + 22U] = 1U;
+    require(validate_stock_ks_per_pixel_signatures(malformed) ==
+                StockKsPerPixelSignatureStatus::parameter_mismatch,
+            "nonzero legacy signature reserved field rejected");
+
+    malformed = container;
+    malformed.vertex_shader[input_payload + 8U + 20U] = 0x10U;
+    require(validate_stock_ks_per_pixel_signatures(malformed) ==
+                StockKsPerPixelSignatureStatus::parameter_mismatch,
+            "invalid signature component mask rejected");
+
+    malformed = container;
+    put_u32(malformed.vertex_shader, input_payload + 8U + 4U, 1U);
+    require(validate_stock_ks_per_pixel_signatures(malformed) ==
+                StockKsPerPixelSignatureStatus::parameter_mismatch,
+            "semantic-index drift rejected");
+
+    malformed = container;
+    malformed.pixel_shader.pop_back();
+    require(validate_stock_ks_per_pixel_signatures(malformed) ==
+                StockKsPerPixelSignatureStatus::invalid_stage_container,
+            "truncated signature stage rejected before record access");
+}
+
+void gates_the_complete_native_program_before_backend_allocation() {
+    auto base = complete_native_container_fixture();
+    require(validate_stock_ks_per_pixel_native_program(
+                base, StockKsPerPixelVariant::base) ==
+                StockKsPerPixelNativeProgramStatus::ready,
+            "complete base native program contract accepted");
+    auto alpha = complete_native_container_fixture(
+        StockKsPerPixelVariant::alpha_to_coverage);
+    require(validate_stock_ks_per_pixel_native_program(
+                alpha, StockKsPerPixelVariant::alpha_to_coverage) ==
+                StockKsPerPixelNativeProgramStatus::ready,
+            "complete alpha-to-coverage native program contract accepted");
+    require(validate_stock_ks_per_pixel_native_program(
+                base, static_cast<StockKsPerPixelVariant>(255U)) ==
+                StockKsPerPixelNativeProgramStatus::invalid_variant,
+            "unknown native program variant rejected");
+
+    auto malformed = base;
+    malformed.header.version = 1U;
+    require(validate_stock_ks_per_pixel_native_program(
+                malformed, StockKsPerPixelVariant::base) ==
+                StockKsPerPixelNativeProgramStatus::container_shape_mismatch,
+            "native program shape failure stops the allocation gate");
+
+    malformed = base;
+    constexpr std::size_t rdef_payload = 56U;
+    put_u32(malformed.vertex_shader, rdef_payload + 16U, 0xffff0400U);
+    require(validate_stock_ks_per_pixel_native_program(
+                malformed, StockKsPerPixelVariant::base) ==
+                StockKsPerPixelNativeProgramStatus::reflection_mismatch,
+            "native program reflection failure stops the allocation gate");
+
+    malformed = base;
+    const std::size_t vertex_input_chunk =
+        get_u32(malformed.vertex_shader, 36U);
+    put_u32(malformed.vertex_shader,
+            vertex_input_chunk + 8U + 8U + 4U, 1U);
+    require(validate_stock_ks_per_pixel_native_program(
+                malformed, StockKsPerPixelVariant::base) ==
+                StockKsPerPixelNativeProgramStatus::signature_mismatch,
+            "native program signature failure stops the allocation gate");
+
+    malformed = base;
+    const std::size_t vertex_output_chunk =
+        get_u32(malformed.vertex_shader, 40U);
+    put_u32(malformed.vertex_shader, vertex_output_chunk, 0x52444853U);
+    require(validate_stock_ks_per_pixel_reflection(malformed) ==
+                StockKsPerPixelReflectionStatus::invalid_stage_container,
+            "duplicate executable chunks reject a direct reflection request");
+}
+
 void preserves_native_constant_bytes_and_rejects_nonfinite_records() {
     StockKsPerPixelMaterialConstants material;
     material.ambient = 0.35F;
@@ -864,6 +1188,22 @@ void names_all_reference_statuses() {
                 static_cast<StockKsPerPixelReflectionStatus>(255U))) ==
                 "unknown",
             "unknown RDEF reflection status name");
+    require(std::string_view(stock_ks_per_pixel_signature_status_name(
+                StockKsPerPixelSignatureStatus::invalid_name)) ==
+                "invalid_name",
+            "signature status name");
+    require(std::string_view(stock_ks_per_pixel_signature_status_name(
+                static_cast<StockKsPerPixelSignatureStatus>(255U))) ==
+                "unknown",
+            "unknown signature status name");
+    require(std::string_view(stock_ks_per_pixel_native_program_status_name(
+                StockKsPerPixelNativeProgramStatus::reflection_mismatch)) ==
+                "reflection_mismatch",
+            "native program status name");
+    require(std::string_view(stock_ks_per_pixel_native_program_status_name(
+                static_cast<StockKsPerPixelNativeProgramStatus>(255U))) ==
+                "unknown",
+            "unknown native program status name");
 }
 
 } // namespace
@@ -876,6 +1216,8 @@ int main() {
         rejects_malformed_backend_binding_layouts();
         validates_owned_container_shape_before_backend_use();
         validates_bounded_rdef_resource_contract();
+        validates_exact_bounded_stage_signatures();
+        gates_the_complete_native_program_before_backend_allocation();
         preserves_native_constant_bytes_and_rejects_nonfinite_records();
         transposes_native_host_matrices_before_upload();
         evaluates_recovered_base_pixel_equation();

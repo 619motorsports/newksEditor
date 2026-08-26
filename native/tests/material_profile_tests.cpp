@@ -293,6 +293,14 @@ void parses_installed_stock_package_when_available() {
                         parsed) ==
                         apex::render::StockKsPerPixelReflectionStatus::ready,
                     "installed ksPerPixel RDEF matches the native resource ABI");
+            require(apex::render::validate_stock_ks_per_pixel_signatures(
+                        parsed) ==
+                        apex::render::StockKsPerPixelSignatureStatus::ready,
+                    "installed ksPerPixel signatures match the native stage ABI");
+            require(apex::render::validate_stock_ks_per_pixel_native_program(
+                        parsed, apex::render::StockKsPerPixelVariant::base) ==
+                        apex::render::StockKsPerPixelNativeProgramStatus::ready,
+                    "installed ksPerPixel passes the complete native allocation gate");
         }
         if (entry.path().filename() == "ksPerPixelAT.shader") {
             require(bytes.size() == 11'330U &&
@@ -308,6 +316,15 @@ void parses_installed_stock_package_when_available() {
                         parsed) ==
                         apex::render::StockKsPerPixelReflectionStatus::ready,
                     "installed ksPerPixelAT RDEF matches the native resource ABI");
+            require(apex::render::validate_stock_ks_per_pixel_signatures(
+                        parsed) ==
+                        apex::render::StockKsPerPixelSignatureStatus::ready,
+                    "installed ksPerPixelAT signatures match the native stage ABI");
+            require(apex::render::validate_stock_ks_per_pixel_native_program(
+                        parsed,
+                        apex::render::StockKsPerPixelVariant::alpha_to_coverage) ==
+                        apex::render::StockKsPerPixelNativeProgramStatus::ready,
+                    "installed ksPerPixelAT passes the complete native allocation gate");
         }
         ++parsed_count;
     }

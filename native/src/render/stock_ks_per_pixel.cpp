@@ -295,9 +295,118 @@ template <std::size_t ResourceCount, std::size_t ConstantBufferCount>
         return StockKsPerPixelReflectionStatus::missing_rdef;
     if (rdef_count != 1U)
         return StockKsPerPixelReflectionStatus::duplicate_rdef;
+    if (inspection.program_chunk_count != 1U ||
+        inspection.program_format != detail::DxbcProgramFormat::legacy)
+        return StockKsPerPixelReflectionStatus::invalid_stage_container;
     return validate_rdef_payload(rdef.payload, expected_target,
                                  expected_resources,
                                  expected_constant_buffers);
+}
+
+[[nodiscard]] bool signature_name(std::span<const std::byte> payload,
+                                  std::uint32_t offset_word,
+                                  std::size_t table_end,
+                                  std::string_view& name) noexcept {
+    constexpr std::size_t max_name_bytes = 64U;
+    const std::size_t offset = static_cast<std::size_t>(offset_word);
+    if (offset < table_end || offset >= payload.size()) return false;
+    const std::size_t available = payload.size() - offset;
+    const std::size_t limit = std::min(available, max_name_bytes + 1U);
+    std::size_t length = 0U;
+    while (length < limit && payload[offset + length] != std::byte{0})
+        ++length;
+    if (length == 0U || length == limit || length > max_name_bytes)
+        return false;
+    name = {reinterpret_cast<const char*>(payload.data() + offset), length};
+    return true;
+}
+
+template <std::size_t ParameterCount>
+[[nodiscard]] StockKsPerPixelSignatureStatus validate_signature_payload(
+    std::span<const std::byte> payload,
+    const std::array<StockShaderSignatureParameter, ParameterCount>& expected)
+    noexcept {
+    constexpr std::size_t header_bytes = 8U;
+    constexpr std::size_t parameter_stride = 24U;
+    if (payload.size() < header_bytes)
+        return StockKsPerPixelSignatureStatus::truncated_signature_header;
+
+    std::uint32_t count_word = 0U;
+    std::uint32_t first_parameter_word = 0U;
+    (void)detail::read_u32_le(payload, 0U, count_word);
+    (void)detail::read_u32_le(payload, 4U, first_parameter_word);
+    if (count_word != ParameterCount)
+        return StockKsPerPixelSignatureStatus::count_mismatch;
+    const std::size_t first_parameter =
+        static_cast<std::size_t>(first_parameter_word);
+    if (first_parameter < header_bytes || first_parameter > payload.size() ||
+        ParameterCount >
+            (payload.size() - first_parameter) / parameter_stride)
+        return StockKsPerPixelSignatureStatus::table_out_of_bounds;
+    if (first_parameter != header_bytes)
+        return StockKsPerPixelSignatureStatus::parameter_mismatch;
+    const std::size_t table_end =
+        first_parameter + ParameterCount * parameter_stride;
+
+    for (std::size_t index = 0U; index < ParameterCount; ++index) {
+        const std::size_t offset = first_parameter + index * parameter_stride;
+        std::array<std::uint32_t, 5U> words{};
+        for (std::size_t word = 0U; word < words.size(); ++word)
+            (void)detail::read_u32_le(payload, offset + word * 4U,
+                                      words[word]);
+        std::string_view semantic;
+        if (!signature_name(payload, words[0], table_end, semantic))
+            return StockKsPerPixelSignatureStatus::invalid_name;
+        const std::uint8_t component_mask =
+            std::to_integer<std::uint8_t>(payload[offset + 20U]);
+        const std::uint8_t read_write_mask =
+            std::to_integer<std::uint8_t>(payload[offset + 21U]);
+        const std::uint16_t reserved = static_cast<std::uint16_t>(
+            std::to_integer<std::uint16_t>(payload[offset + 22U]) |
+            (std::to_integer<std::uint16_t>(payload[offset + 23U]) << 8U));
+        const StockShaderSignatureParameter& parameter = expected[index];
+        if (semantic != parameter.semantic ||
+            words[1] != parameter.semantic_index ||
+            words[2] != static_cast<std::uint32_t>(parameter.system_value) ||
+            words[3] != static_cast<std::uint32_t>(parameter.component_type) ||
+            words[4] != parameter.shader_register ||
+            component_mask != parameter.component_mask ||
+            read_write_mask != parameter.read_write_mask || reserved != 0U)
+            return StockKsPerPixelSignatureStatus::parameter_mismatch;
+    }
+    return StockKsPerPixelSignatureStatus::ready;
+}
+
+template <std::size_t ParameterCount>
+[[nodiscard]] StockKsPerPixelSignatureStatus validate_stage_signature(
+    std::span<const std::uint8_t> stage, std::uint32_t expected_tag,
+    const std::array<StockShaderSignatureParameter, ParameterCount>& expected)
+    noexcept {
+    detail::DxbcContainerInspection inspection;
+    std::size_t error_offset = 0U;
+    const auto bytes = detail::as_bytes(stage);
+    if (detail::inspect_dxbc_container(bytes, 4096U, inspection,
+                                       error_offset) !=
+            detail::DxbcReaderStatus::ready ||
+        inspection.program_chunk_count != 1U ||
+        inspection.program_format != detail::DxbcProgramFormat::legacy)
+        return StockKsPerPixelSignatureStatus::invalid_stage_container;
+
+    std::uint32_t signature_count = 0U;
+    detail::DxbcChunkView signature;
+    for (std::uint32_t index = 0U; index < inspection.chunk_count; ++index) {
+        detail::DxbcChunkView chunk;
+        if (!detail::read_dxbc_chunk(bytes, index, chunk))
+            return StockKsPerPixelSignatureStatus::invalid_stage_container;
+        if (chunk.tag != expected_tag) continue;
+        ++signature_count;
+        signature = chunk;
+    }
+    if (signature_count == 0U)
+        return StockKsPerPixelSignatureStatus::missing_signature;
+    if (signature_count != 1U)
+        return StockKsPerPixelSignatureStatus::duplicate_signature;
+    return validate_signature_payload(signature.payload, expected);
 }
 
 } // namespace
@@ -646,6 +755,83 @@ StockKsPerPixelReflectionStatus validate_stock_ks_per_pixel_reflection(
     return validate_stage_reflection(
         container.pixel_shader, 0xffff0400U, pixel_rdef_resources,
         pixel_rdef_constant_buffers);
+}
+
+const char* stock_ks_per_pixel_signature_status_name(
+    StockKsPerPixelSignatureStatus status) noexcept {
+    switch (status) {
+    case StockKsPerPixelSignatureStatus::ready: return "ready";
+    case StockKsPerPixelSignatureStatus::invalid_stage_container:
+        return "invalid_stage_container";
+    case StockKsPerPixelSignatureStatus::missing_signature:
+        return "missing_signature";
+    case StockKsPerPixelSignatureStatus::duplicate_signature:
+        return "duplicate_signature";
+    case StockKsPerPixelSignatureStatus::truncated_signature_header:
+        return "truncated_signature_header";
+    case StockKsPerPixelSignatureStatus::count_mismatch:
+        return "count_mismatch";
+    case StockKsPerPixelSignatureStatus::table_out_of_bounds:
+        return "table_out_of_bounds";
+    case StockKsPerPixelSignatureStatus::invalid_name:
+        return "invalid_name";
+    case StockKsPerPixelSignatureStatus::parameter_mismatch:
+        return "parameter_mismatch";
+    }
+    return "unknown";
+}
+
+StockKsPerPixelSignatureStatus validate_stock_ks_per_pixel_signatures(
+    const StockShaderContainer& container) noexcept {
+    StockKsPerPixelSignatureStatus status = validate_stage_signature(
+        container.vertex_shader, detail::dxbc_tag_isgn,
+        stock_ks_per_pixel_vertex_input_signature);
+    if (status != StockKsPerPixelSignatureStatus::ready) return status;
+    status = validate_stage_signature(
+        container.vertex_shader, detail::dxbc_tag_osgn,
+        stock_ks_per_pixel_vertex_output_signature);
+    if (status != StockKsPerPixelSignatureStatus::ready) return status;
+    status = validate_stage_signature(
+        container.pixel_shader, detail::dxbc_tag_isgn,
+        stock_ks_per_pixel_fragment_input_signature);
+    if (status != StockKsPerPixelSignatureStatus::ready) return status;
+    return validate_stage_signature(
+        container.pixel_shader, detail::dxbc_tag_osgn,
+        stock_ks_per_pixel_fragment_output_signature);
+}
+
+const char* stock_ks_per_pixel_native_program_status_name(
+    StockKsPerPixelNativeProgramStatus status) noexcept {
+    switch (status) {
+    case StockKsPerPixelNativeProgramStatus::ready: return "ready";
+    case StockKsPerPixelNativeProgramStatus::invalid_variant:
+        return "invalid_variant";
+    case StockKsPerPixelNativeProgramStatus::container_shape_mismatch:
+        return "container_shape_mismatch";
+    case StockKsPerPixelNativeProgramStatus::reflection_mismatch:
+        return "reflection_mismatch";
+    case StockKsPerPixelNativeProgramStatus::signature_mismatch:
+        return "signature_mismatch";
+    }
+    return "unknown";
+}
+
+StockKsPerPixelNativeProgramStatus validate_stock_ks_per_pixel_native_program(
+    const StockShaderContainer& container,
+    StockKsPerPixelVariant variant) noexcept {
+    if (variant != StockKsPerPixelVariant::base &&
+        variant != StockKsPerPixelVariant::alpha_to_coverage)
+        return StockKsPerPixelNativeProgramStatus::invalid_variant;
+    if (validate_stock_ks_per_pixel_container_shape(container, variant) !=
+        StockKsPerPixelContainerStatus::ready)
+        return StockKsPerPixelNativeProgramStatus::container_shape_mismatch;
+    if (validate_stock_ks_per_pixel_reflection(container) !=
+        StockKsPerPixelReflectionStatus::ready)
+        return StockKsPerPixelNativeProgramStatus::reflection_mismatch;
+    if (validate_stock_ks_per_pixel_signatures(container) !=
+        StockKsPerPixelSignatureStatus::ready)
+        return StockKsPerPixelNativeProgramStatus::signature_mismatch;
+    return StockKsPerPixelNativeProgramStatus::ready;
 }
 
 StockKsPerPixelEvaluationResult evaluate_stock_ks_per_pixel(
