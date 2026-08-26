@@ -19,6 +19,10 @@ using apex::core::ParseError;
 
 constexpr std::size_t V1_FRAME_SIZE = 64;
 constexpr std::size_t V2_FRAME_SIZE = 40;
+// Every serialized track has at least a name-length and frame-count word.
+// Check this before reserving the track vector so a count cannot force a
+// large allocation when the input is truncated immediately after the header.
+constexpr std::size_t MINIMUM_TRACK_BYTES = 8;
 constexpr float EPSILON = std::numeric_limits<float>::epsilon();
 
 [[nodiscard]] ParseError invalid(std::string_view source, std::size_t offset,
@@ -165,6 +169,9 @@ KsAnimation parseKsAnimation(std::span<const std::uint8_t> bytes, std::string so
     const auto trackCount = reader.u32("track count");
     if (trackCount > limits.maxTracks)
         throw reader.error(trackCountOffset, "COUNT_LIMIT", "track count exceeds configured limit");
+    if (static_cast<std::size_t>(trackCount) > reader.remaining() / MINIMUM_TRACK_BYTES)
+        throw reader.error(trackCountOffset, "COUNT_INVALID",
+                           "track count exceeds remaining KSANIM bytes");
 
     KsAnimation animation;
     animation.source = std::move(source);

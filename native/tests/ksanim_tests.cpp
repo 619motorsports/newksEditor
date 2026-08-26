@@ -144,6 +144,14 @@ void rejectsMalformedValues() {
     expectsParseError([&] { parseKsAnimation(unsupported); }, "UNSUPPORTED_VERSION");
     const std::vector<std::uint8_t> hugeTracks = {2, 0, 0, 0, 0xff, 0xff, 0xff, 0xff};
     expectsParseError([&] { parseKsAnimation(hugeTracks); }, "COUNT_LIMIT");
+    apex::core::ParseLimits permissiveTracks;
+    permissiveTracks.maxTracks = std::numeric_limits<std::uint32_t>::max();
+    expectsParseError([&] { parseKsAnimation(hugeTracks, "truncated-tracks.ksanim", permissiveTracks); },
+                      "COUNT_INVALID");
+
+    const std::vector<std::uint8_t> missingTrackHeader = {2, 0, 0, 0, 1, 0, 0, 0};
+    expectsParseError([&] { parseKsAnimation(missingTrackHeader, "truncated-track.ksanim"); },
+                      "COUNT_INVALID");
 
     std::vector<std::uint8_t> invalidUtf8;
     u32(invalidUtf8, 2); u32(invalidUtf8, 1); u32(invalidUtf8, 1); invalidUtf8.push_back(0xff);
