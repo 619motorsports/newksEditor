@@ -665,6 +665,10 @@ StockSceneExecutionResult prepare_stock_scene_execution(
         material_request.scene = request.scene;
         material_request.packets = packet_result.packets;
         material_request.shader_modules = request.shader_modules;
+        material_request.builtin_vulkan_source =
+            request.builtin_vulkan_source;
+        material_request.builtin_vulkan_source_sampler_settings =
+            request.builtin_vulkan_source_sampler_settings;
         material_request.overrides_by_material = material_overrides;
         material_request.targets = request.targets;
         material_request.wireframe = request.wireframe;

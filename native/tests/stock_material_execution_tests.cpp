@@ -85,6 +85,7 @@ public:
         return {TriangleDrawStatus::unsupported, {"unused", "unused"}, {}};
     }
     SamplerResult create_sampler(const SamplerDescription& description) override {
+        sampler_descriptions.push_back(description);
         return {SamplerStatus::ready, {},
                 std::make_unique<FakeSampler>(description, info_.backend)};
     }
@@ -95,6 +96,7 @@ public:
 
     std::size_t buffer_calls = 0U;
     std::vector<std::vector<std::byte>> initial_buffers;
+    std::vector<SamplerDescription> sampler_descriptions;
 private:
     DeviceInfo info_{};
 };
@@ -621,6 +623,116 @@ void test_directional_shadow_receiver_module_opt_in() {
             "receiver and non-receiver module sets have independent uniqueness keys");
 }
 
+void test_builtin_vulkan_source_selector() {
+    Fixture source_fixture = fixture("ksPerPixel");
+    source_fixture.model.materials[0].properties.push_back(
+        {"ksAlphaRef", 0.37F, {}, {}, {}});
+    auto source_request = request_for(source_fixture);
+    source_request.shader_modules = {};
+    source_request.builtin_vulkan_source =
+        BuiltinVulkanStockSourceSelector::ks_per_pixel;
+    source_request.builtin_vulkan_source_sampler_settings = {4.0F, -2.5F};
+    FakeDevice source_device;
+    const auto source = prepare_stock_material_execution(
+        source_device, source_request);
+    require(source.ok() &&
+                source.resources->stock_vulkan_source_program_count() == 1U,
+            "opt-in Vulkan ksPerPixel source fallback must retain one source owner");
+    bool found_native_material = false;
+    for (const std::vector<std::byte>& bytes :
+         source_device.initial_buffers) {
+        if (bytes.size() !=
+            stock_ks_per_pixel_native_constant_buffer_view_bytes)
+            continue;
+        StockKsPerPixelMaterialConstants native_material{};
+        std::memcpy(&native_material, bytes.data(), sizeof(native_material));
+        found_native_material =
+            found_native_material ||
+            std::abs(native_material.alpha_reference - 0.37F) < 0.0001F;
+    }
+    require(found_native_material,
+            "source fallback must preserve authored ksAlphaRef in native b4");
+    require(source_device.sampler_descriptions.size() == 2U,
+            "Vulkan source fallback must create its linear and shadow samplers");
+    const SamplerDescription& linear = source_device.sampler_descriptions[0];
+    require(linear.min_filter == SamplerFilter::anisotropic &&
+                linear.mag_filter == SamplerFilter::anisotropic &&
+                linear.mip_filter == SamplerFilter::anisotropic &&
+                linear.address_u == SamplerAddressMode::repeat &&
+                linear.address_v == SamplerAddressMode::repeat &&
+                linear.address_w == SamplerAddressMode::repeat &&
+                linear.compare == SamplerCompare::disabled &&
+                linear.max_anisotropy == 4.0F &&
+                linear.mip_lod_bias == -2.5F &&
+                linear.max_lod == std::numeric_limits<float>::max(),
+            "source sampler settings must reach the native linear sampler");
+    const SamplerDescription& shadow = source_device.sampler_descriptions[1];
+    require(shadow.min_filter == SamplerFilter::linear &&
+                shadow.mag_filter == SamplerFilter::linear &&
+                shadow.mip_filter == SamplerFilter::nearest &&
+                shadow.address_u == SamplerAddressMode::clamp_to_edge &&
+                shadow.address_v == SamplerAddressMode::clamp_to_edge &&
+                shadow.address_w == SamplerAddressMode::clamp_to_edge &&
+                shadow.compare == SamplerCompare::less &&
+                shadow.max_lod == std::numeric_limits<float>::max(),
+            "source sampler contract must retain the comparison shadow sampler");
+
+    Fixture explicit_fixture = fixture("ksPerPixel");
+    auto explicit_request = request_for(explicit_fixture);
+    explicit_request.builtin_vulkan_source =
+        BuiltinVulkanStockSourceSelector::ks_per_pixel;
+    FakeDevice explicit_device;
+    const auto explicit_result = prepare_stock_material_execution(
+        explicit_device, explicit_request);
+    require(explicit_result.ok() &&
+                explicit_result.resources->stock_vulkan_source_program_count() == 0U &&
+                explicit_result.resources->unique_pipeline_count() == 1U &&
+                explicit_device.sampler_descriptions.empty(),
+            "explicit ksPerPixel modules must take precedence over source fallback");
+
+    Fixture d3d_fixture = fixture("ksPerPixel", Backend::D3D12);
+    auto d3d_request = request_for(d3d_fixture);
+    d3d_request.shader_modules = {};
+    d3d_request.builtin_vulkan_source =
+        BuiltinVulkanStockSourceSelector::ks_per_pixel;
+    FakeDevice d3d_device(Backend::D3D12);
+    const auto d3d_result = prepare_stock_material_execution(
+        d3d_device, d3d_request);
+    require(d3d_result.status == StaticSceneResourceStatus::unsupported &&
+                d3d_result.diagnostic.code ==
+                    "stock_material_builtin_source_backend_unsupported" &&
+                d3d_device.buffer_calls == 0U,
+            "Vulkan source fallback must reject D3D12 before allocation");
+
+    Fixture multi_map_fixture = fixture("ksPerPixelMultiMap");
+    auto multi_map_request = request_for(multi_map_fixture);
+    multi_map_request.shader_modules = {};
+    multi_map_request.builtin_vulkan_source =
+        BuiltinVulkanStockSourceSelector::ks_per_pixel;
+    FakeDevice multi_map_device;
+    const auto multi_map_result = prepare_stock_material_execution(
+        multi_map_device, multi_map_request);
+    require(multi_map_result.status == StaticSceneResourceStatus::unsupported &&
+                multi_map_result.diagnostic.code ==
+                    "stock_material_shader_module_missing" &&
+                multi_map_device.buffer_calls == 0U,
+            "non-ksPerPixel families must not inherit the Vulkan source fallback");
+
+    Fixture skinned_fixture = fixture("ksSkinnedMesh");
+    auto skinned_request = request_for(skinned_fixture);
+    skinned_request.shader_modules = {};
+    skinned_request.builtin_vulkan_source =
+        BuiltinVulkanStockSourceSelector::ks_per_pixel;
+    FakeDevice skinned_device;
+    const auto skinned_result = prepare_stock_material_execution(
+        skinned_device, skinned_request);
+    require(skinned_result.status == StaticSceneResourceStatus::unsupported &&
+                skinned_result.diagnostic.code ==
+                    "stock_material_shader_module_missing" &&
+                skinned_device.buffer_calls == 0U,
+            "skinned packets must remain on their explicit portable family path");
+}
+
 } // namespace
 
 int main() {
@@ -629,6 +741,7 @@ int main() {
         test_skinned_cross_backend_family_authority();
         test_preflight_failures();
         test_directional_shadow_receiver_module_opt_in();
+        test_builtin_vulkan_source_selector();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

@@ -212,6 +212,10 @@ public:
     [[nodiscard]] std::size_t unique_pipeline_count() const noexcept {
         return pipelines_.size() + stock_vulkan_source_programs_.size();
     }
+    [[nodiscard]] std::size_t stock_vulkan_source_program_count() const
+        noexcept {
+        return stock_vulkan_source_programs_.size();
+    }
     [[nodiscard]] std::size_t unique_geometry_count() const noexcept {
         return uploads_.size() + skinned_uploads_.size();
     }

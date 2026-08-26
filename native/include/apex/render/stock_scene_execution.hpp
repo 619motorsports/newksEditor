@@ -17,6 +17,8 @@ namespace apex::render {
 // post-processing. A caller can opt into the bounded retained directional-
 // shadow receiver contract. Per-node CSP mesh state is supported. Callers must
 // resolve external resources into owned model payloads before this boundary.
+// Static Vulkan ksPerPixel packets can explicitly select the immutable
+// source-equivalent package when no caller module set matches.
 // Other CSP shader, property, and resource changes remain explicit evidence in
 // render_plan.
 struct StockSceneExecutionLimits {
@@ -37,6 +39,10 @@ struct StockSceneExecutionRequest {
     RenderPlanOptions render{};
     DrawPacketOptions packets{};
     std::span<const StockMaterialShaderModules> shader_modules{};
+    BuiltinVulkanStockSourceSelector builtin_vulkan_source =
+        BuiltinVulkanStockSourceSelector::disabled;
+    StockKsPerPixelNativeSamplerSettings
+        builtin_vulkan_source_sampler_settings{};
     std::span<const MaterialBindingOverrides> overrides_by_material{};
     // When enabled, resolve the source-evidenced F4 state at this facade
     // boundary. The resolver's complete material table is merged after any

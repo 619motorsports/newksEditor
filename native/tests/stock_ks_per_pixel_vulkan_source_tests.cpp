@@ -59,6 +59,15 @@ void acceptsBothImmutableBuiltIns() {
     require(base.pipeline().shaders[1].bytes !=
                 alpha.pipeline().shaders[1].bytes,
             "base and AT retain distinct fragment behavior");
+    require(stock_ks_per_pixel_vulkan_source_shader_bytes(
+                StockKsPerPixelVariant::base) ==
+                base.pipeline().shaders[0].bytes.size() +
+                    base.pipeline().shaders[1].bytes.size() &&
+                stock_ks_per_pixel_vulkan_source_shader_bytes(
+                    StockKsPerPixelVariant::alpha_to_coverage) ==
+                    alpha.pipeline().shaders[0].bytes.size() +
+                        alpha.pipeline().shaders[1].bytes.size(),
+            "source package byte accounting matches immutable modules");
     require(base.pipeline().targets.colors[0].samples == 1U &&
                 !base.pipeline().blend.alpha_to_coverage,
             "base owns single-sample non-A2C state");
@@ -280,6 +289,8 @@ void rejectsInvalidVariant() {
                     StockKsPerPixelVulkanSourceStatus::invalid_variant &&
                 !result.program.has_value(),
             "unknown variant has no built-in module owner");
+    require(stock_ks_per_pixel_vulkan_source_shader_bytes(invalid) == 0U,
+            "unknown variant has no source package byte budget");
 }
 
 } // namespace

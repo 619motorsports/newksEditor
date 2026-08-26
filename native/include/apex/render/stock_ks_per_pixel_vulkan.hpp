@@ -3,6 +3,7 @@
 #include "apex/render/pipeline.hpp"
 #include "apex/render/stock_ks_per_pixel.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string_view>
@@ -40,6 +41,12 @@ enum class StockKsPerPixelVulkanSourceStatus : std::uint8_t {
 
 [[nodiscard]] const char* stock_ks_per_pixel_vulkan_source_status_name(
     StockKsPerPixelVulkanSourceStatus status) noexcept;
+
+// Exact combined byte count of the immutable checked-in vertex and fragment
+// modules for one source variant. Returns zero for an invalid variant. This
+// lets bounded facade layers account for owner copies before allocation.
+[[nodiscard]] std::size_t stock_ks_per_pixel_vulkan_source_shader_bytes(
+    StockKsPerPixelVariant variant) noexcept;
 
 // Validate a complete declaration against the immutable built-in modules.
 // This is deliberately stricter than PipelineShaderProvenance: arbitrary

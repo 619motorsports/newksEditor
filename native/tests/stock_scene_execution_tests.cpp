@@ -231,6 +231,19 @@ void test_success_and_plan_evidence() {
     require(device.buffer_calls != 0U, "successful scene preparation must allocate resources");
 }
 
+void test_builtin_vulkan_source_selector_reaches_material_handoff() {
+    Fixture fixture_value = fixture();
+    auto request = request_for(fixture_value);
+    request.shader_modules = {};
+    request.builtin_vulkan_source =
+        BuiltinVulkanStockSourceSelector::ks_per_pixel;
+    FakeDevice device;
+    const auto result = prepare_stock_scene_execution(device, request);
+    require(result.ok() &&
+                result.resources->stock_vulkan_source_program_count() == 2U,
+            "stock-scene source selector must reach material execution for opaque and transparent states");
+}
+
 void test_directional_shadow_receiver_reaches_material_handoff() {
     Fixture fixture_value = fixture();
     fixture_value.module_set.directional_shadow_receiver = true;
@@ -753,6 +766,7 @@ void test_preflight_and_missing_modules() {
 int main() {
     try {
         test_success_and_plan_evidence();
+        test_builtin_vulkan_source_selector_reaches_material_handoff();
         test_directional_shadow_receiver_reaches_material_handoff();
         test_alpha_shadow_constants_reach_static_scene_handoff();
         test_resolved_subtree_filter_and_isolation_reach_facade();

@@ -47,6 +47,23 @@ namespace {
     return true;
 }
 
+// Installed stock color and alpha-shadow programs both consume the material-
+// owned 32-byte cbMaterial/b4 record. Repack the already source-evidenced
+// resolver result into the color-path field names without changing bytes.
+[[nodiscard]] StockKsPerPixelMaterialConstants native_material_constants(
+    const StockShadowCasterMaterialConstants& value) noexcept {
+    StockKsPerPixelMaterialConstants result;
+    result.ambient = value.lighting[0U];
+    result.diffuse = value.lighting[1U];
+    result.specular = value.lighting[2U];
+    result.specular_exponent = value.lighting[3U];
+    result.emissive = {value.emissive_and_alpha_ref[0U],
+                       value.emissive_and_alpha_ref[1U],
+                       value.emissive_and_alpha_ref[2U]};
+    result.alpha_reference = value.emissive_and_alpha_ref[3U];
+    return result;
+}
+
 [[nodiscard]] Diagnostic diag(std::string code, std::string message) {
     return {std::move(code), std::move(message)};
 }
@@ -369,6 +386,45 @@ bool estimate_adapter_copy(const StockMaterialExecutionRequest& request,
                           "Copied shader bytecode exceeds the adapter preparation limit");
         return false;
     }
+    if (request.builtin_vulkan_source ==
+        BuiltinVulkanStockSourceSelector::ks_per_pixel) {
+        const std::uint64_t material_count = request.model->materials.size();
+        if (material_count > std::numeric_limits<std::uint64_t>::max() / 2U) {
+            diagnostic = diag("stock_material_preparation_limit",
+                              "Built-in source owner count exceeds the preparation limit");
+            return false;
+        }
+        const std::uint64_t owner_count = std::min(
+            static_cast<std::uint64_t>(request.packets.size()),
+            material_count * 2U);
+        const std::uint64_t owner_shader_bytes = std::max(
+            static_cast<std::uint64_t>(
+                stock_ks_per_pixel_vulkan_source_shader_bytes(
+                    StockKsPerPixelVariant::base)),
+            static_cast<std::uint64_t>(
+                stock_ks_per_pixel_vulkan_source_shader_bytes(
+                    StockKsPerPixelVariant::alpha_to_coverage)));
+        if (owner_count > std::numeric_limits<std::uint64_t>::max() - 2U ||
+            (owner_count + 2U != 0U &&
+             owner_shader_bytes >
+                 std::numeric_limits<std::uint64_t>::max() /
+                     (owner_count + 2U))) {
+            diagnostic = diag("stock_material_preparation_limit",
+                              "Built-in source shader copies exceed the preparation limit");
+            return false;
+        }
+        // Retained owners coexist transiently with the profile-building seed
+        // and the final immutable factory result.
+        if (!charge((owner_count + 2U) * owner_shader_bytes, total, limit) ||
+            !charge_count(request.packets.size(), sizeof(std::uint32_t)) ||
+            !charge_count(request.model->materials.size(),
+                          sizeof(StockKsPerPixelMaterialConstants) +
+                              sizeof(bool))) {
+            diagnostic = diag("stock_material_preparation_limit",
+                              "Built-in source metadata exceeds the preparation limit");
+            return false;
+        }
+    }
     if (!charge_count(request.model->materials.size(), sizeof(formats::Kn5Material)) ||
         !charge_count(request.packets.size(), sizeof(PipelineProgram)) ||
         !charge_count(request.packets.size(), sizeof(MaterialRenderProfile)) ||
@@ -464,6 +520,13 @@ StockMaterialExecutionResult prepare_stock_material_execution(
             request.overrides_by_material.size() != request.model->materials.size())
             return fail(StaticSceneResourceStatus::invalid_request,
                         "stock_material_override_table_invalid", "Material overrides must match the final KN5 material table");
+        if (request.builtin_vulkan_source !=
+                BuiltinVulkanStockSourceSelector::disabled &&
+            request.builtin_vulkan_source !=
+                BuiltinVulkanStockSourceSelector::ks_per_pixel)
+            return fail(StaticSceneResourceStatus::invalid_request,
+                        "stock_material_builtin_source_selector_invalid",
+                        "The built-in Vulkan stock source selector is invalid");
         if (request.shader_modules.size() > request.limits.max_shader_sets)
             return fail(StaticSceneResourceStatus::invalid_request,
                         "stock_material_shader_set_limit", "Shader module set count exceeds the configured limit");
@@ -480,13 +543,29 @@ StockMaterialExecutionResult prepare_stock_material_execution(
         std::vector<MaterialRenderProfile> pipeline_profiles;
         pipeline_profiles.reserve(packets.size());
         std::vector<const PipelineProgram*> pipeline_ptrs(packets.size(), nullptr);
+        std::vector<std::shared_ptr<const
+            ValidatedStockKsPerPixelVulkanSourceProgram>> source_programs;
+        source_programs.reserve(std::min(
+            packets.size(), request.model->materials.size() * 2U));
+        std::vector<MaterialRenderProfile> source_pipeline_profiles;
+        source_pipeline_profiles.reserve(source_programs.capacity());
+        std::vector<std::uint32_t> source_program_by_packet(
+            packets.size(), invalid_static_scene_source_program_index);
         std::vector<KsPerPixelMaterialConstants> constants(request.model->materials.size());
+        std::vector<StockKsPerPixelMaterialConstants> native_constants(
+            request.model->materials.size());
+        std::vector<bool> native_constants_ready(
+            request.model->materials.size(), false);
         std::vector<StockShadowCasterMaterialConstants> shadow_constants(
             request.model->materials.size());
         bool has_alpha_shadow_constants = false;
         std::vector<bool> used(request.model->materials.size(), false);
         std::vector<std::size_t> first_packet(request.model->materials.size(), 0U);
         std::vector<std::array<std::size_t, 2U>> pipeline_indices(
+            request.model->materials.size(),
+            {std::numeric_limits<std::size_t>::max(),
+             std::numeric_limits<std::size_t>::max()});
+        std::vector<std::array<std::size_t, 2U>> source_pipeline_indices(
             request.model->materials.size(),
             {std::numeric_limits<std::size_t>::max(),
              std::numeric_limits<std::size_t>::max()});
@@ -591,7 +670,24 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                 const StockMaterialShaderModules* modules = find_modules(
                     request.shader_modules, source.name, binding.shader, shader_variant,
                     request.directional_shadow_receiver);
-                if (modules == nullptr)
+                const bool source_candidate =
+                    request.builtin_vulkan_source ==
+                        BuiltinVulkanStockSourceSelector::ks_per_pixel &&
+                    canonical(source.shader) == "ksperpixel" &&
+                    shader_key == "ksperpixel" &&
+                    packet.primitive == DrawPrimitiveKind::static_mesh &&
+                    shader_variant == StockMaterialShaderVariant::standard &&
+                    !request.directional_shadow_receiver;
+                const bool use_builtin_source =
+                    modules == nullptr && source_candidate &&
+                    device.info().backend == Backend::Vulkan;
+                if (modules == nullptr && source_candidate &&
+                    device.info().backend != Backend::Vulkan)
+                    return fail(
+                        StaticSceneResourceStatus::unsupported,
+                        "stock_material_builtin_source_backend_unsupported",
+                        "The built-in ksPerPixel source-equivalent fallback requires Vulkan");
+                if (modules == nullptr && !use_builtin_source)
                     return fail(
                         StaticSceneResourceStatus::unsupported,
                         shader_variant == StockMaterialShaderVariant::damage_dust
@@ -600,8 +696,53 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                         shader_variant == StockMaterialShaderVariant::damage_dust
                             ? "The txDust packet requires caller-supplied damage-dust shader modules"
                             : "No caller-supplied executable shader modules match the material or shader family");
+                if (use_builtin_source &&
+                    !native_constants_ready[material_index]) {
+                    const StockShadowCasterMaterialResolveResult
+                        native_resolved =
+                            resolve_stock_shadow_caster_material_constants(
+                                binding);
+                    if (!native_resolved.ok())
+                        return fail(
+                            StaticSceneResourceStatus::invalid_request,
+                            native_resolved.diagnostic.code.empty()
+                                ? "stock_material_builtin_source_constants_invalid"
+                                : native_resolved.diagnostic.code,
+                            native_resolved.diagnostic.message.empty()
+                                ? "The recovered native b4 material resolver rejected the source material"
+                                : native_resolved.diagnostic.message);
+                    native_constants[material_index] =
+                        native_material_constants(native_resolved.constants);
+                    native_constants_ready[material_index] = true;
+                }
                 const apex::scene::SceneNode* packet_node = request.scene->find_node(packet.node);
-                if (pipeline_indices[material_index][state_index] !=
+                const auto apply_profile = [&](const MaterialRenderProfile& profile) {
+                    packet.material_profile = profile;
+                    packet.flags.transparent = profile.transparent;
+                    packet.flags.blend_enabled = profile.blend_enabled;
+                    packet.flags.alpha_to_coverage =
+                        profile.alpha_to_coverage;
+                    packet.flags.depth_test = profile.depth_test;
+                    packet.flags.depth_write =
+                        profile.depth_write && !profile.transparent;
+                    material_needs_alpha_shadow =
+                        material_needs_alpha_shadow ||
+                        profile.shadow_alpha_tested;
+                };
+                if (use_builtin_source &&
+                    source_pipeline_indices[material_index][state_index] !=
+                        std::numeric_limits<std::size_t>::max()) {
+                    const std::size_t source_index =
+                        source_pipeline_indices[material_index][state_index];
+                    pipeline_ptrs[packet_index] =
+                        &source_programs[source_index]->pipeline();
+                    source_program_by_packet[packet_index] =
+                        static_cast<std::uint32_t>(source_index);
+                    apply_profile(source_pipeline_profiles[source_index]);
+                    continue;
+                }
+                if (!use_builtin_source &&
+                    pipeline_indices[material_index][state_index] !=
                     std::numeric_limits<std::size_t>::max()) {
                     const std::size_t pipeline_index =
                         pipeline_indices[material_index][state_index];
@@ -614,21 +755,28 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                                     "Packets sharing one stock material state must agree on txDust presence");
                     pipeline_ptrs[packet_index] = &pipelines[pipeline_index];
                     const MaterialRenderProfile& profile = pipeline_profiles[pipeline_index];
-                    packet.material_profile = profile;
-                    packet.flags.transparent = profile.transparent;
-                    packet.flags.blend_enabled = profile.blend_enabled;
-                    packet.flags.alpha_to_coverage = profile.alpha_to_coverage;
-                    packet.flags.depth_test = profile.depth_test;
-                    packet.flags.depth_write = profile.depth_write && !profile.transparent;
-                    material_needs_alpha_shadow =
-                        material_needs_alpha_shadow || profile.shadow_alpha_tested;
+                    apply_profile(profile);
                     continue;
                 }
                 StockPipelineRequest pipeline_request;
                 pipeline_request.material = std::move(material_input);
                 pipeline_request.node = {packet_node != nullptr && packet_node->transparent};
                 pipeline_request.override_values = &profile_override;
-                pipeline_request.shaders.assign(modules->modules.begin(), modules->modules.end());
+                if (use_builtin_source) {
+                    StockKsPerPixelVulkanSourceProgramResult seed =
+                        create_builtin_stock_ks_per_pixel_vulkan_source_program(
+                            StockKsPerPixelVariant::base);
+                    if (!seed.ok())
+                        return fail(
+                            StaticSceneResourceStatus::unsupported,
+                            "stock_material_builtin_source_seed_invalid",
+                            "The immutable Vulkan ksPerPixel source package is unavailable");
+                    pipeline_request.shaders =
+                        seed.program->pipeline().shaders;
+                } else {
+                    pipeline_request.shaders.assign(
+                        modules->modules.begin(), modules->modules.end());
+                }
                 pipeline_request.targets = request.targets;
                 pipeline_request.resources = resources_for(binding.shader,
                                                            damage_dirt_shader && packet_has_dust,
@@ -654,18 +802,53 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                                 final_validation.diagnostics.empty()
                                     ? "Stock pipeline validation failed after explicit execution state"
                                     : final_validation.diagnostics.front().message);
-                pipeline_indices[material_index][state_index] = pipelines.size();
-                pipelines.push_back(std::move(built.program));
-                pipeline_profiles.push_back(built.profile);
-                pipeline_ptrs[packet_index] = &pipelines.back();
-                packet.material_profile = built.profile;
-                packet.flags.transparent = built.profile.transparent;
-                packet.flags.blend_enabled = built.profile.blend_enabled;
-                packet.flags.alpha_to_coverage = built.profile.alpha_to_coverage;
-                packet.flags.depth_test = built.profile.depth_test;
-                packet.flags.depth_write = built.profile.depth_write && !built.profile.transparent;
-                material_needs_alpha_shadow =
-                    material_needs_alpha_shadow || built.profile.shadow_alpha_tested;
+                if (use_builtin_source) {
+                    const StockKsPerPixelVariant variant =
+                        built.profile.alpha_to_coverage
+                            ? StockKsPerPixelVariant::alpha_to_coverage
+                            : StockKsPerPixelVariant::base;
+                    StockKsPerPixelVulkanSourcePipelineState source_state;
+                    source_state.targets = built.program.targets;
+                    source_state.raster = built.program.raster;
+                    source_state.blend = built.program.blend;
+                    source_state.depth = built.program.depth;
+                    StockKsPerPixelVulkanSourceProgramResult source_result =
+                        create_builtin_stock_ks_per_pixel_vulkan_source_program(
+                            variant, std::move(source_state));
+                    if (!source_result.ok())
+                        return fail(
+                            StaticSceneResourceStatus::unsupported,
+                            "stock_material_builtin_source_" + std::string(
+                                stock_ks_per_pixel_vulkan_source_status_name(
+                                    source_result.status)),
+                            "The resolved render state is incompatible with the immutable Vulkan ksPerPixel source package");
+                    if (source_programs.size() >=
+                        static_cast<std::size_t>(
+                            invalid_static_scene_source_program_index))
+                        return fail(
+                            StaticSceneResourceStatus::invalid_request,
+                            "stock_material_builtin_source_owner_limit",
+                            "Built-in Vulkan source owners exceed packet index capacity");
+                    const std::size_t source_index = source_programs.size();
+                    auto owner = std::make_shared<const
+                        ValidatedStockKsPerPixelVulkanSourceProgram>(
+                            std::move(*source_result.program));
+                    source_programs.push_back(std::move(owner));
+                    source_pipeline_profiles.push_back(built.profile);
+                    source_pipeline_indices[material_index][state_index] =
+                        source_index;
+                    source_program_by_packet[packet_index] =
+                        static_cast<std::uint32_t>(source_index);
+                    pipeline_ptrs[packet_index] =
+                        &source_programs.back()->pipeline();
+                } else {
+                    pipeline_indices[material_index][state_index] =
+                        pipelines.size();
+                    pipelines.push_back(std::move(built.program));
+                    pipeline_profiles.push_back(built.profile);
+                    pipeline_ptrs[packet_index] = &pipelines.back();
+                }
+                apply_profile(built.profile);
             }
             if (material_needs_alpha_shadow) {
                 const StockShadowCasterMaterialResolveResult shadow_resolved =
@@ -690,6 +873,15 @@ StockMaterialExecutionResult prepare_stock_material_execution(
         scene_request.packets = packets;
         scene_request.pipelines_by_packet = pipeline_ptrs;
         scene_request.material_constants_by_material = constants;
+        if (!source_programs.empty()) {
+            scene_request.stock_vulkan_source_programs = source_programs;
+            scene_request.stock_vulkan_source_program_by_packet =
+                source_program_by_packet;
+            scene_request.stock_vulkan_source_material_constants_by_material =
+                native_constants;
+            scene_request.stock_vulkan_source_sampler_settings =
+                request.builtin_vulkan_source_sampler_settings;
+        }
         if (has_alpha_shadow_constants)
             scene_request.stock_shadow_constants_by_material = shadow_constants;
         scene_request.texture_authority = request.texture_authority;

@@ -232,6 +232,19 @@ const char* stock_ks_per_pixel_vulkan_source_status_name(
     return "unknown";
 }
 
+std::size_t stock_ks_per_pixel_vulkan_source_shader_bytes(
+    StockKsPerPixelVariant variant) noexcept {
+    constexpr std::size_t vertex_bytes =
+        sizeof(stock_ks_per_pixel_source_equivalent_vertex_spirv);
+    if (variant == StockKsPerPixelVariant::base)
+        return vertex_bytes +
+               sizeof(stock_ks_per_pixel_source_equivalent_base_fragment_spirv);
+    if (variant == StockKsPerPixelVariant::alpha_to_coverage)
+        return vertex_bytes +
+               sizeof(stock_ks_per_pixel_source_equivalent_at_fragment_spirv);
+    return 0U;
+}
+
 StockKsPerPixelVulkanSourceStatus
 validate_stock_ks_per_pixel_vulkan_source_program(
     const PipelineProgram& program,
