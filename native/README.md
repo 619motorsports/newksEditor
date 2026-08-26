@@ -620,17 +620,21 @@ arrays, cubemaps, 1D/3D textures, BC6H, and legacy D3D9 float textures.
 The maps path rejects sRGB payloads before backend allocation. Source, decoded,
 and host-preparation budgets include the maps resource and its retained tables.
 A separate CPU bridge resolves external DDS, PNG, JPEG, and BMP files through
-explicit `AssetSource` grants. It rejects unsafe, missing, ambiguous, and over-budget
-requests. It retains source identity and returns no partial table after an
-error. The bridge copies validated image bytes into opaque, synthetic KN5
-textures. It rewrites only the requested material slots and preserves their
-bind points. Then the stock-scene facade can own and execute the effective
-model. A real backend pixel test proves the ACD-to-GPU path. The renderer does
-not receive the `AssetSource`, the grant, or the external path.
-Workspace viewport preparation now uses this bridge before it allocates GPU
-resources. It passes the owned effective model and the remaining overrides to
-the stock-scene facade. Vulkan and D3D12 use the same embedded-texture path.
-Raw external-file overrides remain invalid at the renderer boundary.
+explicit `AssetSource` grants. It rejects unsafe, missing, ambiguous, and
+over-budget requests. It retains source identity and returns no partial table
+after an error. The bridge also converts finite CSP solid colors to exact
+132-byte legacy BGRA8 DDS payloads. This compatibility path matches the WebGL
+and FBX adapters. It is not recovered ksEditor FBX behavior.
+If an override also contains a file or texture name, its color takes priority.
+The bridge copies each payload into an opaque, synthetic KN5 texture. It
+rewrites only the resolved material slots and preserves their bind points.
+The stock-scene facade owns and executes this effective model. Real backend
+pixel tests cover external files and solid colors. The renderer does not
+receive an `AssetSource`, a grant, or an external path.
+Workspace viewport preparation uses this bridge before GPU allocation. It
+also uses the bridge for a color-only override with no external grant. Vulkan
+and D3D12 use the same embedded-texture path. Raw external-file overrides
+remain invalid at the renderer boundary.
 The FBX converter handles static positions, triangulation, hierarchy, a
 bounded transform subset, first material assignment, and one face-varying UV
 layer. Its aggregate budget includes temporary containers, copied strings,

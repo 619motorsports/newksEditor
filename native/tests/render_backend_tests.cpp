@@ -5201,15 +5201,42 @@ bool contract_backend(apex::render::Backend backend) {
                 external_stock_result.resources->owned_texture_count() == 1U,
             "external authority effective model reaches the real backend");
     const IndexedStaticMeshBatchResult external_stock_draw =
-        external_stock_result.resources->draw_and_readback(
-            *device.device, *triangle_texture.texture, stock_frame);
-    require(external_stock_draw.ok(),
-            "external authority effective model executes on the real backend");
+        external_stock_result.resources->draw_and_readback(*device.device, *triangle_texture.texture, stock_frame);
+    require(external_stock_draw.ok(), "external authority effective model executes on the real backend");
     require(near_material_channel(external_stock_draw.rgba8[center], 191U) &&
                 near_material_channel(external_stock_draw.rgba8[center + 1U], 10U) &&
                 near_material_channel(external_stock_draw.rgba8[center + 2U], 34U) &&
                 near_material_channel(external_stock_draw.rgba8[center + 3U], 255U),
             "external authority effective PNG controls the rendered center pixel");
+
+    // Prove the retained WebGL/CSP solid-color path through the same real
+    // backend. The exact compatibility DDS decodes to the same RGBA texel as
+    // the external PNG above, so both owned handoffs must render identically.
+    std::vector<MaterialBindingOverrides> solid_overrides(1U);
+    MaterialTextureOverride solid_override;
+    solid_override.color = std::array<float, 4>{static_cast<float>(external_pixel[0U]) / 255.0F,
+                                                static_cast<float>(external_pixel[1U]) / 255.0F,
+                                                static_cast<float>(external_pixel[2U]) / 255.0F, 1.0F};
+    solid_overrides[0U].resources.emplace("txDiffuse", std::move(solid_override));
+    ExternalTextureEffectiveStockSceneResult effective_solid =
+        prepare_effective_stock_scene_input(stock_model, solid_overrides, {}, {});
+    require(effective_solid.ok() && effective_solid.input->solid_color_bindings.size() == 1U &&
+                effective_solid.input->external_bindings.empty() &&
+                effective_solid.input->model.textures.size() == 2U &&
+                effective_solid.input->model.textures.back().data.size() == 132U,
+            "solid-color authority prepares one exact owned compatibility DDS");
+
+    StockSceneExecutionRequest solid_stock_request = stock_request;
+    solid_stock_request.model = &effective_solid.input->model;
+    solid_stock_request.overrides_by_material = effective_solid.input->overrides_by_material;
+    StockSceneExecutionResult solid_stock_result = prepare_stock_scene_execution(*device.device, solid_stock_request);
+    require(solid_stock_result.ok() && solid_stock_result.resources->owned_texture_count() == 1U,
+            "solid-color effective model reaches the real backend");
+    const IndexedStaticMeshBatchResult solid_stock_draw =
+        solid_stock_result.resources->draw_and_readback(*device.device, *triangle_texture.texture, stock_frame);
+    require(solid_stock_draw.ok(), "solid-color effective model executes on the real backend");
+    require(solid_stock_draw.rgba8 == external_stock_draw.rgba8,
+            "solid-color DDS and equivalent external PNG render identically");
 
     // Execute the bounded base ksPerPixelMultiMap family through the same
     // stock-scene facade. This path implements only the source-evidenced

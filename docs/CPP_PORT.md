@@ -687,11 +687,16 @@ remains unchanged and feature-complete.
   texture order. A second authority owns the used embedded KN5 textures. This
   authority validates every supported DDS and PNG payload before backend allocation. It decodes
   supported DDS 2D mip chains and bounded PNG images to RGBA8. DDS retains
-  explicit sRGB metadata; PNG follows the WebGL no-conversion RGBA8 UNORM contract. Stock
-  shader translation and complete material-resource resolution remain staged.
-  The external-texture bridge is a separate target above Assets and Render.
-  It materializes owned DDS or PNG bytes before the stock-scene handoff. Thus,
-  filesystem authority does not enter the renderer library.
+  explicit sRGB metadata. PNG follows the WebGL RGBA8 UNORM contract without
+  color conversion. Stock shader translation and unsupported resource types
+  remain staged. The texture bridge is a separate target above Assets and
+  Render. It materializes authorized image files before the stock-scene
+  handoff. It also materializes CSP solid colors as exact 132-byte legacy BGRA8
+  DDS payloads. This color path matches the retained WebGL and FBX adapter. It
+  is not recovered ksEditor FBX behavior. Both paths use scoped opaque names,
+  preserve bind points, and consume only resolved overrides. The bridge rejects
+  non-finite colors and all limit errors before backend allocation. Filesystem
+  authority does not enter the renderer library.
   Vulkan and D3D12 create a basic graphics pipeline and execute fixed and
   indexed R16 static and CPU-skinned mesh draws. A real Vulkan pixel test
   proves that a one-bone update moves the triangle. The same test runs on the

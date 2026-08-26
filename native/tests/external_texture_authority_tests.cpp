@@ -1,6 +1,7 @@
 #include "apex/render/external_texture_authority.hpp"
 
 #include "apex/formats/acd.hpp"
+#include "apex/render/decoded_dds_texture.hpp"
 #include "png_fixture.hpp"
 
 #include <array>
@@ -10,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -24,15 +26,16 @@ using apex::render::ExternalTextureAuthorityLimits;
 using apex::render::ExternalTextureAuthorityStatus;
 using apex::render::ExternalTextureGrant;
 using apex::render::ExternalTextureRequest;
+using apex::render::MaterialBindingOverrides;
 using apex::render::MaterialTextureBinding;
 using apex::render::MaterialTextureKind;
-using apex::render::MaterialBindingOverrides;
 using apex::render::MaterialTextureOverride;
 using apex::render::prepare_effective_stock_scene_input;
 using apex::render::resolve_external_texture_authority;
 
 void require(bool condition, std::string_view message) {
-    if (!condition) throw std::runtime_error(std::string(message));
+    if (!condition)
+        throw std::runtime_error(std::string(message));
 }
 
 void put32(std::vector<std::uint8_t>& bytes, std::size_t offset, std::uint32_t value) {
@@ -43,17 +46,24 @@ void put32(std::vector<std::uint8_t>& bytes, std::size_t offset, std::uint32_t v
     bytes[offset + 3U] = static_cast<std::uint8_t>(value >> 24U);
 }
 
+std::uint32_t get32(const std::vector<std::uint8_t>& bytes, std::size_t offset) {
+    require(offset + 4U <= bytes.size(), "DDS fixture read is in bounds");
+    return static_cast<std::uint32_t>(bytes[offset]) | (static_cast<std::uint32_t>(bytes[offset + 1U]) << 8U) |
+           (static_cast<std::uint32_t>(bytes[offset + 2U]) << 16U) |
+           (static_cast<std::uint32_t>(bytes[offset + 3U]) << 24U);
+}
+
 std::vector<std::uint8_t> rgba8Dds(std::array<std::uint8_t, 4> pixel) {
     std::vector<std::uint8_t> bytes(152U, 0U);
-    put32(bytes, 0U, 0x20534444U);  // DDS magic
-    put32(bytes, 4U, 124U);         // header size
-    put32(bytes, 12U, 1U);          // height
-    put32(bytes, 16U, 1U);          // width
-    put32(bytes, 20U, 4U);          // pitch
-    put32(bytes, 28U, 1U);          // mip count
-    put32(bytes, 76U, 32U);         // pixel format size
-    put32(bytes, 80U, 0x40U);       // RGB flag
-    put32(bytes, 88U, 32U);         // bits per pixel
+    put32(bytes, 0U, 0x20534444U); // DDS magic
+    put32(bytes, 4U, 124U);        // header size
+    put32(bytes, 12U, 1U);         // height
+    put32(bytes, 16U, 1U);         // width
+    put32(bytes, 20U, 4U);         // pitch
+    put32(bytes, 28U, 1U);         // mip count
+    put32(bytes, 76U, 32U);        // pixel format size
+    put32(bytes, 80U, 0x40U);      // RGB flag
+    put32(bytes, 88U, 32U);        // bits per pixel
     put32(bytes, 92U, 0x000000ffU);
     put32(bytes, 96U, 0x0000ff00U);
     put32(bytes, 100U, 0x00ff0000U);
@@ -374,17 +384,306 @@ void materializesOwnedPngEffectiveScene(const std::filesystem::path& root) {
 
     const auto authority = resolve_external_texture_authority(
         fixture.grants, fixture.requests);
-    const auto result = prepare_effective_stock_scene_input(
-        fixture.model, fixture.overrides, fixture.grants, fixture.requests);
-    require(authority.ok() && authority.resources.size() == 1U &&
-                authority.resources.front().source_bytes == png &&
-                authority.resources.front().plan.description.format ==
-                    apex::render::TextureFormat::rgba8_unorm &&
+    const auto result =
+        prepare_effective_stock_scene_input(fixture.model, fixture.overrides, fixture.grants, fixture.requests);
+    require(authority.ok() && authority.resources.size() == 1U && authority.resources.front().source_bytes == png &&
+                authority.resources.front().plan.description.format == apex::render::TextureFormat::rgba8_unorm &&
                 authority.resources.front().plan.levels.front().pixels ==
                     std::vector<std::uint8_t>(pixel.begin(), pixel.end()) &&
-                result.ok() &&
-                result.input->model.textures.back().data == png,
-            "external PNG becomes a decoded plan and exact owned effective payload");
+                result.ok() && result.input->model.textures.back().data == png,
+            "external PNG becomes a decoded plan and exact owned effective "
+            "payload");
+}
+
+void materializesMixedExternalAndSolidScene(
+    const std::filesystem::path& root) {
+    auto fixture = effectiveFixture(root);
+    const auto normal = rgba8Dds({128U, 128U, 255U, 255U});
+    fixture.model.materials.front().resources.push_back(
+        {"txNormal", 22U, "normal.dds"});
+    fixture.model.textures.push_back(
+        {true, "normal.dds", static_cast<std::uint32_t>(normal.size()),
+         normal, 7U});
+    MaterialTextureOverride solid;
+    solid.color = std::array<float, 4>{0.25F, 0.5F, 0.75F, 1.0F};
+    fixture.overrides.front().resources.emplace("txNormal", solid);
+    AssetSource source;
+    source.addDirectory(root, "car");
+    fixture.grants = {{"car-grant", &source}};
+
+    const auto result = prepare_effective_stock_scene_input(
+        fixture.model, fixture.overrides, fixture.grants, fixture.requests);
+    require(result.ok() && result.input->external_bindings.size() == 1U &&
+                result.input->solid_color_bindings.size() == 1U &&
+                result.input->model.textures.size() == 4U &&
+                result.input->overrides_by_material.front().resources.empty(),
+            "mixed external and solid resources share one effective scene");
+    const auto& resources = result.input->model.materials.front().resources;
+    require(resources.size() == 2U && resources[0U].textureId == 17U &&
+                resources[1U].textureId == 22U &&
+                resources[0U].texture ==
+                    result.input->external_bindings.front()
+                        .synthetic_texture_name &&
+                resources[1U].texture ==
+                    result.input->solid_color_bindings.front()
+                        .synthetic_texture_name,
+            "mixed effective resources preserve both serialized bind points");
+    require(fixture.model.textures.size() == 2U &&
+                fixture.model.materials.front().resources[0U].texture ==
+                    "base.dds" &&
+                fixture.model.materials.front().resources[1U].texture ==
+                    "normal.dds" &&
+                fixture.overrides.front().resources.size() == 2U,
+            "mixed preparation preserves the complete caller input");
+}
+
+void materializesExactSolidColorEffectiveScene(const std::filesystem::path& root) {
+    auto fixture = effectiveFixture(root);
+    fixture.grants.clear();
+    fixture.requests.clear();
+    auto& override_value = fixture.overrides.front().resources.at("txDiffuse");
+    override_value.texture = "ignored.dds";
+    override_value.file = "missing/ignored.dds";
+    override_value.color = std::array<float, 4>{0.125F, 0.5F, 0.75F, 1.0F};
+
+    const auto original_texture = fixture.model.materials.front().resources.front().texture;
+    const auto result = prepare_effective_stock_scene_input(fixture.model, fixture.overrides, {}, {});
+    require(result.ok() && result.input->model.textures.size() == 2U && result.input->external_bindings.empty() &&
+                result.input->solid_color_bindings.size() == 1U &&
+                result.input->overrides_by_material.front().resources.empty(),
+            "solid color becomes an owned effective-scene texture without a grant");
+    const auto& material = result.input->model.materials.front();
+    require(material.resources.size() == 1U && material.resources.front().textureId == 17U &&
+                material.resources.front().texture != original_texture,
+            "solid color preserves the serialized bind point and replaces only "
+            "texture name");
+    const auto& synthetic = result.input->model.textures.back();
+    require(synthetic.name.rfind("__apex_solid_color_", 0U) == 0U && synthetic.workspaceFileIndex == 7U &&
+                synthetic.size == 132U && synthetic.data.size() == 132U,
+            "solid color uses one scoped opaque 132-byte DDS");
+    require(get32(synthetic.data, 0U) == 0x20534444U && get32(synthetic.data, 4U) == 124U &&
+                get32(synthetic.data, 8U) == 0x100fU && get32(synthetic.data, 12U) == 1U &&
+                get32(synthetic.data, 16U) == 1U && get32(synthetic.data, 20U) == 4U &&
+                get32(synthetic.data, 28U) == 0U && get32(synthetic.data, 76U) == 32U &&
+                get32(synthetic.data, 80U) == 0x41U && get32(synthetic.data, 88U) == 32U &&
+                get32(synthetic.data, 92U) == 0x00ff0000U && get32(synthetic.data, 96U) == 0x0000ff00U &&
+                get32(synthetic.data, 100U) == 0x000000ffU && get32(synthetic.data, 104U) == 0xff000000U &&
+                get32(synthetic.data, 108U) == 0x1000U,
+            "solid color DDS header matches the recovered FBX helper");
+    require(synthetic.data[128U] == 191U && synthetic.data[129U] == 128U && synthetic.data[130U] == 32U &&
+                synthetic.data[131U] == 255U,
+            "solid color uses JavaScript rounding and exact BGRA payload order");
+    const auto planned = apex::render::plan_decoded_texture_payload(
+        synthetic.data, synthetic.name);
+    require(planned.ok() && planned.plan.description.width == 1U &&
+                planned.plan.description.height == 1U &&
+                planned.plan.description.mip_levels == 1U &&
+                planned.plan.description.format ==
+                    apex::render::TextureFormat::rgba8_unorm &&
+                planned.plan.levels.size() == 1U &&
+                planned.plan.levels.front().pixels ==
+                    std::vector<std::uint8_t>{32U, 128U, 191U, 255U},
+            "solid-color DDS round-trips to one exact RGBA8 texel");
+    auto truncated = synthetic.data;
+    truncated.pop_back();
+    const auto rejected = apex::render::plan_decoded_texture_payload(
+        truncated, "truncated-solid-color.dds");
+    require(!rejected.ok(),
+            "truncated solid-color DDS is rejected by the texture planner");
+    require(fixture.model.materials.front().resources.front().texture == original_texture &&
+                fixture.overrides.front().resources.at("txDiffuse").color == override_value.color &&
+                fixture.overrides.front().resources.at("txDiffuse").file == "missing/ignored.dds",
+            "solid color preparation does not mutate caller model or overrides");
+
+    ExternalTextureRequest conflicting =
+        request("unused-grant", "missing/ignored.dds");
+    conflicting.material_index = 0U;
+    conflicting.workspace_file_index = 7U;
+    const std::array<ExternalTextureRequest, 1U> conflicting_requests = {
+        std::move(conflicting)};
+    const auto conflict_result = prepare_effective_stock_scene_input(
+        fixture.model, fixture.overrides, {}, conflicting_requests);
+    require(conflict_result.status == ExternalTextureAuthorityStatus::rejected &&
+                conflict_result.input == nullptr &&
+                conflict_result.diagnostics.front().code ==
+                    "external_texture_override_mismatch",
+            "solid-color precedence rejects a conflicting external request");
+}
+
+void deduplicatesAndClampsSolidColors(const std::filesystem::path& root) {
+    auto fixture = effectiveFixture(root);
+    fixture.grants.clear();
+    fixture.requests.clear();
+    fixture.model.materials.push_back(fixture.model.materials.front());
+    fixture.model.materials.back().name = "glass";
+    fixture.overrides.resize(2U);
+    MaterialTextureOverride first;
+    first.color = std::array<float, 4>{-1.0F, 1.25F, 0.5F, 0.0F};
+    fixture.overrides[0U].resources.clear();
+    fixture.overrides[0U].resources.emplace("txDiffuse", first);
+    fixture.overrides[1U].resources.emplace("txDiffuse", first);
+
+    auto result = prepare_effective_stock_scene_input(fixture.model, fixture.overrides, {}, {});
+    require(result.ok() && result.input->model.textures.size() == 2U &&
+                result.input->solid_color_bindings.size() == 2U &&
+                result.input->model.materials[0U].resources[0U].texture ==
+                    result.input->model.materials[1U].resources[0U].texture,
+            "equal colors in one workspace scope share one synthetic texture");
+    const auto& data = result.input->model.textures.back().data;
+    require(data[128U] == 128U && data[129U] == 255U && data[130U] == 0U && data[131U] == 0U,
+            "finite solid colors clamp before deterministic tie rounding");
+
+    fixture.model.textures.push_back({true, " __APEX_SOLID_COLOR_0 ", 0U, {}, 7U});
+    result = prepare_effective_stock_scene_input(fixture.model, fixture.overrides, {}, {});
+    require(result.ok() && result.input->model.textures.back().name != "__apex_solid_color_0",
+            "solid-color names avoid existing scoped texture collisions");
+
+    fixture.model.materials[1U].workspaceFileIndex = 8U;
+    result = prepare_effective_stock_scene_input(fixture.model, fixture.overrides, {}, {});
+    require(result.ok() && result.input->model.textures.size() == 4U &&
+                result.input->model.materials[0U].resources[0U].texture !=
+                    result.input->model.materials[1U].resources[0U].texture,
+            "equal colors in different workspace scopes retain separate textures");
+}
+
+void rejectsInvalidSolidColorsAtomically(const std::filesystem::path& root) {
+    auto fixture = effectiveFixture(root);
+    fixture.grants.clear();
+    fixture.requests.clear();
+    fixture.overrides.front().resources.at("txDiffuse").file.clear();
+
+    for (const float invalid : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(),
+                                -std::numeric_limits<float>::infinity()}) {
+        fixture.overrides.front().resources.at("txDiffuse").color = std::array<float, 4>{invalid, 0.0F, 0.0F, 1.0F};
+        const auto result = prepare_effective_stock_scene_input(fixture.model, fixture.overrides, {}, {});
+        require(result.status == ExternalTextureAuthorityStatus::invalid_request && result.input == nullptr &&
+                    result.diagnostics.front().code == "solid_color_non_finite",
+                "non-finite solid color fails atomically");
+    }
+
+    fixture.model.materials.front().resources.push_back(
+        {"txNormal", 22U, "normal.dds"});
+    MaterialTextureOverride external_override;
+    external_override.file = "missing.dds";
+    fixture.overrides.front().resources.emplace("txNormal",
+                                                external_override);
+    fixture.overrides.front().resources.at("txDiffuse").color =
+        std::array<float, 4>{
+            std::numeric_limits<float>::quiet_NaN(), 0.0F, 0.0F, 1.0F};
+    ExternalTextureRequest external = request("missing-grant", "missing.dds");
+    external.material_index = 0U;
+    external.workspace_file_index = 7U;
+    external.binding.slot = "txNormal";
+    const std::array<ExternalTextureRequest, 1U> external_requests = {
+        std::move(external)};
+    auto result = prepare_effective_stock_scene_input(
+        fixture.model, fixture.overrides, {}, external_requests);
+    require(result.status == ExternalTextureAuthorityStatus::invalid_request &&
+                result.input == nullptr &&
+                result.diagnostics.front().code ==
+                    "solid_color_non_finite",
+            "invalid solid color fails before an external grant is resolved");
+
+    fixture.overrides.front().resources.clear();
+    MaterialTextureOverride missing_bind;
+    missing_bind.color = std::array<float, 4>{0.1F, 0.2F, 0.3F, 1.0F};
+    fixture.overrides.front().resources.emplace("txMaps", missing_bind);
+    result = prepare_effective_stock_scene_input(fixture.model,
+                                                 fixture.overrides, {}, {});
+    require(result.status == ExternalTextureAuthorityStatus::invalid_request && result.input == nullptr &&
+                result.diagnostics.front().code == "solid_color_bind_point_missing",
+            "new solid-color slot requires an explicit bind point");
+
+    fixture.overrides.front().resources.at("txMaps").bind_point = 4U;
+    result = prepare_effective_stock_scene_input(fixture.model, fixture.overrides, {}, {});
+    require(result.ok() && result.input->model.materials.front().resources.back().slot == "txMaps" &&
+                result.input->model.materials.front().resources.back().textureId == 4U,
+            "new solid-color slot retains its explicit bind point");
+
+    fixture.overrides.front().resources.emplace(" TXMAPS ", fixture.overrides.front().resources.at("txMaps"));
+    result = prepare_effective_stock_scene_input(fixture.model, fixture.overrides, {}, {});
+    require(result.status == ExternalTextureAuthorityStatus::ambiguous && result.input == nullptr &&
+                result.diagnostics.front().code == "solid_color_override_collision",
+            "case-insensitive solid-color slot collision fails atomically");
+}
+
+void enforcesSolidColorEffectiveLimits(const std::filesystem::path& root) {
+    auto fixture = effectiveFixture(root);
+    fixture.grants.clear();
+    fixture.requests.clear();
+    auto& override_value = fixture.overrides.front().resources.at("txDiffuse");
+    override_value.file.clear();
+    override_value.color = std::array<float, 4>{0.1F, 0.2F, 0.3F, 1.0F};
+
+    ExternalTextureAuthorityLimits limits;
+    limits.max_total_effective_source_bytes = 131U;
+    auto result = prepare_effective_stock_scene_input(fixture.model, fixture.overrides, {}, {}, limits);
+    require(result.status == ExternalTextureAuthorityStatus::resource_limit && result.input == nullptr &&
+                result.diagnostics.front().code == "solid_color_effective_source_limit",
+            "solid-color DDS aggregate limit fails atomically");
+
+    limits = {};
+    limits.max_effective_textures = fixture.model.textures.size();
+    result = prepare_effective_stock_scene_input(fixture.model, fixture.overrides, {}, {}, limits);
+    require(result.status == ExternalTextureAuthorityStatus::resource_limit && result.input == nullptr &&
+                result.diagnostics.front().code == "solid_color_effective_texture_limit",
+            "solid-color texture count limit fails atomically");
+
+    limits = {};
+    limits.max_effective_texture_name_bytes = 1U;
+    result = prepare_effective_stock_scene_input(fixture.model, fixture.overrides, {}, {}, limits);
+    require(result.status == ExternalTextureAuthorityStatus::resource_limit && result.input == nullptr &&
+                result.diagnostics.front().code == "solid_color_effective_name_limit",
+            "solid-color name limit fails atomically");
+
+    fixture.model.materials.push_back(fixture.model.materials.front());
+    fixture.model.materials.back().name = "second";
+    fixture.overrides.resize(2U);
+    MaterialTextureOverride second;
+    second.color = std::array<float, 4>{0.9F, 0.8F, 0.7F, 1.0F};
+    fixture.overrides[1U].resources.emplace("txDiffuse", second);
+    limits = {};
+    limits.max_solid_colors = 1U;
+    result = prepare_effective_stock_scene_input(fixture.model, fixture.overrides,
+                                                 {}, {}, limits);
+    require(result.status == ExternalTextureAuthorityStatus::resource_limit &&
+                result.input == nullptr &&
+                result.diagnostics.front().code ==
+                    "solid_color_count_limit",
+            "solid-color override count limit fails atomically");
+
+    limits = {};
+    limits.max_total_effective_copy_bytes = 4096U;
+    result = prepare_effective_stock_scene_input(fixture.model,
+                                                 fixture.overrides, {}, {},
+                                                 limits);
+    require(result.ok(),
+            "bounded effective copy fixture fits before hostile growth");
+    fixture.overrides[1U].resources.emplace(
+        "txNormal",
+        MaterialTextureOverride{std::nullopt, std::string(8192U, 'x'), {},
+                                std::nullopt});
+    result = prepare_effective_stock_scene_input(fixture.model,
+                                                 fixture.overrides, {}, {},
+                                                 limits);
+    require(result.status == ExternalTextureAuthorityStatus::resource_limit &&
+                result.input == nullptr &&
+                result.diagnostics.front().code ==
+                    "external_texture_effective_copy_limit",
+            "unrelated override storage is bounded before the model copy");
+
+    fixture.overrides[1U].resources.erase("txNormal");
+    fixture.model.root.children.push_back({});
+    limits = {};
+    limits.max_effective_nodes = 1U;
+    result = prepare_effective_stock_scene_input(fixture.model,
+                                                 fixture.overrides, {}, {},
+                                                 limits);
+    require(result.status == ExternalTextureAuthorityStatus::resource_limit &&
+                result.input == nullptr &&
+                result.diagnostics.front().code ==
+                    "external_texture_effective_copy_limit",
+            "effective model node count is bounded before the model copy");
 }
 
 void rejectsEffectiveMalformedScopeAndCollisions(const std::filesystem::path& root) {
@@ -393,25 +692,21 @@ void rejectsEffectiveMalformedScopeAndCollisions(const std::filesystem::path& ro
     AssetSource malformed_source;
     malformed_source.addDirectory(root / "malformed", "malformed");
     malformed.grants = {{"car-grant", &malformed_source}};
-    auto result = prepare_effective_stock_scene_input(
-        malformed.model, malformed.overrides, malformed.grants, malformed.requests);
-    require(result.status == ExternalTextureAuthorityStatus::invalid_request &&
-                result.input == nullptr,
+    auto result =
+        prepare_effective_stock_scene_input(malformed.model, malformed.overrides, malformed.grants, malformed.requests);
+    require(result.status == ExternalTextureAuthorityStatus::invalid_request && result.input == nullptr,
             "truncated effective DDS fails atomically");
 
-    auto malformed_png = effectiveFixture(
-        root / "malformed-png", "textures/bad.png");
+    auto malformed_png = effectiveFixture(root / "malformed-png", "textures/bad.png");
     auto short_png = apex::tests::rgba8PngFixture({1U, 2U, 3U, 255U});
     short_png.pop_back();
     writeBytes(root / "malformed-png" / "textures/bad.png", short_png);
     AssetSource malformed_png_source;
     malformed_png_source.addDirectory(root / "malformed-png", "malformed-png");
     malformed_png.grants = {{"car-grant", &malformed_png_source}};
-    result = prepare_effective_stock_scene_input(
-        malformed_png.model, malformed_png.overrides,
-        malformed_png.grants, malformed_png.requests);
-    require(result.status == ExternalTextureAuthorityStatus::invalid_request &&
-                result.input == nullptr,
+    result = prepare_effective_stock_scene_input(malformed_png.model, malformed_png.overrides, malformed_png.grants,
+                                                 malformed_png.requests);
+    require(result.status == ExternalTextureAuthorityStatus::invalid_request && result.input == nullptr,
             "truncated effective PNG fails atomically");
 
     auto scoped = effectiveFixture(root / "scope");
@@ -419,10 +714,8 @@ void rejectsEffectiveMalformedScopeAndCollisions(const std::filesystem::path& ro
     scoped_source.addDirectory(root / "scope", "scope");
     scoped.grants = {{"car-grant", &scoped_source}};
     scoped.requests.front().workspace_file_index = 8U;
-    result = prepare_effective_stock_scene_input(
-        scoped.model, scoped.overrides, scoped.grants, scoped.requests);
-    require(result.status == ExternalTextureAuthorityStatus::rejected &&
-                result.input == nullptr,
+    result = prepare_effective_stock_scene_input(scoped.model, scoped.overrides, scoped.grants, scoped.requests);
+    require(result.status == ExternalTextureAuthorityStatus::rejected && result.input == nullptr,
             "workspace scope mismatch fails atomically");
 
     auto collision = effectiveFixture(root / "collision");
@@ -435,23 +728,19 @@ void rejectsEffectiveMalformedScopeAndCollisions(const std::filesystem::path& ro
     auto duplicate = collision.requests.front();
     duplicate.grant_id = "second";
     collision.requests.push_back(std::move(duplicate));
-    result = prepare_effective_stock_scene_input(
-        collision.model, collision.overrides, collision.grants, collision.requests);
-    require(result.status == ExternalTextureAuthorityStatus::ambiguous &&
-                result.input == nullptr,
+    result =
+        prepare_effective_stock_scene_input(collision.model, collision.overrides, collision.grants, collision.requests);
+    require(result.status == ExternalTextureAuthorityStatus::ambiguous && result.input == nullptr,
             "same material slot collision fails atomically");
 
     auto name_collision = effectiveFixture(root / "name-collision");
-    name_collision.model.textures.push_back(
-        {true, "__apex_external_image_0", 0U, {}, 7U});
+    name_collision.model.textures.push_back({true, "__apex_external_image_0", 0U, {}, 7U});
     AssetSource name_source;
     name_source.addDirectory(root / "name-collision", "name");
     name_collision.grants = {{"car-grant", &name_source}};
-    result = prepare_effective_stock_scene_input(
-        name_collision.model, name_collision.overrides,
-        name_collision.grants, name_collision.requests);
-    require(result.ok() && result.input->model.textures.back().name !=
-                "__apex_external_image_0",
+    result = prepare_effective_stock_scene_input(name_collision.model, name_collision.overrides, name_collision.grants,
+                                                 name_collision.requests);
+    require(result.ok() && result.input->model.textures.back().name != "__apex_external_image_0",
             "synthetic texture names avoid scoped table collisions");
 
     auto budget = effectiveFixture(root / "budget");
@@ -460,15 +749,13 @@ void rejectsEffectiveMalformedScopeAndCollisions(const std::filesystem::path& ro
     budget.grants = {{"car-grant", &budget_source}};
     ExternalTextureAuthorityLimits effective_limits;
     effective_limits.max_total_effective_source_bytes = 1U;
-    result = prepare_effective_stock_scene_input(
-        budget.model, budget.overrides, budget.grants, budget.requests,
-        effective_limits);
-    require(result.status == ExternalTextureAuthorityStatus::resource_limit &&
-                result.input == nullptr,
+    result = prepare_effective_stock_scene_input(budget.model, budget.overrides, budget.grants, budget.requests,
+                                                 effective_limits);
+    require(result.status == ExternalTextureAuthorityStatus::resource_limit && result.input == nullptr,
             "effective owned DDS aggregate limit fails atomically");
 }
 
-}  // namespace
+} // namespace
 
 int main() {
     const auto root = testRoot("all");
@@ -480,6 +767,11 @@ int main() {
         enforcesSourceAndDecodedLimits(root / "limits");
         materializesOwnedEffectiveScene(root / "effective");
         materializesOwnedPngEffectiveScene(root / "effective-png");
+        materializesMixedExternalAndSolidScene(root / "effective-mixed");
+        materializesExactSolidColorEffectiveScene(root / "effective-solid");
+        deduplicatesAndClampsSolidColors(root / "effective-solid-dedup");
+        rejectsInvalidSolidColorsAtomically(root / "effective-solid-invalid");
+        enforcesSolidColorEffectiveLimits(root / "effective-solid-limits");
         rejectsEffectiveMalformedScopeAndCollisions(root / "effective-cases");
         std::error_code cleanup;
         std::filesystem::remove_all(root, cleanup);

@@ -120,7 +120,9 @@ vertical slice is only the foundation.
   world-space preview noise until CSP's exact `txNoise` asset can be replaced portably.
   CSP replacement slots now
   resolve embedded textures, solid colors, and external DDS/PNG/JPEG/WebP files from
-  a user-selected car, track, or CSP asset folder. Procedural textures remain missing.
+  a user-selected car, track, or CSP asset folder. The C++ stock-scene bridge
+  now owns authorized external files and exact WebGL-compatible solid-color DDS
+  payloads before Vulkan or D3D12 allocation. Procedural textures remain missing.
   GrassFX now has a bounded authoring preview with selector evaluation, CPU-readable
   BC1/2/3 diffuse and `ksMultilayer` material-pass composition, CSP's continuous
   normalized-color/luminance threshold and stochastic acceptance, areas, shape

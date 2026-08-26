@@ -1640,35 +1640,57 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         render_options.suppressed_subtree_roots = suppressed_roots;
         render_options.activity_overrides = activity_overrides;
 
-        std::unique_ptr<render::ExternalTextureEffectiveStockSceneInput>
-            effective_scene;
+        std::unique_ptr<render::ExternalTextureEffectiveStockSceneInput> effective_scene;
         const formats::Kn5File* scene_model = &document.assembly.model;
-        std::span<const render::MaterialBindingOverrides> material_overrides =
-            request.overrides_by_material;
-        if (request.external_textures.has_value()) {
-            if (request.external_textures->requests.empty()) {
-                result.status = WorkspaceViewportStatus::invalid;
-                result.diagnostic = diagnostic(
-                    "workspace_viewport_external_texture_request_empty",
-                    "External texture viewport preparation requires at least one request");
-                return result;
+        std::span<const render::MaterialBindingOverrides> material_overrides = request.overrides_by_material;
+        const bool has_solid_color_overrides =
+            std::any_of(request.overrides_by_material.begin(), request.overrides_by_material.end(),
+                        [](const render::MaterialBindingOverrides& overrides) {
+                            return std::any_of(overrides.resources.begin(), overrides.resources.end(),
+                                               [](const auto& entry) { return entry.second.color.has_value(); });
+                        });
+        if (request.external_textures.has_value() || has_solid_color_overrides) {
+            std::span<const render::ExternalTextureGrant> grants;
+            std::span<const render::ExternalTextureRequest> requests;
+            render::ExternalTextureAuthorityLimits limits;
+            if (request.external_textures.has_value()) {
+                if (request.external_textures->requests.empty()) {
+                    result.status = WorkspaceViewportStatus::invalid;
+                    result.diagnostic = diagnostic("workspace_viewport_external_texture_request_empty",
+                                                   "External texture viewport preparation requires at least one "
+                                                   "request");
+                    return result;
+                }
+                grants = request.external_textures->grants;
+                requests = request.external_textures->requests;
+                limits = request.external_textures->limits;
             }
             auto prepared_effective = render::prepare_effective_stock_scene_input(
-                document.assembly.model, request.overrides_by_material,
-                request.external_textures->grants,
-                request.external_textures->requests,
-                request.external_textures->limits);
+                document.assembly.model, request.overrides_by_material, grants, requests, limits);
             if (!prepared_effective.ok()) {
                 result.status = externalTextureStatus(prepared_effective.status);
                 if (prepared_effective.diagnostics.empty()) {
-                    result.diagnostic = diagnostic(
-                        "workspace_viewport_external_texture_failed",
-                        "External texture viewport preparation failed without a diagnostic");
+                    result.diagnostic = diagnostic("workspace_viewport_external_texture_failed",
+                                                   "External texture viewport preparation failed "
+                                                   "without a diagnostic");
                 } else {
-                    result.diagnostic = {
-                        prepared_effective.diagnostics.front().code,
-                        prepared_effective.diagnostics.front().message};
+                    result.diagnostic = {prepared_effective.diagnostics.front().code,
+                                         prepared_effective.diagnostics.front().message};
                 }
+                return result;
+            }
+            const auto residual_resource = std::find_if(
+                prepared_effective.input->overrides_by_material.begin(),
+                prepared_effective.input->overrides_by_material.end(),
+                [](const render::MaterialBindingOverrides& overrides) {
+                    return !overrides.resources.empty();
+                });
+            if (residual_resource !=
+                prepared_effective.input->overrides_by_material.end()) {
+                result.status = WorkspaceViewportStatus::unsupported;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_texture_override_unresolved",
+                    "A texture override remains unresolved after effective scene preparation");
                 return result;
             }
             effective_scene = std::move(prepared_effective.input);

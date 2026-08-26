@@ -2785,11 +2785,22 @@ It also sets `ksSpecularEXP` to 1. For recognized surface materials, it reads
 the first component of the ambient, diffuse, and specular colors. Values of
 `ksSpecularEXP` that are less than 1 become 10.
 
+The native importer sends these color components to `Material::setVar(float)`
+at `0x100408B6`. It does not create a one-pixel texture. `Material::setTexture`
+at `0x1004082B` binds an existing texture. The native buffer path at
+`0x10041300` receives bytes from the KN5 loader only.
+
 ksEditor loops through all 32 entries in `FbxLayerElement::sTextureChannelNames`.
 It accepts only `FbxFileTexture` objects and reduces each path to a basename.
 It searches the configured folders and the automatic sibling `texture` folder.
 The first file found fills `txDiffuse`. Later channels cannot replace this resource.
 The importer never requests `txNormal`.
+
+The WebGL and FBX adapters use a separate compatibility path for missing image
+files and CSP color resources. This path creates a 132-byte legacy BGRA8 DDS.
+It clamps and rounds RGBA channels before it writes the BGRA pixel. The native
+C++ stock-scene bridge now owns this exact payload for Vulkan and D3D12. This
+behavior is not an approximation of the ksEditor FBX importer.
 
 Apex keeps the explicit FBX diffuse channel as `txDiffuse`. For static materials,
 it maps `normalMap` to `txNormal` and selects `ksPerPixelNM`. Unresolved normal

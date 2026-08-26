@@ -610,15 +610,76 @@ void materializes_external_texture_before_backend_preparation() {
 
         const std::vector<std::byte> expected = {
             std::byte{7U}, std::byte{19U}, std::byte{31U}, std::byte{255U}};
-        require(prepared.ok() &&
-                    std::find(device.created_texture_bytes.begin(),
-                              device.created_texture_bytes.end(), expected) !=
-                        device.created_texture_bytes.end(),
-                "external DDS is copied and uploaded through each backend contract");
-        require(overrides.front().resources.at("txDiffuse").file ==
-                    "override.dds",
+        require(prepared.ok() && std::find(device.created_texture_bytes.begin(), device.created_texture_bytes.end(),
+                                           expected) != device.created_texture_bytes.end(),
+                "external DDS is copied and uploaded through each backend "
+                "contract");
+        require(overrides.front().resources.at("txDiffuse").file == "override.dds",
                 "external texture preparation does not mutate caller overrides");
     }
+}
+
+void materializes_solid_color_before_backend_preparation() {
+    for (const auto backend : {Backend::Vulkan, Backend::D3D12}) {
+        auto value = fixture();
+        if (backend == Backend::D3D12) {
+            for (auto& module : value.modules) {
+                module.format = PipelineShaderFormat::dxil;
+                module.bytes = dxbc_shader_bytes();
+            }
+        }
+
+        std::vector<MaterialBindingOverrides> overrides(1U);
+        MaterialTextureOverride override_value;
+        override_value.color = std::array<float, 4>{0.125F, 0.5F, 0.75F, 1.0F};
+        overrides.front().resources.emplace("txDiffuse", override_value);
+
+        auto request = request_for(value);
+        request.overrides_by_material = overrides;
+        FakeDevice device(backend);
+        auto prepared = apex::app::prepareWorkspaceViewport(device, value.document, request);
+
+        const std::vector<std::byte> expected = {std::byte{32U}, std::byte{128U}, std::byte{191U}, std::byte{255U}};
+        require(prepared.ok() && std::find(device.created_texture_bytes.begin(), device.created_texture_bytes.end(),
+                                           expected) != device.created_texture_bytes.end(),
+                "solid color is decoded and uploaded through each backend contract");
+        require(overrides.front().resources.at("txDiffuse").color == override_value.color,
+                "solid-color preparation does not mutate caller overrides");
+    }
+}
+
+void rejects_invalid_solid_color_before_gpu_allocation() {
+    auto value = fixture();
+    std::vector<MaterialBindingOverrides> overrides(1U);
+    MaterialTextureOverride override_value;
+    override_value.color = std::array<float, 4>{std::numeric_limits<float>::quiet_NaN(), 0.0F, 0.0F, 1.0F};
+    overrides.front().resources.emplace("txDiffuse", override_value);
+
+    auto request = request_for(value);
+    request.overrides_by_material = overrides;
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(device, value.document, request);
+    require(!prepared.ok() && prepared.status == apex::app::WorkspaceViewportStatus::invalid &&
+                prepared.diagnostic.code == "solid_color_non_finite" && device.texture_calls == 0U &&
+                device.depth_calls == 0U && device.buffer_calls == 0U,
+            "non-finite solid color fails before GPU allocation");
+
+    overrides.front().resources.at("txDiffuse").color =
+        std::array<float, 4>{0.25F, 0.5F, 0.75F, 1.0F};
+    MaterialTextureOverride unresolved;
+    unresolved.file = "not-authorized.dds";
+    overrides.front().resources.emplace("txNormal", unresolved);
+    request.overrides_by_material = overrides;
+    prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(!prepared.ok() &&
+                prepared.status ==
+                    apex::app::WorkspaceViewportStatus::unsupported &&
+                prepared.diagnostic.code ==
+                    "workspace_viewport_texture_override_unresolved" &&
+                device.texture_calls == 0U && device.depth_calls == 0U &&
+                device.buffer_calls == 0U,
+            "unresolved resource override fails before GPU allocation");
 }
 
 void rejects_invalid_external_textures_before_gpu_allocation() {
@@ -630,8 +691,7 @@ void rejects_invalid_external_textures_before_gpu_allocation() {
 
     apex::assets::AssetSource source;
     source.addAcdArchive(texture_archive({1U, 2U, 3U}));
-    const std::array<ExternalTextureGrant, 1U> grants = {
-        ExternalTextureGrant{"viewport", &source}};
+    const std::array<ExternalTextureGrant, 1U> grants = {ExternalTextureGrant{"viewport", &source}};
     std::array<ExternalTextureRequest, 1U> external_requests{};
     auto& external = external_requests.front();
     external.grant_id = "viewport";
@@ -643,44 +703,29 @@ void rejects_invalid_external_textures_before_gpu_allocation() {
 
     auto request = request_for(value);
     request.overrides_by_material = overrides;
-    request.external_textures = apex::app::WorkspaceViewportExternalTextureRequest{
-        grants, external_requests, {}};
+    request.external_textures = apex::app::WorkspaceViewportExternalTextureRequest{grants, external_requests, {}};
     FakeDevice device;
-    auto malformed = apex::app::prepareWorkspaceViewport(
-        device, value.document, request);
-    require(!malformed.ok() &&
-                malformed.status == apex::app::WorkspaceViewportStatus::invalid &&
-                malformed.diagnostic.code ==
-                    "external_texture_decode_invalid_header" &&
-                device.texture_calls == 0U && device.depth_calls == 0U &&
-                device.buffer_calls == 0U,
+    auto malformed = apex::app::prepareWorkspaceViewport(device, value.document, request);
+    require(!malformed.ok() && malformed.status == apex::app::WorkspaceViewportStatus::invalid &&
+                malformed.diagnostic.code == "external_texture_decode_invalid_header" && device.texture_calls == 0U &&
+                device.depth_calls == 0U && device.buffer_calls == 0U,
             "truncated external DDS fails before GPU allocation");
 
     apex::assets::AssetSource scoped_source;
     scoped_source.addAcdArchive(texture_archive(diffuse_dds()));
-    const std::array<ExternalTextureGrant, 1U> scoped_grants = {
-        ExternalTextureGrant{"viewport", &scoped_source}};
+    const std::array<ExternalTextureGrant, 1U> scoped_grants = {ExternalTextureGrant{"viewport", &scoped_source}};
     external.workspace_file_index = 1U;
-    request.external_textures = apex::app::WorkspaceViewportExternalTextureRequest{
-        scoped_grants, external_requests, {}};
-    auto wrong_scope = apex::app::prepareWorkspaceViewport(
-        device, value.document, request);
-    require(!wrong_scope.ok() &&
-                wrong_scope.diagnostic.code ==
-                    "external_texture_workspace_scope_mismatch" &&
-                device.texture_calls == 0U && device.depth_calls == 0U &&
-                device.buffer_calls == 0U,
+    request.external_textures =
+        apex::app::WorkspaceViewportExternalTextureRequest{scoped_grants, external_requests, {}};
+    auto wrong_scope = apex::app::prepareWorkspaceViewport(device, value.document, request);
+    require(!wrong_scope.ok() && wrong_scope.diagnostic.code == "external_texture_workspace_scope_mismatch" &&
+                device.texture_calls == 0U && device.depth_calls == 0U && device.buffer_calls == 0U,
             "external texture scope mismatch fails before GPU allocation");
 
-    request.external_textures =
-        apex::app::WorkspaceViewportExternalTextureRequest{grants, {}, {}};
-    auto empty = apex::app::prepareWorkspaceViewport(
-        device, value.document, request);
-    require(!empty.ok() &&
-                empty.diagnostic.code ==
-                    "workspace_viewport_external_texture_request_empty" &&
-                device.texture_calls == 0U && device.depth_calls == 0U &&
-                device.buffer_calls == 0U,
+    request.external_textures = apex::app::WorkspaceViewportExternalTextureRequest{grants, {}, {}};
+    auto empty = apex::app::prepareWorkspaceViewport(device, value.document, request);
+    require(!empty.ok() && empty.diagnostic.code == "workspace_viewport_external_texture_request_empty" &&
+                device.texture_calls == 0U && device.depth_calls == 0U && device.buffer_calls == 0U,
             "empty external texture handoff fails before GPU allocation");
 }
 
@@ -4647,11 +4692,9 @@ void rejects_frame_mismatch_and_preserves_present_atomicity() {
 
     device.unsupported_draw = false;
     frame.camera.clip_space = CameraClipSpace::d3d12;
-    status =
-        prepared.viewport->drawAndPresent(device, target, frame, diagnostic);
+    status = prepared.viewport->drawAndPresent(device, target, frame, diagnostic);
     require(status == WorkspaceViewportFrameStatus::invalid &&
-                diagnostic.code == "workspace_viewport_camera_clip_space" &&
-                device.present_calls == 0U,
+                diagnostic.code == "workspace_viewport_camera_clip_space" && device.present_calls == 0U,
             "wrong backend camera convention fails before draw and present");
 }
 
@@ -4661,6 +4704,8 @@ int main() {
     try {
         evaluates_bounded_workspace_lighting();
         materializes_external_texture_before_backend_preparation();
+        materializes_solid_color_before_backend_preparation();
+        rejects_invalid_solid_color_before_gpu_allocation();
         rejects_invalid_external_textures_before_gpu_allocation();
         opens_and_draws();
         draws_four_sample_viewport_through_retained_resolve();
@@ -4695,7 +4740,7 @@ int main() {
         rejects_frame_mismatch_and_preserves_present_atomicity();
         std::cout << "workspace_viewport_tests: ok\n";
         return 0;
-    } catch (const std::exception &error) {
+    } catch (const std::exception& error) {
         std::cerr << "workspace_viewport_tests: " << error.what() << '\n';
         return 1;
     }
