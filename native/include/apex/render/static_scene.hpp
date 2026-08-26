@@ -45,6 +45,10 @@ struct StaticSceneResourceLimits {
     // records. This limit is separate from the portable material table.
     std::uint64_t max_total_stock_vulkan_source_constant_bytes =
         32ULL * 1024ULL * 1024ULL;
+    // Installed D3D12 native draws also own five aligned records per packet,
+    // including a private mutable b4 allocation.
+    std::uint64_t max_total_stock_d3d12_native_constant_bytes =
+        32ULL * 1024ULL * 1024ULL;
     // One D3D12/Vulkan-aligned frame record is allocated when a prepared
     // pipeline declares the portable frame binding.
     std::uint64_t max_total_frame_constant_bytes = portable_frame_buffer_view_bytes;
@@ -90,6 +94,19 @@ struct StaticScenePrepareRequest {
     // active video/render settings without changing shader authority.
     StockKsPerPixelNativeSamplerSettings
         stock_vulkan_source_sampler_settings{};
+    // Optional retained installed-DXBC owners. The packet-index table follows
+    // the Vulkan source table contract and uses the same invalid sentinel for
+    // portable packets. Static-scene preparation clones one validated program
+    // into a distinct mutable native resource bundle for every selected draw.
+    std::span<const std::shared_ptr<const
+        ValidatedStockKsPerPixelNativeProgram>>
+        stock_d3d12_native_programs{};
+    std::span<const std::uint32_t>
+        stock_d3d12_native_program_by_packet{};
+    std::span<const StockKsPerPixelMaterialConstants>
+        stock_d3d12_native_material_constants_by_material{};
+    StockKsPerPixelNativeSamplerSettings
+        stock_d3d12_native_sampler_settings{};
     // This optional table uses the same material order. A used pipeline that
     // declares the portable constants binding requires the complete table.
     // Preparation copies each used value into an owned 256-byte GPU record.
@@ -148,7 +165,7 @@ struct StaticSceneFrameDescription {
     // ordered batch is recorded. It always derives the record's camera
     // position from camera.position.
     std::optional<KsPerPixelFrameConstants> frame_constants;
-    struct StockVulkanSourceFrame {
+    struct StockNativeFrame {
         StockKsPerPixelCameraConstants camera{};
         StockKsPerPixelLightingConstants lighting{};
         StockDirectionalShadowReceiverConstants shadow_constants{};
@@ -156,10 +173,15 @@ struct StaticSceneFrameDescription {
                    stock_ks_per_pixel_shadow_cascade_count>
             shadow_maps{};
     };
+    using StockVulkanSourceFrame = StockNativeFrame;
     // Complete recovered-native frame ABI for retained source-equivalent
     // packets. Portable frame constants are never reinterpreted as these
     // records.
     std::optional<StockVulkanSourceFrame> stock_vulkan_source_frame;
+    // Complete recovered-native frame ABI for installed D3D12 packets. It is
+    // separate from the Vulkan source field so backend authority cannot be
+    // inferred or accidentally crossed.
+    std::optional<StockNativeFrame> stock_d3d12_native_frame;
     // Optional retained maps for pipelines that declare the directional
     // receiver extension. The maps must come from the same device and remain
     // alive through this synchronous call. Caster execution remains an
@@ -218,6 +240,13 @@ public:
     }
     [[nodiscard]] bool requires_stock_vulkan_source_frame() const noexcept {
         return !stock_vulkan_source_programs_.empty();
+    }
+    [[nodiscard]] std::size_t stock_d3d12_native_program_count() const
+        noexcept {
+        return stock_d3d12_native_programs_.size();
+    }
+    [[nodiscard]] bool requires_stock_d3d12_native_frame() const noexcept {
+        return !stock_d3d12_native_programs_.empty();
     }
     [[nodiscard]] std::size_t unique_geometry_count() const noexcept {
         return uploads_.size() + skinned_uploads_.size();
@@ -293,6 +322,12 @@ private:
     std::vector<std::uint32_t> stock_vulkan_source_program_for_packet_;
     std::vector<std::unique_ptr<StockKsPerPixelNativeConstantBuffers>>
         stock_vulkan_source_constants_for_packet_;
+    std::vector<std::shared_ptr<const
+        ValidatedStockKsPerPixelNativeProgram>>
+        stock_d3d12_native_programs_;
+    std::vector<std::uint32_t> stock_d3d12_native_program_for_packet_;
+    std::vector<std::unique_ptr<StockKsPerPixelNativeDrawResources>>
+        stock_d3d12_native_resources_for_packet_;
     std::vector<PacketTextureIndices> textures_for_packet_;
     std::vector<std::size_t> material_constant_for_packet_;
     std::vector<std::size_t> stock_shadow_constant_for_material_;

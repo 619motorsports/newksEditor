@@ -680,6 +680,9 @@ private:
     create_validated_stock_ks_per_pixel_native_program(
         StockShaderContainer container,
         StockKsPerPixelVariant variant);
+    friend StockKsPerPixelNativeProgramResult
+    clone_validated_stock_ks_per_pixel_native_program(
+        const ValidatedStockKsPerPixelNativeProgram& program);
 
     explicit ValidatedStockKsPerPixelNativeProgram(
         StockShaderContainer container,
@@ -707,6 +710,13 @@ struct StockKsPerPixelNativeProgramResult {
 create_validated_stock_ks_per_pixel_native_program(
     StockShaderContainer container,
     StockKsPerPixelVariant variant);
+
+// Produce a separately owned proof for another per-draw native resource
+// bundle. The complete container gate is repeated so callers never receive a
+// mutable copy of the validated package internals.
+[[nodiscard]] StockKsPerPixelNativeProgramResult
+clone_validated_stock_ks_per_pixel_native_program(
+    const ValidatedStockKsPerPixelNativeProgram& program);
 
 struct StockKsPerPixelPixelInput {
     std::array<float, 3U> interpolated_normal{};

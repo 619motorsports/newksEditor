@@ -846,6 +846,13 @@ create_validated_stock_ks_per_pixel_native_program(
                         std::move(container), variant)};
 }
 
+StockKsPerPixelNativeProgramResult
+clone_validated_stock_ks_per_pixel_native_program(
+    const ValidatedStockKsPerPixelNativeProgram& program) {
+    return create_validated_stock_ks_per_pixel_native_program(
+        program.container_, program.variant_);
+}
+
 StockKsPerPixelEvaluationResult evaluate_stock_ks_per_pixel(
     const StockKsPerPixelPixelInput& input,
     const StockKsPerPixelLightingConstants& lighting,

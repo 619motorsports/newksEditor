@@ -1357,6 +1357,10 @@ public:
         const noexcept {
         return *constant_buffers_;
     }
+    [[nodiscard]] StockKsPerPixelNativeConstantBuffers& constant_buffers()
+        noexcept {
+        return *constant_buffers_;
+    }
     [[nodiscard]] const StockKsPerPixelNativeSamplers& samplers() const noexcept {
         return *samplers_;
     }

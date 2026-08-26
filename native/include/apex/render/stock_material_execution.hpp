@@ -49,6 +49,18 @@ enum class BuiltinVulkanStockSourceSelector : std::uint8_t {
     ks_per_pixel,
 };
 
+enum class BuiltinD3D12StockNativeSelector : std::uint8_t {
+    disabled,
+    ks_per_pixel_base,
+};
+
+struct StockMaterialD3D12NativeProgram {
+    // Exact stock shader-family key. The first native batch slice accepts
+    // only ksPerPixel paired with a validated base package.
+    std::string key;
+    std::shared_ptr<const ValidatedStockKsPerPixelNativeProgram> program;
+};
+
 struct StockMaterialExecutionRequest {
     const formats::Kn5File* model = nullptr;
     const apex::scene::SceneSnapshot* scene = nullptr;
@@ -68,6 +80,16 @@ struct StockMaterialExecutionRequest {
         BuiltinVulkanStockSourceSelector::disabled;
     StockKsPerPixelNativeSamplerSettings
         builtin_vulkan_source_sampler_settings{};
+    // Opt-in installed-DXBC execution for homogeneous opaque static
+    // ksPerPixel scenes on D3D12. Matching caller modules remain
+    // authoritative. The validated package owner is cloned into one mutable
+    // b0-b4 resource bundle per selected packet by StaticSceneResources.
+    BuiltinD3D12StockNativeSelector builtin_d3d12_native =
+        BuiltinD3D12StockNativeSelector::disabled;
+    std::span<const StockMaterialD3D12NativeProgram>
+        builtin_d3d12_native_programs{};
+    StockKsPerPixelNativeSamplerSettings
+        builtin_d3d12_native_sampler_settings{};
     // Empty means no overrides. Otherwise this table must match model
     // material order. External/solid-color resource overrides are rejected
     // because StaticSceneResources resolves KN5 texture ownership only.
@@ -99,7 +121,7 @@ struct StockMaterialExecutionResult {
 // paths use explicit PipelineProgram values. Build one resolved 80-byte
 // material record per used material, then synchronously prepare the static
 // scene. Supported shader families are
-// ksPerPixel, ksSkinnedMesh, ksPerPixelNM, ksPerPixelMultiMap,
+// ksPerPixel, ksPerPixelAT, ksSkinnedMesh, ksPerPixelNM, ksPerPixelMultiMap,
 // ksPerPixelMultiMap_AT, ksPerPixelMultiMap_NMDetail, and
 // ksPerPixelMultiMap_AT_NMDetail. A bounded dirt-zero stage from
 // ksPerPixelMultiMap_damage_dirt is also supported. This stage does not claim

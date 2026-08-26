@@ -1,5 +1,7 @@
 #include "apex/render/device.hpp"
 #include "apex/render/draw_packet.hpp"
+#include "apex/render/static_scene.hpp"
+#include "apex/render/stock_material_execution.hpp"
 #include "../src/render/d3d12_stock_ks_per_pixel_status.hpp"
 
 #include <algorithm>
@@ -164,13 +166,17 @@ public:
     }
     [[nodiscard]] BufferUpdateResult update_buffer(
         Buffer&, std::uint64_t,
-        std::span<const std::byte>) override {
-        return {BufferStatus::unsupported, {"unused", "unused"}};
+        std::span<const std::byte> data) override {
+        ++buffer_update_calls;
+        updated_buffers.emplace_back(data.begin(), data.end());
+        return {BufferStatus::ready, {}};
     }
     [[nodiscard]] TextureResult create_texture(
-        const TextureDescription&,
+        const TextureDescription& description,
         const TextureUploadPlan&) override {
-        return {TextureStatus::unsupported, {"unused", "unused"}, nullptr};
+        return {TextureStatus::ready, {},
+                std::make_unique<FakeNativeTexture>(info_.backend,
+                                                    description)};
     }
     [[nodiscard]] TextureUpdateResult update_texture(
         Texture&, const TextureUploadPlan&) override {
@@ -220,6 +226,29 @@ public:
                 std::make_unique<FakeShaderModule>(module_backend,
                                                    module_info)};
     }
+    [[nodiscard]] IndexedStaticMeshBatchResult
+    draw_indexed_static_mesh_batch_and_readback(
+        Texture& target,
+        const IndexedStaticMeshBatchDescription& batch) override {
+        Diagnostic diagnostic;
+        const IndexedStaticMeshBatchStatus status =
+            validate_indexed_static_mesh_batch_description(target, batch,
+                                                           diagnostic);
+        if (status != IndexedStaticMeshBatchStatus::ready)
+            return {status, std::move(diagnostic), {}};
+        ++batch_calls;
+        native_draws = 0U;
+        native_resource_owners.clear();
+        for (const IndexedStaticMeshDrawRequest& draw : batch.draws) {
+            if (draw.shader_authority !=
+                IndexedShaderAuthority::explicit_stock_ks_per_pixel_native)
+                continue;
+            ++native_draws;
+            native_resource_owners.push_back(
+                draw.stock_ks_per_pixel_native->resources);
+        }
+        return {IndexedStaticMeshBatchStatus::ready, {}, {std::byte{0x7f}}};
+    }
     void wait_idle() noexcept override {}
 
     std::size_t shader_calls = 0U;
@@ -228,6 +257,9 @@ public:
     std::size_t buffer_fail_call = 0U;
     std::size_t sampler_calls = 0U;
     std::size_t sampler_fail_call = 0U;
+    std::size_t buffer_update_calls = 0U;
+    std::size_t batch_calls = 0U;
+    std::size_t native_draws = 0U;
     bool wrong_stage = false;
     bool wrong_format = false;
     bool wrong_backend = false;
@@ -237,7 +269,10 @@ public:
     std::vector<std::size_t> sizes;
     std::vector<BufferDescription> buffer_descriptions;
     std::vector<std::vector<std::byte>> initial_buffers;
+    std::vector<std::vector<std::byte>> updated_buffers;
     std::vector<SamplerDescription> sampler_descriptions;
+    std::vector<const StockKsPerPixelNativeDrawResources*>
+        native_resource_owners;
 
 private:
     DeviceInfo info_{};
@@ -1261,6 +1296,172 @@ ValidatedStockKsPerPixelNativeProgram validated_program_fixture() {
         complete_native_container_fixture(), StockKsPerPixelVariant::base);
     require(result.ok(), "native shader allocation fixture passes the gate");
     return std::move(*result.program);
+}
+
+void clones_validated_native_programs_without_aliasing_mutable_state() {
+    const auto original = validated_program_fixture();
+    auto cloned = clone_validated_stock_ks_per_pixel_native_program(original);
+    require(cloned.ok() && cloned.program.has_value(),
+            "validated native program clone passes the complete gate");
+    require(cloned.program->variant() == original.variant() &&
+                cloned.program->vertex_shader().size() ==
+                    original.vertex_shader().size() &&
+                cloned.program->pixel_shader().size() ==
+                    original.pixel_shader().size() &&
+                std::equal(cloned.program->vertex_shader().begin(),
+                           cloned.program->vertex_shader().end(),
+                           original.vertex_shader().begin()) &&
+                std::equal(cloned.program->pixel_shader().begin(),
+                           cloned.program->pixel_shader().end(),
+                           original.pixel_shader().begin()),
+            "native clone preserves the exact validated DXBC payloads");
+}
+
+void executes_a_validated_native_program_through_the_static_scene_batch() {
+    FakeShaderDevice device(Backend::D3D12);
+
+    apex::formats::Kn5File model;
+    model.materials.resize(1U);
+    model.materials[0].name = "body";
+    model.materials[0].shader = "ksPerPixel";
+    model.materials[0].properties.push_back(
+        {"fresnelMaxLevel", 0.0F, {}, {}, {}});
+    model.materials[0].resources.push_back(
+        {"txDiffuse", 0U, "body.dds"});
+    model.textures.push_back(
+        {true, "body.dds", 4U, {}, std::nullopt});
+    model.root.type = 1U;
+    model.root.kind = "node";
+    model.root.name = "ROOT";
+    apex::formats::Kn5Node mesh;
+    mesh.type = 2U;
+    mesh.kind = "mesh";
+    mesh.name = "BODY";
+    mesh.materialId = 0U;
+    mesh.vertexStride = 11U;
+    mesh.vertices.resize(33U, 0.0F);
+    mesh.vertices[0U] = -0.5F;
+    mesh.vertices[11U] = 0.5F;
+    mesh.vertices[23U] = 0.5F;
+    mesh.indices = {0U, 1U, 2U};
+    model.root.children.push_back(std::move(mesh));
+
+    apex::scene::SceneSnapshot scene;
+    (void)scene.add_material(
+        {"body", "ksPerPixel", apex::scene::BlendMode::opaque});
+    apex::scene::SceneNode root;
+    root.name = "ROOT";
+    const apex::scene::NodeId root_id = scene.add_node(std::move(root));
+    apex::scene::SceneNode node;
+    node.name = "BODY";
+    node.kind = apex::scene::NodeKind::mesh;
+    node.material = 0U;
+    const apex::scene::NodeId node_id =
+        scene.add_node(std::move(node), root_id);
+
+    DrawPacket packet;
+    packet.node = node_id;
+    packet.material = 0U;
+    packet.primitive = DrawPrimitiveKind::static_mesh;
+    packet.vertex_count = 3U;
+    packet.index_count = 3U;
+    packet.vertex_stride_floats = 11U;
+    packet.material_profile.shader = "ksPerPixel";
+    packet.resources.push_back({"txDiffuse", 0U, 0U, "body.dds"});
+    const std::array<DrawPacket, 1U> packets = {packet};
+
+    auto native_owner =
+        std::make_shared<const ValidatedStockKsPerPixelNativeProgram>(
+            validated_program_fixture());
+    const std::array<StockMaterialD3D12NativeProgram, 1U> native_programs = {
+        StockMaterialD3D12NativeProgram{"ksPerPixel", native_owner}};
+    StockMaterialExecutionRequest request;
+    request.model = &model;
+    request.scene = &scene;
+    request.packets = packets;
+    request.builtin_d3d12_native =
+        BuiltinD3D12StockNativeSelector::ks_per_pixel_base;
+    request.builtin_d3d12_native_programs = native_programs;
+    request.targets.colors.push_back(
+        {PipelineRenderTargetFormat::rgba8_unorm, 1U});
+    request.targets.has_depth = true;
+    request.targets.depth =
+        {PipelineRenderTargetFormat::depth32_float, 1U};
+
+    auto prepared = prepare_stock_material_execution(device, request);
+    require(prepared.ok() && prepared.resources->draw_count() == 1U &&
+                prepared.resources->stock_d3d12_native_program_count() == 1U &&
+                prepared.resources->requires_stock_d3d12_native_frame(),
+            prepared.diagnostic.code.empty()
+                ? "native D3D12 stock scene preparation"
+                : prepared.diagnostic.code.c_str());
+    require(device.shader_calls == 2U && device.buffer_calls == 7U &&
+                device.sampler_calls == 2U,
+            "scene preparation allocates geometry plus one private native resource bundle");
+
+    CameraFrameRequest camera_request;
+    camera_request.eye = {0.0F, 0.0F, 2.0F};
+    camera_request.target = {0.0F, 0.0F, 0.0F};
+    camera_request.aspect = 1.0F;
+    camera_request.near_plane = 0.1F;
+    camera_request.far_plane = 100.0F;
+    camera_request.clip_space = CameraClipSpace::d3d12;
+    const CameraFrameResult camera = build_camera_frame(camera_request);
+    require(camera.ok(), "native scene camera frame");
+
+    const TextureDescription sampled_description{
+        1U, 1U, 1U, 1U, TextureFormat::rgba8_unorm,
+        TextureUsage::sampled, TextureMemory::device_local,
+        TextureMutability::immutable};
+    FakeNativeTexture diffuse(Backend::D3D12, sampled_description);
+    const std::array<const Texture*, 1U> textures = {&diffuse};
+    std::array<FakeNativeDepth, 3U> shadow_maps = {
+        FakeNativeDepth(Backend::D3D12,
+                        {32U, 32U, 1U, DepthAttachmentFormat::d32_float, true}),
+        FakeNativeDepth(Backend::D3D12,
+                        {32U, 32U, 1U, DepthAttachmentFormat::d32_float, true}),
+        FakeNativeDepth(Backend::D3D12,
+                        {32U, 32U, 1U, DepthAttachmentFormat::d32_float, true})};
+    FakeNativeDepth depth(
+        Backend::D3D12,
+        {16U, 16U, 1U, DepthAttachmentFormat::d32_float, false});
+    FakeNativeTexture target(
+        Backend::D3D12,
+        {16U, 16U, 1U, 1U, TextureFormat::rgba8_unorm,
+         TextureUsage::color_attachment | TextureUsage::transfer_source,
+         TextureMemory::device_local, TextureMutability::mutable_data});
+
+    StaticSceneFrameDescription::StockNativeFrame native_frame;
+    native_frame.camera = make_stock_ks_per_pixel_camera_constants(
+        camera.frame->view, camera.frame->projection,
+        apex::scene::identity_matrix, {0.0F, 0.0F, 2.0F}, 0.1F,
+        100.0F, camera.frame->fov_radians);
+    native_frame.lighting.light_direction = {0.0F, -1.0F, 0.0F};
+    native_frame.shadow_constants =
+        make_stock_directional_shadow_receiver_constants(
+            {apex::scene::identity_matrix, apex::scene::identity_matrix,
+             apex::scene::identity_matrix},
+            {0.0F, 0.0F, 0.0F}, 32U);
+    native_frame.shadow_maps = {
+        &shadow_maps[0], &shadow_maps[1], &shadow_maps[2]};
+    StaticSceneFrameDescription frame;
+    frame.camera = *camera.frame;
+    frame.depth_attachment = &depth;
+    frame.clear_depth = true;
+    frame.textures_by_global_index = textures;
+    frame.stock_d3d12_native_frame = native_frame;
+
+    const IndexedStaticMeshBatchResult drawn =
+        prepared.resources->draw_and_readback(device, target, frame);
+    require(drawn.ok() && device.batch_calls == 1U &&
+                device.native_draws == 1U &&
+                device.native_resource_owners.size() == 1U &&
+                device.native_resource_owners[0U] != nullptr &&
+                device.native_resource_owners[0U]->ready() &&
+                device.buffer_update_calls == 4U,
+            drawn.diagnostic.code.empty()
+                ? "native static scene submits one exact D3D12 authority draw"
+                : drawn.diagnostic.code.c_str());
 }
 
 void allocates_only_validated_native_d3d12_shader_objects() {
@@ -2303,6 +2504,8 @@ int main() {
         validates_exact_bounded_stage_signatures();
         gates_the_complete_native_program_before_backend_allocation();
         owns_the_validated_native_program_after_the_gate();
+        clones_validated_native_programs_without_aliasing_mutable_state();
+        executes_a_validated_native_program_through_the_static_scene_batch();
         allocates_only_validated_native_d3d12_shader_objects();
         allocates_exact_native_d3d12_constant_buffer_views();
         allocates_exact_native_stock_samplers();

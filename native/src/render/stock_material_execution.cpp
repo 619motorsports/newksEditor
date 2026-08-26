@@ -111,6 +111,62 @@ namespace {
     return family;
 }
 
+[[nodiscard]] const StockMaterialD3D12NativeProgram* find_d3d12_native_program(
+    std::span<const StockMaterialD3D12NativeProgram> programs,
+    std::string_view shader) {
+    const std::string shader_key = canonical(shader);
+    for (const StockMaterialD3D12NativeProgram& program : programs)
+        if (canonical(program.key) == shader_key) return &program;
+    return nullptr;
+}
+
+[[nodiscard]] bool validate_d3d12_native_programs(
+    const StockMaterialExecutionRequest& request, Diagnostic& diagnostic) {
+    if (request.builtin_d3d12_native ==
+        BuiltinD3D12StockNativeSelector::disabled) {
+        if (!request.builtin_d3d12_native_programs.empty()) {
+            diagnostic = diag(
+                "stock_material_d3d12_native_programs_unreferenced",
+                "Installed D3D12 native programs require an enabled selector");
+            return false;
+        }
+        return true;
+    }
+    if (request.builtin_d3d12_native !=
+        BuiltinD3D12StockNativeSelector::ks_per_pixel_base) {
+        diagnostic = diag(
+            "stock_material_d3d12_native_selector_invalid",
+            "The installed D3D12 native selector is invalid");
+        return false;
+    }
+    if (request.builtin_d3d12_native_programs.empty() ||
+        request.builtin_d3d12_native_programs.size() >
+            request.limits.max_shader_sets) {
+        diagnostic = diag(
+            "stock_material_d3d12_native_program_count_invalid",
+            "The base D3D12 native selector requires one bounded validated program");
+        return false;
+    }
+    std::set<std::string> keys;
+    for (const StockMaterialD3D12NativeProgram& entry :
+         request.builtin_d3d12_native_programs) {
+        const std::string key = canonical(entry.key);
+        if (entry.key.empty() ||
+            entry.key.size() > request.limits.max_shader_key_bytes ||
+            key != "ksperpixel" || !keys.insert(key).second ||
+            entry.program == nullptr ||
+            entry.program->validation_status() !=
+                StockKsPerPixelNativeProgramStatus::ready ||
+            entry.program->variant() != StockKsPerPixelVariant::base) {
+            diagnostic = diag(
+                "stock_material_d3d12_native_program_invalid",
+                "The first D3D12 native slice accepts one exact validated base ksPerPixel program");
+            return false;
+        }
+    }
+    return true;
+}
+
 [[nodiscard]] std::vector<PipelineResourceBinding> resources_for(
     std::string_view shader, bool include_damage_dust = false,
     bool directional_shadow_receiver = false) {
@@ -427,6 +483,38 @@ bool estimate_adapter_copy(const StockMaterialExecutionRequest& request,
             return false;
         }
     }
+    if (request.builtin_d3d12_native ==
+        BuiltinD3D12StockNativeSelector::ks_per_pixel_base) {
+        if (!charge_count(request.builtin_d3d12_native_programs.size(),
+                          sizeof(StockMaterialD3D12NativeProgram)) ||
+            !charge_count(request.packets.size(), sizeof(std::uint32_t))) {
+            diagnostic = diag("stock_material_preparation_limit",
+                              "D3D12 native owner metadata exceeds the preparation limit");
+            return false;
+        }
+        for (const StockMaterialD3D12NativeProgram& entry :
+             request.builtin_d3d12_native_programs) {
+            if (!charge(string_bytes(entry.key), total, limit)) {
+                diagnostic = diag("stock_material_preparation_limit",
+                                  "D3D12 native shader keys exceed the preparation limit");
+                return false;
+            }
+            if (entry.program == nullptr) continue;
+            const std::uint64_t shader_bytes =
+                static_cast<std::uint64_t>(entry.program->vertex_shader().size()) +
+                static_cast<std::uint64_t>(entry.program->pixel_shader().size());
+            const std::uint64_t copies =
+                static_cast<std::uint64_t>(request.packets.size()) + 2U;
+            if ((copies != 0U &&
+                 shader_bytes >
+                     std::numeric_limits<std::uint64_t>::max() / copies) ||
+                !charge(shader_bytes * copies, total, limit)) {
+                diagnostic = diag("stock_material_preparation_limit",
+                                  "D3D12 native shader copies exceed the preparation limit");
+                return false;
+            }
+        }
+    }
     if (!charge_count(request.model->materials.size(), sizeof(formats::Kn5Material)) ||
         !charge_count(request.packets.size(), sizeof(PipelineProgram)) ||
         !charge_count(request.packets.size(), sizeof(MaterialRenderProfile)) ||
@@ -529,10 +617,26 @@ StockMaterialExecutionResult prepare_stock_material_execution(
             return fail(StaticSceneResourceStatus::invalid_request,
                         "stock_material_builtin_source_selector_invalid",
                         "The built-in Vulkan stock source selector is invalid");
+        if (request.builtin_vulkan_source !=
+                BuiltinVulkanStockSourceSelector::disabled &&
+            request.builtin_d3d12_native !=
+                BuiltinD3D12StockNativeSelector::disabled)
+            return fail(StaticSceneResourceStatus::invalid_request,
+                        "stock_material_native_selector_conflict",
+                        "Vulkan source and installed D3D12 native selectors are mutually exclusive");
+        if (request.builtin_d3d12_native !=
+                BuiltinD3D12StockNativeSelector::disabled &&
+            device.info().backend != Backend::D3D12)
+            return fail(StaticSceneResourceStatus::unsupported,
+                        "stock_material_d3d12_native_backend_unsupported",
+                        "Installed native ksPerPixel packages require D3D12");
         if (request.shader_modules.size() > request.limits.max_shader_sets)
             return fail(StaticSceneResourceStatus::invalid_request,
                         "stock_material_shader_set_limit", "Shader module set count exceeds the configured limit");
         Diagnostic module_diagnostic;
+        if (!validate_d3d12_native_programs(request, module_diagnostic))
+            return {StaticSceneResourceStatus::invalid_request,
+                    std::move(module_diagnostic), nullptr};
         if (!estimate_adapter_copy(request, module_diagnostic))
             return {StaticSceneResourceStatus::invalid_request, std::move(module_diagnostic), nullptr};
         if (!validate_module_sets(request.shader_modules, request.limits, device.info().backend,
@@ -552,6 +656,10 @@ StockMaterialExecutionResult prepare_stock_material_execution(
         std::vector<MaterialRenderProfile> source_pipeline_profiles;
         source_pipeline_profiles.reserve(source_programs.capacity());
         std::vector<std::uint32_t> source_program_by_packet(
+            packets.size(), invalid_static_scene_source_program_index);
+        std::vector<std::shared_ptr<const
+            ValidatedStockKsPerPixelNativeProgram>> d3d12_native_programs;
+        std::vector<std::uint32_t> d3d12_native_program_by_packet(
             packets.size(), invalid_static_scene_source_program_index);
         std::vector<KsPerPixelMaterialConstants> constants(request.model->materials.size());
         std::vector<StockKsPerPixelMaterialConstants> native_constants(
@@ -688,13 +796,51 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                 const bool use_builtin_source =
                     modules == nullptr && source_candidate &&
                     device.info().backend == Backend::Vulkan;
+                const bool d3d12_native_family =
+                    canonical(source.shader) == shader_key &&
+                    shader_key == "ksperpixel";
+                const bool d3d12_native_candidate =
+                    request.builtin_d3d12_native ==
+                        BuiltinD3D12StockNativeSelector::ks_per_pixel_base &&
+                    d3d12_native_family &&
+                    packet.primitive == DrawPrimitiveKind::static_mesh &&
+                    shader_variant == StockMaterialShaderVariant::standard &&
+                    !request.directional_shadow_receiver &&
+                    !desired_transparent && !request.wireframe;
+                const StockMaterialD3D12NativeProgram* d3d12_native_entry =
+                    d3d12_native_candidate
+                        ? find_d3d12_native_program(
+                              request.builtin_d3d12_native_programs,
+                              binding.shader)
+                        : nullptr;
+                const bool use_builtin_d3d12_native =
+                    modules == nullptr && d3d12_native_candidate &&
+                    d3d12_native_entry != nullptr;
                 if (modules == nullptr && source_candidate &&
                     device.info().backend != Backend::Vulkan)
                     return fail(
                         StaticSceneResourceStatus::unsupported,
                         "stock_material_builtin_source_backend_unsupported",
                         "The built-in ksPerPixel source-equivalent fallback requires Vulkan");
-                if (modules == nullptr && !use_builtin_source)
+                if (modules == nullptr && d3d12_native_family &&
+                    request.builtin_d3d12_native !=
+                        BuiltinD3D12StockNativeSelector::disabled &&
+                    !use_builtin_d3d12_native)
+                    return fail(
+                        StaticSceneResourceStatus::unsupported,
+                        "stock_material_d3d12_native_packet_unsupported",
+                        "The first installed D3D12 batch slice requires opaque solid static base ksPerPixel packets");
+                if (use_builtin_d3d12_native &&
+                    (request.targets.colors.size() != 1U ||
+                     request.targets.colors.front().samples != 1U ||
+                     (request.targets.has_depth &&
+                      request.targets.depth.samples != 1U)))
+                    return fail(
+                        StaticSceneResourceStatus::unsupported,
+                        "stock_material_d3d12_native_target_unsupported",
+                        "The first installed D3D12 batch slice requires a one-sample color and optional matching depth target");
+                if (modules == nullptr && !use_builtin_source &&
+                    !use_builtin_d3d12_native)
                     return fail(
                         StaticSceneResourceStatus::unsupported,
                         shader_variant == StockMaterialShaderVariant::damage_dust
@@ -703,7 +849,7 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                         shader_variant == StockMaterialShaderVariant::damage_dust
                             ? "The txDust packet requires caller-supplied damage-dust shader modules"
                             : "No caller-supplied executable shader modules match the material or shader family");
-                if (use_builtin_source &&
+                if ((use_builtin_source || use_builtin_d3d12_native) &&
                     !native_constants_ready[material_index]) {
                     const StockShadowCasterMaterialResolveResult
                         native_resolved =
@@ -750,7 +896,7 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                 }
                 if (!use_builtin_source &&
                     pipeline_indices[material_index][state_index] !=
-                    std::numeric_limits<std::size_t>::max()) {
+                        std::numeric_limits<std::size_t>::max()) {
                     const std::size_t pipeline_index =
                         pipeline_indices[material_index][state_index];
                     const bool pipeline_has_dust =
@@ -762,6 +908,23 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                                     "Packets sharing one stock material state must agree on txDust presence");
                     pipeline_ptrs[packet_index] = &pipelines[pipeline_index];
                     const MaterialRenderProfile& profile = pipeline_profiles[pipeline_index];
+                    if (use_builtin_d3d12_native) {
+                        const auto existing = std::find(
+                            d3d12_native_programs.begin(),
+                            d3d12_native_programs.end(),
+                            d3d12_native_entry->program);
+                        std::size_t native_index = 0U;
+                        if (existing == d3d12_native_programs.end()) {
+                            native_index = d3d12_native_programs.size();
+                            d3d12_native_programs.push_back(
+                                d3d12_native_entry->program);
+                        } else {
+                            native_index = static_cast<std::size_t>(
+                                existing - d3d12_native_programs.begin());
+                        }
+                        d3d12_native_program_by_packet[packet_index] =
+                            static_cast<std::uint32_t>(native_index);
+                    }
                     apply_profile(profile);
                     continue;
                 }
@@ -780,14 +943,29 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                             "The immutable Vulkan ksPerPixel source package is unavailable");
                     pipeline_request.shaders =
                         seed.program->pipeline().shaders;
+                } else if (use_builtin_d3d12_native) {
+                    const ValidatedStockKsPerPixelNativeProgram& program =
+                        *d3d12_native_entry->program;
+                    pipeline_request.shaders = {
+                        {PipelineShaderStage::vertex,
+                         PipelineShaderFormat::dxbc,
+                         {program.vertex_shader().begin(),
+                          program.vertex_shader().end()}},
+                        {PipelineShaderStage::fragment,
+                         PipelineShaderFormat::dxbc,
+                         {program.pixel_shader().begin(),
+                          program.pixel_shader().end()}},
+                    };
                 } else {
                     pipeline_request.shaders.assign(
                         modules->modules.begin(), modules->modules.end());
                 }
                 pipeline_request.targets = request.targets;
-                pipeline_request.resources = resources_for(binding.shader,
-                                                           damage_dirt_shader && packet_has_dust,
-                                                           request.directional_shadow_receiver);
+                if (!use_builtin_d3d12_native)
+                    pipeline_request.resources = resources_for(
+                        binding.shader,
+                        damage_dirt_shader && packet_has_dust,
+                        request.directional_shadow_receiver);
                 pipeline_request.wireframe = request.wireframe;
                 StockPipelineResult built =
                     build_stock_pipeline(pipeline_request, request.limits.scene.pipeline);
@@ -797,7 +975,9 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                                 built.validation.diagnostics.empty()
                                     ? "Stock pipeline validation failed"
                                     : built.validation.diagnostics.front().message);
-                built.program.transform_contract = PipelineTransformContract::draw_matrices;
+                built.program.transform_contract = use_builtin_d3d12_native
+                                                       ? PipelineTransformContract::none
+                                                       : PipelineTransformContract::draw_matrices;
                 built.program.depth.compare = PipelineCompareOperation::less;
                 built.program.depth.write_enabled =
                     built.profile.depth_write && !built.profile.transparent;
@@ -854,6 +1034,30 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                     pipelines.push_back(std::move(built.program));
                     pipeline_profiles.push_back(built.profile);
                     pipeline_ptrs[packet_index] = &pipelines.back();
+                    if (use_builtin_d3d12_native) {
+                        if (d3d12_native_programs.size() >=
+                            static_cast<std::size_t>(
+                                invalid_static_scene_source_program_index))
+                            return fail(
+                                StaticSceneResourceStatus::invalid_request,
+                                "stock_material_d3d12_native_owner_limit",
+                                "Installed D3D12 native owners exceed packet index capacity");
+                        const auto existing = std::find(
+                            d3d12_native_programs.begin(),
+                            d3d12_native_programs.end(),
+                            d3d12_native_entry->program);
+                        std::size_t native_index = 0U;
+                        if (existing == d3d12_native_programs.end()) {
+                            native_index = d3d12_native_programs.size();
+                            d3d12_native_programs.push_back(
+                                d3d12_native_entry->program);
+                        } else {
+                            native_index = static_cast<std::size_t>(
+                                existing - d3d12_native_programs.begin());
+                        }
+                        d3d12_native_program_by_packet[packet_index] =
+                            static_cast<std::uint32_t>(native_index);
+                    }
                 }
                 apply_profile(built.profile);
             }
@@ -874,6 +1078,26 @@ StockMaterialExecutionResult prepare_stock_material_execution(
             }
         }
 
+        const std::size_t d3d12_native_packet_count =
+            static_cast<std::size_t>(std::count_if(
+                d3d12_native_program_by_packet.begin(),
+                d3d12_native_program_by_packet.end(),
+                [](std::uint32_t value) {
+                    return value != invalid_static_scene_source_program_index;
+                }));
+        if (d3d12_native_packet_count != 0U &&
+            d3d12_native_packet_count != packets.size())
+            return fail(
+                StaticSceneResourceStatus::unsupported,
+                "stock_material_d3d12_native_mixed_scene_unsupported",
+                "The first installed D3D12 batch slice cannot mix native and portable packets");
+        if (d3d12_native_packet_count >
+            max_stock_ks_per_pixel_native_batch_draws)
+            return fail(
+                StaticSceneResourceStatus::unsupported,
+                "stock_material_d3d12_native_draw_limit",
+                "The installed D3D12 native scene exceeds the sampler-heap batch limit");
+
         StaticScenePrepareRequest scene_request;
         scene_request.model = request.model;
         scene_request.scene = request.scene;
@@ -888,6 +1112,16 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                 native_constants;
             scene_request.stock_vulkan_source_sampler_settings =
                 request.builtin_vulkan_source_sampler_settings;
+        }
+        if (!d3d12_native_programs.empty()) {
+            scene_request.stock_d3d12_native_programs =
+                d3d12_native_programs;
+            scene_request.stock_d3d12_native_program_by_packet =
+                d3d12_native_program_by_packet;
+            scene_request.stock_d3d12_native_material_constants_by_material =
+                native_constants;
+            scene_request.stock_d3d12_native_sampler_settings =
+                request.builtin_d3d12_native_sampler_settings;
         }
         if (has_alpha_shadow_constants)
             scene_request.stock_shadow_constants_by_material = shadow_constants;
