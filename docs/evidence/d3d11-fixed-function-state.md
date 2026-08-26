@@ -52,6 +52,25 @@ All attributes use input slot `0`. All attributes are per-vertex data with a ste
 | `2` | `3` | Line strip |
 | `3` | `5` | Triangle strip |
 
+## Blend states
+
+`initBlendStates` at `0x1000e2d0` creates four blend states. The function calls `CreateBlendState` through vtable offset `0x50`.
+
+The recovered descriptors contain these values:
+
+| Index | Alpha-to-coverage | Color blend | Color factors | Alpha operation | Write mask |
+| ---: | --- | --- | --- | --- | ---: |
+| `0` | Disabled | Disabled | `SRC_ALPHA`, `INV_SRC_ALPHA`, `ADD` | `ONE`, `ONE`, `ADD` | `0xf` |
+| `1` | Disabled | Enabled | `SRC_ALPHA`, `INV_SRC_ALPHA`, `ADD` | `ONE`, `ONE`, `MAX` | `0xf` |
+| `2` | Enabled | Disabled | `SRC_ALPHA`, `INV_SRC_ALPHA`, `ADD` | `ONE`, `ONE`, `MAX` | `0xf` |
+| `3` | Disabled | Enabled | `SRC_ALPHA`, `INV_SRC_ALPHA`, `ADD` | `ONE`, `ONE`, `MAX` | `0x0` |
+
+State `0` is the opaque state. State `1` is the alpha-blend state, and state `2` is the alpha-to-coverage state.
+
+`KN5IO::loadMaterialsBinary` at `0x1003b9de` reads the material flags. The alpha-to-coverage flag overrides the alpha-blend flag.
+
+The `ksPerPixelAT` pixel shader contains no discard instruction. Its cutout behavior uses fixed-function alpha-to-coverage and a multisample render target.
+
 ## Depth states
 
 `initDX11` at `0x1000d9f0` creates the depth states. The function calls `CreateDepthStencilState` through vtable offset `0x54`.
@@ -73,14 +92,17 @@ The recovered descriptors contain these values:
 
 Constants at `0x1101d770` through `0x1101d800` identify these standard descriptors:
 
-| Fill mode | Cull mode | Front counterclockwise |
-| --- | --- | ---: |
-| `SOLID` | `NONE` | `0` |
-| `SOLID` | `FRONT` | `0` |
-| `SOLID` | `BACK` | `0` |
-| `WIREFRAME` | `NONE` | `0` |
+| Index | Fill mode | Cull mode | Front counterclockwise |
+| ---: | --- | --- | ---: |
+| `0` | `SOLID` | `FRONT` | `0` |
+| `1` | `SOLID` | `BACK` | `0` |
+| `2` | `SOLID` | `NONE` | `0` |
+| `4` | `WIREFRAME` | `NONE` | `0` |
+| `5` | `SOLID` | `FRONT` | `0` |
 
-The function also creates a special `SOLID` and `NONE` descriptor with a depth bias of `-100`.
+State `3` uses `SOLID`, `NONE`, depth bias `-100`, and depth-bias clamp `0.1`.
+
+`GraphicsManager::setCullMode` at `0x10046572` selects state `5` for front culling when `overrideNoMS` is active.
 
 ## Main draw order
 

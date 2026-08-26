@@ -1,5 +1,6 @@
 #include "backend_internal.hpp"
 #include "apex/render/draw_packet.hpp"
+#include "d3d12_stock_ks_per_pixel.hpp"
 
 #include <algorithm>
 #include <array>
@@ -3975,6 +3976,14 @@ public:
         return drawn;
     }
 
+    bool draw_stock_ks_per_pixel_native(
+        const IndexedStaticMeshDrawRequest& request,
+        const D3D12Buffer& vertex_buffer,
+        const D3D12Buffer& index_buffer,
+        D3D12DepthAttachment* depth_attachment,
+        std::vector<std::byte>& output,
+        Diagnostic& diagnostic);
+
     bool draw_indexed_static_mesh_batch(const IndexedStaticMeshBatchDescription& batch,
                                         std::span<const D3D12IndexedBatchDraw> draws,
                                         D3D12DepthAttachment* depth_attachment,
@@ -5392,12 +5401,248 @@ public:
         : context_(std::move(context)), bytecode_(std::move(bytecode)), info_(info) {}
     Backend backend() const noexcept override { return Backend::D3D12; }
     const ShaderModuleInfo& info() const noexcept override { return info_; }
+    [[nodiscard]] const D3D12Context* context() const noexcept {
+        return context_.get();
+    }
 
 private:
     std::shared_ptr<D3D12Context> context_;
     std::shared_ptr<const std::vector<std::byte>> bytecode_;
     ShaderModuleInfo info_;
 };
+
+bool D3D12Texture::draw_stock_ks_per_pixel_native(
+    const IndexedStaticMeshDrawRequest& request,
+    const D3D12Buffer& vertex_buffer,
+    const D3D12Buffer& index_buffer,
+    D3D12DepthAttachment* depth_attachment,
+    std::vector<std::byte>& output,
+    Diagnostic& diagnostic) {
+    if (request.load_color && !initialized_) {
+        diagnostic = {"indexed_color_load_before_clear",
+                      "A color load was requested before the color attachment was initialized"};
+        return false;
+    }
+    const StockKsPerPixelNativeDrawBinding* binding =
+        request.stock_ks_per_pixel_native;
+    if (binding == nullptr || binding->shader_program == nullptr ||
+        binding->constant_buffers == nullptr || binding->samplers == nullptr ||
+        binding->diffuse_texture == nullptr) {
+        diagnostic = {"indexed_stock_native_binding_missing",
+                      "The native D3D12 draw binding is incomplete"};
+        return false;
+    }
+
+    auto* diffuse = const_cast<D3D12Texture*>(
+        dynamic_cast<const D3D12Texture*>(binding->diffuse_texture));
+    std::array<D3D12DepthAttachment*,
+               stock_ks_per_pixel_shadow_cascade_count>
+        shadows{};
+    for (std::size_t index = 0U; index < shadows.size(); ++index) {
+        shadows[index] = const_cast<D3D12DepthAttachment*>(
+            dynamic_cast<const D3D12DepthAttachment*>(
+                binding->shadow_maps[index]));
+    }
+    std::array<const D3D12Buffer*,
+               static_cast<std::size_t>(
+                   StockKsPerPixelNativeConstantSlot::count)>
+        constants{};
+    for (std::size_t index = 0U; index < constants.size(); ++index) {
+        constants[index] = dynamic_cast<const D3D12Buffer*>(
+            binding->constant_buffers->buffer(
+                static_cast<StockKsPerPixelNativeConstantSlot>(index)));
+    }
+    const auto* linear_sampler = dynamic_cast<const D3D12Sampler*>(
+        binding->samplers->sampler(
+            StockKsPerPixelNativeSamplerSlot::linear));
+    const auto* shadow_sampler = dynamic_cast<const D3D12Sampler*>(
+        binding->samplers->sampler(
+            StockKsPerPixelNativeSamplerSlot::shadow));
+    const auto* vertex_shader = dynamic_cast<const D3D12ShaderModule*>(
+        &binding->shader_program->vertex_shader());
+    const auto* pixel_shader = dynamic_cast<const D3D12ShaderModule*>(
+        &binding->shader_program->pixel_shader());
+    if (diffuse == nullptr || linear_sampler == nullptr ||
+        shadow_sampler == nullptr || vertex_shader == nullptr ||
+        pixel_shader == nullptr ||
+        std::any_of(shadows.begin(), shadows.end(),
+                    [](const D3D12DepthAttachment* value) {
+                        return value == nullptr;
+                    }) ||
+        std::any_of(constants.begin(), constants.end(),
+                    [](const D3D12Buffer* value) {
+                        return value == nullptr;
+                    })) {
+        diagnostic = {"indexed_stock_native_type_unsupported",
+                      "The native binding contains an unknown D3D12 resource handle"};
+        return false;
+    }
+
+    const D3D12Context* expected_context = context_.get();
+    const bool foreign_context =
+        vertex_buffer.context() != expected_context ||
+        index_buffer.context() != expected_context ||
+        diffuse->context() != expected_context ||
+        linear_sampler->context() != expected_context ||
+        shadow_sampler->context() != expected_context ||
+        vertex_shader->context() != expected_context ||
+        pixel_shader->context() != expected_context ||
+        (depth_attachment != nullptr &&
+         depth_attachment->context() != expected_context) ||
+        std::any_of(shadows.begin(), shadows.end(),
+                    [&](const D3D12DepthAttachment* value) {
+                        return value->context() != expected_context;
+                    }) ||
+        std::any_of(constants.begin(), constants.end(),
+                    [&](const D3D12Buffer* value) {
+                        return value->context() != expected_context;
+                    });
+    if (foreign_context) {
+        diagnostic = {"indexed_stock_native_context_mismatch",
+                      "Native ksPerPixel resources belong to different D3D12 devices"};
+        return false;
+    }
+    if (!diffuse->initialized()) {
+        diagnostic = {"indexed_stock_native_diffuse_uninitialized",
+                      "The native diffuse texture has no uploaded data"};
+        return false;
+    }
+    if (std::any_of(shadows.begin(), shadows.end(),
+                    [](const D3D12DepthAttachment* value) {
+                        return !value->cleared();
+                    })) {
+        diagnostic = {"indexed_stock_native_shadow_uninitialized",
+                      "Every native shadow map must be cleared before sampling"};
+        return false;
+    }
+
+    std::lock_guard command_guard(context_->command_mutex);
+    D3D12_DESCRIPTOR_HEAP_DESC rtv_description{};
+    rtv_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    rtv_description.NumDescriptors = 1U;
+    ComPtr<ID3D12DescriptorHeap> rtv_heap;
+    HRESULT result = context_->device->CreateDescriptorHeap(
+        &rtv_description, IID_PPV_ARGS(&rtv_heap));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "CreateDescriptorHeap(stock native RTV)", result);
+        diagnostic.code = "indexed_stock_native_descriptor_failed";
+        return false;
+    }
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv =
+        rtv_heap->GetCPUDescriptorHandleForHeapStart();
+    context_->device->CreateRenderTargetView(resource_.Get(), nullptr, rtv);
+
+    ComPtr<ID3D12CommandAllocator> allocator;
+    result = context_->device->CreateCommandAllocator(
+        D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "CreateCommandAllocator(stock native)", result);
+        diagnostic.code = "indexed_stock_native_execution_failed";
+        return false;
+    }
+    ComPtr<ID3D12GraphicsCommandList> command_list;
+    result = context_->device->CreateCommandList(
+        0U, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
+        IID_PPV_ARGS(&command_list));
+    if (SUCCEEDED(result)) result = command_list->Close();
+    if (FAILED(result)) {
+        diagnostic = hresult_error("CreateCommandList(stock native)", result);
+        diagnostic.code = "indexed_stock_native_execution_failed";
+        return false;
+    }
+
+    D3D12_RESOURCE_STATES target_state = state_;
+    D3D12_RESOURCE_STATES diffuse_state = diffuse->state();
+    D3D12_RESOURCE_STATES depth_state =
+        depth_attachment != nullptr ? depth_attachment->state()
+                                    : D3D12_RESOURCE_STATE_COMMON;
+    bool depth_cleared =
+        depth_attachment != nullptr && depth_attachment->cleared();
+    std::array<D3D12_RESOURCE_STATES,
+               stock_ks_per_pixel_shadow_cascade_count>
+        shadow_states{};
+    std::array<ID3D12Resource*, stock_ks_per_pixel_shadow_cascade_count>
+        shadow_resources{};
+    for (std::size_t index = 0U; index < shadows.size(); ++index) {
+        shadow_states[index] = shadows[index]->state();
+        shadow_resources[index] = shadows[index]->resource();
+    }
+    std::array<ID3D12Resource*,
+               static_cast<std::size_t>(
+                   StockKsPerPixelNativeConstantSlot::count)>
+        constant_resources{};
+    for (std::size_t index = 0U; index < constants.size(); ++index)
+        constant_resources[index] = constants[index]->resource();
+
+    D3D12StockKsPerPixelNativeDrawContext native_context;
+    native_context.device = context_->device.Get();
+    native_context.queue = context_->queue.Get();
+    native_context.allocator = allocator.Get();
+    native_context.command_list = command_list.Get();
+    native_context.target = resource_.Get();
+    native_context.target_rtv = rtv;
+    native_context.target_state = &target_state;
+    native_context.target_format = dxgi_texture_format(info_.description.format);
+    native_context.target_width = info_.description.width;
+    native_context.target_height = info_.description.height;
+    native_context.depth =
+        depth_attachment != nullptr ? depth_attachment->resource() : nullptr;
+    native_context.depth_write_dsv =
+        depth_attachment != nullptr ? depth_attachment->dsv(true)
+                                    : D3D12_CPU_DESCRIPTOR_HANDLE{};
+    native_context.depth_read_dsv =
+        depth_attachment != nullptr ? depth_attachment->dsv(false)
+                                    : D3D12_CPU_DESCRIPTOR_HANDLE{};
+    native_context.depth_state =
+        depth_attachment != nullptr ? &depth_state : nullptr;
+    native_context.depth_cleared =
+        depth_attachment != nullptr ? &depth_cleared : nullptr;
+    native_context.vertex_buffer = vertex_buffer.resource();
+    native_context.vertex_state = vertex_buffer.state();
+    native_context.index_buffer = index_buffer.resource();
+    native_context.index_state = index_buffer.state();
+    native_context.diffuse_texture = diffuse->resource();
+    native_context.diffuse_format =
+        dxgi_texture_format(diffuse->info().description.format);
+    native_context.diffuse_state = &diffuse_state;
+    native_context.shadow_maps = shadow_resources;
+    for (std::size_t index = 0U; index < shadow_states.size(); ++index)
+        native_context.shadow_states[index] = &shadow_states[index];
+    native_context.shader_program = binding->shader_program;
+    native_context.constant_buffers = binding->constant_buffers;
+    native_context.samplers = binding->samplers;
+    native_context.constant_buffer_resources = constant_resources;
+    native_context.request = &request;
+    native_context.readback = &output;
+
+    output.clear();
+    const bool drawn = record_d3d12_stock_ks_per_pixel_native_draw(
+        native_context, diagnostic);
+    if (!drawn &&
+        diagnostic.code == "d3d12_stock_native_submit_undrained") {
+        state_ = D3D12_RESOURCE_STATE_COMMON;
+        diffuse->set_state(D3D12_RESOURCE_STATE_COMMON);
+        for (D3D12DepthAttachment* shadow_attachment : shadows)
+            shadow_attachment->set_state(D3D12_RESOURCE_STATE_COMMON);
+        if (depth_attachment != nullptr)
+            depth_attachment->set_state(D3D12_RESOURCE_STATE_COMMON);
+        return false;
+    }
+    if (!drawn) return false;
+
+    state_ = target_state;
+    diffuse->set_state(diffuse_state);
+    for (std::size_t index = 0U; index < shadows.size(); ++index)
+        shadows[index]->set_state(shadow_states[index]);
+    if (depth_attachment != nullptr) {
+        depth_attachment->set_state(depth_state);
+        if (depth_cleared) depth_attachment->set_cleared();
+    }
+    initialized_ = true;
+    return true;
+}
 
 [[nodiscard]] D3D12_TEXTURE_ADDRESS_MODE d3d12_sampler_address(SamplerAddressMode mode) noexcept {
     switch (mode) {
@@ -5900,12 +6145,6 @@ public:
             validate_indexed_static_mesh_draw_request(texture, request, diagnostic);
         if (validation != IndexedStaticMeshDrawStatus::ready)
             return {validation, std::move(diagnostic), {}};
-        if (request.shader_authority ==
-            IndexedShaderAuthority::explicit_stock_ks_per_pixel_native)
-            return {IndexedStaticMeshDrawStatus::unsupported,
-                    {"indexed_stock_native_pipeline_staged",
-                     "The validated native binding is ready, but its D3D12 root signature and pipeline are not allocated yet"},
-                    {}};
         if (texture.backend() != Backend::D3D12)
             return {IndexedStaticMeshDrawStatus::unsupported,
                     {"texture_backend_mismatch", "The texture belongs to another graphics backend"}, {}};
@@ -5944,6 +6183,16 @@ public:
                     {"indexed_static_mesh_context_mismatch",
                      "Indexed static-mesh depth attachment belongs to another D3D12 device"}, {}};
         std::vector<std::byte> output;
+        if (request.shader_authority ==
+            IndexedShaderAuthority::explicit_stock_ks_per_pixel_native) {
+            if (!d3d_texture->draw_stock_ks_per_pixel_native(
+                    request, *d3d_vertex, *d3d_index, d3d_depth, output,
+                    diagnostic))
+                return {IndexedStaticMeshDrawStatus::execution_failed,
+                        std::move(diagnostic), {}};
+            return {IndexedStaticMeshDrawStatus::ready, {},
+                    std::move(output)};
+        }
         if (!d3d_texture->draw_indexed_static_mesh(request, *d3d_vertex, *d3d_index, d3d_depth, output, diagnostic))
             return {IndexedStaticMeshDrawStatus::execution_failed, std::move(diagnostic), {}};
         return {IndexedStaticMeshDrawStatus::ready, {}, std::move(output)};
