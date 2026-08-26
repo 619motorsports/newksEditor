@@ -118,27 +118,28 @@ LocalBounds geometryBounds(const formats::Kn5Node& source, std::string_view path
         return {{source.bounds[0], source.bounds[1], source.bounds[2]}, source.bounds[3]};
     }
 
-    // Skinned records do not carry a serialized sphere. Derive a conservative
-    // local sphere from the position AABB for scene framing and diagnostics.
+    // Skinned records do not carry a serialized sphere. Mesh::updateBoundingSphere
+    // and SkinnedMesh::updateBoundingSphere use the arithmetic mean of the
+    // positions, followed by the maximum distance from that mean.
     const std::size_t stride = source.vertexStride;
     if (stride == 0 || source.vertices.empty()) return {};
     if (source.vertices.size() % stride != 0) invalid(path, "vertex data is not stride-aligned");
-    Vector3 minimum = {std::numeric_limits<float>::infinity(),
-                       std::numeric_limits<float>::infinity(),
-                       std::numeric_limits<float>::infinity()};
-    Vector3 maximum = {-std::numeric_limits<float>::infinity(),
-                       -std::numeric_limits<float>::infinity(),
-                       -std::numeric_limits<float>::infinity()};
+    LocalBounds result;
+    const std::size_t vertex_count = source.vertices.size() / stride;
     for (std::size_t offset = 0; offset < source.vertices.size(); offset += stride) {
         for (std::size_t axis = 0; axis < 3; ++axis) {
             const float value = source.vertices[offset + axis];
             requireFinite(value, path, "vertex position");
-            minimum[axis] = std::min(minimum[axis], value);
-            maximum[axis] = std::max(maximum[axis], value);
+            result.center[axis] += value;
+            requireFinite(result.center[axis], path, "vertex bounds center sum");
         }
     }
-    LocalBounds result;
-    for (std::size_t axis = 0; axis < 3; ++axis) result.center[axis] = (minimum[axis] + maximum[axis]) * 0.5F;
+    const float inverse_count = 1.0F / static_cast<float>(vertex_count);
+    requireFinite(inverse_count, path, "vertex bounds inverse count");
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        result.center[axis] *= inverse_count;
+        requireFinite(result.center[axis], path, "vertex bounds center");
+    }
     for (std::size_t offset = 0; offset < source.vertices.size(); offset += stride) {
         float squared = 0.0F;
         for (std::size_t axis = 0; axis < 3; ++axis) {
@@ -335,6 +336,11 @@ void appendNode(const formats::Kn5Node& source, NodeId parent, const Matrix4& pa
         node.material = static_cast<MaterialId>(source.materialId);
 
         const auto bounds = geometryBounds(source, path);
+        node.local_bounds_center = bounds.center;
+        node.local_bounds_radius = bounds.radius;
+        node.local_bounds_source = kind == NodeKind::mesh
+                                       ? LocalBoundsSource::kn5_serialized
+                                       : LocalBoundsSource::kn5_vertex_mean;
         node.bounds_center = transformPoint(world, bounds.center, path);
         node.bounds_radius = bounds.radius * maxScale(world, path);
         requireFinite(node.bounds_radius, path, "world bounds radius");

@@ -125,8 +125,45 @@ The active path reads `Renderable` fields directly. These fields are
 `castShadows +188`, `isVisible +189`, `isTransparent +190`, `noCull +191`,
 `boundingSphere +192`, `layer +208`, `lodIN +212`, `lodOUT +216`, and
 `isStatic +220`. Thus, PVS array population is not an integration dependency.
-The port still needs explicit pass, static-bound, frustum, and `NO_CULL` state
-before it can claim exact render-plan integration.
+
+`Renderable::Renderable` at `0x1004C229` sets `noCull` and `isStatic` to false.
+The KN5 loader does not replace either value. Ordinary KN5 meshes use the
+dynamic-sphere path.
+
+`sphere::transform` at `0x10064EB6` transforms the sphere center with the world
+matrix. `mat44f::getScale` at `0x100438A3` gets the three matrix basis lengths.
+If any length is exactly 1, the function keeps the source radius. Otherwise,
+the function multiplies the radius by the largest length.
+
+`BoundingFrustum::setMatrix` at `0x10063FA1` creates six normalized planes.
+The plane order is near, far, left, right, top, and bottom. For the native
+zero-to-one depth convention, the raw row-vector planes are:
+
+```text
+near   = (-M13,      -M23,      -M33,      -M43)
+far    = ( M13-M14,   M23-M24,   M33-M34,   M43-M44)
+left   = (-M14-M11,  -M24-M21,  -M34-M31,  -M44-M41)
+right  = ( M11-M14,   M21-M24,   M31-M34,   M41-M44)
+top    = ( M12-M14,   M22-M24,   M32-M34,   M42-M44)
+bottom = (-M14-M12,  -M24-M22,  -M34-M32,  -M44-M42)
+```
+
+If a plane normal has zero length, the native fallback is `(0, 1, 0, 0)`.
+`BoundingFrustum::intersect` at `0x10063F57` rejects a sphere only when the
+signed plane distance is more than its radius. Therefore, tangency is visible.
+
+The port now retains each KN5 local sphere with its source. Static meshes use
+the serialized KN5 sphere. Skinned meshes use the recovered vertex-mean and
+maximum-distance rule from `SkinnedMesh::updateBoundingSphere` at `0x1004A97E`.
+
+The backend-neutral `camera_mesh_filter_visible()` function implements this
+active path. It supports the port's column-major matrices and all three clip
+conventions. It rejects non-finite inputs that the selected path consumes.
+The native comparisons permit NaN values. A native bypass does not consume
+the bypassed fields.
+
+This function is not connected to the live viewport yet. The viewport still
+needs a retained per-packet filter catalog and a new mask for each frame.
 
 The opt-in mode implements only the recovered PVS-array distance stage. It
 does not implement the complete active `CameraMeshFilter` path. In particular,

@@ -1,4 +1,5 @@
 #include "apex/render/camera.hpp"
+#include "apex/render/camera_mesh_filter.hpp"
 
 #include <cmath>
 #include <iostream>
@@ -182,6 +183,137 @@ void rejects_malformed_camera_inputs() {
     require(build_camera_frame(request).code == "camera_clip_space_invalid", "unknown clip space rejected");
 }
 
+CameraFrame identity_filter_camera(CameraClipSpace clip_space) {
+    CameraFrame camera;
+    camera.view_projection = apex::scene::identity_matrix;
+    camera.position = {0.0F, 0.0F, 0.0F};
+    camera.fov_radians = 0.7853981633974483F;
+    camera.aspect = 1.0F;
+    camera.near_plane = 0.1F;
+    camera.far_plane = 100.0F;
+    camera.clip_space = clip_space;
+    return camera;
+}
+
+void recovers_native_frustum_planes_and_tangency() {
+    CameraFilterFrustum frustum;
+    const auto d3d = identity_filter_camera(CameraClipSpace::d3d12);
+    require(build_camera_filter_frustum(d3d, frustum), "D3D filter frustum accepted");
+    require(camera_filter_frustum_intersects(frustum, {{{0.0F, 0.0F, 0.5F}}, 0.0F}),
+            "D3D point inside unit clip volume");
+    require(!camera_filter_frustum_intersects(frustum, {{{0.0F, 0.0F, -0.001F}}, 0.0F}),
+            "D3D point before zero-depth near plane rejected");
+    require(!camera_filter_frustum_intersects(frustum, {{{0.0F, 0.0F, 1.001F}}, 0.0F}),
+            "D3D point after far plane rejected");
+    require(camera_filter_frustum_intersects(frustum, {{{1.25F, 0.0F, 0.5F}}, 0.25F}),
+            "sphere tangent to right plane accepted");
+
+    const auto webgl = identity_filter_camera(CameraClipSpace::webgl);
+    require(build_camera_filter_frustum(webgl, frustum), "WebGL filter frustum accepted");
+    require(camera_filter_frustum_intersects(frustum, {{{0.0F, 0.0F, -0.5F}}, 0.0F}),
+            "WebGL negative clip depth accepted");
+}
+
+void recovers_native_sphere_transform_scale_rule() {
+    CameraFilterSphere input{{1.0F, 2.0F, 3.0F}, 2.0F};
+    CameraFilterSphere output;
+    auto world = apex::scene::identity_matrix;
+    world[0] = 2.0F;
+    world[5] = 3.0F;
+    world[10] = 1.0F;
+    world[12] = 4.0F;
+    require(transform_camera_filter_sphere(input, world, output),
+            "native sphere transform accepted");
+    require(output.center == apex::scene::Vector3{6.0F, 6.0F, 3.0F},
+            "native sphere center uses column-major transpose equivalent");
+    require_close(output.radius, 2.0F, "one exact unit scale preserves native radius");
+
+    world[10] = 4.0F;
+    require(transform_camera_filter_sphere(input, world, output),
+            "non-unit native sphere transform accepted");
+    require_close(output.radius, 8.0F, "all non-unit scales use maximum basis length");
+}
+
+void applies_native_camera_mesh_filter_gates() {
+    const auto camera = identity_filter_camera(CameraClipSpace::d3d12);
+    CameraMeshFilterRequest request;
+    request.camera = &camera;
+    request.renderable.bounding_sphere = {{0.0F, 0.0F, 0.5F}, 0.0F};
+
+    require(camera_mesh_filter_visible(request).visible(), "opaque mesh inside frustum visible");
+    request.renderable.layer = 6U;
+    require(camera_mesh_filter_visible(request).status == CameraMeshFilterStatus::culled,
+            "layer above native maximum rejected");
+    request.renderable.layer = 0U;
+    request.renderable.transparent = true;
+    require(camera_mesh_filter_visible(request).status == CameraMeshFilterStatus::culled,
+            "transparent mesh rejected from opaque pass");
+    request.pass = CameraMeshPass::transparent;
+    require(camera_mesh_filter_visible(request).visible(),
+            "transparent mesh accepted in transparent pass");
+    request.pass = CameraMeshPass::shadow;
+    request.renderable.cast_shadows = false;
+    require(camera_mesh_filter_visible(request).status == CameraMeshFilterStatus::culled,
+            "non-caster rejected from shadow pass");
+    request.renderable.cast_shadows = true;
+    request.renderable.visible = false;
+    require(camera_mesh_filter_visible(request).visible(),
+            "shadow pass does not use ordinary visibility flag");
+    request.pass = CameraMeshPass::transparent;
+    require(camera_mesh_filter_visible(request).status == CameraMeshFilterStatus::culled,
+            "color pass uses ordinary visibility flag");
+
+    request.renderable.visible = true;
+    request.renderable.no_cull = true;
+    request.renderable.bounding_sphere.center[0] = std::numeric_limits<float>::quiet_NaN();
+    require(camera_mesh_filter_visible(request).visible(),
+            "NO_CULL bypasses native LOD and frustum inputs");
+}
+
+void applies_native_dynamic_static_and_lod_rules() {
+    auto camera = identity_filter_camera(CameraClipSpace::d3d12);
+    CameraMeshFilterRequest request;
+    request.camera = &camera;
+    request.renderable.bounding_sphere = {{0.0F, 0.0F, 0.5F}, 0.0F};
+    request.world_matrix[12] = 4.0F;
+    require(camera_mesh_filter_visible(request).status == CameraMeshFilterStatus::culled,
+            "dynamic mesh sphere uses world transform");
+    request.renderable.is_static = true;
+    require(camera_mesh_filter_visible(request).visible(),
+            "static mesh sphere ignores world transform");
+    request.world_matrix[0] = std::numeric_limits<float>::quiet_NaN();
+    require(camera_mesh_filter_visible(request).visible(),
+            "static mesh does not consume world matrix");
+
+    request = {};
+    request.camera = &camera;
+    request.renderable.bounding_sphere = {{0.0F, 0.0F, 0.5F}, 6.0F};
+    request.renderable.lod_out = 1.0F;
+    camera.position = {0.0F, 0.0F, 5.0F};
+    require(camera_mesh_filter_visible(request).visible(),
+            "original sphere radius raises native far LOD limit");
+    request.renderable.bounding_sphere.radius = 0.0F;
+    require(camera_mesh_filter_visible(request).status == CameraMeshFilterStatus::culled,
+            "native far LOD rejects distance beyond authored limit");
+}
+
+void rejects_malformed_camera_mesh_filter_inputs() {
+    auto camera = identity_filter_camera(CameraClipSpace::d3d12);
+    CameraMeshFilterRequest request;
+    request.camera = &camera;
+    request.renderable.bounding_sphere = {{0.0F, 0.0F, 0.5F}, 0.0F};
+    request.world_matrix[0] = std::numeric_limits<float>::infinity();
+    require(camera_mesh_filter_visible(request).status == CameraMeshFilterStatus::invalid_input,
+            "non-finite dynamic world matrix rejected");
+    request.world_matrix = apex::scene::identity_matrix;
+    camera.view_projection[0] = std::numeric_limits<float>::quiet_NaN();
+    require(camera_mesh_filter_visible(request).status == CameraMeshFilterStatus::invalid_input,
+            "non-finite frustum matrix rejected");
+    request.pass = static_cast<CameraMeshPass>(255);
+    require(camera_mesh_filter_visible(request).status == CameraMeshFilterStatus::invalid_input,
+            "unknown camera mesh pass rejected");
+}
+
 } // namespace
 
 int main() {
@@ -193,6 +325,11 @@ int main() {
         matches_native_fov_and_aspect_fallback();
         rejects_invalid_native_pose_operations();
         rejects_malformed_camera_inputs();
+        recovers_native_frustum_planes_and_tangency();
+        recovers_native_sphere_transform_scale_rule();
+        applies_native_camera_mesh_filter_gates();
+        applies_native_dynamic_static_and_lod_rules();
+        rejects_malformed_camera_mesh_filter_inputs();
         std::cout << "camera tests passed\n";
         return 0;
     } catch (const std::exception& error) {

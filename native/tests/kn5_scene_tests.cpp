@@ -102,6 +102,16 @@ void test_world_conversion_and_metadata() {
     require(snapshot.nodes[2].bounds_center[0] == 11 && snapshot.nodes[2].bounds_center[1] == 2,
             "world bounds center");
     require(snapshot.nodes[2].bounds_radius == 2, "world bounds radius");
+    require(snapshot.nodes[2].local_bounds_center == apex::scene::Vector3{1.0F, 0.0F, 0.0F} &&
+                snapshot.nodes[2].local_bounds_radius == 2.0F &&
+                snapshot.nodes[2].local_bounds_source ==
+                    apex::scene::LocalBoundsSource::kn5_serialized,
+            "serialized mesh keeps native local bounds");
+    require(snapshot.nodes[3].local_bounds_center == apex::scene::Vector3{0.0F, 0.0F, 0.0F} &&
+                snapshot.nodes[3].local_bounds_radius == 0.0F &&
+                snapshot.nodes[3].local_bounds_source ==
+                    apex::scene::LocalBoundsSource::kn5_vertex_mean,
+            "skinned mesh keeps recovered vertex-mean bounds");
     require(snapshot.nodes[2].material == 0 && snapshot.nodes[2].transparent &&
                 snapshot.nodes[2].cast_shadows && snapshot.nodes[2].layer == 4 &&
                 snapshot.nodes[2].lod_in == 1 && snapshot.nodes[2].lod_out == 100,
@@ -126,6 +136,24 @@ void test_ids_are_repeatable() {
                     first.snapshot.nodes[index].name == second.snapshot.nodes[index].name,
                 "stable preorder IDs");
     }
+}
+
+void test_skinned_bounds_use_native_vertex_mean() {
+    auto model = fixture();
+    auto& skin = model.root.children[0].children[1];
+    skin.vertices[0] = 0.0F;
+    skin.vertices[skin.vertexStride] = 3.0F;
+    skin.vertices[skin.vertexStride * 2U] = 3.0F;
+
+    const auto conversion = apex::scene::convertKn5Scene(model);
+    const auto& node = conversion.snapshot.nodes[3];
+    require(node.local_bounds_center == apex::scene::Vector3{2.0F, 0.0F, 0.0F},
+            "skinned local sphere center is arithmetic vertex mean");
+    require(node.local_bounds_radius == 2.0F,
+            "skinned local sphere radius is maximum distance from mean");
+    require(node.bounds_center == apex::scene::Vector3{12.0F, 2.0F, 0.0F} &&
+                node.bounds_radius == 2.0F,
+            "skinned native sphere retains existing world-bounds contract");
 }
 
 void test_preview_bounds_follow_transformed_authored_visibility() {
@@ -307,6 +335,7 @@ int main() {
     try {
         test_world_conversion_and_metadata();
         test_ids_are_repeatable();
+        test_skinned_bounds_use_native_vertex_mean();
         test_preview_bounds_follow_transformed_authored_visibility();
         test_invalid_references_and_boundaries();
         test_conversion_limits_before_snapshot_allocation();

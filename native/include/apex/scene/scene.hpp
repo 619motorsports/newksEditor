@@ -31,6 +31,13 @@ enum class NodeKind {
     skinned_mesh,
 };
 
+/** The source of a renderable's native local-space bounding sphere. */
+enum class LocalBoundsSource : std::uint8_t {
+    unavailable,
+    kn5_serialized,
+    kn5_vertex_mean,
+};
+
 /** The serialized KN5 blend modes needed to classify transparent geometry. */
 enum class BlendMode : std::uint8_t {
     opaque = 0,
@@ -80,6 +87,12 @@ struct SceneNode {
     std::string workspace_auxiliary;
     std::string workspace_file;
     std::vector<NodeId> children;
+    // CameraMeshFilter transforms this source sphere for ordinary KN5
+    // renderables. Existing bounds_center and bounds_radius stay in world
+    // space for the current planner and scene-framing contracts.
+    Vector3 local_bounds_center = {0.0F, 0.0F, 0.0F};
+    float local_bounds_radius = 0.0F;
+    LocalBoundsSource local_bounds_source = LocalBoundsSource::unavailable;
 };
 
 /**

@@ -192,6 +192,7 @@ endif()
 add_library(apex_render STATIC
   src/render/authoring_grid.cpp
   src/render/camera.cpp
+  src/render/camera_mesh_filter.cpp
   src/render/csp_node_state.cpp
   src/render/damage_preview.cpp
   src/render/decoded_dds_texture.cpp

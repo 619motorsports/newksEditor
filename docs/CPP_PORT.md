@@ -497,9 +497,13 @@ remains unchanged and feature-complete.
   default plan keeps the WebGL-compatible distance rule.
   Reverse engineering identifies `CameraMeshFilter::isVisible` as the active
   path. It reads each `Renderable` directly and does not populate
-  `PvsProcessor` arrays. Exact active-path integration remains staged. The port
-  still needs per-frame reculling, static-bound behavior, frustum tests, and
-  pass-specific inputs.
+  `PvsProcessor` arrays. The port now retains source-local KN5 spheres. It also
+  implements the exact pass gates, dynamic-sphere transform, LOD rule, and
+  frustum test in a backend-neutral function. This function includes the
+  native exact-unit-scale radius rule and tangent-inclusive planes. It uses a
+  WebGL near-plane variant for the WebGL clip convention. Live viewport
+  integration remains staged. It needs a retained packet catalog and a new
+  visibility mask for each frame.
   Shadows, reflections, sky, CSP lights, and post-processing remain staged
   with explicit evidence.
 - P1 is partial. Bounded readers support KN5 v4/v5/v6, DDS, ACD, INI/CSP,
