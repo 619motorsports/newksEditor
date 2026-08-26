@@ -144,6 +144,17 @@ void recovered_ksnet_mesh_lod_rule_is_bounded_and_inclusive() {
     request.no_cull = false;
     require(!apex::render::ksnet_mesh_lod_visible(request),
             "bounded ksNet contract rejects non-finite distance");
+
+    request.camera_position = {100.0F, 0.0F, 0.0F};
+    request.bounds_center = {0.0F, 0.0F, 0.0F};
+    request.lod_in = 0.0F;
+    request.lod_out = 0.0F;
+    request.bounds_radius = 0.0F;
+    require(apex::render::ksnet_mesh_lod_visible(request),
+            "ksNet skips distance culling when both LOD limits are zero");
+    request.camera_position[0] = std::numeric_limits<float>::quiet_NaN();
+    require(apex::render::ksnet_mesh_lod_visible(request),
+            "ksNet zero-limit bypass does not read unused camera values");
 }
 
 void color_order_matches_viewport() {

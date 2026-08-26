@@ -89,6 +89,7 @@ const char* reflection_selection_mode_name(ReflectionSelectionMode mode) noexcep
 bool ksnet_mesh_lod_visible(const KsNetMeshLodRequest& request) noexcept {
     if (!request.in_pvs) return false;
     if (request.no_cull) return true;
+    if (request.lod_in == 0.0F && request.lod_out == 0.0F) return true;
     if (!std::isfinite(request.camera_fov_degrees) ||
         !std::isfinite(request.lod_in) || !std::isfinite(request.lod_out) ||
         !std::isfinite(request.bounds_radius) || request.bounds_radius < 0.0F) {

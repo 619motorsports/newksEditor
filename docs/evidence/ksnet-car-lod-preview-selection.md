@@ -56,6 +56,7 @@ function performs this bounded loop for `i = 0 .. meshCount - 1`:
 
 1. Process only entries with `inPvs[i] != false` and without the
    `MESH_FLAG_NO_CULL` bit (`0x10`) in `flags[i]`.
+   Skip distance culling when both `lodIns[i]` and `lodOuts[i]` are zero.
 2. Read the camera FOV and compute `s = clamp(camera.fov * 0.0125f, 0, 1)`.
    The binary constant at `0x10115628` is the exact float `0.0125`.
 3. Read camera position from the translation components of the camera matrix
@@ -94,9 +95,9 @@ function.
 
 The native port now exposes a bounded per-mesh predicate as
 `ksnet_mesh_lod_visible()`. It preserves the strict comparisons, FOV scale
-`0.0125`, radius floor, initial PVS state, and explicit `NO_CULL` input. The
-render planner does not enable this rule yet. Loader population and per-frame
-submission remain unrecovered.
+`0.0125`, radius floor, zero-limit bypass, initial PVS state, and explicit
+`NO_CULL` input. The render planner does not enable this rule yet.
+Loader population and per-frame submission remain unrecovered.
 
 The predicate does not reinterpret the editor's LOD1–LOD4 menu as an
 automatic distance selector.

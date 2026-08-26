@@ -523,8 +523,9 @@ visibility and subtree filters. It still applies the selected mesh LOD range.
 The workspace-file contract follows `itemPreviewVisible()` and the draw filter
 in `public/app.js`. It does not claim recovered ksNet per-mesh culling parity.
 The render library also exposes the recovered bounded ksNet mesh predicate.
-It keeps PVS input, FOV scaling, the radius floor, inclusive limits, and an
-explicit `NO_CULL` input. The render planner does not select this rule yet.
+It keeps PVS input, FOV scaling, the radius floor, inclusive limits, and the
+zero-limit bypass. It also keeps an explicit `NO_CULL` input.
+The render planner does not select this rule yet.
 The ordered scene batch also supports one selected static mesh. It draws after
 opaque model packets and before the world view axis and transparent packets.
 The grid and selected-node axis remain late overlays. The pass uses
