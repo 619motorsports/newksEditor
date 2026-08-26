@@ -100,6 +100,13 @@ Control with an existing selection appends the shorter wrapped point range.
 Control with an empty selection uses the clear-and-add path.
 All additions use `addIndex`, so earlier entries retain their order.
 
+The existing final entry is the range anchor. The method compares the forward
+wrapped distance with the reverse distance. A shorter forward path walks from
+the anchor to the clicked index in increasing wrapped order. The other path
+walks from the clicked index to the anchor in increasing wrapped order.
+Equal distances use this second path. Both paths include their endpoints.
+`addIndex` removes duplicate endpoints and duplicate intermediate entries.
+
 The return reads the final selected vector entry. It divides this index by the
 active spline point count. The method does not validate the input position,
 the selected index, or a zero point count.
@@ -392,8 +399,17 @@ The viewport retains a validated selection pipeline when the selection is
 empty. Thus, start and cancel can clear markers without viewport recreation.
 The temporary edit-point producer and five-point finish operation remain
 pending in the C++ port.
-The window cannot change the selected AI indices at runtime. It also has no
-control for edit mode, cancel, or refresh.
+The controller accepts a validated point index and ports the recovered add,
+replace, and cyclic Control paths. It returns the final stored index divided by
+the point count. The safe port rejects invalid indices and zero point counts.
+The native method does not provide these checks.
+The controller request includes the owner, revision, and expected edit mode.
+It rejects stale input before allocation. A successful selection keeps model
+bytes, history, revision, and dirty state. Publication replaces the staged
+overlay set atomically for Vulkan and D3D12 device contracts.
+The window cannot produce this point index at runtime. Native screen hit
+testing remains pending. The window also has no edit-mode, cancel, or refresh
+control.
 The `--ai-spline-save-on-exit` option saves after a clean window exit.
 The `--save-ai-spline` command exposes the same rebuilt-grid save boundary.
 
@@ -419,6 +435,9 @@ They also prove that a failed save preserves the existing destination.
 The file-output test covers temporary-name collisions and promotion failure.
 Headless tests cover controller bytes and direct command output.
 They do not run the successful window-exit save path.
+The point-selection test covers plain replacement and duplicate suppression.
+It covers both cyclic routes, the equal-distance route, and edit-mode append.
+It also covers stale input, invalid indices, failed publication, and retry.
 
 The production WebGL source has no AI-spline load or render path. A source
 search found no AI-spline or `fast_lane.ai` identifiers. Thus, a direct WebGL
@@ -428,9 +447,9 @@ production WebGL suite passed 380 tests. It skipped 34 installed-fixture tests.
 SwiftShader executes the native line passes at 1x and 4x MSAA. The pixel test
 checks magenta and cyan depth rejection. It also checks blue depth-off output.
 The test checks red and green camber lines with normal depth.
-The current native suite discovered 79 tests. It passed 77 tests and skipped
-two unavailable fixture targets. The affected controller test passed with GCC
-and Clang sanitizers.
+The current native suite discovered 80 tests. It passed 79 tests and skipped
+the unavailable Vulkan runtime probe. The affected controller test passed with
+GCC and Clang sanitizers.
 The complete sanitizer run reported one 183-byte NVIDIA driver leak after the
 platform-window test. The D3D12 code uses the same batch contract. A Windows
 WARP test remains necessary for D3D12 execution evidence.

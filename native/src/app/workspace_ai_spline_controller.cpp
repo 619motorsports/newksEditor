@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <exception>
+#include <limits>
 #include <new>
 #include <unordered_set>
 #include <utility>
@@ -94,6 +95,22 @@ namespace {
         }
     }
     configuration.selectedIndices = std::move(unique);
+    return true;
+}
+
+[[nodiscard]] bool appendUniqueSelectionIndex(
+    std::vector<std::uint32_t>& selectedIndices,
+    std::unordered_set<std::uint32_t>& seen, std::uint32_t index,
+    render::Diagnostic& outputDiagnostic) {
+    if (!seen.insert(index).second) return true;
+    if (selectedIndices.size() >= authoring::aiSplineMaxSelectionEntries ||
+        selectedIndices.size() >= workspace_ai_spline_max_selection_points) {
+        outputDiagnostic = diagnostic(
+            "workspace_ai_spline_controller_selection_limit",
+            "AI spline point selection exceeds the marker limit");
+        return false;
+    }
+    selectedIndices.push_back(index);
     return true;
 }
 
@@ -600,6 +617,198 @@ WorkspaceAiSplineControllerResult WorkspaceAiSplineController::cancelEditing(
     render::Device& device, WorkspaceViewport& viewport,
     std::uint64_t expectedRevision) {
     return updateEditingState(device, viewport, expectedRevision, false, true);
+}
+
+WorkspaceAiSplinePointSelectionResult
+WorkspaceAiSplineController::selectPoint(
+    render::Device& device, WorkspaceViewport& viewport,
+    const WorkspaceAiSplinePointSelectionRequest& request) {
+    const auto baseResult = [&]() {
+        WorkspaceAiSplinePointSelectionResult result;
+        result.generation = state_->generation;
+        result.revision = state_->session.revision();
+        result.selectionCount =
+            state_->configuration.selectedIndices.size();
+        return result;
+    };
+    const auto staleResult = [&](const char* code, const char* message) {
+        auto result = baseResult();
+        result.status = WorkspaceAiSplineControllerStatus::stale_revision;
+        result.diagnostic = diagnostic(code, message);
+        return result;
+    };
+
+    if (!request.expectedGeneration.valid() ||
+        request.expectedGeneration != state_->generation) {
+        return staleResult(
+            "workspace_ai_spline_controller_selection_generation_stale",
+            "AI spline point selection generation does not match the "
+            "current controller");
+    }
+    if (request.expectedEditing != state_->editing) {
+        return staleResult(
+            "workspace_ai_spline_controller_selection_mode_stale",
+            "AI spline point selection edit mode does not match the current "
+            "controller");
+    }
+    if (!viewportMatches(viewport)) {
+        return staleResult(
+            "workspace_ai_spline_controller_viewport_generation_mismatch",
+            "AI spline viewport does not show the current controller "
+            "revision");
+    }
+
+    const std::size_t pointCount = state_->session.current().points.size();
+    if (pointCount == 0U ||
+        pointCount >
+            static_cast<std::size_t>(
+                std::numeric_limits<std::uint32_t>::max()) ||
+        static_cast<std::size_t>(request.pointIndex) >= pointCount) {
+        auto result = baseResult();
+        result.status = WorkspaceAiSplineControllerStatus::invalid_edit;
+        result.diagnostic = diagnostic(
+            "workspace_ai_spline_controller_selection_index_invalid",
+            "AI spline point selection index is outside the point array");
+        return result;
+    }
+
+    try {
+        auto candidateConfiguration = state_->configuration;
+        auto& selected = candidateConfiguration.selectedIndices;
+        std::unordered_set<std::uint32_t> seen;
+        seen.reserve(std::min(selected.size(),
+                              workspace_ai_spline_max_selection_points));
+        seen.insert(selected.begin(), selected.end());
+        render::Diagnostic selectionDiagnostic;
+        const auto add = [&](std::uint32_t index) {
+            return appendUniqueSelectionIndex(selected, seen, index,
+                                              selectionDiagnostic);
+        };
+
+        if (state_->editing) {
+            if (!add(request.pointIndex)) {
+                auto result = baseResult();
+                result.status =
+                    WorkspaceAiSplineControllerStatus::invalid_edit;
+                result.diagnostic = std::move(selectionDiagnostic);
+                return result;
+            }
+        } else if (!request.controlPressed || selected.empty()) {
+            selected.clear();
+            seen.clear();
+            if (!add(request.pointIndex)) {
+                auto result = baseResult();
+                result.status =
+                    WorkspaceAiSplineControllerStatus::invalid_edit;
+                result.diagnostic = std::move(selectionDiagnostic);
+                return result;
+            }
+        } else {
+            const std::uint32_t anchor = selected.back();
+            if (static_cast<std::size_t>(anchor) >= pointCount) {
+                auto result = baseResult();
+                result.status =
+                    WorkspaceAiSplineControllerStatus::invalid_edit;
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_controller_selection_anchor_invalid",
+                    "AI spline point selection anchor is outside the point "
+                    "array");
+                return result;
+            }
+            const std::size_t clicked = request.pointIndex;
+            const std::size_t anchorIndex = anchor;
+            const std::size_t forward =
+                clicked >= anchorIndex
+                    ? clicked - anchorIndex
+                    : pointCount - (anchorIndex - clicked);
+            const std::size_t reverse = pointCount - forward;
+            std::size_t current =
+                forward < reverse ? anchorIndex : clicked;
+            const std::size_t stop =
+                forward < reverse ? clicked : anchorIndex;
+            while (current != stop) {
+                if (!add(static_cast<std::uint32_t>(current))) {
+                    auto result = baseResult();
+                    result.status =
+                        WorkspaceAiSplineControllerStatus::invalid_edit;
+                    result.diagnostic = std::move(selectionDiagnostic);
+                    return result;
+                }
+                current = current + 1U == pointCount ? 0U : current + 1U;
+            }
+            if (!add(request.pointIndex)) {
+                auto result = baseResult();
+                result.status =
+                    WorkspaceAiSplineControllerStatus::invalid_edit;
+                result.diagnostic = std::move(selectionDiagnostic);
+                return result;
+            }
+        }
+
+        const std::uint32_t lastSelected = selected.back();
+        const float normalized = static_cast<float>(lastSelected) /
+                                 static_cast<float>(pointCount);
+        if (selected == state_->configuration.selectedIndices) {
+            auto result = baseResult();
+            result.status = WorkspaceAiSplineControllerStatus::unchanged;
+            result.lastSelectedIndex = lastSelected;
+            result.normalizedPosition = normalized;
+            return result;
+        }
+
+        auto built = buildWorkspaceAiSplineOverlays(
+            state_->session.current(), overlayRequest(candidateConfiguration));
+        if (!built.ok()) {
+            auto result = baseResult();
+            result.status = overlayFailureStatus(built.status);
+            result.diagnostic = std::move(built.diagnostic);
+            return result;
+        }
+        auto nextState = std::make_unique<State>(
+            state_->session, std::move(candidateConfiguration),
+            std::move(built.overlays), state_->movementForwards,
+            state_->generation, state_->editing);
+        const auto replaced = viewport.replaceAiSplineOverlays(
+            device, nextState->overlays,
+            WorkspaceViewportAiSplineGenerationTransition{
+                state_->generation, nextState->generation});
+        if (!replaced.ok()) {
+            auto result = baseResult();
+            result.status =
+                replaced.status ==
+                        WorkspaceViewportAiSplineUpdateStatus::unsupported
+                    ? WorkspaceAiSplineControllerStatus::unsupported
+                : replaced.status == WorkspaceViewportAiSplineUpdateStatus::
+                                         allocation_failed
+                    ? WorkspaceAiSplineControllerStatus::allocation_failed
+                    : WorkspaceAiSplineControllerStatus::viewport_failed;
+            result.diagnostic = replaced.diagnostic;
+            return result;
+        }
+
+        auto result = baseResult();
+        result.status = WorkspaceAiSplineControllerStatus::ready;
+        result.selectionCount = nextState->configuration.selectedIndices.size();
+        result.lastSelectedIndex = lastSelected;
+        result.normalizedPosition = normalized;
+        result.replacedPassCount = replaced.replaced_pass_count;
+        result.changed = true;
+        state_.swap(nextState);
+        return result;
+    } catch (const std::bad_alloc&) {
+        auto result = baseResult();
+        result.status = WorkspaceAiSplineControllerStatus::allocation_failed;
+        result.diagnostic = diagnostic(
+            "workspace_ai_spline_controller_allocation_failed",
+            "AI spline point selection exceeded available allocation "
+            "capacity");
+        return result;
+    } catch (const std::exception& error) {
+        auto result = baseResult();
+        result.diagnostic = {
+            "workspace_ai_spline_controller_selection_failed", error.what()};
+        return result;
+    }
 }
 
 WorkspaceAiSplineControllerResult

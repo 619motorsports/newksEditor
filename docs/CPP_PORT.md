@@ -266,6 +266,21 @@ remains unchanged and feature-complete.
   The controller also ports start, finish, and cancel edit-mode state.
   Start clears the selected indices. Finish preserves them. Cancel clears them.
   These lifecycle calls preserve model bytes, revision, history, and dirty state.
+  The controller also accepts one validated spline point index at runtime.
+  The request includes the controller generation and the expected edit mode.
+  This rejects foreign controllers, stale model revisions, and queued input from
+  another edit mode before buffer allocation.
+  Edit mode appends the point and ignores Control for range selection.
+  View mode without Control replaces the selection with the point.
+  Control appends the shorter cyclic range from the final stored index.
+  Equal cyclic distances use the clicked-to-anchor route.
+  Each addition keeps first-seen order and ignores an existing index.
+  The result returns the final stored index and its normalized point position.
+  A selection update keeps model bytes, revision, history, and dirty state.
+  It publishes the complete staged overlay set with the current generation.
+  Invalid indices and publication errors keep the old selection and buffers.
+  The request consumes an already resolved index. Native screen hit testing
+  remains pending, so the C++ port does not claim mouse-picking parity.
   Temporary edit-point interpolation on finish remains pending.
   The native window option `--ai-spline-edit-point` applies one scripted batch
   after viewport setup.

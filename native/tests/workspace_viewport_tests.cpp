@@ -2608,6 +2608,198 @@ void publishes_recovered_ai_spline_edit_lifecycle() {
             "empty-selection start changes only controller edit mode");
 }
 
+void publishes_recovered_ai_spline_point_selection() {
+    apex::formats::AiSpline spline;
+    spline.source = "controller-selection.ai";
+    spline.version = 7U;
+    spline.points.resize(10U);
+    spline.payloads.resize(10U);
+    for (std::size_t index = 0U; index < spline.points.size(); ++index) {
+        spline.points[index].position = {
+            static_cast<float>(index) * 10.0F, 0.0F,
+            static_cast<float>(index)};
+        spline.points[index].tag = static_cast<std::int32_t>(index);
+        spline.payloads[index].side0 = 1.0F;
+        spline.payloads[index].side1 = 2.0F;
+    }
+    apex::app::WorkspaceAiSplineControllerConfiguration configuration;
+    configuration.selectedIndices = {2U};
+    auto created = apex::app::WorkspaceAiSplineController::create(
+        spline, std::move(configuration));
+    require(created.ok(), "AI spline selection controller creates");
+    auto controller = std::move(created.controller);
+
+    auto value = fixture();
+    auto request = request_for(value);
+    request.ai_spline_geometry = &controller->overlays().primary;
+    request.ai_spline_generation = controller->generation();
+    request.ai_spline_pipeline = ai_spline_pipeline(value);
+    request.ai_spline_selection_geometry = &*controller->overlays().selection;
+    request.ai_spline_selection_pipeline = ai_spline_camber_pipeline(value);
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok(), "AI spline selection viewport prepares");
+
+    const auto baselineBytes = controller->currentBytes();
+    const auto baselineGeneration = controller->generation();
+    const auto baselineRevision = controller->revision();
+    const auto select = [&](std::uint32_t index, bool control) {
+        apex::app::WorkspaceAiSplinePointSelectionRequest selection;
+        selection.pointIndex = index;
+        selection.controlPressed = control;
+        selection.expectedEditing = controller->editing();
+        selection.expectedGeneration = controller->generation();
+        return controller->selectPoint(device, *prepared.viewport, selection);
+    };
+    const auto preservesAuthoringState = [&]() {
+        return controller->currentBytes() == baselineBytes &&
+               controller->revision() == baselineRevision &&
+               controller->generation() == baselineGeneration &&
+               !controller->dirty() && !controller->canUndo() &&
+               !controller->canRedo();
+    };
+
+    const auto replaced = select(6U, false);
+    require(replaced.ok() && replaced.changed && replaced.selectionCount == 1U &&
+                replaced.lastSelectedIndex == 6U &&
+                replaced.normalizedPosition == 0.6F &&
+                replaced.replacedPassCount == 2U &&
+                controller->configuration().selectedIndices ==
+                    std::vector<std::uint32_t>({6U}) &&
+                preservesAuthoringState(),
+            "plain selection replaces indices without authoring changes");
+    const auto callsBeforeDuplicate = device.buffer_calls;
+    const auto duplicate = select(6U, false);
+    require(duplicate.ok() && !duplicate.changed &&
+                duplicate.lastSelectedIndex == 6U &&
+                duplicate.normalizedPosition == 0.6F &&
+                device.buffer_calls == callsBeforeDuplicate &&
+                preservesAuthoringState(),
+            "duplicate plain selection performs no viewport work");
+
+    const auto tiedRange = select(1U, true);
+    require(tiedRange.ok() && tiedRange.changed &&
+                tiedRange.lastSelectedIndex == 5U &&
+                tiedRange.normalizedPosition == 0.5F &&
+                controller->configuration().selectedIndices ==
+                    std::vector<std::uint32_t>({6U, 1U, 2U, 3U, 4U, 5U}),
+            "Control tie walks clicked to anchor and returns the final entry");
+    const auto forwardRange = select(8U, true);
+    require(forwardRange.ok() && forwardRange.changed &&
+                forwardRange.lastSelectedIndex == 8U &&
+                controller->configuration().selectedIndices ==
+                    std::vector<std::uint32_t>(
+                        {6U, 1U, 2U, 3U, 4U, 5U, 7U, 8U}),
+            "Control appends the shorter forward cyclic range");
+    require(select(2U, false).ok(),
+            "plain selection resets the reverse-range fixture");
+    const auto reverseRange = select(8U, true);
+    require(reverseRange.ok() && reverseRange.changed &&
+                reverseRange.lastSelectedIndex == 1U &&
+                reverseRange.normalizedPosition == 0.1F &&
+                controller->configuration().selectedIndices ==
+                    std::vector<std::uint32_t>({2U, 8U, 9U, 0U, 1U}) &&
+                preservesAuthoringState(),
+            "Control appends the shorter wrapped reverse range");
+
+    const auto callsBeforeInvalid = device.buffer_calls;
+    auto invalidRequest =
+        apex::app::WorkspaceAiSplinePointSelectionRequest{};
+    invalidRequest.pointIndex = std::numeric_limits<std::uint32_t>::max();
+    invalidRequest.expectedEditing = controller->editing();
+    invalidRequest.expectedGeneration = controller->generation();
+    const auto invalid = controller->selectPoint(
+        device, *prepared.viewport, invalidRequest);
+    auto foreignCreated = apex::app::WorkspaceAiSplineController::create(
+        spline, {});
+    require(foreignCreated.ok(), "foreign selection controller creates");
+    auto foreignRequest = invalidRequest;
+    foreignRequest.pointIndex = 3U;
+    foreignRequest.expectedGeneration =
+        foreignCreated.controller->generation();
+    const auto foreign = controller->selectPoint(
+        device, *prepared.viewport, foreignRequest);
+    auto staleRequest = invalidRequest;
+    staleRequest.pointIndex = 3U;
+    staleRequest.expectedGeneration = controller->generation();
+    ++staleRequest.expectedGeneration.revision;
+    const auto stale = controller->selectPoint(
+        device, *prepared.viewport, staleRequest);
+    require(!invalid.ok() &&
+                invalid.diagnostic.code ==
+                    "workspace_ai_spline_controller_selection_index_invalid" &&
+                !foreign.ok() && !stale.ok() &&
+                foreign.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::
+                        stale_revision &&
+                stale.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::
+                        stale_revision &&
+                device.buffer_calls == callsBeforeInvalid &&
+                preservesAuthoringState(),
+            "selection rejects invalid, foreign, and stale input before upload");
+
+    const auto selectionBeforeFailure =
+        controller->configuration().selectedIndices;
+    const auto liveBeforeFailure = *device.live_buffer_count;
+    device.fail_buffer_call = device.buffer_calls + 2U;
+    device.fail_buffer_status = BufferStatus::upload_failed;
+    const auto uploadFailed = select(4U, false);
+    require(!uploadFailed.ok() &&
+                uploadFailed.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::
+                        viewport_failed &&
+                controller->configuration().selectedIndices ==
+                    selectionBeforeFailure &&
+                *device.live_buffer_count == liveBeforeFailure &&
+                preservesAuthoringState(),
+            "failed selection upload keeps controller and visible buffers");
+    device.fail_buffer_call = device.buffer_calls + 1U;
+    device.fail_buffer_status = BufferStatus::allocation_failed;
+    const auto allocationFailed = select(4U, false);
+    require(!allocationFailed.ok() &&
+                allocationFailed.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::
+                        allocation_failed &&
+                controller->configuration().selectedIndices ==
+                    selectionBeforeFailure &&
+                *device.live_buffer_count == liveBeforeFailure &&
+                preservesAuthoringState(),
+            "failed selection allocation keeps controller and visible buffers");
+    device.fail_buffer_call = 0U;
+    require(select(4U, false).ok(), "selection retry succeeds");
+
+    apex::app::WorkspaceAiSplinePointSelectionRequest beforeEdit;
+    beforeEdit.pointIndex = 7U;
+    beforeEdit.expectedEditing = false;
+    beforeEdit.expectedGeneration = controller->generation();
+    const auto started = controller->startEditing(
+        device, *prepared.viewport, controller->revision());
+    const auto staleMode = controller->selectPoint(
+        device, *prepared.viewport, beforeEdit);
+    require(started.ok() && controller->editing() && !staleMode.ok() &&
+                staleMode.diagnostic.code ==
+                    "workspace_ai_spline_controller_selection_mode_stale",
+            "queued selection rejects an edit-mode transition");
+    const auto editFirst = select(4U, false);
+    const auto editControl = select(6U, true);
+    require(editFirst.ok() && editControl.ok() &&
+                controller->configuration().selectedIndices ==
+                    std::vector<std::uint32_t>({4U, 6U}) &&
+                preservesAuthoringState(),
+            "edit mode appends and ignores the Control range modifier");
+    const auto cancelled = controller->cancelEditing(
+        device, *prepared.viewport, controller->revision());
+    const auto controlEmpty = select(9U, true);
+    require(cancelled.ok() && controlEmpty.ok() &&
+                controller->configuration().selectedIndices ==
+                    std::vector<std::uint32_t>({9U}) &&
+                controlEmpty.lastSelectedIndex == 9U &&
+                preservesAuthoringState(),
+            "Control with an empty view-mode selection adds one point");
+}
+
 void rejects_foreign_ai_spline_controller_generations() {
     apex::formats::AiSpline spline;
     spline.source = "controller-owner.ai";
@@ -2983,6 +3175,19 @@ void publishes_controller_through_d3d12_metadata_contract() {
         device, *prepared.viewport, movement, controller->revision());
     require(changed.ok() && changed.changed && changed.replacedPassCount == 2U,
             "D3D12 contract accepts one manual controller generation");
+
+    apex::app::WorkspaceAiSplinePointSelectionRequest selection;
+    selection.pointIndex = 3U;
+    selection.expectedEditing = controller->editing();
+    selection.expectedGeneration = controller->generation();
+    const auto selected = controller->selectPoint(
+        device, *prepared.viewport, selection);
+    require(selected.ok() && selected.changed &&
+                selected.replacedPassCount == 2U &&
+                controller->configuration().selectedIndices ==
+                    std::vector<std::uint32_t>({3U}) &&
+                controller->revision() == changed.revision,
+            "D3D12 contract accepts one point selection transaction");
 
     FakeTarget target(request.presentation, Backend::D3D12);
     WorkspaceViewportFrameRequest frame;
@@ -3679,6 +3884,7 @@ int main() {
         tracks_recovered_ai_spline_manual_input();
         publishes_ai_spline_controller_transactions();
         publishes_recovered_ai_spline_edit_lifecycle();
+        publishes_recovered_ai_spline_point_selection();
         rejects_foreign_ai_spline_controller_generations();
         rejects_unsafe_ai_spline_controller_candidates();
         handles_degenerate_ai_spline_manual_forwards();

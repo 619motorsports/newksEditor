@@ -99,6 +99,34 @@ struct WorkspaceAiSplineControllerResult {
     }
 };
 
+// A caller creates this request after it resolves a viewport hit to one
+// validated spline point. Screen-space hit testing is intentionally outside
+// the controller. Snapshot both controller fields with the input event.
+struct WorkspaceAiSplinePointSelectionRequest {
+    std::uint32_t pointIndex = 0U;
+    bool controlPressed = false;
+    bool expectedEditing = false;
+    WorkspaceViewportAiSplineGeneration expectedGeneration;
+};
+
+struct WorkspaceAiSplinePointSelectionResult {
+    WorkspaceAiSplineControllerStatus status =
+        WorkspaceAiSplineControllerStatus::invalid_edit;
+    render::Diagnostic diagnostic;
+    WorkspaceViewportAiSplineGeneration generation;
+    std::uint64_t revision = 0U;
+    std::size_t selectionCount = 0U;
+    std::optional<std::uint32_t> lastSelectedIndex;
+    std::optional<float> normalizedPosition;
+    std::size_t replacedPassCount = 0U;
+    bool changed = false;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == WorkspaceAiSplineControllerStatus::ready ||
+               status == WorkspaceAiSplineControllerStatus::unchanged;
+    }
+};
+
 enum class WorkspaceAiSplineControllerSaveStatus : std::uint8_t {
     ready,
     stale_revision,
@@ -190,6 +218,9 @@ public:
     [[nodiscard]] WorkspaceAiSplineControllerResult cancelEditing(
         render::Device& device, WorkspaceViewport& viewport,
         std::uint64_t expectedRevision);
+    [[nodiscard]] WorkspaceAiSplinePointSelectionResult selectPoint(
+        render::Device& device, WorkspaceViewport& viewport,
+        const WorkspaceAiSplinePointSelectionRequest& request);
     [[nodiscard]] WorkspaceAiSplineControllerResult undo(
         render::Device& device, WorkspaceViewport& viewport,
         std::uint64_t expectedRevision);

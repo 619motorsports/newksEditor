@@ -292,6 +292,16 @@ This identity rejects a foreign controller at the same numeric revision.
 It also rejects owner changes, revision rollback, and skipped revisions.
 A controller viewport retains the validated selection pipeline while no marker
 geometry exists. This permits atomic marker removal without viewport recreation.
+The controller can apply one validated point index at runtime.
+View mode replaces the selection unless Control is active.
+Control appends the recovered shorter cyclic range from the final stored index.
+Equal distances use the clicked-to-anchor route. Edit mode always appends.
+The request carries the generation identity and expected edit mode.
+Invalid, foreign, and stale input fails before viewport publication.
+Successful selection keeps spline bytes, history, revision, and dirty state.
+The result contains the final stored index and its normalized point position.
+This API does not resolve a mouse position. Native screen hit testing remains
+pending, and the native window does not expose the point-index operation yet.
 The temporary edit-point interpolation path remains pending.
 The native window does not expose these lifecycle calls yet.
 `--save-ai-spline` accepts version 7 and rebuilds the native grid.
