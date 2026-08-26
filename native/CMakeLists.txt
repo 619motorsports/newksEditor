@@ -422,6 +422,7 @@ apex_add_native_test(stock_ks_per_pixel_vulkan_abi_tests.cpp stock_ks_per_pixel_
 apex_add_native_test(stock_ks_per_pixel_vulkan_runtime_tests.cpp stock_ks_per_pixel_vulkan_runtime_tests ApexEditor::Render)
 apex_add_native_test(stock_ks_per_pixel_d3d12_tests.cpp stock_ks_per_pixel_d3d12_tests ApexEditor::Render)
 apex_add_native_test(stock_scene_execution_tests.cpp stock_scene_execution_tests ApexEditor::Render)
+apex_add_native_test(stock_scene_d3d12_directional_shadow_tests.cpp stock_scene_d3d12_directional_shadow_tests ApexEditor::Render)
 apex_add_native_test(lighting_tests.cpp lighting_tests ApexEditor::Render)
 apex_add_native_test(material_binding_tests.cpp material_binding_tests ApexEditor::Render)
 apex_add_native_test(material_profile_tests.cpp material_profile_tests ApexEditor::Render)
@@ -445,6 +446,10 @@ if(TARGET stock_ks_per_pixel_d3d12_tests AND WIN32)
   # The hybrid WARP test compiles a small portable shader pair so one command
   # list exercises both the caller and recovered native root ABIs.
   target_link_libraries(stock_ks_per_pixel_d3d12_tests PRIVATE d3dcompiler)
+endif()
+
+if(TARGET stock_scene_d3d12_directional_shadow_tests AND WIN32)
+  target_link_libraries(stock_scene_d3d12_directional_shadow_tests PRIVATE d3dcompiler)
 endif()
 
 if(WIN32 AND APEX_ENABLE_D3D12 AND APEX_NATIVE_WINDOW_AVAILABLE)
@@ -504,7 +509,7 @@ if(TEST render_backend_tests)
       ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")
   endif()
 endif()
-foreach(render_test IN ITEMS authoring_grid_tests camera_tests bmp_texture_tests csp_node_state_tests damage_preview_tests external_texture_authority_tests fbx_render_adapter_tests draw_packet_tests frame_plan_tests indexed_draw_tests selection_axis_tests selected_mesh_tests view_axis_tests static_mesh_upload_tests skinned_mesh_upload_tests static_scene_tests stock_material_execution_tests stock_scene_execution_tests workspace_ai_spline_tests workspace_real_fixture_tests workspace_shadow_programs_tests workspace_track_camera_tests workspace_viewport_tests lighting_tests material_binding_tests
+foreach(render_test IN ITEMS authoring_grid_tests camera_tests bmp_texture_tests csp_node_state_tests damage_preview_tests external_texture_authority_tests fbx_render_adapter_tests draw_packet_tests frame_plan_tests indexed_draw_tests selection_axis_tests selected_mesh_tests view_axis_tests static_mesh_upload_tests skinned_mesh_upload_tests static_scene_tests stock_material_execution_tests stock_scene_execution_tests stock_scene_d3d12_directional_shadow_tests workspace_ai_spline_tests workspace_real_fixture_tests workspace_shadow_programs_tests workspace_track_camera_tests workspace_viewport_tests lighting_tests material_binding_tests
                              material_profile_tests pipeline_tests render_plan_tests stock_ks_per_pixel_tests stock_ks_per_pixel_vulkan_source_tests stock_ks_per_pixel_vulkan_source_drift_tests stock_ks_per_pixel_vulkan_abi_tests stock_ks_per_pixel_vulkan_runtime_tests stock_ks_per_pixel_d3d12_tests texture_upload_tests)
   if(TEST ${render_test})
     set_tests_properties(${render_test} PROPERTIES LABELS "unit;render")
