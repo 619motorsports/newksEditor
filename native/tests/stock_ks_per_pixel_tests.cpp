@@ -1456,7 +1456,10 @@ void executes_a_validated_native_program_through_the_static_scene_batch() {
     mesh.vertices[11U] = 0.5F;
     mesh.vertices[23U] = 0.5F;
     mesh.indices = {0U, 1U, 2U};
+    apex::formats::Kn5Node second_mesh = mesh;
+    second_mesh.name = "BODY_SECOND";
     model.root.children.push_back(std::move(mesh));
+    model.root.children.push_back(std::move(second_mesh));
 
     apex::scene::SceneSnapshot scene;
     (void)scene.add_material(
@@ -1470,6 +1473,12 @@ void executes_a_validated_native_program_through_the_static_scene_batch() {
     node.material = 0U;
     const apex::scene::NodeId node_id =
         scene.add_node(std::move(node), root_id);
+    apex::scene::SceneNode second_node;
+    second_node.name = "BODY_SECOND";
+    second_node.kind = apex::scene::NodeKind::mesh;
+    second_node.material = 0U;
+    const apex::scene::NodeId second_node_id =
+        scene.add_node(std::move(second_node), root_id);
 
     DrawPacket packet;
     packet.node = node_id;
@@ -1480,7 +1489,10 @@ void executes_a_validated_native_program_through_the_static_scene_batch() {
     packet.vertex_stride_floats = 11U;
     packet.material_profile.shader = "ksPerPixel";
     packet.resources.push_back({"txDiffuse", 0U, 0U, "body.dds"});
-    const std::array<DrawPacket, 1U> packets = {packet};
+    DrawPacket second_packet = packet;
+    second_packet.node = second_node_id;
+    second_packet.world_matrix[12U] = 2.0F;
+    const std::array<DrawPacket, 2U> packets = {packet, second_packet};
 
     auto native_owner =
         std::make_shared<const ValidatedStockKsPerPixelNativeProgram>(
@@ -1500,6 +1512,53 @@ void executes_a_validated_native_program_through_the_static_scene_batch() {
     request.targets.depth =
         {PipelineRenderTargetFormat::depth32_float, 1U};
 
+    constexpr std::uint64_t per_draw_native_constant_bytes =
+        static_cast<std::uint64_t>(
+            stock_ks_per_pixel_native_constant_buffer_view_bytes) *
+        static_cast<std::uint64_t>(
+            StockKsPerPixelNativeConstantSlot::count);
+    FakeShaderDevice constant_limit_device(Backend::D3D12);
+    auto constant_limit_request = request;
+    constant_limit_request.limits.scene
+        .max_total_stock_d3d12_native_constant_bytes =
+        per_draw_native_constant_bytes;
+    const auto constant_limited = prepare_stock_material_execution(
+        constant_limit_device, constant_limit_request);
+    require(!constant_limited.ok() &&
+                constant_limited.diagnostic.code ==
+                    "static_scene_stock_d3d12_native_constant_aggregate_limit" &&
+                constant_limit_device.shader_calls == 0U &&
+                constant_limit_device.buffer_calls == 0U &&
+                constant_limit_device.sampler_calls == 0U,
+            "native constant-byte limits reject multiple draws before allocation");
+    FakeShaderDevice update_limit_device(Backend::D3D12);
+    auto update_limit_request = request;
+    update_limit_request.limits.scene.max_total_update_bytes =
+        static_cast<std::uint64_t>(
+            stock_ks_per_pixel_native_constant_buffer_view_bytes) *
+        4U;
+    const auto update_limited = prepare_stock_material_execution(
+        update_limit_device, update_limit_request);
+    require(!update_limited.ok() &&
+                update_limited.diagnostic.code ==
+                    "static_scene_stock_d3d12_native_update_aggregate_limit" &&
+                update_limit_device.shader_calls == 0U &&
+                update_limit_device.buffer_calls == 0U &&
+                update_limit_device.sampler_calls == 0U,
+            "native update-byte limits reject multiple draws before allocation");
+    FakeShaderDevice draw_limit_device(Backend::D3D12);
+    auto draw_limit_request = request;
+    draw_limit_request.limits.scene.max_draws = 1U;
+    const auto draw_limited = prepare_stock_material_execution(
+        draw_limit_device, draw_limit_request);
+    require(!draw_limited.ok() &&
+                draw_limited.diagnostic.code ==
+                    "stock_material_packet_count_invalid" &&
+                draw_limit_device.shader_calls == 0U &&
+                draw_limit_device.buffer_calls == 0U &&
+                draw_limit_device.sampler_calls == 0U,
+            "native draw-count limits reject before backend allocation");
+
     constexpr std::array<PipelineRenderTargetFormat, 4U>
         supported_native_formats = {
             PipelineRenderTargetFormat::rgba8_unorm,
@@ -1513,7 +1572,7 @@ void executes_a_validated_native_program_through_the_static_scene_batch() {
         format_request.targets.colors.front().format = format;
         const auto accepted = prepare_stock_material_execution(
             format_device, format_request);
-        require(accepted.ok() && format_device.shader_calls == 2U,
+        require(accepted.ok() && format_device.shader_calls == 4U,
                 "native static scene accepts one-sample RGBA8 and BGRA8 targets");
     }
     FakeShaderDevice unsupported_format_device(Backend::D3D12);
@@ -1557,15 +1616,15 @@ void executes_a_validated_native_program_through_the_static_scene_batch() {
             "native multisampling rejects before backend allocation");
 
     auto prepared = prepare_stock_material_execution(device, request);
-    require(prepared.ok() && prepared.resources->draw_count() == 1U &&
+    require(prepared.ok() && prepared.resources->draw_count() == 2U &&
                 prepared.resources->stock_d3d12_native_program_count() == 1U &&
                 prepared.resources->requires_stock_d3d12_native_frame(),
             prepared.diagnostic.code.empty()
                 ? "native D3D12 stock scene preparation"
                 : prepared.diagnostic.code.c_str());
-    require(device.shader_calls == 2U && device.buffer_calls == 7U &&
-                device.sampler_calls == 2U,
-            "scene preparation allocates geometry plus one private native resource bundle");
+    require(device.shader_calls == 4U && device.buffer_calls == 14U &&
+                device.sampler_calls == 4U,
+            "scene preparation allocates one private native resource bundle per draw");
 
     CameraFrameRequest camera_request;
     camera_request.eye = {0.0F, 0.0F, 2.0F};
@@ -1626,14 +1685,34 @@ void executes_a_validated_native_program_through_the_static_scene_batch() {
     const IndexedStaticMeshBatchResult drawn =
         prepared.resources->draw_and_readback(device, target, frame);
     require(drawn.ok() && device.batch_calls == 1U &&
-                device.native_draws == 1U &&
-                device.native_resource_owners.size() == 1U &&
+                device.native_draws == 2U &&
+                device.native_resource_owners.size() == 2U &&
                 device.native_resource_owners[0U] != nullptr &&
                 device.native_resource_owners[0U]->ready() &&
-                device.buffer_update_calls == 4U,
+                device.native_resource_owners[1U] != nullptr &&
+                device.native_resource_owners[1U]->ready() &&
+                device.native_resource_owners[0U] !=
+                    device.native_resource_owners[1U] &&
+                device.buffer_update_calls == 8U,
             drawn.diagnostic.code.empty()
-                ? "native static scene submits one exact D3D12 authority draw"
+                ? "native static scene submits two independent D3D12 authority draws"
                 : drawn.diagnostic.code.c_str());
+    StockKsPerPixelObjectConstants first_object;
+    StockKsPerPixelObjectConstants second_object;
+    require(device.updated_buffers.size() == 8U &&
+                device.updated_buffers[1U].size() >= sizeof(first_object) &&
+                device.updated_buffers[5U].size() >= sizeof(second_object),
+            "each native draw updates its private object record");
+    std::memcpy(&first_object, device.updated_buffers[1U].data(),
+                sizeof(first_object));
+    std::memcpy(&second_object, device.updated_buffers[5U].data(),
+                sizeof(second_object));
+    require(first_object.world == stock_ks_per_pixel_transpose_matrix(
+                                      packet.world_matrix) &&
+                second_object.world == stock_ks_per_pixel_transpose_matrix(
+                                       second_packet.world_matrix) &&
+                first_object.world != second_object.world,
+            "separate native draws retain independent object transforms");
 
     FakeShaderDevice foreign_device(Backend::D3D12);
     FakeNativeTexture foreign_target(
@@ -1704,7 +1783,7 @@ void executes_a_validated_native_program_through_the_static_scene_batch() {
     const auto unused_foreign = prepared.resources->draw_and_readback(
         device, target, frame);
     require(unused_foreign.ok() &&
-                device.buffer_update_calls == updates_before_rejection + 4U &&
+                device.buffer_update_calls == updates_before_rejection + 8U &&
                 device.batch_calls == batches_before_rejection + 1U,
             "unused foreign caller-table entries do not reject a native draw");
 }
