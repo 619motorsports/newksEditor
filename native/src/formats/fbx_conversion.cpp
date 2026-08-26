@@ -1141,7 +1141,9 @@ void unsupportedFeatureScan(const FbxDocument& document, FbxSceneConversion& res
                 addDiagnostic(result, diagnostics, FbxConversionSeverity::warning, code, message, frame.path);
             };
             const auto& node = *frame.node;
-            if (node.name == "Texture" || node.name == "Video" || node.name == "Image") add("unsupported_images", "FBX image and texture records are not converted");
+            if (node.name == "Video" || node.name == "Image")
+                add("unsupported_images",
+                    "Embedded FBX image records are not converted");
             if ((node.name == "LayerElementNormal" &&
                  !supportedNormalLayer(node)) ||
                 (node.name == "LayerElementMaterial" &&
@@ -1960,6 +1962,7 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
             links.push_back(std::move(link));
         }
     }
+    std::set<std::int64_t> supportedFileTextures;
     for (std::size_t connectionIndex = 0u; connectionIndex < links.size();
          ++connectionIndex) {
         const auto& link = links[connectionIndex];
@@ -1984,6 +1987,8 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
         result.file_texture_candidates.push_back(
             {material->second, source.id, link.property, std::move(basename),
              link.connection_order});
+        (void)insertSet(supportedFileTextures, source.id, budget,
+                        "scene/supported file textures");
     }
     std::sort(result.file_texture_candidates.begin(),
               result.file_texture_candidates.end(),
@@ -1999,6 +2004,16 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
                       right.connection_order};
                   return leftKey < rightKey;
               });
+    for (const auto& record : records) {
+        if (record.node->name != "Texture" ||
+            supportedFileTextures.contains(record.id))
+            continue;
+        addDiagnostic(
+            result, diagnostics, FbxConversionSeverity::warning,
+            "unsupported_images",
+            "FBX texture record has no supported native file connection",
+            "Objects/Texture/" + std::to_string(record.id));
+    }
     std::map<std::int64_t, std::int64_t> parent;
     std::map<std::int64_t, std::vector<std::int64_t>> childrenByParent;
     std::map<std::int64_t, std::int64_t> geometryForModel;

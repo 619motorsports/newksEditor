@@ -5214,6 +5214,34 @@ void resolves_preview_state_without_mutating_document() {
             "workspace LOD and preview resolution do not mutate the source document");
 }
 
+void rejects_staged_fbx_before_backend_allocation() {
+    apex::app::FbxPreviewDocumentResult staged;
+    staged.status = apex::app::FbxPreviewDocumentStatus::staged;
+    staged.document = apex::app::WorkspaceSessionDocument{};
+    FakeDevice device;
+    WorkspaceViewportPrepareRequest request;
+    const auto rejected = apex::app::prepareWorkspaceViewport(
+        device, staged, request);
+    require(rejected.status ==
+                apex::app::WorkspaceViewportStatus::unsupported &&
+                rejected.diagnostic.code ==
+                    "fbx_preview_document_staged" &&
+                device.buffer_calls == 0U && device.texture_calls == 0U &&
+                device.depth_calls == 0U,
+            "staged FBX is rejected before backend allocation");
+
+    staged.status = apex::app::FbxPreviewDocumentStatus::invalid_request;
+    staged.document.reset();
+    const auto invalid = apex::app::prepareWorkspaceViewport(
+        device, staged, request);
+    require(invalid.status == apex::app::WorkspaceViewportStatus::invalid &&
+                invalid.diagnostic.code ==
+                    "fbx_preview_document_invalid" &&
+                device.buffer_calls == 0U && device.texture_calls == 0U &&
+                device.depth_calls == 0U,
+            "invalid FBX document is rejected before backend allocation");
+}
+
 void rejects_invalid_inputs() {
     auto value = fixture();
     FakeDevice device;
@@ -5443,6 +5471,7 @@ int main() {
         updates_webgl_compatible_transparent_order_per_frame();
         combines_workspace_lod_and_live_mesh_visibility();
         resolves_preview_state_without_mutating_document();
+        rejects_staged_fbx_before_backend_allocation();
         camera_controller_matches_bounded_editor_gestures();
         camera_controller_supports_keyboard_translation();
         schedules_directional_shadows_before_color_and_reuses_maps();

@@ -654,6 +654,13 @@ source behavior produce a staged model. A staged model cannot enter a GPU
 backend. Malformed hierarchy, geometry, material, texture, and limit data fail
 atomically and do not publish a partial model.
 
+The application layer now opens caller-owned FBX bytes as a standard preview
+document. It accepts only a logical source name. External textures require an
+explicit `AssetSource` grant. A supported file-texture record does not count as
+an embedded-image gap after the authority resolves it. Embedded images and
+unsupported texture records remain staged. The FBX viewport overload rejects a
+staged document before it creates a Vulkan or D3D12 resource.
+
 The strict Linux build detects the Vulkan SDK. The runtime test uses a software
 Vulkan device when an ICD is available. CI defines the same Vulkan test. The
 current GitHub account billing error prevents fresh CI evidence. The production

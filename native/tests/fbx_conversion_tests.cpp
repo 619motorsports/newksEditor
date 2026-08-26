@@ -325,8 +325,13 @@ void appliesNativeGeometricMeshTransform() {
 
 void preservesBoundedFileTextureCandidates() {
     const auto result = apex::formats::convertFbxScene(fileTextureFixture());
-    require(result.file_texture_candidates.size() == 1u,
+    require(result.complete && result.file_texture_candidates.size() == 1u,
             "FBX file texture connection becomes one candidate");
+    require(std::none_of(result.diagnostics.begin(), result.diagnostics.end(),
+                         [](const auto& diagnostic) {
+                             return diagnostic.code == "unsupported_images";
+                         }),
+            "supported external file texture is not an embedded-image gap");
     const auto& candidate = result.file_texture_candidates.front();
     require(candidate.material == 0u && candidate.texture_object_id == 400 &&
                 candidate.channel == "DiffuseColor" &&
@@ -1150,7 +1155,9 @@ void enforcesLimitsAndUnsupportedCapability() {
 
     auto unsupported = fixture();
     unsupported.roots.push_back(node("AnimationStack", {std::int64_t(500), std::string("AnimationStack::A"), std::string("AnimationStack")}));
-    unsupported.roots.push_back(node("Texture", {std::int64_t(600), std::string("Texture::A"), std::string("Texture")}));
+    unsupported.roots.push_back(node(
+        "Video", {std::int64_t(600), std::string("Video::A"),
+                  std::string("Clip")}));
     const auto result = apex::formats::convertFbxScene(unsupported);
     require(!result.complete, "unsupported FBX features are not marked complete");
     bool animation = false, image = false;

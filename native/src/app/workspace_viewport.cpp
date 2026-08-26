@@ -2658,4 +2658,24 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
     }
 }
 
+WorkspaceViewportPrepareResult prepareWorkspaceViewport(
+    render::Device& device, const FbxPreviewDocumentResult& document,
+    const WorkspaceViewportPrepareRequest& request) {
+    if (!document.gpu_renderable()) {
+        WorkspaceViewportPrepareResult result;
+        result.status = document.status == FbxPreviewDocumentStatus::staged
+                            ? WorkspaceViewportStatus::unsupported
+                            : WorkspaceViewportStatus::invalid;
+        result.diagnostic = diagnostic(
+            document.status == FbxPreviewDocumentStatus::staged
+                ? "fbx_preview_document_staged"
+                : "fbx_preview_document_invalid",
+            document.status == FbxPreviewDocumentStatus::staged
+                ? "Staged FBX source behavior or resources cannot enter a GPU backend"
+                : "FBX preview document is not ready");
+        return result;
+    }
+    return prepareWorkspaceViewport(device, *document.document, request);
+}
+
 }  // namespace apex::app

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "apex/app/fbx_preview_document.hpp"
 #include "apex/app/workspace_ai_spline.hpp"
 #include "apex/app/workspace_session.hpp"
 #include "apex/render/device.hpp"
@@ -481,6 +482,12 @@ struct WorkspaceViewportPrepareResult {
 
 [[nodiscard]] WorkspaceViewportPrepareResult prepareWorkspaceViewport(
     render::Device& device, const WorkspaceSessionDocument& document,
+    const WorkspaceViewportPrepareRequest& request);
+
+// This overload enforces the FBX staging gate before any backend resource is
+// created. Callers cannot accidentally preview an incomplete FBX document.
+[[nodiscard]] WorkspaceViewportPrepareResult prepareWorkspaceViewport(
+    render::Device& device, const FbxPreviewDocumentResult& document,
     const WorkspaceViewportPrepareRequest& request);
 
 [[nodiscard]] const char* workspace_viewport_status_name(

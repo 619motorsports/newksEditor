@@ -239,6 +239,7 @@ target_link_libraries(apex_external_texture_authority
 # Renderer-facing application composition remains separate from apex_app. It
 # can materialize application-authorized assets before entering GPU backends.
 add_library(apex_app_render STATIC
+  src/app/fbx_preview_document.cpp
   src/app/workspace_ai_spline.cpp
   src/app/workspace_ai_spline_commands.cpp
   src/app/workspace_ai_spline_controller.cpp
@@ -379,6 +380,7 @@ apex_add_native_test(damage_preview_tests.cpp damage_preview_tests ApexEditor::R
 apex_add_native_test(external_texture_authority_tests.cpp external_texture_authority_tests ApexEditor::ExternalTextureAuthority)
 apex_add_native_test(fbx_external_texture_authority_tests.cpp fbx_external_texture_authority_tests ApexEditor::ExternalTextureAuthority)
 apex_add_native_test(fbx_render_adapter_tests.cpp fbx_render_adapter_tests ApexEditor::ExternalTextureAuthority)
+apex_add_native_test(fbx_preview_document_tests.cpp fbx_preview_document_tests ApexEditor::AppRender)
 apex_add_native_test(render_backend_tests.cpp render_backend_tests ApexEditor::ExternalTextureAuthority)
 apex_add_native_test(draw_packet_tests.cpp draw_packet_tests ApexEditor::Render)
 if(TARGET draw_packet_tests)
@@ -446,7 +448,7 @@ foreach(boundary_test IN ITEMS authoring_project_tests project_bake_tests geomet
                                project_surfaces_tests
                                analog_instruments_tests animation_preview_tests driver_tests skin_metadata_tests
                                track_data_tests kn5_scene_tests workspace_tests workspace_scene_tests
-                               workspace_session_tests)
+                               workspace_session_tests fbx_preview_document_tests)
   if(TEST ${boundary_test})
     set_tests_properties(${boundary_test} PROPERTIES LABELS "unit;malformed")
   endif()
