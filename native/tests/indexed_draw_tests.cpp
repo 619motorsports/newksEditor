@@ -2046,6 +2046,16 @@ void validates_ordered_indexed_batch_contract() {
                 requests[0].depth_attachment == nullptr && requests[1].depth_attachment == nullptr,
             "batch preflight preserves ordered requests and caller state");
 
+    requests[1].shader_authority =
+        IndexedShaderAuthority::explicit_stock_ks_per_pixel_native;
+    requests[1].camera_frame.reset();
+    require(validate_indexed_static_mesh_batch_description(
+                target, description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::unsupported &&
+                diagnostic.code == "indexed_stock_native_batch_staged",
+            "native batch authority rejects before portable camera assembly");
+    requests[1] = request_fixture(second_packet, pipeline, vertices, indices);
+
     PipelineProgram multisample_pipeline = pipeline_fixture();
     multisample_pipeline.targets.colors.front().samples = 4U;
     multisample_pipeline.targets.has_depth = true;

@@ -2672,6 +2672,17 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
         return target_status == IndexedStaticMeshDrawStatus::unsupported
                    ? IndexedStaticMeshBatchStatus::unsupported
                    : IndexedStaticMeshBatchStatus::invalid_request;
+    if (std::any_of(
+            description.draws.begin(), description.draws.end(),
+            [](const IndexedStaticMeshDrawRequest& request) {
+                return request.shader_authority ==
+                       IndexedShaderAuthority::explicit_stock_ks_per_pixel_native;
+            })) {
+        diagnostic = {
+            "indexed_stock_native_batch_staged",
+            "Native ksPerPixel execution currently supports one synchronous draw, not queued batch execution"};
+        return IndexedStaticMeshBatchStatus::unsupported;
+    }
     std::uint32_t previous_selected_position = 0U;
     bool has_previous_selected_position = false;
     for (const SelectedMeshDrawRequest& selected :
