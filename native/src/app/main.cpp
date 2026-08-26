@@ -59,6 +59,7 @@ void usage(std::ostream& output) {
            << "  apex-native --backend vulkan|d3d12 [--validation]\n"
            << "  apex-native --window vulkan|d3d12 [--frames <count>] [--validation]\n"
            << "  apex-native --window vulkan|d3d12 [--model <file>] [--workspace-root <dir> --manifest <file> --kind track|carLods]\n"
+              "                       [--fbx <file> --fbx-assets <directory>]\n"
               "                       [--analog-instruments <file> [--rpm <value>]]\n"
               "                       [--animation <file> [--animation-position <value>]]\n"
            "                       [--lod-index <index>]\n"
@@ -316,6 +317,23 @@ int inspect_kn5(const std::filesystem::path& path) {
     return 0;
 }
 
+void report_fbx_diagnostics(
+    const apex::app::FbxPreviewDocumentResult& result) {
+    for (const auto& diagnostic : result.diagnostics) {
+        write_cli_text(std::cerr, diagnostic.code);
+        if (!diagnostic.path.empty()) {
+            std::cerr << " [";
+            write_cli_text(std::cerr, diagnostic.path);
+            std::cerr << ']';
+        }
+        if (diagnostic.offset != 0U)
+            std::cerr << " at byte " << diagnostic.offset;
+        std::cerr << ": ";
+        write_cli_text(std::cerr, diagnostic.message);
+        std::cerr << '\n';
+    }
+}
+
 int inspect_fbx(const std::filesystem::path& path,
                 const std::optional<std::filesystem::path>& asset_root) {
     const auto bytes = read_file(path);
@@ -330,19 +348,7 @@ int inspect_fbx(const std::filesystem::path& path,
     }
 
     const auto result = apex::app::open_fbx_preview_document(request);
-    for (const auto& diagnostic : result.diagnostics) {
-        write_cli_text(std::cerr, diagnostic.code);
-        if (!diagnostic.path.empty()) {
-            std::cerr << " [";
-            write_cli_text(std::cerr, diagnostic.path);
-            std::cerr << ']';
-        }
-        if (diagnostic.offset != 0U)
-            std::cerr << " at byte " << diagnostic.offset;
-        std::cerr << ": ";
-        write_cli_text(std::cerr, diagnostic.message);
-        std::cerr << '\n';
-    }
+    report_fbx_diagnostics(result);
 
     write_cli_text(std::cout, path.string());
     std::cout << ": FBX "
@@ -470,6 +476,8 @@ struct WindowShaderSpec {
 
 struct WindowWorkspaceOptions {
     std::optional<std::filesystem::path> model;
+    std::optional<std::filesystem::path> fbx;
+    std::optional<std::filesystem::path> fbxAssets;
     std::optional<std::filesystem::path> workspaceRoot;
     std::optional<std::filesystem::path> manifest;
     apex::app::WorkspaceSessionKind kind = apex::app::WorkspaceSessionKind::generic;
@@ -535,6 +543,7 @@ bool has_directional_shadow_modules(
 
 struct LoadedWindowWorkspace {
     std::optional<apex::app::WorkspaceSessionDocument> document;
+    std::optional<apex::app::FbxPreviewDocumentResult> fbxPreview;
     struct ShaderSet {
         std::vector<apex::render::PipelineShaderModule> modules;
         apex::render::StockMaterialShaderModules descriptor;
@@ -561,6 +570,24 @@ struct LoadedWindowWorkspace {
         readOnlyAiSplineOverlays;
     apex::app::WorkspaceSelectionState selection;
     bool animationSkinningRequired = false;
+
+    [[nodiscard]] apex::app::WorkspaceSessionDocument* activeDocument()
+        noexcept {
+        if (fbxPreview.has_value())
+            return fbxPreview->document.has_value()
+                       ? &*fbxPreview->document
+                       : nullptr;
+        return document.has_value() ? &*document : nullptr;
+    }
+
+    [[nodiscard]] const apex::app::WorkspaceSessionDocument* activeDocument()
+        const noexcept {
+        if (fbxPreview.has_value())
+            return fbxPreview->document.has_value()
+                       ? &*fbxPreview->document
+                       : nullptr;
+        return document.has_value() ? &*document : nullptr;
+    }
 
     [[nodiscard]] const apex::app::WorkspaceAiSplineOverlaySet*
     aiSplineOverlays() const noexcept {
@@ -1040,6 +1067,15 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
         } else if (option == "--model") {
             if (result.model.has_value()) throw std::runtime_error("duplicate --model option");
             result.model = std::filesystem::path(require_value("--model"));
+        } else if (option == "--fbx") {
+            if (result.fbx.has_value())
+                throw std::runtime_error("duplicate --fbx option");
+            result.fbx = std::filesystem::path(require_value("--fbx"));
+        } else if (option == "--fbx-assets") {
+            if (result.fbxAssets.has_value())
+                throw std::runtime_error("duplicate --fbx-assets option");
+            result.fbxAssets =
+                std::filesystem::path(require_value("--fbx-assets"));
         } else if (option == "--workspace-root") {
             if (result.workspaceRoot.has_value())
                 throw std::runtime_error("duplicate --workspace-root option");
@@ -1299,8 +1335,17 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             throw std::runtime_error("unknown window option");
         }
     }
-    if (result.model.has_value() && result.workspaceRoot.has_value())
-        throw std::runtime_error("--model and --workspace-root are mutually exclusive");
+    const auto model_source_count =
+        static_cast<unsigned>(result.model.has_value()) +
+        static_cast<unsigned>(result.fbx.has_value()) +
+        static_cast<unsigned>(result.workspaceRoot.has_value());
+    if (model_source_count > 1U)
+        throw std::runtime_error(
+            "--model, --fbx, and --workspace-root are mutually exclusive");
+    if (result.fbxAssets.has_value() && !result.fbx.has_value())
+        throw std::runtime_error("--fbx-assets requires --fbx");
+    if (result.fbx.has_value() && !result.fbxAssets.has_value())
+        throw std::runtime_error("--fbx requires --fbx-assets for window rendering");
     if (result.model.has_value() && result.kind != apex::app::WorkspaceSessionKind::generic)
         throw std::runtime_error("--model accepts only the generic workspace kind");
     if (result.manifest.has_value() != result.workspaceRoot.has_value())
@@ -1318,7 +1363,15 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
                 throw std::runtime_error("duplicate shader family: " + shader.family);
         }
     }
-    if ((!result.model.has_value() && !result.workspaceRoot.has_value()) &&
+    if (result.fbx.has_value() &&
+        std::none_of(result.shaders.begin(), result.shaders.end(),
+                     [](const auto& shader) {
+                         return shader.family == "ksPerPixel";
+                     }))
+        throw std::runtime_error(
+            "--fbx requires a ksPerPixel shader family");
+    const bool has_model_source = model_source_count != 0U;
+    if (!has_model_source &&
         (!result.shaders.empty() || has_directional_shadow_modules(result) ||
          result.authoringOverlayVertex.has_value() ||
          result.authoringOverlayFragment.has_value() ||
@@ -1364,13 +1417,18 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
     if (result.rpmSpecified && !result.analogInstruments.has_value())
         throw std::runtime_error("--rpm requires --analog-instruments");
     if (result.analogInstruments.has_value() &&
-        !result.model.has_value() && !result.workspaceRoot.has_value())
+        !has_model_source)
         throw std::runtime_error("--analog-instruments requires a workspace model");
+    if (result.fbx.has_value() && result.analogInstruments.has_value())
+        throw std::runtime_error(
+            "--analog-instruments is not supported with --fbx");
     if (result.animationPositionSpecified && !result.animation.has_value())
         throw std::runtime_error("--animation-position requires --animation");
     if (result.animation.has_value() &&
-        !result.model.has_value() && !result.workspaceRoot.has_value())
+        !has_model_source)
         throw std::runtime_error("--animation requires a workspace model");
+    if (result.fbx.has_value() && result.animation.has_value())
+        throw std::runtime_error("--animation is not supported with --fbx");
     if (result.lodIndex.has_value() &&
         (!result.workspaceRoot.has_value() ||
          result.kind != apex::app::WorkspaceSessionKind::carLods)) {
@@ -1392,13 +1450,16 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
         result.trackCameraPosition > 1.0)
         throw std::runtime_error(
             "track-camera position must be from zero to one");
-    if (result.trackCameraSet.has_value() && !result.model.has_value() &&
-        !result.workspaceRoot.has_value())
+    if (result.trackCameraSet.has_value() && !has_model_source)
         throw std::runtime_error(
             "track-camera options require a workspace model");
-    if (result.aiSpline.has_value() && !result.model.has_value() &&
-        !result.workspaceRoot.has_value())
+    if (result.fbx.has_value() && result.trackCameraSet.has_value())
+        throw std::runtime_error(
+            "track-camera options are not supported with --fbx");
+    if (result.aiSpline.has_value() && !has_model_source)
         throw std::runtime_error("--ai-spline requires a workspace model");
+    if (result.fbx.has_value() && result.aiSpline.has_value())
+        throw std::runtime_error("--ai-spline is not supported with --fbx");
     if (result.aiSpline.has_value() &&
         !result.authoringOverlayVertex.has_value())
         throw std::runtime_error(
@@ -1422,14 +1483,12 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
                                    result.selectedNode.has_value() ||
                                    result.showHidden || result.wireframe ||
                                    result.gridVisible || result.viewAxisVisible;
-    if (selection_options && !result.model.has_value() &&
-        !result.workspaceRoot.has_value())
+    if (selection_options && !has_model_source)
         throw std::runtime_error("hierarchy options require a workspace model");
     const bool lighting_options = result.weatherSpecified ||
                                   result.sunHeadingSpecified ||
                                   result.sunHeightSpecified;
-    if (lighting_options && !result.model.has_value() &&
-        !result.workspaceRoot.has_value())
+    if (lighting_options && !has_model_source)
         throw std::runtime_error("lighting options require a workspace model");
     return result;
 }
@@ -1442,34 +1501,58 @@ void report_workspace_diagnostics(const apex::app::WorkspaceSessionResult& resul
 void load_window_workspace(const WindowWorkspaceOptions& options,
                            apex::render::Backend backend,
                            LoadedWindowWorkspace& loaded) {
-    if (!options.model.has_value() && !options.workspaceRoot.has_value()) return;
+    if (!options.model.has_value() && !options.fbx.has_value() &&
+        !options.workspaceRoot.has_value())
+        return;
 
-    apex::app::WorkspaceSessionResult opened;
-    if (options.model.has_value()) {
-        const auto bytes = read_file(*options.model);
-        apex::app::WorkspaceSessionFile file;
-        file.name = options.model->filename().generic_string();
-        file.bytes = bytes;
-        apex::app::WorkspaceSessionOpenRequest request;
-        request.kind = apex::app::WorkspaceSessionKind::generic;
-        request.name = file.name;
-        request.modelFiles = std::span<const apex::app::WorkspaceSessionFile>(&file, 1U);
-        opened = apex::app::WorkspaceSession{}.open(request);
+    if (options.fbx.has_value()) {
+        const auto bytes = read_file(*options.fbx);
+        apex::assets::AssetSource assets;
+        assets.addDirectory(*options.fbxAssets);
+        apex::app::FbxPreviewDocumentRequest request;
+        request.source = options.fbx->filename().generic_string();
+        request.bytes = bytes;
+        request.textures = apex::app::FbxPreviewTextureGrant{
+            "window-fbx-assets", &assets};
+        auto opened = apex::app::open_fbx_preview_document(request);
+        report_fbx_diagnostics(opened);
+        if (!opened.gpu_renderable()) {
+            throw std::runtime_error(
+                std::string("FBX window preview is ") +
+                apex::app::fbx_preview_document_status_name(opened.status));
+        }
+        loaded.fbxPreview = std::move(opened);
     } else {
-        apex::assets::AssetSource source;
-        source.addDirectory(*options.workspaceRoot);
-        const auto manifestName = options.manifest->generic_string();
-        opened = apex::app::WorkspaceSession{}.openAssetSource(
-            options.kind, options.workspaceRoot->filename().generic_string(),
-            manifestName, source);
+        apex::app::WorkspaceSessionResult opened;
+        if (options.model.has_value()) {
+            const auto bytes = read_file(*options.model);
+            apex::app::WorkspaceSessionFile file;
+            file.name = options.model->filename().generic_string();
+            file.bytes = bytes;
+            apex::app::WorkspaceSessionOpenRequest request;
+            request.kind = apex::app::WorkspaceSessionKind::generic;
+            request.name = file.name;
+            request.modelFiles =
+                std::span<const apex::app::WorkspaceSessionFile>(&file, 1U);
+            opened = apex::app::WorkspaceSession{}.open(request);
+        } else {
+            apex::assets::AssetSource source;
+            source.addDirectory(*options.workspaceRoot);
+            const auto manifestName = options.manifest->generic_string();
+            opened = apex::app::WorkspaceSession{}.openAssetSource(
+                options.kind,
+                options.workspaceRoot->filename().generic_string(),
+                manifestName, source);
+        }
+        if (!opened.ok()) {
+            report_workspace_diagnostics(opened);
+            throw std::runtime_error("workspace open failed");
+        }
+        loaded.document = std::move(opened.document);
     }
-    if (!opened.ok()) {
-        report_workspace_diagnostics(opened);
-        throw std::runtime_error("workspace open failed");
-    }
-    loaded.document = std::move(opened.document);
+    auto& document = *loaded.activeDocument();
     if (options.lodIndex.has_value()) {
-        const auto& files = loaded.document->assembly.workspace.files;
+        const auto& files = document.assembly.workspace.files;
         const bool present = std::any_of(
             files.begin(), files.end(), [&](const auto& file) {
                 return file.lod.has_value() &&
@@ -1494,7 +1577,7 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
         if (!config.rpm->preview_supported)
             throw std::runtime_error("analog RPM LUT preview is unsupported");
         const auto applied = apex::domain::apply_analog_rpm(
-            loaded.document->assembly.model, &*config.rpm, options.rpm);
+            document.assembly.model, &*config.rpm, options.rpm);
         if (applied.applied_nodes == 0U) {
             throw std::runtime_error(
                 std::string("analog RPM node binding is ") +
@@ -1512,7 +1595,7 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
         const auto clamped_position = static_cast<float>(
             std::clamp(options.animationPosition, 0.0, 1.0));
         const auto applied = apex::domain::apply_animation_preview(
-            loaded.document->assembly.model, animation, clamped_position);
+            document.assembly.model, animation, clamped_position);
         for (const auto& item : applied.diagnostics) {
             std::cerr << item.code << " [" << item.source
                       << "]: " << item.message << '\n';
@@ -1526,11 +1609,10 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
                   << ", position=" << applied.position << '\n';
     }
     if (model_changed) {
-        loaded.document->scene = apex::scene::convertKn5Scene(
-            loaded.document->assembly.model);
-        loaded.document->sceneBinding = apex::workspace::bindWorkspaceScene(
-            loaded.document->scene.snapshot,
-            loaded.document->assembly.workspace);
+        document.scene = apex::scene::convertKn5Scene(
+            document.assembly.model);
+        document.sceneBinding = apex::workspace::bindWorkspaceScene(
+            document.scene.snapshot, document.assembly.workspace);
     }
     if (options.trackCameraSet.has_value()) {
         const auto camera_bytes = read_file(*options.trackCameraSet);
@@ -1736,7 +1818,7 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
         request.show_hidden = options.showHidden;
         request.wireframe = options.wireframe;
         const auto selection = apex::app::resolve_workspace_selection(
-            loaded.document->scene.snapshot, request);
+            document.scene.snapshot, request);
         if (!selection.ok()) {
             std::cerr << selection.diagnostic.code;
             if (selection.diagnostic.node != apex::scene::invalid_node_id)
@@ -1924,6 +2006,7 @@ int run_window(int argc, char** argv) {
     }
     LoadedWindowWorkspace loaded_workspace;
     load_window_workspace(workspace_options, backend, loaded_workspace);
+    const auto* active_document = loaded_workspace.activeDocument();
 
     apex::platform::WindowDescription window_description;
     window_description.title = "Apex Editor native shell";
@@ -1964,9 +2047,9 @@ int run_window(int argc, char** argv) {
                                 ? apex::render::CameraClipSpace::vulkan
                                 : apex::render::CameraClipSpace::d3d12;
     apex::app::WorkspaceViewportCameraController camera_controller;
-    if (loaded_workspace.document.has_value() &&
-        loaded_workspace.document->scene.preview_bounds.has_value()) {
-        const auto& bounds = *loaded_workspace.document->scene.preview_bounds;
+    if (active_document != nullptr &&
+        active_document->scene.preview_bounds.has_value()) {
+        const auto& bounds = *active_document->scene.preview_bounds;
         const double distance = std::max(
             static_cast<double>(bounds.radius) * 2.35, 0.2);
         if (!std::isfinite(distance) || distance > 1.0e7) {
@@ -2043,7 +2126,7 @@ int run_window(int argc, char** argv) {
     };
     std::unique_ptr<apex::app::WorkspaceViewport> viewport;
     auto prepare_viewport = [&]() {
-        if (!loaded_workspace.document.has_value()) {
+        if (active_document == nullptr) {
             viewport.reset();
             return true;
         }
@@ -2224,22 +2307,27 @@ int run_window(int argc, char** argv) {
             request.directional_shadow_receiver = true;
             request.directional_shadows = loaded_workspace.directionalShadows;
             request.directional_shadows->maps.lighting.scene_radius = std::max(
-                1.0F, loaded_workspace.document->scene.snapshot.bounds_radius);
+                1.0F, active_document->scene.snapshot.bounds_radius);
             request.directional_shadows->maps.lighting.sun_direction =
                 workspace_lighting.evaluated.sun_direction;
         }
-        if (loaded_workspace.document->assembly.workspace.kind == "carLods") {
-            if (!loaded_workspace.document->scene.preview_bounds.has_value()) {
+        if (active_document->assembly.workspace.kind == "carLods") {
+            if (!active_document->scene.preview_bounds.has_value()) {
                 throw std::runtime_error(
                     "carLods workspace has no preview-visible geometry bounds");
             }
             request.workspace.lod_bounds_center =
-                loaded_workspace.document->scene.preview_bounds->center;
+                active_document->scene.preview_bounds->center;
             request.workspace.lod_index = workspace_options.lodIndex;
             request.workspace.lod_track_camera = track_camera_active;
         }
-        auto prepared = apex::app::prepareWorkspaceViewport(
-            *device_result.device, *loaded_workspace.document, request);
+        auto prepared = loaded_workspace.fbxPreview.has_value()
+                            ? apex::app::prepareWorkspaceViewport(
+                                  *device_result.device,
+                                  *loaded_workspace.fbxPreview, request)
+                            : apex::app::prepareWorkspaceViewport(
+                                  *device_result.device, *active_document,
+                                  request);
         if (!prepared.ok()) {
             std::cerr << "workspace render: " << prepared.diagnostic.code << ": "
                       << prepared.diagnostic.message << '\n';
@@ -2287,7 +2375,7 @@ int run_window(int argc, char** argv) {
     auto pick_ai_spline_point =
         [&](const apex::platform::WindowEvent& event) {
             if (loaded_workspace.aiSplineController == nullptr ||
-                !loaded_workspace.document.has_value() || viewport == nullptr)
+                active_document == nullptr || viewport == nullptr)
                 return;
             const std::uint32_t width = window_result.window->width();
             const std::uint32_t height = window_result.window->height();
@@ -2312,7 +2400,7 @@ int run_window(int argc, char** argv) {
                 return;
             }
             const auto mesh_hit = apex::render::pick_kn5_scene(
-                *ray.ray, loaded_workspace.document->assembly.model.root);
+                *ray.ray, active_document->assembly.model.root);
             if (mesh_hit.status == apex::render::PickStatus::invalid_request) {
                 std::cerr << "AI spline mesh pick: "
                           << mesh_hit.diagnostic.code << ": "
@@ -2565,7 +2653,7 @@ int run_window(int argc, char** argv) {
                 loaded_workspace.selection.selected_node !=
                     apex::scene::invalid_node_id) {
                 frame_request.selection_axis_world =
-                    loaded_workspace.document->scene.snapshot.nodes[
+                    active_document->scene.snapshot.nodes[
                         static_cast<std::size_t>(
                             loaded_workspace.selection.selected_node)]
                         .transform;
@@ -2676,9 +2764,13 @@ int run_window(int argc, char** argv) {
               << device_result.device->info().name << ", window="
               << window_result.window->pixel_width() << 'x'
               << window_result.window->pixel_height() << ", frames=" << frames;
-    if (loaded_workspace.document.has_value())
-        std::cout << ", workspace=" << workspace_kind_name(
-            workspace_options.kind);
+    if (active_document != nullptr) {
+        if (loaded_workspace.fbxPreview.has_value())
+            std::cout << ", workspace=fbx";
+        else
+            std::cout << ", workspace=" << workspace_kind_name(
+                workspace_options.kind);
+    }
     std::cout << '\n';
     return 0;
 }

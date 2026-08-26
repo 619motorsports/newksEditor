@@ -295,6 +295,7 @@ add_test(NAME apex_native_fbx_cli
   COMMAND ${CMAKE_COMMAND}
     "-DAPEX_NATIVE_COMMAND=$<TARGET_FILE:apex_native_app>"
     "-DAPEX_BINARY_DIR=${CMAKE_BINARY_DIR}"
+    "-DAPEX_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/fbx_cli_test.cmake"
 )
 set_tests_properties(apex_native_fbx_cli

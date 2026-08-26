@@ -161,6 +161,10 @@ out/native/dev/native/apex-native --invert-ai-spline fast_lane.ai inverted.ai \
   --index 42 --index 84
 out/native/dev/native/apex-native --save-ai-spline fast_lane.ai fast_lane.ai
 out/native/dev/native/apex-native --window vulkan --frames 300
+out/native/dev/native/apex-native --window vulkan \
+  --fbx model.fbx --fbx-assets path/to/authorized/assets \
+  --shader-family ksPerPixel --shader-vertex stock.vert.spv \
+  --shader-fragment stock.frag.spv
 out/native/dev/native/apex-native --window vulkan --model car.kn5 \
   --analog-instruments data/analog_instruments.ini --rpm 6000 \
   --animation animations/car_door_l.ksanim --animation-position 0.5 \
@@ -666,6 +670,15 @@ staged document before it creates a Vulkan or D3D12 resource.
 The `--inspect-fbx` command uses this application path without creating a GPU
 backend. It reports staged models when no asset directory is granted. The
 optional `--fbx-assets` directory is the only authority for external textures.
+Window rendering uses `--fbx` as a separate model source. It requires an
+explicit `--fbx-assets` directory and caller-supplied `ksPerPixel` modules for
+the selected backend. Invalid and staged FBX documents fail before the window
+or graphics device is created. Vulkan and D3D12 use the same owned document and
+the same staged-document gate.
+The native shell frames FBX bounds with its existing workspace camera. This is
+shell behavior, not recovered ksEditor behavior; the installed editor keeps its
+current camera when it loads FBX geometry. FBX animation remains a separate
+unsupported window operation.
 
 The strict Linux build detects the Vulkan SDK. The runtime test uses a software
 Vulkan device when an ICD is available. CI defines the same Vulkan test. The

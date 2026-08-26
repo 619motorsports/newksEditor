@@ -5215,6 +5215,19 @@ void resolves_preview_state_without_mutating_document() {
 }
 
 void rejects_staged_fbx_before_backend_allocation() {
+    auto ready_value = fixture();
+    auto ready_request = request_for(ready_value);
+    apex::app::FbxPreviewDocumentResult ready;
+    ready.status = apex::app::FbxPreviewDocumentStatus::ready;
+    ready.document = std::move(ready_value.document);
+    FakeDevice ready_device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        ready_device, ready, ready_request);
+    require(prepared.ok() && ready_device.buffer_calls > 0U &&
+                ready_device.texture_calls > 0U &&
+                ready_device.depth_calls > 0U,
+            "ready FBX enters the shared workspace viewport");
+
     apex::app::FbxPreviewDocumentResult staged;
     staged.status = apex::app::FbxPreviewDocumentStatus::staged;
     staged.document = apex::app::WorkspaceSessionDocument{};
