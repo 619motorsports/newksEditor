@@ -834,6 +834,18 @@ StockKsPerPixelNativeProgramStatus validate_stock_ks_per_pixel_native_program(
     return StockKsPerPixelNativeProgramStatus::ready;
 }
 
+StockKsPerPixelNativeProgramResult
+create_validated_stock_ks_per_pixel_native_program(
+    StockShaderContainer container,
+    StockKsPerPixelVariant variant) {
+    const StockKsPerPixelNativeProgramStatus status =
+        validate_stock_ks_per_pixel_native_program(container, variant);
+    if (status != StockKsPerPixelNativeProgramStatus::ready)
+        return {status, std::nullopt};
+    return {status, ValidatedStockKsPerPixelNativeProgram(
+                        std::move(container), variant)};
+}
+
 StockKsPerPixelEvaluationResult evaluate_stock_ks_per_pixel(
     const StockKsPerPixelPixelInput& input,
     const StockKsPerPixelLightingConstants& lighting,

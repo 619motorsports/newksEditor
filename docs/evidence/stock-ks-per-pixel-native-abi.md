@@ -105,10 +105,11 @@ The `samShadow` sampler at `s1` uses these values:
 
 - Comparison min-mag linear and mip point filtering
 - Clamp mode for the U, V, and W axes
-- `LESS_EQUAL` comparison
+- `LESS` comparison
 
 `kglCreateSampler` at `0x1000c560` maps the recovered filter and address
-selectors to these D3D11 values.
+selectors to these D3D11 values. The instruction at `0x1000c5b5` writes
+filter value `0x94`. The same function writes comparison value `2`.
 
 ## Recovered pixel equation
 
@@ -160,6 +161,16 @@ buffer sizes. `CBuffer::CBuffer` at `0x1004ab2d` clears every buffer byte.
 `GraphicsManager::commitShaderChanges` at `0x10044dc6` commits the updated
 camera, lighting, object, and shadow buffers.
 
+`Mesh::render` at `0x100494ff` applies the material before it binds the mesh.
+It then binds the vertex buffer and the index buffer.
+Next, it commits shader changes and calls `GraphicsManager::drawPrimitive` at
+`0x10044ffc`.
+
+`Shader::apply` at `0x1004b11b` binds the input layout, vertex shader, and
+pixel shader. `kglSetIndexBuffer` at `0x1000d610` uses `DXGI_FORMAT_R16_UINT`.
+`GraphicsManager::commitShaderChanges` commits the system buffers in this
+order: camera, lighting, object, and shadow.
+
 The matrix setters provide the upload convention:
 
 - `GraphicsManager::setProjectionMatrix` at `0x10046632`
@@ -173,6 +184,15 @@ The matrix setters provide the upload convention:
 owns the exact buffer layouts and register manifest. It also contains the
 separate base and AT variant contract.
 
+`create_validated_stock_ks_per_pixel_native_program` takes ownership of a
+parsed package. It returns a move-only program only after the complete gate
+accepts the package. Thus, a caller cannot change the stage bytes after
+validation.
+
+`allocate_stock_ks_per_pixel_native_shaders` accepts only this move-only
+program. D3D12 allocates the vertex and pixel module objects in stage order.
+The function rejects Vulkan DXBC before it calls the device.
+
 The CPU evaluator follows the recovered pixel equation. It rejects non-finite
 records and degenerate normalization inputs before evaluation. This evaluator
 does not execute the installed DXBC.
@@ -181,6 +201,7 @@ The current Vulkan path remains a labeled portable ABI. A future translated
 path needs separate descriptor sets for constant buffers, textures, and
 samplers because Vulkan uses one binding namespace.
 
-The current D3D12 path still needs an opt-in native root signature. A Windows
-WARP pipeline and readback test must pass before production selection becomes
-available.
+The D3D12 module objects do not create the native root signature or pipeline
+state. The D3D12 path still needs these objects and the exact native resource
+bindings. A Windows WARP pipeline and readback test must pass before production
+selection becomes available.

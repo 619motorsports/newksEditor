@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <set>
 #include <utility>
 
@@ -3362,6 +3363,99 @@ ShaderModuleStatus validate_shader_module_description(const ShaderModuleDescript
     return ShaderModuleStatus::ready;
 }
 
+StockKsPerPixelNativeShaderResult
+allocate_stock_ks_per_pixel_native_shaders(
+    Device& device,
+    ValidatedStockKsPerPixelNativeProgram&& program) {
+    if (program.validation_status() !=
+        StockKsPerPixelNativeProgramStatus::ready) {
+        return {StockKsPerPixelNativeShaderStatus::invalid_program,
+                {"stock_native_shader_program_invalid",
+                 "The owned native shader program is not in its validated state."},
+                nullptr};
+    }
+    if (device.info().backend != Backend::D3D12) {
+        return {StockKsPerPixelNativeShaderStatus::backend_unsupported,
+                {"stock_native_shader_backend_unsupported",
+                 "Vulkan cannot allocate the installed DXBC program. A source-equivalent SPIR-V program is required."},
+                nullptr};
+    }
+
+    const auto description = [](ShaderStage stage,
+                                std::span<const std::uint8_t> bytes) {
+        return ShaderModuleDescription{
+            stage,
+            std::span<const std::byte>(
+                reinterpret_cast<const std::byte*>(bytes.data()),
+                bytes.size())};
+    };
+    const auto stage_failure = [](StockKsPerPixelNativeShaderStatus status,
+                                  const char* fallback_code,
+                                  const char* fallback_message,
+                                  ShaderModuleResult& module) {
+        Diagnostic diagnostic = std::move(module.diagnostic);
+        if (diagnostic.code.empty()) diagnostic.code = fallback_code;
+        if (diagnostic.message.empty()) diagnostic.message = fallback_message;
+        return StockKsPerPixelNativeShaderResult{
+            status, std::move(diagnostic), nullptr};
+    };
+    const auto valid_module = [](const ShaderModuleResult& result,
+                                 ShaderStage stage,
+                                 std::size_t size_bytes) {
+        if (!result.ok() || result.shader_module->backend() != Backend::D3D12)
+            return false;
+        const ShaderModuleInfo& info = result.shader_module->info();
+        return info.stage == stage && info.format == ShaderBytecodeFormat::dxbc &&
+               info.size_bytes == size_bytes;
+    };
+
+    ShaderModuleResult vertex = device.create_shader_module(
+        description(ShaderStage::vertex, program.vertex_shader()));
+    if (vertex.status != ShaderModuleStatus::ready)
+        return stage_failure(
+            StockKsPerPixelNativeShaderStatus::vertex_shader_failed,
+            "stock_native_vertex_shader_failed",
+            "D3D12 did not allocate the validated native vertex shader.",
+            vertex);
+    if (!valid_module(vertex, ShaderStage::vertex,
+                      program.vertex_shader().size())) {
+        return {StockKsPerPixelNativeShaderStatus::invalid_shader_module,
+                {"stock_native_vertex_shader_invalid",
+                 "D3D12 returned an invalid native vertex shader object."},
+                nullptr};
+    }
+
+    ShaderModuleResult pixel = device.create_shader_module(
+        description(ShaderStage::fragment, program.pixel_shader()));
+    if (pixel.status != ShaderModuleStatus::ready)
+        return stage_failure(
+            StockKsPerPixelNativeShaderStatus::pixel_shader_failed,
+            "stock_native_pixel_shader_failed",
+            "D3D12 did not allocate the validated native pixel shader.",
+            pixel);
+    if (!valid_module(pixel, ShaderStage::fragment,
+                      program.pixel_shader().size())) {
+        return {StockKsPerPixelNativeShaderStatus::invalid_shader_module,
+                {"stock_native_pixel_shader_invalid",
+                 "D3D12 returned an invalid native pixel shader object."},
+                nullptr};
+    }
+
+    try {
+        auto owned = std::unique_ptr<StockKsPerPixelNativeShaderProgram>(
+            new StockKsPerPixelNativeShaderProgram(
+                std::move(program), std::move(vertex.shader_module),
+                std::move(pixel.shader_module)));
+        return {StockKsPerPixelNativeShaderStatus::ready, {},
+                std::move(owned)};
+    } catch (const std::bad_alloc&) {
+        return {StockKsPerPixelNativeShaderStatus::allocation_failed,
+                {"stock_native_shader_program_allocation_failed",
+                 "The native shader program owner allocation failed."},
+                nullptr};
+    }
+}
+
 bool valid_sampler_description(const SamplerDescription& description,
                                Diagnostic& diagnostic) {
     return validate_sampler_description(description, diagnostic) == SamplerStatus::ready;
@@ -3590,6 +3684,26 @@ const char* shader_module_status_name(ShaderModuleStatus status) noexcept {
     case ShaderModuleStatus::unsupported:
         return "unsupported";
     case ShaderModuleStatus::allocation_failed:
+        return "allocation_failed";
+    }
+    return "unknown";
+}
+
+const char* stock_ks_per_pixel_native_shader_status_name(
+    StockKsPerPixelNativeShaderStatus status) noexcept {
+    switch (status) {
+    case StockKsPerPixelNativeShaderStatus::ready: return "ready";
+    case StockKsPerPixelNativeShaderStatus::invalid_program:
+        return "invalid_program";
+    case StockKsPerPixelNativeShaderStatus::backend_unsupported:
+        return "backend_unsupported";
+    case StockKsPerPixelNativeShaderStatus::vertex_shader_failed:
+        return "vertex_shader_failed";
+    case StockKsPerPixelNativeShaderStatus::pixel_shader_failed:
+        return "pixel_shader_failed";
+    case StockKsPerPixelNativeShaderStatus::invalid_shader_module:
+        return "invalid_shader_module";
+    case StockKsPerPixelNativeShaderStatus::allocation_failed:
         return "allocation_failed";
     }
     return "unknown";

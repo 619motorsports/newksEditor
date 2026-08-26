@@ -301,6 +301,12 @@ void parses_installed_stock_package_when_available() {
                         parsed, apex::render::StockKsPerPixelVariant::base) ==
                         apex::render::StockKsPerPixelNativeProgramStatus::ready,
                     "installed ksPerPixel passes the complete native allocation gate");
+            const auto owned =
+                apex::render::create_validated_stock_ks_per_pixel_native_program(
+                    parsed, apex::render::StockKsPerPixelVariant::base);
+            require(owned.ok() && owned.program->vertex_shader().size() == 3'728U &&
+                        owned.program->pixel_shader().size() == 7'508U,
+                    "installed ksPerPixel creates the owned native program boundary");
         }
         if (entry.path().filename() == "ksPerPixelAT.shader") {
             require(bytes.size() == 11'330U &&
@@ -325,6 +331,13 @@ void parses_installed_stock_package_when_available() {
                         apex::render::StockKsPerPixelVariant::alpha_to_coverage) ==
                         apex::render::StockKsPerPixelNativeProgramStatus::ready,
                     "installed ksPerPixelAT passes the complete native allocation gate");
+            const auto owned =
+                apex::render::create_validated_stock_ks_per_pixel_native_program(
+                    parsed,
+                    apex::render::StockKsPerPixelVariant::alpha_to_coverage);
+            require(owned.ok() && owned.program->vertex_shader().size() == 3'728U &&
+                        owned.program->pixel_shader().size() == 7'584U,
+                    "installed ksPerPixelAT creates the owned native program boundary");
         }
         ++parsed_count;
     }

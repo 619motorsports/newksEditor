@@ -22,6 +22,7 @@ namespace apex::render {
 
 struct DrawPacket;
 class Sampler;
+class Device;
 
 /** Graphics APIs supported by the native renderer. */
 enum class Backend {
@@ -998,6 +999,72 @@ struct ShaderModuleResult {
     }
 };
 
+enum class StockKsPerPixelNativeShaderStatus : std::uint8_t {
+    ready,
+    invalid_program,
+    backend_unsupported,
+    vertex_shader_failed,
+    pixel_shader_failed,
+    invalid_shader_module,
+    allocation_failed,
+};
+
+struct StockKsPerPixelNativeShaderResult;
+
+class StockKsPerPixelNativeShaderProgram {
+public:
+    StockKsPerPixelNativeShaderProgram(
+        StockKsPerPixelNativeShaderProgram&&) noexcept = default;
+    StockKsPerPixelNativeShaderProgram& operator=(
+        StockKsPerPixelNativeShaderProgram&&) noexcept = default;
+    StockKsPerPixelNativeShaderProgram(
+        const StockKsPerPixelNativeShaderProgram&) = delete;
+    StockKsPerPixelNativeShaderProgram& operator=(
+        const StockKsPerPixelNativeShaderProgram&) = delete;
+
+    [[nodiscard]] const ValidatedStockKsPerPixelNativeProgram& source()
+        const noexcept {
+        return source_;
+    }
+    [[nodiscard]] const ShaderModule& vertex_shader() const noexcept {
+        return *vertex_shader_;
+    }
+    [[nodiscard]] const ShaderModule& pixel_shader() const noexcept {
+        return *pixel_shader_;
+    }
+
+private:
+    friend struct StockKsPerPixelNativeShaderResult;
+    friend StockKsPerPixelNativeShaderResult
+    allocate_stock_ks_per_pixel_native_shaders(
+        Device& device,
+        ValidatedStockKsPerPixelNativeProgram&& program);
+
+    StockKsPerPixelNativeShaderProgram(
+        ValidatedStockKsPerPixelNativeProgram source,
+        std::unique_ptr<ShaderModule> vertex_shader,
+        std::unique_ptr<ShaderModule> pixel_shader) noexcept
+        : source_(std::move(source)),
+          vertex_shader_(std::move(vertex_shader)),
+          pixel_shader_(std::move(pixel_shader)) {}
+
+    ValidatedStockKsPerPixelNativeProgram source_;
+    std::unique_ptr<ShaderModule> vertex_shader_;
+    std::unique_ptr<ShaderModule> pixel_shader_;
+};
+
+struct StockKsPerPixelNativeShaderResult {
+    StockKsPerPixelNativeShaderStatus status =
+        StockKsPerPixelNativeShaderStatus::backend_unsupported;
+    Diagnostic diagnostic;
+    std::unique_ptr<StockKsPerPixelNativeShaderProgram> program;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == StockKsPerPixelNativeShaderStatus::ready &&
+               program != nullptr;
+    }
+};
+
 inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
 
 [[nodiscard]] BufferStatus validate_buffer_description(
@@ -1262,6 +1329,14 @@ public:
     virtual void wait_idle() noexcept = 0;
 };
 
+// Allocate the two validated native DXBC stages on D3D12. Vulkan rejects this
+// request before a device call because Vulkan requires source-equivalent
+// SPIR-V. A successful result owns both the source package and shader objects.
+[[nodiscard]] StockKsPerPixelNativeShaderResult
+allocate_stock_ks_per_pixel_native_shaders(
+    Device& device,
+    ValidatedStockKsPerPixelNativeProgram&& program);
+
 struct DeviceResult {
     DeviceStatus status = DeviceStatus::unavailable;
     Diagnostic diagnostic;
@@ -1291,6 +1366,8 @@ struct DeviceResult {
     DepthOnlyIndexedStaticMeshBatchStatus status) noexcept;
 [[nodiscard]] const char* sampler_status_name(SamplerStatus status) noexcept;
 [[nodiscard]] const char* shader_module_status_name(ShaderModuleStatus status) noexcept;
+[[nodiscard]] const char* stock_ks_per_pixel_native_shader_status_name(
+    StockKsPerPixelNativeShaderStatus status) noexcept;
 [[nodiscard]] const char* presentation_target_status_name(
     PresentationTargetStatus status) noexcept;
 [[nodiscard]] const char* presentation_frame_status_name(

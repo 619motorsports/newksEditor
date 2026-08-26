@@ -7,9 +7,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 
 namespace apex::render {
 
@@ -367,7 +369,7 @@ enum class StockKsPerPixelSamplerAddress : std::uint8_t {
 
 enum class StockKsPerPixelSamplerCompare : std::uint8_t {
     disabled,
-    less_equal,
+    less,
 };
 
 struct StockKsPerPixelSamplerContract {
@@ -393,7 +395,7 @@ inline constexpr std::array<StockKsPerPixelSamplerContract, 2U>
         {"samShadow", 1U,
          StockKsPerPixelSamplerFilter::comparison_min_mag_linear_mip_point,
          StockKsPerPixelSamplerAddress::clamp,
-         StockKsPerPixelSamplerCompare::less_equal, false, false,
+         StockKsPerPixelSamplerCompare::less, false, false,
          std::numeric_limits<float>::max()},
     }};
 
@@ -642,6 +644,69 @@ enum class StockKsPerPixelNativeProgramStatus : std::uint8_t {
 validate_stock_ks_per_pixel_native_program(
     const StockShaderContainer& container,
     StockKsPerPixelVariant variant) noexcept;
+
+struct StockKsPerPixelNativeProgramResult;
+
+// Move-only proof that an owned package passed the complete native allocation
+// gate. Backends consume this type instead of a mutable StockShaderContainer,
+// which prevents validation followed by caller mutation of the stage bytes.
+class ValidatedStockKsPerPixelNativeProgram {
+public:
+    ValidatedStockKsPerPixelNativeProgram(
+        ValidatedStockKsPerPixelNativeProgram&&) noexcept = default;
+    ValidatedStockKsPerPixelNativeProgram& operator=(
+        ValidatedStockKsPerPixelNativeProgram&&) noexcept = default;
+    ValidatedStockKsPerPixelNativeProgram(
+        const ValidatedStockKsPerPixelNativeProgram&) = delete;
+    ValidatedStockKsPerPixelNativeProgram& operator=(
+        const ValidatedStockKsPerPixelNativeProgram&) = delete;
+
+    [[nodiscard]] StockKsPerPixelVariant variant() const noexcept {
+        return variant_;
+    }
+    [[nodiscard]] StockKsPerPixelNativeProgramStatus validation_status()
+        const noexcept {
+        return validate_stock_ks_per_pixel_native_program(container_, variant_);
+    }
+    [[nodiscard]] std::span<const std::uint8_t> vertex_shader() const noexcept {
+        return container_.vertex_shader;
+    }
+    [[nodiscard]] std::span<const std::uint8_t> pixel_shader() const noexcept {
+        return container_.pixel_shader;
+    }
+
+private:
+    friend StockKsPerPixelNativeProgramResult
+    create_validated_stock_ks_per_pixel_native_program(
+        StockShaderContainer container,
+        StockKsPerPixelVariant variant);
+
+    explicit ValidatedStockKsPerPixelNativeProgram(
+        StockShaderContainer container,
+        StockKsPerPixelVariant variant) noexcept
+        : container_(std::move(container)), variant_(variant) {}
+
+    StockShaderContainer container_;
+    StockKsPerPixelVariant variant_ = StockKsPerPixelVariant::base;
+};
+
+struct StockKsPerPixelNativeProgramResult {
+    StockKsPerPixelNativeProgramStatus status =
+        StockKsPerPixelNativeProgramStatus::invalid_variant;
+    std::optional<ValidatedStockKsPerPixelNativeProgram> program;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == StockKsPerPixelNativeProgramStatus::ready &&
+               program.has_value();
+    }
+};
+
+// Take ownership before validation. A successful result is the only supported
+// input to future native backend allocation paths.
+[[nodiscard]] StockKsPerPixelNativeProgramResult
+create_validated_stock_ks_per_pixel_native_program(
+    StockShaderContainer container,
+    StockKsPerPixelVariant variant);
 
 struct StockKsPerPixelPixelInput {
     std::array<float, 3U> interpolated_normal{};

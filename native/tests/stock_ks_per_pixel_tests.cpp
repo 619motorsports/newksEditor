@@ -1,4 +1,4 @@
-#include "apex/render/stock_ks_per_pixel.hpp"
+#include "apex/render/device.hpp"
 
 #include <algorithm>
 #include <array>
@@ -12,12 +12,117 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 namespace {
 
 using namespace apex::render;
+
+static_assert(!std::is_copy_constructible_v<
+              ValidatedStockKsPerPixelNativeProgram>);
+static_assert(!std::is_copy_assignable_v<
+              ValidatedStockKsPerPixelNativeProgram>);
+static_assert(std::is_nothrow_move_constructible_v<
+              ValidatedStockKsPerPixelNativeProgram>);
+static_assert(std::is_nothrow_move_assignable_v<
+              ValidatedStockKsPerPixelNativeProgram>);
+
+class FakeShaderModule final : public ShaderModule {
+public:
+    FakeShaderModule(Backend backend, ShaderModuleInfo info)
+        : backend_(backend), info_(info) {
+        ++live_count;
+    }
+    ~FakeShaderModule() override { --live_count; }
+
+    [[nodiscard]] Backend backend() const noexcept override {
+        return backend_;
+    }
+    [[nodiscard]] const ShaderModuleInfo& info() const noexcept override {
+        return info_;
+    }
+
+    static inline std::size_t live_count = 0U;
+
+private:
+    Backend backend_ = Backend::D3D12;
+    ShaderModuleInfo info_{};
+};
+
+class FakeShaderDevice final : public Device {
+public:
+    explicit FakeShaderDevice(Backend backend)
+        : info_{backend, "fake", "unit", 1U, 0U, 0U, 0U, 0U, true} {}
+
+    [[nodiscard]] const DeviceInfo& info() const noexcept override {
+        return info_;
+    }
+    [[nodiscard]] BufferResult create_buffer(
+        const BufferDescription&,
+        std::span<const std::byte>) override {
+        return {BufferStatus::unsupported, {"unused", "unused"}, nullptr};
+    }
+    [[nodiscard]] BufferUpdateResult update_buffer(
+        Buffer&, std::uint64_t,
+        std::span<const std::byte>) override {
+        return {BufferStatus::unsupported, {"unused", "unused"}};
+    }
+    [[nodiscard]] TextureResult create_texture(
+        const TextureDescription&,
+        const TextureUploadPlan&) override {
+        return {TextureStatus::unsupported, {"unused", "unused"}, nullptr};
+    }
+    [[nodiscard]] TextureUpdateResult update_texture(
+        Texture&, const TextureUploadPlan&) override {
+        return {TextureStatus::unsupported, {"unused", "unused"}};
+    }
+    [[nodiscard]] TextureClearReadbackResult clear_texture_and_readback(
+        Texture&, const TextureClearReadbackRequest&) override {
+        return {TextureReadbackStatus::unsupported, {"unused", "unused"}, {}};
+    }
+    [[nodiscard]] TriangleDrawResult draw_triangle_and_readback(
+        Texture&, const TriangleDrawRequest&) override {
+        return {TriangleDrawStatus::unsupported, {"unused", "unused"}, {}};
+    }
+    [[nodiscard]] SamplerResult create_sampler(
+        const SamplerDescription&) override {
+        return {SamplerStatus::unsupported, {"unused", "unused"}, nullptr};
+    }
+    [[nodiscard]] ShaderModuleResult create_shader_module(
+        const ShaderModuleDescription& description) override {
+        ++shader_calls;
+        stages.push_back(description.stage);
+        sizes.push_back(description.bytecode.size());
+        if (fail_call != 0U && shader_calls == fail_call)
+            return {ShaderModuleStatus::allocation_failed,
+                    {"fake_shader_failure", "fake shader allocation failed"},
+                    nullptr};
+        ShaderModuleInfo module_info{
+            wrong_stage ? ShaderStage::compute : description.stage,
+            wrong_format ? ShaderBytecodeFormat::spirv
+                         : ShaderBytecodeFormat::dxbc,
+            description.bytecode.size()};
+        const Backend module_backend =
+            wrong_backend ? Backend::Vulkan : info_.backend;
+        return {ShaderModuleStatus::ready, {},
+                std::make_unique<FakeShaderModule>(module_backend,
+                                                   module_info)};
+    }
+    void wait_idle() noexcept override {}
+
+    std::size_t shader_calls = 0U;
+    std::size_t fail_call = 0U;
+    bool wrong_stage = false;
+    bool wrong_format = false;
+    bool wrong_backend = false;
+    std::vector<ShaderStage> stages;
+    std::vector<std::size_t> sizes;
+
+private:
+    DeviceInfo info_{};
+};
 
 StockKsPerPixelLightingConstants lighting_fixture();
 
@@ -459,7 +564,7 @@ void exposes_recovered_vertex_and_sampler_contracts() {
                     StockKsPerPixelSamplerFilter::
                         comparison_min_mag_linear_mip_point &&
                 shadow.address == StockKsPerPixelSamplerAddress::clamp &&
-                shadow.compare == StockKsPerPixelSamplerCompare::less_equal &&
+                shadow.compare == StockKsPerPixelSamplerCompare::less &&
                 !shadow.runtime_max_anisotropy &&
                 !shadow.runtime_mip_lod_bias &&
                 shadow.maximum_lod == std::numeric_limits<float>::max(),
@@ -973,6 +1078,175 @@ void gates_the_complete_native_program_before_backend_allocation() {
             "duplicate executable chunks reject a direct reflection request");
 }
 
+void owns_the_validated_native_program_after_the_gate() {
+    auto source = complete_native_container_fixture();
+    const std::size_t vertex_bytes = source.vertex_shader.size();
+    const std::size_t pixel_bytes = source.pixel_shader.size();
+    const std::uint8_t vertex_tail = source.vertex_shader.back();
+    const std::uint8_t pixel_tail = source.pixel_shader.back();
+
+    auto created = create_validated_stock_ks_per_pixel_native_program(
+        std::move(source), StockKsPerPixelVariant::base);
+    require(created.ok() && created.program.has_value(),
+            "complete package creates an owned validated native program");
+    source.vertex_shader.assign(32U, 0xffU);
+    source.pixel_shader.assign(32U, 0xffU);
+    require(created.program->variant() == StockKsPerPixelVariant::base &&
+                created.program->vertex_shader().size() == vertex_bytes &&
+                created.program->pixel_shader().size() == pixel_bytes &&
+                created.program->vertex_shader().back() == vertex_tail &&
+                created.program->pixel_shader().back() == pixel_tail,
+            "caller mutation after move cannot change validated stage bytes");
+
+    ValidatedStockKsPerPixelNativeProgram moved =
+        std::move(*created.program);
+    created.program.reset();
+    require(moved.vertex_shader().size() == vertex_bytes &&
+                moved.pixel_shader().size() == pixel_bytes,
+            "validated stage ownership survives program moves");
+
+    auto alpha_source = complete_native_container_fixture(
+        StockKsPerPixelVariant::alpha_to_coverage);
+    auto alpha = create_validated_stock_ks_per_pixel_native_program(
+        std::move(alpha_source),
+        StockKsPerPixelVariant::alpha_to_coverage);
+    require(alpha.ok() && alpha.program->variant() ==
+                              StockKsPerPixelVariant::alpha_to_coverage,
+            "alpha package retains its explicit native variant");
+
+    auto wrong_variant = complete_native_container_fixture();
+    auto rejected_variant = create_validated_stock_ks_per_pixel_native_program(
+        std::move(wrong_variant),
+        StockKsPerPixelVariant::alpha_to_coverage);
+    require(!rejected_variant.ok() && !rejected_variant.program.has_value() &&
+                rejected_variant.status ==
+                    StockKsPerPixelNativeProgramStatus::container_shape_mismatch,
+            "variant mismatch produces no validated native object");
+
+    auto malformed = complete_native_container_fixture();
+    const std::size_t input_chunk = get_u32(malformed.vertex_shader, 36U);
+    put_u32(malformed.vertex_shader, input_chunk + 8U + 8U + 4U, 1U);
+    auto rejected_signature =
+        create_validated_stock_ks_per_pixel_native_program(
+            std::move(malformed), StockKsPerPixelVariant::base);
+    require(!rejected_signature.ok() &&
+                !rejected_signature.program.has_value() &&
+                rejected_signature.status ==
+                    StockKsPerPixelNativeProgramStatus::signature_mismatch,
+            "malformed signature produces no validated native object");
+}
+
+ValidatedStockKsPerPixelNativeProgram validated_program_fixture() {
+    auto result = create_validated_stock_ks_per_pixel_native_program(
+        complete_native_container_fixture(), StockKsPerPixelVariant::base);
+    require(result.ok(), "native shader allocation fixture passes the gate");
+    return std::move(*result.program);
+}
+
+void allocates_only_validated_native_d3d12_shader_objects() {
+    require(FakeShaderModule::live_count == 0U,
+            "native shader allocation test starts without live objects");
+
+    FakeShaderDevice d3d12(Backend::D3D12);
+    auto validated = validated_program_fixture();
+    const std::size_t vertex_bytes = validated.vertex_shader().size();
+    const std::size_t pixel_bytes = validated.pixel_shader().size();
+    auto allocated = allocate_stock_ks_per_pixel_native_shaders(
+        d3d12, std::move(validated));
+    require(allocated.ok() && d3d12.shader_calls == 2U &&
+                d3d12.stages ==
+                    std::vector<ShaderStage>{ShaderStage::vertex,
+                                             ShaderStage::fragment} &&
+                d3d12.sizes ==
+                    std::vector<std::size_t>{vertex_bytes, pixel_bytes} &&
+                allocated.program->source().variant() ==
+                    StockKsPerPixelVariant::base &&
+                allocated.program->vertex_shader().info().format ==
+                    ShaderBytecodeFormat::dxbc &&
+                allocated.program->pixel_shader().info().format ==
+                    ShaderBytecodeFormat::dxbc &&
+                FakeShaderModule::live_count == 2U,
+            "D3D12 allocates and owns the exact validated shader pair");
+    allocated.program.reset();
+    require(FakeShaderModule::live_count == 0U,
+            "native shader program releases both shader objects");
+
+    FakeShaderDevice moved_from_device(Backend::D3D12);
+    const auto rejected_moved_from =
+        allocate_stock_ks_per_pixel_native_shaders(
+            moved_from_device, std::move(validated));
+    require(!rejected_moved_from.ok() &&
+                rejected_moved_from.status ==
+                    StockKsPerPixelNativeShaderStatus::invalid_program &&
+                moved_from_device.shader_calls == 0U,
+            "moved-from native proof rejects before a device call");
+
+    FakeShaderDevice vulkan(Backend::Vulkan);
+    auto vulkan_source = validated_program_fixture();
+    const std::size_t retained_vertex_bytes =
+        vulkan_source.vertex_shader().size();
+    const auto rejected_vulkan =
+        allocate_stock_ks_per_pixel_native_shaders(
+            vulkan, std::move(vulkan_source));
+    require(!rejected_vulkan.ok() &&
+                rejected_vulkan.status ==
+                    StockKsPerPixelNativeShaderStatus::backend_unsupported &&
+                rejected_vulkan.diagnostic.code ==
+                    "stock_native_shader_backend_unsupported" &&
+                vulkan.shader_calls == 0U &&
+                vulkan_source.vertex_shader().size() == retained_vertex_bytes,
+            "Vulkan rejects native DXBC before allocation and retains the source");
+
+    FakeShaderDevice vertex_failure(Backend::D3D12);
+    vertex_failure.fail_call = 1U;
+    auto vertex_source = validated_program_fixture();
+    const auto rejected_vertex =
+        allocate_stock_ks_per_pixel_native_shaders(
+            vertex_failure, std::move(vertex_source));
+    require(!rejected_vertex.ok() &&
+                rejected_vertex.status ==
+                    StockKsPerPixelNativeShaderStatus::vertex_shader_failed &&
+                vertex_failure.shader_calls == 1U &&
+                FakeShaderModule::live_count == 0U,
+            "vertex allocation failure stops before the pixel shader");
+
+    FakeShaderDevice pixel_failure(Backend::D3D12);
+    pixel_failure.fail_call = 2U;
+    auto pixel_source = validated_program_fixture();
+    const auto rejected_pixel =
+        allocate_stock_ks_per_pixel_native_shaders(
+            pixel_failure, std::move(pixel_source));
+    require(!rejected_pixel.ok() &&
+                rejected_pixel.status ==
+                    StockKsPerPixelNativeShaderStatus::pixel_shader_failed &&
+                pixel_failure.shader_calls == 2U &&
+                FakeShaderModule::live_count == 0U,
+            "pixel allocation failure releases the vertex shader object");
+
+    FakeShaderDevice wrong_module(Backend::D3D12);
+    wrong_module.wrong_format = true;
+    auto wrong_source = validated_program_fixture();
+    const auto rejected_module =
+        allocate_stock_ks_per_pixel_native_shaders(
+            wrong_module, std::move(wrong_source));
+    require(!rejected_module.ok() &&
+                rejected_module.status ==
+                    StockKsPerPixelNativeShaderStatus::invalid_shader_module &&
+                wrong_module.shader_calls == 1U &&
+                FakeShaderModule::live_count == 0U,
+            "unexpected backend shader metadata is rejected and released");
+
+    require(std::string_view(
+                stock_ks_per_pixel_native_shader_status_name(
+                    StockKsPerPixelNativeShaderStatus::pixel_shader_failed)) ==
+                "pixel_shader_failed" &&
+                std::string_view(
+                    stock_ks_per_pixel_native_shader_status_name(
+                        static_cast<StockKsPerPixelNativeShaderStatus>(255U))) ==
+                    "unknown",
+            "native shader allocation statuses have stable names");
+}
+
 void preserves_native_constant_bytes_and_rejects_nonfinite_records() {
     StockKsPerPixelMaterialConstants material;
     material.ambient = 0.35F;
@@ -1218,6 +1492,8 @@ int main() {
         validates_bounded_rdef_resource_contract();
         validates_exact_bounded_stage_signatures();
         gates_the_complete_native_program_before_backend_allocation();
+        owns_the_validated_native_program_after_the_gate();
+        allocates_only_validated_native_d3d12_shader_objects();
         preserves_native_constant_bytes_and_rejects_nonfinite_records();
         transposes_native_host_matrices_before_upload();
         evaluates_recovered_base_pixel_equation();
