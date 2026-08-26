@@ -1,4 +1,5 @@
 #include "apex/render/pipeline.hpp"
+#include "apex/render/stock_ks_per_pixel.hpp"
 
 #include <array>
 #include <cstdint>
@@ -334,7 +335,22 @@ void mapsStockProfileWithExplicitStaging() {
     const StockPipelineResult result = build_stock_pipeline(request);
     require(result.profile.stock != nullptr && result.profile.transparent && result.profile.blend_enabled,
             "stock profile controls transparent blend state");
-    require(result.program.raster.cull == PipelineCullMode::back && result.program.vertex_layout.stride == 44,
+    require(result.program.raster.cull == PipelineCullMode::back &&
+                result.program.vertex_layout.stride ==
+                    stock_ks_per_pixel_vertex_stride_bytes &&
+                result.program.vertex_layout.attributes.size() == 4U &&
+                result.program.vertex_layout.attributes[0U].semantic ==
+                    PipelineVertexSemantic::position &&
+                result.program.vertex_layout.attributes[0U].offset == 0U &&
+                result.program.vertex_layout.attributes[1U].semantic ==
+                    PipelineVertexSemantic::normal &&
+                result.program.vertex_layout.attributes[1U].offset == 12U &&
+                result.program.vertex_layout.attributes[2U].semantic ==
+                    PipelineVertexSemantic::texcoord0 &&
+                result.program.vertex_layout.attributes[2U].offset == 24U &&
+                result.program.vertex_layout.attributes[3U].semantic ==
+                    PipelineVertexSemantic::tangent &&
+                result.program.vertex_layout.attributes[3U].offset == 32U,
             "stock mesh layout and cull mapping");
     require(result.program.blend.source_color == PipelineBlendFactor::source_alpha &&
                 result.program.blend.destination_color ==

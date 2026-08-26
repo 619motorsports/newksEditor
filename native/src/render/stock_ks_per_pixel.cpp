@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace apex::render {
 namespace {
@@ -56,7 +57,218 @@ template <std::size_t Size>
            finite(value.emissive) && finite(value.alpha_reference);
 }
 
+[[nodiscard]] bool valid_register_class(
+    StockShaderRegisterClass value) noexcept {
+    return value == StockShaderRegisterClass::constant_buffer ||
+           value == StockShaderRegisterClass::sampled_texture ||
+           value == StockShaderRegisterClass::sampler;
+}
+
+[[nodiscard]] bool valid_stage_mask(StockShaderStageMask value) noexcept {
+    return value == StockShaderStageMask::vertex ||
+           value == StockShaderStageMask::fragment ||
+           value == StockShaderStageMask::vertex_fragment;
+}
+
+[[nodiscard]] bool valid_descriptor_kind(
+    StockShaderDescriptorKind value) noexcept {
+    return value == StockShaderDescriptorKind::uniform_buffer ||
+           value == StockShaderDescriptorKind::sampled_image ||
+           value == StockShaderDescriptorKind::sampler;
+}
+
+[[nodiscard]] StockShaderDescriptorKind descriptor_kind_for(
+    StockShaderRegisterClass value) noexcept {
+    switch (value) {
+    case StockShaderRegisterClass::constant_buffer:
+        return StockShaderDescriptorKind::uniform_buffer;
+    case StockShaderRegisterClass::sampled_texture:
+        return StockShaderDescriptorKind::sampled_image;
+    case StockShaderRegisterClass::sampler:
+        return StockShaderDescriptorKind::sampler;
+    }
+    return static_cast<StockShaderDescriptorKind>(255U);
+}
+
+[[nodiscard]] std::uint32_t vulkan_set_for(
+    StockShaderRegisterClass value) noexcept {
+    switch (value) {
+    case StockShaderRegisterClass::constant_buffer: return 0U;
+    case StockShaderRegisterClass::sampled_texture: return 1U;
+    case StockShaderRegisterClass::sampler: return 2U;
+    }
+    return 3U;
+}
+
 } // namespace
+
+const char* stock_ks_per_pixel_binding_status_name(
+    StockKsPerPixelBindingStatus status) noexcept {
+    switch (status) {
+    case StockKsPerPixelBindingStatus::ready: return "ready";
+    case StockKsPerPixelBindingStatus::count_mismatch:
+        return "count_mismatch";
+    case StockKsPerPixelBindingStatus::invalid_register_class:
+        return "invalid_register_class";
+    case StockKsPerPixelBindingStatus::invalid_descriptor_kind:
+        return "invalid_descriptor_kind";
+    case StockKsPerPixelBindingStatus::invalid_stage_mask:
+        return "invalid_stage_mask";
+    case StockKsPerPixelBindingStatus::invalid_name: return "invalid_name";
+    case StockKsPerPixelBindingStatus::duplicate_native_binding:
+        return "duplicate_native_binding";
+    case StockKsPerPixelBindingStatus::duplicate_vulkan_binding:
+        return "duplicate_vulkan_binding";
+    case StockKsPerPixelBindingStatus::d3d12_space_mismatch:
+        return "d3d12_space_mismatch";
+    case StockKsPerPixelBindingStatus::vulkan_namespace_mismatch:
+        return "vulkan_namespace_mismatch";
+    case StockKsPerPixelBindingStatus::contract_mismatch:
+        return "contract_mismatch";
+    case StockKsPerPixelBindingStatus::invalid_descriptor_range:
+        return "invalid_descriptor_range";
+    case StockKsPerPixelBindingStatus::duplicate_descriptor_range:
+        return "duplicate_descriptor_range";
+    }
+    return "unknown";
+}
+
+StockKsPerPixelBindingStatus validate_stock_ks_per_pixel_backend_contract(
+    std::span<const StockKsPerPixelBackendBinding> bindings) noexcept {
+    if (bindings.size() != stock_ks_per_pixel_backend_contract.size())
+        return StockKsPerPixelBindingStatus::count_mismatch;
+
+    std::array<bool, stock_ks_per_pixel_backend_contract.size()> found{};
+    for (std::size_t index = 0U; index < bindings.size(); ++index) {
+        const StockKsPerPixelBackendBinding& binding = bindings[index];
+        if (!valid_register_class(binding.register_class))
+            return StockKsPerPixelBindingStatus::invalid_register_class;
+        if (!valid_descriptor_kind(binding.descriptor_kind))
+            return StockKsPerPixelBindingStatus::invalid_descriptor_kind;
+        if (!valid_stage_mask(binding.stages))
+            return StockKsPerPixelBindingStatus::invalid_stage_mask;
+        if (binding.name.empty() || binding.name.size() > 64U)
+            return StockKsPerPixelBindingStatus::invalid_name;
+        if (binding.d3d12_register_space != 0U)
+            return StockKsPerPixelBindingStatus::d3d12_space_mismatch;
+
+        for (std::size_t previous = 0U; previous < index; ++previous) {
+            const StockKsPerPixelBackendBinding& other = bindings[previous];
+            if (binding.register_class == other.register_class &&
+                binding.register_index == other.register_index &&
+                binding.d3d12_register_space == other.d3d12_register_space)
+                return StockKsPerPixelBindingStatus::duplicate_native_binding;
+            if (binding.vulkan_set == other.vulkan_set &&
+                binding.vulkan_binding == other.vulkan_binding)
+                return StockKsPerPixelBindingStatus::duplicate_vulkan_binding;
+        }
+        if (binding.vulkan_set != vulkan_set_for(binding.register_class) ||
+            binding.vulkan_binding != binding.register_index)
+            return StockKsPerPixelBindingStatus::vulkan_namespace_mismatch;
+        if (binding.descriptor_kind !=
+            descriptor_kind_for(binding.register_class))
+            return StockKsPerPixelBindingStatus::contract_mismatch;
+
+        std::size_t expected_index =
+            stock_ks_per_pixel_backend_contract.size();
+        for (std::size_t candidate = 0U;
+             candidate < stock_ks_per_pixel_backend_contract.size();
+             ++candidate) {
+            if (stock_ks_per_pixel_backend_contract[candidate].name ==
+                binding.name) {
+                expected_index = candidate;
+                break;
+            }
+        }
+        if (expected_index == stock_ks_per_pixel_backend_contract.size())
+            return StockKsPerPixelBindingStatus::contract_mismatch;
+        if (found[expected_index])
+            return StockKsPerPixelBindingStatus::duplicate_native_binding;
+        found[expected_index] = true;
+
+        const StockKsPerPixelBackendBinding& expected =
+            stock_ks_per_pixel_backend_contract[expected_index];
+        std::size_t native_index =
+            stock_ks_per_pixel_register_contract.size();
+        for (std::size_t candidate = 0U;
+             candidate < stock_ks_per_pixel_register_contract.size();
+             ++candidate) {
+            if (stock_ks_per_pixel_register_contract[candidate].name ==
+                binding.name) {
+                native_index = candidate;
+                break;
+            }
+        }
+        if (native_index == stock_ks_per_pixel_register_contract.size())
+            return StockKsPerPixelBindingStatus::contract_mismatch;
+        const StockShaderRegisterBinding& native =
+            stock_ks_per_pixel_register_contract[native_index];
+        if (binding.register_class != expected.register_class ||
+            binding.descriptor_kind != expected.descriptor_kind ||
+            binding.register_index != expected.register_index ||
+            binding.d3d12_register_space != expected.d3d12_register_space ||
+            binding.stages != expected.stages ||
+            binding.constant_bytes != expected.constant_bytes ||
+            binding.comparison_sampler != expected.comparison_sampler ||
+            binding.vulkan_set != expected.vulkan_set ||
+            binding.vulkan_binding != expected.vulkan_binding)
+            return StockKsPerPixelBindingStatus::contract_mismatch;
+        if (binding.register_class != native.register_class ||
+            binding.register_index != native.register_index ||
+            binding.stages != native.stages ||
+            binding.constant_bytes != native.constant_bytes ||
+            binding.comparison_sampler != native.comparison_sampler)
+            return StockKsPerPixelBindingStatus::contract_mismatch;
+    }
+    return std::all_of(found.begin(), found.end(), [](bool value) {
+               return value;
+           })
+               ? StockKsPerPixelBindingStatus::ready
+               : StockKsPerPixelBindingStatus::contract_mismatch;
+}
+
+StockKsPerPixelBindingStatus validate_stock_ks_per_pixel_d3d12_root_ranges(
+    std::span<const StockKsPerPixelD3D12DescriptorRange> ranges) noexcept {
+    if (ranges.size() != stock_ks_per_pixel_d3d12_root_ranges.size())
+        return StockKsPerPixelBindingStatus::count_mismatch;
+
+    std::array<bool, stock_ks_per_pixel_d3d12_root_ranges.size()> found{};
+    for (const StockKsPerPixelD3D12DescriptorRange& range : ranges) {
+        if (!valid_register_class(range.register_class) ||
+            !valid_stage_mask(range.stages) || range.descriptor_count == 0U ||
+            range.descriptor_count >
+                stock_ks_per_pixel_backend_contract.size() ||
+            range.base_register > 4095U ||
+            range.base_register >
+                std::numeric_limits<std::uint32_t>::max() -
+                    range.descriptor_count ||
+            range.register_space != 0U)
+            return StockKsPerPixelBindingStatus::invalid_descriptor_range;
+
+        std::size_t expected_index =
+            stock_ks_per_pixel_d3d12_root_ranges.size();
+        for (std::size_t candidate = 0U;
+             candidate < stock_ks_per_pixel_d3d12_root_ranges.size();
+             ++candidate) {
+            const auto& expected =
+                stock_ks_per_pixel_d3d12_root_ranges[candidate];
+            if (range.register_class == expected.register_class &&
+                range.base_register == expected.base_register &&
+                range.descriptor_count == expected.descriptor_count &&
+                range.register_space == expected.register_space &&
+                range.stages == expected.stages) {
+                expected_index = candidate;
+                break;
+            }
+        }
+        if (expected_index == stock_ks_per_pixel_d3d12_root_ranges.size())
+            return StockKsPerPixelBindingStatus::contract_mismatch;
+        if (found[expected_index])
+            return StockKsPerPixelBindingStatus::duplicate_descriptor_range;
+        found[expected_index] = true;
+    }
+    return StockKsPerPixelBindingStatus::ready;
+}
 
 apex::scene::Matrix4 stock_ks_per_pixel_transpose_matrix(
     const apex::scene::Matrix4& matrix) noexcept {

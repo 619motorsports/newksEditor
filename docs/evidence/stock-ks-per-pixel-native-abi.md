@@ -33,6 +33,29 @@ DXBC reflection gives the complete register map for this family.
 | `s0` | `samLinear` | — | pixel |
 | `s1` | `samShadow` comparison sampler | — | pixel |
 
+The backend projection keeps each native register number. Vulkan uses three
+descriptor sets because Vulkan has one binding namespace in each set.
+
+| Native class | Vulkan set | Binding rule | D3D12 space |
+|---|---:|---|---:|
+| `bN` constant buffer | 0 | `N` | 0 |
+| `tN` sampled texture | 1 | `N` | 0 |
+| `sN` sampler | 2 | `N` | 0 |
+
+This projection keeps the unused texture bindings from `t1` through `t5`.
+It also keeps `b0`, `t0`, and `s0` in separate Vulkan sets.
+
+The D3D12 root plan uses five descriptor tables:
+
+- Vertex constant buffers `b0` through `b3`
+- Pixel constant buffers `b2` through `b4`
+- Pixel texture `t0`
+- Pixel textures `t6` through `t8`
+- Pixel samplers `s0` through `s1`
+
+The two constant-buffer tables can point to the same `b2` and `b3` heap
+descriptors. This method keeps the recovered stage visibility exact.
+
 `cbCamera` stores three matrices at offsets 0, 64, and 128. The camera
 position starts at 192. The four trailing scalar values start at 208.
 
@@ -46,6 +69,46 @@ bias values start at 192. The reciprocal texture width is at 204.
 
 The host transposes all matrices before it uploads them. This rule applies to
 the view, projection, inverse-view-projection, world, and shadow matrices.
+
+## Vertex and draw contract
+
+The standard `MeshVertex` record has a stride of 44 bytes.
+
+| Offset | Input | Format |
+|---:|---|---|
+| 0 | `POSITION0` | `R32G32B32_FLOAT` |
+| 12 | `NORMAL0` | `R32G32B32_FLOAT` |
+| 24 | `TEXCOORD0` | `R32G32_FLOAT` |
+| 32 | `TANGENT0` | `R32G32B32_FLOAT` |
+
+`MeshVertex::MeshVertex` at `0x10039ad3` initializes this record.
+`VertexBuffer<MeshVertex>::VertexBuffer` at `0x10047245` supplies the 44-byte
+stride. `getInputLayout` at `0x1000eea0` supplies the four input elements.
+
+The index buffer uses `DXGI_FORMAT_R16_UINT`. The default primitive topology
+is `D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST`.
+
+## Sampler contract
+
+`GraphicsManager::initSamplerStates` at `0x10045639` creates the stock
+samplers. `GraphicsManager::setSamplerState` at `0x100466f6` binds them.
+
+The `samLinear` sampler at `s0` uses these values:
+
+- Anisotropic filtering
+- Wrap mode for the U, V, and W axes
+- The video setting for maximum anisotropy
+- The render flag for the mip LOD bias
+- The maximum finite float for the maximum LOD
+
+The `samShadow` sampler at `s1` uses these values:
+
+- Comparison min-mag linear and mip point filtering
+- Clamp mode for the U, V, and W axes
+- `LESS_EQUAL` comparison
+
+`kglCreateSampler` at `0x1000c560` maps the recovered filter and address
+selectors to these D3D11 values.
 
 ## Recovered pixel equation
 

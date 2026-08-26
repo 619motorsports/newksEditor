@@ -1,4 +1,5 @@
 #include "apex/render/pipeline.hpp"
+#include "apex/render/stock_ks_per_pixel.hpp"
 
 #include <algorithm>
 #include <optional>
@@ -249,11 +250,35 @@ void validate_spirv(std::span<const std::uint8_t> bytes, DiagnosticSink& diagnos
 [[nodiscard]] PipelineVertexLayout stock_layout(std::string_view name) {
     PipelineVertexLayout layout;
     if (name == "mesh") {
-        layout.stride = 44;
-        layout.attributes = {{PipelineVertexSemantic::position, PipelineVertexAttributeFormat::float32x3, 0, 0},
-                             {PipelineVertexSemantic::normal, PipelineVertexAttributeFormat::float32x3, 1, 12},
-                             {PipelineVertexSemantic::texcoord0, PipelineVertexAttributeFormat::float32x2, 2, 24},
-                             {PipelineVertexSemantic::tangent, PipelineVertexAttributeFormat::float32x3, 3, 32}};
+        layout.stride = stock_ks_per_pixel_vertex_stride_bytes;
+        layout.attributes.reserve(stock_ks_per_pixel_vertex_contract.size());
+        for (std::size_t index = 0U;
+             index < stock_ks_per_pixel_vertex_contract.size(); ++index) {
+            const StockKsPerPixelVertexElement& element =
+                stock_ks_per_pixel_vertex_contract[index];
+            PipelineVertexSemantic semantic = PipelineVertexSemantic::position;
+            switch (element.semantic) {
+            case StockKsPerPixelVertexSemantic::position:
+                semantic = PipelineVertexSemantic::position;
+                break;
+            case StockKsPerPixelVertexSemantic::normal:
+                semantic = PipelineVertexSemantic::normal;
+                break;
+            case StockKsPerPixelVertexSemantic::texcoord0:
+                semantic = PipelineVertexSemantic::texcoord0;
+                break;
+            case StockKsPerPixelVertexSemantic::tangent:
+                semantic = PipelineVertexSemantic::tangent;
+                break;
+            }
+            const PipelineVertexAttributeFormat format =
+                element.component_count == 2U
+                    ? PipelineVertexAttributeFormat::float32x2
+                    : PipelineVertexAttributeFormat::float32x3;
+            layout.attributes.push_back(
+                {semantic, format, static_cast<std::uint32_t>(index),
+                 element.offset_bytes});
+        }
     } else if (name == "skinned") {
         layout = stock_layout("mesh");
         layout.stride = 76;
