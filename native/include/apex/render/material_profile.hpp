@@ -56,6 +56,31 @@ struct StockShaderContainerHeader {
     std::uint32_t geometry_bytes = 0;
 };
 
+struct StockShaderContainerLimits {
+    std::size_t max_container_bytes = 16U * 1024U * 1024U;
+    std::size_t max_stage_bytes = 16U * 1024U * 1024U;
+    std::uint32_t max_dxbc_chunks = 4096U;
+};
+
+struct StockShaderStageMetadata {
+    std::uint8_t shader_model_major = 0U;
+    std::uint8_t shader_model_minor = 0U;
+    std::uint32_t chunk_count = 0U;
+};
+
+// Own the extracted stage programs so a later D3D12 handoff cannot retain
+// spans into a temporary file buffer. Vulkan still requires explicit SPIR-V;
+// this type does not translate DXBC or claim cross-backend shader parity.
+struct StockShaderContainer {
+    StockShaderContainerHeader header;
+    StockShaderStageMetadata vertex_metadata;
+    StockShaderStageMetadata pixel_metadata;
+    std::optional<StockShaderStageMetadata> geometry_metadata;
+    std::vector<std::uint8_t> vertex_shader;
+    std::vector<std::uint8_t> pixel_shader;
+    std::vector<std::uint8_t> geometry_shader;
+};
+
 class MaterialProfileError final : public std::runtime_error {
 public:
     MaterialProfileError(std::string message, std::size_t offset);
@@ -70,6 +95,13 @@ private:
 // for their DXBC signatures and bounds; no GPU API objects are created here.
 [[nodiscard]] StockShaderContainerHeader parse_stock_shader_container_header(
     std::span<const std::uint8_t> bytes);
+
+// Extract and validate a complete v2 package. This stricter boundary rejects
+// trailing bytes, non-boolean flags, malformed DXBC chunk tables, overlapping
+// chunks, and stage programs whose embedded type does not match their slot.
+[[nodiscard]] StockShaderContainer parse_stock_shader_container(
+    std::span<const std::uint8_t> bytes,
+    const StockShaderContainerLimits& limits = {});
 
 struct MaterialInput {
     std::string shader;

@@ -431,6 +431,12 @@ remains unchanged and feature-complete.
   translate stock shader containers. Production packets remain marked as
   staged. This work proves an explicit production-material boundary. It does
   not prove complete scene-rendering parity.
+  A strict version-2 package extractor now owns the embedded DXBC stages. It
+  checks package limits, chunk ranges, and stage identity before allocation.
+  The installed-fixture test validates 79 nonempty SDK packages and counts two
+  empty placeholders. The extracted `ksPerPixel` stages report Shader Model
+  4.0. They remain staged because the D3D12 ABI differs and Vulkan needs
+  explicit SPIR-V.
   A bounded stock-scene facade composes the render plan, draw packets, material
   handoff, and static-scene preparation. Its preflight uses linear topology
   traversal. It rejects malformed edges, cycles, and over-budget plans before
@@ -801,6 +807,10 @@ remains unchanged and feature-complete.
   completed offscreen color attachment with the same size and format. The
   port contains a bounded Windows D3D12 swapchain path pending its Windows/WARP
   verification gate, but does not provide full stock-shader golden-image parity.
+  The owned extractor does not relabel stock DXBC as DXIL. A future D3D12
+  adapter must prove the shader model, signatures, registers, constants, and
+  root signature for each supported family. A future Vulkan adapter must use
+  explicit SPIR-V or label translated output as an approximation.
 
 The production WebGL material gate uses the synthetic `BC7_PLANE` scene. The
 baseline screenshot SHA-256 is

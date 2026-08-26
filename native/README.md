@@ -98,6 +98,11 @@ workspace LOD and preview resolution without changing the document. It keeps
 one packet catalog for all car LODs. A frame mask changes the active LOD without
 new graphics resources. Multisample presentation and stock-container shader
 translation remain explicit gaps.
+The render library can extract owned vertex, pixel, and optional geometry
+programs from a complete version-2 stock shader package. This boundary checks
+package limits, DXBC chunk ranges, and each embedded program type before it
+copies bytes. It also reports the shader-model version and chunk count.
+Extraction does not make the stock programs executable on Vulkan or D3D12.
 The shell maps left-drag orbit, middle-drag pan, wheel zoom, and WASD/QE
 camera translation through a backend-neutral application controller.
 The application service can bind immutable track-model or car-LOD manifest
@@ -555,6 +560,12 @@ color attachment with the same size and format. Native window surfaces,
 D3D12 swapchains, and complete stock execution remain roadmap work on
 non-Windows builds; the Windows D3D12 presentation path above remains gated on
 a Windows SDK/WARP verification run.
+The strict stock-package extractor validates all 79 nonempty packages in the
+installed SDK editor when `ASSETTO_CORSA_ROOT` is available. It also identifies
+the installed `ksPerPixel` vertex and pixel programs as Shader Model 4.0.
+The current D3D12 path requires a different root-register contract. The Vulkan
+path requires explicit SPIR-V. Therefore, both backends keep these extracted
+stock programs staged.
 A bounded stock-scene facade composes the render plan, draw packets, material
 handoff, and static-scene preparation. It uses linear topology preflight and
 rejects malformed edges, cycles, and over-budget plans before backend

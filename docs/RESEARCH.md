@@ -410,6 +410,28 @@ override that default. The stock main pixel shaders output diffuse alpha without
 discard. The portable renderer therefore uses WebGL multisample
 `SAMPLE_ALPHA_TO_COVERAGE` for mode 2 instead of a hard fragment cutoff.
 
+The strict C++ extractor checks the complete version-2 envelope and each DXBC
+chunk table. It rejects non-boolean flags, trailing bytes, overlapping chunks,
+wrong stage types, and all truncated prefixes. It owns the extracted stage
+bytes so later code cannot retain spans into a temporary file buffer.
+
+The installed SDK editor has 81 named `.shader` files. Seventy-nine files are
+valid version-2 packages. `ksPerPixelMultiMap_emissive.shader` and
+`stPerPixelNM_UVflow.shader` are empty placeholders. None of the 79 packages
+contains a geometry stage.
+
+`ksPerPixel.shader` has 11,254 bytes and SHA-256
+`255d0228faa70d5b8454a2abe618447bef16ef29612ffab4a0d684dbedcfdb0b`.
+Its vertex payload has 3,728 bytes. Its pixel payload has 7,508 bytes. Both
+programs identify themselves as Shader Model 4.0.
+
+The extracted bytes are not portable backend programs. D3D12 uses a different
+root-register ABI in the current port, while the stock programs use the native
+`b0` through `b4` lighting contract. Vulkan requires SPIR-V, and the local tool
+set has no trusted DXBC-to-SPIR-V translator. Stock execution therefore remains
+staged after extraction. The [stock package evidence](evidence/stock-shader-container-extraction.md)
+records the native split-file load path and the complete extraction boundary.
+
 `MaterialFilterSM::apply` (`0x100650c7`) selects `ksShadowGenAT` for every material
 whose effective blend mode is not opaque. Its pixel shader subtracts `ksAlphaRef`
 from diffuse alpha and discards below the threshold. This cutoff belongs to the

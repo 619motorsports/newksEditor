@@ -9,6 +9,7 @@
 #include <sstream>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace apex::render {
 namespace {
@@ -171,6 +172,135 @@ constexpr std::array<std::string_view, 4> kLayouts = {"mesh", "skinned", "partic
            bytes[offset + 1] == 0x58U && bytes[offset + 2] == 0x42U && bytes[offset + 3] == 0x43U;
 }
 
+struct StockShaderContainerLayout {
+    StockShaderContainerHeader header;
+    std::size_t vertex_offset = 0U;
+    std::size_t pixel_offset = 0U;
+    std::size_t geometry_offset = 0U;
+    std::size_t end_offset = 0U;
+};
+
+[[nodiscard]] StockShaderContainerLayout parse_container_layout(
+    std::span<const std::uint8_t> bytes) {
+    if (bytes.size() < 14U) fail("Stock shader container is truncated", 0U);
+    const std::uint8_t version = bytes[0];
+    const std::uint32_t layout_code = u32_le(bytes, 2U);
+    if (version != 2U)
+        fail("Unsupported stock shader container version " +
+                 std::to_string(version),
+             0U);
+    if (layout_code >= kLayouts.size())
+        fail("Unsupported stock shader vertex layout " +
+                 std::to_string(layout_code),
+             2U);
+
+    const std::uint32_t vertex_bytes = u32_le(bytes, 6U);
+    constexpr std::size_t vertex_offset = 10U;
+    if (!dxbc_at(bytes, vertex_offset) ||
+        static_cast<std::size_t>(vertex_bytes) > bytes.size() - vertex_offset)
+        fail("Invalid stock vertex shader payload", vertex_offset);
+    const std::size_t pixel_size_offset =
+        vertex_offset + static_cast<std::size_t>(vertex_bytes);
+    if (pixel_size_offset > bytes.size() ||
+        bytes.size() - pixel_size_offset < 8U)
+        fail("Invalid stock vertex shader payload", pixel_size_offset);
+
+    const std::uint32_t pixel_bytes = u32_le(bytes, pixel_size_offset);
+    const std::size_t pixel_offset = pixel_size_offset + 4U;
+    if (!dxbc_at(bytes, pixel_offset) ||
+        static_cast<std::size_t>(pixel_bytes) >
+            bytes.size() - pixel_offset - 4U)
+        fail("Invalid stock pixel shader payload", pixel_offset);
+    const std::size_t geometry_size_offset =
+        pixel_offset + static_cast<std::size_t>(pixel_bytes);
+    const std::uint32_t geometry_bytes = u32_le(bytes, geometry_size_offset);
+    const std::size_t geometry_offset = geometry_size_offset + 4U;
+    if (static_cast<std::size_t>(geometry_bytes) >
+        bytes.size() - geometry_offset)
+        fail("Invalid stock geometry shader payload", geometry_offset);
+    if (geometry_bytes != 0U && !dxbc_at(bytes, geometry_offset))
+        fail("Invalid stock geometry shader payload", geometry_offset);
+
+    return {{version, bytes[1] != 0U, kLayouts[layout_code], vertex_bytes,
+             pixel_bytes, geometry_bytes},
+            vertex_offset, pixel_offset, geometry_offset,
+            geometry_offset + static_cast<std::size_t>(geometry_bytes)};
+}
+
+enum class DxbcProgramType : std::uint16_t {
+    pixel = 0U,
+    vertex = 1U,
+    geometry = 2U,
+};
+
+[[nodiscard]] StockShaderStageMetadata validate_dxbc_payload(
+    std::span<const std::uint8_t> bytes, std::size_t container_offset,
+    DxbcProgramType expected, const StockShaderContainerLimits& limits) {
+    if (bytes.size() < 32U || !dxbc_at(bytes, 0U))
+        fail("Stock shader DXBC payload is truncated", container_offset);
+    const std::size_t declared_size = u32_le(bytes, 24U);
+    if (declared_size != bytes.size())
+        fail("Stock shader DXBC declared size does not match its stage payload",
+             container_offset + 24U);
+    const std::uint32_t chunk_count = u32_le(bytes, 28U);
+    if (chunk_count == 0U || chunk_count > limits.max_dxbc_chunks)
+        fail("Stock shader DXBC chunk count is outside its limit",
+             container_offset + 28U);
+    if (chunk_count > (bytes.size() - 32U) / 4U)
+        fail("Stock shader DXBC chunk table exceeds its stage payload",
+             container_offset + 28U);
+    const std::size_t table_end =
+        32U + static_cast<std::size_t>(chunk_count) * 4U;
+    std::vector<std::pair<std::size_t, std::size_t>> ranges;
+    ranges.reserve(chunk_count);
+    bool found_program = false;
+    std::uint32_t program_version = 0U;
+    for (std::uint32_t index = 0U; index < chunk_count; ++index) {
+        const std::size_t table_offset =
+            32U + static_cast<std::size_t>(index) * 4U;
+        const std::size_t chunk_offset = u32_le(bytes, table_offset);
+        if (chunk_offset < table_end || chunk_offset > bytes.size() ||
+            bytes.size() - chunk_offset < 8U)
+            fail("Stock shader DXBC chunk offset exceeds its stage payload",
+                 container_offset + table_offset);
+        const std::size_t chunk_bytes = u32_le(bytes, chunk_offset + 4U);
+        if (chunk_bytes > bytes.size() - chunk_offset - 8U)
+            fail("Stock shader DXBC chunk payload exceeds its stage payload",
+                 container_offset + chunk_offset + 4U);
+        const std::size_t chunk_end = chunk_offset + 8U + chunk_bytes;
+        ranges.emplace_back(chunk_offset, chunk_end);
+
+        const bool shader_chunk =
+            (bytes[chunk_offset] == 'S' && bytes[chunk_offset + 1U] == 'H' &&
+             bytes[chunk_offset + 2U] == 'D' && bytes[chunk_offset + 3U] == 'R') ||
+            (bytes[chunk_offset] == 'S' && bytes[chunk_offset + 1U] == 'H' &&
+             bytes[chunk_offset + 2U] == 'E' && bytes[chunk_offset + 3U] == 'X');
+        if (!shader_chunk) continue;
+        if (found_program || chunk_bytes < 4U)
+            fail("Stock shader DXBC must contain one complete program chunk",
+                 container_offset + chunk_offset);
+        const std::uint32_t version_token = u32_le(bytes, chunk_offset + 8U);
+        const auto program_type = static_cast<DxbcProgramType>(
+            static_cast<std::uint16_t>(version_token >> 16U));
+        if (program_type != expected)
+            fail("Stock shader DXBC program type does not match its stage",
+                 container_offset + chunk_offset + 8U);
+        program_version = version_token;
+        found_program = true;
+    }
+    std::sort(ranges.begin(), ranges.end());
+    for (std::size_t index = 1U; index < ranges.size(); ++index) {
+        if (ranges[index].first < ranges[index - 1U].second)
+            fail("Stock shader DXBC chunks overlap",
+                 container_offset + ranges[index].first);
+    }
+    if (!found_program)
+        fail("Stock shader DXBC has no executable program chunk",
+             container_offset);
+    return {static_cast<std::uint8_t>((program_version >> 4U) & 0x0fU),
+            static_cast<std::uint8_t>(program_version & 0x0fU), chunk_count};
+}
+
 } // namespace
 
 const StockShaderProfile* stock_shader_profile(std::string_view name) noexcept {
@@ -194,34 +324,57 @@ MaterialProfileError::MaterialProfileError(std::string message, std::size_t offs
       offset_(offset) {}
 
 StockShaderContainerHeader parse_stock_shader_container_header(std::span<const std::uint8_t> bytes) {
-    if (bytes.size() < 14) fail("Stock shader container is truncated", 0);
-    const std::uint8_t version = bytes[0];
-    const std::uint32_t layout_code = u32_le(bytes, 2);
-    if (version != 2) fail("Unsupported stock shader container version " + std::to_string(version), 0);
-    if (layout_code >= kLayouts.size())
-        fail("Unsupported stock shader vertex layout " + std::to_string(layout_code), 2);
+    return parse_container_layout(bytes).header;
+}
 
-    const std::uint32_t vertex_bytes = u32_le(bytes, 6);
-    constexpr std::size_t vertex_offset = 10;
-    if (!dxbc_at(bytes, vertex_offset) || vertex_bytes > bytes.size() - vertex_offset)
-        fail("Invalid stock vertex shader payload", vertex_offset);
-    const std::size_t pixel_size_offset = vertex_offset + static_cast<std::size_t>(vertex_bytes);
-    // The pixel size and geometry size fields must both be present. This also
-    // prevents an oversized vertex payload from wrapping on 32-bit hosts.
-    if (pixel_size_offset > bytes.size() || bytes.size() - pixel_size_offset < 8)
-        fail("Invalid stock vertex shader payload", pixel_size_offset);
-    const std::uint32_t pixel_bytes = u32_le(bytes, pixel_size_offset);
-    const std::size_t pixel_offset = pixel_size_offset + 4;
-    if (!dxbc_at(bytes, pixel_offset) || pixel_bytes > bytes.size() - pixel_offset - 4)
-        fail("Invalid stock pixel shader payload", pixel_offset);
-    const std::size_t geometry_size_offset = pixel_offset + static_cast<std::size_t>(pixel_bytes);
-    const std::uint32_t geometry_bytes = u32_le(bytes, geometry_size_offset);
-    const std::size_t geometry_offset = geometry_size_offset + 4;
-    if (geometry_bytes != 0 &&
-        (!dxbc_at(bytes, geometry_offset) || geometry_bytes > bytes.size() - geometry_offset))
-        fail("Invalid stock geometry shader payload", geometry_offset);
-    return StockShaderContainerHeader{version, bytes[1] != 0, kLayouts[layout_code], vertex_bytes,
-                                      pixel_bytes, geometry_bytes};
+StockShaderContainer parse_stock_shader_container(
+    std::span<const std::uint8_t> bytes,
+    const StockShaderContainerLimits& limits) {
+    if (limits.max_container_bytes == 0U || limits.max_stage_bytes == 0U ||
+        limits.max_dxbc_chunks == 0U)
+        fail("Stock shader container limits are invalid", 0U);
+    if (bytes.size() > limits.max_container_bytes)
+        fail("Stock shader container exceeds its byte limit", 0U);
+    const StockShaderContainerLayout layout = parse_container_layout(bytes);
+    if (bytes[1] > 1U)
+        fail("Stock shader alpha-tested flag must be zero or one", 1U);
+    if (layout.end_offset != bytes.size())
+        fail("Stock shader container has trailing bytes", layout.end_offset);
+    if (layout.header.vertex_bytes > limits.max_stage_bytes)
+        fail("Stock shader vertex stage exceeds its byte limit", 6U);
+    if (layout.header.pixel_bytes > limits.max_stage_bytes)
+        fail("Stock shader pixel stage exceeds its byte limit",
+             layout.pixel_offset - 4U);
+    if (layout.header.geometry_bytes > limits.max_stage_bytes)
+        fail("Stock shader geometry stage exceeds its byte limit",
+             layout.geometry_offset - 4U);
+
+    const auto vertex = bytes.subspan(layout.vertex_offset,
+                                      layout.header.vertex_bytes);
+    const auto pixel = bytes.subspan(layout.pixel_offset,
+                                     layout.header.pixel_bytes);
+    const auto geometry = bytes.subspan(layout.geometry_offset,
+                                        layout.header.geometry_bytes);
+    const StockShaderStageMetadata vertex_metadata = validate_dxbc_payload(
+        vertex, layout.vertex_offset, DxbcProgramType::vertex, limits);
+    const StockShaderStageMetadata pixel_metadata = validate_dxbc_payload(
+        pixel, layout.pixel_offset, DxbcProgramType::pixel, limits);
+    std::optional<StockShaderStageMetadata> geometry_metadata;
+    if (!geometry.empty()) {
+        geometry_metadata = validate_dxbc_payload(
+            geometry, layout.geometry_offset, DxbcProgramType::geometry,
+            limits);
+    }
+
+    StockShaderContainer result;
+    result.header = layout.header;
+    result.vertex_metadata = vertex_metadata;
+    result.pixel_metadata = pixel_metadata;
+    result.geometry_metadata = geometry_metadata;
+    result.vertex_shader.assign(vertex.begin(), vertex.end());
+    result.pixel_shader.assign(pixel.begin(), pixel.end());
+    result.geometry_shader.assign(geometry.begin(), geometry.end());
+    return result;
 }
 
 MaterialRenderProfile resolve_material_render_profile(const MaterialInput& material,
