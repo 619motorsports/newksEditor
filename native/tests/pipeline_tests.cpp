@@ -110,6 +110,35 @@ void acceptsBoundedBackendNeutralContract() {
             "LLVM Direct3D bytecode is labeled DXIL");
 }
 
+void enforcesShaderProvenanceFormatBoundary() {
+    PipelineProgram source_equivalent = valid_program();
+    for (auto& shader : source_equivalent.shaders)
+        shader.provenance = PipelineShaderProvenance::source_equivalent;
+    const PipelineValidationResult source_result = validate_pipeline(source_equivalent);
+    require(source_result.valid &&
+                pipeline_shader_provenance_name(
+                    PipelineShaderProvenance::source_equivalent) ==
+                    std::string_view("source_equivalent"),
+            "source-equivalent SPIR-V provenance is explicit and accepted");
+
+    PipelineProgram mislabeled_source = source_equivalent;
+    mislabeled_source.shaders[0].format = PipelineShaderFormat::dxbc;
+    const PipelineValidationResult source_mismatch =
+        validate_pipeline(mislabeled_source);
+    require(!source_mismatch.valid &&
+                has_code(source_mismatch, "shader_provenance_format_mismatch"),
+            "source-equivalent provenance cannot label DXBC");
+
+    PipelineProgram mislabeled_native = valid_program();
+    mislabeled_native.shaders[0].provenance =
+        PipelineShaderProvenance::installed_native;
+    const PipelineValidationResult native_mismatch =
+        validate_pipeline(mislabeled_native);
+    require(!native_mismatch.valid &&
+                has_code(native_mismatch, "shader_provenance_format_mismatch"),
+            "installed-native provenance cannot label portable SPIR-V");
+}
+
 void rejectsMalformedShaderBytes() {
     PipelineProgram truncated = valid_program();
     truncated.shaders[0].bytes = {0x03, 0x02, 0x23, 0x07};
@@ -430,6 +459,7 @@ void mapsStockProfileWithExplicitStaging() {
 int main() {
     try {
         acceptsBoundedBackendNeutralContract();
+        enforcesShaderProvenanceFormatBoundary();
         rejectsMalformedShaderBytes();
         rejectsInvalidLayoutAndState();
         acceptsDepthOnlyVertexStageOnly();

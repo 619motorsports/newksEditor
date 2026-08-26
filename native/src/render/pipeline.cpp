@@ -72,6 +72,30 @@ struct DiagnosticSink {
            format == PipelineShaderFormat::dxil;
 }
 
+[[nodiscard]] bool valid_shader_provenance(PipelineShaderProvenance provenance) noexcept {
+    return provenance == PipelineShaderProvenance::unspecified ||
+           provenance == PipelineShaderProvenance::portable ||
+           provenance == PipelineShaderProvenance::installed_native ||
+           provenance == PipelineShaderProvenance::source_equivalent ||
+           provenance == PipelineShaderProvenance::translated;
+}
+
+[[nodiscard]] bool provenance_matches_format(PipelineShaderProvenance provenance,
+                                              PipelineShaderFormat format) noexcept {
+    switch (provenance) {
+    case PipelineShaderProvenance::unspecified:
+        return true;
+    case PipelineShaderProvenance::portable:
+    case PipelineShaderProvenance::source_equivalent:
+    case PipelineShaderProvenance::translated:
+        return format == PipelineShaderFormat::spirv;
+    case PipelineShaderProvenance::installed_native:
+        return format == PipelineShaderFormat::stock_container ||
+               format == PipelineShaderFormat::dxbc;
+    }
+    return false;
+}
+
 [[nodiscard]] std::uint32_t u32_le(std::span<const std::uint8_t> bytes, std::size_t offset) noexcept {
     return static_cast<std::uint32_t>(bytes[offset]) |
            (static_cast<std::uint32_t>(bytes[offset + 1]) << 8U) |
@@ -286,6 +310,18 @@ const char* pipeline_shader_format_name(PipelineShaderFormat format) noexcept {
     return "unknown";
 }
 
+const char* pipeline_shader_provenance_name(
+    PipelineShaderProvenance provenance) noexcept {
+    switch (provenance) {
+    case PipelineShaderProvenance::unspecified: return "unspecified";
+    case PipelineShaderProvenance::portable: return "portable";
+    case PipelineShaderProvenance::installed_native: return "installed_native";
+    case PipelineShaderProvenance::source_equivalent: return "source_equivalent";
+    case PipelineShaderProvenance::translated: return "translated";
+    }
+    return "unknown";
+}
+
 PipelineShaderFormat detect_pipeline_shader_format(
     std::span<const std::uint8_t> bytes) noexcept {
     if (bytes.size() >= 4U && u32_le(bytes, 0U) == 0x07230203U)
@@ -343,6 +379,15 @@ PipelineValidationResult validate_pipeline(const PipelineProgram& program, const
         if (!stages.insert(module.stage).second) diagnostics.error("duplicate_shader_stage", "pipeline contains a duplicate shader stage");
         if (!valid_shader_format(module.format)) {
             diagnostics.error("invalid_shader_format", "pipeline contains an unknown shader bytecode format");
+            continue;
+        }
+        if (!valid_shader_provenance(module.provenance)) {
+            diagnostics.error("invalid_shader_provenance", "pipeline contains an unknown shader provenance");
+            continue;
+        }
+        if (!provenance_matches_format(module.provenance, module.format)) {
+            diagnostics.error("shader_provenance_format_mismatch",
+                              "shader provenance does not match its bytecode format");
             continue;
         }
         if (module.bytes.empty() || module.bytes.size() > limits.max_shader_module_bytes) {

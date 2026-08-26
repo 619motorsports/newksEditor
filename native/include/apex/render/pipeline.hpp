@@ -25,10 +25,23 @@ enum class PipelineShaderFormat : std::uint8_t {
     dxil,
 };
 
+// Format identifies the bytes. Provenance identifies what a caller is
+// allowed to claim about those bytes. In particular, source-equivalent SPIR-V
+// is not an installed native DXBC translation, and portable SPIR-V is not a
+// stock-material implementation.
+enum class PipelineShaderProvenance : std::uint8_t {
+    unspecified,
+    portable,
+    installed_native,
+    source_equivalent,
+    translated,
+};
+
 struct PipelineShaderModule {
     PipelineShaderStage stage = PipelineShaderStage::vertex;
     PipelineShaderFormat format = PipelineShaderFormat::unknown;
     std::vector<std::uint8_t> bytes;
+    PipelineShaderProvenance provenance = PipelineShaderProvenance::unspecified;
 };
 
 enum class PipelineVertexSemantic : std::uint8_t {
@@ -225,6 +238,8 @@ struct StockPipelineResult {
 
 [[nodiscard]] const char* pipeline_shader_stage_name(PipelineShaderStage stage) noexcept;
 [[nodiscard]] const char* pipeline_shader_format_name(PipelineShaderFormat format) noexcept;
+[[nodiscard]] const char* pipeline_shader_provenance_name(
+    PipelineShaderProvenance provenance) noexcept;
 [[nodiscard]] PipelineShaderFormat detect_pipeline_shader_format(
     std::span<const std::uint8_t> bytes) noexcept;
 [[nodiscard]] const char* pipeline_vertex_semantic_name(PipelineVertexSemantic semantic) noexcept;
