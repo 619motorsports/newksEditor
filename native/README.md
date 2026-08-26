@@ -287,6 +287,9 @@ recovered single-selection payload edit.
 The live controller exposes the recovered start, finish, and cancel lifecycle.
 Start clears the selected indices. Finish preserves them. Cancel clears them.
 These operations do not change spline bytes, history, revision, or dirty state.
+A generation identity combines one controller owner with its model revision.
+This identity rejects a foreign controller at the same numeric revision.
+It also rejects owner changes, revision rollback, and skipped revisions.
 A controller viewport retains the validated selection pipeline while no marker
 geometry exists. This permits atomic marker removal without viewport recreation.
 The temporary edit-point interpolation path remains pending.

@@ -257,7 +257,10 @@ remains unchanged and feature-complete.
   The controller edits a copied session and builds a complete next state.
   It publishes the model only after the viewport accepts all candidate buffers.
   An error keeps the prior model revision and the prior visible generation.
-  The viewport binds each controller update to its expected visible revision.
+  The viewport binds each controller update to an owner and model revision.
+  A controller cannot use a viewport that belongs to another controller.
+  A replacement keeps its owner and uses the current or next revision.
+  Equal revisions support selection-only lifecycle updates without history.
   Transactional undo, redo, and baseline reset use the same publication path.
   Dirty state compares canonical current bytes with canonical baseline bytes.
   The controller also ports start, finish, and cancel edit-mode state.

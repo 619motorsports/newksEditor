@@ -753,7 +753,7 @@ WorkspaceViewport::WorkspaceViewport(
     std::optional<render::PipelineProgram> authoring_overlay_pipeline,
     std::array<AiSplinePassResources, workspace_ai_spline_pass_count>
         ai_spline_passes,
-    std::optional<std::uint64_t> ai_spline_generation,
+    std::optional<WorkspaceViewportAiSplineGeneration> ai_spline_generation,
     std::unique_ptr<render::Buffer> authoring_grid_buffer, bool grid_visible,
     std::unique_ptr<render::Buffer> view_axis_buffer, bool view_axis_visible,
     std::unique_ptr<render::Buffer> selection_axis_buffer,
@@ -803,12 +803,31 @@ WorkspaceViewport::replaceAiSplineOverlaysBorrowed(
             "tracking");
         return result;
     }
-    if (generation.has_value() &&
-        generation->expected != *ai_spline_generation_) {
-        result.diagnostic = diagnostic(
-            "workspace_viewport_ai_spline_generation_stale",
-            "AI spline replacement expected a different visible generation");
-        return result;
+    if (generation.has_value()) {
+        const bool nextRevision =
+            generation->expected.revision !=
+                std::numeric_limits<std::uint64_t>::max() &&
+            generation->replacement.revision ==
+                generation->expected.revision + 1U;
+        if (!generation->expected.valid() ||
+            !generation->replacement.valid() ||
+            !generation->expected.sameOwner(generation->replacement) ||
+            (generation->replacement.revision !=
+                 generation->expected.revision &&
+             !nextRevision)) {
+            result.diagnostic = diagnostic(
+                "workspace_viewport_ai_spline_generation_transition_invalid",
+                "AI spline generation replacement must retain its owner and "
+                "use the current or next revision");
+            return result;
+        }
+        if (generation->expected != *ai_spline_generation_) {
+            result.diagnostic = diagnostic(
+                "workspace_viewport_ai_spline_generation_stale",
+                "AI spline replacement expected a different visible "
+                "generation");
+            return result;
+        }
     }
 
     const std::array<const WorkspaceAiSplineGeometry *,
@@ -1768,6 +1787,14 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             result.diagnostic = diagnostic(
                 "workspace_viewport_ai_spline_generation_without_geometry",
                 "AI spline generation tracking requires a primary pass");
+            return result;
+        }
+        if (request.ai_spline_generation.has_value() &&
+            !request.ai_spline_generation->valid()) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_ai_spline_generation_invalid",
+                "AI spline generation tracking requires a valid owner");
             return result;
         }
         if ((request.ai_spline_interval_geometry != nullptr ||

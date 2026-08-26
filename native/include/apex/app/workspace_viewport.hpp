@@ -94,6 +94,26 @@ struct WorkspaceViewportLightingResult {
 [[nodiscard]] WorkspaceViewportLightingResult evaluateWorkspaceViewportLighting(
     const WorkspaceViewportLightingRequest& request);
 
+struct WorkspaceViewportAiSplineGenerationOwner final {};
+
+struct WorkspaceViewportAiSplineGeneration {
+    std::shared_ptr<const WorkspaceViewportAiSplineGenerationOwner> owner;
+    std::uint64_t revision = 0U;
+
+    [[nodiscard]] bool valid() const noexcept { return owner != nullptr; }
+    [[nodiscard]] bool sameOwner(
+        const WorkspaceViewportAiSplineGeneration& other) const noexcept {
+        return valid() && other.valid() && !owner.owner_before(other.owner) &&
+               !other.owner.owner_before(owner);
+    }
+
+    friend bool operator==(const WorkspaceViewportAiSplineGeneration& left,
+                           const WorkspaceViewportAiSplineGeneration& right)
+        noexcept {
+        return left.revision == right.revision && left.sameOwner(right);
+    }
+};
+
 struct WorkspaceViewportPrepareRequest {
     render::PresentationTargetDescription presentation{};
     // A presentation target is single-sample. Four-sample scenes resolve to
@@ -114,9 +134,9 @@ struct WorkspaceViewportPrepareRequest {
     // by reference.
     const WorkspaceAiSplineGeometry* ai_spline_geometry = nullptr;
     std::optional<render::PipelineProgram> ai_spline_pipeline;
-    // A controller supplies its model revision here. Geometry-only callers
-    // leave this empty and use untracked replacement calls.
-    std::optional<std::uint64_t> ai_spline_generation;
+    // A controller supplies its owner and model revision here. Geometry-only
+    // callers leave this empty and use untracked replacement calls.
+    std::optional<WorkspaceViewportAiSplineGeneration> ai_spline_generation;
     // Optional recovered interpolated in/out overlay. This is a second blue,
     // depth-off pass and must be supplied with the primary spline pass.
     const WorkspaceAiSplineGeometry* ai_spline_interval_geometry = nullptr;
@@ -201,8 +221,8 @@ struct WorkspaceViewportAiSplineUpdateResult {
 };
 
 struct WorkspaceViewportAiSplineGenerationTransition {
-    std::uint64_t expected = 0U;
-    std::uint64_t replacement = 0U;
+    WorkspaceViewportAiSplineGeneration expected;
+    WorkspaceViewportAiSplineGeneration replacement;
 };
 
 // The editor's browser viewport uses an orbit target, yaw/pitch, and distance
@@ -269,8 +289,17 @@ public:
     [[nodiscard]] const render::StockSceneExecutionResult& preparation() const noexcept {
         return *execution_;
     }
+    // This scalar is for status output only. Binding checks must use the
+    // complete owner-and-revision identity below.
     [[nodiscard]] std::optional<std::uint64_t>
-    aiSplineGeneration() const noexcept {
+    aiSplineRevision() const noexcept {
+        return ai_spline_generation_.has_value()
+                   ? std::optional<std::uint64_t>(
+                         ai_spline_generation_->revision)
+                   : std::nullopt;
+    }
+    [[nodiscard]] const std::optional<WorkspaceViewportAiSplineGeneration>&
+    aiSplineGenerationIdentity() const noexcept {
         return ai_spline_generation_;
     }
 
@@ -335,7 +364,8 @@ private:
         std::optional<render::PipelineProgram> authoring_overlay_pipeline,
         std::array<AiSplinePassResources, workspace_ai_spline_pass_count>
             ai_spline_passes,
-        std::optional<std::uint64_t> ai_spline_generation,
+        std::optional<WorkspaceViewportAiSplineGeneration>
+            ai_spline_generation,
         std::unique_ptr<render::Buffer> authoring_grid_buffer,
         bool grid_visible,
         std::unique_ptr<render::Buffer> view_axis_buffer,
@@ -358,7 +388,7 @@ private:
     std::optional<render::PipelineProgram> authoring_overlay_pipeline_;
     std::array<AiSplinePassResources, workspace_ai_spline_pass_count>
         ai_spline_passes_;
-    std::optional<std::uint64_t> ai_spline_generation_;
+    std::optional<WorkspaceViewportAiSplineGeneration> ai_spline_generation_;
     std::unique_ptr<render::Buffer> authoring_grid_buffer_;
     bool grid_visible_ = false;
     std::unique_ptr<render::Buffer> view_axis_buffer_;

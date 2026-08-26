@@ -2062,7 +2062,7 @@ void publishes_ai_spline_controller_transactions() {
     const auto& overlays = controller->overlays();
     auto request = request_for(value);
     request.ai_spline_geometry = &overlays.primary;
-    request.ai_spline_generation = controller->revision();
+    request.ai_spline_generation = controller->generation();
     request.ai_spline_pipeline = ai_spline_pipeline(value);
     request.ai_spline_interval_geometry = &*overlays.interval;
     request.ai_spline_interval_pipeline = ai_spline_interval_pipeline(value);
@@ -2147,7 +2147,7 @@ void publishes_ai_spline_controller_transactions() {
     require(changed.ok() && changed.changed && changed.revision == 1U &&
                 changed.replacedPassCount == 6U &&
                 controller->revision() == 1U && controller->dirty() &&
-                prepared.viewport->aiSplineGeneration() == 1U &&
+                prepared.viewport->aiSplineRevision() == 1U &&
                 controller->current().points[0U].position == edit[0U].position,
             "controller commits the model only after all passes upload");
     require(
@@ -2245,7 +2245,7 @@ void publishes_ai_spline_controller_transactions() {
         controller->undo(device, *prepared.viewport, controller->revision());
     require(undone.ok() && undone.changed && undone.revision == 4U &&
                 !controller->dirty() && controller->canRedo() &&
-                prepared.viewport->aiSplineGeneration() == 4U &&
+                prepared.viewport->aiSplineRevision() == 4U &&
                 controller->current().points[0U].position ==
                     std::array<float, 3U>{0.0F, 0.0F, 0.0F},
             "transactional undo publishes baseline and clears dirty state");
@@ -2260,7 +2260,7 @@ void publishes_ai_spline_controller_transactions() {
         controller->redo(device, *prepared.viewport, controller->revision());
     require(redone.ok() && redone.changed && redone.revision == 5U &&
                 controller->dirty() &&
-                prepared.viewport->aiSplineGeneration() == 5U &&
+                prepared.viewport->aiSplineRevision() == 5U &&
                 controller->current().points[0U].position == edit[0U].position,
             "transactional redo republishes the edited generation");
     const auto redoBuffers = drawControllerGeneration();
@@ -2274,7 +2274,7 @@ void publishes_ai_spline_controller_transactions() {
         device, *prepared.viewport, controller->revision());
     require(restored.ok() && restored.changed && restored.revision == 6U &&
                 !controller->dirty() &&
-                prepared.viewport->aiSplineGeneration() == 6U &&
+                prepared.viewport->aiSplineRevision() == 6U &&
                 controller->currentBytes() == baselineBytes,
             "transactional reset publishes the baseline and clears dirty");
     const auto resetBuffers = drawControllerGeneration();
@@ -2433,7 +2433,7 @@ void publishes_recovered_ai_spline_edit_lifecycle() {
         auto value = fixture();
         auto request = request_for(value);
         request.ai_spline_geometry = &controller.overlays().primary;
-        request.ai_spline_generation = controller.revision();
+        request.ai_spline_generation = controller.generation();
         request.ai_spline_pipeline = ai_spline_pipeline(value);
         request.ai_spline_selection_geometry =
             &*controller.overlays().selection;
@@ -2489,7 +2489,7 @@ void publishes_recovered_ai_spline_edit_lifecycle() {
                     std::vector<std::uint32_t>({0U, 1U}) &&
                 controller->currentBytes() == baselineBytes &&
                 controller->revision() == baselineRevision &&
-                prepared.viewport->aiSplineGeneration() == baselineRevision &&
+                prepared.viewport->aiSplineRevision() == baselineRevision &&
                 *device.live_buffer_count == baselineLiveBuffers,
             "failed upload keeps lifecycle and viewport state");
     device.fail_buffer_call = device.buffer_calls + 1U;
@@ -2507,7 +2507,7 @@ void publishes_recovered_ai_spline_edit_lifecycle() {
                 controller->revision() == baselineRevision &&
                 !controller->dirty() && !controller->canUndo() &&
                 !controller->canRedo() &&
-                prepared.viewport->aiSplineGeneration() == baselineRevision &&
+                prepared.viewport->aiSplineRevision() == baselineRevision &&
                 *device.live_buffer_count == baselineLiveBuffers,
             "failed allocation keeps selection, history, and visible buffers");
     device.fail_buffer_call = 0U;
@@ -2589,7 +2589,7 @@ void publishes_recovered_ai_spline_edit_lifecycle() {
     auto value = fixture();
     auto emptyRequest = request_for(value);
     emptyRequest.ai_spline_geometry = &emptyController->overlays().primary;
-    emptyRequest.ai_spline_generation = emptyController->revision();
+    emptyRequest.ai_spline_generation = emptyController->generation();
     emptyRequest.ai_spline_pipeline = ai_spline_pipeline(value);
     emptyRequest.ai_spline_selection_pipeline =
         ai_spline_camber_pipeline(value);
@@ -2606,6 +2606,198 @@ void publishes_recovered_ai_spline_edit_lifecycle() {
                 emptyController->editing() &&
                 emptyDevice.buffer_calls == emptyBufferCalls,
             "empty-selection start changes only controller edit mode");
+}
+
+void rejects_foreign_ai_spline_controller_generations() {
+    apex::formats::AiSpline spline;
+    spline.source = "controller-owner.ai";
+    spline.version = 7U;
+    spline.points.resize(4U);
+    spline.payloads.resize(4U);
+    for (std::size_t index = 0U; index < spline.points.size(); ++index) {
+        spline.points[index].position = {
+            static_cast<float>(index) * 10.0F, 0.0F, 0.0F};
+        spline.points[index].tag = static_cast<std::int32_t>(index);
+    }
+    auto firstCreated = apex::app::WorkspaceAiSplineController::create(
+        spline, {});
+    auto secondCreated = apex::app::WorkspaceAiSplineController::create(
+        spline, {});
+    require(firstCreated.ok() && secondCreated.ok(),
+            "independent AI spline controllers create");
+    auto first = std::move(firstCreated.controller);
+    auto second = std::move(secondCreated.controller);
+    require(first->generation().valid() && second->generation().valid() &&
+                first->generation().revision == 0U &&
+                second->generation().revision == 0U &&
+                !first->generation().sameOwner(second->generation()),
+            "equal revisions retain distinct controller owners");
+
+    auto value = fixture();
+    auto request = request_for(value);
+    request.ai_spline_geometry = &first->overlays().primary;
+    request.ai_spline_generation = first->generation();
+    request.ai_spline_pipeline = ai_spline_pipeline(value);
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok(), "first controller viewport prepares");
+    const auto bufferCalls = device.buffer_calls;
+    const std::array<apex::authoring::AiSplinePointPositionEdit, 1U> edit{
+        apex::authoring::AiSplinePointPositionEdit{0U, {1.0F, 0.0F, 0.0F}}};
+    const auto foreign = second->setPointPositions(
+        device, *prepared.viewport, edit, second->revision());
+    require(!foreign.ok() &&
+                foreign.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::
+                        stale_revision &&
+                foreign.diagnostic.code ==
+                    "workspace_ai_spline_controller_viewport_generation_mismatch" &&
+                first->revision() == 0U && second->revision() == 0U &&
+                device.buffer_calls == bufferCalls,
+            "equal-revision controller cannot publish to a foreign viewport");
+
+    const auto secondGeneration = second->generation();
+    apex::app::WorkspaceAiSplineController moved(std::move(*second));
+    require(moved.generation() == secondGeneration && moved.revision() == 0U,
+            "controller move preserves its generation owner");
+
+    auto reprepareCreated =
+        apex::app::WorkspaceAiSplineController::create(spline, {});
+    require(reprepareCreated.ok(), "reprepare controller creates");
+    auto reprepareController = std::move(reprepareCreated.controller);
+    auto reprepareRequest = request_for(value);
+    reprepareRequest.ai_spline_geometry =
+        &reprepareController->overlays().primary;
+    reprepareRequest.ai_spline_generation =
+        reprepareController->generation();
+    reprepareRequest.ai_spline_pipeline = ai_spline_pipeline(value);
+    FakeDevice reprepareDevice;
+    auto stalePrepared = apex::app::prepareWorkspaceViewport(
+        reprepareDevice, value.document, reprepareRequest);
+    require(stalePrepared.ok(), "initial reprepare viewport creates");
+    const auto firstEdit = reprepareController->setPointPositions(
+        reprepareDevice, *stalePrepared.viewport, edit,
+        reprepareController->revision());
+    require(firstEdit.ok() && firstEdit.revision == 1U,
+            "controller advances before viewport reprepare");
+    reprepareRequest.ai_spline_geometry =
+        &reprepareController->overlays().primary;
+    reprepareRequest.ai_spline_generation =
+        reprepareController->generation();
+    auto currentPrepared = apex::app::prepareWorkspaceViewport(
+        reprepareDevice, value.document, reprepareRequest);
+    require(currentPrepared.ok() &&
+                currentPrepared.viewport->aiSplineGenerationIdentity()
+                    .has_value() &&
+                *currentPrepared.viewport->aiSplineGenerationIdentity() ==
+                    reprepareController->generation(),
+            "reprepared viewport retains current controller identity");
+    const std::array<apex::authoring::AiSplinePointPositionEdit, 1U>
+        secondEdit{apex::authoring::AiSplinePointPositionEdit{
+            1U, {11.0F, 0.0F, 0.0F}}};
+    const auto editedAgain = reprepareController->setPointPositions(
+        reprepareDevice, *currentPrepared.viewport, secondEdit,
+        reprepareController->revision());
+    require(editedAgain.ok() && editedAgain.revision == 2U,
+            "reprepared viewport accepts the next controller edit");
+    const auto staleCalls = reprepareDevice.buffer_calls;
+    const auto staleViewport = reprepareController->setPointPositions(
+        reprepareDevice, *stalePrepared.viewport, secondEdit,
+        reprepareController->revision());
+    require(!staleViewport.ok() &&
+                staleViewport.diagnostic.code ==
+                    "workspace_ai_spline_controller_viewport_generation_mismatch" &&
+                reprepareController->revision() == 2U &&
+                reprepareDevice.buffer_calls == staleCalls,
+            "controller rejects its stale pre-reprepare viewport");
+
+    auto next = first->generation();
+    next.revision = 1U;
+    const auto advanced = prepared.viewport->replaceAiSplineOverlays(
+        device, first->overlays(),
+        apex::app::WorkspaceViewportAiSplineGenerationTransition{
+            first->generation(), next});
+    require(advanced.ok() &&
+                prepared.viewport->aiSplineGenerationIdentity().has_value() &&
+                *prepared.viewport->aiSplineGenerationIdentity() == next,
+            "generation transition accepts the next owned revision");
+
+    const auto callsAfterAdvance = device.buffer_calls;
+    const auto rollback = prepared.viewport->replaceAiSplineOverlays(
+        device, first->overlays(),
+        apex::app::WorkspaceViewportAiSplineGenerationTransition{
+            next, first->generation()});
+    require(!rollback.ok() &&
+                rollback.diagnostic.code ==
+                    "workspace_viewport_ai_spline_generation_transition_invalid" &&
+                device.buffer_calls == callsAfterAdvance &&
+                *prepared.viewport->aiSplineGenerationIdentity() == next,
+            "generation transition rejects an ABA revision rollback");
+
+    auto leap = next;
+    leap.revision = 3U;
+    const auto skipped = prepared.viewport->replaceAiSplineOverlays(
+        device, first->overlays(),
+        apex::app::WorkspaceViewportAiSplineGenerationTransition{next,
+                                                                  leap});
+    require(!skipped.ok() &&
+                skipped.diagnostic.code ==
+                    "workspace_viewport_ai_spline_generation_transition_invalid" &&
+                device.buffer_calls == callsAfterAdvance,
+            "generation transition rejects a skipped revision");
+
+    auto foreignReplacement = moved.generation();
+    foreignReplacement.revision = 2U;
+    const auto ownerChanged = prepared.viewport->replaceAiSplineOverlays(
+        device, first->overlays(),
+        apex::app::WorkspaceViewportAiSplineGenerationTransition{
+            next, foreignReplacement});
+    require(!ownerChanged.ok() &&
+                ownerChanged.diagnostic.code ==
+                    "workspace_viewport_ai_spline_generation_transition_invalid" &&
+                device.buffer_calls == callsAfterAdvance,
+            "generation transition rejects a replacement owner change");
+
+    auto staleReplacement = moved.generation();
+    staleReplacement.revision = 1U;
+    const auto staleOwner = prepared.viewport->replaceAiSplineOverlays(
+        device, first->overlays(),
+        apex::app::WorkspaceViewportAiSplineGenerationTransition{
+            moved.generation(), staleReplacement});
+    require(!staleOwner.ok() &&
+                staleOwner.diagnostic.code ==
+                    "workspace_viewport_ai_spline_generation_stale" &&
+                device.buffer_calls == callsAfterAdvance,
+            "generation transition rejects a stale foreign expected owner");
+
+    auto invalidRequest = request;
+    invalidRequest.ai_spline_generation =
+        apex::app::WorkspaceViewportAiSplineGeneration{};
+    const auto invalidPrepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, invalidRequest);
+    require(!invalidPrepared.ok() &&
+                invalidPrepared.diagnostic.code ==
+                    "workspace_viewport_ai_spline_generation_invalid",
+            "viewport rejects generation tracking without an owner");
+
+    auto maximumRequest = request;
+    auto maximum = first->generation();
+    maximum.revision = std::numeric_limits<std::uint64_t>::max();
+    maximumRequest.ai_spline_generation = maximum;
+    auto maximumPrepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, maximumRequest);
+    require(maximumPrepared.ok(), "maximum owned generation prepares");
+    auto wrapped = maximum;
+    wrapped.revision = 0U;
+    const auto overflow = maximumPrepared.viewport->replaceAiSplineOverlays(
+        device, first->overlays(),
+        apex::app::WorkspaceViewportAiSplineGenerationTransition{maximum,
+                                                                  wrapped});
+    require(!overflow.ok() &&
+                overflow.diagnostic.code ==
+                    "workspace_viewport_ai_spline_generation_transition_invalid",
+            "maximum generation cannot wrap to zero");
 }
 
 void rejects_unsafe_ai_spline_controller_candidates() {
@@ -2652,7 +2844,7 @@ void rejects_unsafe_ai_spline_controller_candidates() {
     auto value = fixture();
     auto request = request_for(value);
     request.ai_spline_geometry = &controller->overlays().primary;
-    request.ai_spline_generation = controller->revision();
+    request.ai_spline_generation = controller->generation();
     request.ai_spline_pipeline = ai_spline_pipeline(value);
     FakeDevice device;
     auto prepared =
@@ -2697,7 +2889,7 @@ void handles_degenerate_ai_spline_manual_forwards() {
     auto value = fixture();
     auto request = request_for(value);
     request.ai_spline_geometry = &controller->overlays().primary;
-    request.ai_spline_generation = controller->revision();
+    request.ai_spline_generation = controller->generation();
     request.ai_spline_pipeline = ai_spline_pipeline(value);
     request.ai_spline_selection_geometry =
         &*controller->overlays().selection;
@@ -2769,7 +2961,7 @@ void publishes_controller_through_d3d12_metadata_contract() {
     }
     auto request = request_for(value);
     request.ai_spline_geometry = &controller->overlays().primary;
-    request.ai_spline_generation = controller->revision();
+    request.ai_spline_generation = controller->generation();
     request.ai_spline_pipeline = ai_spline_pipeline(value);
     request.ai_spline_selection_geometry =
         &*controller->overlays().selection;
@@ -3487,6 +3679,7 @@ int main() {
         tracks_recovered_ai_spline_manual_input();
         publishes_ai_spline_controller_transactions();
         publishes_recovered_ai_spline_edit_lifecycle();
+        rejects_foreign_ai_spline_controller_generations();
         rejects_unsafe_ai_spline_controller_candidates();
         handles_degenerate_ai_spline_manual_forwards();
         publishes_controller_through_d3d12_metadata_contract();

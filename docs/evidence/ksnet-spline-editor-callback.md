@@ -85,8 +85,24 @@ The `selectedIndices` field is a `std::vector<int>` at offset 52.
 `SplineEditor.addIndex` is at `0x10024BFC`. It ignores an existing index and
 appends each new index. Thus, the vector keeps insertion order without
 duplicates. `getSelectedIndices` is at `0x1001F6A8` and returns a copy.
+`addIndex` has token `0x06000062` and performs a linear integer scan.
+It returns `void` and does not validate the sign or point range.
 `setCurrentPoint` tests virtual key 17 before its forward range-selection path.
 This key is Control. Shift is virtual key 16.
+
+`onPickedPoint` has token `0x0600010A` and execution VA `0x1002FED0`.
+A null active spline returns `-1.0`. Otherwise, the method finds the closest
+interpolated point before it applies selection state.
+
+Edit mode always adds the point without clearing the existing selection.
+Outside edit mode, a click without Control clears the selection before add.
+Control with an existing selection appends the shorter wrapped point range.
+Control with an empty selection uses the clear-and-add path.
+All additions use `addIndex`, so earlier entries retain their order.
+
+The return reads the final selected vector entry. It divides this index by the
+active spline point count. The method does not validate the input position,
+the selected index, or a zero point count.
 
 `onNodeRender` has method RVA `0x2F754` and execution VA `0x1002F760`.
 It calls `showCurrentSplineIndexInfo` for each selected index. The first entry

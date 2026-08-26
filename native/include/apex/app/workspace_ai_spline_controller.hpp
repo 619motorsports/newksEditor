@@ -161,6 +161,8 @@ public:
     [[nodiscard]] const WorkspaceAiSplineOverlaySet& overlays() const noexcept;
     [[nodiscard]] const WorkspaceAiSplineControllerConfiguration&
     configuration() const noexcept;
+    [[nodiscard]] const WorkspaceViewportAiSplineGeneration&
+    generation() const noexcept;
     [[nodiscard]] std::uint64_t revision() const noexcept;
     [[nodiscard]] bool dirty() const noexcept;
     [[nodiscard]] bool canUndo() const noexcept;
@@ -209,6 +211,8 @@ private:
     [[nodiscard]] WorkspaceAiSplineControllerResult staleResult() const;
     [[nodiscard]] WorkspaceAiSplineControllerResult
     viewportBindingResult() const;
+    [[nodiscard]] bool viewportMatches(
+        const WorkspaceViewport& viewport) const noexcept;
     [[nodiscard]] WorkspaceAiSplineControllerResult updateEditingState(
         render::Device& device, WorkspaceViewport& viewport,
         std::uint64_t expectedRevision, bool editing,

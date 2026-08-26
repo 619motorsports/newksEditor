@@ -206,17 +206,20 @@ struct WorkspaceAiSplineController::State {
     WorkspaceAiSplineControllerConfiguration configuration;
     WorkspaceAiSplineOverlaySet overlays;
     std::vector<std::array<float, 2U>> movementForwards;
+    WorkspaceViewportAiSplineGeneration generation;
     bool editing = false;
 
     State(authoring::AiSplineSession candidateSession,
           WorkspaceAiSplineControllerConfiguration candidateConfiguration,
           WorkspaceAiSplineOverlaySet candidateOverlays,
           std::vector<std::array<float, 2U>> candidateMovementForwards,
+          WorkspaceViewportAiSplineGeneration candidateGeneration,
           bool candidateEditing = false)
         : session(std::move(candidateSession)),
           configuration(std::move(candidateConfiguration)),
           overlays(std::move(candidateOverlays)),
           movementForwards(std::move(candidateMovementForwards)),
+          generation(std::move(candidateGeneration)),
           editing(candidateEditing) {}
 };
 
@@ -260,9 +263,14 @@ WorkspaceAiSplineControllerCreateResult WorkspaceAiSplineController::create(
         if (!buildMovementForwards(session.current(), movementForwards,
                                    result.diagnostic))
             return result;
+        WorkspaceViewportAiSplineGeneration generation;
+        generation.owner =
+            std::make_shared<WorkspaceViewportAiSplineGenerationOwner>();
+        generation.revision = session.revision();
         auto state = std::make_unique<State>(
             std::move(session), std::move(configuration),
-            std::move(built.overlays), std::move(movementForwards));
+            std::move(built.overlays), std::move(movementForwards),
+            std::move(generation));
         result.controller = std::unique_ptr<WorkspaceAiSplineController>(
             new WorkspaceAiSplineController(std::move(state)));
         result.status = WorkspaceAiSplineControllerStatus::ready;
@@ -306,6 +314,11 @@ WorkspaceAiSplineController::overlays() const noexcept {
 const WorkspaceAiSplineControllerConfiguration&
 WorkspaceAiSplineController::configuration() const noexcept {
     return state_->configuration;
+}
+
+const WorkspaceViewportAiSplineGeneration&
+WorkspaceAiSplineController::generation() const noexcept {
+    return state_->generation;
 }
 
 std::uint64_t WorkspaceAiSplineController::revision() const noexcept {
@@ -400,6 +413,12 @@ WorkspaceAiSplineController::viewportBindingResult() const {
     return result;
 }
 
+bool WorkspaceAiSplineController::viewportMatches(
+    const WorkspaceViewport& viewport) const noexcept {
+    return viewport.aiSplineGenerationIdentity().has_value() &&
+           *viewport.aiSplineGenerationIdentity() == state_->generation;
+}
+
 WorkspaceAiSplineControllerResult
 WorkspaceAiSplineController::publishCandidate(
     render::Device& device, WorkspaceViewport& viewport,
@@ -426,15 +445,17 @@ WorkspaceAiSplineController::publishCandidate(
             result.applied = sessionResult.applied;
             return result;
         }
+        auto nextGeneration = state_->generation;
+        nextGeneration.revision = sessionResult.revision;
         auto nextState = std::make_unique<State>(
             std::move(candidate), state_->configuration,
             std::move(built.overlays), state_->movementForwards,
-            state_->editing);
+            std::move(nextGeneration), state_->editing);
         const auto replaced =
             viewport.replaceAiSplineOverlays(
                 device, nextState->overlays,
                 WorkspaceViewportAiSplineGenerationTransition{
-                    state_->session.revision(), sessionResult.revision});
+                    state_->generation, nextState->generation});
         if (!replaced.ok()) {
             WorkspaceAiSplineControllerResult result;
             result.status =
@@ -482,7 +503,7 @@ WorkspaceAiSplineController::updateEditingState(
     std::uint64_t expectedRevision, bool editing, bool clearSelection) {
     if (expectedRevision != state_->session.revision())
         return staleResult();
-    if (viewport.aiSplineGeneration() != state_->session.revision())
+    if (!viewportMatches(viewport))
         return viewportBindingResult();
 
     const bool selectionChanged =
@@ -516,12 +537,13 @@ WorkspaceAiSplineController::updateEditingState(
         }
         auto nextState = std::make_unique<State>(
             state_->session, std::move(candidateConfiguration),
-            std::move(built.overlays), state_->movementForwards, editing);
+            std::move(built.overlays), state_->movementForwards,
+            state_->generation, editing);
         const auto revision = state_->session.revision();
         const auto replaced = viewport.replaceAiSplineOverlays(
             device, nextState->overlays,
-            WorkspaceViewportAiSplineGenerationTransition{revision,
-                                                          revision});
+            WorkspaceViewportAiSplineGenerationTransition{
+                state_->generation, nextState->generation});
         if (!replaced.ok()) {
             WorkspaceAiSplineControllerResult result;
             result.status =
@@ -587,7 +609,7 @@ WorkspaceAiSplineController::setPointPositions(
     std::uint64_t expectedRevision) {
     if (expectedRevision != state_->session.revision())
         return staleResult();
-    if (viewport.aiSplineGeneration() != state_->session.revision())
+    if (!viewportMatches(viewport))
         return viewportBindingResult();
     try {
         auto candidate = state_->session;
@@ -612,7 +634,7 @@ WorkspaceAiSplineController::moveSelectedByManualInput(
     std::uint64_t expectedRevision) {
     if (expectedRevision != state_->session.revision())
         return staleResult();
-    if (viewport.aiSplineGeneration() != state_->session.revision())
+    if (!viewportMatches(viewport))
         return viewportBindingResult();
     try {
         const auto local = workspaceAiSplineManualLocalDelta(movement);
@@ -675,7 +697,7 @@ WorkspaceAiSplineControllerResult WorkspaceAiSplineController::undo(
     std::uint64_t expectedRevision) {
     if (expectedRevision != state_->session.revision())
         return staleResult();
-    if (viewport.aiSplineGeneration() != state_->session.revision())
+    if (!viewportMatches(viewport))
         return viewportBindingResult();
     try {
         auto candidate = state_->session;
@@ -698,7 +720,7 @@ WorkspaceAiSplineControllerResult WorkspaceAiSplineController::redo(
     std::uint64_t expectedRevision) {
     if (expectedRevision != state_->session.revision())
         return staleResult();
-    if (viewport.aiSplineGeneration() != state_->session.revision())
+    if (!viewportMatches(viewport))
         return viewportBindingResult();
     try {
         auto candidate = state_->session;
@@ -722,7 +744,7 @@ WorkspaceAiSplineController::restoreBaseline(
     std::uint64_t expectedRevision) {
     if (expectedRevision != state_->session.revision())
         return staleResult();
-    if (viewport.aiSplineGeneration() != state_->session.revision())
+    if (!viewportMatches(viewport))
         return viewportBindingResult();
     try {
         auto candidate = state_->session;

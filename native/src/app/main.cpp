@@ -1995,7 +1995,7 @@ int run_window(int argc, char** argv) {
             const auto& ai = *ai_overlays;
             if (loaded_workspace.aiSplineController != nullptr)
                 request.ai_spline_generation =
-                    loaded_workspace.aiSplineController->revision();
+                    loaded_workspace.aiSplineController->generation();
             apex::render::PipelineProgram pipeline;
             pipeline.name = "workspace-ai-spline-raw";
             pipeline.shaders = *loaded_workspace.authoringOverlayModules;
