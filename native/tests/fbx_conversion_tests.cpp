@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <span>
 #include <string>
@@ -51,12 +52,29 @@ FbxNode uvLayer(std::string_view mapping = "ByPolygonVertex",
         propertyNode("UVIndex", {std::move(indices)})});
 }
 
+FbxNode normalLayer(
+    std::string_view mapping = "ByPolygonVertex",
+    std::string_view reference = "Direct",
+    FbxArray direct = FbxArray{std::vector<double>{0.0, 0.0, 1.0, 0.0,
+                                                   0.0, 1.0, 0.0, 0.0,
+                                                   1.0}},
+    std::optional<FbxArray> indices = std::nullopt) {
+    std::vector<FbxNode> children = {
+        propertyNode("MappingInformationType", {std::string(mapping)}),
+        propertyNode("ReferenceInformationType", {std::string(reference)}),
+        propertyNode("Normals", {std::move(direct)})};
+    if (indices.has_value())
+        children.push_back(
+            propertyNode("NormalsIndex", {std::move(*indices)}));
+    return node("LayerElementNormal", {}, std::move(children));
+}
+
 FbxDocument fixture() {
     const FbxNode geometry = node("Geometry", {
         std::int64_t(100), std::string("Geometry::Triangle"), std::string("Mesh")}, {
         propertyNode("Vertices", {FbxArray{std::vector<double>{0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0}}}),
         propertyNode("PolygonVertexIndex", {FbxArray{std::vector<std::int64_t>{0, 1, -3}}}),
-        propertyNode("LayerElementNormal", {}),
+        normalLayer(),
         uvLayer()});
     const FbxNode model = node("Model", {
         std::int64_t(200), std::string("Model::Triangle"), std::string("Mesh")}, {
@@ -65,7 +83,12 @@ FbxDocument fixture() {
             propertyNode("P", {std::string("Lcl Rotation"), std::string("Lcl Rotation"), std::string(""), std::string("A"), 0.0, 0.0, 90.0})})});
     const FbxNode material = node("Material", {
         std::int64_t(300), std::string("Material::Paint"), std::string("Material")}, {
-        propertyNode("ShadingModel", {std::string("Phong")})});
+        propertyNode("ShadingModel", {std::string("Phong")}),
+        node("Properties70", {}, {
+            propertyNode("P", {std::string("AmbientColor"), std::string("ColorRGB"), std::string("Color"), std::string(""), 0.25, 0.5, 0.75}),
+            propertyNode("P", {std::string("DiffuseColor"), std::string("ColorRGB"), std::string("Color"), std::string(""), 0.6, 0.7, 0.8}),
+            propertyNode("P", {std::string("SpecularColor"), std::string("ColorRGB"), std::string("Color"), std::string(""), 0.9, 0.4, 0.2}),
+            propertyNode("P", {std::string("Shininess"), std::string("double"), std::string("Number"), std::string(""), 0.5})})});
     const FbxNode objects = node("Objects", {}, {model, geometry, material});
     const FbxNode connections = node("Connections", {}, {
         node("C", {std::string("OO"), std::int64_t(100), std::int64_t(200)}),
@@ -84,6 +107,10 @@ FbxDocument seamFixture() {
                                               1.0, 1.0, 0.0, 0.0, 1.0, 0.0}}};
     geometry.children[1].properties[0].values[0] =
         FbxValue{FbxArray{std::vector<std::int64_t>{0, 1, -3, 0, 2, -4}}};
+    geometry.children[2] = normalLayer(
+        "ByControlPoint", "Direct",
+        FbxArray{std::vector<double>{0.0, 0.0, 1.0, 0.0, 0.0, 1.0,
+                                     0.0, 0.0, 1.0, 0.0, 0.0, 1.0}});
     geometry.children[3] = uvLayer(
         "ByPolygonVertex", "IndexToDirect",
         FbxArray{std::vector<double>{0.0, 0.0, 1.0, 0.0, 1.0, 1.0,
@@ -224,21 +251,36 @@ void convertsStaticGeometryTransformsAndMaterials() {
             "FBX mesh and material assignment");
     require(result.meshes.size() == 1u && result.meshes[0].positions.size() == 9u &&
                 result.meshes[0].uvs == std::vector<float>{0.0F, -0.0F, 1.0F, -0.0F, 0.0F, -1.0F} &&
+                result.meshes[0].normals ==
+                    std::vector<float>{0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+                                       1.0F, 0.0F, 0.0F, 1.0F} &&
                 result.meshes[0].triangle_indices == std::vector<std::uint32_t>{0u, 1u, 2u},
             "FBX static triangle geometry");
     require(result.transforms.size() == 1u && std::abs(result.transforms[0].local[12] - 1.0F) < 1e-6F &&
                 std::abs(result.transforms[0].world[13] - 2.0F) < 1e-6F,
             "FBX local and world transforms");
-    require(result.snapshot.nodes[1].bounds_radius > 0.7F && result.snapshot.nodes[1].bounds_center[2] > 2.9F && !result.complete,
-            "FBX bounds and incomplete capability status");
+    require(result.snapshot.nodes[1].bounds_radius > 0.7F &&
+                result.snapshot.nodes[1].bounds_center[2] > 2.9F &&
+                result.complete,
+            "FBX bounds and supported layer capability status");
     require(result.snapshot.nodes[1].local_aabb_center.has_value() &&
                 *result.snapshot.nodes[1].local_aabb_center ==
                     apex::scene::Vector3{0.5F, 0.5F, 0.0F},
             "FBX conversion retains the exact local vertex-AABB center");
-    require(!result.diagnostics.empty() && result.diagnostics[0].code == "unsupported_layer_mapping",
-            "FBX layer mapping diagnostic");
-    require(result.snapshot.materials[0].name == "Paint" && result.snapshot.materials[0].shader == "Phong",
-            "FBX material metadata");
+    require(result.diagnostics.empty(), "supported FBX layers need no warning");
+    require(result.snapshot.materials[0].name == "Paint" &&
+                result.snapshot.materials[0].shader == "ksPerPixel",
+            "FBX material uses the recovered native shader");
+    require(result.material_parameters.size() == 1u &&
+                result.material_parameters[0].recognized_surface &&
+                result.material_parameters[0].ambient_color ==
+                    std::array<float, 3u>{0.25F, 0.5F, 0.75F} &&
+                result.material_parameters[0].diffuse_color ==
+                    std::array<float, 3u>{0.6F, 0.7F, 0.8F} &&
+                result.material_parameters[0].specular_color ==
+                    std::array<float, 3u>{0.9F, 0.4F, 0.2F} &&
+                result.material_parameters[0].shininess == 0.5F,
+            "FBX material retains bounded native scalar sources");
 }
 
 void appliesNativeGeometricMeshTransform() {
@@ -253,6 +295,10 @@ void appliesNativeGeometricMeshTransform() {
                 std::abs(result.snapshot.nodes[1].bounds_center[1] - 13.0F) < 1e-6F &&
                 std::abs(result.snapshot.nodes[1].bounds_center[2] - 3.0F) < 1e-6F,
             "FBX bounds include the native geometric mesh transform");
+    require(result.node_geometry.size() == 1u &&
+                std::abs(result.node_geometry[0].geometric[12] - 10.0F) < 1e-6F &&
+                std::abs(result.node_geometry[0].geometric[0] - 2.0F) < 1e-6F,
+            "FBX conversion retains geometric TRS for the render adapter");
 
     auto malformed = geometricTransformFixture();
     malformed.roots[0].children[0].children[0].children.back().properties[0].values.pop_back();
@@ -680,6 +726,136 @@ void rejectsInvalidReferencesIndicesAndNonFiniteValues() {
     expectsError([&] { (void)apex::formats::convertFbxScene(extreme); }, "non_finite");
 }
 
+void preservesNativeNormalMappingsAndRejectsMalformedLayers() {
+    auto indexed = fixture();
+    indexed.roots[0].children[1].children[2] = normalLayer(
+        "ByPolygonVertex", "IndexToDirect",
+        FbxArray{std::vector<double>{1.0, 0.0, 0.0, 0.0, 1.0, 0.0}},
+        FbxArray{std::vector<std::int64_t>{0, 1, 0}});
+    const auto indexedResult = apex::formats::convertFbxScene(indexed);
+    require(indexedResult.meshes[0].normals ==
+                std::vector<float>{1.0F, 0.0F, 0.0F, 0.0F, 1.0F,
+                                   0.0F, 1.0F, 0.0F, 0.0F},
+            "indexed polygon-corner normals retain their source order");
+
+    auto byPolygon = seamFixture();
+    byPolygon.roots[0].children[1].children[2] = normalLayer(
+        "ByPolygon", "Direct",
+        FbxArray{std::vector<double>{0.0, 0.0, 1.0, 0.0, 1.0, 0.0}});
+    const auto polygonResult = apex::formats::convertFbxScene(byPolygon);
+    require(polygonResult.meshes[0].normals ==
+                std::vector<float>{0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 1.0F,
+                                   0.0F, 0.0F, 1.0F, 0.0F, 1.0F, 0.0F,
+                                   0.0F, 1.0F, 0.0F, 0.0F, 1.0F, 0.0F},
+            "by-polygon normals expand to every triangulated corner");
+
+    auto allSame = fixture();
+    allSame.roots[0].children[1].children[2] = normalLayer(
+        "AllSame", "Direct",
+        FbxArray{std::vector<double>{0.0, -1.0, 0.0}});
+    const auto allSameResult = apex::formats::convertFbxScene(allSame);
+    require(allSameResult.meshes[0].normals ==
+                std::vector<float>{0.0F, -1.0F, 0.0F, 0.0F, -1.0F,
+                                   0.0F, 0.0F, -1.0F, 0.0F},
+            "all-same normals expand to every corner");
+
+    auto missing = fixture();
+    missing.roots[0].children[1].children[2].children.pop_back();
+    expectsError([&] { (void)apex::formats::convertFbxScene(missing); },
+                 "invalid_normal");
+
+    auto odd = fixture();
+    odd.roots[0].children[1].children[2].children[2].properties[0].values[0] =
+        FbxValue{FbxArray{std::vector<double>{0.0, 1.0}}};
+    expectsError([&] { (void)apex::formats::convertFbxScene(odd); },
+                 "invalid_normal");
+
+    auto missingIndices = fixture();
+    missingIndices.roots[0].children[1].children[2] = normalLayer(
+        "ByPolygonVertex", "IndexToDirect");
+    expectsError(
+        [&] { (void)apex::formats::convertFbxScene(missingIndices); },
+        "invalid_normal");
+
+    auto shortIndices = fixture();
+    shortIndices.roots[0].children[1].children[2] = normalLayer(
+        "ByPolygonVertex", "IndexToDirect", FbxArray{std::vector<double>{
+                                                  0.0, 0.0, 1.0}},
+        FbxArray{std::vector<std::int64_t>{0, 0}});
+    expectsError([&] { (void)apex::formats::convertFbxScene(shortIndices); },
+                 "invalid_normal");
+
+    auto outOfRange = fixture();
+    outOfRange.roots[0].children[1].children[2] = normalLayer(
+        "ByPolygonVertex", "IndexToDirect", FbxArray{std::vector<double>{
+                                                  0.0, 0.0, 1.0}},
+        FbxArray{std::vector<std::int64_t>{0, 1, 0}});
+    expectsError([&] { (void)apex::formats::convertFbxScene(outOfRange); },
+                 "invalid_normal");
+
+    auto nonFinite = fixture();
+    nonFinite.roots[0].children[1].children[2].children[2]
+        .properties[0]
+        .values[0] = FbxValue{FbxArray{std::vector<double>{
+        0.0, 0.0, std::numeric_limits<double>::infinity()}}};
+    expectsError([&] { (void)apex::formats::convertFbxScene(nonFinite); },
+                 "non_finite");
+
+    auto unsupported = fixture();
+    unsupported.roots[0].children[1].children[2] = normalLayer(
+        "ByEdge", "Direct", FbxArray{std::vector<double>{0.0, 0.0, 1.0}});
+    const auto unsupportedResult = apex::formats::convertFbxScene(unsupported);
+    require(unsupportedResult.meshes[0].normals.empty() &&
+                !unsupportedResult.complete &&
+                std::any_of(unsupportedResult.diagnostics.begin(),
+                            unsupportedResult.diagnostics.end(),
+                            [](const auto& diagnostic) {
+                                return diagnostic.code ==
+                                       "unsupported_layer_mapping";
+                            }),
+            "unsupported normal mapping remains explicitly incomplete");
+
+    auto overLimit = fixture();
+    overLimit.roots[0].children[1].children[2] = normalLayer(
+        "AllSame", "Direct",
+        FbxArray{std::vector<double>{0.0, 0.0, 1.0, 0.0, 1.0, 0.0,
+                                     1.0, 0.0, 0.0, -1.0, 0.0, 0.0}});
+    auto limits = apex::formats::FbxConversionLimits{};
+    limits.max_vertices = 3u;
+    expectsError(
+        [&] { (void)apex::formats::convertFbxScene(overLimit, limits); },
+        "vertex_limit");
+}
+
+void rejectsMalformedNativeMaterialParameters() {
+    auto duplicate = fixture();
+    duplicate.roots[0].children[2].children[1].children.push_back(
+        duplicate.roots[0].children[2].children[1].children.front());
+    expectsError([&] { (void)apex::formats::convertFbxScene(duplicate); },
+                 "invalid_material");
+
+    auto truncated = fixture();
+    truncated.roots[0].children[2].children[1].children.front()
+        .properties[0]
+        .values.pop_back();
+    expectsError([&] { (void)apex::formats::convertFbxScene(truncated); },
+                 "invalid_material");
+
+    auto nonFinite = fixture();
+    nonFinite.roots[0].children[2].children[1].children.front()
+        .properties[0]
+        .values[4] = std::numeric_limits<double>::infinity();
+    expectsError([&] { (void)apex::formats::convertFbxScene(nonFinite); },
+                 "invalid_material");
+
+    auto legacy = fixture();
+    legacy.roots[0].children[2].children[1].name = "Properties60";
+    const auto legacyResult = apex::formats::convertFbxScene(legacy);
+    require(legacyResult.material_parameters[0].diffuse_color ==
+                std::array<float, 3u>{0.6F, 0.7F, 0.8F},
+            "Properties60 retains native material values");
+}
+
 void rejectsMalformedAndUnsupportedUvLayers() {
     auto oddShape = fixture();
     auto& oddDirect = oddShape.roots[0].children[1].children[3].children[2].properties[0].values[0];
@@ -866,6 +1042,8 @@ int main() {
         mergesDuplicateNativeAnimationSetNames();
         rejectsMalformedAnimationCurvesAndUnsupportedInterpolation();
         rejectsInvalidReferencesIndicesAndNonFiniteValues();
+        preservesNativeNormalMappingsAndRejectsMalformedLayers();
+        rejectsMalformedNativeMaterialParameters();
         rejectsMalformedAndUnsupportedUvLayers();
         enforcesUvExpansionBudgets();
         enforcesLimitsAndUnsupportedCapability();

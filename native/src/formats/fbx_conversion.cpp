@@ -414,6 +414,103 @@ bool modelVisible(const FbxNode& model, Budget* budget = nullptr) {
     return true;
 }
 
+bool asciiEqualFold(std::string_view left, std::string_view right) noexcept {
+    if (left.size() != right.size()) return false;
+    for (std::size_t index = 0u; index < left.size(); ++index) {
+        const auto lower = [](unsigned char value) {
+            return value >= static_cast<unsigned char>('A') &&
+                           value <= static_cast<unsigned char>('Z')
+                       ? static_cast<unsigned char>(value + ('a' - 'A'))
+                       : value;
+        };
+        if (lower(static_cast<unsigned char>(left[index])) !=
+            lower(static_cast<unsigned char>(right[index])))
+            return false;
+    }
+    return true;
+}
+
+float materialFloat(const FbxValue* value, std::string_view path) {
+    double number = 0.0;
+    if (!finiteNumber(value, number) ||
+        number < -static_cast<double>(std::numeric_limits<float>::max()) ||
+        number > static_cast<double>(std::numeric_limits<float>::max()))
+        fail("invalid_material",
+             "FBX material property is not a finite representable float",
+             std::string(path));
+    return static_cast<float>(number);
+}
+
+FbxMaterialParameters materialParameters(const FbxNode& material,
+                                         std::string_view shading_model,
+                                         std::string_view path,
+                                         Budget& budget) {
+    FbxMaterialParameters result;
+    result.recognized_surface =
+        asciiEqualFold(shading_model, "phong") ||
+        asciiEqualFold(shading_model, "lambert");
+    if (!result.recognized_surface) return result;
+    std::optional<float> shininess_exponent;
+    const auto set_color = [&](std::optional<std::array<float, 3u>>& target,
+                               const std::vector<const FbxValue*>& flattened,
+                               std::string_view property_path) {
+        if (target.has_value())
+            fail("invalid_material", "FBX material property is duplicated",
+                 std::string(property_path));
+        if (flattened.size() != 7u)
+            fail("invalid_material",
+                 "FBX material color property has an invalid value count",
+                 std::string(property_path));
+        target = std::array<float, 3u>{
+            materialFloat(flattened[4], property_path),
+            materialFloat(flattened[5], property_path),
+            materialFloat(flattened[6], property_path)};
+    };
+    const auto set_scalar = [&](std::optional<float>& target,
+                                const std::vector<const FbxValue*>& flattened,
+                                std::string_view property_path) {
+        if (target.has_value())
+            fail("invalid_material", "FBX material property is duplicated",
+                 std::string(property_path));
+        if (flattened.size() != 5u)
+            fail("invalid_material",
+                 "FBX material scalar property has an invalid value count",
+                 std::string(property_path));
+        target = materialFloat(flattened[4], property_path);
+    };
+
+    for (std::size_t group_index = 0u; group_index < material.children.size();
+         ++group_index) {
+        const auto& group = material.children[group_index];
+        if (group.name != "Properties70" && group.name != "Properties60")
+            continue;
+        for (std::size_t property_index = 0u;
+             property_index < group.children.size(); ++property_index) {
+            const auto& property = group.children[property_index];
+            if (property.name != "P") continue;
+            const auto property_path =
+                std::string(path) + "/" + group.name + "/" +
+                std::to_string(property_index);
+            const auto flattened = values(property, &budget, property_path);
+            if (flattened.empty() || stringValue(flattened.front()) == nullptr)
+                continue;
+            const auto& name = *stringValue(flattened.front());
+            if (name == "AmbientColor")
+                set_color(result.ambient_color, flattened, property_path);
+            else if (name == "DiffuseColor")
+                set_color(result.diffuse_color, flattened, property_path);
+            else if (name == "SpecularColor")
+                set_color(result.specular_color, flattened, property_path);
+            else if (name == "Shininess")
+                set_scalar(result.shininess, flattened, property_path);
+            else if (name == "ShininessExponent")
+                set_scalar(shininess_exponent, flattened, property_path);
+        }
+    }
+    if (!result.shininess.has_value()) result.shininess = shininess_exponent;
+    return result;
+}
+
 std::vector<float> geometryPositions(const FbxNode& geometry, std::string_view path,
                                      const FbxConversionLimits& limits, Budget& budget) {
     const FbxNode* vertices = nullptr;
@@ -471,11 +568,125 @@ bool supportedUvLayer(const FbxNode& layer) {
            *mappingText == "ByPolygonVertex" && *referenceText == "IndexToDirect";
 }
 
+enum class NormalMapping { polygon_vertex, control_point, polygon, all_same };
+
+std::optional<NormalMapping> normalMapping(const FbxNode& layer) {
+    const auto* value = stringValue(firstChildValue(layer, "MappingInformationType"));
+    if (value == nullptr) return std::nullopt;
+    if (*value == "ByPolygonVertex") return NormalMapping::polygon_vertex;
+    if (*value == "ByControlPoint" || *value == "ByVertice" ||
+        *value == "ByVertex")
+        return NormalMapping::control_point;
+    if (*value == "ByPolygon") return NormalMapping::polygon;
+    if (*value == "AllSame") return NormalMapping::all_same;
+    return std::nullopt;
+}
+
+bool supportedNormalLayer(const FbxNode& layer) {
+    const auto* reference = firstChildValue(layer, "ReferenceInformationType");
+    const auto* referenceText = stringValue(reference);
+    return normalMapping(layer).has_value() && referenceText != nullptr &&
+           (*referenceText == "Direct" || *referenceText == "IndexToDirect");
+}
+
 struct ParsedUvLayer {
     const FbxArray* direct = nullptr;
     const std::vector<std::int64_t>* indices = nullptr;
     std::size_t directCount = 0u;
 };
+
+struct ParsedNormalLayer {
+    const FbxArray* direct = nullptr;
+    const std::vector<std::int64_t>* indices = nullptr;
+    std::size_t direct_count = 0u;
+    NormalMapping mapping = NormalMapping::polygon_vertex;
+    bool indexed = false;
+};
+
+ParsedNormalLayer parseNormalLayer(const FbxNode& layer, std::string_view path,
+                                   const FbxConversionLimits& limits,
+                                   Budget& budget) {
+    const auto mapping = normalMapping(layer);
+    const auto* reference = stringValue(
+        firstChildValue(layer, "ReferenceInformationType"));
+    if (!mapping.has_value() || reference == nullptr ||
+        (*reference != "Direct" && *reference != "IndexToDirect"))
+        fail("unsupported_normal", "FBX normal layer mapping is unsupported",
+             std::string(path));
+    const auto* normals_node = firstChildNode(layer, "Normals");
+    if (normals_node == nullptr)
+        fail("invalid_normal", "FBX normal layer is missing Normals data",
+             std::string(path));
+    const auto normal_values = values(*normals_node, &budget, path);
+    if (normal_values.empty())
+        fail("invalid_normal", "FBX Normals array is empty", std::string(path));
+    const auto* direct = std::get_if<FbxArray>(normal_values.front());
+    if (direct == nullptr)
+        fail("invalid_normal", "FBX Normals data is not an array",
+             std::string(path));
+    std::size_t component_count = 0u;
+    if (const auto* doubles = std::get_if<std::vector<double>>(direct))
+        component_count = doubles->size();
+    else if (const auto* floats = std::get_if<std::vector<float>>(direct))
+        component_count = floats->size();
+    else
+        fail("invalid_normal", "FBX Normals data has an unsupported numeric type",
+             std::string(path));
+    if (component_count == 0u || component_count % 3u != 0u)
+        fail("invalid_normal", "FBX Normals data is not xyz-aligned",
+             std::string(path));
+    const auto direct_count = component_count / 3u;
+    if (direct_count > limits.max_vertices)
+        fail("vertex_limit", "FBX normal values exceed the vertex limit",
+             std::string(path));
+    const auto check_finite = [&](double value) {
+        if (!std::isfinite(value) ||
+            value < -static_cast<double>(std::numeric_limits<float>::max()) ||
+            value > static_cast<double>(std::numeric_limits<float>::max()))
+            fail("non_finite",
+                 "FBX normal is not representable as a finite float",
+                 std::string(path));
+    };
+    if (const auto* doubles = std::get_if<std::vector<double>>(direct)) {
+        for (const auto value : *doubles) check_finite(value);
+    } else {
+        for (const auto value : *std::get_if<std::vector<float>>(direct))
+            check_finite(value);
+    }
+
+    const bool indexed = *reference == "IndexToDirect";
+    const std::vector<std::int64_t>* indices = nullptr;
+    if (indexed) {
+        const auto* index_node = firstChildNode(layer, "NormalsIndex");
+        if (index_node == nullptr)
+            fail("invalid_normal",
+                 "Indexed FBX normal layer is missing NormalsIndex data",
+                 std::string(path));
+        const auto index_values = values(*index_node, &budget, path);
+        if (index_values.empty())
+            fail("invalid_normal", "FBX NormalsIndex array is empty",
+                 std::string(path));
+        const auto* index_array = std::get_if<FbxArray>(index_values.front());
+        indices = index_array == nullptr
+                      ? nullptr
+                      : std::get_if<std::vector<std::int64_t>>(index_array);
+        if (indices == nullptr)
+            fail("invalid_normal",
+                 "FBX NormalsIndex data has an unsupported numeric type",
+                 std::string(path));
+        if (indices->size() > limits.max_indices)
+            fail("index_limit", "FBX NormalsIndex count exceeds its limit",
+                 std::string(path));
+        for (const auto direct_index : *indices) {
+            if (direct_index < 0 ||
+                static_cast<std::uint64_t>(direct_index) >= direct_count)
+                fail("invalid_normal",
+                     "FBX NormalsIndex references a missing direct normal",
+                     std::string(path));
+        }
+    }
+    return {direct, indices, direct_count, *mapping, indexed};
+}
 
 ParsedUvLayer parseUvLayer(const FbxNode& layer, std::string_view path,
                            const FbxConversionLimits& limits, Budget& budget) {
@@ -520,11 +731,14 @@ ParsedUvLayer parseUvLayer(const FbxNode& layer, std::string_view path,
 struct UvCorner {
     std::uint32_t position = 0u;
     std::size_t uv = 0u;
+    std::size_t polygon_vertex = 0u;
+    std::size_t polygon = 0u;
 };
 
 struct ExpandedUvGeometry {
     std::vector<float> positions;
     std::vector<float> uvs;
+    std::vector<float> normals;
     std::vector<std::uint32_t> triangle_indices;
 };
 
@@ -535,10 +749,53 @@ double uvComponent(const ParsedUvLayer& layer, std::size_t index) {
     return static_cast<double>((*std::get_if<std::vector<float>>(layer.direct))[index]);
 }
 
-ExpandedUvGeometry geometryWithUvs(const FbxNode& geometry, const FbxNode& layer,
-                                   std::string_view path, const FbxConversionLimits& limits,
-                                   Budget& budget, const std::vector<float>& controlPositions) {
-    const auto parsed = parseUvLayer(layer, path, limits, budget);
+double normalComponent(const ParsedNormalLayer& layer, std::size_t index) {
+    if (const auto* doubles = std::get_if<std::vector<double>>(layer.direct))
+        return (*doubles)[index];
+    return static_cast<double>(
+        (*std::get_if<std::vector<float>>(layer.direct))[index]);
+}
+
+std::size_t normalDirectIndex(const ParsedNormalLayer& layer,
+                              const UvCorner& corner,
+                              std::string_view path) {
+    std::size_t mapped = 0u;
+    switch (layer.mapping) {
+    case NormalMapping::polygon_vertex: mapped = corner.polygon_vertex; break;
+    case NormalMapping::control_point: mapped = corner.position; break;
+    case NormalMapping::polygon: mapped = corner.polygon; break;
+    case NormalMapping::all_same: mapped = 0u; break;
+    }
+    if (layer.indexed) {
+        if (mapped >= layer.indices->size())
+            fail("invalid_normal",
+                 "FBX NormalsIndex does not cover every mapped normal",
+                 std::string(path));
+        const auto direct = (*layer.indices)[mapped];
+        if (direct < 0 || static_cast<std::uint64_t>(direct) >= layer.direct_count)
+            fail("invalid_normal",
+                 "FBX NormalsIndex references a missing direct normal",
+                 std::string(path));
+        return static_cast<std::size_t>(direct);
+    }
+    if (mapped >= layer.direct_count)
+        fail("invalid_normal", "FBX normal mapping references missing data",
+             std::string(path));
+    return mapped;
+}
+
+ExpandedUvGeometry geometryWithLayers(
+    const FbxNode& geometry, const FbxNode* uv_layer,
+    const FbxNode* normal_layer, std::string_view path,
+    const FbxConversionLimits& limits, Budget& budget,
+    const std::vector<float>& controlPositions) {
+    const auto parsed_uv = uv_layer == nullptr
+                               ? std::optional<ParsedUvLayer>{}
+                               : parseUvLayer(*uv_layer, path, limits, budget);
+    const auto parsed_normal = normal_layer == nullptr
+                                   ? std::optional<ParsedNormalLayer>{}
+                                   : parseNormalLayer(*normal_layer, path, limits,
+                                                      budget);
     const auto* polygon = firstChildNode(geometry, "PolygonVertexIndex");
     if (polygon == nullptr)
         fail("missing_geometry", "FBX geometry has no PolygonVertexIndex array", std::string(path));
@@ -549,8 +806,8 @@ ExpandedUvGeometry geometryWithUvs(const FbxNode& geometry, const FbxNode& layer
     const auto* encoded = polygonArray == nullptr ? nullptr : std::get_if<std::vector<std::int64_t>>(polygonArray);
     if (encoded == nullptr)
         fail("invalid_geometry", "FBX PolygonVertexIndex has an unsupported type", std::string(path));
-    if (parsed.indices->size() != encoded->size())
-        fail("invalid_uv", "FBX UVIndex count " + std::to_string(parsed.indices->size()) +
+    if (parsed_uv.has_value() && parsed_uv->indices->size() != encoded->size())
+        fail("invalid_uv", "FBX UVIndex count " + std::to_string(parsed_uv->indices->size()) +
                               " does not match polygon vertex count " + std::to_string(encoded->size()), std::string(path));
 
     const auto vertexCount = controlPositions.size() / 3u;
@@ -564,9 +821,13 @@ ExpandedUvGeometry geometryWithUvs(const FbxNode& geometry, const FbxNode& layer
         const auto decoded = value < 0 ? ~value : value;
         if (decoded < 0 || static_cast<std::uint64_t>(decoded) >= vertexCount)
             fail("invalid_index", "FBX polygon index references a missing vertex", std::string(path));
-        const auto uvIndex = (*parsed.indices)[index];
-        if (uvIndex < 0 || static_cast<std::uint64_t>(uvIndex) >= parsed.directCount)
-            fail("invalid_uv", "FBX UVIndex references a missing direct UV", std::string(path));
+        if (parsed_uv.has_value()) {
+            const auto uvIndex = (*parsed_uv->indices)[index];
+            if (uvIndex < 0 ||
+                static_cast<std::uint64_t>(uvIndex) >= parsed_uv->directCount)
+                fail("invalid_uv", "FBX UVIndex references a missing direct UV",
+                     std::string(path));
+        }
         if (polygonSize >= maxPolygonVertices)
             fail("index_limit", "FBX polygon vertex count exceeds its limit", std::string(path));
         ++polygonSize;
@@ -590,44 +851,72 @@ ExpandedUvGeometry geometryWithUvs(const FbxNode& geometry, const FbxNode& layer
 
     const auto positionValues = checkedMultiply(outputVertices, 3u, path);
     const auto uvValues = checkedMultiply(outputVertices, 2u, path);
+    const auto normalValues = checkedMultiply(outputVertices, 3u, path);
     budget.add(checkedMultiply(positionValues, sizeof(float), path), path);
-    budget.add(checkedMultiply(uvValues, sizeof(float), path), path);
+    if (parsed_uv.has_value())
+        budget.add(checkedMultiply(uvValues, sizeof(float), path), path);
+    if (parsed_normal.has_value())
+        budget.add(checkedMultiply(normalValues, sizeof(float), path), path);
     budget.add(checkedMultiply(outputVertices, sizeof(std::uint32_t), path), path);
     ExpandedUvGeometry result;
     result.positions.reserve(positionValues);
-    result.uvs.reserve(uvValues);
+    if (parsed_uv.has_value()) result.uvs.reserve(uvValues);
+    if (parsed_normal.has_value()) result.normals.reserve(normalValues);
     result.triangle_indices.reserve(outputVertices);
 
     std::vector<UvCorner> polygonCorners;
     const auto appendCorner = [&](const UvCorner corner) {
         const auto positionOffset = checkedMultiply(static_cast<std::size_t>(corner.position), 3u, path);
-        const auto uvOffset = checkedMultiply(corner.uv, 2u, path);
         const auto outputIndex = result.positions.size() / 3u;
         if (outputIndex >= static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))
             fail("id_limit", "expanded FBX UV geometry exceeds its uint32 range", std::string(path));
         result.positions.insert(result.positions.end(), controlPositions.begin() + static_cast<std::ptrdiff_t>(positionOffset),
                                 controlPositions.begin() + static_cast<std::ptrdiff_t>(positionOffset + 3u));
-        result.uvs.push_back(static_cast<float>(uvComponent(parsed, uvOffset)));
-        result.uvs.push_back(-static_cast<float>(uvComponent(parsed, uvOffset + 1u)));
+        if (parsed_uv.has_value()) {
+            const auto uvOffset = checkedMultiply(corner.uv, 2u, path);
+            result.uvs.push_back(
+                static_cast<float>(uvComponent(*parsed_uv, uvOffset)));
+            result.uvs.push_back(
+                -static_cast<float>(uvComponent(*parsed_uv, uvOffset + 1u)));
+        }
+        if (parsed_normal.has_value()) {
+            const auto direct = normalDirectIndex(*parsed_normal, corner, path);
+            const auto normalOffset = checkedMultiply(direct, 3u, path);
+            result.normals.push_back(static_cast<float>(
+                normalComponent(*parsed_normal, normalOffset)));
+            result.normals.push_back(static_cast<float>(
+                normalComponent(*parsed_normal, normalOffset + 1u)));
+            result.normals.push_back(static_cast<float>(
+                normalComponent(*parsed_normal, normalOffset + 2u)));
+        }
         result.triangle_indices.push_back(static_cast<std::uint32_t>(outputIndex));
     };
     const auto appendTriangle = [&](const UvCorner& first, const UvCorner& second, const UvCorner& third) {
         appendCorner(first); appendCorner(second); appendCorner(third);
     };
+    std::size_t polygon_index = 0u;
     for (std::size_t index = 0u; index < encoded->size(); ++index) {
         const auto value = (*encoded)[index];
         const auto decoded = value < 0 ? ~value : value;
         if (polygonCorners.size() >= maxPolygonVertices)
             fail("index_limit", "FBX polygon vertex count exceeds its limit", std::string(path));
         reserveForAppend(polygonCorners, polygonCorners.size() + 1u, budget, path);
-        polygonCorners.push_back({static_cast<std::uint32_t>(decoded), static_cast<std::size_t>((*parsed.indices)[index])});
+        polygonCorners.push_back(
+            {static_cast<std::uint32_t>(decoded),
+             parsed_uv.has_value()
+                 ? static_cast<std::size_t>((*parsed_uv->indices)[index])
+                 : 0u,
+             index, polygon_index});
         if (value < 0) {
             for (std::size_t corner = 1u; corner + 1u < polygonCorners.size(); ++corner)
                 appendTriangle(polygonCorners[0], polygonCorners[corner], polygonCorners[corner + 1u]);
             polygonCorners.clear();
+            ++polygon_index;
         }
     }
-    if (result.positions.size() != positionValues || result.uvs.size() != uvValues ||
+    if (result.positions.size() != positionValues ||
+        (parsed_uv.has_value() && result.uvs.size() != uvValues) ||
+        (parsed_normal.has_value() && result.normals.size() != normalValues) ||
         result.triangle_indices.size() != outputVertices)
         fail("invalid_geometry", "expanded FBX UV geometry count changed during conversion", std::string(path));
     return result;
@@ -705,7 +994,9 @@ void unsupportedFeatureScan(const FbxDocument& document, FbxSceneConversion& res
             };
             const auto& node = *frame.node;
             if (node.name == "Texture" || node.name == "Video" || node.name == "Image") add("unsupported_images", "FBX image and texture records are not converted");
-            if (node.name == "LayerElementNormal" || node.name == "LayerElementMaterial" ||
+            if ((node.name == "LayerElementNormal" &&
+                 !supportedNormalLayer(node)) ||
+                node.name == "LayerElementMaterial" ||
                 (node.name == "LayerElementUV" && !supportedUvLayer(node)))
                 add("unsupported_layer_mapping", "FBX layer-element mappings are not converted");
             if (node.name == "Deformer" || node.name == "Skin" || node.name == "Cluster") add("unsupported_skinning", "FBX skinning and deformers are not converted");
@@ -1362,7 +1653,7 @@ std::optional<std::size_t> fbxNativeFileTextureChannelRank(
 
 FbxConversionCapabilityDetail fbxSceneConversionCapability() {
     return {true, true, true, true, false, true, false, false,
-            "Static FBX geometry, transforms, material assignments, external file-texture candidates, one bounded UV mapping, and an explicit-linear local-transform KSANIM bridge are converted; file resolution, native-pivot evaluation, non-linear animation, skinning, and images remain unsupported"};
+            "Static FBX geometry, geometric transforms, native material scalars, external file-texture candidates, bounded polygon normal and UV mappings, and an explicit-linear local-transform KSANIM bridge are converted; native-pivot evaluation, polygon material layers, non-linear animation, skinning, and embedded images remain unsupported"};
 }
 
 FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLimits limits) {
@@ -1433,12 +1724,17 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
     budget.add(checkedMultiply(geometryIndexes.size(), sizeof(FbxStaticMesh), "scene/meshes"), "scene/meshes");
     budget.add(checkedMultiply(modelIndexes.size(), sizeof(FbxNodeTransform), "scene/transforms"), "scene/transforms");
     budget.add(checkedMultiply(geometryIndexes.size(), sizeof(FbxNodeGeometry), "scene/node geometry"), "scene/node geometry");
+    budget.add(checkedMultiply(materialIndexes.size(),
+                               sizeof(FbxMaterialParameters),
+                               "scene/material parameters"),
+               "scene/material parameters");
     budget.add(checkedMultiply(modelIndexes.size(), sizeof(NodeId), "scene/children"), "scene/children");
     result.snapshot.nodes.reserve(modelIndexes.size() + 1u);
     result.snapshot.materials.reserve(materialIndexes.size());
     result.meshes.reserve(geometryIndexes.size());
     result.transforms.reserve(modelIndexes.size());
     result.node_geometry.reserve(geometryIndexes.size());
+    result.material_parameters.reserve(materialIndexes.size());
     result.snapshot.nodes.push_back({0u, scene::invalid_node_id, "FBX", scene::NodeKind::node, true, true, false, false, true, 0u, 0.0F, 0.0F, scene::invalid_material_id, {0.0F, 0.0F, 0.0F}, 0.0F, scene::identity_matrix, {}, {}, {}, {}, 0.0F, scene::LocalBoundsSource::unavailable, {}});
     result.snapshot.root = 0u;
     std::map<std::int64_t, std::uint32_t> materialIds;
@@ -1449,9 +1745,14 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
             const auto flattened = values(child, &budget, "scene/materials");
             if (!flattened.empty() && stringValue(flattened[0]) != nullptr) shaderView = *stringValue(flattened[0]);
         }
-        budget.add(checkedAdd(record.name.size(), shaderView.size(), "scene/materials"), "scene/materials");
-        std::string shader(shaderView);
-        result.snapshot.materials.push_back({record.name, shader, scene::BlendMode::opaque});
+        budget.add(checkedAdd(record.name.size(), std::string_view{"ksPerPixel"}.size(),
+                              "scene/materials"),
+                   "scene/materials");
+        result.snapshot.materials.push_back(
+            {record.name, "ksPerPixel", scene::BlendMode::opaque});
+        result.material_parameters.push_back(materialParameters(
+            *record.node, shaderView,
+            "Objects/Material/" + std::to_string(record.id), budget));
         chargeAssociativeNode(budget, sizeof(std::pair<const std::int64_t, std::uint32_t>), "material IDs");
         materialIds.emplace(record.id, static_cast<std::uint32_t>(index));
     }
@@ -1636,10 +1937,21 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
         mesh.name = record.name;
         mesh.positions = geometryPositions(*record.node, path, limits, budget);
         const auto* uvLayer = firstChildNode(*record.node, "LayerElementUV");
-        if (uvLayer != nullptr && supportedUvLayer(*uvLayer)) {
-            auto expanded = geometryWithUvs(*record.node, *uvLayer, path, limits, budget, mesh.positions);
+        const auto* normalLayer =
+            firstChildNode(*record.node, "LayerElementNormal");
+        const auto* supportedUv =
+            uvLayer != nullptr && supportedUvLayer(*uvLayer) ? uvLayer : nullptr;
+        const auto* supportedNormal =
+            normalLayer != nullptr && supportedNormalLayer(*normalLayer)
+                ? normalLayer
+                : nullptr;
+        if (supportedUv != nullptr || supportedNormal != nullptr) {
+            auto expanded = geometryWithLayers(
+                *record.node, supportedUv, supportedNormal, path, limits, budget,
+                mesh.positions);
             mesh.positions = std::move(expanded.positions);
             mesh.uvs = std::move(expanded.uvs);
+            mesh.normals = std::move(expanded.normals);
             mesh.triangle_indices = std::move(expanded.triangle_indices);
         } else {
             mesh.triangle_indices = geometryIndices(*record.node, path, mesh.positions.size() / 3u, limits, budget);
@@ -1685,8 +1997,11 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
                 material = materialIndex->second;
             }
         }
+        const auto geometric = kind == scene::NodeKind::mesh
+                                   ? geometricTransform(*record.node, path)
+                                   : scene::identity_matrix;
         const auto meshWorld = kind == scene::NodeKind::mesh
-                                   ? multiply(world, geometricTransform(*record.node, path))
+                                   ? multiply(world, geometric)
                                    : world;
         finiteMatrix(meshWorld, path);
         budget.add(record.name.size(), path);
@@ -1738,7 +2053,7 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
             }
             if (!std::isfinite(radius) || radius > static_cast<double>(std::numeric_limits<float>::max())) fail("non_finite", "FBX bounds radius is not representable as float", path);
             node.bounds_radius = static_cast<float>(radius);
-            result.node_geometry.push_back({id, meshIndex});
+            result.node_geometry.push_back({id, meshIndex, geometric});
         }
         result.snapshot.nodes.push_back(std::move(node));
         result.transforms.push_back({id, local, world});

@@ -24,6 +24,17 @@ struct FbxStaticMesh {
     // When an FBX UV layer is supported, this is two floats per emitted
     // vertex. Face-varying seams are represented by expanded vertices.
     std::vector<float> uvs;
+    // When a native FBX normal layer is supported, this is three floats per
+    // emitted vertex. Polygon-corner normal seams are expanded exactly.
+    std::vector<float> normals;
+};
+
+struct FbxMaterialParameters {
+    bool recognized_surface = false;
+    std::optional<std::array<float, 3u>> ambient_color;
+    std::optional<std::array<float, 3u>> diffuse_color;
+    std::optional<std::array<float, 3u>> specular_color;
+    std::optional<float> shininess;
 };
 
 struct FbxNodeTransform {
@@ -35,6 +46,9 @@ struct FbxNodeTransform {
 struct FbxNodeGeometry {
     scene::NodeId node = scene::invalid_node_id;
     std::uint32_t mesh = 0;
+    // ksEditor keeps the evaluated node matrix separate in local mode and
+    // applies this geometric TRS to positions and normals.
+    scene::Matrix4 geometric = scene::identity_matrix;
 };
 
 // A bounded source record for a file texture connected to an FBX material.
@@ -86,6 +100,8 @@ struct FbxSceneConversion {
     std::vector<FbxStaticMesh> meshes;
     std::vector<FbxNodeTransform> transforms;
     std::vector<FbxNodeGeometry> node_geometry;
+    // Indexed exactly like snapshot.materials.
+    std::vector<FbxMaterialParameters> material_parameters;
     std::vector<FbxMaterialFileTextureCandidate> file_texture_candidates;
     std::vector<FbxAnimationClip> animations;
     std::vector<FbxConversionDiagnostic> diagnostics;
