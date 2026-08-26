@@ -7,8 +7,10 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -49,6 +51,15 @@ struct FbxMaterialFileTextureCandidate {
     // converter uses it to retain source-object order within one channel.
     std::size_t connection_order = 0;
 };
+
+inline constexpr std::array<std::string_view, 8u>
+    fbx_native_file_texture_channels = {
+        "DiffuseColor", "DiffuseFactor", "EmissiveColor", "EmissiveFactor",
+        "AmbientColor", "AmbientFactor", "SpecularColor", "SpecularFactor",
+    };
+
+[[nodiscard]] std::optional<std::size_t> fbxNativeFileTextureChannelRank(
+    std::string_view channel) noexcept;
 
 // The native animation bridge intentionally exposes only the bounded subset
 // whose FBX evidence is available: local transform channels with explicit
@@ -137,6 +148,11 @@ struct FbxConversionCapabilityDetail {
 inline FbxSceneConversion convert_fbx_scene(const FbxDocument& document,
                                             FbxConversionLimits limits = {}) {
     return convertFbxScene(document, std::move(limits));
+}
+
+inline std::optional<std::size_t> fbx_native_file_texture_channel_rank(
+    std::string_view channel) noexcept {
+    return fbxNativeFileTextureChannelRank(channel);
 }
 
 }  // namespace apex::formats

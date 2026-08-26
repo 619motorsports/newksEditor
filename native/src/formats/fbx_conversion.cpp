@@ -145,17 +145,6 @@ struct Link {
     std::size_t connection_order = 0;
 };
 
-constexpr std::array<std::string_view, 8u> kNativeFileTextureChannels = {
-    "DiffuseColor",   "DiffuseFactor",  "EmissiveColor", "EmissiveFactor",
-    "AmbientColor",   "AmbientFactor",  "SpecularColor", "SpecularFactor",
-};
-
-std::size_t nativeFileTextureChannelRank(std::string_view channel) {
-    const auto match = std::find(kNativeFileTextureChannels.begin(),
-                                 kNativeFileTextureChannels.end(), channel);
-    return static_cast<std::size_t>(match - kNativeFileTextureChannels.begin());
-}
-
 std::string fileTextureBasename(const ObjectRecord& record,
                                 const FbxConversionLimits& limits,
                                 Budget& budget, std::string_view path) {
@@ -1362,6 +1351,15 @@ void extractAnimations(const std::vector<ObjectRecord>& records,
 FbxConversionError::FbxConversionError(FbxConversionDiagnostic diagnostic)
     : std::runtime_error(diagnostic.message), diagnostic_(std::move(diagnostic)) {}
 
+std::optional<std::size_t> fbxNativeFileTextureChannelRank(
+    std::string_view channel) noexcept {
+    const auto match = std::find(fbx_native_file_texture_channels.begin(),
+                                 fbx_native_file_texture_channels.end(), channel);
+    if (match == fbx_native_file_texture_channels.end()) return std::nullopt;
+    return static_cast<std::size_t>(
+        match - fbx_native_file_texture_channels.begin());
+}
+
 FbxConversionCapabilityDetail fbxSceneConversionCapability() {
     return {true, true, true, true, false, true, false, false,
             "Static FBX geometry, transforms, material assignments, external file-texture candidates, one bounded UV mapping, and an explicit-linear local-transform KSANIM bridge are converted; file resolution, native-pivot evaluation, non-linear animation, skinning, and images remain unsupported"};
@@ -1516,9 +1514,7 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
          ++connectionIndex) {
         const auto& link = links[connectionIndex];
         if (link.kind != "OP" || link.property.empty() || link.target == 0) continue;
-        if (nativeFileTextureChannelRank(link.property) ==
-            kNativeFileTextureChannels.size())
-            continue;
+        if (!fbxNativeFileTextureChannelRank(link.property).has_value()) continue;
         const auto& source = records[byId.at(link.source)];
         const auto& target = records[byId.at(link.target)];
         if (source.node->name != "Texture" || target.node->name != "Material") continue;
@@ -1544,10 +1540,12 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
               [](const FbxMaterialFileTextureCandidate& left,
                  const FbxMaterialFileTextureCandidate& right) {
                   const auto leftKey = std::tuple{
-                      left.material, nativeFileTextureChannelRank(left.channel),
+                      left.material,
+                      *fbxNativeFileTextureChannelRank(left.channel),
                       left.connection_order};
                   const auto rightKey = std::tuple{
-                      right.material, nativeFileTextureChannelRank(right.channel),
+                      right.material,
+                      *fbxNativeFileTextureChannelRank(right.channel),
                       right.connection_order};
                   return leftKey < rightKey;
               });

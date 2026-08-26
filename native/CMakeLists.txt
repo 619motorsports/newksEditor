@@ -228,6 +228,7 @@ target_link_libraries(apex_render
 # This bridge resolves and decodes CPU resources, but it creates no GPU objects.
 add_library(apex_external_texture_authority STATIC
   src/render/external_texture_authority.cpp
+  src/render/fbx_external_texture_authority.cpp
 )
 add_library(ApexEditor::ExternalTextureAuthority ALIAS apex_external_texture_authority)
 target_link_libraries(apex_external_texture_authority
@@ -375,6 +376,7 @@ apex_add_native_test(bmp_texture_tests.cpp bmp_texture_tests ApexEditor::Render)
 apex_add_native_test(csp_node_state_tests.cpp csp_node_state_tests ApexEditor::Render)
 apex_add_native_test(damage_preview_tests.cpp damage_preview_tests ApexEditor::Render)
 apex_add_native_test(external_texture_authority_tests.cpp external_texture_authority_tests ApexEditor::ExternalTextureAuthority)
+apex_add_native_test(fbx_external_texture_authority_tests.cpp fbx_external_texture_authority_tests ApexEditor::ExternalTextureAuthority)
 apex_add_native_test(render_backend_tests.cpp render_backend_tests ApexEditor::ExternalTextureAuthority)
 apex_add_native_test(draw_packet_tests.cpp draw_packet_tests ApexEditor::Render)
 if(TARGET draw_packet_tests)
