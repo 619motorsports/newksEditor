@@ -374,6 +374,76 @@ int run_runtime_probe() {
                 "Vulkan source-equivalent center matches recovered CPU equation");
     }
 
+    const std::array<std::byte, 16U> blue_pixels = {
+        std::byte{0}, std::byte{0}, std::byte{255}, std::byte{255},
+        std::byte{0}, std::byte{0}, std::byte{255}, std::byte{255},
+        std::byte{0}, std::byte{0}, std::byte{255}, std::byte{255},
+        std::byte{0}, std::byte{0}, std::byte{255}, std::byte{255},
+    };
+    TextureUploadPlan blue_upload;
+    blue_upload.subresources.push_back(
+        {0U, 0U, 2U, 2U, 8U, blue_pixels});
+    TextureResult blue_diffuse =
+        device.create_texture(diffuse_description, blue_upload);
+    require(blue_diffuse.ok(),
+            "Vulkan source-equivalent second diffuse upload");
+    StockKsPerPixelNativeConstantData second_source_constants =
+        source_constants;
+    second_source_constants.object.world[3U] = 0.1F;
+    second_source_constants.material.ambient = 0.2F;
+    second_source_constants.material.diffuse = 0.3F;
+    StockKsPerPixelNativeConstantBufferResult second_source_buffers =
+        allocate_stock_ks_per_pixel_native_constant_buffers(
+            device, second_source_constants);
+    require(second_source_buffers.ok(),
+            "Vulkan source-equivalent second native constant allocation");
+    StockKsPerPixelVulkanSourceDrawBinding second_source_binding =
+        source_binding;
+    for (std::size_t index = 0U;
+         index < second_source_binding.resources.uniform_buffers.size();
+         ++index) {
+        second_source_binding.resources.uniform_buffers[index] = {
+            second_source_buffers.buffers->buffer(
+                static_cast<StockKsPerPixelNativeConstantSlot>(index)),
+            0U, stock_ks_per_pixel_native_constant_buffer_view_bytes};
+    }
+    second_source_binding.resources.diffuse_texture =
+        blue_diffuse.texture.get();
+    IndexedStaticMeshDrawRequest second_source_request = source_request;
+    second_source_request.stock_ks_per_pixel_vulkan_source =
+        &second_source_binding;
+    const std::array source_batch_requests = {
+        source_request, second_source_request};
+    IndexedStaticMeshBatchDescription source_batch;
+    source_batch.draws = source_batch_requests;
+    const IndexedStaticMeshBatchResult source_batch_draw =
+        device.draw_indexed_static_mesh_batch_and_readback(
+            *target.texture, source_batch);
+    require(source_batch_draw.ok() &&
+                source_batch_draw.rgba8.size() == 32U * 32U * 4U,
+            source_batch_draw.diagnostic.code.empty()
+                ? "two-draw Vulkan source-equivalent batch/readback"
+                : source_batch_draw.diagnostic.code);
+    const StockKsPerPixelEvaluationResult expected_second =
+        evaluate_stock_ks_per_pixel(
+            {{0.0F, 1.0F, 0.0F},
+             {-0.1F, 0.0F, -2.0F},
+             {0.0F, 0.0F, 1.0F, 1.0F},
+             0.0F,
+             1.0F},
+            second_source_constants.lighting,
+            second_source_constants.material,
+            StockKsPerPixelVariant::base);
+    require(expected_second.ok(),
+            "CPU second source-equivalent reference evaluation");
+    for (std::size_t channel = 0U; channel < 4U; ++channel) {
+        const int actual = std::to_integer<std::uint8_t>(
+            source_batch_draw.rgba8[center + channel]);
+        const int reference = expected_byte(expected_second.rgba[channel]);
+        require(std::abs(actual - reference) <= 1,
+                "Vulkan source batch binds the second draw resource tuple");
+    }
+
     TextureDescription alpha_target_description = target_description;
     alpha_target_description.samples = 4U;
     TextureResult alpha_target =

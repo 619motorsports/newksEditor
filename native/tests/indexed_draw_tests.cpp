@@ -2889,14 +2889,28 @@ void validates_stock_vulkan_abi_probe_authority() {
                 ? "complete Vulkan source-equivalent draw passes preflight"
                 : diagnostic.code.c_str());
 
-    const std::array source_draws = {source_request};
+    const std::array source_draws = {source_request, source_request};
     batch.draws = source_draws;
     require(validate_indexed_static_mesh_batch_description(
                 target, batch, diagnostic) ==
-                IndexedStaticMeshBatchStatus::unsupported &&
-                diagnostic.code ==
-                    "indexed_stock_vulkan_source_batch_unsupported",
-            "Vulkan source-equivalent batches remain explicitly staged");
+                IndexedStaticMeshBatchStatus::ready,
+            diagnostic.code.empty()
+                ? "Vulkan source-equivalent batches pass common preflight"
+                : diagnostic.code.c_str());
+
+    PipelineProgram portable_pipeline = pipeline_fixture();
+    IndexedStaticMeshDrawRequest portable_request =
+        request_fixture(packet, portable_pipeline, vertices, indices);
+    portable_request.shader_authority =
+        IndexedShaderAuthority::explicit_pipeline;
+    const std::array mixed_draws = {source_request, portable_request};
+    batch.draws = mixed_draws;
+    require(validate_indexed_static_mesh_batch_description(
+                target, batch, diagnostic) ==
+                IndexedStaticMeshBatchStatus::ready,
+            diagnostic.code.empty()
+                ? "Vulkan source-equivalent and portable draws can share a batch"
+                : diagnostic.code.c_str());
 
     PipelineProgram copied_source_pipeline =
         source_program.program->pipeline();

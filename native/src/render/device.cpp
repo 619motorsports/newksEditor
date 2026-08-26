@@ -3065,19 +3065,6 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
             "The Vulkan ksPerPixel ABI probe is limited to single-draw validation"};
         return IndexedStaticMeshBatchStatus::unsupported;
     }
-    const bool has_vulkan_source = std::any_of(
-        description.draws.begin(), description.draws.end(),
-        [](const IndexedStaticMeshDrawRequest& request) {
-            return request.shader_authority ==
-                   IndexedShaderAuthority::
-                       explicit_stock_ks_per_pixel_vulkan_source_equivalent;
-        });
-    if (has_vulkan_source) {
-        diagnostic = {
-            "indexed_stock_vulkan_source_batch_unsupported",
-            "The Vulkan ksPerPixel source-equivalent path is currently limited to single draws"};
-        return IndexedStaticMeshBatchStatus::unsupported;
-    }
     const std::size_t native_draw_count = static_cast<std::size_t>(std::count_if(
         description.draws.begin(), description.draws.end(),
         [](const IndexedStaticMeshDrawRequest& request) {
