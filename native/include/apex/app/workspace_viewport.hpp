@@ -143,6 +143,15 @@ struct WorkspaceViewportPrepareRequest {
         render::BuiltinVulkanStockSourceSelector::disabled;
     render::StockKsPerPixelNativeSamplerSettings
         builtin_vulkan_source_sampler_settings{};
+    // Explicit installed-DXBC path for the first homogeneous base ksPerPixel
+    // D3D12 slice. The validated owner table is borrowed only during
+    // preparation; retained scene resources clone each selected packet.
+    render::BuiltinD3D12StockNativeSelector builtin_d3d12_native =
+        render::BuiltinD3D12StockNativeSelector::disabled;
+    std::span<const render::StockMaterialD3D12NativeProgram>
+        builtin_d3d12_native_programs{};
+    render::StockKsPerPixelNativeSamplerSettings
+        builtin_d3d12_native_sampler_settings{};
     std::span<const render::MaterialBindingOverrides> overrides_by_material{};
     // Presence requires at least one external request. The matching file
     // overrides are consumed into owned embedded payloads before render
@@ -219,13 +228,18 @@ struct WorkspaceViewportPrepareRequest {
     WorkspaceViewportWorkspaceOptions workspace{};
 };
 
-struct WorkspaceViewportStockVulkanSourceFrame {
+struct WorkspaceViewportStockNativeFrame {
     // Exact recovered b0 and b2 host records. The viewport derives b3 and all
     // three map bindings from its retained, freshly rendered cascades so a
     // caller cannot substitute unrelated GPU resources.
     render::StockKsPerPixelCameraConstants camera{};
     render::StockKsPerPixelLightingConstants lighting{};
 };
+
+using WorkspaceViewportStockVulkanSourceFrame =
+    WorkspaceViewportStockNativeFrame;
+using WorkspaceViewportStockD3D12NativeFrame =
+    WorkspaceViewportStockNativeFrame;
 
 // Maps evaluated stock weather into the recovered b2 layout. The screen
 // fields are reciprocal active-viewport dimensions, matching setViewport.
@@ -239,6 +253,13 @@ buildWorkspaceViewportStockVulkanSourceLighting(
 // malformed camera from reaching the source-equivalent shader ABI.
 [[nodiscard]] std::optional<WorkspaceViewportStockVulkanSourceFrame>
 buildWorkspaceViewportStockVulkanSourceFrame(
+    const render::CameraFrame& camera,
+    const render::StockKsPerPixelLightingConstants& lighting) noexcept;
+
+// Build the same recovered b0/b2 records for a D3D12 camera. Backend
+// authority remains separate in WorkspaceViewportFrameRequest.
+[[nodiscard]] std::optional<WorkspaceViewportStockD3D12NativeFrame>
+buildWorkspaceViewportStockD3D12NativeFrame(
     const render::CameraFrame& camera,
     const render::StockKsPerPixelLightingConstants& lighting) noexcept;
 
@@ -269,6 +290,10 @@ struct WorkspaceViewportFrameRequest {
     // this recovered native ABI.
     std::optional<WorkspaceViewportStockVulkanSourceFrame>
         stock_vulkan_source_frame;
+    // Required exactly when preparation selects installed D3D12 native
+    // owners. The viewport supplies its retained shadow maps after refresh.
+    std::optional<WorkspaceViewportStockD3D12NativeFrame>
+        stock_d3d12_native_frame;
     // Override the prepared grid state. A true value requires grid resources
     // to have been requested during viewport preparation.
     std::optional<bool> grid_visible;

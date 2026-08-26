@@ -43,6 +43,12 @@ struct StockSceneExecutionRequest {
         BuiltinVulkanStockSourceSelector::disabled;
     StockKsPerPixelNativeSamplerSettings
         builtin_vulkan_source_sampler_settings{};
+    BuiltinD3D12StockNativeSelector builtin_d3d12_native =
+        BuiltinD3D12StockNativeSelector::disabled;
+    std::span<const StockMaterialD3D12NativeProgram>
+        builtin_d3d12_native_programs{};
+    StockKsPerPixelNativeSamplerSettings
+        builtin_d3d12_native_sampler_settings{};
     std::span<const MaterialBindingOverrides> overrides_by_material{};
     // When enabled, resolve the source-evidenced F4 state at this facade
     // boundary. The resolver's complete material table is merged after any

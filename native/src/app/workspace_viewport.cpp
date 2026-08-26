@@ -50,6 +50,29 @@ expectedClipSpace(render::Backend backend) noexcept {
                                               : render::CameraClipSpace::d3d12;
 }
 
+[[nodiscard]] std::optional<WorkspaceViewportStockNativeFrame>
+buildStockNativeFrame(
+    const render::CameraFrame& camera,
+    const render::StockKsPerPixelLightingConstants& lighting,
+    render::CameraClipSpace expected_clip_space) noexcept {
+    if (camera.clip_space != expected_clip_space ||
+        !render::valid_stock_ks_per_pixel_lighting_constants(lighting))
+        return std::nullopt;
+    const auto inverse_view_projection =
+        render::invert_camera_matrix(camera.view_projection);
+    if (!inverse_view_projection) return std::nullopt;
+
+    WorkspaceViewportStockNativeFrame frame;
+    frame.camera = render::make_stock_ks_per_pixel_camera_constants(
+        camera.view, camera.projection, *inverse_view_projection,
+        camera.position, camera.near_plane, camera.far_plane,
+        camera.fov_radians * radians_to_degrees);
+    if (!render::valid_stock_ks_per_pixel_camera_constants(frame.camera))
+        return std::nullopt;
+    frame.lighting = lighting;
+    return frame;
+}
+
 [[nodiscard]] bool finite_vector(const apex::scene::Vector3 &value) noexcept {
     return std::all_of(value.begin(), value.end(), [](const float component) {
         return std::isfinite(component);
@@ -761,22 +784,16 @@ std::optional<WorkspaceViewportStockVulkanSourceFrame>
 buildWorkspaceViewportStockVulkanSourceFrame(
     const render::CameraFrame& camera,
     const render::StockKsPerPixelLightingConstants& lighting) noexcept {
-    if (camera.clip_space != render::CameraClipSpace::vulkan ||
-        !render::valid_stock_ks_per_pixel_lighting_constants(lighting))
-        return std::nullopt;
-    const auto inverse_view_projection =
-        render::invert_camera_matrix(camera.view_projection);
-    if (!inverse_view_projection) return std::nullopt;
+    return buildStockNativeFrame(camera, lighting,
+                                 render::CameraClipSpace::vulkan);
+}
 
-    WorkspaceViewportStockVulkanSourceFrame frame;
-    frame.camera = render::make_stock_ks_per_pixel_camera_constants(
-        camera.view, camera.projection, *inverse_view_projection,
-        camera.position, camera.near_plane, camera.far_plane,
-        camera.fov_radians * radians_to_degrees);
-    if (!render::valid_stock_ks_per_pixel_camera_constants(frame.camera))
-        return std::nullopt;
-    frame.lighting = lighting;
-    return frame;
+std::optional<WorkspaceViewportStockD3D12NativeFrame>
+buildWorkspaceViewportStockD3D12NativeFrame(
+    const render::CameraFrame& camera,
+    const render::StockKsPerPixelLightingConstants& lighting) noexcept {
+    return buildStockNativeFrame(camera, lighting,
+                                 render::CameraClipSpace::d3d12);
 }
 
 bool WorkspaceViewportCameraController::apply(
@@ -1282,6 +1299,8 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
     }
     const bool requires_stock_vulkan_source_frame =
         execution_->resources->requires_stock_vulkan_source_frame();
+    const bool requires_stock_d3d12_native_frame =
+        execution_->resources->requires_stock_d3d12_native_frame();
     if (requires_stock_vulkan_source_frame !=
         request.stock_vulkan_source_frame.has_value()) {
         output_diagnostic = diagnostic(
@@ -1295,17 +1314,38 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
                   "portable-only viewport");
         return WorkspaceViewportFrameStatus::invalid;
     }
-    if (requires_stock_vulkan_source_frame) {
-        const WorkspaceViewportStockVulkanSourceFrame& source =
-            *request.stock_vulkan_source_frame;
+    if (requires_stock_d3d12_native_frame !=
+        request.stock_d3d12_native_frame.has_value()) {
+        output_diagnostic = diagnostic(
+            requires_stock_d3d12_native_frame
+                ? "static_scene_stock_d3d12_native_frame_missing"
+                : "static_scene_stock_d3d12_native_frame_unexpected",
+            requires_stock_d3d12_native_frame
+                ? "Retained installed D3D12 draws require exact native "
+                  "camera and lighting records"
+                : "Installed D3D12 native records were supplied to a "
+                  "viewport without native owners");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    const bool d3d12_native_frame = requires_stock_d3d12_native_frame;
+    const WorkspaceViewportStockNativeFrame* native_frame =
+        requires_stock_vulkan_source_frame
+            ? &*request.stock_vulkan_source_frame
+        : requires_stock_d3d12_native_frame
+            ? &*request.stock_d3d12_native_frame
+            : nullptr;
+    if (native_frame != nullptr) {
+        const WorkspaceViewportStockNativeFrame& source = *native_frame;
         if (!render::valid_stock_ks_per_pixel_camera_constants(
                 source.camera) ||
             !render::valid_stock_ks_per_pixel_lighting_constants(
                 source.lighting)) {
             output_diagnostic = diagnostic(
-                "static_scene_stock_vulkan_source_frame_invalid",
-                "Native Vulkan source camera and lighting records must be "
-                "finite and complete");
+                d3d12_native_frame
+                    ? "static_scene_stock_d3d12_native_frame_invalid"
+                    : "static_scene_stock_vulkan_source_frame_invalid",
+                "Stock native camera and lighting records must be finite "
+                "and complete");
             return WorkspaceViewportFrameStatus::invalid;
         }
         if (source.camera.view !=
@@ -1320,9 +1360,11 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
             source.camera.field_of_view !=
                 request.camera.fov_radians * radians_to_degrees) {
             output_diagnostic = diagnostic(
-                "workspace_viewport_stock_vulkan_source_camera_mismatch",
-                "Native Vulkan source camera state must match the current "
-                "viewport camera");
+                d3d12_native_frame
+                    ? "workspace_viewport_stock_d3d12_native_camera_mismatch"
+                    : "workspace_viewport_stock_vulkan_source_camera_mismatch",
+                "Stock native camera state must match the current viewport "
+                "camera");
             return WorkspaceViewportFrameStatus::invalid;
         }
         double source_light_length_squared = 0.0;
@@ -1331,9 +1373,10 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
                 static_cast<double>(component) * component;
         if (!(source_light_length_squared > 1.0e-12)) {
             output_diagnostic = diagnostic(
-                "static_scene_stock_vulkan_source_frame_invalid",
-                "Native Vulkan source lighting requires a nonzero light "
-                "direction");
+                d3d12_native_frame
+                    ? "static_scene_stock_d3d12_native_frame_invalid"
+                    : "static_scene_stock_vulkan_source_frame_invalid",
+                "Stock native lighting requires a nonzero light direction");
             return WorkspaceViewportFrameStatus::invalid;
         }
         if (request.frame_constants.has_value()) {
@@ -1344,18 +1387,22 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
                         -request.frame_constants->sun_direction[component]) >
                     lighting_match_tolerance) {
                     output_diagnostic = diagnostic(
-                        "workspace_viewport_stock_vulkan_source_lighting_mismatch",
-                        "Native light-ray direction must oppose the portable "
-                        "surface-to-sun direction in a mixed scene");
+                        d3d12_native_frame
+                            ? "workspace_viewport_stock_d3d12_native_lighting_mismatch"
+                            : "workspace_viewport_stock_vulkan_source_lighting_mismatch",
+                        "Stock native light-ray direction must oppose the "
+                        "portable surface-to-sun direction");
                     return WorkspaceViewportFrameStatus::invalid;
                 }
             }
         }
         if (shadow_maps_ == nullptr || !directional_shadows_.has_value()) {
             output_diagnostic = diagnostic(
-                "workspace_viewport_stock_vulkan_source_shadows_missing",
-                "Native Vulkan source draws require retained directional "
-                "shadow resources");
+                d3d12_native_frame
+                    ? "workspace_viewport_stock_d3d12_native_shadows_missing"
+                    : "workspace_viewport_stock_vulkan_source_shadows_missing",
+                "Stock native draws require retained directional shadow "
+                "resources");
             return WorkspaceViewportFrameStatus::invalid;
         }
     }
@@ -1846,7 +1893,7 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
         lighting.fov_radians = request.camera.fov_radians;
         lighting.aspect = request.camera.aspect;
         lighting.near_plane = request.camera.near_plane;
-        lighting.far_plane = requires_stock_vulkan_source_frame
+        lighting.far_plane = native_frame != nullptr
                                  ? directional_shadows_->maps.lighting.far_plane
                                  : request.camera.far_plane;
         if (request.frame_constants.has_value()) {
@@ -1856,9 +1903,9 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
                 request.frame_constants->sun_direction[2],
             };
         }
-        if (requires_stock_vulkan_source_frame) {
+        if (native_frame != nullptr) {
             const auto& source_lighting =
-                request.stock_vulkan_source_frame->lighting.light_direction;
+                native_frame->lighting.light_direction;
             lighting.sun_direction = {
                 -source_lighting[0], -source_lighting[1],
                 -source_lighting[2]};
@@ -1900,12 +1947,10 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
             frame.directional_shadow_constants_layout =
                 directional_shadows_->constants_layout;
         }
-        if (requires_stock_vulkan_source_frame) {
-            render::StaticSceneFrameDescription::StockVulkanSourceFrame
-                source_frame;
-            source_frame.camera = request.stock_vulkan_source_frame->camera;
-            source_frame.lighting =
-                request.stock_vulkan_source_frame->lighting;
+        if (native_frame != nullptr) {
+            render::StaticSceneFrameDescription::StockNativeFrame source_frame;
+            source_frame.camera = native_frame->camera;
+            source_frame.lighting = native_frame->lighting;
             std::array<apex::scene::Matrix4,
                        render::stock_ks_per_pixel_shadow_cascade_count>
                 shadow_matrices{};
@@ -1923,12 +1968,17 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
             if (!render::valid_stock_directional_shadow_receiver_constants(
                     source_frame.shadow_constants)) {
                 output_diagnostic = diagnostic(
-                    "static_scene_stock_vulkan_source_frame_invalid",
+                    d3d12_native_frame
+                        ? "static_scene_stock_d3d12_native_frame_invalid"
+                        : "static_scene_stock_vulkan_source_frame_invalid",
                     "Fresh directional-shadow state cannot populate the "
-                    "native Vulkan source frame");
+                    "stock native frame");
                 return WorkspaceViewportFrameStatus::invalid;
             }
-            frame.stock_vulkan_source_frame = source_frame;
+            if (d3d12_native_frame)
+                frame.stock_d3d12_native_frame = source_frame;
+            else
+                frame.stock_vulkan_source_frame = source_frame;
         }
     }
 
@@ -1962,6 +2012,9 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         const bool builtin_vulkan_source =
             request.builtin_vulkan_source ==
             render::BuiltinVulkanStockSourceSelector::ks_per_pixel;
+        const bool builtin_d3d12_native =
+            request.builtin_d3d12_native ==
+            render::BuiltinD3D12StockNativeSelector::ks_per_pixel_base;
         if (request.builtin_vulkan_source !=
                 render::BuiltinVulkanStockSourceSelector::disabled &&
             !builtin_vulkan_source) {
@@ -1969,6 +2022,23 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             result.diagnostic = diagnostic(
                 "workspace_viewport_builtin_source_selector_invalid",
                 "The built-in Vulkan stock source selector is invalid");
+            return result;
+        }
+        if (request.builtin_d3d12_native !=
+                render::BuiltinD3D12StockNativeSelector::disabled &&
+            !builtin_d3d12_native) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_d3d12_native_selector_invalid",
+                "The installed D3D12 stock selector is invalid");
+            return result;
+        }
+        if (builtin_vulkan_source && builtin_d3d12_native) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_native_selector_conflict",
+                "Vulkan source and installed D3D12 selectors are mutually "
+                "exclusive");
             return result;
         }
         if (builtin_vulkan_source && request.shader_modules.empty() &&
@@ -1980,16 +2050,63 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 "Vulkan");
             return result;
         }
+        if (builtin_d3d12_native &&
+            device.info().backend != render::Backend::D3D12) {
+            result.status = WorkspaceViewportStatus::unsupported;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_d3d12_native_backend_unsupported",
+                "Installed native ksPerPixel packages require D3D12");
+            return result;
+        }
+        if (builtin_d3d12_native &&
+            request.builtin_d3d12_native_programs.empty()) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "stock_material_d3d12_native_program_count_invalid",
+                "Installed native selection requires a bounded nonempty "
+                "validated program table");
+            return result;
+        }
+        if (builtin_d3d12_native && request.shader_modules.empty() &&
+            request.color_samples != 1U) {
+            result.status = WorkspaceViewportStatus::unsupported;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_d3d12_native_multisample_unsupported",
+                "The first installed D3D12 native viewport requires a "
+                "one-sample target");
+            return result;
+        }
+        if (builtin_d3d12_native && request.shader_modules.empty() &&
+            (request.wireframe || request.grid_visible ||
+             request.view_axis_visible ||
+             request.authoring_overlay_pipeline.has_value() ||
+             request.selected_mesh_pipeline.has_value() ||
+             request.ai_spline_pipeline.has_value() ||
+             request.ai_spline_interval_pipeline.has_value() ||
+             request.ai_spline_left_pipeline.has_value() ||
+             request.ai_spline_right_pipeline.has_value() ||
+             request.ai_spline_selection_pipeline.has_value() ||
+             request.ai_spline_temporary_interpolation_pipeline.has_value() ||
+             request.ai_spline_temporary_marker_pipeline.has_value() ||
+             request.ai_spline_camber_pipeline.has_value())) {
+            result.status = WorkspaceViewportStatus::unsupported;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_d3d12_native_overlay_unsupported",
+                "The first installed D3D12 native viewport cannot submit "
+                "wireframe, authoring, selection, or spline overlays");
+            return result;
+        }
         if ((request.directional_shadow_receiver &&
              !request.directional_shadows.has_value()) ||
             (request.directional_shadows.has_value() &&
-             !request.directional_shadow_receiver && !builtin_vulkan_source)) {
+             !request.directional_shadow_receiver && !builtin_vulkan_source &&
+             !builtin_d3d12_native)) {
             result.status = WorkspaceViewportStatus::invalid;
             result.diagnostic = diagnostic(
                 "workspace_viewport_directional_shadow_configuration_invalid",
-                "Directional shadows require the portable receiver or "
-                "immutable Vulkan source selector, and portable receivers "
-                "always require directional shadows");
+                "Directional shadows require the portable receiver or a "
+                "stock native selector, and portable receivers always "
+                "require directional shadows");
             return result;
         }
         render::Diagnostic shadow_program_diagnostic;
@@ -2222,6 +2339,12 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             request.builtin_vulkan_source;
         scene_request.builtin_vulkan_source_sampler_settings =
             request.builtin_vulkan_source_sampler_settings;
+        scene_request.builtin_d3d12_native =
+            request.builtin_d3d12_native;
+        scene_request.builtin_d3d12_native_programs =
+            request.builtin_d3d12_native_programs;
+        scene_request.builtin_d3d12_native_sampler_settings =
+            request.builtin_d3d12_native_sampler_settings;
         scene_request.overrides_by_material = material_overrides;
         scene_request.evaluate_damage_preview = request.evaluate_damage_preview;
         scene_request.damage_broken_visible = request.damage_broken_visible;
@@ -2251,7 +2374,17 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 "viewport-owned directional shadow maps");
             return result;
         }
-        if (execution->resources->requires_stock_vulkan_source_frame()) {
+        if (execution->resources->requires_stock_d3d12_native_frame() &&
+            shadow_maps == nullptr) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_stock_d3d12_native_shadows_missing",
+                "A selected installed D3D12 native program requires "
+                "viewport-owned directional shadow maps");
+            return result;
+        }
+        if (execution->resources->requires_stock_vulkan_source_frame() ||
+            execution->resources->requires_stock_d3d12_native_frame()) {
             directional_shadows->maps.lighting.splits =
                 render::ks_editor_shadow_splits;
             directional_shadows->maps.lighting.far_plane =

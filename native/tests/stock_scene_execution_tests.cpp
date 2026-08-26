@@ -23,30 +23,37 @@ void require(bool condition, const char* message) {
 
 class FakeBuffer final : public Buffer {
 public:
-    explicit FakeBuffer(BufferDescription description) : info_{{description}} {}
-    Backend backend() const noexcept override { return Backend::Vulkan; }
+    FakeBuffer(BufferDescription description, Backend backend)
+        : info_{{description}}, backend_(backend) {}
+    Backend backend() const noexcept override { return backend_; }
     const BufferInfo& info() const noexcept override { return info_; }
 private:
     BufferInfo info_{};
+    Backend backend_ = Backend::Vulkan;
 };
 
 class FakeSampler final : public Sampler {
 public:
-    explicit FakeSampler(SamplerDescription description) : info_{description} {}
-    Backend backend() const noexcept override { return Backend::Vulkan; }
+    FakeSampler(SamplerDescription description, Backend backend)
+        : info_{description}, backend_(backend) {}
+    Backend backend() const noexcept override { return backend_; }
     const SamplerInfo& info() const noexcept override { return info_; }
 private:
     SamplerInfo info_{};
+    Backend backend_ = Backend::Vulkan;
 };
 
 class FakeDevice final : public Device {
 public:
+    explicit FakeDevice(Backend backend = Backend::Vulkan)
+        : info_{backend, "fake", "unit", 1U, 0U, 0U, 0U, 0U, true} {}
     const DeviceInfo& info() const noexcept override { return info_; }
     BufferResult create_buffer(const BufferDescription& description,
                                std::span<const std::byte> initial_data) override {
         ++buffer_calls;
         initial_buffers.emplace_back(initial_data.begin(), initial_data.end());
-        return {BufferStatus::ready, {}, std::make_unique<FakeBuffer>(description)};
+        return {BufferStatus::ready, {},
+                std::make_unique<FakeBuffer>(description, info_.backend)};
     }
     BufferUpdateResult update_buffer(Buffer&, std::uint64_t,
                                      std::span<const std::byte>) override {
@@ -67,7 +74,7 @@ public:
     }
     SamplerResult create_sampler(const SamplerDescription& description) override {
         return {SamplerStatus::ready, {},
-                std::make_unique<FakeSampler>(description)};
+                std::make_unique<FakeSampler>(description, info_.backend)};
     }
     ShaderModuleResult create_shader_module(const ShaderModuleDescription&) override {
         return {ShaderModuleStatus::unsupported, {"unused", "unused"}, nullptr};
@@ -77,7 +84,7 @@ public:
     std::size_t buffer_calls = 0U;
     std::vector<std::vector<std::byte>> initial_buffers;
 private:
-    DeviceInfo info_{Backend::Vulkan, "fake", "unit", 1U, 0U, 0U, 0U, 0U, true};
+    DeviceInfo info_{};
 };
 
 std::vector<std::uint8_t> shader_fixture() {
@@ -242,6 +249,21 @@ void test_builtin_vulkan_source_selector_reaches_material_handoff() {
     require(result.ok() &&
                 result.resources->stock_vulkan_source_program_count() == 2U,
             "stock-scene source selector must reach material execution for opaque and transparent states");
+}
+
+void test_d3d12_native_selector_reaches_material_handoff() {
+    Fixture fixture_value = fixture();
+    auto request = request_for(fixture_value);
+    request.shader_modules = {};
+    request.builtin_d3d12_native =
+        BuiltinD3D12StockNativeSelector::ks_per_pixel_base;
+    FakeDevice device(Backend::D3D12);
+    const auto result = prepare_stock_scene_execution(device, request);
+    require(!result.ok() &&
+                result.diagnostic.code ==
+                    "stock_material_d3d12_native_program_count_invalid" &&
+                device.buffer_calls == 0U,
+            "stock-scene D3D12 selector must reach material validation before allocation");
 }
 
 void test_directional_shadow_receiver_reaches_material_handoff() {
@@ -767,6 +789,7 @@ int main() {
     try {
         test_success_and_plan_evidence();
         test_builtin_vulkan_source_selector_reaches_material_handoff();
+        test_d3d12_native_selector_reaches_material_handoff();
         test_directional_shadow_receiver_reaches_material_handoff();
         test_alpha_shadow_constants_reach_static_scene_handoff();
         test_resolved_subtree_filter_and_isolation_reach_facade();

@@ -232,7 +232,8 @@ public:
         return packets_;
     }
     [[nodiscard]] std::size_t unique_pipeline_count() const noexcept {
-        return pipelines_.size() + stock_vulkan_source_programs_.size();
+        return pipelines_.size() + stock_vulkan_source_programs_.size() +
+               stock_d3d12_native_programs_.size();
     }
     [[nodiscard]] std::size_t stock_vulkan_source_program_count() const
         noexcept {

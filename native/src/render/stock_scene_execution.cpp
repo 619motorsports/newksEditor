@@ -669,6 +669,12 @@ StockSceneExecutionResult prepare_stock_scene_execution(
             request.builtin_vulkan_source;
         material_request.builtin_vulkan_source_sampler_settings =
             request.builtin_vulkan_source_sampler_settings;
+        material_request.builtin_d3d12_native =
+            request.builtin_d3d12_native;
+        material_request.builtin_d3d12_native_programs =
+            request.builtin_d3d12_native_programs;
+        material_request.builtin_d3d12_native_sampler_settings =
+            request.builtin_d3d12_native_sampler_settings;
         material_request.overrides_by_material = material_overrides;
         material_request.targets = request.targets;
         material_request.wireframe = request.wireframe;

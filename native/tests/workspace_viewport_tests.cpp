@@ -1113,6 +1113,26 @@ void builds_checked_stock_vulkan_source_frames() {
                  singular, lighting),
             "source frame builder rejects singular camera state");
 
+    const CameraFrame d3d12_camera =
+        valid_shadow_camera(1.25F, CameraClipSpace::d3d12);
+    const auto d3d12_built =
+        apex::app::buildWorkspaceViewportStockD3D12NativeFrame(
+            d3d12_camera, lighting);
+    require(d3d12_built.has_value() &&
+                d3d12_built->camera.view ==
+                    stock_ks_per_pixel_transpose_matrix(d3d12_camera.view) &&
+                d3d12_built->camera.projection ==
+                    stock_ks_per_pixel_transpose_matrix(
+                        d3d12_camera.projection) &&
+                d3d12_built->camera.camera_position ==
+                    d3d12_camera.position,
+            "native frame builder accepts the D3D12 camera convention");
+    require(!apex::app::buildWorkspaceViewportStockD3D12NativeFrame(
+                 camera, lighting) &&
+                !apex::app::buildWorkspaceViewportStockVulkanSourceFrame(
+                    d3d12_camera, lighting),
+            "stock native frame builders reject cross-backend cameras");
+
     lighting.game_time = std::numeric_limits<float>::quiet_NaN();
     require(!apex::app::buildWorkspaceViewportStockVulkanSourceFrame(
                  camera, lighting),
@@ -4871,6 +4891,88 @@ void preserves_portable_and_d3d12_viewport_paths() {
             "explicit D3D12 modules retain the portable viewport draw path");
 }
 
+void rejects_invalid_d3d12_native_viewport_selection_before_allocation() {
+    auto value = fixture();
+    auto request = request_for(value);
+    request.shader_modules = {};
+    request.builtin_d3d12_native =
+        BuiltinD3D12StockNativeSelector::ks_per_pixel_base;
+    std::vector<StockMaterialD3D12NativeProgram> placeholder_programs = {
+        {"ksPerPixel", {}}};
+    request.builtin_d3d12_native_programs = placeholder_programs;
+
+    FakeDevice vulkan_device;
+    auto wrong_backend = apex::app::prepareWorkspaceViewport(
+        vulkan_device, value.document, request);
+    require(!wrong_backend.ok() &&
+                wrong_backend.status ==
+                    apex::app::WorkspaceViewportStatus::unsupported &&
+                wrong_backend.diagnostic.code ==
+                    "workspace_viewport_d3d12_native_backend_unsupported" &&
+                vulkan_device.buffer_calls == 0U &&
+                vulkan_device.texture_calls == 0U &&
+                vulkan_device.depth_calls == 0U &&
+                vulkan_device.sampler_calls == 0U,
+            "D3D12 native selection rejects Vulkan before allocation");
+
+    request.builtin_vulkan_source =
+        BuiltinVulkanStockSourceSelector::ks_per_pixel;
+    FakeDevice conflict_device(Backend::D3D12);
+    auto conflict = apex::app::prepareWorkspaceViewport(
+        conflict_device, value.document, request);
+    require(!conflict.ok() &&
+                conflict.diagnostic.code ==
+                    "workspace_viewport_native_selector_conflict" &&
+                conflict_device.buffer_calls == 0U &&
+                conflict_device.texture_calls == 0U &&
+                conflict_device.depth_calls == 0U,
+            "native selector conflict rejects before allocation");
+
+    request.builtin_vulkan_source =
+        BuiltinVulkanStockSourceSelector::disabled;
+    request.builtin_d3d12_native_programs = {};
+    FakeDevice empty_program_device(Backend::D3D12);
+    auto empty_programs = apex::app::prepareWorkspaceViewport(
+        empty_program_device, value.document, request);
+    require(!empty_programs.ok() &&
+                empty_programs.diagnostic.code ==
+                    "stock_material_d3d12_native_program_count_invalid" &&
+                empty_program_device.buffer_calls == 0U &&
+                empty_program_device.texture_calls == 0U &&
+                empty_program_device.depth_calls == 0U,
+            "empty native owner tables reject before viewport allocation");
+
+    request.builtin_d3d12_native_programs = placeholder_programs;
+    request.color_samples = 4U;
+    FakeDevice multisample_device(Backend::D3D12);
+    auto multisample = apex::app::prepareWorkspaceViewport(
+        multisample_device, value.document, request);
+    require(!multisample.ok() &&
+                multisample.status ==
+                    apex::app::WorkspaceViewportStatus::unsupported &&
+                multisample.diagnostic.code ==
+                    "workspace_viewport_d3d12_native_multisample_unsupported" &&
+                multisample_device.buffer_calls == 0U &&
+                multisample_device.texture_calls == 0U &&
+                multisample_device.depth_calls == 0U,
+            "native D3D12 multisampling rejects before allocation");
+
+    request.color_samples = 1U;
+    request.grid_visible = true;
+    FakeDevice overlay_device(Backend::D3D12);
+    auto overlay = apex::app::prepareWorkspaceViewport(
+        overlay_device, value.document, request);
+    require(!overlay.ok() &&
+                overlay.status ==
+                    apex::app::WorkspaceViewportStatus::unsupported &&
+                overlay.diagnostic.code ==
+                    "workspace_viewport_d3d12_native_overlay_unsupported" &&
+                overlay_device.buffer_calls == 0U &&
+                overlay_device.texture_calls == 0U &&
+                overlay_device.depth_calls == 0U,
+            "native D3D12 overlays reject before allocation");
+}
+
 void shares_live_camera_visibility_with_directional_shadows() {
     auto value = fixture();
     auto& body = value.document.scene.snapshot.nodes[1U];
@@ -5832,6 +5934,7 @@ int main() {
         prepares_and_draws_builtin_vulkan_source_viewport();
         rejects_invalid_builtin_vulkan_source_frames_before_draw();
         preserves_portable_and_d3d12_viewport_paths();
+        rejects_invalid_d3d12_native_viewport_selection_before_allocation();
         shares_live_camera_visibility_with_directional_shadows();
         retains_independent_shadowgen_visibility();
         rejects_invalid_inputs();

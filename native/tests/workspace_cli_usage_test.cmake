@@ -65,6 +65,81 @@ if(d3d_source_position EQUAL -1)
 endif()
 
 execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window d3d12
+          --d3d12-ks-per-pixel-package first.shader
+          --d3d12-ks-per-pixel-package second.shader
+  RESULT_VARIABLE duplicate_d3d12_package_result
+  ERROR_VARIABLE duplicate_d3d12_package_error
+)
+if(NOT duplicate_d3d12_package_result STREQUAL "1")
+  message(FATAL_ERROR
+    "duplicate D3D12 package returned ${duplicate_d3d12_package_result}: ${duplicate_d3d12_package_error}")
+endif()
+string(FIND "${duplicate_d3d12_package_error}"
+  "duplicate --d3d12-ks-per-pixel-package option"
+  duplicate_d3d12_package_position)
+if(duplicate_d3d12_package_position EQUAL -1)
+  message(FATAL_ERROR
+    "duplicate D3D12 package was not diagnosed: ${duplicate_d3d12_package_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window d3d12
+          --d3d12-ks-per-pixel-package detached.shader
+  RESULT_VARIABLE detached_d3d12_package_result
+  ERROR_VARIABLE detached_d3d12_package_error
+)
+if(NOT detached_d3d12_package_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached D3D12 package returned ${detached_d3d12_package_result}: ${detached_d3d12_package_error}")
+endif()
+string(FIND "${detached_d3d12_package_error}"
+  "shader modules require a workspace model"
+  detached_d3d12_package_position)
+if(detached_d3d12_package_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached D3D12 package was not diagnosed: ${detached_d3d12_package_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --model missing.kn5
+          --d3d12-ks-per-pixel-package missing.shader
+  RESULT_VARIABLE vulkan_d3d12_package_result
+  ERROR_VARIABLE vulkan_d3d12_package_error
+)
+if(NOT vulkan_d3d12_package_result STREQUAL "1")
+  message(FATAL_ERROR
+    "Vulkan D3D12 package returned ${vulkan_d3d12_package_result}: ${vulkan_d3d12_package_error}")
+endif()
+string(FIND "${vulkan_d3d12_package_error}"
+  "--d3d12-ks-per-pixel-package requires the D3D12 backend"
+  vulkan_d3d12_package_position)
+if(vulkan_d3d12_package_position EQUAL -1)
+  message(FATAL_ERROR
+    "Vulkan D3D12 package was not diagnosed before loading: ${vulkan_d3d12_package_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window d3d12
+          --model missing.kn5 --builtin-vulkan-ks-per-pixel
+          --d3d12-ks-per-pixel-package missing.shader
+  RESULT_VARIABLE native_selector_conflict_result
+  ERROR_VARIABLE native_selector_conflict_error
+)
+if(NOT native_selector_conflict_result STREQUAL "1")
+  message(FATAL_ERROR
+    "native selector conflict returned ${native_selector_conflict_result}: ${native_selector_conflict_error}")
+endif()
+string(FIND "${native_selector_conflict_error}"
+  "--builtin-vulkan-ks-per-pixel and --d3d12-ks-per-pixel-package are mutually exclusive"
+  native_selector_conflict_position)
+if(native_selector_conflict_position EQUAL -1)
+  message(FATAL_ERROR
+    "native selector conflict was not diagnosed: ${native_selector_conflict_error}")
+endif()
+
+execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --ai-spline fast_lane.ai
   RESULT_VARIABLE detached_ai_result
   ERROR_VARIABLE detached_ai_error
