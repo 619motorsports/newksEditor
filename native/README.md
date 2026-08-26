@@ -147,6 +147,9 @@ Probe an available backend or inspect a KSANIM file:
 ```sh
 out/native/dev/native/apex-native --backend vulkan
 out/native/dev/native/apex-native --inspect-kn5 model.kn5
+out/native/dev/native/apex-native --inspect-fbx model.fbx
+out/native/dev/native/apex-native --inspect-fbx model.fbx \
+  --fbx-assets path/to/authorized/assets
 out/native/dev/native/apex-native --inspect-dds texture.dds
 out/native/dev/native/apex-native --inspect-acd car_directory data.acd
 out/native/dev/native/apex-native --inspect-ini ext_config.ini
@@ -660,6 +663,9 @@ explicit `AssetSource` grant. A supported file-texture record does not count as
 an embedded-image gap after the authority resolves it. Embedded images and
 unsupported texture records remain staged. The FBX viewport overload rejects a
 staged document before it creates a Vulkan or D3D12 resource.
+The `--inspect-fbx` command uses this application path without creating a GPU
+backend. It reports staged models when no asset directory is granted. The
+optional `--fbx-assets` directory is the only authority for external textures.
 
 The strict Linux build detects the Vulkan SDK. The runtime test uses a software
 Vulkan device when an ICD is available. CI defines the same Vulkan test. The

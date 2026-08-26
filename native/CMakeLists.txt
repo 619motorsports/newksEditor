@@ -291,6 +291,15 @@ add_test(NAME apex_native_workspace_cli
 )
 set_tests_properties(apex_native_workspace_cli PROPERTIES LABELS "unit;security")
 
+add_test(NAME apex_native_fbx_cli
+  COMMAND ${CMAKE_COMMAND}
+    "-DAPEX_NATIVE_COMMAND=$<TARGET_FILE:apex_native_app>"
+    "-DAPEX_BINARY_DIR=${CMAKE_BINARY_DIR}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/fbx_cli_test.cmake"
+)
+set_tests_properties(apex_native_fbx_cli
+  PROPERTIES LABELS "unit;malformed;security")
+
 # Tests are intentionally discovered by filename. This keeps the native build
 # usable while the port is staged and gives each format/backend a separate
 # executable once its implementation lands in native/tests.

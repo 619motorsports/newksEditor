@@ -1,5 +1,6 @@
 #include "apex/app/ai_spline_legacy_conversion.hpp"
 #include "apex/app/authoring_service.hpp"
+#include "apex/app/fbx_preview_document.hpp"
 #include "apex/app/presentation_recreation.hpp"
 #include "apex/app/workspace_ai_spline.hpp"
 #include "apex/app/workspace_ai_spline_commands.hpp"
@@ -51,6 +52,8 @@
 
 namespace {
 
+void write_cli_text(std::ostream& output, std::string_view value);
+
 void usage(std::ostream& output) {
     output << "Usage:\n"
            << "  apex-native --backend vulkan|d3d12 [--validation]\n"
@@ -76,6 +79,7 @@ void usage(std::ostream& output) {
               "                       [--directional-shadow-alpha-vertex <file> --directional-shadow-alpha-fragment <file>]\n"
               "                       [--directional-shadow-skinned-vertex <file>]\n"
            << "  apex-native --inspect-kn5 <file>\n"
+           << "  apex-native --inspect-fbx <file> [--fbx-assets <directory>]\n"
            << "  apex-native --inspect-dds <file>\n"
            << "  apex-native --inspect-acd <asset-directory-name> <file>\n"
            << "  apex-native --inspect-ini <file>\n"
@@ -310,6 +314,48 @@ int inspect_kn5(const std::filesystem::path& path) {
         std::cout << ", " << model.encryption->format << (model.encryption->valid ? " valid" : " malformed");
     std::cout << '\n';
     return 0;
+}
+
+int inspect_fbx(const std::filesystem::path& path,
+                const std::optional<std::filesystem::path>& asset_root) {
+    const auto bytes = read_file(path);
+    apex::assets::AssetSource assets;
+    apex::app::FbxPreviewDocumentRequest request;
+    request.source = path.filename().generic_string();
+    request.bytes = bytes;
+    if (asset_root.has_value()) {
+        assets.addDirectory(*asset_root);
+        request.textures = apex::app::FbxPreviewTextureGrant{
+            "cli-fbx-assets", &assets};
+    }
+
+    const auto result = apex::app::open_fbx_preview_document(request);
+    for (const auto& diagnostic : result.diagnostics) {
+        write_cli_text(std::cerr, diagnostic.code);
+        if (!diagnostic.path.empty()) {
+            std::cerr << " [";
+            write_cli_text(std::cerr, diagnostic.path);
+            std::cerr << ']';
+        }
+        if (diagnostic.offset != 0U)
+            std::cerr << " at byte " << diagnostic.offset;
+        std::cerr << ": ";
+        write_cli_text(std::cerr, diagnostic.message);
+        std::cerr << '\n';
+    }
+
+    write_cli_text(std::cout, path.string());
+    std::cout << ": FBX "
+              << apex::app::fbx_preview_document_status_name(result.status);
+    if (result.document.has_value()) {
+        const auto& model = result.document->assembly.model;
+        std::cout << ", " << apex::formats::walkKn5(model.root).size()
+                  << " nodes, " << model.materials.size() << " materials, "
+                  << model.textures.size() << " textures, "
+                  << result.animations.size() << " animations";
+    }
+    std::cout << '\n';
+    return result.ok() ? 0 : 1;
 }
 
 int inspect_dds(const std::filesystem::path& path) {
@@ -562,8 +608,6 @@ double parse_finite_number(std::string_view value, std::string_view label) {
     }
     return result;
 }
-
-void write_cli_text(std::ostream& output, std::string_view value);
 
 float parse_finite_float(std::string_view value, std::string_view label) {
     const double parsed = parse_finite_number(value, label);
@@ -2700,6 +2744,15 @@ int main(int argc, char** argv) {
             return inspect_ksanim(argv[2]);
         if (argc == 3 && std::string_view(argv[1]) == "--inspect-kn5")
             return inspect_kn5(argv[2]);
+        if (argc >= 2 && std::string_view(argv[1]) == "--inspect-fbx") {
+            if (argc == 3)
+                return inspect_fbx(argv[2], std::nullopt);
+            if (argc == 5 &&
+                std::string_view(argv[3]) == "--fbx-assets")
+                return inspect_fbx(argv[2], std::filesystem::path(argv[4]));
+            usage(std::cerr);
+            return 2;
+        }
         if (argc == 3 && std::string_view(argv[1]) == "--inspect-dds")
             return inspect_dds(argv[2]);
         if (argc == 4 && std::string_view(argv[1]) == "--inspect-acd")
