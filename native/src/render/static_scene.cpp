@@ -768,15 +768,21 @@ StaticSceneResourceResult prepare_static_scene_resources(
                       static_cast<std::size_t>(raw_source_program)]
                 : nullptr;
         if (stock_vulkan_source) {
+            const bool material_base = canonical_resource_equals(
+                model.materials[material_index].shader, "ksperpixel");
+            const bool material_at = canonical_resource_equals(
+                model.materials[material_index].shader, "ksperpixelat");
+            const bool profile_base = canonical_resource_equals(
+                packet.material_profile.shader, "ksperpixel");
+            const bool profile_at = canonical_resource_equals(
+                packet.material_profile.shader, "ksperpixelat");
             if (!static_mesh ||
-                !canonical_resource_equals(
-                    model.materials[material_index].shader, "ksperpixel") ||
-                !canonical_resource_equals(
-                    packet.material_profile.shader, "ksperpixel"))
+                !((material_base && profile_base) ||
+                  (material_at && profile_at)))
                 return fail(
                     StaticSceneResourceStatus::unsupported,
                     "static_scene_stock_vulkan_source_material_unsupported",
-                    "Vulkan source-equivalent execution supports only resolved static ksPerPixel packets");
+                    "Vulkan source-equivalent execution supports only resolved static ksPerPixel and ksPerPixelAT packets");
             if (source_program == nullptr || *source_program == nullptr ||
                 &(*source_program)->pipeline() != pipeline ||
                 (*source_program)->validation_status() !=

@@ -30,7 +30,8 @@ namespace {
 
 [[nodiscard]] bool supported_family(std::string_view shader) {
     const std::string key = canonical(shader);
-    return key == "ksperpixel" || key == "ksskinnedmesh" ||
+    return key == "ksperpixel" || key == "ksperpixelat" ||
+           key == "ksskinnedmesh" ||
            key == "ksperpixelnm" ||
            key == "ksperpixelmultimap" ||
            key == "ksperpixelmultimap_at" ||
@@ -168,7 +169,8 @@ namespace {
 
 [[nodiscard]] std::size_t expected_texture_slots(std::string_view shader) {
     const std::string key = canonical(shader);
-    if (key == "ksperpixel" || key == "ksskinnedmesh") return 1U;
+    if (key == "ksperpixel" || key == "ksperpixelat" ||
+        key == "ksskinnedmesh") return 1U;
     if (key == "ksperpixelnm") return 2U;
     if (key == "ksperpixelmultimap" || key == "ksperpixelmultimap_at") return 3U;
     return 5U;
@@ -607,8 +609,10 @@ StockMaterialExecutionResult prepare_stock_material_execution(
 
             const KsPerPixelMaterialResolveResult resolved =
                 resolve_ks_per_pixel_material_constants(binding,
-                    {false, shader_key == "ksperpixelmultimap_at" ||
-                                shader_key == "ksperpixelmultimap_at_nmdetail"});
+                    {false, shader_key == "ksperpixelat" ||
+                                shader_key == "ksperpixelmultimap_at" ||
+                                shader_key ==
+                                    "ksperpixelmultimap_at_nmdetail"});
             if (!resolved.ok()) {
                 const StaticSceneResourceStatus status =
                     resolved.status == KsPerPixelMaterialResolveStatus::unsupported
@@ -670,11 +674,14 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                 const StockMaterialShaderModules* modules = find_modules(
                     request.shader_modules, source.name, binding.shader, shader_variant,
                     request.directional_shadow_receiver);
+                const bool exact_source_family =
+                    canonical(source.shader) == shader_key &&
+                    (shader_key == "ksperpixel" ||
+                     shader_key == "ksperpixelat");
                 const bool source_candidate =
                     request.builtin_vulkan_source ==
                         BuiltinVulkanStockSourceSelector::ks_per_pixel &&
-                    canonical(source.shader) == "ksperpixel" &&
-                    shader_key == "ksperpixel" &&
+                    exact_source_family &&
                     packet.primitive == DrawPrimitiveKind::static_mesh &&
                     shader_variant == StockMaterialShaderVariant::standard &&
                     !request.directional_shadow_receiver;

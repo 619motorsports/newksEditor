@@ -4678,9 +4678,19 @@ void prepares_and_draws_builtin_vulkan_source_viewport() {
     FakeTarget target(request.presentation);
     WorkspaceViewportFrameRequest frame;
     frame.camera = valid_shadow_camera();
-    frame.stock_vulkan_source_frame = valid_source_frame(frame.camera);
-    frame.frame_constants = KsPerPixelFrameConstants{};
-    frame.frame_constants->sun_direction = {0.0F, 0.0F, 1.0F, 0.0F};
+    const auto evaluated = apex::app::evaluateWorkspaceViewportLighting({});
+    const auto native_lighting =
+        apex::app::buildWorkspaceViewportStockVulkanSourceLighting(
+            evaluated.evaluated, request.presentation.width,
+            request.presentation.height);
+    require(native_lighting.has_value(),
+            "evaluated weather builds the native source lighting record");
+    frame.stock_vulkan_source_frame =
+        apex::app::buildWorkspaceViewportStockVulkanSourceFrame(
+            frame.camera, *native_lighting);
+    require(frame.stock_vulkan_source_frame.has_value(),
+            "the live camera builds the native source frame record");
+    frame.frame_constants = evaluated.frame_constants;
     Diagnostic diagnostic;
     const auto source_status = prepared.viewport->drawAndPresent(
         device, target, frame, diagnostic);
@@ -4711,7 +4721,10 @@ void prepares_and_draws_builtin_vulkan_source_viewport() {
     expected_shadow.near_plane = frame.camera.near_plane;
     expected_shadow.far_plane = ks_editor_shadow_range;
     expected_shadow.splits = ks_editor_shadow_splits;
-    expected_shadow.sun_direction = {0.0F, 0.0F, 1.0F};
+    expected_shadow.sun_direction = {
+        -frame.stock_vulkan_source_frame->lighting.light_direction[0],
+        -frame.stock_vulkan_source_frame->lighting.light_direction[1],
+        -frame.stock_vulkan_source_frame->lighting.light_direction[2]};
     const auto expected_cascades =
         computeDirectionalShadowCascades(expected_shadow);
     const auto expected_matrix = convertDirectionalShadowCascadeMatrix(
@@ -4724,7 +4737,7 @@ void prepares_and_draws_builtin_vulkan_source_viewport() {
                            [](float left, float right) {
                                return std::abs(left - right) < 1.0e-5F;
                            }),
-            "source shadows use installed-editor splits, range, and the opposite native light ray");
+            "production weather and camera builders drive installed-editor source shadows");
 }
 
 void rejects_invalid_builtin_vulkan_source_frames_before_draw() {

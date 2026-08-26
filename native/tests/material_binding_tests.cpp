@@ -313,6 +313,18 @@ void resolves_ks_per_pixel_defaults_and_kn5_values() {
                 default_result.constants.fresnel == std::array<float, 4>{0.0F, 5.0F, 0.05F, 0.0F} &&
                 default_result.constants.emissive == std::array<float, 4>{0, 0, 0, 0},
             "ksPerPixel defaults match the production binder");
+
+    defaults.shader = "ksPerPixelAT";
+    defaults.resources.push_back({"txDiffuse", 0U, "alpha.dds"});
+    const MaterialBinding alpha_tested = build_material_binding(defaults, 1);
+    const auto alpha_tested_result =
+        resolve_ks_per_pixel_material_constants(alpha_tested);
+    require(alpha_tested.status == MaterialBindingStatus::complete &&
+                alpha_tested.profile.alpha_to_coverage &&
+                alpha_tested_result.ok() &&
+                alpha_tested_result.constants.lighting ==
+                    default_result.constants.lighting,
+            "ksPerPixelAT reuses the exact diffuse-only material ABI");
 }
 
 void adapts_the_bounded_kn5_parser_model() {

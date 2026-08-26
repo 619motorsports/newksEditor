@@ -222,11 +222,12 @@ Fixture fixture(std::string shader, Backend backend = Backend::Vulkan) {
     const bool base_multimap = material.shader == "ksPerPixelMultiMap" ||
                                material.shader == "ksPerPixelMultiMap_AT" ||
                                material.shader == "ksPerPixelMultiMapSimpleRefl";
-    const std::size_t count = material.shader == "ksPerPixel" || skinned
-                                  ? 1U
-                                  : material.shader == "ksPerPixelNM"
-                                        ? 2U
-                                        : base_multimap ? 3U : 5U;
+    const std::size_t count =
+        material.shader == "ksPerPixel" ||
+                material.shader == "ksPerPixelAT" || skinned
+            ? 1U
+            : material.shader == "ksPerPixelNM" ? 2U
+                                                 : base_multimap ? 3U : 5U;
     for (std::size_t index = 0U; index < count; ++index)
         packet.resources.push_back({slots[index], static_cast<std::uint32_t>(index),
                                     static_cast<std::uint32_t>(index), std::string("texture_") + std::to_string(index)});
@@ -274,11 +275,15 @@ StockMaterialExecutionRequest request_for(Fixture& fixture) {
     request.scene = &fixture.scene;
     request.packets = fixture.packets;
     request.shader_modules = std::span<const StockMaterialShaderModules>(&fixture.module_set, 1U);
-    request.targets.colors.push_back({PipelineRenderTargetFormat::rgba8_unorm,
-                                      fixture.model.materials.front().serializedBlendMode == 2U ? 4U : 1U});
+    const bool alpha_to_coverage =
+        fixture.model.materials.front().shader == "ksPerPixelAT" ||
+        fixture.model.materials.front().serializedBlendMode == 2U;
+    request.targets.colors.push_back(
+        {PipelineRenderTargetFormat::rgba8_unorm,
+         alpha_to_coverage ? 4U : 1U});
     request.targets.has_depth = true;
     request.targets.depth = {PipelineRenderTargetFormat::depth32_float,
-                             fixture.model.materials.front().serializedBlendMode == 2U ? 4U : 1U};
+                             alpha_to_coverage ? 4U : 1U};
     return request;
 }
 
@@ -677,6 +682,57 @@ void test_builtin_vulkan_source_selector() {
                 shadow.max_lod == std::numeric_limits<float>::max(),
             "source sampler contract must retain the comparison shadow sampler");
 
+    Fixture alpha_fixture = fixture("ksPerPixelAT");
+    alpha_fixture.model.materials[0].properties.push_back(
+        {"ksAlphaRef", 0.61F, {}, {}, {}});
+    auto alpha_request = request_for(alpha_fixture);
+    alpha_request.shader_modules = {};
+    alpha_request.builtin_vulkan_source =
+        BuiltinVulkanStockSourceSelector::ks_per_pixel;
+    FakeDevice alpha_device;
+    const auto alpha = prepare_stock_material_execution(
+        alpha_device, alpha_request);
+    if (!alpha.ok())
+        throw std::runtime_error("ksPerPixelAT source handoff failed: " +
+                                 alpha.diagnostic.code + " " +
+                                 alpha.diagnostic.message);
+    require(alpha.resources->stock_vulkan_source_program_count() == 1U &&
+                alpha.resources->prepared_packets().front()
+                    .flags.alpha_to_coverage &&
+                alpha.resources->prepared_packets().front()
+                    .material_profile.alpha_to_coverage,
+            "exact ksPerPixelAT selects the retained four-sample source program");
+    bool found_alpha_material = false;
+    for (const std::vector<std::byte>& bytes : alpha_device.initial_buffers) {
+        if (bytes.size() !=
+            stock_ks_per_pixel_native_constant_buffer_view_bytes)
+            continue;
+        StockKsPerPixelMaterialConstants native_material{};
+        std::memcpy(&native_material, bytes.data(), sizeof(native_material));
+        found_alpha_material =
+            found_alpha_material ||
+            std::abs(native_material.alpha_reference - 0.61F) < 0.0001F;
+    }
+    require(found_alpha_material,
+            "ksPerPixelAT source b4 preserves its authored alpha reference");
+
+    auto alpha_single_sample = request_for(alpha_fixture);
+    alpha_single_sample.shader_modules = {};
+    alpha_single_sample.builtin_vulkan_source =
+        BuiltinVulkanStockSourceSelector::ks_per_pixel;
+    alpha_single_sample.targets.colors.front().samples = 1U;
+    alpha_single_sample.targets.depth.samples = 1U;
+    FakeDevice alpha_single_sample_device;
+    const auto rejected_alpha = prepare_stock_material_execution(
+        alpha_single_sample_device, alpha_single_sample);
+    require(rejected_alpha.status ==
+                    StaticSceneResourceStatus::invalid_request &&
+                rejected_alpha.diagnostic.code ==
+                    "stock_material_pipeline_invalid" &&
+                alpha_single_sample_device.buffer_calls == 0U &&
+                alpha_single_sample_device.sampler_descriptions.empty(),
+            "ksPerPixelAT rejects a one-sample source target before allocation");
+
     Fixture explicit_fixture = fixture("ksPerPixel");
     auto explicit_request = request_for(explicit_fixture);
     explicit_request.builtin_vulkan_source =
@@ -689,6 +745,21 @@ void test_builtin_vulkan_source_selector() {
                 explicit_result.resources->unique_pipeline_count() == 1U &&
                 explicit_device.sampler_descriptions.empty(),
             "explicit ksPerPixel modules must take precedence over source fallback");
+
+    Fixture explicit_alpha_fixture = fixture("ksPerPixelAT");
+    auto explicit_alpha_request = request_for(explicit_alpha_fixture);
+    explicit_alpha_request.builtin_vulkan_source =
+        BuiltinVulkanStockSourceSelector::ks_per_pixel;
+    FakeDevice explicit_alpha_device;
+    const auto explicit_alpha_result = prepare_stock_material_execution(
+        explicit_alpha_device, explicit_alpha_request);
+    require(explicit_alpha_result.ok() &&
+                explicit_alpha_result.resources
+                        ->stock_vulkan_source_program_count() == 0U &&
+                explicit_alpha_result.resources->unique_pipeline_count() ==
+                    1U &&
+                explicit_alpha_device.sampler_descriptions.empty(),
+            "explicit ksPerPixelAT modules remain authoritative");
 
     Fixture d3d_fixture = fixture("ksPerPixel", Backend::D3D12);
     auto d3d_request = request_for(d3d_fixture);
@@ -703,6 +774,21 @@ void test_builtin_vulkan_source_selector() {
                     "stock_material_builtin_source_backend_unsupported" &&
                 d3d_device.buffer_calls == 0U,
             "Vulkan source fallback must reject D3D12 before allocation");
+
+    Fixture d3d_alpha_fixture = fixture("ksPerPixelAT", Backend::D3D12);
+    auto d3d_alpha_request = request_for(d3d_alpha_fixture);
+    d3d_alpha_request.shader_modules = {};
+    d3d_alpha_request.builtin_vulkan_source =
+        BuiltinVulkanStockSourceSelector::ks_per_pixel;
+    FakeDevice d3d_alpha_device(Backend::D3D12);
+    const auto d3d_alpha_result = prepare_stock_material_execution(
+        d3d_alpha_device, d3d_alpha_request);
+    require(d3d_alpha_result.status ==
+                    StaticSceneResourceStatus::unsupported &&
+                d3d_alpha_result.diagnostic.code ==
+                    "stock_material_builtin_source_backend_unsupported" &&
+                d3d_alpha_device.buffer_calls == 0U,
+            "ksPerPixelAT Vulkan source fallback rejects D3D12 before allocation");
 
     Fixture multi_map_fixture = fixture("ksPerPixelMultiMap");
     auto multi_map_request = request_for(multi_map_fixture);
