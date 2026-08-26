@@ -653,6 +653,105 @@ void rejectsOversizedUploadSubresourceLists() {
             "an oversized upload list is rejected before iteration");
 }
 
+void validatesExplicitCubeTextureContracts() {
+    constexpr std::array<CubeFace, texture_cube_face_count> faces = {
+        CubeFace::positive_x, CubeFace::negative_x, CubeFace::positive_y,
+        CubeFace::negative_y, CubeFace::positive_z, CubeFace::negative_z};
+    const std::array<std::byte, 16U> rgba = {};
+
+    TextureDescription cube;
+    cube.width = 2U;
+    cube.height = 2U;
+    cube.format = TextureFormat::rgba8_unorm;
+    cube.usage = TextureUsage::sampled;
+    cube.shape = TextureShape::texture_cube;
+    TextureUploadPlan uploads;
+    for (const CubeFace face : faces)
+        uploads.subresources.push_back({0U, 0U, 2U, 2U, 8U, rgba, face});
+
+    Diagnostic diagnostic;
+    require(validate_texture_description(cube, uploads, diagnostic) ==
+                TextureStatus::ready &&
+                texture_physical_array_layers(cube) == 6U &&
+                texture_upload_physical_array_layer(
+                    cube, uploads.subresources.back()) == 5U,
+            "an explicit six-face cube maps to six physical layers");
+
+    TextureDescription ordinary_array = cube;
+    ordinary_array.shape = TextureShape::texture_2d;
+    ordinary_array.array_layers = 6U;
+    require(texture_physical_array_layers(ordinary_array) == 6U,
+            "a six-layer 2D array is not inferred to be a cube");
+
+    TextureUploadPlan missing_face = uploads;
+    missing_face.subresources.front().cube_face = CubeFace::none;
+    require(validate_texture_upload_plan(cube, missing_face, diagnostic) ==
+                TextureStatus::invalid_description &&
+                diagnostic.code == "texture_cube_face_missing",
+            "cube uploads require an explicit face");
+
+    TextureUploadPlan unexpected_face;
+    unexpected_face.subresources.push_back(
+        {0U, 0U, 2U, 2U, 8U, rgba, CubeFace::positive_x});
+    TextureDescription ordinary;
+    ordinary.width = 2U;
+    ordinary.height = 2U;
+    ordinary.format = TextureFormat::rgba8_unorm;
+    ordinary.usage = TextureUsage::sampled;
+    require(validate_texture_upload_plan(ordinary, unexpected_face, diagnostic) ==
+                TextureStatus::invalid_description &&
+                diagnostic.code == "texture_cube_face_unexpected",
+            "2D uploads reject cube-face metadata");
+
+    TextureUploadPlan duplicate = uploads;
+    duplicate.subresources.push_back(duplicate.subresources.front());
+    require(validate_texture_upload_plan(cube, duplicate, diagnostic) ==
+                TextureStatus::invalid_description &&
+                diagnostic.code == "texture_subresource_duplicate",
+            "cube duplicate detection includes the face");
+
+    TextureDescription non_square = cube;
+    non_square.height = 1U;
+    require(validate_texture_description(non_square, {}, diagnostic) ==
+                TextureStatus::invalid_description &&
+                diagnostic.code == "texture_cube_dimensions_invalid",
+            "non-square cubes are rejected before allocation");
+
+    TextureDescription multisampled = cube;
+    multisampled.samples = 4U;
+    require(validate_texture_description(multisampled, {}, diagnostic) ==
+                TextureStatus::invalid_description &&
+                diagnostic.code == "texture_cube_samples_invalid",
+            "multisampled cubes are rejected before allocation");
+
+    TextureDescription oversized_cube_array = cube;
+    oversized_cube_array.array_layers = 342U;
+    require(validate_texture_description(oversized_cube_array, {}, diagnostic) ==
+                TextureStatus::invalid_description &&
+                diagnostic.code == "texture_layer_limit",
+            "logical cube arrays obey the physical layer limit");
+
+    const std::array<std::byte, 8U> bc1_block = {};
+    TextureDescription compressed_cube = cube;
+    compressed_cube.width = 4U;
+    compressed_cube.height = 4U;
+    compressed_cube.format = TextureFormat::bc1_unorm;
+    TextureUploadPlan compressed_uploads;
+    for (const CubeFace face : faces)
+        compressed_uploads.subresources.push_back(
+            {0U, 0U, 4U, 4U, 8U, bc1_block, face});
+    require(validate_texture_description(compressed_cube, compressed_uploads,
+                                         diagnostic) == TextureStatus::ready,
+            "compressed cubes require and accept all six faces");
+    compressed_uploads.subresources.back().data =
+        std::span<const std::byte>(bc1_block.data(), bc1_block.size() - 1U);
+    require(validate_texture_description(compressed_cube, compressed_uploads,
+                                         diagnostic) ==
+                TextureStatus::invalid_description &&
+                diagnostic.code == "texture_upload_truncated",
+            "a truncated sixth compressed face has no valid upload plan");
+}
+
 } // namespace
 
 int main() {
@@ -667,6 +766,7 @@ int main() {
         plansPortableDecodedTextureResources();
         plansPortableJpegResources();
         rejectsOversizedUploadSubresourceLists();
+        validatesExplicitCubeTextureContracts();
         std::cout << "texture upload tests passed\n";
         return 0;
     } catch (const std::exception& error) {

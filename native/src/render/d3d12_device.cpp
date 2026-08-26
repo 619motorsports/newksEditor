@@ -980,7 +980,9 @@ bool execute_texture_upload(const std::shared_ptr<D3D12Context>& context,
         diagnostic = {"texture_format_unknown", "Texture upload format has no byte layout"};
         return false;
     }
-    const UINT subresource_count = description.mip_levels * description.array_layers;
+    const UINT subresource_count = static_cast<UINT>(
+        static_cast<std::uint64_t>(description.mip_levels) *
+        texture_physical_array_layers(description));
     std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(subresource_count);
     std::vector<UINT> row_counts(subresource_count);
     std::vector<UINT64> row_sizes(subresource_count);
@@ -1029,7 +1031,10 @@ bool execute_texture_upload(const std::shared_ptr<D3D12Context>& context,
             return false;
         }
         for (const TextureUpload& upload : uploads.subresources) {
-            const UINT subresource = upload.array_layer * description.mip_levels + upload.mip_level;
+            const UINT subresource = static_cast<UINT>(
+                texture_upload_physical_array_layer(description, upload) *
+                    description.mip_levels +
+                upload.mip_level);
             const auto& footprint = footprints[subresource];
             const std::size_t row_bytes = compressed
                                               ? ((static_cast<std::size_t>(upload.width) +
@@ -6539,12 +6544,14 @@ public:
                          "D3D12 supports only BC1, BC2, BC3, BC4, BC5, BC6H, and BC7 compressed sampled textures"},
                         nullptr};
             }
+            const bool supported_layers = description.shape == TextureShape::texture_cube ||
+                                          description.array_layers == 1U;
             if (description.usage != TextureUsage::sampled ||
                 description.mutability != TextureMutability::immutable ||
-                description.samples != 1U || description.array_layers != 1U) {
+                description.samples != 1U || !supported_layers) {
                 return {TextureStatus::unsupported,
                         {"d3d12_compressed_texture_unsupported",
-                         "D3D12 BC1, BC2, BC3, BC4, BC5, BC6H, and BC7 textures require immutable sampled one-layer, single-sample resources"},
+                         "D3D12 BC1, BC2, BC3, BC4, BC5, BC6H, and BC7 textures require immutable sampled one-layer 2D or explicit cube, single-sample resources"},
                         nullptr};
             }
             if (!validate_d3d12_texture_format_support(
@@ -6579,7 +6586,8 @@ public:
         resource_description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         resource_description.Width = description.width;
         resource_description.Height = description.height;
-        resource_description.DepthOrArraySize = static_cast<UINT16>(description.array_layers);
+        resource_description.DepthOrArraySize =
+            static_cast<UINT16>(texture_physical_array_layers(description));
         resource_description.MipLevels = static_cast<UINT16>(description.mip_levels);
         resource_description.Format = dxgi_texture_format(description.format);
         resource_description.SampleDesc.Count = description.samples;

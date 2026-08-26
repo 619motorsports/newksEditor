@@ -260,6 +260,23 @@ enum class TextureMutability : std::uint8_t {
     mutable_data,
 };
 
+enum class TextureShape : std::uint8_t {
+    texture_2d,
+    texture_cube,
+};
+
+enum class CubeFace : std::uint8_t {
+    positive_x = 0,
+    negative_x = 1,
+    positive_y = 2,
+    negative_y = 3,
+    positive_z = 4,
+    negative_z = 5,
+    none = 0xff,
+};
+
+inline constexpr std::uint32_t texture_cube_face_count = 6U;
+
 struct TextureDescription {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
@@ -270,6 +287,9 @@ struct TextureDescription {
     TextureMemory memory = TextureMemory::device_local;
     TextureMutability mutability = TextureMutability::immutable;
     std::uint32_t samples = 1;
+    // For texture_cube, array_layers is the logical cube count. Backends own
+    // six physical layers per cube; a six-layer texture_2d remains a 2D array.
+    TextureShape shape = TextureShape::texture_2d;
 };
 
 struct TextureUpload {
@@ -279,7 +299,30 @@ struct TextureUpload {
     std::uint32_t height = 0;
     std::uint32_t row_pitch = 0;
     std::span<const std::byte> data{};
+    // Required for texture_cube and forbidden for texture_2d. array_layer is
+    // the logical cube index when this field names a face.
+    CubeFace cube_face = CubeFace::none;
 };
+
+[[nodiscard]] constexpr bool is_cube_face(const CubeFace face) noexcept {
+    return static_cast<std::uint8_t>(face) < texture_cube_face_count;
+}
+
+[[nodiscard]] constexpr std::uint64_t
+texture_physical_array_layers(const TextureDescription& description) noexcept {
+    return description.shape == TextureShape::texture_cube
+               ? static_cast<std::uint64_t>(description.array_layers) * texture_cube_face_count
+               : description.array_layers;
+}
+
+[[nodiscard]] constexpr std::uint64_t
+texture_upload_physical_array_layer(const TextureDescription& description,
+                                    const TextureUpload& upload) noexcept {
+    return description.shape == TextureShape::texture_cube
+               ? static_cast<std::uint64_t>(upload.array_layer) * texture_cube_face_count +
+                     static_cast<std::uint8_t>(upload.cube_face)
+               : upload.array_layer;
+}
 
 struct TextureUploadPlan {
     std::vector<TextureUpload> subresources;

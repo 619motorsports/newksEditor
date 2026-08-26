@@ -89,11 +89,31 @@ TextureStatus validate_texture_block_upload_contract(const TextureDescription& d
                       "This block-compressed texture format is not supported by the neutral upload contract"};
         return TextureStatus::unsupported;
     }
+    const bool supported_layers = description.shape == TextureShape::texture_cube ||
+                                  description.array_layers == 1U;
     if (description.samples != 1U || description.mutability != TextureMutability::immutable ||
-        description.array_layers != 1U || description.usage != TextureUsage::sampled) {
+        !supported_layers || description.usage != TextureUsage::sampled) {
         diagnostic = {"texture_compressed_upload_unsupported",
-                      "BC1, BC2, BC3, BC4, BC5, BC6H, and BC7 uploads require one-layer, one-sample immutable sampled texture resources"};
+                      "BC1, BC2, BC3, BC4, BC5, BC6H, and BC7 uploads require one-layer 2D or explicit cube, one-sample immutable sampled resources"};
         return TextureStatus::unsupported;
+    }
+    return TextureStatus::ready;
+}
+
+TextureStatus validate_texture_shape_contract(const TextureDescription& description,
+                                               Diagnostic& diagnostic) {
+    if (description.shape != TextureShape::texture_2d &&
+        description.shape != TextureShape::texture_cube) {
+        diagnostic = {"texture_shape_unknown", "The texture shape is not recognized by the native contract"};
+        return TextureStatus::invalid_description;
+    }
+    if (description.shape == TextureShape::texture_cube && description.width != description.height) {
+        diagnostic = {"texture_cube_dimensions_invalid", "Cube textures require equal width and height"};
+        return TextureStatus::invalid_description;
+    }
+    if (description.shape == TextureShape::texture_cube && description.samples != 1U) {
+        diagnostic = {"texture_cube_samples_invalid", "Cube textures require one sample per texel"};
+        return TextureStatus::invalid_description;
     }
     return TextureStatus::ready;
 }
@@ -102,7 +122,8 @@ TextureStatus validate_texture_scalar_float_contract(const TextureDescription& d
                                                       Diagnostic& diagnostic) {
     if (description.format != TextureFormat::r32_sfloat) return TextureStatus::ready;
     if (description.samples != 1U || description.mutability != TextureMutability::immutable ||
-        description.array_layers != 1U || description.usage != TextureUsage::sampled) {
+        description.shape != TextureShape::texture_2d || description.array_layers != 1U ||
+        description.usage != TextureUsage::sampled) {
         diagnostic = {"texture_scalar_float_upload_unsupported",
                       "R32_SFLOAT textures require one-layer, one-sample immutable sampled resources"};
         return TextureStatus::unsupported;
@@ -313,6 +334,8 @@ TextureStatus validate_texture_upload_plan(const TextureDescription& description
         diagnostic = {"texture_dimensions_invalid", "Texture dimensions, mip levels, and array layers must be non-zero"};
         return TextureStatus::invalid_description;
     }
+    const TextureStatus shape_status = validate_texture_shape_contract(description, diagnostic);
+    if (shape_status != TextureStatus::ready) return shape_status;
     const TextureStatus sample_status =
         validate_texture_sample_contract(description, !uploads.subresources.empty(), diagnostic);
     if (sample_status != TextureStatus::ready) return sample_status;
@@ -321,8 +344,9 @@ TextureStatus validate_texture_upload_plan(const TextureDescription& description
         diagnostic = {"texture_dimension_limit", "Texture upload dimensions exceed the backend-neutral safety limit"};
         return TextureStatus::invalid_description;
     }
-    if (description.array_layers > 2048U ||
-        static_cast<std::uint64_t>(description.mip_levels) * description.array_layers > 65535U) {
+    const std::uint64_t physical_layers = texture_physical_array_layers(description);
+    if (physical_layers > 2048U ||
+        static_cast<std::uint64_t>(description.mip_levels) * physical_layers > 65535U) {
         diagnostic = {"texture_subresource_limit", "Texture upload subresources exceed the backend-neutral safety limit"};
         return TextureStatus::invalid_description;
     }
@@ -355,6 +379,14 @@ TextureStatus validate_texture_upload_plan(const TextureDescription& description
     std::set<std::uint64_t> seen;
     std::uint64_t upload_total = 0U;
     for (const TextureUpload& upload : uploads.subresources) {
+        if (description.shape == TextureShape::texture_2d && upload.cube_face != CubeFace::none) {
+            diagnostic = {"texture_cube_face_unexpected", "A 2D texture upload cannot name a cube face"};
+            return TextureStatus::invalid_description;
+        }
+        if (description.shape == TextureShape::texture_cube && !is_cube_face(upload.cube_face)) {
+            diagnostic = {"texture_cube_face_missing", "Each cube texture upload must name one of six faces"};
+            return TextureStatus::invalid_description;
+        }
         if (upload.mip_level >= description.mip_levels || upload.array_layer >= description.array_layers) {
             diagnostic = {"texture_subresource_out_of_range", "Texture upload subresource is outside the description"};
             return TextureStatus::invalid_description;
@@ -405,7 +437,8 @@ TextureStatus validate_texture_upload_plan(const TextureDescription& description
             return TextureStatus::invalid_description;
         }
         upload_total += upload_size;
-        const std::uint64_t key = (static_cast<std::uint64_t>(upload.array_layer) << 32U) | upload.mip_level;
+        const std::uint64_t physical_layer = texture_upload_physical_array_layer(description, upload);
+        const std::uint64_t key = (physical_layer << 32U) | upload.mip_level;
         if (!seen.insert(key).second) {
             diagnostic = {"texture_subresource_duplicate", "Texture upload plan contains a duplicate subresource"};
             return TextureStatus::invalid_description;
@@ -422,6 +455,8 @@ TextureStatus validate_texture_description(const TextureDescription& description
         diagnostic = {"texture_dimensions_invalid", "Texture dimensions, mip levels, and array layers must be non-zero"};
         return TextureStatus::invalid_description;
     }
+    const TextureStatus shape_status = validate_texture_shape_contract(description, diagnostic);
+    if (shape_status != TextureStatus::ready) return shape_status;
     const TextureStatus sample_status =
         validate_texture_sample_contract(description, !initial_uploads.subresources.empty(), diagnostic);
     if (sample_status != TextureStatus::ready) return sample_status;
@@ -433,11 +468,12 @@ TextureStatus validate_texture_description(const TextureDescription& description
         diagnostic = {"texture_mip_limit", "The texture has too many mip levels"};
         return TextureStatus::invalid_description;
     }
-    if (description.array_layers > 2048U) {
+    const std::uint64_t physical_layers = texture_physical_array_layers(description);
+    if (physical_layers > 2048U) {
         diagnostic = {"texture_layer_limit", "Texture array layers exceed the backend-neutral safety limit"};
         return TextureStatus::invalid_description;
     }
-    if (static_cast<std::uint64_t>(description.mip_levels) * description.array_layers > 65535U) {
+    if (static_cast<std::uint64_t>(description.mip_levels) * physical_layers > 65535U) {
         diagnostic = {"texture_subresource_limit", "Texture subresources exceed the backend-neutral safety limit"};
         return TextureStatus::invalid_description;
     }
@@ -462,14 +498,14 @@ TextureStatus validate_texture_description(const TextureDescription& description
     if (scalar_float_status != TextureStatus::ready) return scalar_float_status;
     if (texture_format_is_compressed(description.format) &&
         initial_uploads.subresources.size() !=
-            static_cast<std::size_t>(description.mip_levels) * description.array_layers) {
+            static_cast<std::size_t>(description.mip_levels) * physical_layers) {
         diagnostic = {"texture_compressed_upload_incomplete",
                       "Immutable BC1, BC2, BC3, BC4, BC5, BC6H, and BC7 textures require one upload for every subresource"};
         return TextureStatus::invalid_description;
     }
     constexpr auto max_size_t = static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max());
     std::uint64_t total_bytes = 0U;
-    for (std::uint32_t layer = 0; layer < description.array_layers; ++layer) {
+    for (std::uint64_t layer = 0; layer < physical_layers; ++layer) {
         (void)layer;
         for (std::uint32_t mip = 0; mip < description.mip_levels; ++mip) {
             const std::uint64_t width = std::max(1U, description.width >> mip);
@@ -633,6 +669,11 @@ DepthAttachmentReadbackStatus validate_depth_attachment_readback(
 TextureReadbackStatus validate_texture_clear_readback(
     const Texture& texture, const TextureClearReadbackRequest& request, Diagnostic& diagnostic) {
     const TextureDescription& description = texture.info().description;
+    if (description.shape != TextureShape::texture_2d) {
+        diagnostic = {"texture_readback_shape_unsupported",
+                      "Texture clear/readback requires an explicit 2D texture"};
+        return TextureReadbackStatus::unsupported;
+    }
     if (description.samples != 1U) {
         diagnostic = {"texture_readback_multisample_unsupported",
                       "Texture clear/readback supports only single-sample textures"};
@@ -708,7 +749,7 @@ TriangleDrawStatus validate_triangle_draw_request(const Texture& texture,
         }
     }
     if (request.mip_level != 0U || request.array_layer != 0U || description.mip_levels != 1U ||
-        description.array_layers != 1U) {
+        description.array_layers != 1U || description.shape != TextureShape::texture_2d) {
         diagnostic = {"triangle_subresource_unsupported",
                       "Triangle drawing currently targets the only mip and array layer"};
         return TriangleDrawStatus::unsupported;
@@ -1034,7 +1075,8 @@ IndexedStaticMeshDrawStatus validate_indexed_color_target(
         return IndexedStaticMeshDrawStatus::invalid_request;
     }
     if (target.width == 0U || target.height == 0U ||
-        target.mip_levels != 1U || target.array_layers != 1U) {
+        target.mip_levels != 1U || target.array_layers != 1U ||
+        target.shape != TextureShape::texture_2d) {
         diagnostic = {"indexed_static_mesh_target_invalid",
                       "Indexed static-mesh target dimensions or subresource count are invalid"};
         return IndexedStaticMeshDrawStatus::invalid_request;
@@ -1182,6 +1224,7 @@ IndexedStaticMeshDrawStatus validate_native_ks_per_pixel_binding(
         diffuse_description.width == 0U || diffuse_description.height == 0U ||
         diffuse_description.mip_levels == 0U ||
         diffuse_description.array_layers != 1U || diffuse_description.samples != 1U ||
+        diffuse_description.shape != TextureShape::texture_2d ||
         !portable_sampled_color_format(diffuse_description.format, true)) {
         diagnostic = {"indexed_stock_native_diffuse_description_unsupported",
                       "The native diffuse binding requires a one-layer sampled color texture"};
@@ -1330,6 +1373,7 @@ IndexedStaticMeshDrawStatus validate_stock_ks_per_pixel_vulkan_native_abi_bindin
                           static_cast<std::uint32_t>(TextureUsage::storage))) != 0U ||
         diffuse_description.width == 0U || diffuse_description.height == 0U ||
         diffuse_description.mip_levels == 0U || diffuse_description.array_layers != 1U ||
+        diffuse_description.shape != TextureShape::texture_2d ||
         diffuse_description.samples != 1U ||
         !portable_sampled_color_format(diffuse_description.format, true)) {
         diagnostic = {"indexed_stock_vulkan_abi_probe_diffuse_invalid",
@@ -2293,6 +2337,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
         }
         if (sampled.width == 0U || sampled.height == 0U || sampled.mip_levels == 0U ||
             sampled.array_layers != 1U || sampled.samples != 1U ||
+            sampled.shape != TextureShape::texture_2d ||
             !portable_sampled_color_format(sampled.format, true) ||
             (texture_format_is_compressed(sampled.format) &&
              sampled.mutability != TextureMutability::immutable)) {
@@ -2339,6 +2384,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             }
             if (normal.width == 0U || normal.height == 0U || normal.mip_levels == 0U ||
                 normal.array_layers != 1U || normal.samples != 1U ||
+                normal.shape != TextureShape::texture_2d ||
                 (normal.format != TextureFormat::rgba8_unorm &&
                  normal.format != TextureFormat::rgba8_srgb &&
                  normal.format != TextureFormat::bgra8_unorm &&
@@ -2388,6 +2434,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             }
             if (maps.width == 0U || maps.height == 0U || maps.mip_levels == 0U ||
                 maps.array_layers != 1U || maps.samples != 1U ||
+                maps.shape != TextureShape::texture_2d ||
                 !portable_sampled_color_format(maps.format, false) ||
                 (texture_format_is_compressed(maps.format) &&
                  maps.mutability != TextureMutability::immutable)) {
@@ -2436,6 +2483,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             }
             if (detail.width == 0U || detail.height == 0U || detail.mip_levels == 0U ||
                 detail.array_layers != 1U || detail.samples != 1U ||
+                detail.shape != TextureShape::texture_2d ||
                 !portable_sampled_color_format(detail.format, true) ||
                 (texture_format_is_compressed(detail.format) &&
                  detail.mutability != TextureMutability::immutable)) {
@@ -2484,6 +2532,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             }
             if (normal_detail.width == 0U || normal_detail.height == 0U ||
                 normal_detail.mip_levels == 0U || normal_detail.array_layers != 1U ||
+                normal_detail.shape != TextureShape::texture_2d ||
                 normal_detail.samples != 1U ||
                 (normal_detail.format != TextureFormat::rgba8_unorm &&
                  normal_detail.format != TextureFormat::bgra8_unorm)) {
@@ -2535,6 +2584,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                 }
                 if (source.width == 0U || source.height == 0U || source.mip_levels == 0U ||
                     source.array_layers != 1U || source.samples != 1U ||
+                    source.shape != TextureShape::texture_2d ||
                     !portable_sampled_color_format(source.format, allow_srgb) ||
                     (texture_format_is_compressed(source.format) &&
                      source.mutability != TextureMutability::immutable)) {
@@ -3226,6 +3276,7 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
             target.format == TextureFormat::bgra8_srgb;
         if (target.width == 0U || target.height == 0U ||
             target.mip_levels != 1U || target.array_layers != 1U ||
+            target.shape != TextureShape::texture_2d ||
             (target_usage & required_target_usage) != required_target_usage) {
             diagnostic = {"indexed_static_mesh_batch_resolve_source_invalid",
                           "Batch resolve source must be a bounded color attachment and transfer source"};
@@ -3248,7 +3299,8 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
         const auto source_usage = static_cast<std::uint32_t>(TextureUsage::transfer_source);
         if (resolved.width != target.width || resolved.height != target.height ||
             resolved.format != target.format || resolved.mip_levels != 1U ||
-            resolved.array_layers != 1U || resolved.samples != 1U) {
+            resolved.array_layers != 1U || resolved.samples != 1U ||
+            resolved.shape != TextureShape::texture_2d) {
             diagnostic = {"indexed_static_mesh_batch_resolve_description_mismatch",
                           "Batch resolve target must be a matching single-sample 2D texture"};
             return IndexedStaticMeshBatchStatus::invalid_request;
@@ -3721,6 +3773,7 @@ validate_depth_only_indexed_static_mesh_draw_request(
             texture.mutability != TextureMutability::immutable ||
             texture.width == 0U || texture.height == 0U || texture.mip_levels == 0U ||
             texture.array_layers != 1U || texture.samples != 1U ||
+            texture.shape != TextureShape::texture_2d ||
             !portable_sampled_color_format(texture.format, true)) {
             diagnostic = {"depth_only_indexed_alpha_tested_texture_description_invalid",
                           "Stock alpha-tested diffuse textures require one-layer immutable sampled RGBA8, BGRA8, BC1, BC3, or BC7 data"};

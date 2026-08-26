@@ -995,7 +995,9 @@ bool create_raw_image(const std::shared_ptr<VulkanContext>& context,
     image_info.format = vk_texture_format(description.format);
     image_info.extent = {description.width, description.height, 1};
     image_info.mipLevels = description.mip_levels;
-    image_info.arrayLayers = description.array_layers;
+    image_info.arrayLayers = static_cast<std::uint32_t>(texture_physical_array_layers(description));
+    if (description.shape == TextureShape::texture_cube)
+        image_info.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
     image_info.samples = sample_count;
     image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
     image_info.usage = vk_texture_usage(description.usage);
@@ -1011,7 +1013,7 @@ bool create_raw_image(const std::shared_ptr<VulkanContext>& context,
     VkImageFormatProperties format_properties{};
     VkResult result = vkGetPhysicalDeviceImageFormatProperties(
         context->physical_device, image_info.format, image_info.imageType, image_info.tiling,
-        image_info.usage, 0, &format_properties);
+        image_info.usage, image_info.flags, &format_properties);
     if (result != VK_SUCCESS) {
         diagnostic = vk_error("vkGetPhysicalDeviceImageFormatProperties", result);
         diagnostic.code = "texture_format_unsupported";
@@ -1053,11 +1055,17 @@ bool create_raw_image(const std::shared_ptr<VulkanContext>& context,
     VkImageViewCreateInfo view_info{};
     view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     view_info.image = raw.image;
-    view_info.viewType = description.array_layers == 1U ? VK_IMAGE_VIEW_TYPE_2D : VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    if (description.shape == TextureShape::texture_cube) {
+        view_info.viewType = description.array_layers == 1U ? VK_IMAGE_VIEW_TYPE_CUBE
+                                                            : VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
+    } else {
+        view_info.viewType = description.array_layers == 1U ? VK_IMAGE_VIEW_TYPE_2D
+                                                            : VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    }
     view_info.format = image_info.format;
     view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     view_info.subresourceRange.levelCount = description.mip_levels;
-    view_info.subresourceRange.layerCount = description.array_layers;
+    view_info.subresourceRange.layerCount = image_info.arrayLayers;
     result = vkCreateImageView(context->device, &view_info, nullptr, &raw.view);
     if (result != VK_SUCCESS) {
         diagnostic = vk_error("vkCreateImageView", result);
@@ -1447,7 +1455,8 @@ bool copy_texture_uploads(const std::shared_ptr<VulkanContext>& context,
         copy.bufferImageHeight = static_cast<std::uint32_t>(buffer_image_height);
         copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         copy.imageSubresource.mipLevel = upload.mip_level;
-        copy.imageSubresource.baseArrayLayer = upload.array_layer;
+        copy.imageSubresource.baseArrayLayer = static_cast<std::uint32_t>(
+            texture_upload_physical_array_layer(description, upload));
         copy.imageSubresource.layerCount = 1;
         copy.imageExtent = {upload.width, upload.height, 1};
         copies.push_back(copy);
@@ -1493,7 +1502,8 @@ bool copy_texture_uploads(const std::shared_ptr<VulkanContext>& context,
             barrier.image = image.image;
             barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             barrier.subresourceRange.levelCount = description.mip_levels;
-            barrier.subresourceRange.layerCount = description.array_layers;
+            barrier.subresourceRange.layerCount =
+                static_cast<std::uint32_t>(texture_physical_array_layers(description));
             barrier.srcAccessMask = current_layout == VK_IMAGE_LAYOUT_UNDEFINED
                                         ? 0U
                                         : VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;

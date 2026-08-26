@@ -433,6 +433,7 @@ apex_add_native_test(selection_axis_tests.cpp selection_axis_tests ApexEditor::R
 apex_add_native_test(selected_mesh_tests.cpp selected_mesh_tests ApexEditor::Render)
 apex_add_native_test(view_axis_tests.cpp view_axis_tests ApexEditor::Render)
 apex_add_native_test(texture_upload_tests.cpp texture_upload_tests ApexEditor::Render)
+apex_add_native_test(texture_cube_backend_tests.cpp texture_cube_backend_tests ApexEditor::Render)
 apex_add_native_test(platform_security_tests.cpp platform_security_tests ApexEditor::Platform)
 apex_add_native_test(platform_window_tests.cpp platform_window_tests ApexEditor::Platform)
 
@@ -510,7 +511,7 @@ if(TEST render_backend_tests)
   endif()
 endif()
 foreach(render_test IN ITEMS authoring_grid_tests camera_tests bmp_texture_tests csp_node_state_tests damage_preview_tests external_texture_authority_tests fbx_render_adapter_tests draw_packet_tests frame_plan_tests indexed_draw_tests selection_axis_tests selected_mesh_tests view_axis_tests static_mesh_upload_tests skinned_mesh_upload_tests static_scene_tests stock_material_execution_tests stock_scene_execution_tests stock_scene_d3d12_directional_shadow_tests workspace_ai_spline_tests workspace_real_fixture_tests workspace_shadow_programs_tests workspace_track_camera_tests workspace_viewport_tests lighting_tests material_binding_tests
-                             material_profile_tests pipeline_tests render_plan_tests stock_ks_per_pixel_tests stock_ks_per_pixel_vulkan_source_tests stock_ks_per_pixel_vulkan_source_drift_tests stock_ks_per_pixel_vulkan_abi_tests stock_ks_per_pixel_vulkan_runtime_tests stock_ks_per_pixel_d3d12_tests texture_upload_tests)
+                             material_profile_tests pipeline_tests render_plan_tests stock_ks_per_pixel_tests stock_ks_per_pixel_vulkan_source_tests stock_ks_per_pixel_vulkan_source_drift_tests stock_ks_per_pixel_vulkan_abi_tests stock_ks_per_pixel_vulkan_runtime_tests stock_ks_per_pixel_d3d12_tests texture_upload_tests texture_cube_backend_tests)
   if(TEST ${render_test})
     set_tests_properties(${render_test} PROPERTIES LABELS "unit;render")
   endif()
