@@ -142,6 +142,60 @@ Neither main pixel stage discards a fragment. The AT package flag selects
 alpha-to-coverage pipeline state. `ksAlphaRef` belongs to the separate shadow
 cutout path.
 
+## Pixel instruction evidence
+
+The recovered equations come from the `SHDR` instructions in the two pixel
+stages. The base stage SHA-256 is
+`2f3a71060f92a69e1da5a4ee5e6597afaebb92b293e66672e549a77566138e2c`.
+The AT stage SHA-256 is
+`06f8436bba0f3b3b5714e02622cf0332504f3077775c7f5c02e3d9471c1efa15`.
+
+The main pixel stage reads only these `cbLighting` fields:
+
+| Register value | Use |
+|---|---|
+| `b2[0].xyz` | Light direction |
+| `b2[1].rgb` | Ambient color |
+| `b2[2].rgb` | Sun color |
+| `b2[6].yzw` | Fog color |
+
+The main pixel stage does not read the other declared lighting fields.
+It reads the fog value from `v3.z` and saturates it before the final color
+interpolation.
+
+The shader selects one shadow cascade. It selects cascade 1 only after
+cascade 0 fails its bounds test. The same rule applies to cascade 2.
+
+Each bounds test uses strict normalized limits for both texture coordinates.
+The valid range is more than `-1` and less than `1`.
+
+The shader reads the three biases from `b3[12].xyz`. It reads the reciprocal
+shadow-map width from `b3[12].w`. Each cascade depth uses this adjustment:
+
+```text
+adjustedDepth = cascadeDepth - bias * (2048 * reciprocalWidth)
+```
+
+The selected cascade uses nine `sample_c_lz` instructions. The shader averages
+the nine comparison results. An invalid cascade selection produces a shadow
+factor of `1`.
+
+Cascade 2 also uses this fade term:
+
+```text
+fade = 2 * max(-(cascade2.y + 0.5), 0)
+shadow = saturate(nineTapAverage + fade)
+```
+
+The comparison sampler uses `LESS`. This value comes from the host sampler
+creation flow and the `sample_c_lz` shader instructions.
+
+The base stage uses the interpolated normal without normalization. The AT
+stage applies `dp3`, `rsq`, and `mul` before all lighting calculations.
+
+Both stages copy the sampled diffuse alpha to `o0.w`. Neither stage reads
+`ksAlphaRef`, and neither stage contains a discard instruction.
+
 ## Host and shadow evidence
 
 `Material::initShaderVars` at `0x10040420` selects alpha-to-coverage for an AT
