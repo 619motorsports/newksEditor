@@ -36,7 +36,9 @@ struct InstalledEditorSpline {
 
 // Replace cumulative_lengths and length with the recovered 0.001f
 // per-segment Catmull-Rom arc-length approximation. The caller selects
-// topology before this call.
+// topology before this call. A finite zero-length result is valid here because
+// the native loader keeps it. Preview callers must apply their own positive-
+// length requirement with validInstalledEditorSpline().
 [[nodiscard]] bool
 recomputeInstalledEditorSplineLengths(InstalledEditorSpline& spline) noexcept;
 

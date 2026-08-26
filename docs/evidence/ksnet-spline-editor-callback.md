@@ -25,24 +25,49 @@ It sends the samples to `GLRenderer::spline`.
 
 `AISpline::loadFast` is at `0x1006959B`. It selects the legacy loader at
 `0x1006968F` or the version-7 loader at `0x10069AEC`. It then calls
-`Spline::computeSplineLength` at `0x10069663` for both versions. Thus, stored
-version-7 point lengths do not control interpolation.
+`InterpolatingSpline::computeSplineLength` at call site `0x10069663` for both
+versions. Thus, stored version-7 point lengths do not control interpolation.
 
-`Spline::computeSplineLength` is at `0x100365C3`. It samples each Catmull-Rom
-segment from zero through one with float increment `0.001F`. Each segment uses
-1,001 samples and wrapped neighbor indices. The constant bytes at `0x1011072C`
-are `6f 12 83 3a`. The function writes each cumulative segment end to the
-current point length. A closed spline also samples the wrapped final segment.
+`InterpolatingSpline::computeSplineLength` is at `0x100365C3`. It samples each
+Catmull-Rom segment with float increment `0.001F`. Each segment uses 1,001
+samples. `Spline::wrapIndex` is at `0x100343E1`. It clamps neighbor indices for
+an open spline and wraps them for a closed spline. The constant bytes at
+`0x1011072C` are `6f 12 83 3a`. The function writes each cumulative segment end
+to the current point length. A closed spline also samples the final segment.
 `Spline::length` at `0x10033A1A` adds the straight endpoint chord to that curve
 length. Closing-segment lookup divides by the same endpoint chord. The safe
-adapter rejects a zero endpoint chord instead of reproducing native division
-by zero.
+preview adapter rejects a zero endpoint chord. It does not reproduce native
+division by zero.
+
+The native coefficient helper is `_Pow_int<float>` at `0x10034520`. It uses
+float multiplication for the square and cube. The recovered sequence stores
+each scalar product and sum before the next operation. It halves each control
+point before coefficient multiplication. Each segment starts with its actual
+start point as the previous sample. The C++ helper preserves these float
+rounding points. This order differs from a mathematically equivalent final
+multiplication by `0.5F`.
 
 The version-2 payload constructor is at `0x100688B2`. It initializes grip to
 one and direction to one. Other numeric fields start at zero. The legacy loader
 derives acceleration from speed and the zero default point length. Native
 `saturate` at `0x10013E20` clamps values more than one or less than zero. A NaN
 passes through because both comparisons are false.
+
+The legacy loader starts `previousSpeed` at zero. It reads speed, gas, and
+lateral G into a default payload for each raw record. Then it calculates:
+
+```text
+acceleration = (speed - previousSpeed) / (payload.length / speed)
+```
+
+If acceleration is nonnegative, the loader replaces gas with one. Otherwise,
+it keeps the input gas and stores `saturate(-acceleration)` in brake. Equal
+speeds can produce a NaN because payload length remains zero.
+
+`AISpline::addPoint` is at `0x10068A5C`. It assigns the current retained point
+count as the point tag. Thus, version-2 source indices `0, 3, 6, ...` receive
+sequential version-7 tags. Radius, sides, camber, normal, payload length, and
+grade remain zero. Direction remains one. The v2 legacy word is discarded.
 
 The constructor sets `inPoint` and `outPoint` to `-1.0F` at offsets 12 and 16.
 The callback skips the interval when either value equals this sentinel.
@@ -413,8 +438,17 @@ This file-safety behavior is an explicit portable difference.
 Replacement can change destination permissions or access-control metadata.
 The POSIX path does not sync the parent directory after replacement.
 It does not promise persistence after a power loss.
-The current save boundary accepts version 7 only.
-The native version-2-to-version-7 payload conversion is not yet recovered.
+The current save boundary accepts version 7 only. The separate
+`--convert-ai-spline-v2` command accepts version 2 only. This command applies
+the recovered retained-point, payload, tag, forward, and length rules. Then it
+builds the recovered grid and writes version 7.
+
+The converter rejects an existing output and identical input and output paths.
+It validates direct-constructed legacy state before it allocates output. It
+also bounds point count, length work, grid work, storage, and output bytes.
+If native arithmetic produces a NaN, the safe converter rejects the result.
+This finite-value rule is an explicit safety difference from the native loader.
+Normal version-2 loading remains read-only and does not convert silently.
 Other edit commands do not replace an existing destination.
 
 The format layer now includes a bounded port of `AISpline.buildGrid`. The port

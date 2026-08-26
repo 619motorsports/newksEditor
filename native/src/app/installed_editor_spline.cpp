@@ -4,9 +4,16 @@
 #include <cmath>
 #include <cstddef>
 #include <new>
+#include <utility>
 
 namespace apex::app {
 namespace {
+
+// Preserve the scalar single-precision stores in the recovered SSE sequence.
+[[nodiscard]] float rounded_float(float value) noexcept {
+    volatile float rounded = value;
+    return rounded;
+}
 
 [[nodiscard]] bool
 finite_point(const InstalledEditorSplinePoint& point) noexcept {
@@ -36,16 +43,31 @@ catmull_segment(std::span<const InstalledEditorSplinePoint> points,
     const auto& p1 = points[spline_index(base, count, closed)];
     const auto& p2 = points[spline_index(base + 1, count, closed)];
     const auto& p3 = points[spline_index(base + 2, count, closed)];
-    const float value2 = value * value;
-    const float value3 = value2 * value;
-    const float c0 = -value3 + 2.0F * value2 - value;
-    const float c1 = 3.0F * value3 - 5.0F * value2 + 2.0F;
-    const float c2 = 4.0F * value2 - 3.0F * value3 + value;
-    const float c3 = value3 - value2;
+    const float value2 = rounded_float(value * value);
+    const float value3 = rounded_float(value2 * value);
+    const float c0 = rounded_float(
+        rounded_float(rounded_float(2.0F * value2) - value3) - value);
+    const float c1 = rounded_float(
+        rounded_float(rounded_float(3.0F * value3) -
+                      rounded_float(5.0F * value2)) +
+        2.0F);
+    const float c2 = rounded_float(
+        rounded_float(rounded_float(4.0F * value2) -
+                      rounded_float(3.0F * value3)) +
+        value);
+    const float c3 = rounded_float(value3 - value2);
     InstalledEditorSplinePoint result{};
     for (std::size_t axis = 0U; axis < result.size(); ++axis) {
-        result[axis] = 0.5F * (p0[axis] * c0 + p1[axis] * c1 + p2[axis] * c2 +
-                               p3[axis] * c3);
+        const float h0 = rounded_float(p0[axis] * 0.5F);
+        const float h1 = rounded_float(p1[axis] * 0.5F);
+        const float h2 = rounded_float(p2[axis] * 0.5F);
+        const float h3 = rounded_float(p3[axis] * 0.5F);
+        const float term0 = rounded_float(h0 * c0);
+        const float term1 = rounded_float(h1 * c1);
+        const float term2 = rounded_float(h2 * c2);
+        const float term3 = rounded_float(h3 * c3);
+        result[axis] = rounded_float(
+            rounded_float(rounded_float(term0 + term1) + term2) + term3);
     }
     return result;
 }
@@ -53,14 +75,14 @@ catmull_segment(std::span<const InstalledEditorSplinePoint> points,
 [[nodiscard]] float
 catmull_segment_length(std::span<const InstalledEditorSplinePoint> points,
                        std::size_t segment, bool closed) noexcept {
-    InstalledEditorSplinePoint previous =
-        catmull_segment(points, segment, 0.0F, closed);
+    InstalledEditorSplinePoint previous = points[segment];
     float length = 0.0F;
     for (float value = 0.0F; value <= 1.0F;
          value += installed_editor_spline_length_step) {
         const InstalledEditorSplinePoint current =
             catmull_segment(points, segment, value, closed);
-        length += installedEditorSplinePointDistance(current, previous);
+        length = rounded_float(
+            length + installedEditorSplinePointDistance(current, previous));
         previous = current;
     }
     return length;
@@ -71,10 +93,14 @@ catmull_segment_length(std::span<const InstalledEditorSplinePoint> points,
 float installedEditorSplinePointDistance(
     const InstalledEditorSplinePoint& left,
     const InstalledEditorSplinePoint& right) noexcept {
-    const float x = left[0] - right[0];
-    const float y = left[1] - right[1];
-    const float z = left[2] - right[2];
-    return std::sqrt(x * x + y * y + z * z);
+    const float x = rounded_float(left[0] - right[0]);
+    const float y = rounded_float(left[1] - right[1]);
+    const float z = rounded_float(left[2] - right[2]);
+    const float squared_x = rounded_float(x * x);
+    const float squared_y = rounded_float(y * y);
+    const float squared_z = rounded_float(z * z);
+    return rounded_float(std::sqrt(
+        rounded_float(rounded_float(squared_x + squared_y) + squared_z)));
 }
 
 bool installedEditorSplineIsClosed(
@@ -86,35 +112,41 @@ bool installedEditorSplineIsClosed(
 
 bool recomputeInstalledEditorSplineLengths(
     InstalledEditorSpline& spline) noexcept {
-    if (spline.points.size() < 2U ||
+    if ((spline.closed && spline.points.size() < 2U) ||
         !std::all_of(spline.points.begin(), spline.points.end(), finite_point))
         return false;
+    std::vector<float> cumulative_lengths;
     try {
-        spline.cumulative_lengths.assign(spline.points.size(), 0.0F);
+        cumulative_lengths.assign(spline.points.size(), 0.0F);
     } catch (const std::bad_alloc&) {
         return false;
     }
     float length = 0.0F;
     for (std::size_t segment = 0U; segment + 1U < spline.points.size();
          ++segment) {
-        length += catmull_segment_length(spline.points, segment, spline.closed);
+        length = rounded_float(
+            length + catmull_segment_length(spline.points, segment,
+                                            spline.closed));
         if (!std::isfinite(length)) return false;
-        spline.cumulative_lengths[segment + 1U] = length;
+        cumulative_lengths[segment + 1U] = length;
     }
     if (spline.closed) {
-        length += catmull_segment_length(spline.points,
-                                         spline.points.size() - 1U, true);
+        length = rounded_float(
+            length + catmull_segment_length(
+                         spline.points, spline.points.size() - 1U, true));
     }
-    spline.closing_length =
+    const float closing_length =
         spline.closed ? installedEditorSplinePointDistance(
                             spline.points.back(), spline.points.front())
                       : 0.0F;
-    if (!(length > 0.0F) || !std::isfinite(length) ||
-        !std::isfinite(spline.closing_length) ||
-        (spline.closed && !(spline.closing_length > 0.0F)))
+    if (!std::isfinite(length) || !std::isfinite(closing_length) ||
+        length < 0.0F || closing_length < 0.0F)
         return false;
-    spline.length = length + spline.closing_length;
-    if (!std::isfinite(spline.length)) return false;
+    const float total_length = rounded_float(length + closing_length);
+    if (!std::isfinite(total_length)) return false;
+    spline.cumulative_lengths = std::move(cumulative_lengths);
+    spline.closing_length = closing_length;
+    spline.length = total_length;
     return true;
 }
 

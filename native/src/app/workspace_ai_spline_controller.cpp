@@ -844,7 +844,8 @@ WorkspaceAiSplineControllerResult WorkspaceAiSplineController::finishEditing(
         interpolating.points.push_back(
             state_->session.current().points[last].position);
         interpolating.closed = false;
-        if (!recomputeInstalledEditorSplineLengths(interpolating)) {
+        if (!recomputeInstalledEditorSplineLengths(interpolating) ||
+            !validInstalledEditorSpline(interpolating, 2U)) {
             auto result = currentResult();
             result.status = WorkspaceAiSplineControllerStatus::invalid_edit;
             result.diagnostic = diagnostic(

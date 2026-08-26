@@ -76,11 +76,14 @@ std::vector<std::uint8_t> version2Fixture() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 3) return 2;
+    if (argc != 4) return 2;
     try {
         writeFile(argv[1],
                   apex::formats::serializeAiSpline(version7Fixture()));
         writeFile(argv[2], version2Fixture());
+        auto truncated = version2Fixture();
+        truncated.pop_back();
+        writeFile(argv[3], truncated);
         return 0;
     } catch (const std::exception&) {
         return 1;

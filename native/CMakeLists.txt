@@ -158,7 +158,9 @@ target_link_libraries(apex_workspace PUBLIC ApexEditor::Scene)
 # returns owned data and diagnostics without exposing filesystem or renderer
 # capabilities to the authoring model.
 add_library(apex_app STATIC
+  src/app/ai_spline_legacy_conversion.cpp
   src/app/authoring_service.cpp
+  src/app/installed_editor_spline.cpp
   src/app/presentation_recreation.cpp
   src/app/workspace_selection.cpp
   src/app/workspace_session.cpp
@@ -166,7 +168,7 @@ add_library(apex_app STATIC
 )
 add_library(ApexEditor::App ALIAS apex_app)
 target_link_libraries(apex_app
-  PUBLIC ApexEditor::Assets ApexEditor::SecondaryAssets ApexEditor::Workspace
+  PUBLIC ApexEditor::Assets ApexEditor::Formats ApexEditor::SecondaryAssets ApexEditor::Workspace
 )
 
 add_library(apex_platform STATIC
@@ -234,7 +236,6 @@ target_link_libraries(apex_external_texture_authority
 # Renderer-facing application composition remains separate from apex_app. It
 # can materialize application-authorized assets before entering GPU backends.
 add_library(apex_app_render STATIC
-  src/app/installed_editor_spline.cpp
   src/app/workspace_ai_spline.cpp
   src/app/workspace_ai_spline_commands.cpp
   src/app/workspace_ai_spline_controller.cpp
@@ -334,6 +335,7 @@ apex_add_native_test(vao_tests.cpp vao_tests ApexEditor::Formats)
 apex_add_native_test(authoring_project_tests.cpp authoring_project_tests ApexEditor::Authoring)
 apex_add_native_test(ai_spline_authoring_tests.cpp ai_spline_authoring_tests ApexEditor::Authoring)
 apex_add_native_test(ai_spline_session_tests.cpp ai_spline_session_tests ApexEditor::Authoring)
+apex_add_native_test(ai_spline_legacy_conversion_tests.cpp ai_spline_legacy_conversion_tests ApexEditor::App)
 apex_add_native_test(authoring_service_tests.cpp authoring_service_tests ApexEditor::App)
 apex_add_native_test(presentation_recreation_tests.cpp presentation_recreation_tests ApexEditor::App)
 apex_add_native_test(workspace_selection_tests.cpp workspace_selection_tests ApexEditor::App)
@@ -432,7 +434,7 @@ foreach(parser_test IN ITEMS ai_spline_tests kn5_tests kn5_write_tests dds_tests
   endif()
 endforeach()
 foreach(boundary_test IN ITEMS authoring_project_tests project_bake_tests geometry_bake_tests project_io_tests
-                               ai_spline_authoring_tests
+                               ai_spline_authoring_tests ai_spline_legacy_conversion_tests
                                authoring_service_tests project_workspace_tests workspace_selection_tests
                                asset_index_tests asset_source_tests csp_config_model_tests
                                csp_material_evaluator_tests car_damage_tests secondary_asset_tests car_validation_tests

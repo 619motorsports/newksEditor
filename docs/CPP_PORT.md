@@ -221,9 +221,11 @@ remains unchanged and feature-complete.
   This pass follows the side passes and uses normal depth.
   The format library writes the exact `AISpline::save` version-7 record
   layout. The writer emits zero reserved words and preserves a valid grid.
-  It rejects version 2 until the explicit legacy converter is implemented.
-  The exact retained-point, payload-default, gas/brake, and sampled-length
-  rules are now recovered. A separate authoring adapter ports
+  It rejects version 2. A separate app-layer converter applies the recovered
+  retained-point, payload-default, gas/brake, tag, and sampled-length rules.
+  The converter rebuilds the recovered grid and returns owned version-7 bytes.
+  `--convert-ai-spline-v2` exposes this explicit, exclusive-output boundary.
+  Normal version-2 loading remains read-only. A separate authoring adapter ports
   the recovered six-field waypoint edit for one selected point. It resolves
   the payload through the point tag. It applies each nonzero replacement, then
   each additive value. Camber values use degrees at this boundary and radians
@@ -331,7 +333,8 @@ remains unchanged and feature-complete.
   The window retries transient allocation and viewport publication errors.
   Open splines clamp the final cached forward. Closed splines wrap it.
   `--save-ai-spline` accepts version 7, rebuilds the grid, and atomically
-  replaces its output. Legacy version-2 conversion is not yet recovered.
+  replaces its output. `--convert-ai-spline-v2` writes a separate version-7
+  file from recovered version-2 data. It rejects non-finite native results.
   `--ai-spline-save-on-exit` saves the live controller after a clean exit.
   Save does not change the revision, history, baseline, selection, or dirty state.
   A save error keeps the prior destination and the complete session state.

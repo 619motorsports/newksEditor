@@ -140,7 +140,8 @@ buildInstalledEditorTrackCameraSpline(
         spline.points.push_back(converted);
     }
     spline.closed = installedEditorSplineIsClosed(spline.points);
-    if (!recomputeInstalledEditorSplineLengths(spline)) {
+    if (!recomputeInstalledEditorSplineLengths(spline) ||
+        !validInstalledEditorSpline(spline)) {
         return {std::nullopt,
                 "installed_editor_track_camera_spline_length_invalid",
                 "Installed-editor camera spline must have a positive finite length"};

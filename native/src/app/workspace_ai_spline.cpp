@@ -263,7 +263,8 @@ WorkspaceAiSplineResult build_geometry(
             interpolating.points = std::move(positions);
             interpolating.closed =
                 installedEditorSplineIsClosed(interpolating.points);
-            if (!recomputeInstalledEditorSplineLengths(interpolating)) {
+            if (!recomputeInstalledEditorSplineLengths(interpolating) ||
+                !validInstalledEditorSpline(interpolating)) {
                 result.status = WorkspaceAiSplineStatus::invalid_source;
                 result.diagnostic = diagnostic(
                     "workspace_ai_spline_interpolation_length_invalid",
@@ -972,7 +973,8 @@ buildWorkspaceAiSplineTemporaryInterpolationGeometry(
         }
         interpolating.points.push_back(spline.points[last].position);
         interpolating.closed = false;
-        if (!recomputeInstalledEditorSplineLengths(interpolating)) {
+        if (!recomputeInstalledEditorSplineLengths(interpolating) ||
+            !validInstalledEditorSpline(interpolating)) {
             result.diagnostic = diagnostic(
                 "workspace_ai_spline_temporary_length_invalid",
                 "Temporary AI spline interpolation requires a positive finite path");

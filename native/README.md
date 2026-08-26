@@ -234,11 +234,13 @@ The AI-spline option loads a bounded version-2 or version-7 file.
 The format library also supplies `serializeAiSpline` for version-7 output.
 This function writes the recovered 20-byte point and 72-byte payload records.
 It writes zero reserved words and preserves a valid optional grid.
-The function rejects version 2 until the explicit legacy converter is
-implemented. The recovered converter uses retained points, native payload
-defaults, legacy gas and brake derivation, and sampled Catmull-Rom lengths.
-It also rejects invalid tags, grid indices, non-finite values, and output that
-exceeds the configured limits.
+The function rejects version 2. Use the explicit app-layer converter for
+legacy input. The converter uses retained points, native payload defaults,
+legacy gas and brake derivation, and sampled Catmull-Rom lengths. It rebuilds
+the recovered grid and produces owned version-7 bytes. It rejects inconsistent
+retained data, non-finite values, and output that exceeds configured limits.
+`--convert-ai-spline-v2 <input.ai> <output.ai>` exposes this boundary. It does
+not replace an existing output. Normal version-2 loading remains read-only.
 `--edit-ai-spline` edits one version-7 point and writes a new file.
 The command does not replace an existing output file.
 The point tag selects the payload, as in the installed editor.
@@ -336,8 +338,10 @@ Cancel clears selection and temporary state without model writes.
 The native sphere marker uses `content/objects3D/sphere.kn5`.
 The port uses a labeled green vertical-line marker in the shared line ABI.
 `--save-ai-spline` accepts version 7 and rebuilds the native grid.
-Legacy version-2 conversion is not yet recovered.
-The command uses a temporary file and atomically replaces its output.
+Use `--convert-ai-spline-v2` to create a separate version-7 file from version
+2. The command uses the recovered payload and sampled-length rules. It rejects
+native NaN results instead of writing non-finite version-7 data.
+`--save-ai-spline` uses a temporary file and atomically replaces its output.
 The input and output can be the same path.
 Replacement can change destination permissions or access-control metadata.
 `--ai-spline-save-on-exit` saves live window edits after a clean exit.

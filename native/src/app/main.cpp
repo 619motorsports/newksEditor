@@ -1,3 +1,4 @@
+#include "apex/app/ai_spline_legacy_conversion.hpp"
 #include "apex/app/authoring_service.hpp"
 #include "apex/app/presentation_recreation.hpp"
 #include "apex/app/workspace_ai_spline.hpp"
@@ -89,6 +90,7 @@ void usage(std::ostream& output) {
            << "  apex-native --set-ai-spline-point <input.ai> <output.ai> --index <point-index> --position <x> <y> <z>\n"
            << "  apex-native --set-ai-spline-points <input.ai> <output.ai> --point <point-index> <x> <y> <z> [--point ...]\n"
            << "  apex-native --save-ai-spline <input.ai> <output.ai>\n"
+           << "  apex-native --convert-ai-spline-v2 <input.ai> <output.ai>\n"
            << "  apex-native --export-project kn5|csp <source.kn5> <project.apex.json> <output>\n"
            << "  apex-native --export-project collider|damage|bottom-colliders|surfaces|models|lods <source.kn5> "
               "<project.apex.json> <secondary-input> <output>\n";
@@ -667,7 +669,7 @@ int save_ai_spline(int argc, char** argv) {
         apex::formats::parseAiSpline(input_bytes, input_path.string());
     if (spline.version != 7U) {
         throw std::runtime_error(
-            "--save-ai-spline requires version 7; legacy conversion is not recovered");
+            "--save-ai-spline requires version 7; use --convert-ai-spline-v2 first");
     }
     apex::authoring::AiSplineSession session(std::move(spline));
     const auto saved = session.buildSaveBytes();
@@ -682,6 +684,42 @@ int save_ai_spline(int argc, char** argv) {
     apex::platform::writeFileAtomicReplace(output_path, saved.bytes);
     std::cout << "AI spline saved: revision=" << saved.revision
               << ", grid=rebuilt, output=";
+    write_cli_text(std::cout, output_path.string());
+    std::cout << '\n';
+    return 0;
+}
+
+int convert_ai_spline_v2(int argc, char** argv) {
+    if (argc != 4)
+        throw std::runtime_error(
+            "invalid --convert-ai-spline-v2 arguments");
+
+    const std::filesystem::path input_path = argv[2];
+    const std::filesystem::path output_path = argv[3];
+    if (input_path == output_path) {
+        throw std::runtime_error(
+            "--convert-ai-spline-v2 requires different input and output paths");
+    }
+
+    const auto input_bytes = read_file(input_path);
+    const auto source =
+        apex::formats::parseAiSpline(input_bytes, input_path.string());
+    const auto converted = apex::app::convertAiSplineV2ToV7File(source);
+    if (!converted.ok()) {
+        if (converted.diagnostics.empty()) {
+            throw std::runtime_error(
+                "AI spline version-2 conversion failed");
+        }
+        const auto& diagnostic = converted.diagnostics.back();
+        throw std::runtime_error(diagnostic.code + ": " +
+                                 diagnostic.message);
+    }
+
+    apex::platform::writeFileExclusive(output_path, converted.bytes);
+    std::cout << "AI spline converted: source-version=2, output-version=7"
+              << ", points=" << converted.pointCount << ", grid="
+              << (converted.gridBuilt ? "rebuilt" : "empty")
+              << ", output=";
     write_cli_text(std::cout, output_path.string());
     std::cout << '\n';
     return 0;
@@ -2591,6 +2629,14 @@ int main(int argc, char** argv) {
                 return 2;
             }
             return save_ai_spline(argc, argv);
+        }
+        if (argc >= 2 &&
+            std::string_view(argv[1]) == "--convert-ai-spline-v2") {
+            if (argc != 4) {
+                usage(std::cerr);
+                return 2;
+            }
+            return convert_ai_spline_v2(argc, argv);
         }
         if (argc >= 2 && std::string_view(argv[1]) == "--invert-ai-spline") {
             if (argc < 6) {

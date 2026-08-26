@@ -17,18 +17,26 @@ set(point_invalid "${APEX_BINARY_DIR}/ai spline point invalid.ai")
 set(point_truncated "${APEX_BINARY_DIR}/ai spline point truncated.ai")
 set(save_input "${APEX_BINARY_DIR}/ai spline save input.ai")
 set(legacy_save_input "${APEX_BINARY_DIR}/ai spline legacy save input.ai")
+set(legacy_truncated_input
+    "${APEX_BINARY_DIR}/ai spline legacy truncated input.ai")
 set(legacy_save_output "${APEX_BINARY_DIR}/ai spline legacy save output.ai")
+set(legacy_convert_output "${APEX_BINARY_DIR}/ai spline legacy converted.ai")
+set(legacy_convert_roundtrip
+    "${APEX_BINARY_DIR}/ai spline legacy converted roundtrip.ai")
+set(legacy_convert_invalid
+    "${APEX_BINARY_DIR}/ai spline legacy conversion invalid.ai")
 set(save_output "${APEX_BINARY_DIR}/ai spline save output.ai")
 set(save_roundtrip "${APEX_BINARY_DIR}/ai spline save roundtrip.ai")
 file(REMOVE "${output}" "${roundtrip_output}" "${invert_output}"
      "${invert_roundtrip}" "${point_output}" "${point_roundtrip}"
      "${point_invalid}" "${point_truncated}" "${save_input}"
-     "${legacy_save_input}" "${legacy_save_output}" "${save_output}"
-     "${save_roundtrip}")
+     "${legacy_save_input}" "${legacy_truncated_input}" "${legacy_save_output}"
+     "${legacy_convert_output}" "${legacy_convert_roundtrip}"
+     "${legacy_convert_invalid}" "${save_output}" "${save_roundtrip}")
 file(WRITE "${point_truncated}" "x")
 execute_process(
   COMMAND "${APEX_AI_SPLINE_FIXTURE_COMMAND}" "${save_input}"
-          "${legacy_save_input}"
+          "${legacy_save_input}" "${legacy_truncated_input}"
   RESULT_VARIABLE save_fixture_result
 )
 if(NOT save_fixture_result STREQUAL "0")
@@ -83,7 +91,10 @@ if(NOT legacy_save_result STREQUAL "1")
   message(FATAL_ERROR "legacy AI spline save was not rejected")
 endif()
 string(FIND "${legacy_save_error}" "requires version 7" legacy_error_position)
-if(legacy_error_position EQUAL -1)
+string(FIND "${legacy_save_error}" "use --convert-ai-spline-v2 first"
+       legacy_conversion_guidance_position)
+if(legacy_error_position EQUAL -1 OR
+   legacy_conversion_guidance_position EQUAL -1)
   message(FATAL_ERROR "legacy AI spline save did not report its version limit")
 endif()
 file(SHA256 "${legacy_save_output}" legacy_after_hash)
@@ -93,6 +104,122 @@ endif()
 file(GLOB legacy_temporary_files "${legacy_save_output}.apex-tmp-*")
 if(legacy_temporary_files)
   message(FATAL_ERROR "legacy AI spline save left temporary output files")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --convert-ai-spline-v2
+          "${legacy_save_input}" "${legacy_convert_output}"
+  RESULT_VARIABLE legacy_convert_result
+  OUTPUT_VARIABLE legacy_convert_standard_output
+  ERROR_VARIABLE legacy_convert_error
+)
+if(NOT legacy_convert_result STREQUAL "0" OR
+   NOT EXISTS "${legacy_convert_output}")
+  message(FATAL_ERROR
+    "legacy AI spline conversion failed; stderr: ${legacy_convert_error}")
+endif()
+string(FIND "${legacy_convert_standard_output}" "output-version=7"
+       legacy_convert_version_position)
+string(FIND "${legacy_convert_standard_output}" "points=1"
+       legacy_convert_count_position)
+string(FIND "${legacy_convert_standard_output}" "grid=rebuilt"
+       legacy_convert_grid_position)
+if(legacy_convert_version_position EQUAL -1 OR
+   legacy_convert_count_position EQUAL -1 OR
+   legacy_convert_grid_position EQUAL -1)
+  message(FATAL_ERROR
+    "legacy AI spline conversion did not report its v7 point and grid result")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --save-ai-spline
+          "${legacy_convert_output}" "${legacy_convert_roundtrip}"
+  RESULT_VARIABLE legacy_convert_roundtrip_result
+  ERROR_VARIABLE legacy_convert_roundtrip_error
+)
+if(NOT legacy_convert_roundtrip_result STREQUAL "0" OR
+   NOT EXISTS "${legacy_convert_roundtrip}")
+  message(FATAL_ERROR
+    "converted legacy AI spline did not parse as v7; stderr: ${legacy_convert_roundtrip_error}")
+endif()
+
+file(SHA256 "${legacy_convert_output}" legacy_convert_hash)
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --convert-ai-spline-v2
+          "${legacy_save_input}" "${legacy_convert_output}"
+  RESULT_VARIABLE legacy_convert_overwrite_result
+  ERROR_VARIABLE legacy_convert_overwrite_error
+)
+if(NOT legacy_convert_overwrite_result STREQUAL "1")
+  message(FATAL_ERROR
+    "legacy AI spline conversion unexpectedly overwrote its destination")
+endif()
+string(FIND "${legacy_convert_overwrite_error}" "output already exists"
+       legacy_convert_overwrite_position)
+if(legacy_convert_overwrite_position EQUAL -1)
+  message(FATAL_ERROR
+    "legacy conversion overwrite rejection did not report its cause")
+endif()
+file(SHA256 "${legacy_convert_output}" legacy_convert_after_hash)
+if(NOT legacy_convert_hash STREQUAL legacy_convert_after_hash)
+  message(FATAL_ERROR
+    "legacy conversion overwrite rejection changed the destination")
+endif()
+
+file(SHA256 "${legacy_save_input}" legacy_source_hash)
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --convert-ai-spline-v2
+          "${legacy_save_input}" "${legacy_save_input}"
+  RESULT_VARIABLE legacy_convert_same_path_result
+  ERROR_VARIABLE legacy_convert_same_path_error
+)
+if(NOT legacy_convert_same_path_result STREQUAL "1")
+  message(FATAL_ERROR "legacy in-place conversion was not rejected")
+endif()
+string(FIND "${legacy_convert_same_path_error}" "different input and output"
+       legacy_convert_same_path_position)
+if(legacy_convert_same_path_position EQUAL -1)
+  message(FATAL_ERROR
+    "legacy in-place conversion did not report its path requirement")
+endif()
+file(SHA256 "${legacy_save_input}" legacy_source_after_hash)
+if(NOT legacy_source_hash STREQUAL legacy_source_after_hash)
+  message(FATAL_ERROR "legacy in-place conversion changed its source")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --convert-ai-spline-v2
+          "${save_input}" "${legacy_convert_invalid}"
+  RESULT_VARIABLE v7_convert_result
+  ERROR_VARIABLE v7_convert_error
+)
+if(NOT v7_convert_result STREQUAL "1" OR
+   EXISTS "${legacy_convert_invalid}")
+  message(FATAL_ERROR "version-7 input was not rejected by legacy conversion")
+endif()
+string(FIND "${v7_convert_error}" "requires a version-2 source"
+       v7_convert_error_position)
+if(v7_convert_error_position EQUAL -1)
+  message(FATAL_ERROR
+    "version-7 conversion rejection did not report its version requirement")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --convert-ai-spline-v2
+          "${legacy_truncated_input}" "${legacy_convert_invalid}"
+  RESULT_VARIABLE truncated_convert_result
+  ERROR_VARIABLE truncated_convert_error
+)
+if(NOT truncated_convert_result STREQUAL "1" OR
+   EXISTS "${legacy_convert_invalid}")
+  message(FATAL_ERROR
+    "truncated legacy conversion input was not rejected; stderr: ${truncated_convert_error}")
+endif()
+file(GLOB legacy_convert_temporary_files
+     "${legacy_convert_output}.apex-tmp-*"
+     "${legacy_convert_invalid}.apex-tmp-*")
+if(legacy_convert_temporary_files)
+  message(FATAL_ERROR "legacy conversion left temporary output files")
 endif()
 
 execute_process(
@@ -340,5 +467,6 @@ endif()
 file(REMOVE "${output}" "${roundtrip_output}" "${invert_output}"
      "${invert_roundtrip}" "${point_output}" "${point_roundtrip}"
      "${point_invalid}" "${point_truncated}" "${save_input}"
-     "${legacy_save_input}" "${legacy_save_output}" "${save_output}"
-     "${save_roundtrip}")
+     "${legacy_save_input}" "${legacy_truncated_input}" "${legacy_save_output}"
+     "${legacy_convert_output}" "${legacy_convert_roundtrip}"
+     "${legacy_convert_invalid}" "${save_output}" "${save_roundtrip}")

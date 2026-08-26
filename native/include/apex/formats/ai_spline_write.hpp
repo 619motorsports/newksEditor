@@ -32,8 +32,8 @@ private:
 };
 
 // Serialize the recovered AISpline::save version-7 layout. The native writer
-// writes zero for the header and payload reserved words. Version 2 is rejected
-// because this representation does not invent version-7 payloads or grid data.
+// writes zero for the header and payload reserved words. Version 2 is rejected.
+// Callers must use the explicit legacy conversion boundary first.
 [[nodiscard]] std::vector<std::uint8_t> serializeAiSpline(
     const AiSpline& spline, AiSplineWriteLimits limits = {});
 
