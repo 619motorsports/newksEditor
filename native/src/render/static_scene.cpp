@@ -347,13 +347,15 @@ ExecutorPipelineValidation validate_executor_pipeline(
 
     bool vertex = false;
     bool fragment = false;
-    const PipelineShaderFormat required_format = backend == Backend::Vulkan
-                                                     ? PipelineShaderFormat::spirv
-                                                     : PipelineShaderFormat::dxil;
     for (const PipelineShaderModule& shader : pipeline.shaders) {
         vertex = vertex || shader.stage == PipelineShaderStage::vertex;
         fragment = fragment || shader.stage == PipelineShaderStage::fragment;
-        if (shader.format != required_format)
+        const bool format_matches =
+            backend == Backend::Vulkan
+                ? shader.format == PipelineShaderFormat::spirv
+                : shader.format == PipelineShaderFormat::dxbc ||
+                      shader.format == PipelineShaderFormat::dxil;
+        if (!format_matches)
             return {StaticSceneResourceStatus::unsupported,
                     "Pipeline shader bytecode format does not match the device backend", 0U};
     }

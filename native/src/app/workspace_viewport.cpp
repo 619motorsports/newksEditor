@@ -553,10 +553,13 @@ preparationStatus(render::StaticSceneResourceStatus status) noexcept {
         {&request.directional_shadows->skinned_pipeline,
          render::DepthOnlyIndexedPipelineRole::skinned},
     }};
-    const render::PipelineShaderFormat expected_format =
-        backend == render::Backend::Vulkan
-            ? render::PipelineShaderFormat::spirv
-            : render::PipelineShaderFormat::dxil;
+    const auto format_matches_backend =
+        [backend](render::PipelineShaderFormat format) {
+            return backend == render::Backend::Vulkan
+                       ? format == render::PipelineShaderFormat::spirv
+                       : format == render::PipelineShaderFormat::dxbc ||
+                             format == render::PipelineShaderFormat::dxil;
+        };
     for (const ProgramRole& entry : programs) {
         if (!entry.program->has_value()) continue;
         const render::PipelineProgram& program = **entry.program;
@@ -586,7 +589,7 @@ preparationStatus(render::StaticSceneResourceStatus status) noexcept {
         if (!std::all_of(
                 program.shaders.begin(), program.shaders.end(),
                 [&](const render::PipelineShaderModule& shader) {
-                    return shader.format == expected_format;
+                    return format_matches_backend(shader.format);
                 })) {
             output_diagnostic = diagnostic(
                 "workspace_viewport_shadow_shader_format_mismatch",
@@ -2201,10 +2204,13 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             const bool shader_format_matches = std::all_of(
                 pipeline.shaders.begin(), pipeline.shaders.end(),
                 [&](const render::PipelineShaderModule& shader) {
-                    return shader.format ==
-                           (device.info().backend == render::Backend::Vulkan
-                                ? render::PipelineShaderFormat::spirv
-                                : render::PipelineShaderFormat::dxil);
+                    return device.info().backend == render::Backend::Vulkan
+                               ? shader.format ==
+                                     render::PipelineShaderFormat::spirv
+                               : shader.format ==
+                                         render::PipelineShaderFormat::dxbc ||
+                                     shader.format ==
+                                         render::PipelineShaderFormat::dxil;
                 });
             const auto shader_stage_count = [&](render::PipelineShaderStage stage) {
                 return std::count_if(

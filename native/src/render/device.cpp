@@ -2909,11 +2909,13 @@ validate_depth_only_indexed_static_mesh_draw_request(
                       "Depth-only packet depth flags must match the executable pipeline"};
         return DepthOnlyIndexedStaticMeshDrawStatus::invalid_request;
     }
-    const PipelineShaderFormat expected_shader = depth.backend() == Backend::Vulkan
-                                                     ? PipelineShaderFormat::spirv
-                                                     : PipelineShaderFormat::dxil;
     for (const auto& shader : pipeline.shaders) {
-        if (shader.format != expected_shader) {
+        const bool format_matches =
+            depth.backend() == Backend::Vulkan
+                ? shader.format == PipelineShaderFormat::spirv
+                : shader.format == PipelineShaderFormat::dxbc ||
+                      shader.format == PipelineShaderFormat::dxil;
+        if (!format_matches) {
             diagnostic = {"depth_only_indexed_shader_format_mismatch",
                           alpha_tested
                               ? "Stock alpha-tested depth-only shader formats must match the backend"
@@ -3227,7 +3229,8 @@ enum class ContainerValidation : std::uint8_t {
 };
 
 ContainerValidation validate_dxbc_container(std::span<const std::byte> bytes,
-                                             Diagnostic& diagnostic) {
+                                             Diagnostic& diagnostic,
+                                             ShaderBytecodeFormat* detected_format = nullptr) {
     if (bytes.size() < 32U) {
         diagnostic = {"shader_dxbc_header_invalid", "DXBC bytecode is shorter than its container header"};
         return ContainerValidation::invalid;
@@ -3251,7 +3254,9 @@ ContainerValidation validate_dxbc_container(std::span<const std::byte> bytes,
     }
     const std::size_t table_end = 32U + static_cast<std::size_t>(chunk_count) * sizeof(std::uint32_t);
     std::set<std::pair<std::size_t, std::size_t>> ranges;
-    bool supported_chunk = false;
+    bool found_dxbc = false;
+    bool found_dxil = false;
+    std::uint32_t program_chunks = 0U;
     for (std::uint32_t index = 0; index < chunk_count; ++index) {
         std::uint32_t offset_word = 0;
         const std::size_t table_offset = 32U + static_cast<std::size_t>(index) * sizeof(std::uint32_t);
@@ -3282,7 +3287,10 @@ ContainerValidation validate_dxbc_container(std::span<const std::byte> bytes,
                 diagnostic = {"shader_dxbc_chunk_invalid", "DXBC shader chunk is truncated"};
                 return ContainerValidation::invalid;
             }
-            supported_chunk = true;
+            found_dxil = found_dxil || chunk_fourcc == 0x4C495844U;
+            found_dxbc = found_dxbc || chunk_fourcc == 0x58454853U ||
+                         chunk_fourcc == 0x52444853U;
+            ++program_chunks;
         }
     }
     std::size_t previous_end = table_end;
@@ -3293,10 +3301,21 @@ ContainerValidation validate_dxbc_container(std::span<const std::byte> bytes,
         }
         previous_end = range.second;
     }
-    if (!supported_chunk) {
+    if (!found_dxbc && !found_dxil) {
         diagnostic = {"shader_dxbc_chunk_unsupported", "DXBC contains no supported shader chunk"};
         return ContainerValidation::unsupported;
     }
+    if (found_dxbc && found_dxil) {
+        diagnostic = {"shader_dxbc_program_ambiguous", "DXBC mixes legacy DXBC and DXIL program chunks"};
+        return ContainerValidation::invalid;
+    }
+    if (program_chunks != 1U) {
+        diagnostic = {"shader_dxbc_program_ambiguous", "DXBC must contain exactly one Direct3D program chunk"};
+        return ContainerValidation::invalid;
+    }
+    if (detected_format != nullptr)
+        *detected_format = found_dxbc ? ShaderBytecodeFormat::dxbc
+                                      : ShaderBytecodeFormat::dxil;
     return ContainerValidation::valid;
 }
 
@@ -3311,8 +3330,9 @@ bool shader_bytecode_format(std::span<const std::byte> bytecode,
         return true;
     }
     if (signature == 0x43425844U) {
-        format = ShaderBytecodeFormat::dxil;
-        return true;
+        Diagnostic diagnostic;
+        return validate_dxbc_container(bytecode, diagnostic, &format) ==
+               ContainerValidation::valid;
     }
     return false;
 }
@@ -3337,8 +3357,18 @@ ShaderModuleStatus validate_shader_module_description(const ShaderModuleDescript
         return ShaderModuleStatus::invalid_description;
     }
     ShaderBytecodeFormat format{};
-    if (!shader_bytecode_format(description.bytecode, format)) {
-        diagnostic = {"shader_bytecode_signature", "Shader module bytecode has no supported SPIR-V or DXIL signature"};
+    const std::uint32_t signature = shader_word(description.bytecode);
+    if (signature == 0x07230203U) {
+        format = ShaderBytecodeFormat::spirv;
+    } else if (signature == 0x43425844U) {
+        const ContainerValidation container = validate_dxbc_container(
+            description.bytecode, diagnostic, &format);
+        if (container == ContainerValidation::invalid)
+            return ShaderModuleStatus::invalid_description;
+        if (container == ContainerValidation::unsupported)
+            return ShaderModuleStatus::unsupported;
+    } else {
+        diagnostic = {"shader_bytecode_signature", "Shader module bytecode has no supported SPIR-V or Direct3D signature"};
         return ShaderModuleStatus::unsupported;
     }
     if (format == ShaderBytecodeFormat::spirv) {
@@ -3376,10 +3406,6 @@ ShaderModuleStatus validate_shader_module_description(const ShaderModuleDescript
             }
             cursor += instruction_words;
         }
-    } else {
-        const ContainerValidation container = validate_dxbc_container(description.bytecode, diagnostic);
-        if (container == ContainerValidation::invalid) return ShaderModuleStatus::invalid_description;
-        if (container == ContainerValidation::unsupported) return ShaderModuleStatus::unsupported;
     }
     return ShaderModuleStatus::ready;
 }

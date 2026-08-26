@@ -709,7 +709,7 @@ void materializes_external_texture_before_backend_preparation() {
         auto value = fixture();
         if (backend == Backend::D3D12) {
             for (auto& module : value.modules) {
-                module.format = PipelineShaderFormat::dxil;
+                module.format = PipelineShaderFormat::dxbc;
                 module.bytes = dxbc_shader_bytes();
             }
         }
@@ -763,7 +763,7 @@ void materializes_solid_color_before_backend_preparation() {
         auto value = fixture();
         if (backend == Backend::D3D12) {
             for (auto& module : value.modules) {
-                module.format = PipelineShaderFormat::dxil;
+                module.format = PipelineShaderFormat::dxbc;
                 module.bytes = dxbc_shader_bytes();
             }
         }
@@ -4110,7 +4110,7 @@ void publishes_controller_through_d3d12_metadata_contract() {
 
     auto value = fixture();
     for (auto& module : value.modules) {
-        module.format = PipelineShaderFormat::dxil;
+        module.format = PipelineShaderFormat::dxbc;
         module.bytes = dxbc_shader_bytes();
     }
     auto request = request_for(value);
@@ -4585,7 +4585,7 @@ void retains_independent_shadowgen_visibility() {
         auto value = shadow_only_fixture();
         if (backend == Backend::D3D12) {
             for (auto& module : value.modules) {
-                module.format = PipelineShaderFormat::dxil;
+                module.format = PipelineShaderFormat::dxbc;
                 module.bytes = dxbc_shader_bytes();
             }
         }
@@ -5110,7 +5110,7 @@ void updates_webgl_compatible_transparent_order_per_frame() {
 
     auto d3d_value = transparent_order_fixture();
     for (auto& module : d3d_value.modules) {
-        module.format = PipelineShaderFormat::dxil;
+        module.format = PipelineShaderFormat::dxbc;
         module.bytes = dxbc_shader_bytes();
     }
     auto d3d_request = request_for(d3d_value);

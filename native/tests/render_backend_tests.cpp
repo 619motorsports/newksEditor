@@ -1779,12 +1779,12 @@ void contract_triangle_draw_limits() {
     std::vector<std::byte> malformed_dxbc = minimal_dxbc_fixture();
     put_word(malformed_dxbc, 24U, 47U);
     put_word(malformed_dxbc, 40U, 3U);
-    pipeline.shaders[0].format = PipelineShaderFormat::dxil;
+    pipeline.shaders[0].format = PipelineShaderFormat::dxbc;
     pipeline.shaders[0].bytes.clear();
     pipeline.shaders[0].bytes.reserve(malformed_dxbc.size());
     for (const std::byte value : malformed_dxbc) pipeline.shaders[0].bytes.push_back(std::to_integer<std::uint8_t>(value));
     require(validate_triangle_draw_request(target, request, diagnostic) == TriangleDrawStatus::invalid_request &&
-                diagnostic.code == "triangle_shader_shader_dxbc_size_invalid",
+                diagnostic.code == "triangle_pipeline_shader_bytecode_size",
             "triangle malformed DXBC rejected");
     pipeline.shaders[0].format = PipelineShaderFormat::spirv;
     pipeline.shaders[0].bytes = pipeline_shader_fixture();
@@ -1883,11 +1883,35 @@ void contract_sampler_shader_limits() {
     shader.bytecode = dxbc;
     require(validate_shader_module_description(shader, diagnostic) == ShaderModuleStatus::ready,
             "structurally valid DXBC accepted");
+    ShaderBytecodeFormat direct3d_format{};
+    require(shader_bytecode_format(dxbc, direct3d_format) &&
+                direct3d_format == ShaderBytecodeFormat::dxbc,
+            "legacy Direct3D shader metadata reports DXBC");
     std::vector<std::byte> dxil_chunk = dxbc;
     put_word(dxil_chunk, 36U, 0x4C495844U); // DXIL chunk inside a DXBC container.
     shader.bytecode = dxil_chunk;
     require(validate_shader_module_description(shader, diagnostic) == ShaderModuleStatus::ready,
             "DXIL chunk in DXBC accepted");
+    require(shader_bytecode_format(dxil_chunk, direct3d_format) &&
+                direct3d_format == ShaderBytecodeFormat::dxil,
+            "LLVM Direct3D shader metadata reports DXIL");
+    std::vector<std::byte> duplicate_program(64U, std::byte{0});
+    put_word(duplicate_program, 0U, 0x43425844U);
+    put_word(duplicate_program, 20U, 1U);
+    put_word(duplicate_program, 24U,
+             static_cast<std::uint32_t>(duplicate_program.size()));
+    put_word(duplicate_program, 28U, 2U);
+    put_word(duplicate_program, 32U, 40U);
+    put_word(duplicate_program, 36U, 52U);
+    for (const std::size_t offset : {40U, 52U}) {
+        put_word(duplicate_program, offset, 0x58454853U);
+        put_word(duplicate_program, offset + 4U, 4U);
+    }
+    shader.bytecode = duplicate_program;
+    require(validate_shader_module_description(shader, diagnostic) ==
+                    ShaderModuleStatus::invalid_description &&
+                diagnostic.code == "shader_dxbc_program_ambiguous",
+            "duplicate Direct3D program chunks are rejected");
     for (std::size_t prefix = 0; prefix < dxbc.size(); ++prefix) {
         shader.bytecode = std::span<const std::byte>(dxbc).first(prefix);
         require(validate_shader_module_description(shader, diagnostic) != ShaderModuleStatus::ready,
@@ -2086,13 +2110,19 @@ bool contract_backend(apex::render::Backend backend) {
                     shader.diagnostic.code == "d3d12_shader_format_unsupported",
                 "D3D12 rejects SPIR-V shader modules explicitly");
     const auto minimal_dxbc = minimal_dxbc_fixture();
-    const ShaderModuleResult dxil = device.device->create_shader_module({ShaderStage::vertex, minimal_dxbc});
+    const ShaderModuleResult direct3d_shader =
+        device.device->create_shader_module(
+            {ShaderStage::vertex, minimal_dxbc});
     if (backend == Backend::D3D12)
-        require(dxil.ok(), "D3D12 immutable shader blob resource");
+        require(direct3d_shader.ok() &&
+                    direct3d_shader.shader_module->info().format ==
+                        ShaderBytecodeFormat::dxbc,
+                "D3D12 immutable DXBC shader blob resource");
     else
-        require(dxil.status == ShaderModuleStatus::unsupported &&
-                    dxil.diagnostic.code == "vulkan_shader_format_unsupported",
-                "Vulkan rejects DXIL shader modules explicitly");
+        require(direct3d_shader.status == ShaderModuleStatus::unsupported &&
+                    direct3d_shader.diagnostic.code ==
+                        "vulkan_shader_format_unsupported",
+                "Vulkan rejects Direct3D shader modules explicitly");
     const std::array<std::byte, 4> initial = {std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
     BufferDescription mutable_description{16U, BufferUsage::vertex, BufferMemory::host_visible,
                                           BufferMutability::mutable_data};
@@ -2253,9 +2283,9 @@ bool contract_backend(apex::render::Backend backend) {
             "Output main(Input input) { Output output; output.position = float4(input.position, 1.0); return output; }";
         constexpr std::string_view fragment_source =
             "float4 main(float4 position : SV_Position) : SV_Target { return float4(1, 0, 0, 1); }";
-        triangle_pipeline.shaders.push_back({PipelineShaderStage::vertex, PipelineShaderFormat::dxil,
+        triangle_pipeline.shaders.push_back({PipelineShaderStage::vertex, PipelineShaderFormat::dxbc,
                                               executable_d3d_shader(vertex_source, "vs_5_0")});
-        triangle_pipeline.shaders.push_back({PipelineShaderStage::fragment, PipelineShaderFormat::dxil,
+        triangle_pipeline.shaders.push_back({PipelineShaderStage::fragment, PipelineShaderFormat::dxbc,
                                               executable_d3d_shader(fragment_source, "ps_5_0")});
 #else
         require(false, "D3D12 executable shader test requires Windows D3DCompile");
@@ -6399,9 +6429,9 @@ Output main(Input input) {
 float4 main(float3 color : COLOR) : SV_Target { return float4(color, 1.0); }
 )";
             pipeline.shaders = {
-                {PipelineShaderStage::vertex, PipelineShaderFormat::dxil,
+                {PipelineShaderStage::vertex, PipelineShaderFormat::dxbc,
                  executable_d3d_shader(vertex_source, "vs_5_0")},
-                {PipelineShaderStage::fragment, PipelineShaderFormat::dxil,
+                {PipelineShaderStage::fragment, PipelineShaderFormat::dxbc,
                  executable_d3d_shader(fragment_source, "ps_5_0")},
             };
 #else

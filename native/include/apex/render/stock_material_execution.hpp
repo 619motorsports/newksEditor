@@ -13,7 +13,7 @@ namespace apex::render {
 
 // This component is an explicit handoff from validated KN5 material data to
 // the already-executable static-scene adapter. It accepts caller-supplied
-// SPIR-V or DXIL modules only; stock-container translation remains staged.
+// SPIR-V, DXBC, or DXIL modules only; stock-container translation remains staged.
 enum class StockMaterialShaderKeyKind : std::uint8_t {
     material_name,
     shader_family,

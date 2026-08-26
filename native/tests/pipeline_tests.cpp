@@ -5,6 +5,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -34,16 +35,43 @@ PipelineShaderModule spirv(PipelineShaderStage stage) {
             {0x03, 0x02, 0x23, 0x07, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0}};
 }
 
-std::vector<std::uint8_t> dxbc_container(std::uint32_t declared_size = 44U,
+std::vector<std::uint8_t> dxbc_container(std::uint32_t declared_size = 48U,
                                           std::uint32_t chunk_count = 1U,
                                           std::uint32_t chunk_offset = 36U) {
-    std::vector<std::uint8_t> bytes(44U, 0);
+    std::vector<std::uint8_t> bytes(48U, 0);
     bytes[0] = 'D'; bytes[1] = 'X'; bytes[2] = 'B'; bytes[3] = 'C';
+    bytes[20U] = 1U;
     for (std::size_t index = 0; index < 4; ++index) bytes[24U + index] = static_cast<std::uint8_t>(declared_size >> (index * 8U));
     for (std::size_t index = 0; index < 4; ++index) bytes[28U + index] = static_cast<std::uint8_t>(chunk_count >> (index * 8U));
     for (std::size_t index = 0; index < 4; ++index) bytes[32U + index] = static_cast<std::uint8_t>(chunk_offset >> (index * 8U));
     if (chunk_offset + 8U <= bytes.size()) {
-        for (std::size_t index = 0; index < 4; ++index) bytes[chunk_offset + 4U + index] = 0;
+        bytes[chunk_offset] = 'S';
+        bytes[chunk_offset + 1U] = 'H';
+        bytes[chunk_offset + 2U] = 'D';
+        bytes[chunk_offset + 3U] = 'R';
+        bytes[chunk_offset + 4U] = 4U;
+        bytes[chunk_offset + 8U] = 0x40U;
+        bytes[chunk_offset + 10U] = 1U;
+    }
+    return bytes;
+}
+
+std::vector<std::uint8_t> duplicate_dxbc_program_container() {
+    std::vector<std::uint8_t> bytes(64U, 0U);
+    const auto put = [&](std::size_t offset, std::uint32_t value) {
+        for (std::size_t index = 0U; index < 4U; ++index)
+            bytes[offset + index] =
+                static_cast<std::uint8_t>(value >> (index * 8U));
+    };
+    put(0U, 0x43425844U);
+    put(20U, 1U);
+    put(24U, static_cast<std::uint32_t>(bytes.size()));
+    put(28U, 2U);
+    put(32U, 40U);
+    put(36U, 52U);
+    for (const std::size_t offset : {40U, 52U}) {
+        put(offset, 0x58454853U);
+        put(offset + 4U, 4U);
     }
     return bytes;
 }
@@ -69,6 +97,16 @@ void acceptsBoundedBackendNeutralContract() {
     const PipelineValidationResult result = validate_pipeline(valid_program());
     require(result.valid, "valid pipeline contract accepted");
     require(!result.shader_execution_supported && result.shader_bytes == 40, "shader execution remains staged");
+    const auto legacy = dxbc_container();
+    require(detect_pipeline_shader_format(legacy) == PipelineShaderFormat::dxbc,
+            "legacy Direct3D bytecode is labeled DXBC");
+    auto llvm = legacy;
+    llvm[36U] = 'D';
+    llvm[37U] = 'X';
+    llvm[38U] = 'I';
+    llvm[39U] = 'L';
+    require(detect_pipeline_shader_format(llvm) == PipelineShaderFormat::dxil,
+            "LLVM Direct3D bytecode is labeled DXIL");
 }
 
 void rejectsMalformedShaderBytes() {
@@ -104,19 +142,44 @@ void rejectsMalformedShaderBytes() {
     require(!id_limit_result.valid && has_code(id_limit_result, "spirv_id_bound_limit"), "SPIR-V ID bound limit enforced");
 
     PipelineProgram bad_size = valid_program();
-    bad_size.shaders = {{PipelineShaderStage::vertex, PipelineShaderFormat::dxil, dxbc_container(32U)}};
+    bad_size.shaders = {{PipelineShaderStage::vertex, PipelineShaderFormat::dxbc, dxbc_container(32U)}};
     const PipelineValidationResult bad_size_result = validate_pipeline(bad_size);
     require(!bad_size_result.valid && has_code(bad_size_result, "shader_bytecode_size"), "undersized DXBC declaration rejected");
 
     PipelineProgram oversized = valid_program();
-    oversized.shaders = {{PipelineShaderStage::vertex, PipelineShaderFormat::dxil, dxbc_container(48U)}};
+    oversized.shaders = {{PipelineShaderStage::vertex, PipelineShaderFormat::dxbc, dxbc_container(52U)}};
     const PipelineValidationResult oversized_result = validate_pipeline(oversized);
     require(!oversized_result.valid && has_code(oversized_result, "shader_bytecode_size"), "oversized DXBC declaration rejected");
 
     PipelineProgram oversized_table = valid_program();
-    oversized_table.shaders = {{PipelineShaderStage::vertex, PipelineShaderFormat::dxil, dxbc_container(44U, 2U)}};
+    oversized_table.shaders = {{PipelineShaderStage::vertex, PipelineShaderFormat::dxbc, dxbc_container(48U, 2U)}};
     const PipelineValidationResult oversized_table_result = validate_pipeline(oversized_table);
     require(!oversized_table_result.valid && has_code(oversized_table_result, "shader_bytecode_bounds"), "oversized DXBC table rejected");
+
+    PipelineProgram mislabeled = valid_program();
+    auto dxil = dxbc_container();
+    dxil[36U] = 'D';
+    dxil[37U] = 'X';
+    dxil[38U] = 'I';
+    dxil[39U] = 'L';
+    mislabeled.shaders = {{PipelineShaderStage::vertex,
+                           PipelineShaderFormat::dxbc, std::move(dxil)}};
+    const PipelineValidationResult mislabeled_result = validate_pipeline(mislabeled);
+    require(!mislabeled_result.valid &&
+                has_code(mislabeled_result,
+                         "shader_bytecode_format_mismatch"),
+            "DXIL payload with a DXBC label is rejected");
+
+    PipelineProgram duplicate_program = valid_program();
+    duplicate_program.shaders = {{PipelineShaderStage::vertex,
+                                  PipelineShaderFormat::dxbc,
+                                  duplicate_dxbc_program_container()}};
+    const PipelineValidationResult duplicate_program_result =
+        validate_pipeline(duplicate_program);
+    require(!duplicate_program_result.valid &&
+                has_code(duplicate_program_result,
+                         "shader_bytecode_program"),
+            "duplicate DXBC program chunks are rejected");
 }
 
 void rejectsInvalidLayoutAndState() {

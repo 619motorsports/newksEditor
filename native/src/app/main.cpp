@@ -1892,19 +1892,33 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
     if (options.shaders.empty())
         throw std::runtime_error("workspace rendering requires caller-supplied shader modules");
 
-    const auto shader_format = backend == apex::render::Backend::Vulkan
-                                   ? apex::render::PipelineShaderFormat::spirv
-                                   : apex::render::PipelineShaderFormat::dxil;
+    const auto shader_format =
+        [backend](std::span<const std::uint8_t> bytes) {
+            const auto detected =
+                apex::render::detect_pipeline_shader_format(bytes);
+            const bool matches = backend == apex::render::Backend::Vulkan
+                                     ? detected == apex::render::PipelineShaderFormat::spirv
+                                     : detected == apex::render::PipelineShaderFormat::dxbc ||
+                                           detected == apex::render::PipelineShaderFormat::dxil;
+            if (!matches)
+                throw std::runtime_error(
+                    "a caller-supplied shader module does not match the selected backend");
+            return detected;
+        };
     constexpr std::uint64_t max_shader_bytes =
         apex::render::StaticSceneResourceLimits{}.max_total_shader_bytes;
     std::uint64_t shader_bytes = 0U;
     loaded.shaderSets.reserve(options.shaders.size());
     for (const auto& shader : options.shaders) {
         LoadedWindowWorkspace::ShaderSet set;
-        set.modules.push_back({apex::render::PipelineShaderStage::vertex, shader_format,
-                               read_file(shader.vertex)});
-        set.modules.push_back({apex::render::PipelineShaderStage::fragment, shader_format,
-                               read_file(shader.fragment)});
+        auto vertex_bytes = read_file(shader.vertex);
+        auto fragment_bytes = read_file(shader.fragment);
+        set.modules.push_back({apex::render::PipelineShaderStage::vertex,
+                               shader_format(vertex_bytes),
+                               std::move(vertex_bytes)});
+        set.modules.push_back({apex::render::PipelineShaderStage::fragment,
+                               shader_format(fragment_bytes),
+                               std::move(fragment_bytes)});
         for (const auto& module : set.modules) {
             if (module.bytes.size() > apex::render::max_shader_module_bytes)
                 throw std::runtime_error("a caller-supplied shader module exceeds the native module budget");
@@ -1917,12 +1931,14 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
     }
     if (options.authoringOverlayVertex.has_value()) {
         std::vector<apex::render::PipelineShaderModule> modules;
+        auto vertex_bytes = read_file(*options.authoringOverlayVertex);
+        auto fragment_bytes = read_file(*options.authoringOverlayFragment);
         modules.push_back({apex::render::PipelineShaderStage::vertex,
-                           shader_format,
-                           read_file(*options.authoringOverlayVertex)});
+                           shader_format(vertex_bytes),
+                           std::move(vertex_bytes)});
         modules.push_back({apex::render::PipelineShaderStage::fragment,
-                           shader_format,
-                           read_file(*options.authoringOverlayFragment)});
+                           shader_format(fragment_bytes),
+                           std::move(fragment_bytes)});
         for (const auto& module : modules) {
             if (module.bytes.size() > apex::render::max_shader_module_bytes)
                 throw std::runtime_error(
@@ -1937,12 +1953,14 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
     }
     if (options.selectedMeshVertex.has_value()) {
         std::vector<apex::render::PipelineShaderModule> modules;
+        auto vertex_bytes = read_file(*options.selectedMeshVertex);
+        auto fragment_bytes = read_file(*options.selectedMeshFragment);
         modules.push_back({apex::render::PipelineShaderStage::vertex,
-                           shader_format,
-                           read_file(*options.selectedMeshVertex)});
+                           shader_format(vertex_bytes),
+                           std::move(vertex_bytes)});
         modules.push_back({apex::render::PipelineShaderStage::fragment,
-                           shader_format,
-                           read_file(*options.selectedMeshFragment)});
+                           shader_format(fragment_bytes),
+                           std::move(fragment_bytes)});
         for (const auto& module : modules) {
             if (module.bytes.size() > apex::render::max_shader_module_bytes)
                 throw std::runtime_error(
@@ -1971,7 +1989,7 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
                         "caller-supplied shader modules exceed the native shader budget");
                 shader_bytes += bytes.size();
                 return apex::render::PipelineShaderModule{
-                    stage, shader_format, std::move(bytes)};
+                    stage, shader_format(bytes), std::move(bytes)};
             };
         const auto build_shadow_pipeline =
             [](std::string name,

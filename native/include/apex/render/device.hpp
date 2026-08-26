@@ -990,8 +990,9 @@ enum class ShaderStage : std::uint8_t {
 
 enum class ShaderBytecodeFormat : std::uint8_t {
     spirv,
-    // Direct3D shader bytecode is a DXBC container; DXIL is a supported
-    // chunk inside that container, not a standalone top-level signature.
+    // Both Direct3D formats use a DXBC container. SHDR/SHEX carries legacy
+    // DXBC programs, while a DXIL chunk carries LLVM-based DXIL programs.
+    dxbc,
     dxil,
 };
 
@@ -1118,6 +1119,10 @@ validate_depth_only_indexed_static_mesh_batch_description(
 [[nodiscard]] ShaderModuleStatus validate_shader_module_description(
     const ShaderModuleDescription& description,
     Diagnostic& diagnostic);
+
+[[nodiscard]] bool shader_bytecode_format(
+    std::span<const std::byte> bytecode,
+    ShaderBytecodeFormat& format) noexcept;
 
 [[nodiscard]] PresentationTargetStatus validate_presentation_target_description(
     const PresentationTargetDescription& description,

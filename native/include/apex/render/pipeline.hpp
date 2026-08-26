@@ -17,7 +17,13 @@ namespace apex::render {
 // D3D12, or other backend handles. Adapters translate this contract after it
 // has passed validation.
 enum class PipelineShaderStage : std::uint8_t { vertex, fragment, geometry };
-enum class PipelineShaderFormat : std::uint8_t { unknown, stock_container, spirv, dxil };
+enum class PipelineShaderFormat : std::uint8_t {
+    unknown,
+    stock_container,
+    spirv,
+    dxbc,
+    dxil,
+};
 
 struct PipelineShaderModule {
     PipelineShaderStage stage = PipelineShaderStage::vertex;
@@ -179,6 +185,7 @@ struct PipelineLimits {
     // validation belongs to the eventual backend shader compiler.
     std::uint32_t max_spirv_version = 0x00010600U;
     std::uint32_t max_spirv_id_bound = 1U << 24U;
+    std::uint32_t max_dxbc_chunks = 4096U;
     std::size_t max_diagnostics = 128;
     std::size_t max_diagnostic_bytes = 64U * 1024U;
 };
@@ -218,6 +225,8 @@ struct StockPipelineResult {
 
 [[nodiscard]] const char* pipeline_shader_stage_name(PipelineShaderStage stage) noexcept;
 [[nodiscard]] const char* pipeline_shader_format_name(PipelineShaderFormat format) noexcept;
+[[nodiscard]] PipelineShaderFormat detect_pipeline_shader_format(
+    std::span<const std::uint8_t> bytes) noexcept;
 [[nodiscard]] const char* pipeline_vertex_semantic_name(PipelineVertexSemantic semantic) noexcept;
 [[nodiscard]] const char* pipeline_render_target_format_name(PipelineRenderTargetFormat format) noexcept;
 

@@ -1510,7 +1510,8 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     const PipelineShaderModule* vertex_shader = nullptr;
     const PipelineShaderModule* fragment_shader = nullptr;
     for (const PipelineShaderModule& shader : shaders) {
-        if (shader.format != PipelineShaderFormat::dxil) {
+        if (shader.format != PipelineShaderFormat::dxbc &&
+            shader.format != PipelineShaderFormat::dxil) {
             diagnostic = {"triangle_shader_format_unsupported", "D3D12 triangle execution requires DXIL/DXBC shaders"};
             return false;
         }
@@ -2595,7 +2596,8 @@ bool draw_indexed_static_mesh_batch_and_readback(
         const PipelineShaderModule* vertex_shader = nullptr;
         const PipelineShaderModule* fragment_shader = nullptr;
         for (const PipelineShaderModule& shader : program.shaders) {
-            if (shader.format != PipelineShaderFormat::dxil) {
+            if (shader.format != PipelineShaderFormat::dxbc &&
+                shader.format != PipelineShaderFormat::dxil) {
                 diagnostic = {"indexed_static_mesh_batch_shader_format_unsupported",
                               "D3D12 indexed static-mesh batch requires DXIL/DXBC shaders"};
                 return false;
@@ -3609,7 +3611,8 @@ bool execute_d3d12_depth_only_indexed_static_mesh_batch(
         const PipelineShaderModule* vertex_shader = nullptr;
         const PipelineShaderModule* fragment_shader = nullptr;
         for (const PipelineShaderModule& shader : program.shaders) {
-            if (shader.format != PipelineShaderFormat::dxil) {
+            if (shader.format != PipelineShaderFormat::dxbc &&
+                shader.format != PipelineShaderFormat::dxil) {
                 diagnostic = {"depth_only_indexed_shader_format_unsupported",
                               "D3D12 depth-only execution requires DXIL/DXBC bytecode"};
                 return false;
@@ -6346,7 +6349,9 @@ public:
         if (validation != ShaderModuleStatus::ready)
             return {validation, std::move(diagnostic), nullptr};
         ShaderBytecodeFormat format{};
-        if (!shader_bytecode_format(description.bytecode, format) || format != ShaderBytecodeFormat::dxil)
+        if (!shader_bytecode_format(description.bytecode, format) ||
+            (format != ShaderBytecodeFormat::dxbc &&
+             format != ShaderBytecodeFormat::dxil))
             return {ShaderModuleStatus::unsupported,
                     {"d3d12_shader_format_unsupported", "D3D12 shader modules require DXBC or DXIL bytecode"}, nullptr};
         try {

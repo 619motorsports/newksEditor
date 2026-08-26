@@ -130,7 +130,8 @@ std::vector<std::uint8_t> dxbc_fixture(std::size_t storage_bytes = 44U) {
                 static_cast<std::uint8_t>(value >> (byte * 8U));
     };
     put(0U, 0x43425844U);  // DXBC
-    put(24U, 44U);
+    put(20U, 1U);
+    put(24U, static_cast<std::uint32_t>(storage_bytes));
     put(28U, 1U);
     put(32U, 36U);
     put(36U, 0x58454853U);  // SHEX
@@ -230,7 +231,7 @@ Fixture fixture(std::string shader, Backend backend = Backend::Vulkan) {
     const std::vector<std::uint8_t> bytes = shader_fixture(backend, false);
     const auto format = backend == Backend::Vulkan
                             ? PipelineShaderFormat::spirv
-                            : PipelineShaderFormat::dxil;
+                            : PipelineShaderFormat::dxbc;
     result.modules = {{PipelineShaderStage::vertex, format, bytes},
                       {PipelineShaderStage::fragment, format, bytes}};
     result.module_set = {StockMaterialShaderKeyKind::shader_family, material.shader, result.modules};

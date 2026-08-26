@@ -60,8 +60,12 @@ namespace {
     return result;
 }
 
-[[nodiscard]] PipelineShaderFormat backend_shader_format(Backend backend) noexcept {
-    return backend == Backend::Vulkan ? PipelineShaderFormat::spirv : PipelineShaderFormat::dxil;
+[[nodiscard]] bool backend_shader_format(Backend backend,
+                                         PipelineShaderFormat format) noexcept {
+    return backend == Backend::Vulkan
+               ? format == PipelineShaderFormat::spirv
+               : format == PipelineShaderFormat::dxbc ||
+                     format == PipelineShaderFormat::dxil;
 }
 
 [[nodiscard]] const StockMaterialShaderModules* find_modules(
@@ -161,7 +165,6 @@ bool validate_module_sets(std::span<const StockMaterialShaderModules> sets,
         return false;
     }
     std::set<std::tuple<int, std::string, int, bool>> keys;
-    const PipelineShaderFormat expected = backend_shader_format(backend);
     for (const StockMaterialShaderModules& set : sets) {
         if (set.key.empty() || set.key.size() > limits.max_shader_key_bytes) {
             diagnostic = diag("stock_material_shader_key_invalid", "Shader module key is empty or exceeds the configured limit");
@@ -187,7 +190,7 @@ bool validate_module_sets(std::span<const StockMaterialShaderModules> sets,
         bool vertex = false;
         bool fragment = false;
         for (const PipelineShaderModule& module : set.modules) {
-            if (module.format != expected) {
+            if (!backend_shader_format(backend, module.format)) {
                 diagnostic = diag("stock_material_shader_module_format", "Shader module format does not match the preparing backend");
                 return false;
             }

@@ -66,6 +66,7 @@ struct DiagnosticSink {
 
 [[nodiscard]] bool valid_shader_format(PipelineShaderFormat format) noexcept {
     return format == PipelineShaderFormat::stock_container || format == PipelineShaderFormat::spirv ||
+           format == PipelineShaderFormat::dxbc ||
            format == PipelineShaderFormat::dxil;
 }
 
@@ -84,17 +85,59 @@ struct DiagnosticSink {
     return true;
 }
 
-void validate_dxil(std::span<const std::uint8_t> bytes, DiagnosticSink& diagnostics) {
-    // DXIL is commonly carried by a DXBC container. Checking the container's
-    // bounded chunk table catches truncated/untrusted input without parsing
-    // or executing the shader language.
+[[nodiscard]] PipelineShaderFormat detect_direct3d_container_format(
+    std::span<const std::uint8_t> bytes,
+    std::uint32_t max_dxbc_chunks) noexcept {
+    if (bytes.size() < 32U || !signature(bytes, "DXBC") ||
+        u32_le(bytes, 20U) != 1U || u32_le(bytes, 24U) != bytes.size())
+        return PipelineShaderFormat::unknown;
+    const std::uint32_t chunk_count = u32_le(bytes, 28U);
+    if (chunk_count == 0U || chunk_count > max_dxbc_chunks ||
+        chunk_count > (bytes.size() - 32U) / 4U)
+        return PipelineShaderFormat::unknown;
+    const std::size_t table_end =
+        32U + static_cast<std::size_t>(chunk_count) * 4U;
+    bool found_dxbc = false;
+    bool found_dxil = false;
+    std::uint32_t program_chunks = 0U;
+    for (std::uint32_t index = 0U; index < chunk_count; ++index) {
+        const std::size_t table_offset =
+            32U + static_cast<std::size_t>(index) * 4U;
+        const std::size_t chunk_offset = u32_le(bytes, table_offset);
+        if (chunk_offset < table_end || chunk_offset > bytes.size() ||
+            bytes.size() - chunk_offset < 8U)
+            return PipelineShaderFormat::unknown;
+        const std::size_t chunk_bytes = u32_le(bytes, chunk_offset + 4U);
+        if (chunk_bytes > bytes.size() - chunk_offset - 8U)
+            return PipelineShaderFormat::unknown;
+        const std::uint32_t tag = u32_le(bytes, chunk_offset);
+        found_dxbc = found_dxbc || tag == 0x52444853U || tag == 0x58454853U;
+        found_dxil = found_dxil || tag == 0x4c495844U;
+        if (tag == 0x52444853U || tag == 0x58454853U ||
+            tag == 0x4c495844U)
+            ++program_chunks;
+    }
+    if (program_chunks != 1U || found_dxbc == found_dxil)
+        return PipelineShaderFormat::unknown;
+    return found_dxbc ? PipelineShaderFormat::dxbc
+                      : PipelineShaderFormat::dxil;
+}
+
+void validate_direct3d(std::span<const std::uint8_t> bytes,
+                       PipelineShaderFormat expected,
+                       DiagnosticSink& diagnostics,
+                       std::uint32_t max_dxbc_chunks) {
     if (bytes.size() < 32 || !signature(bytes, "DXBC")) {
-        diagnostics.error("shader_bytecode_truncated", "DXIL/DXBC shader module is truncated or has no DXBC signature");
+        diagnostics.error("shader_bytecode_truncated", "Direct3D shader module is truncated or has no DXBC signature");
+        return;
+    }
+    if (u32_le(bytes, 20U) != 1U) {
+        diagnostics.error("shader_bytecode_malformed", "DXBC container header version must be one");
         return;
     }
     const std::uint32_t chunk_count = u32_le(bytes, 28);
-    if (chunk_count == 0U) {
-        diagnostics.error("shader_bytecode_malformed", "DXBC container has no shader chunks");
+    if (chunk_count == 0U || chunk_count > max_dxbc_chunks) {
+        diagnostics.error("shader_bytecode_malformed", "DXBC container chunk count is outside its limit");
         return;
     }
     if (chunk_count > (bytes.size() - 32U) / 4U) {
@@ -103,10 +146,12 @@ void validate_dxil(std::span<const std::uint8_t> bytes, DiagnosticSink& diagnost
     }
     const std::size_t table_end = 32U + static_cast<std::size_t>(chunk_count) * 4U;
     const std::size_t declared_size = static_cast<std::size_t>(u32_le(bytes, 24));
-    if (declared_size < table_end || declared_size > bytes.size()) {
-        diagnostics.error("shader_bytecode_size", "DXBC declared size does not contain its table or exceeds supplied bytes");
+    if (declared_size != bytes.size() || declared_size < table_end) {
+        diagnostics.error("shader_bytecode_size", "DXBC declared size does not match the supplied shader module");
         return;
     }
+    std::vector<std::pair<std::size_t, std::size_t>> ranges;
+    ranges.reserve(chunk_count);
     for (std::uint32_t index = 0; index < chunk_count; ++index) {
         const std::size_t table_offset = 32U + static_cast<std::size_t>(index) * 4U;
         const std::size_t chunk_offset = u32_le(bytes, table_offset);
@@ -119,6 +164,21 @@ void validate_dxil(std::span<const std::uint8_t> bytes, DiagnosticSink& diagnost
             diagnostics.error("shader_bytecode_bounds", "DXBC chunk payload exceeds shader module bounds");
             return;
         }
+        ranges.emplace_back(chunk_offset, chunk_offset + 8U + chunk_bytes);
+    }
+    std::sort(ranges.begin(), ranges.end());
+    for (std::size_t index = 1U; index < ranges.size(); ++index) {
+        if (ranges[index].first < ranges[index - 1U].second) {
+            diagnostics.error("shader_bytecode_overlap", "DXBC shader chunks overlap");
+            return;
+        }
+    }
+    const PipelineShaderFormat detected =
+        detect_direct3d_container_format(bytes, max_dxbc_chunks);
+    if (detected == PipelineShaderFormat::unknown) {
+        diagnostics.error("shader_bytecode_program", "DXBC container must contain exactly one Direct3D program format");
+    } else if (detected != expected) {
+        diagnostics.error("shader_bytecode_format_mismatch", "Direct3D shader label does not match its DXBC container program");
     }
 }
 
@@ -233,9 +293,18 @@ const char* pipeline_shader_format_name(PipelineShaderFormat format) noexcept {
     case PipelineShaderFormat::unknown: return "unknown";
     case PipelineShaderFormat::stock_container: return "stock-container";
     case PipelineShaderFormat::spirv: return "spirv";
+    case PipelineShaderFormat::dxbc: return "dxbc";
     case PipelineShaderFormat::dxil: return "dxil";
     }
     return "unknown";
+}
+
+PipelineShaderFormat detect_pipeline_shader_format(
+    std::span<const std::uint8_t> bytes) noexcept {
+    if (bytes.size() >= 4U && u32_le(bytes, 0U) == 0x07230203U)
+        return PipelineShaderFormat::spirv;
+    return detect_direct3d_container_format(
+        bytes, PipelineLimits{}.max_dxbc_chunks);
 }
 
 const char* pipeline_vertex_semantic_name(PipelineVertexSemantic semantic) noexcept {
@@ -302,7 +371,10 @@ PipelineValidationResult validate_pipeline(const PipelineProgram& program, const
         const std::span<const std::uint8_t> bytes(module.bytes.data(), module.bytes.size());
         if (module.format == PipelineShaderFormat::spirv)
             validate_spirv(bytes, diagnostics, limits.max_spirv_version, limits.max_spirv_id_bound);
-        else if (module.format == PipelineShaderFormat::dxil) validate_dxil(bytes, diagnostics);
+        else if (module.format == PipelineShaderFormat::dxbc ||
+                 module.format == PipelineShaderFormat::dxil)
+            validate_direct3d(bytes, module.format, diagnostics,
+                              limits.max_dxbc_chunks);
         else {
             try {
                 const StockShaderContainerHeader header = parse_stock_shader_container_header(bytes);
