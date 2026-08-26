@@ -679,6 +679,11 @@ The native shell frames FBX bounds with its existing workspace camera. This is
 shell behavior, not recovered ksEditor behavior; the installed editor keeps its
 current camera when it loads FBX geometry. FBX animation remains a separate
 unsupported window operation.
+The optional real-backend contract test also carries one supported ASCII FBX
+through parsing, external-texture authority, the canonical adapter, and the
+stock-scene draw/readback path. It requires visible color output on Vulkan and
+D3D12. Hosts without a usable Vulkan device or Windows WARP skip that runtime
+contract with an actionable backend diagnostic.
 
 The strict Linux build detects the Vulkan SDK. The runtime test uses a software
 Vulkan device when an ICD is available. CI defines the same Vulkan test. The

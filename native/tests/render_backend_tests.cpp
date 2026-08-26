@@ -1,9 +1,13 @@
 #include "apex/assets/asset_source.hpp"
 #include "apex/formats/acd.hpp"
+#include "apex/formats/fbx.hpp"
+#include "apex/formats/fbx_conversion.hpp"
 #include "apex/render/authoring_grid.hpp"
 #include "apex/render/device.hpp"
 #include "apex/render/draw_packet.hpp"
 #include "apex/render/external_texture_authority.hpp"
+#include "apex/render/fbx_external_texture_authority.hpp"
+#include "apex/render/fbx_render_adapter.hpp"
 #include "apex/render/selected_mesh.hpp"
 #include "apex/render/skinned_mesh_upload.hpp"
 #include "apex/render/static_scene.hpp"
@@ -5075,6 +5079,114 @@ bool contract_backend(apex::render::Backend backend) {
                 stock_draw_result.rgba8[2] == std::byte{0} &&
                 stock_draw_result.rgba8[3] == std::byte{255},
             "bounded stock-scene facade retains the clear color outside geometry");
+
+    // Exercise the complete supported FBX CPU path through this same real
+    // Vulkan/D3D12 stock-scene execution. This fixture uses explicit shader
+    // modules and does not claim recovered stock shader translation.
+    const std::string fbx_text =
+        "FBXVersion: 7400\n"
+        "Objects: {\n"
+        " Model: 200, \"Model::Triangle\", \"Mesh\" { }\n"
+        " Geometry: 100, \"Geometry::Triangle\", \"Mesh\" {\n"
+        "  Vertices: *9 { a: 0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0,0.0 }\n"
+        "  PolygonVertexIndex: *3 { a: 0,1,-3 }\n"
+        "  LayerElementNormal: 0 {\n"
+        "   MappingInformationType: \"ByPolygonVertex\"\n"
+        "   ReferenceInformationType: \"Direct\"\n"
+        "   Normals: *9 { a: 0.0,0.0,1.0,0.0,0.0,1.0,0.0,0.0,1.0 }\n"
+        "  }\n"
+        "  LayerElementUV: 0 {\n"
+        "   MappingInformationType: \"ByPolygonVertex\"\n"
+        "   ReferenceInformationType: \"IndexToDirect\"\n"
+        "   UV: *6 { a: 0.0,0.0,1.0,0.0,0.0,1.0 }\n"
+        "   UVIndex: *3 { a: 0,1,2 }\n"
+        "  }\n"
+        "  LayerElementMaterial: 0 {\n"
+        "   MappingInformationType: \"AllSame\"\n"
+        "   ReferenceInformationType: \"IndexToDirect\"\n"
+        "   Materials: *1 { a: 0 }\n"
+        "  }\n"
+        " }\n"
+        " Material: 300, \"Material::Paint\", \"Material\" {\n"
+        "  ShadingModel: \"Phong\"\n"
+        "  Properties70: {\n"
+        "   P: \"AmbientColor\", \"ColorRGB\", \"Color\", \"\", 0.2,0.2,0.2\n"
+        "   P: \"DiffuseColor\", \"ColorRGB\", \"Color\", \"\", 0.8,0.8,0.8\n"
+        "   P: \"SpecularColor\", \"ColorRGB\", \"Color\", \"\", 0.0,0.0,0.0\n"
+        "   P: \"Shininess\", \"double\", \"Number\", \"\", 20\n"
+        "  }\n"
+        " }\n"
+        " Texture: 400, \"Texture::Paint\", \"TextureVideoClip\" {\n"
+        "  FileName: \"C:\\\\car\\\\texture\\\\paint.dds\"\n"
+        " }\n"
+        "}\n"
+        "Connections: {\n"
+        " C: \"OO\", 100, 200\n"
+        " C: \"OO\", 300, 200\n"
+        " C: \"OP\", 400, 300, \"DiffuseColor\"\n"
+        "}\n";
+    const auto fbx_bytes = std::span<const std::uint8_t>(
+        reinterpret_cast<const std::uint8_t*>(fbx_text.data()),
+        fbx_text.size());
+    const auto fbx_document = apex::formats::parseFbx(
+        fbx_bytes, "real-backend-triangle.fbx");
+    const auto fbx_conversion = apex::formats::convertFbxScene(fbx_document);
+    require(fbx_conversion.complete && fbx_conversion.meshes.size() == 1U,
+            "real-backend FBX fixture converts completely");
+
+    apex::formats::AcdArchive fbx_archive;
+    fbx_archive.source = "fixture/data.acd";
+    fbx_archive.assetName = "fixture";
+    apex::formats::AcdEntry fbx_texture_entry;
+    fbx_texture_entry.name = "paint.dds";
+    fbx_texture_entry.path = "paint.dds";
+    fbx_texture_entry.safe = true;
+    fbx_texture_entry.data =
+        rgba8_dds_fixture({201U, 17U, 83U, 255U});
+    fbx_texture_entry.size = fbx_texture_entry.data.size();
+    fbx_archive.entries.push_back(std::move(fbx_texture_entry));
+    apex::assets::AssetSource fbx_source;
+    fbx_source.addAcdArchive(std::move(fbx_archive));
+    const auto fbx_textures =
+        apex::render::resolve_fbx_external_texture_authority(
+            fbx_conversion, "real-backend-fbx", fbx_source);
+    require(fbx_textures.ok(),
+            "real-backend FBX fixture resolves its explicit texture grant");
+    const auto fbx_adapter = apex::render::build_fbx_render_scene(
+        fbx_conversion, &fbx_textures, "real-backend-triangle.fbx");
+    require(fbx_adapter.gpu_renderable(),
+            "real-backend FBX fixture builds a ready owned model");
+
+    StockSceneExecutionRequest fbx_stock_request;
+    fbx_stock_request.model = &*fbx_adapter.model;
+    fbx_stock_request.scene = &fbx_adapter.scene->snapshot;
+    fbx_stock_request.shader_modules = stock_shader_modules;
+    fbx_stock_request.targets = ks_pipeline.targets;
+    fbx_stock_request.texture_authority =
+        StaticSceneTextureAuthority::embedded_kn5;
+    const auto fbx_stock_result = prepare_stock_scene_execution(
+        *device.device, fbx_stock_request);
+    require(fbx_stock_result.ok() &&
+                fbx_stock_result.render_plan.items.size() == 1U &&
+                fbx_stock_result.resources->owned_texture_count() == 1U,
+            "ready FBX reaches the shared real-backend stock scene");
+    const auto fbx_draw_result =
+        fbx_stock_result.resources->draw_and_readback(
+            *device.device, *triangle_texture.texture, stock_frame);
+    require(fbx_draw_result.ok(),
+            "ready FBX draws through the selected real backend");
+    bool fbx_visible_pixel = false;
+    for (std::size_t offset = 0U; offset + 3U < fbx_draw_result.rgba8.size();
+         offset += 4U) {
+        if (fbx_draw_result.rgba8[offset] != std::byte{0} ||
+            fbx_draw_result.rgba8[offset + 1U] != std::byte{0} ||
+            fbx_draw_result.rgba8[offset + 2U] != std::byte{0}) {
+            fbx_visible_pixel = true;
+            break;
+        }
+    }
+    require(fbx_visible_pixel,
+            "ready FBX produces visible real-backend color output");
 
     if (backend == Backend::Vulkan) {
         // Execute the same stock-scene material through the retained receiver
