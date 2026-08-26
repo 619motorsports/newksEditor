@@ -55,6 +55,9 @@ struct FbxRenderAdapterResult {
     std::optional<formats::Kn5File> model;
     std::optional<scene::Kn5SceneConversion> scene;
     std::vector<FbxRenderAdapterDiagnostic> diagnostics;
+    // Conservative byte charge for the canonical model and bounded adapter
+    // metadata. Application composition uses this instead of source FBX size.
+    std::size_t accounted_model_bytes = 0U;
 
     [[nodiscard]] bool ok() const noexcept {
         return (status == FbxRenderAdapterStatus::ready ||

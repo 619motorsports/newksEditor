@@ -245,6 +245,20 @@ void enforces_composition_limits() {
                 apex::app::FbxPreviewDocumentStatus::resource_limit &&
                 !workspace_limited.document.has_value(),
             "workspace composition limit publishes no partial document");
+
+    const auto textured = ascii_fbx();
+    auto large_texture = rgba8_dds({1U, 2U, 3U, 255U});
+    large_texture.resize(1U * 1024U * 1024U, 0U);
+    auto source = source_with({
+        entry("paint.dds", std::move(large_texture))});
+    limits = {};
+    limits.workspace.maxAggregateBytes = 64U * 1024U;
+    const auto generated_limited = apex::app::open_fbx_preview_document(
+        request_for(textured, &source), limits);
+    require(generated_limited.status ==
+                apex::app::FbxPreviewDocumentStatus::resource_limit &&
+                !generated_limited.document.has_value(),
+            "workspace charges generated FBX model bytes, not only source bytes");
 }
 
 } // namespace

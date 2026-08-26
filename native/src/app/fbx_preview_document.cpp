@@ -167,11 +167,12 @@ void collect_adapter_diagnostics(
 
 [[nodiscard]] WorkspaceSessionDocument make_workspace_document(
     const std::string& source, const formats::Kn5File& model,
-    std::size_t source_bytes, const FbxPreviewDocumentLimits& limits) {
+    std::size_t accounted_model_bytes,
+    const FbxPreviewDocumentLimits& limits) {
     workspace::WorkspaceModelInput input;
     input.name = source;
     input.model = &model;
-    input.size = source_bytes;
+    input.size = accounted_model_bytes;
     workspace::WorkspaceOptions options;
     options.name = source;
     options.kind = "generic";
@@ -257,7 +258,8 @@ FbxPreviewDocumentResult open_fbx_preview_document(
         }
 
         auto workspace_document = make_workspace_document(
-            request.source, *adapter.model, request.bytes.size(), limits);
+            request.source, *adapter.model, adapter.accounted_model_bytes,
+            limits);
         result.document = std::move(workspace_document);
         result.animations = std::move(conversion.animations);
         result.diagnostics = diagnostics.take();
@@ -279,6 +281,11 @@ FbxPreviewDocumentResult open_fbx_preview_document(
         result.status = error.status_;
         result.diagnostics.push_back(error.diagnostic_);
     } catch (const std::bad_alloc&) {
+        result.status = FbxPreviewDocumentStatus::resource_limit;
+        result.diagnostics.push_back(
+            {"fbx_preview_allocation_failed", "preview",
+             "FBX preview allocation failed", 0U});
+    } catch (const std::length_error&) {
         result.status = FbxPreviewDocumentStatus::resource_limit;
         result.diagnostics.push_back(
             {"fbx_preview_allocation_failed", "preview",

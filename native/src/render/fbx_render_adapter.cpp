@@ -9,6 +9,7 @@
 #include <map>
 #include <new>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -75,6 +76,8 @@ public:
         used_ += bytes;
     }
 
+    [[nodiscard]] std::size_t used() const noexcept { return used_; }
+
 private:
     std::size_t limit_ = 0U;
     std::size_t used_ = 0U;
@@ -83,6 +86,31 @@ private:
 bool finite_matrix(const Matrix4& matrix) {
     return std::all_of(matrix.begin(), matrix.end(),
                        [](float value) { return std::isfinite(value); });
+}
+
+bool valid_texture_basename(std::string_view value,
+                            std::size_t max_bytes) noexcept {
+    if (value.empty() || value.size() > max_bytes || value == "." ||
+        value == "..")
+        return false;
+    return std::all_of(value.begin(), value.end(), [](char character) {
+        const auto byte = static_cast<unsigned char>(character);
+        return character != '/' && character != '\\' && character != ':' &&
+               byte >= 0x20U && byte != 0x7fU;
+    });
+}
+
+std::string texture_key(std::string_view value) {
+    std::string result;
+    result.reserve(value.size());
+    for (const char character : value) {
+        const auto byte = static_cast<unsigned char>(character);
+        result.push_back(byte >= static_cast<unsigned char>('A') &&
+                                 byte <= static_cast<unsigned char>('Z')
+                             ? static_cast<char>(byte + ('a' - 'A'))
+                             : character);
+    }
+    return result;
 }
 
 struct Vector3 {
@@ -319,6 +347,7 @@ public:
         FbxRenderAdapterResult result;
         result.status = staged_ ? FbxRenderAdapterStatus::staged
                                 : FbxRenderAdapterStatus::ready;
+        result.accounted_model_bytes = budget_.used();
         result.model = std::move(model_);
         result.scene = std::move(converted);
         result.diagnostics = std::move(diagnostics_);
@@ -481,12 +510,16 @@ private:
 
         if (textures_ == nullptr) return;
         if (!textures_->ok() ||
-            textures_->material_selection_indices.size() != material_count)
+            textures_->material_selection_indices.size() != material_count ||
+            textures_->selections.size() > material_count ||
+            textures_->authority.request_resource_indices.size() !=
+                textures_->selections.size())
             fail(FbxRenderAdapterStatus::invalid_request,
                  "invalid_texture_authority",
                  "FBX texture authority result is incomplete", "textures");
 
         std::map<std::string, std::pair<std::size_t, std::size_t>> by_name;
+        std::vector<bool> selection_seen(textures_->selections.size(), false);
         for (std::size_t material = 0U; material < material_count; ++material) {
             const auto selection_index =
                 textures_->material_selection_indices[material];
@@ -497,22 +530,40 @@ private:
                      "FBX material texture selection is outside its table",
                      "textures/materials/" + std::to_string(material));
             const auto& selection = textures_->selections[selection_index];
-            if (selection.material_index != material ||
+            if (selection_seen[selection_index] ||
+                selection.material_index != material ||
+                selection.candidate_index >=
+                    conversion_.file_texture_candidates.size() ||
+                selection.texture_object_id <= 0 ||
+                !apex::formats::fbxNativeFileTextureChannelRank(
+                     selection.channel).has_value() ||
                 selection.authority_resource_index ==
                     invalid_external_texture_resource ||
                 selection.authority_resource_index >=
-                    textures_->authority.resources.size())
+                    textures_->authority.resources.size() ||
+                textures_->authority.request_resource_indices[selection_index] !=
+                    selection.authority_resource_index)
                 fail(FbxRenderAdapterStatus::invalid_request,
                      "invalid_texture_selection",
                      "FBX material texture selection is malformed",
                      "textures/materials/" + std::to_string(material));
-            if (selection.basename.empty())
+            selection_seen[selection_index] = true;
+            const auto& candidate = conversion_.file_texture_candidates
+                [selection.candidate_index];
+            if (candidate.material != material ||
+                candidate.texture_object_id != selection.texture_object_id ||
+                candidate.channel != selection.channel ||
+                candidate.basename != selection.basename)
+                fail(FbxRenderAdapterStatus::invalid_request,
+                     "invalid_texture_selection",
+                     "FBX texture selection does not match its source candidate",
+                     "textures/materials/" + std::to_string(material));
+            if (!valid_texture_basename(selection.basename,
+                                        limits_.max_name_bytes))
                 fail(FbxRenderAdapterStatus::invalid_request,
                      "invalid_texture_name",
-                     "FBX selected texture has no basename",
+                     "FBX selected texture basename is unsafe",
                      "textures/materials/" + std::to_string(material));
-            validate_name(selection.basename,
-                          "textures/materials/" + std::to_string(material));
             const auto& resource = textures_->authority.resources
                 [selection.authority_resource_index];
             if (resource.source_bytes.empty() ||
@@ -524,7 +575,8 @@ private:
                      "textures/materials/" + std::to_string(material));
 
             std::size_t texture_index = 0U;
-            const auto existing = by_name.find(selection.basename);
+            const auto canonical_name = texture_key(selection.basename);
+            const auto existing = by_name.find(canonical_name);
             if (existing != by_name.end()) {
                 if (existing->second.first !=
                     selection.authority_resource_index)
@@ -557,19 +609,25 @@ private:
                                     std::pair<std::size_t, std::size_t>>) +
                                 selection.basename.size(),
                             "textures");
-                by_name.emplace(selection.basename,
+                by_name.emplace(canonical_name,
                                 std::pair{selection.authority_resource_index,
                                           texture_index});
             }
-            (void)texture_index;
             material_has_texture_[material] = true;
+            const auto& emitted_name = model_.textures[texture_index].name;
             budget_.add(sizeof(apex::formats::Kn5MaterialResource) +
                             std::string_view{"txDiffuse"}.size() +
-                            selection.basename.size(),
+                            emitted_name.size(),
                         "materials/resources");
             model_.materials[material].resources.push_back(
-                {"txDiffuse", 0U, selection.basename});
+                {"txDiffuse", 0U, emitted_name});
         }
+        if (!std::all_of(selection_seen.begin(), selection_seen.end(),
+                         [](bool seen) { return seen; }))
+            fail(FbxRenderAdapterStatus::invalid_request,
+                 "invalid_texture_authority",
+                 "FBX texture authority contains an unreferenced selection",
+                 "textures");
     }
 
     std::uint32_t fallback_material() {
@@ -682,8 +740,10 @@ private:
                        const FbxNodeGeometry& mapping,
                        const FbxStaticMesh& mesh, std::int32_t raw_slot,
                        std::size_t batch_index, std::size_t batch_count,
-                       std::size_t triangle_count, bool exact_slots,
+                       std::span<const std::size_t> triangles,
+                       bool exact_slots,
                        std::string_view path) {
+        const auto triangle_count = triangles.size();
         const auto vertex_count = checked_multiply(triangle_count, 3U, path);
         if (vertex_count > limits_.max_vertices_per_mesh ||
             vertex_count > 65'536U)
@@ -728,12 +788,12 @@ private:
 
         std::size_t output_vertex = 0U;
         const auto source_triangles = mesh.triangle_indices.size() / 3U;
-        for (std::size_t triangle = 0U; triangle < source_triangles;
-             ++triangle) {
-            const auto slot = mesh.triangle_material_slots.empty()
-                                  ? std::int32_t{0}
-                                  : mesh.triangle_material_slots[triangle];
-            if (slot != raw_slot) continue;
+        for (const auto triangle : triangles) {
+            if (triangle >= source_triangles)
+                fail(FbxRenderAdapterStatus::invalid_request,
+                     "invalid_batch_triangle",
+                     "FBX material batch references a missing triangle",
+                     std::string(path));
             for (std::size_t corner = 0U; corner < 3U; ++corner) {
                 append_source_vertex(output.vertices, mesh, mapping.geometric,
                                      mesh.triangle_indices[triangle * 3U + corner],
@@ -789,8 +849,10 @@ private:
                  "FBX mesh position or triangle data is malformed",
                  std::string(path));
         const auto vertex_count = mesh.positions.size() / 3U;
+        const auto expected_uv_count =
+            checked_multiply(vertex_count, 2U, path);
         if ((!mesh.normals.empty() && mesh.normals.size() != mesh.positions.size()) ||
-            (!mesh.uvs.empty() && mesh.uvs.size() != vertex_count * 2U))
+            (!mesh.uvs.empty() && mesh.uvs.size() != expected_uv_count))
             fail(FbxRenderAdapterStatus::invalid_request,
                  "invalid_geometry_layout",
                  "FBX mesh attribute arrays are not vertex-aligned",
@@ -848,12 +910,29 @@ private:
         output_nodes_ += batch_slots.size();
         budget_.add(checked_multiply(batch_slots.size(), sizeof(Kn5Node), path),
                     path);
+        budget_.add(checked_multiply(batch_slots.size(),
+                                     sizeof(std::vector<std::size_t>), path),
+                    path);
+        budget_.add(checked_multiply(triangle_count, sizeof(std::size_t), path),
+                    path);
+        std::vector<std::vector<std::size_t>> batch_triangles;
+        batch_triangles.reserve(batch_slots.size());
+        for (const auto count : batch_counts) {
+            batch_triangles.emplace_back();
+            batch_triangles.back().reserve(count);
+        }
+        for (std::size_t triangle = 0U; triangle < triangle_count; ++triangle) {
+            const auto slot = exact_slots
+                                  ? mesh.triangle_material_slots[triangle]
+                                  : std::int32_t{0};
+            batch_triangles[batch_by_slot.at(slot)].push_back(triangle);
+        }
         wrapper.children.reserve(
             checked_add(wrapper.children.size(), batch_slots.size(), path));
         for (std::size_t batch = 0U; batch < batch_slots.size(); ++batch) {
             wrapper.children.push_back(make_batch(
                 source_node, mapping, mesh, batch_slots[batch], batch,
-                batch_slots.size(), batch_counts[batch], exact_slots,
+                batch_slots.size(), batch_triangles[batch], exact_slots,
                 std::string(path) + "/batch/" + std::to_string(batch)));
         }
     }
@@ -947,6 +1026,13 @@ FbxRenderAdapterResult build_fbx_render_scene(
         result.diagnostics.push_back(error.diagnostic_);
         return result;
     } catch (const std::bad_alloc&) {
+        FbxRenderAdapterResult result;
+        result.status = FbxRenderAdapterStatus::resource_limit;
+        result.diagnostics.push_back(
+            {"allocation_failed",
+             "FBX render adapter allocation failed", "adapter"});
+        return result;
+    } catch (const std::length_error&) {
         FbxRenderAdapterResult result;
         result.status = FbxRenderAdapterStatus::resource_limit;
         result.diagnostics.push_back(

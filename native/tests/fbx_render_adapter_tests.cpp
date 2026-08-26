@@ -90,8 +90,9 @@ FbxSceneConversion fixture(std::size_t material_count = 1U) {
 }
 
 FbxExternalTextureAuthorityResult textures(
-    std::size_t material_count,
+    FbxSceneConversion& conversion,
     const std::vector<std::string>& selected_basenames) {
+    const auto material_count = conversion.snapshot.materials.size();
     FbxExternalTextureAuthorityResult result;
     result.status = ExternalTextureAuthorityStatus::ready;
     result.authority.status = ExternalTextureAuthorityStatus::ready;
@@ -100,10 +101,17 @@ FbxExternalTextureAuthorityResult textures(
     for (std::size_t material = 0U; material < selected_basenames.size();
          ++material) {
         apex::render::ExternalTextureResource resource;
+        resource.grant_id = "test-grant";
+        resource.requested_path = selected_basenames[material];
         resource.source_bytes = {
             static_cast<std::uint8_t>(0x40U + material), 0x50U, 0x60U, 0x70U};
         const auto authority_index = result.authority.resources.size();
         result.authority.resources.push_back(std::move(resource));
+        result.authority.request_resource_indices.push_back(authority_index);
+        conversion.file_texture_candidates.push_back(
+            {static_cast<apex::scene::MaterialId>(material),
+             static_cast<std::int64_t>(400U + material), "DiffuseColor",
+             selected_basenames[material], material});
         FbxExternalTextureSelection selection;
         selection.material_index = material;
         selection.candidate_index = material;
@@ -127,12 +135,12 @@ const apex::formats::Kn5MaterialProperty* property(
 
 void buildsOwnedCanonicalScene() {
     auto conversion = fixture();
-    auto authority = textures(1U, {"paint.png"});
+    auto authority = textures(conversion, {"paint.png"});
     const auto original_bytes = authority.authority.resources[0].source_bytes;
     auto result = apex::render::build_fbx_render_scene(
         conversion, &authority, "body.fbx");
     require(result.status == FbxRenderAdapterStatus::ready && result.ok() &&
-                result.gpu_renderable(),
+                result.gpu_renderable() && result.accounted_model_bytes > 0U,
             "complete textured FBX conversion is ready");
     require(result.model->source == "body.fbx" && result.model->version == 6U &&
                 result.model->root.type == 1U &&
@@ -194,7 +202,7 @@ void preservesNativeBatchOrderNamesAndMaterialResolution() {
     mesh.triangle_indices = {0U, 1U, 2U, 3U, 4U, 5U};
     mesh.triangle_material_slots = {1, 0};
     conversion.node_geometry[0].materials = {1U, 0U};
-    auto authority = textures(2U, {"first.png", "second.png"});
+    auto authority = textures(conversion, {"first.png", "second.png"});
     const auto result =
         apex::render::build_fbx_render_scene(conversion, &authority);
     require(result.status == FbxRenderAdapterStatus::ready &&
@@ -212,8 +220,9 @@ void preservesNativeBatchOrderNamesAndMaterialResolution() {
     auto single = fixture(2U);
     single.meshes[0].triangle_material_slots = {7};
     single.node_geometry[0].materials = {1U, 0U};
+    auto singleAuthority = textures(single, {"first.png", "second.png"});
     const auto singleResult =
-        apex::render::build_fbx_render_scene(single, &authority);
+        apex::render::build_fbx_render_scene(single, &singleAuthority);
     require(singleResult.model->root.children[0].children[0].materialId == 1U,
             "single native batch resolves literal local material slot zero");
 }
@@ -240,7 +249,7 @@ void stagesMissingResourcesAndUsesBoundedFallback() {
     mesh.uvs.insert(mesh.uvs.end(), uvs_copy.begin(), uvs_copy.end());
     mesh.triangle_indices = {0U, 1U, 2U, 3U, 4U, 5U};
     mesh.triangle_material_slots = {0, -1};
-    auto authority = textures(1U, {"paint.png"});
+    auto authority = textures(invalidSlot, {"paint.png"});
     const auto fallback =
         apex::render::build_fbx_render_scene(invalidSlot, &authority);
     require(fallback.status == FbxRenderAdapterStatus::staged &&
@@ -251,8 +260,9 @@ void stagesMissingResourcesAndUsesBoundedFallback() {
 
     auto incomplete = fixture();
     incomplete.complete = false;
+    auto incompleteAuthority = textures(incomplete, {"paint.png"});
     const auto incompleteResult =
-        apex::render::build_fbx_render_scene(incomplete, &authority);
+        apex::render::build_fbx_render_scene(incomplete, &incompleteAuthority);
     require(incompleteResult.status == FbxRenderAdapterStatus::staged &&
                 std::any_of(incompleteResult.diagnostics.begin(),
                             incompleteResult.diagnostics.end(),
@@ -265,8 +275,11 @@ void stagesMissingResourcesAndUsesBoundedFallback() {
 
 void rejectsMalformedInputAtomically() {
     const auto rejected = [](FbxSceneConversion conversion,
-                             FbxRenderAdapterStatus expected) {
-        const auto result = apex::render::build_fbx_render_scene(conversion);
+                             FbxRenderAdapterStatus expected,
+                             const FbxExternalTextureAuthorityResult* textures =
+                                 nullptr) {
+        const auto result = apex::render::build_fbx_render_scene(
+            conversion, textures);
         require(result.status == expected && !result.model.has_value() &&
                     !result.scene.has_value() &&
                     !result.diagnostics.empty(),
@@ -318,7 +331,7 @@ void rejectsMalformedInputAtomically() {
              FbxRenderAdapterStatus::invalid_request);
 
     auto authorityConversion = fixture();
-    auto badAuthority = textures(1U, {"paint.png"});
+    auto badAuthority = textures(authorityConversion, {"paint.png"});
     badAuthority.selections[0].authority_resource_index = 99U;
     const auto authorityResult = apex::render::build_fbx_render_scene(
         authorityConversion, &badAuthority);
@@ -328,19 +341,52 @@ void rejectsMalformedInputAtomically() {
             "malformed texture authority is rejected atomically");
 
     auto collisionConversion = fixture(2U);
-    auto collision = textures(2U, {"same.png", "same.png"});
+    auto collision = textures(collisionConversion, {"same.png", "same.png"});
     const auto collisionResult = apex::render::build_fbx_render_scene(
         collisionConversion, &collision);
     require(collisionResult.status == FbxRenderAdapterStatus::invalid_request &&
                 !collisionResult.model.has_value(),
             "distinct payloads cannot alias one KN5 texture name");
+
+    auto caseCollisionConversion = fixture(2U);
+    auto caseCollision = textures(caseCollisionConversion,
+                                  {"Paint.png", "paint.png"});
+    const auto caseCollisionResult = apex::render::build_fbx_render_scene(
+        caseCollisionConversion, &caseCollision);
+    require(caseCollisionResult.status ==
+                FbxRenderAdapterStatus::invalid_request &&
+                !caseCollisionResult.model.has_value(),
+            "case-only texture collisions fail before workspace folding");
+
+    auto forgedConversion = fixture();
+    auto forged = textures(forgedConversion, {"paint.png"});
+    forged.selections[0].candidate_index = 99U;
+    rejected(forgedConversion, FbxRenderAdapterStatus::invalid_request,
+             &forged);
+
+    forgedConversion = fixture();
+    forged = textures(forgedConversion, {"paint.png"});
+    forged.selections[0].channel = "UnsupportedColor";
+    rejected(forgedConversion, FbxRenderAdapterStatus::invalid_request,
+             &forged);
+
+    forgedConversion = fixture();
+    forged = textures(forgedConversion, {"paint.png"});
+    forged.selections[0].texture_object_id = 0;
+    rejected(forgedConversion, FbxRenderAdapterStatus::invalid_request,
+             &forged);
+
+    forgedConversion = fixture();
+    forged = textures(forgedConversion, {"../paint.png"});
+    rejected(forgedConversion, FbxRenderAdapterStatus::invalid_request,
+             &forged);
 }
 
 void enforcesLimitsAndFiniteNativeFallbacks() {
     auto fallbackConversion = fixture();
     fallbackConversion.meshes[0].normals.clear();
     fallbackConversion.meshes[0].uvs.clear();
-    auto authority = textures(1U, {"paint.png"});
+    auto authority = textures(fallbackConversion, {"paint.png"});
     const auto fallback = apex::render::build_fbx_render_scene(
         fallbackConversion, &authority);
     const auto& fallbackMesh = fallback.model->root.children[0].children[0];
@@ -355,8 +401,9 @@ void enforcesLimitsAndFiniteNativeFallbacks() {
                                 0.0F, 1.0F, 1.0F, 0.0F};
     scaled.node_geometry[0].geometric = apex::scene::identity_matrix;
     scaled.node_geometry[0].geometric[0] = 2.0F;
+    auto scaledAuthority = textures(scaled, {"paint.png"});
     const auto scaledResult =
-        apex::render::build_fbx_render_scene(scaled, &authority);
+        apex::render::build_fbx_render_scene(scaled, &scaledAuthority);
     const auto& scaledMesh = scaledResult.model->root.children[0].children[0];
     require(std::abs(scaledMesh.vertices[3] - 2.0F / std::sqrt(5.0F)) <
                     1.0e-6F &&
@@ -366,8 +413,9 @@ void enforcesLimitsAndFiniteNativeFallbacks() {
 
     auto byteLimits = apex::render::FbxRenderAdapterLimits{};
     byteLimits.max_output_bytes = 1U;
+    auto byteLimitedConversion = fixture();
     const auto byteLimited = apex::render::build_fbx_render_scene(
-        fixture(), &authority, "scene.fbx", byteLimits);
+        byteLimitedConversion, nullptr, "scene.fbx", byteLimits);
     require(byteLimited.status == FbxRenderAdapterStatus::resource_limit &&
                 !byteLimited.model.has_value(),
             "aggregate output budget is enforced before publication");
@@ -400,8 +448,9 @@ void enforcesLimitsAndFiniteNativeFallbacks() {
     for (std::size_t triangle = 0U; triangle < 21'845U; ++triangle)
         maximum.meshes[0].triangle_indices.insert(
             maximum.meshes[0].triangle_indices.end(), {0U, 1U, 2U});
+    auto maximumAuthority = textures(maximum, {"paint.png"});
     const auto maximumResult =
-        apex::render::build_fbx_render_scene(maximum, &authority);
+        apex::render::build_fbx_render_scene(maximum, &maximumAuthority);
     require(maximumResult.status == FbxRenderAdapterStatus::ready &&
                 maximumResult.model->root.children[0].children[0]
                         .indices.size() == 65'535U,
@@ -411,10 +460,29 @@ void enforcesLimitsAndFiniteNativeFallbacks() {
     maximum.meshes[0].triangle_indices.insert(
         maximum.meshes[0].triangle_indices.end(), {0U, 1U, 2U});
     const auto overflow =
-        apex::render::build_fbx_render_scene(maximum, &authority);
+        apex::render::build_fbx_render_scene(maximum, &maximumAuthority);
     require(overflow.status == FbxRenderAdapterStatus::unsupported &&
                 !overflow.model.has_value() && !overflow.scene.has_value(),
             "unsafe KN5 16-bit batch overflow is rejected atomically");
+
+    constexpr std::size_t hostile_batch_count = 4'096U;
+    auto hostile = fixture(hostile_batch_count);
+    auto& hostile_mesh = hostile.meshes[0];
+    hostile_mesh.triangle_indices.clear();
+    hostile_mesh.triangle_material_slots.clear();
+    hostile_mesh.triangle_indices.reserve(hostile_batch_count * 3U);
+    hostile_mesh.triangle_material_slots.reserve(hostile_batch_count);
+    for (std::size_t batch = 0U; batch < hostile_batch_count; ++batch) {
+        hostile_mesh.triangle_indices.insert(
+            hostile_mesh.triangle_indices.end(), {0U, 1U, 2U});
+        hostile_mesh.triangle_material_slots.push_back(
+            static_cast<std::int32_t>(batch));
+    }
+    const auto hostileResult = apex::render::build_fbx_render_scene(hostile);
+    require(hostileResult.status == FbxRenderAdapterStatus::staged &&
+                hostileResult.model->root.children[0].children.size() ==
+                    hostile_batch_count,
+            "many distinct material slots are bucketed in bounded passes");
 }
 
 } // namespace
