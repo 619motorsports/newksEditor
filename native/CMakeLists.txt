@@ -229,6 +229,7 @@ target_link_libraries(apex_render
 add_library(apex_external_texture_authority STATIC
   src/render/external_texture_authority.cpp
   src/render/fbx_external_texture_authority.cpp
+  src/render/fbx_render_adapter.cpp
 )
 add_library(ApexEditor::ExternalTextureAuthority ALIAS apex_external_texture_authority)
 target_link_libraries(apex_external_texture_authority
@@ -377,6 +378,7 @@ apex_add_native_test(csp_node_state_tests.cpp csp_node_state_tests ApexEditor::R
 apex_add_native_test(damage_preview_tests.cpp damage_preview_tests ApexEditor::Render)
 apex_add_native_test(external_texture_authority_tests.cpp external_texture_authority_tests ApexEditor::ExternalTextureAuthority)
 apex_add_native_test(fbx_external_texture_authority_tests.cpp fbx_external_texture_authority_tests ApexEditor::ExternalTextureAuthority)
+apex_add_native_test(fbx_render_adapter_tests.cpp fbx_render_adapter_tests ApexEditor::ExternalTextureAuthority)
 apex_add_native_test(render_backend_tests.cpp render_backend_tests ApexEditor::ExternalTextureAuthority)
 apex_add_native_test(draw_packet_tests.cpp draw_packet_tests ApexEditor::Render)
 if(TARGET draw_packet_tests)
@@ -465,7 +467,7 @@ if(TEST render_backend_tests)
       ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")
   endif()
 endif()
-foreach(render_test IN ITEMS authoring_grid_tests camera_tests bmp_texture_tests csp_node_state_tests damage_preview_tests external_texture_authority_tests draw_packet_tests frame_plan_tests indexed_draw_tests selection_axis_tests selected_mesh_tests view_axis_tests static_mesh_upload_tests skinned_mesh_upload_tests static_scene_tests stock_material_execution_tests stock_scene_execution_tests workspace_ai_spline_tests workspace_real_fixture_tests workspace_shadow_programs_tests workspace_track_camera_tests workspace_viewport_tests lighting_tests material_binding_tests
+foreach(render_test IN ITEMS authoring_grid_tests camera_tests bmp_texture_tests csp_node_state_tests damage_preview_tests external_texture_authority_tests fbx_render_adapter_tests draw_packet_tests frame_plan_tests indexed_draw_tests selection_axis_tests selected_mesh_tests view_axis_tests static_mesh_upload_tests skinned_mesh_upload_tests static_scene_tests stock_material_execution_tests stock_scene_execution_tests workspace_ai_spline_tests workspace_real_fixture_tests workspace_shadow_programs_tests workspace_track_camera_tests workspace_viewport_tests lighting_tests material_binding_tests
                              material_profile_tests pipeline_tests render_plan_tests texture_upload_tests)
   if(TEST ${render_test})
     set_tests_properties(${render_test} PROPERTIES LABELS "unit;render")

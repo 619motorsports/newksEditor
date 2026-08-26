@@ -644,6 +644,16 @@ material slots, and output containers. It diagnoses embedded images, skinning,
 unsupported animation data, mappings outside the supported subsets, and
 advanced transform semantics.
 
+The bounded FBX render adapter now creates an owned KN5-compatible CPU model.
+Vulkan and D3D12 consume the same regenerated scene. The adapter preserves
+recovered geometric transforms, material batch order, material lookup, mesh
+names, native material values, tangent generation, and bounds. It copies
+selected external texture bytes from the authorized CPU result. It retains no
+file handle, grant, source path, or GPU object. Missing textures and unsupported
+source behavior produce a staged model. A staged model cannot enter a GPU
+backend. Malformed hierarchy, geometry, material, texture, and limit data fail
+atomically and do not publish a partial model.
+
 The strict Linux build detects the Vulkan SDK. The runtime test uses a software
 Vulkan device when an ICD is available. CI defines the same Vulkan test. The
 current GitHub account billing error prevents fresh CI evidence. The production
