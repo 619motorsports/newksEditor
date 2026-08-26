@@ -1,4 +1,5 @@
 #include "apex/render/device.hpp"
+#include "apex/render/draw_packet.hpp"
 
 #include <algorithm>
 #include <array>
@@ -102,6 +103,28 @@ public:
 private:
     Backend backend_ = Backend::D3D12;
     SamplerInfo info_{};
+};
+
+class FakeNativeTexture final : public Texture {
+public:
+    FakeNativeTexture(Backend backend, TextureDescription description)
+        : backend_(backend), info_{description} {}
+    [[nodiscard]] Backend backend() const noexcept override { return backend_; }
+    [[nodiscard]] const TextureInfo& info() const noexcept override { return info_; }
+private:
+    Backend backend_ = Backend::D3D12;
+    TextureInfo info_{};
+};
+
+class FakeNativeDepth final : public DepthAttachment {
+public:
+    FakeNativeDepth(Backend backend, DepthAttachmentDescription description)
+        : backend_(backend), info_{description} {}
+    [[nodiscard]] Backend backend() const noexcept override { return backend_; }
+    [[nodiscard]] const DepthAttachmentInfo& info() const noexcept override { return info_; }
+private:
+    Backend backend_ = Backend::D3D12;
+    DepthAttachmentInfo info_{};
 };
 
 class FakeShaderDevice final : public Device {
@@ -494,6 +517,7 @@ std::vector<std::uint8_t> complete_native_stage_fixture(bool vertex) {
     add_chunk(1U, 0x4e475349U, input_payload);
     add_chunk(2U, 0x4e47534fU, output_payload);
     add_chunk(3U, 0x52444853U, program);
+    stage.resize((stage.size() + 3U) & ~std::size_t{3U}, 0U);
     put_u32(stage, 24U, static_cast<std::uint32_t>(stage.size()));
     return stage;
 }
@@ -1577,6 +1601,110 @@ void allocates_exact_native_stock_samplers() {
             "native sampler statuses have stable names");
 }
 
+void validates_complete_native_draw_bindings_before_execution() {
+    FakeShaderDevice device(Backend::D3D12);
+    auto source = validated_program_fixture();
+    auto shaders = allocate_stock_ks_per_pixel_native_shaders(device, std::move(source));
+    auto constants = allocate_stock_ks_per_pixel_native_constant_buffers(
+        device, native_constant_data_fixture());
+    auto samplers = allocate_stock_ks_per_pixel_native_samplers(device);
+    require(shaders.ok() && constants.ok() && samplers.ok(),
+            "native draw fixture owns its validated resources");
+
+    const TextureDescription target_description{
+        16U, 16U, 1U, 1U, TextureFormat::rgba8_unorm,
+        TextureUsage::color_attachment | TextureUsage::transfer_source,
+        TextureMemory::device_local, TextureMutability::mutable_data};
+    FakeNativeTexture target(Backend::D3D12, target_description);
+    FakeNativeTexture diffuse(
+        Backend::D3D12,
+        {2U, 2U, 1U, 1U, TextureFormat::rgba8_unorm, TextureUsage::sampled,
+         TextureMemory::device_local, TextureMutability::immutable});
+    const DepthAttachmentDescription shadow_description{
+        32U, 32U, 1U, DepthAttachmentFormat::d32_float, true};
+    FakeNativeDepth shadow0(Backend::D3D12, shadow_description);
+    FakeNativeDepth shadow1(Backend::D3D12, shadow_description);
+    FakeNativeDepth shadow2(Backend::D3D12, shadow_description);
+    FakeConstantBuffer vertices(
+        Backend::D3D12,
+        {3U * stock_ks_per_pixel_vertex_stride_bytes, BufferUsage::vertex,
+         BufferMemory::device_local, BufferMutability::immutable});
+    FakeConstantBuffer indices(
+        Backend::D3D12,
+        {3U * sizeof(std::uint16_t), BufferUsage::index,
+         BufferMemory::device_local, BufferMutability::immutable});
+
+    PipelineProgram pipeline;
+    pipeline.name = "native-ks-per-pixel-state";
+    pipeline.targets.colors.push_back({PipelineRenderTargetFormat::rgba8_unorm, 1U});
+    pipeline.raster.cull = PipelineCullMode::none;
+    pipeline.depth.test_enabled = false;
+    pipeline.depth.write_enabled = false;
+    pipeline.depth.compare = PipelineCompareOperation::less;
+    pipeline.vertex_layout.stride = stock_ks_per_pixel_vertex_stride_bytes;
+    pipeline.vertex_layout.attributes = {
+        {PipelineVertexSemantic::position, PipelineVertexAttributeFormat::float32x3, 0U, 0U},
+        {PipelineVertexSemantic::normal, PipelineVertexAttributeFormat::float32x3, 1U, 12U},
+        {PipelineVertexSemantic::texcoord0, PipelineVertexAttributeFormat::float32x2, 2U, 24U},
+        {PipelineVertexSemantic::tangent, PipelineVertexAttributeFormat::float32x3, 3U, 32U},
+    };
+    DrawPacket packet;
+    packet.primitive = DrawPrimitiveKind::static_mesh;
+    packet.vertex_count = 3U;
+    packet.index_count = 3U;
+    packet.vertex_stride_floats = 11U;
+    packet.flags.depth_test = false;
+    packet.flags.depth_write = false;
+    const StockKsPerPixelNativeDrawBinding binding{
+        shaders.program.get(), constants.buffers.get(), samplers.samplers.get(),
+        &diffuse, {&shadow0, &shadow1, &shadow2}};
+    IndexedStaticMeshDrawRequest request;
+    request.packet = &packet;
+    request.pipeline = &pipeline;
+    request.vertex_buffer = &vertices;
+    request.index_buffer = &indices;
+    request.shader_authority = IndexedShaderAuthority::explicit_stock_ks_per_pixel_native;
+    request.stock_ks_per_pixel_native = &binding;
+
+    Diagnostic diagnostic;
+    const auto valid_status = validate_indexed_static_mesh_draw_request(
+        target, request, diagnostic);
+    require(valid_status == IndexedStaticMeshDrawStatus::ready,
+            diagnostic.code.empty() ?
+                "complete native binding passes before command recording" :
+                diagnostic.code.c_str());
+    auto missing = request;
+    missing.stock_ks_per_pixel_native = nullptr;
+    require(validate_indexed_static_mesh_draw_request(target, missing, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_stock_native_binding_missing",
+            "missing native owner rejects before pipeline work");
+    FakeNativeTexture vulkan_target(Backend::Vulkan, target_description);
+    require(validate_indexed_static_mesh_draw_request(vulkan_target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code == "indexed_stock_native_backend_unsupported",
+            "Vulkan rejects installed DXBC before execution");
+    auto portable_overlap = request;
+    portable_overlap.sampled_binding.texture = &diffuse;
+    require(validate_indexed_static_mesh_draw_request(target, portable_overlap, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_resource_binding_unexpected",
+            "native and portable material bindings cannot overlap");
+
+    packet.flags.alpha_to_coverage = true;
+    pipeline.blend.alpha_to_coverage = true;
+    pipeline.targets.colors[0U].samples = 4U;
+    TextureDescription multisample_description = target_description;
+    multisample_description.samples = 4U;
+    FakeNativeTexture multisample_target(Backend::D3D12,
+                                         multisample_description);
+    require(validate_indexed_static_mesh_draw_request(
+                multisample_target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_stock_native_variant_state_mismatch",
+            "base package rejects alpha-to-coverage draw state");
+}
+
 void preserves_native_constant_bytes_and_rejects_nonfinite_records() {
     StockKsPerPixelMaterialConstants material;
     material.ambient = 0.35F;
@@ -1826,6 +1954,7 @@ int main() {
         allocates_only_validated_native_d3d12_shader_objects();
         allocates_exact_native_d3d12_constant_buffer_views();
         allocates_exact_native_stock_samplers();
+        validates_complete_native_draw_bindings_before_execution();
         preserves_native_constant_bytes_and_rejects_nonfinite_records();
         transposes_native_host_matrices_before_upload();
         evaluates_recovered_base_pixel_equation();

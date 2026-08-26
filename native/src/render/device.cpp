@@ -1060,6 +1060,180 @@ IndexedStaticMeshDrawStatus validate_indexed_color_target(
     }
 }
 
+bool native_sampler_matches(const SamplerDescription& actual,
+                            const SamplerDescription& expected) noexcept {
+    return actual.min_filter == expected.min_filter &&
+           actual.mag_filter == expected.mag_filter &&
+           actual.mip_filter == expected.mip_filter &&
+           actual.address_u == expected.address_u &&
+           actual.address_v == expected.address_v &&
+           actual.address_w == expected.address_w &&
+           actual.compare == expected.compare &&
+           actual.mip_lod_bias == expected.mip_lod_bias &&
+           actual.max_anisotropy == expected.max_anisotropy &&
+           actual.min_lod == expected.min_lod &&
+           actual.max_lod == expected.max_lod;
+}
+
+IndexedStaticMeshDrawStatus validate_native_ks_per_pixel_binding(
+    const Texture& target, const IndexedStaticMeshDrawRequest& request,
+    Diagnostic& diagnostic) {
+    const auto* binding = request.stock_ks_per_pixel_native;
+    if (binding == nullptr || binding->shader_program == nullptr ||
+        binding->constant_buffers == nullptr || binding->samplers == nullptr ||
+        binding->diffuse_texture == nullptr ||
+        std::any_of(binding->shadow_maps.begin(), binding->shadow_maps.end(),
+                    [](const DepthAttachment* map) { return map == nullptr; })) {
+        diagnostic = {"indexed_stock_native_binding_missing",
+                      "Native ksPerPixel drawing requires its shader, constants, samplers, diffuse texture, and three shadow maps"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (target.backend() != Backend::D3D12) {
+        diagnostic = {"indexed_stock_native_backend_unsupported",
+                      "Installed ksPerPixel DXBC execution requires D3D12"};
+        return IndexedStaticMeshDrawStatus::unsupported;
+    }
+    const auto& shaders = *binding->shader_program;
+    if (!shaders.ready() || shaders.source().validation_status() !=
+                                StockKsPerPixelNativeProgramStatus::ready) {
+        diagnostic = {"indexed_stock_native_shader_invalid",
+                      "Native ksPerPixel drawing requires an intact validated shader owner"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (shaders.vertex_shader().backend() != Backend::D3D12 ||
+        shaders.pixel_shader().backend() != Backend::D3D12 ||
+        shaders.vertex_shader().info().stage != ShaderStage::vertex ||
+        shaders.pixel_shader().info().stage != ShaderStage::fragment ||
+        shaders.vertex_shader().info().format != ShaderBytecodeFormat::dxbc ||
+        shaders.pixel_shader().info().format != ShaderBytecodeFormat::dxbc) {
+        diagnostic = {"indexed_stock_native_shader_backend_mismatch",
+                      "Native ksPerPixel shader modules must be D3D12 DXBC vertex and pixel stages"};
+        return IndexedStaticMeshDrawStatus::unsupported;
+    }
+    if (!binding->constant_buffers->ready()) {
+        diagnostic = {"indexed_stock_native_constants_invalid",
+                      "Native ksPerPixel drawing requires all five constant buffers"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    for (std::size_t index = 0U; index < static_cast<std::size_t>(
+             StockKsPerPixelNativeConstantSlot::count); ++index) {
+        const Buffer* buffer = binding->constant_buffers->buffer(
+            static_cast<StockKsPerPixelNativeConstantSlot>(index));
+        if (buffer == nullptr || buffer->backend() != Backend::D3D12) {
+            diagnostic = {"indexed_stock_native_constant_backend_mismatch",
+                          "Every native ksPerPixel constant buffer must belong to D3D12"};
+            return IndexedStaticMeshDrawStatus::unsupported;
+        }
+        const auto& description = buffer->info().description;
+        if (description.size_bytes != stock_ks_per_pixel_native_constant_buffer_view_bytes ||
+            description.usage != BufferUsage::uniform ||
+            description.memory != BufferMemory::host_visible ||
+            description.mutability != BufferMutability::mutable_data) {
+            diagnostic = {"indexed_stock_native_constant_description_invalid",
+                          "Every native ksPerPixel constant buffer must preserve its 256-byte mutable uniform view"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+    }
+    if (!binding->samplers->ready()) {
+        diagnostic = {"indexed_stock_native_samplers_invalid",
+                      "Native ksPerPixel drawing requires both validated samplers"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    const Sampler* linear = binding->samplers->sampler(
+        StockKsPerPixelNativeSamplerSlot::linear);
+    const Sampler* shadow = binding->samplers->sampler(
+        StockKsPerPixelNativeSamplerSlot::shadow);
+    if (linear == nullptr || shadow == nullptr ||
+        linear->backend() != Backend::D3D12 ||
+        shadow->backend() != Backend::D3D12) {
+        diagnostic = {"indexed_stock_native_sampler_backend_mismatch",
+                      "Both native ksPerPixel samplers must belong to D3D12"};
+        return IndexedStaticMeshDrawStatus::unsupported;
+    }
+    SamplerDescription expected_linear;
+    expected_linear.min_filter = SamplerFilter::anisotropic;
+    expected_linear.mag_filter = SamplerFilter::anisotropic;
+    expected_linear.mip_filter = SamplerFilter::anisotropic;
+    expected_linear.max_anisotropy = linear->info().description.max_anisotropy;
+    expected_linear.mip_lod_bias = linear->info().description.mip_lod_bias;
+    expected_linear.max_lod = std::numeric_limits<float>::max();
+    SamplerDescription expected_shadow;
+    expected_shadow.min_filter = SamplerFilter::linear;
+    expected_shadow.mag_filter = SamplerFilter::linear;
+    expected_shadow.mip_filter = SamplerFilter::nearest;
+    expected_shadow.address_u = SamplerAddressMode::clamp_to_edge;
+    expected_shadow.address_v = SamplerAddressMode::clamp_to_edge;
+    expected_shadow.address_w = SamplerAddressMode::clamp_to_edge;
+    expected_shadow.compare = SamplerCompare::less;
+    expected_shadow.max_lod = std::numeric_limits<float>::max();
+    if (linear->info().description.max_anisotropy < 2.0F ||
+        !native_sampler_matches(linear->info().description, expected_linear) ||
+        !native_sampler_matches(shadow->info().description, expected_shadow)) {
+        diagnostic = {"indexed_stock_native_sampler_contract_invalid",
+                      "Native ksPerPixel samplers do not match the recovered s0 and s1 contract"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    const Texture& diffuse = *binding->diffuse_texture;
+    const auto& diffuse_description = diffuse.info().description;
+    if (&diffuse == &target) {
+        diagnostic = {"indexed_stock_native_diffuse_feedback_loop",
+                      "The native diffuse texture cannot also be the color target"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (diffuse.backend() != Backend::D3D12) {
+        diagnostic = {"indexed_stock_native_diffuse_backend_mismatch",
+                      "The native diffuse texture must belong to D3D12"};
+        return IndexedStaticMeshDrawStatus::unsupported;
+    }
+    if ((static_cast<std::uint32_t>(diffuse_description.usage) &
+         static_cast<std::uint32_t>(TextureUsage::sampled)) == 0U ||
+        diffuse_description.width == 0U || diffuse_description.height == 0U ||
+        diffuse_description.mip_levels == 0U ||
+        diffuse_description.array_layers != 1U || diffuse_description.samples != 1U ||
+        !portable_sampled_color_format(diffuse_description.format, true)) {
+        diagnostic = {"indexed_stock_native_diffuse_description_unsupported",
+                      "The native diffuse binding requires a one-layer sampled color texture"};
+        return IndexedStaticMeshDrawStatus::unsupported;
+    }
+    const DepthAttachmentDescription* first_shadow = nullptr;
+    for (std::size_t index = 0U; index < binding->shadow_maps.size(); ++index) {
+        const DepthAttachment* map = binding->shadow_maps[index];
+        for (std::size_t previous = 0U; previous < index; ++previous) {
+            if (map == binding->shadow_maps[previous]) {
+                diagnostic = {"indexed_stock_native_shadow_map_duplicate",
+                              "Native ksPerPixel shadow slots require three distinct maps"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+        }
+        if (map == request.depth_attachment) {
+            diagnostic = {"indexed_stock_native_shadow_feedback_loop",
+                          "A writable main-pass depth attachment cannot be sampled as a native shadow map"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        if (map->backend() != Backend::D3D12) {
+            diagnostic = {"indexed_stock_native_shadow_backend_mismatch",
+                          "Every native shadow map must belong to D3D12"};
+            return IndexedStaticMeshDrawStatus::unsupported;
+        }
+        const auto& description = map->info().description;
+        if (!description.shader_readable || description.samples != 1U ||
+            description.format != DepthAttachmentFormat::d32_float) {
+            diagnostic = {"indexed_stock_native_shadow_description_unsupported",
+                          "Native ksPerPixel shadows require shader-readable single-sample D32 maps"};
+            return IndexedStaticMeshDrawStatus::unsupported;
+        }
+        if (first_shadow != nullptr &&
+            (description.width != first_shadow->width ||
+             description.height != first_shadow->height)) {
+            diagnostic = {"indexed_stock_native_shadow_dimensions_mismatch",
+                          "All native ksPerPixel shadow maps must have equal dimensions"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        first_shadow = &description;
+    }
+    return IndexedStaticMeshDrawStatus::ready;
+}
+
 } // namespace
 
 IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
@@ -1138,13 +1312,16 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     const DrawPacket& packet = *request.packet;
     const bool static_mesh = packet.primitive == DrawPrimitiveKind::static_mesh;
     const bool skinned_mesh = packet.primitive == DrawPrimitiveKind::skinned_mesh;
+    const bool stock_native = request.shader_authority ==
+        IndexedShaderAuthority::explicit_stock_ks_per_pixel_native;
     if (!static_mesh && !skinned_mesh) {
         diagnostic = {"indexed_static_mesh_primitive_unsupported",
                       "Indexed drawing requires a static or skinned mesh primitive"};
         return IndexedStaticMeshDrawStatus::unsupported;
     }
     if (!packet.shader_execution_supported &&
-        request.shader_authority != IndexedShaderAuthority::explicit_pipeline) {
+        request.shader_authority != IndexedShaderAuthority::explicit_pipeline &&
+        !stock_native) {
         diagnostic = {"indexed_shader_execution_staged",
                       "The draw packet does not contain an executable shader contract"};
         return IndexedStaticMeshDrawStatus::unsupported;
@@ -1159,37 +1336,45 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                       "Skinned indexed drawing requires a non-empty bone palette"};
         return IndexedStaticMeshDrawStatus::unsupported;
     }
-    if (request.pipeline->transform_contract != PipelineTransformContract::draw_matrices) {
+    if (stock_native && !static_mesh) {
+        diagnostic = {"indexed_stock_native_primitive_unsupported",
+                      "Native ksPerPixel execution supports only static mesh draws"};
+        return IndexedStaticMeshDrawStatus::unsupported;
+    }
+    if (!stock_native && request.pipeline->transform_contract !=
+                             PipelineTransformContract::draw_matrices) {
         diagnostic = {"indexed_transform_contract_required",
                       "Indexed static-mesh execution requires the draw-matrices shader contract"};
         return IndexedStaticMeshDrawStatus::unsupported;
     }
-    if (!request.camera_frame.has_value()) {
+    if (!stock_native && !request.camera_frame.has_value()) {
         diagnostic = {"indexed_camera_frame_missing",
                       "Indexed static-mesh transform execution requires a camera frame"};
         return IndexedStaticMeshDrawStatus::invalid_request;
     }
-    const CameraFrame& camera = *request.camera_frame;
-    const CameraClipSpace expected_clip_space = texture.backend() == Backend::Vulkan
-                                                    ? CameraClipSpace::vulkan
-                                                    : CameraClipSpace::d3d12;
-    if (camera.clip_space != expected_clip_space) {
-        diagnostic = {"indexed_camera_clip_space_mismatch",
-                      "Camera clip space does not match the indexed draw backend"};
-        return IndexedStaticMeshDrawStatus::invalid_request;
-    }
-    for (const float component : packet.world_matrix) {
-        if (!std::isfinite(component)) {
-            diagnostic = {"indexed_static_mesh_world_matrix_non_finite",
-                          "Indexed static-mesh world matrix must be finite"};
+    if (!stock_native) {
+        const CameraFrame& camera = *request.camera_frame;
+        const CameraClipSpace expected_clip_space = texture.backend() == Backend::Vulkan
+                                                        ? CameraClipSpace::vulkan
+                                                        : CameraClipSpace::d3d12;
+        if (camera.clip_space != expected_clip_space) {
+            diagnostic = {"indexed_camera_clip_space_mismatch",
+                          "Camera clip space does not match the indexed draw backend"};
             return IndexedStaticMeshDrawStatus::invalid_request;
         }
-    }
-    for (const float component : camera.view_projection) {
-        if (!std::isfinite(component)) {
-            diagnostic = {"indexed_camera_view_projection_non_finite",
-                          "Camera view-projection matrix must be finite"};
-            return IndexedStaticMeshDrawStatus::invalid_request;
+        for (const float component : packet.world_matrix) {
+            if (!std::isfinite(component)) {
+                diagnostic = {"indexed_static_mesh_world_matrix_non_finite",
+                              "Indexed static-mesh world matrix must be finite"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+        }
+        for (const float component : camera.view_projection) {
+            if (!std::isfinite(component)) {
+                diagnostic = {"indexed_camera_view_projection_non_finite",
+                              "Camera view-projection matrix must be finite"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
         }
     }
     if (packet.flags.alpha_to_coverage && target.samples != 4U) {
@@ -1214,8 +1399,34 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                       "Indexed static-mesh vertex/index counts are outside bounded triangle-list limits"};
         return IndexedStaticMeshDrawStatus::invalid_request;
     }
+    if (stock_native) {
+        const IndexedStaticMeshDrawStatus native_status =
+            validate_native_ks_per_pixel_binding(texture, request, diagnostic);
+        if (native_status != IndexedStaticMeshDrawStatus::ready)
+            return native_status;
+    } else if (request.stock_ks_per_pixel_native != nullptr) {
+        diagnostic = {"indexed_stock_native_binding_unexpected",
+                      "A native ksPerPixel binding requires native shader authority"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
 
-    const PipelineProgram& pipeline = *request.pipeline;
+    PipelineProgram native_pipeline;
+    const PipelineProgram* effective_pipeline = request.pipeline;
+    if (stock_native) {
+        native_pipeline = *request.pipeline;
+        const auto& source =
+            request.stock_ks_per_pixel_native->shader_program->source();
+        native_pipeline.shaders = {
+            {PipelineShaderStage::vertex, PipelineShaderFormat::dxbc,
+             {source.vertex_shader().begin(), source.vertex_shader().end()}},
+            {PipelineShaderStage::fragment, PipelineShaderFormat::dxbc,
+             {source.pixel_shader().begin(), source.pixel_shader().end()}},
+        };
+        native_pipeline.transform_contract = PipelineTransformContract::none;
+        native_pipeline.resources.clear();
+        effective_pipeline = &native_pipeline;
+    }
+    const PipelineProgram& pipeline = *effective_pipeline;
     const PipelineValidationResult pipeline_validation = validate_pipeline(pipeline);
     if (!pipeline_validation.valid) {
         if (!pipeline_validation.diagnostics.empty()) {
@@ -1262,6 +1473,48 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
         diagnostic = {"indexed_blend_state_mismatch",
                       "Pipeline blend state must match the draw packet"};
         return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (stock_native) {
+        if (!request.pipeline->resources.empty() ||
+            request.pipeline->transform_contract != PipelineTransformContract::none) {
+            diagnostic = {"indexed_stock_native_pipeline_contract_invalid",
+                          "Native ksPerPixel state must not declare portable resources or transform constants"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        const PipelineVertexLayout& layout = request.pipeline->vertex_layout;
+        const auto matches = [&](std::size_t index, PipelineVertexSemantic semantic,
+                                 PipelineVertexAttributeFormat format,
+                                 std::uint32_t location, std::uint32_t offset) {
+            if (index >= layout.attributes.size()) return false;
+            const auto& attribute = layout.attributes[index];
+            return attribute.semantic == semantic && attribute.format == format &&
+                   attribute.location == location && attribute.offset == offset;
+        };
+        if (layout.stride != stock_ks_per_pixel_vertex_stride_bytes ||
+            layout.attributes.size() != 4U ||
+            !matches(0U, PipelineVertexSemantic::position,
+                     PipelineVertexAttributeFormat::float32x3, 0U, 0U) ||
+            !matches(1U, PipelineVertexSemantic::normal,
+                     PipelineVertexAttributeFormat::float32x3, 1U, 12U) ||
+            !matches(2U, PipelineVertexSemantic::texcoord0,
+                     PipelineVertexAttributeFormat::float32x2, 2U, 24U) ||
+            !matches(3U, PipelineVertexSemantic::tangent,
+                     PipelineVertexAttributeFormat::float32x3, 3U, 32U)) {
+            diagnostic = {"indexed_stock_native_vertex_layout_invalid",
+                          "Native ksPerPixel drawing requires the exact 44-byte POSITION, NORMAL, TEXCOORD0, TANGENT layout"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        const bool expected_a2c =
+            request.stock_ks_per_pixel_native->shader_program->source().variant() ==
+            StockKsPerPixelVariant::alpha_to_coverage;
+        if (packet.flags.blend_enabled || pipeline.blend.enabled ||
+            packet.flags.alpha_to_coverage != expected_a2c ||
+            pipeline.blend.alpha_to_coverage != expected_a2c ||
+            (expected_a2c && target.samples != 4U)) {
+            diagnostic = {"indexed_stock_native_variant_state_mismatch",
+                          "Native ksPerPixel base and alpha-to-coverage packages require their exact blend and sample state"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
     }
     const bool has_sampled_texture = request.sampled_binding.texture != nullptr;
     const bool has_sampler = request.sampled_binding.sampler != nullptr;
@@ -1321,7 +1574,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                           "A resource-free pipeline cannot receive explicit material bindings"};
             return IndexedStaticMeshDrawStatus::invalid_request;
         }
-        if (!packet.resources.empty()) {
+        if (!packet.resources.empty() && !stock_native) {
             diagnostic = {"indexed_static_mesh_resources_unsupported",
                           "The resource-free indexed baseline cannot execute material packet resources"};
             return IndexedStaticMeshDrawStatus::unsupported;

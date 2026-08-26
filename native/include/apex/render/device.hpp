@@ -23,6 +23,9 @@ namespace apex::render {
 struct DrawPacket;
 class Sampler;
 class Device;
+class StockKsPerPixelNativeShaderProgram;
+class StockKsPerPixelNativeConstantBuffers;
+class StockKsPerPixelNativeSamplers;
 
 /** Graphics APIs supported by the native renderer. */
 enum class Backend {
@@ -459,6 +462,7 @@ enum class StaticMeshIndexType : std::uint8_t { uint16 };
 enum class IndexedShaderAuthority : std::uint8_t {
     packet_contract,
     explicit_pipeline,
+    explicit_stock_ks_per_pixel_native,
 };
 
 // Material resources remain staged unless a caller supplies the complete
@@ -473,6 +477,16 @@ struct IndexedSampledTextureBinding {
     // Non-owning. Keep both handles alive until the synchronous draw returns.
     const Texture* texture = nullptr;
     const Sampler* sampler = nullptr;
+};
+
+// Exact installed ksPerPixel resource binding. The request does not own these
+// objects. Keep every handle alive until the synchronous draw returns.
+struct StockKsPerPixelNativeDrawBinding {
+    const StockKsPerPixelNativeShaderProgram* shader_program = nullptr;
+    const StockKsPerPixelNativeConstantBuffers* constant_buffers = nullptr;
+    const StockKsPerPixelNativeSamplers* samplers = nullptr;
+    const Texture* diffuse_texture = nullptr;
+    std::array<const DepthAttachment*, 3U> shadow_maps{};
 };
 
 // Recovered stock ksShadowGenAT cbMaterial packing. The installed pixel
@@ -719,6 +733,7 @@ struct IndexedStaticMeshDrawRequest {
     IndexedMaterialBufferBinding material_binding{};
     IndexedFrameBufferBinding frame_binding{};
     IndexedDirectionalShadowBinding directional_shadow_binding{};
+    const StockKsPerPixelNativeDrawBinding* stock_ks_per_pixel_native = nullptr;
 };
 
 // A recovered selected-mesh draw reuses one static 44-byte-stride mesh. The
@@ -1033,6 +1048,9 @@ public:
     [[nodiscard]] const ShaderModule& pixel_shader() const noexcept {
         return *pixel_shader_;
     }
+    [[nodiscard]] bool ready() const noexcept {
+        return vertex_shader_ != nullptr && pixel_shader_ != nullptr;
+    }
 
 private:
     friend struct StockKsPerPixelNativeShaderResult;
@@ -1118,6 +1136,11 @@ public:
         const std::size_t index = static_cast<std::size_t>(slot);
         return index < buffers_.size() ? buffers_[index].get() : nullptr;
     }
+    [[nodiscard]] bool ready() const noexcept {
+        for (const auto& buffer : buffers_)
+            if (buffer == nullptr) return false;
+        return true;
+    }
 
 private:
     friend StockKsPerPixelNativeConstantBufferResult
@@ -1186,6 +1209,11 @@ public:
         StockKsPerPixelNativeSamplerSlot slot) const noexcept {
         const std::size_t index = static_cast<std::size_t>(slot);
         return index < samplers_.size() ? samplers_[index].get() : nullptr;
+    }
+    [[nodiscard]] bool ready() const noexcept {
+        for (const auto& sampler : samplers_)
+            if (sampler == nullptr) return false;
+        return true;
     }
 
 private:

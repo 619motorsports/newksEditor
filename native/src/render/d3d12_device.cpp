@@ -5900,6 +5900,12 @@ public:
             validate_indexed_static_mesh_draw_request(texture, request, diagnostic);
         if (validation != IndexedStaticMeshDrawStatus::ready)
             return {validation, std::move(diagnostic), {}};
+        if (request.shader_authority ==
+            IndexedShaderAuthority::explicit_stock_ks_per_pixel_native)
+            return {IndexedStaticMeshDrawStatus::unsupported,
+                    {"indexed_stock_native_pipeline_staged",
+                     "The validated native binding is ready, but its D3D12 root signature and pipeline are not allocated yet"},
+                    {}};
         if (texture.backend() != Backend::D3D12)
             return {IndexedStaticMeshDrawStatus::unsupported,
                     {"texture_backend_mismatch", "The texture belongs to another graphics backend"}, {}};
