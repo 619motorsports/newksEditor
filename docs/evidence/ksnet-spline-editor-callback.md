@@ -163,6 +163,18 @@ It polls these numeric-keypad virtual keys through `GetAsyncKeyState`:
 Each direction uses an independent test. Thus, concurrent keys combine their
 movement. The nonzero return test makes held-key movement level-triggered.
 
+The `SplineEditor` constructor has token `0x06000106` and RVA `0x2EB3C`.
+`ksGraphics.initSceneGraph` has token `0x060003F1` and RVA `0x25490`.
+This caller passes the literal `0.16F` as `deltaT`. No later method changes it.
+Thus, normal movement is `0.016` units for each callback. Control movement is
+`0.16` units for each callback. The movement rate depends on callback rate.
+
+The original path does not test window focus. It also accepts the low-order
+transition bit from `GetAsyncKeyState`. The portable port tracks key-down and
+key-up events instead. It clears all held keys after SDL reports focus loss.
+It ignores new key-down events until SDL reports focus gain.
+This focus behavior is an explicit cross-platform safety boundary.
+
 `SplineEditor.renderCamberOnSpline` has token `0x0600010C` and RVA `0x2E8C0`.
 It draws one vertical line for each point. The line height is
 `abs(payload.camber) * 1000`.
@@ -299,12 +311,33 @@ state. After a successful upload, one no-throw pointer swap publishes the model
 and overlay set. An upload error keeps the model revision and visible buffers.
 The viewport also compares the expected visible revision before replacement.
 
-The native window option
-`--ai-spline-edit-point <index> <x> <y> <z>` exposes this render-thread path.
+The native window option `--ai-spline-edit-point` exposes an absolute startup
+batch on this render-thread path.
 Repeated options form one bounded batch after viewport preparation. The first
-frame uses the accepted generation. The window does not yet track frame time,
-focus changes, or recovered numeric-keypad state. It does not yet emulate
-`allowSplineEdit`.
+frame uses the accepted generation.
+
+The `--ai-spline-unlock-edit` option exposes the separate movement flag.
+It starts off, like the original checkbox and constructor field.
+The `--ai-spline-index` options supply the ordered selected-index vector.
+The window maps Numpad and Control scan codes to portable semantic keys.
+It combines all held directions into one point batch for each frame.
+The controller publishes that batch after the current draw completes.
+Thus, the next frame shows the new generation, as in `onNodeRender`.
+
+The controller retains the load-time horizontal forward cache across movement.
+A zero XZ forward suppresses horizontal movement but keeps vertical movement.
+The port rejects a forward length that overflows during normalization.
+Open splines clamp the final cached forward. Closed splines wrap it.
+The port rebuilds the grid and all enabled passes for each accepted frame.
+This transactional refresh is safer than the original stale derived caches.
+Each accepted frame also creates one bounded undo revision.
+The unlock option stays off by default. D3D12 buffer retirement can wait for
+idle for each pass, so a Windows WARP cadence test remains necessary.
+The window retries transient allocation and viewport publication errors.
+It also clears held input while the presentation surface has no size.
+
+The window cannot change the selected AI indices at runtime. It also has no
+edit-mode, cancel, refresh, or durable save control for this path.
 
 Dirty state compares the current canonical bytes with the baseline bytes.
 Transactional undo, redo, and baseline reset use the same publication path.
@@ -316,8 +349,13 @@ It also rejects a forged overrun chunk and an over-limit aggregate. An injected
 third buffer upload error keeps the controller and viewport at the prior
 revision. The test also covers stale revisions, no-op edits, undo, redo, and
 baseline reset. Temporary buffers leave no retained allocation.
-A D3D12 fake checks the shared metadata and clip-space contract. It does not
-run a D3D12 queue, fence, or resource destructor.
+A D3D12 fake checks one manual transaction and the clip-space contract.
+It does not run a D3D12 queue, fence, or resource destructor.
+
+The manual-input test covers repeated key-down events and simultaneous keys.
+It covers both Control keys, opposite-key cancellation, and focus-state clear.
+The viewport test covers the exact local transform for two selected points.
+It also covers cached forwards, zero forwards, upload failure, and retry.
 
 The production WebGL source has no AI-spline load or render path. A source
 search found no AI-spline or `fast_lane.ai` identifiers. Thus, a direct WebGL

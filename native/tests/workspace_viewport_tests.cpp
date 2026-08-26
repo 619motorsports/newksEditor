@@ -1964,6 +1964,66 @@ void replaces_committed_ai_spline_overlays_atomically() {
             "live replacement rejects a different same-backend device");
 }
 
+void tracks_recovered_ai_spline_manual_input() {
+    using apex::app::WorkspaceAiSplineManualInputState;
+    using apex::app::WorkspaceAiSplineManualKey;
+
+    WorkspaceAiSplineManualInputState input;
+    require(input.setPressed(WorkspaceAiSplineManualKey::forward, true) &&
+                !input.setPressed(WorkspaceAiSplineManualKey::forward, true),
+            "repeated manual key-down is idempotent");
+    require(input.setPressed(WorkspaceAiSplineManualKey::right, true) &&
+                input.setPressed(WorkspaceAiSplineManualKey::up, true),
+            "independent manual direction keys combine");
+    const auto normal =
+        apex::app::workspaceAiSplineManualLocalDelta(input.movement());
+    const float normalAmount =
+        apex::app::workspace_ai_spline_manual_speed *
+        apex::app::workspace_ai_spline_manual_fixed_delta;
+    require(std::abs(normal[0U] - normalAmount) < 1.0e-7F &&
+                std::abs(normal[1U] - normalAmount) < 1.0e-7F &&
+                std::abs(normal[2U] + normalAmount) < 1.0e-7F,
+            "manual keys use the recovered local signs and fixed delta");
+
+    require(input.setPressed(WorkspaceAiSplineManualKey::left_control, true) &&
+                input.setPressed(WorkspaceAiSplineManualKey::right_control,
+                                 true),
+            "left and right Control have independent held state");
+    require(input.setPressed(WorkspaceAiSplineManualKey::left_control, false) &&
+                input.movement().accelerated,
+            "releasing one Control retains acceleration from the other");
+    const auto accelerated =
+        apex::app::workspaceAiSplineManualLocalDelta(input.movement());
+    require(std::abs(accelerated[0U] - normal[0U] * 10.0F) < 1.0e-6F &&
+                std::abs(accelerated[1U] - normal[1U] * 10.0F) < 1.0e-6F &&
+                std::abs(accelerated[2U] - normal[2U] * 10.0F) < 1.0e-6F,
+            "Control applies the recovered ten-times movement scale");
+
+    require(input.setPressed(WorkspaceAiSplineManualKey::backward, true) &&
+                input.setPressed(WorkspaceAiSplineManualKey::left, true) &&
+                input.setPressed(WorkspaceAiSplineManualKey::down, true),
+            "opposite manual directions can be held together");
+    const auto cancelled =
+        apex::app::workspaceAiSplineManualLocalDelta(input.movement());
+    require(cancelled == std::array<float, 3U>{0.0F, 0.0F, 0.0F},
+            "opposite manual directions cancel exactly");
+    input.clear();
+    require(input.movement() == apex::app::WorkspaceAiSplineManualMovement{},
+            "focus-loss clear releases every manual input bit");
+    input.setFocused(false);
+    require(!input.setPressed(WorkspaceAiSplineManualKey::forward, true) &&
+                input.movement() ==
+                    apex::app::WorkspaceAiSplineManualMovement{},
+            "unfocused manual input ignores new key-down events");
+    input.setFocused(true);
+    require(input.setPressed(WorkspaceAiSplineManualKey::forward, true),
+            "manual input resumes after explicit focus gain");
+    input.clear();
+    require(!input.setPressed(
+                static_cast<WorkspaceAiSplineManualKey>(255U), true),
+            "unknown manual key values do not change input state");
+}
+
 void publishes_ai_spline_controller_transactions() {
     auto value = fixture();
     apex::formats::AiSpline spline;
@@ -2224,6 +2284,86 @@ void publishes_ai_spline_controller_transactions() {
                            return before != after;
                        }),
             "next frame draws the reset generation");
+
+    apex::app::WorkspaceAiSplineManualInputState manualInput;
+    (void)manualInput.setPressed(
+        apex::app::WorkspaceAiSplineManualKey::forward, true);
+    (void)manualInput.setPressed(
+        apex::app::WorkspaceAiSplineManualKey::right, true);
+    (void)manualInput.setPressed(apex::app::WorkspaceAiSplineManualKey::up,
+                                 true);
+    const auto callsBeforeManual = device.buffer_calls;
+    const auto staleManual = controller->moveSelectedByManualInput(
+        device, *prepared.viewport, manualInput.movement(), 99U);
+    require(!staleManual.ok() &&
+                staleManual.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::
+                        stale_revision &&
+                device.buffer_calls == callsBeforeManual,
+            "manual movement rejects a stale controller revision");
+    const auto moved = controller->moveSelectedByManualInput(
+        device, *prepared.viewport, manualInput.movement(),
+        controller->revision());
+    const float amount = apex::app::workspace_ai_spline_manual_speed *
+                         apex::app::workspace_ai_spline_manual_fixed_delta;
+    const float diagonalLength = std::sqrt(125.0F);
+    const float headingX = 10.0F / diagonalLength;
+    const float headingZ = 5.0F / diagonalLength;
+    require(moved.ok() && moved.changed && moved.revision == 7U &&
+                moved.replacedPassCount == 6U &&
+                device.buffer_calls == callsBeforeManual + 6U &&
+                std::abs(controller->current().points[0U].position[0U] -
+                         amount) < 1.0e-6F &&
+                std::abs(controller->current().points[0U].position[1U] -
+                         amount) < 1.0e-6F &&
+                std::abs(controller->current().points[0U].position[2U] -
+                         amount) < 1.0e-6F &&
+                std::abs(controller->current().points[1U].position[0U] -
+                         (10.0F + (headingX - headingZ) * amount)) <
+                    1.0e-6F &&
+                std::abs(controller->current().points[1U].position[1U] -
+                         amount) < 1.0e-6F &&
+                std::abs(controller->current().points[1U].position[2U] -
+                         (headingX + headingZ) * amount) < 1.0e-6F,
+            "manual movement publishes one recovered multi-point transform");
+    (void)drawControllerGeneration();
+
+    manualInput.clear();
+    (void)manualInput.setPressed(
+        apex::app::WorkspaceAiSplineManualKey::forward, true);
+    const auto pointOneBeforeRetry =
+        controller->current().points[1U].position;
+    device.fail_buffer_call = device.buffer_calls + 3U;
+    device.fail_buffer_status = BufferStatus::upload_failed;
+    const auto failedManual = controller->moveSelectedByManualInput(
+        device, *prepared.viewport, manualInput.movement(),
+        controller->revision());
+    require(!failedManual.ok() && controller->revision() == 7U &&
+                controller->current().points[1U].position ==
+                    pointOneBeforeRetry,
+            "failed manual publication keeps the prior model revision");
+    device.fail_buffer_call = 0U;
+    const auto retriedManual = controller->moveSelectedByManualInput(
+        device, *prepared.viewport, manualInput.movement(),
+        controller->revision());
+    require(retriedManual.ok() && retriedManual.revision == 8U &&
+                std::abs(controller->current().points[1U].position[0U] -
+                         (pointOneBeforeRetry[0U] + headingX * amount)) <
+                    1.0e-6F &&
+                std::abs(controller->current().points[1U].position[2U] -
+                         (pointOneBeforeRetry[2U] + headingZ * amount)) <
+                    1.0e-6F,
+            "manual retry uses one cached-forward step after upload recovery");
+    (void)drawControllerGeneration();
+
+    manualInput.clear();
+    const auto callsBeforeIdle = device.buffer_calls;
+    const auto idle = controller->moveSelectedByManualInput(
+        device, *prepared.viewport, manualInput.movement(),
+        controller->revision());
+    require(idle.ok() && !idle.changed && idle.revision == 8U &&
+                device.buffer_calls == callsBeforeIdle,
+            "released manual input performs no session or buffer work");
 }
 
 void rejects_unsafe_ai_spline_controller_candidates() {
@@ -2293,6 +2433,75 @@ void rejects_unsafe_ai_spline_controller_candidates() {
             "unsafe derived geometry cannot commit a model candidate");
 }
 
+void handles_degenerate_ai_spline_manual_forwards() {
+    apex::formats::AiSpline spline;
+    spline.source = "degenerate-manual.ai";
+    spline.version = 7U;
+    spline.points.resize(4U);
+    spline.payloads.resize(4U);
+    spline.points[0U].position = {0.0F, 0.0F, 0.0F};
+    spline.points[1U].position = {0.0F, 5.0F, 0.0F};
+    spline.points[2U].position = {100.0F, 0.0F, 0.0F};
+    spline.points[3U].position = {200.0F, 0.0F, 0.0F};
+    for (std::size_t index = 0U; index < spline.points.size(); ++index)
+        spline.points[index].tag = static_cast<std::int32_t>(index);
+    apex::app::WorkspaceAiSplineControllerConfiguration configuration;
+    configuration.selectedIndices = {0U};
+    auto created = apex::app::WorkspaceAiSplineController::create(
+        spline, std::move(configuration));
+    require(created.ok(), "zero-XZ-forward controller creates");
+    auto controller = std::move(created.controller);
+
+    auto value = fixture();
+    auto request = request_for(value);
+    request.ai_spline_geometry = &controller->overlays().primary;
+    request.ai_spline_generation = controller->revision();
+    request.ai_spline_pipeline = ai_spline_pipeline(value);
+    request.ai_spline_selection_geometry =
+        &*controller->overlays().selection;
+    request.ai_spline_selection_pipeline = ai_spline_camber_pipeline(value);
+    FakeDevice device;
+    auto prepared =
+        apex::app::prepareWorkspaceViewport(device, value.document, request);
+    require(prepared.ok(), "zero-XZ-forward viewport prepares");
+
+    apex::app::WorkspaceAiSplineManualMovement horizontal;
+    horizontal.forward = true;
+    const auto bufferCalls = device.buffer_calls;
+    const auto unchanged = controller->moveSelectedByManualInput(
+        device, *prepared.viewport, horizontal, controller->revision());
+    require(unchanged.ok() && !unchanged.changed &&
+                controller->revision() == 0U &&
+                device.buffer_calls == bufferCalls,
+            "zero cached forward suppresses horizontal movement");
+
+    apex::app::WorkspaceAiSplineManualMovement vertical;
+    vertical.up = true;
+    const auto changed = controller->moveSelectedByManualInput(
+        device, *prepared.viewport, vertical, controller->revision());
+    const float amount = apex::app::workspace_ai_spline_manual_speed *
+                         apex::app::workspace_ai_spline_manual_fixed_delta;
+    require(changed.ok() && changed.changed && changed.revision == 1U &&
+                changed.replacedPassCount == 2U &&
+                controller->current().points[0U].position ==
+                    std::array<float, 3U>{0.0F, amount, 0.0F},
+            "zero cached forward retains independent vertical movement");
+
+    auto extreme = spline;
+    extreme.source = "non-finite-forward.ai";
+    extreme.points[0U].position = {0.0F, 0.0F, 0.0F};
+    extreme.points[1U].position = {1.0e20F, 0.0F, 0.0F};
+    const auto rejected =
+        apex::app::WorkspaceAiSplineController::create(std::move(extreme), {});
+    require(!rejected.ok() &&
+                rejected.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::
+                        invalid_edit &&
+                rejected.diagnostic.code ==
+                    "workspace_ai_spline_controller_forward_non_finite",
+            "controller rejects overflowed manual forward normalization");
+}
+
 void publishes_controller_through_d3d12_metadata_contract() {
     apex::formats::AiSpline spline;
     spline.source = "d3d12-controller.ai";
@@ -2304,8 +2513,10 @@ void publishes_controller_through_d3d12_metadata_contract() {
             static_cast<float>(index) * 100.0F, 0.0F, 0.0F};
         spline.points[index].tag = static_cast<std::int32_t>(index);
     }
+    apex::app::WorkspaceAiSplineControllerConfiguration configuration;
+    configuration.selectedIndices = {1U};
     auto created = apex::app::WorkspaceAiSplineController::create(
-        std::move(spline), {});
+        std::move(spline), std::move(configuration));
     require(created.ok(), "D3D12 contract controller creates");
     auto controller = std::move(created.controller);
 
@@ -2318,6 +2529,9 @@ void publishes_controller_through_d3d12_metadata_contract() {
     request.ai_spline_geometry = &controller->overlays().primary;
     request.ai_spline_generation = controller->revision();
     request.ai_spline_pipeline = ai_spline_pipeline(value);
+    request.ai_spline_selection_geometry =
+        &*controller->overlays().selection;
+    request.ai_spline_selection_pipeline = ai_spline_camber_pipeline(value);
     FakeDevice device(Backend::D3D12);
     auto prepared =
         apex::app::prepareWorkspaceViewport(device, value.document, request);
@@ -2329,12 +2543,12 @@ void publishes_controller_through_d3d12_metadata_contract() {
                 prepared.viewport->backend() == Backend::D3D12,
             "D3D12 contract viewport prepares the controller baseline");
 
-    const std::array<apex::authoring::AiSplinePointPositionEdit, 1U> edit{
-        apex::authoring::AiSplinePointPositionEdit{1U, {110.0F, 5.0F, 2.0F}}};
-    const auto changed = controller->setPointPositions(
-        device, *prepared.viewport, edit, controller->revision());
-    require(changed.ok() && changed.changed && changed.replacedPassCount == 1U,
-            "D3D12 contract accepts one atomic controller generation");
+    apex::app::WorkspaceAiSplineManualMovement movement;
+    movement.forward = true;
+    const auto changed = controller->moveSelectedByManualInput(
+        device, *prepared.viewport, movement, controller->revision());
+    require(changed.ok() && changed.changed && changed.replacedPassCount == 2U,
+            "D3D12 contract accepts one manual controller generation");
 
     FakeTarget target(request.presentation, Backend::D3D12);
     WorkspaceViewportFrameRequest frame;
@@ -2344,7 +2558,7 @@ void publishes_controller_through_d3d12_metadata_contract() {
     require(
         prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
                 WorkspaceViewportFrameStatus::ready &&
-            device.overlay_buffers.size() == 1U,
+            device.overlay_buffers.size() == 2U,
         "D3D12 contract draws the accepted controller generation");
 }
 
@@ -3028,8 +3242,10 @@ int main() {
         draws_recovered_ai_spline_selected_index_pass();
         draws_recovered_ai_spline_camber_pass();
         replaces_committed_ai_spline_overlays_atomically();
+        tracks_recovered_ai_spline_manual_input();
         publishes_ai_spline_controller_transactions();
         rejects_unsafe_ai_spline_controller_candidates();
+        handles_degenerate_ai_spline_manual_forwards();
         publishes_controller_through_d3d12_metadata_contract();
         draws_selected_mesh_with_recovered_fade_boundary();
         toggles_prepared_authoring_grid_per_frame();

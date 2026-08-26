@@ -263,10 +263,21 @@ remains unchanged and feature-complete.
   The first frame uses the accepted model and all derived passes.
   Unsafe authoring baselines retain the read-only viewer path.
   The original editor polls Numpad 8, 2, 4, 6, 9, and 3 each frame.
-  Control changes its movement scale from `0.1 * deltaT` to `1.0 * deltaT`.
+  It uses a fixed `0.16` delta for each render callback.
+  Thus, a key moves `0.016` units, or `0.16` units with Control.
   It transforms local movement with a cached horizontal forward vector.
-  The port does not yet connect this held-key input, frame time, or focus state
-  to the controller.
+  `--ai-spline-unlock-edit` enables this held-key path for version 7.
+  The configured `--ai-spline-index` values select the moved points.
+  The platform layer maps SDL scan codes to portable keypad and Control keys.
+  One frame combines all held directions into one controller transaction.
+  The update occurs after the current frame, so the next frame shows it.
+  The portable window clears held input after focus loss.
+  It also clears held input while the presentation surface has no size.
+  This focus rule differs from the original global Windows key polling.
+  The controller rejects an overflowed cached-forward normalization.
+  The window retries transient allocation and viewport publication errors.
+  Open splines clamp the final cached forward. Closed splines wrap it.
+  Runtime point picking, edit-mode controls, and durable save remain pending.
   Another version-7 option adds the recovered vertical camber lines after the
   side passes. Positive values are green. Other values are red.
   The selected pass uses solid fill, front-face culling, opaque blend state,

@@ -53,6 +53,29 @@ void release_video() noexcept {
     return value > 0 ? static_cast<std::uint32_t>(value) : 0U;
 }
 
+[[nodiscard]] WindowKey semantic_key(const SDL_KeyboardEvent& event) noexcept {
+    switch (event.scancode) {
+    case SDL_SCANCODE_KP_2: return WindowKey::keypad_2;
+    case SDL_SCANCODE_KP_3: return WindowKey::keypad_3;
+    case SDL_SCANCODE_KP_4: return WindowKey::keypad_4;
+    case SDL_SCANCODE_KP_6: return WindowKey::keypad_6;
+    case SDL_SCANCODE_KP_8: return WindowKey::keypad_8;
+    case SDL_SCANCODE_KP_9: return WindowKey::keypad_9;
+    case SDL_SCANCODE_LCTRL: return WindowKey::left_control;
+    case SDL_SCANCODE_RCTRL: return WindowKey::right_control;
+    default: break;
+    }
+    switch (event.key) {
+    case SDLK_W: return WindowKey::w;
+    case SDLK_S: return WindowKey::s;
+    case SDLK_A: return WindowKey::a;
+    case SDLK_D: return WindowKey::d;
+    case SDLK_Q: return WindowKey::q;
+    case SDLK_E: return WindowKey::e;
+    default: return WindowKey::unknown;
+    }
+}
+
 #endif
 
 }  // namespace
@@ -292,12 +315,22 @@ std::size_t Window::poll_events(std::span<WindowEvent> events) noexcept {
             translated.height = event.window.data2;
             relevant = true;
             break;
+        case SDL_EVENT_WINDOW_FOCUS_GAINED:
+        case SDL_EVENT_WINDOW_FOCUS_LOST:
+            if (event.window.windowID != implementation_->id) break;
+            translated.type =
+                event.type == SDL_EVENT_WINDOW_FOCUS_GAINED
+                    ? WindowEventType::focus_gained
+                    : WindowEventType::focus_lost;
+            relevant = true;
+            break;
         case SDL_EVENT_KEY_DOWN:
         case SDL_EVENT_KEY_UP:
             if (event.key.windowID != implementation_->id) break;
             translated.type = event.type == SDL_EVENT_KEY_DOWN ? WindowEventType::key_down
                                                                 : WindowEventType::key_up;
             translated.key = static_cast<std::uint32_t>(event.key.key);
+            translated.semantic_key = semantic_key(event.key);
             translated.modifiers = static_cast<std::uint32_t>(event.key.mod);
             translated.repeat = event.key.repeat;
             relevant = true;

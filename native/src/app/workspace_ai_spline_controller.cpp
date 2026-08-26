@@ -1,8 +1,10 @@
 #include "apex/app/workspace_ai_spline_controller.hpp"
 
+#include "apex/app/installed_editor_spline.hpp"
 #include "apex/formats/ai_spline_write.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <exception>
 #include <new>
 #include <unordered_set>
@@ -95,19 +97,124 @@ namespace {
     return true;
 }
 
+[[nodiscard]] bool buildMovementForwards(
+    const formats::AiSpline& spline,
+    std::vector<std::array<float, 2U>>& forwards,
+    render::Diagnostic& outputDiagnostic) {
+    forwards.reserve(spline.points.size());
+    const bool closed =
+        spline.points.size() >= 2U &&
+        installedEditorSplinePointDistance(spline.points.back().position,
+                                           spline.points.front().position) <=
+            installed_editor_spline_closure_distance;
+    for (std::size_t index = 0U; index < spline.points.size(); ++index) {
+        const std::size_t nextIndex =
+            index + 1U < spline.points.size()
+                ? index + 1U
+                : (closed && !spline.points.empty() ? 0U : index);
+        float forwardX = spline.points[nextIndex].position[0] -
+                         spline.points[index].position[0];
+        float forwardZ = spline.points[nextIndex].position[2] -
+                         spline.points[index].position[2];
+        const float length =
+            std::sqrt(forwardX * forwardX + forwardZ * forwardZ);
+        if (!std::isfinite(length)) {
+            outputDiagnostic = diagnostic(
+                "workspace_ai_spline_controller_forward_non_finite",
+                "AI spline manual movement produced a non-finite forward "
+                "direction");
+            return false;
+        }
+        if (length != 0.0F) {
+            forwardX /= length;
+            forwardZ /= length;
+        }
+        if (!std::isfinite(forwardX) || !std::isfinite(forwardZ)) {
+            outputDiagnostic = diagnostic(
+                "workspace_ai_spline_controller_forward_non_finite",
+                "AI spline manual movement produced a non-finite forward "
+                "direction");
+            return false;
+        }
+        forwards.push_back({forwardX, forwardZ});
+    }
+    return true;
+}
+
 } // namespace
+
+bool WorkspaceAiSplineManualInputState::setPressed(
+    WorkspaceAiSplineManualKey key, bool pressed) noexcept {
+    const auto index = static_cast<std::size_t>(key);
+    if (index >= pressed_.size() || (pressed && !focused_)) return false;
+    const bool changed = pressed_[index] != pressed;
+    pressed_[index] = pressed;
+    return changed;
+}
+
+void WorkspaceAiSplineManualInputState::setFocused(bool focused) noexcept {
+    focused_ = focused;
+    if (!focused_) clear();
+}
+
+void WorkspaceAiSplineManualInputState::clear() noexcept {
+    pressed_.fill(false);
+}
+
+WorkspaceAiSplineManualMovement
+WorkspaceAiSplineManualInputState::movement() const noexcept {
+    WorkspaceAiSplineManualMovement result;
+    result.forward = pressed_[static_cast<std::size_t>(
+        WorkspaceAiSplineManualKey::forward)];
+    result.backward = pressed_[static_cast<std::size_t>(
+        WorkspaceAiSplineManualKey::backward)];
+    result.left = pressed_[static_cast<std::size_t>(
+        WorkspaceAiSplineManualKey::left)];
+    result.right = pressed_[static_cast<std::size_t>(
+        WorkspaceAiSplineManualKey::right)];
+    result.up = pressed_[static_cast<std::size_t>(
+        WorkspaceAiSplineManualKey::up)];
+    result.down = pressed_[static_cast<std::size_t>(
+        WorkspaceAiSplineManualKey::down)];
+    result.accelerated =
+        pressed_[static_cast<std::size_t>(
+            WorkspaceAiSplineManualKey::left_control)] ||
+        pressed_[static_cast<std::size_t>(
+            WorkspaceAiSplineManualKey::right_control)];
+    return result;
+}
+
+std::array<float, 3U> workspaceAiSplineManualLocalDelta(
+    const WorkspaceAiSplineManualMovement& movement) noexcept {
+    const float amount =
+        (movement.accelerated
+             ? workspace_ai_spline_manual_accelerated_speed
+             : workspace_ai_spline_manual_speed) *
+        workspace_ai_spline_manual_fixed_delta;
+    std::array<float, 3U> result{};
+    if (movement.forward) result[2] -= amount;
+    if (movement.backward) result[2] += amount;
+    if (movement.left) result[0] -= amount;
+    if (movement.right) result[0] += amount;
+    if (movement.up) result[1] += amount;
+    if (movement.down) result[1] -= amount;
+    return result;
+}
 
 struct WorkspaceAiSplineController::State {
     authoring::AiSplineSession session;
     WorkspaceAiSplineControllerConfiguration configuration;
     WorkspaceAiSplineOverlaySet overlays;
+    std::vector<std::array<float, 2U>> movementForwards;
 
     State(authoring::AiSplineSession candidateSession,
           WorkspaceAiSplineControllerConfiguration candidateConfiguration,
-          WorkspaceAiSplineOverlaySet candidateOverlays)
+          WorkspaceAiSplineOverlaySet candidateOverlays,
+          std::vector<std::array<float, 2U>> candidateMovementForwards)
         : session(std::move(candidateSession)),
           configuration(std::move(candidateConfiguration)),
-          overlays(std::move(candidateOverlays)) {}
+          overlays(std::move(candidateOverlays)),
+          movementForwards(std::move(candidateMovementForwards)) {}
 };
 
 WorkspaceAiSplineController::WorkspaceAiSplineController(
@@ -146,9 +253,13 @@ WorkspaceAiSplineControllerCreateResult WorkspaceAiSplineController::create(
             result.diagnostic = std::move(built.diagnostic);
             return result;
         }
+        std::vector<std::array<float, 2U>> movementForwards;
+        if (!buildMovementForwards(session.current(), movementForwards,
+                                   result.diagnostic))
+            return result;
         auto state = std::make_unique<State>(
             std::move(session), std::move(configuration),
-            std::move(built.overlays));
+            std::move(built.overlays), std::move(movementForwards));
         result.controller = std::unique_ptr<WorkspaceAiSplineController>(
             new WorkspaceAiSplineController(std::move(state)));
         result.status = WorkspaceAiSplineControllerStatus::ready;
@@ -260,7 +371,7 @@ WorkspaceAiSplineController::publishCandidate(
         }
         auto nextState = std::make_unique<State>(
             std::move(candidate), state_->configuration,
-            std::move(built.overlays));
+            std::move(built.overlays), state_->movementForwards);
         const auto replaced =
             viewport.replaceAiSplineOverlays(
                 device, nextState->overlays,
@@ -328,6 +439,71 @@ WorkspaceAiSplineController::setPointPositions(
         result.diagnostic = diagnostic(
             "workspace_ai_spline_controller_allocation_failed",
             "AI spline edit exceeded available allocation capacity");
+        return result;
+    }
+}
+
+WorkspaceAiSplineControllerResult
+WorkspaceAiSplineController::moveSelectedByManualInput(
+    render::Device& device, WorkspaceViewport& viewport,
+    const WorkspaceAiSplineManualMovement& movement,
+    std::uint64_t expectedRevision) {
+    if (expectedRevision != state_->session.revision())
+        return staleResult();
+    if (viewport.aiSplineGeneration() != state_->session.revision())
+        return viewportBindingResult();
+    try {
+        const auto local = workspaceAiSplineManualLocalDelta(movement);
+        if (state_->configuration.selectedIndices.empty() ||
+            (local[0U] == 0.0F && local[1U] == 0.0F &&
+             local[2U] == 0.0F)) {
+            WorkspaceAiSplineControllerResult result;
+            result.status = WorkspaceAiSplineControllerStatus::unchanged;
+            result.revision = state_->session.revision();
+            return result;
+        }
+        std::vector<authoring::AiSplinePointPositionEdit> edits;
+        edits.reserve(state_->configuration.selectedIndices.size());
+        for (const std::uint32_t selectedIndex :
+             state_->configuration.selectedIndices) {
+            const auto index = static_cast<std::size_t>(selectedIndex);
+            if (index >= state_->session.current().points.size() ||
+                index >= state_->movementForwards.size()) {
+                WorkspaceAiSplineControllerResult result;
+                result.status =
+                    WorkspaceAiSplineControllerStatus::invalid_edit;
+                result.revision = state_->session.revision();
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_controller_selection_invalid",
+                    "AI spline manual movement selection is outside the "
+                    "current model");
+                return result;
+            }
+            const auto& position =
+                state_->session.current().points[index].position;
+            const float headingX = state_->movementForwards[index][0U];
+            const float headingZ = state_->movementForwards[index][1U];
+            const std::array<float, 3U> worldDelta = {
+                -headingZ * local[0U] - headingX * local[2U],
+                local[1U],
+                headingX * local[0U] - headingZ * local[2U]};
+            authoring::AiSplinePointPositionEdit edit;
+            edit.pointIndex = selectedIndex;
+            edit.position = {
+                position[0U] + worldDelta[0U],
+                position[1U] + worldDelta[1U],
+                position[2U] + worldDelta[2U]};
+            edits.push_back(edit);
+        }
+        return setPointPositions(device, viewport, edits, expectedRevision);
+    } catch (const std::bad_alloc&) {
+        WorkspaceAiSplineControllerResult result;
+        result.status = WorkspaceAiSplineControllerStatus::allocation_failed;
+        result.revision = state_->session.revision();
+        result.diagnostic = diagnostic(
+            "workspace_ai_spline_controller_allocation_failed",
+            "AI spline manual movement exceeded available allocation "
+            "capacity");
         return result;
     }
 }

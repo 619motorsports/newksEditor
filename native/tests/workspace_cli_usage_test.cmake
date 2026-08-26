@@ -210,6 +210,23 @@ endif()
 
 execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --ai-spline-unlock-edit
+  RESULT_VARIABLE detached_ai_unlock_result
+  ERROR_VARIABLE detached_ai_unlock_error
+)
+if(NOT detached_ai_unlock_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached AI unlock returned ${detached_ai_unlock_result}: ${detached_ai_unlock_error}")
+endif()
+string(FIND "${detached_ai_unlock_error}"
+  "AI spline overlays require --ai-spline" detached_ai_unlock_position)
+if(detached_ai_unlock_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached AI unlock was not diagnosed: ${detached_ai_unlock_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
           --ai-spline-edit-point 0 nan 2 3
   RESULT_VARIABLE nonfinite_ai_edit_result
   ERROR_VARIABLE nonfinite_ai_edit_error

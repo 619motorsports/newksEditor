@@ -3,6 +3,7 @@
 #include "apex/app/workspace_viewport.hpp"
 #include "apex/authoring/ai_spline_session.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -20,6 +21,57 @@ struct WorkspaceAiSplineControllerConfiguration {
     std::vector<std::uint32_t> selectedIndices;
     bool showCamber = false;
 };
+
+inline constexpr float workspace_ai_spline_manual_fixed_delta = 0.16F;
+inline constexpr float workspace_ai_spline_manual_speed = 0.1F;
+inline constexpr float workspace_ai_spline_manual_accelerated_speed = 1.0F;
+
+enum class WorkspaceAiSplineManualKey : std::uint8_t {
+    forward,
+    backward,
+    left,
+    right,
+    up,
+    down,
+    left_control,
+    right_control,
+    count,
+};
+
+struct WorkspaceAiSplineManualMovement {
+    bool forward = false;
+    bool backward = false;
+    bool left = false;
+    bool right = false;
+    bool up = false;
+    bool down = false;
+    bool accelerated = false;
+
+    friend bool operator==(const WorkspaceAiSplineManualMovement&,
+                           const WorkspaceAiSplineManualMovement&) = default;
+};
+
+// This state consumes portable key transitions. Repeated key-down events are
+// idempotent. Focus loss clears held keys and blocks new key-down events.
+class WorkspaceAiSplineManualInputState final {
+public:
+    [[nodiscard]] bool setPressed(WorkspaceAiSplineManualKey key,
+                                  bool pressed) noexcept;
+    void setFocused(bool focused) noexcept;
+    void clear() noexcept;
+    [[nodiscard]] WorkspaceAiSplineManualMovement movement() const noexcept;
+
+private:
+    std::array<bool, static_cast<std::size_t>(
+                         WorkspaceAiSplineManualKey::count)>
+        pressed_{};
+    bool focused_ = true;
+};
+
+// Recover the fixed local movement applied by one installed-editor callback.
+// The source passes 0.16 instead of the measured frame duration.
+[[nodiscard]] std::array<float, 3U> workspaceAiSplineManualLocalDelta(
+    const WorkspaceAiSplineManualMovement& movement) noexcept;
 
 enum class WorkspaceAiSplineControllerStatus : std::uint8_t {
     ready,
@@ -96,6 +148,10 @@ public:
     [[nodiscard]] WorkspaceAiSplineControllerResult setPointPositions(
         render::Device& device, WorkspaceViewport& viewport,
         std::span<const authoring::AiSplinePointPositionEdit> edits,
+        std::uint64_t expectedRevision);
+    [[nodiscard]] WorkspaceAiSplineControllerResult moveSelectedByManualInput(
+        render::Device& device, WorkspaceViewport& viewport,
+        const WorkspaceAiSplineManualMovement& movement,
         std::uint64_t expectedRevision);
     [[nodiscard]] WorkspaceAiSplineControllerResult undo(
         render::Device& device, WorkspaceViewport& viewport,

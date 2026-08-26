@@ -70,7 +70,7 @@ void usage(std::ostream& output) {
               "                       [--track-camera-mode webgl|installed-editor]\n"
               "                       [--ai-spline <file> [--ai-spline-mode raw|interpolated] [--ai-spline-interval <in> <out>]]\n"
               "                       [--ai-spline-show-left] [--ai-spline-show-right] [--ai-spline-index <index> ...] [--ai-spline-show-camber]\n"
-              "                       [--ai-spline-edit-point <index> <x> <y> <z> ...]\n"
+              "                       [--ai-spline-edit-point <index> <x> <y> <z> ...] [--ai-spline-unlock-edit]\n"
               "                       [--node-search <query>] [--selected-node <id> [--isolate-selected]]\n"
               "                       [--show-hidden] [--wireframe] [--grid] [--view-axis]\n"
               "                       [--weather <stock-id>] [--sun-heading <degrees>] [--sun-height <degrees>]\n"
@@ -577,6 +577,7 @@ struct WindowWorkspaceOptions {
     std::vector<std::uint32_t> aiSplineIndices;
     bool aiSplineShowCamber = false;
     std::vector<apex::authoring::AiSplinePointPositionEdit> aiSplineEdits;
+    bool aiSplineUnlockEdit = false;
     std::optional<std::string> nodeSearch;
     std::optional<apex::scene::NodeId> selectedNode;
     bool isolateSelected = false;
@@ -966,26 +967,45 @@ std::string workspace_kind_name(apex::app::WorkspaceSessionKind kind) {
 }
 
 std::optional<apex::app::WorkspaceViewportCameraMove>
-workspace_camera_move_for_key(std::uint32_t key) noexcept {
+workspace_camera_move_for_key(apex::platform::WindowKey key) noexcept {
     switch (key) {
-    case static_cast<std::uint32_t>('w'):
-    case static_cast<std::uint32_t>('W'):
+    case apex::platform::WindowKey::w:
         return apex::app::WorkspaceViewportCameraMove::forward;
-    case static_cast<std::uint32_t>('s'):
-    case static_cast<std::uint32_t>('S'):
+    case apex::platform::WindowKey::s:
         return apex::app::WorkspaceViewportCameraMove::backward;
-    case static_cast<std::uint32_t>('a'):
-    case static_cast<std::uint32_t>('A'):
+    case apex::platform::WindowKey::a:
         return apex::app::WorkspaceViewportCameraMove::left;
-    case static_cast<std::uint32_t>('d'):
-    case static_cast<std::uint32_t>('D'):
+    case apex::platform::WindowKey::d:
         return apex::app::WorkspaceViewportCameraMove::right;
-    case static_cast<std::uint32_t>('q'):
-    case static_cast<std::uint32_t>('Q'):
+    case apex::platform::WindowKey::q:
         return apex::app::WorkspaceViewportCameraMove::down;
-    case static_cast<std::uint32_t>('e'):
-    case static_cast<std::uint32_t>('E'):
+    case apex::platform::WindowKey::e:
         return apex::app::WorkspaceViewportCameraMove::up;
+    default:
+        return std::nullopt;
+    }
+}
+
+std::optional<apex::app::WorkspaceAiSplineManualKey>
+workspace_ai_spline_manual_key_for_window_key(
+    apex::platform::WindowKey key) noexcept {
+    switch (key) {
+    case apex::platform::WindowKey::keypad_8:
+        return apex::app::WorkspaceAiSplineManualKey::forward;
+    case apex::platform::WindowKey::keypad_2:
+        return apex::app::WorkspaceAiSplineManualKey::backward;
+    case apex::platform::WindowKey::keypad_4:
+        return apex::app::WorkspaceAiSplineManualKey::left;
+    case apex::platform::WindowKey::keypad_6:
+        return apex::app::WorkspaceAiSplineManualKey::right;
+    case apex::platform::WindowKey::keypad_9:
+        return apex::app::WorkspaceAiSplineManualKey::up;
+    case apex::platform::WindowKey::keypad_3:
+        return apex::app::WorkspaceAiSplineManualKey::down;
+    case apex::platform::WindowKey::left_control:
+        return apex::app::WorkspaceAiSplineManualKey::left_control;
+    case apex::platform::WindowKey::right_control:
+        return apex::app::WorkspaceAiSplineManualKey::right_control;
     default:
         return std::nullopt;
     }
@@ -1147,6 +1167,11 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
                 parse_finite_float(require_value("--ai-spline-edit-point"),
                                    "AI spline edit Z")};
             result.aiSplineEdits.push_back(edit);
+        } else if (option == "--ai-spline-unlock-edit") {
+            if (result.aiSplineUnlockEdit)
+                throw std::runtime_error(
+                    "duplicate --ai-spline-unlock-edit option");
+            result.aiSplineUnlockEdit = true;
         } else if (option == "--node-search") {
             if (result.nodeSearch.has_value())
                 throw std::runtime_error("duplicate --node-search option");
@@ -1371,7 +1396,8 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             "--ai-spline-interval requires --ai-spline");
     if ((result.aiSplineShowLeft || result.aiSplineShowRight ||
          !result.aiSplineIndices.empty() ||
-         result.aiSplineShowCamber || !result.aiSplineEdits.empty()) &&
+         result.aiSplineShowCamber || !result.aiSplineEdits.empty() ||
+         result.aiSplineUnlockEdit) &&
         !result.aiSpline.has_value())
         throw std::runtime_error(
             "AI spline overlays require --ai-spline");
@@ -1586,7 +1612,8 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
             if (created.ok()) {
                 loaded.aiSplineController = std::move(created.controller);
                 overlay_set = &loaded.aiSplineController->overlays();
-            } else if (!options.aiSplineEdits.empty()) {
+            } else if (!options.aiSplineEdits.empty() ||
+                       options.aiSplineUnlockEdit) {
                 throw std::runtime_error(created.diagnostic.code + ": " +
                                          created.diagnostic.message);
             } else {
@@ -1597,9 +1624,10 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
             }
         }
         if (read_only) {
-            if (!options.aiSplineEdits.empty())
+            if (!options.aiSplineEdits.empty() ||
+                options.aiSplineUnlockEdit)
                 throw std::runtime_error(
-                    "--ai-spline-edit-point requires version 7");
+                    "AI spline live editing requires version 7");
             apex::app::WorkspaceAiSplineOverlayRequest overlay_request;
             overlay_request.mode = options.aiSplineMode;
             overlay_request.interval = options.aiSplineInterval;
@@ -2201,9 +2229,14 @@ int run_window(int argc, char** argv) {
     if (workspace_options.trackCameraPlay)
         track_camera_playback_started = std::chrono::steady_clock::now();
 
-    std::array<apex::platform::WindowEvent, 64U> events{};
+    std::array<apex::platform::WindowEvent,
+               apex::platform::max_window_poll_count>
+        events{};
+    apex::app::WorkspaceAiSplineManualInputState ai_spline_manual_input;
     std::uint64_t frames = 0U;
     bool reported_shadow_diagnostic = false;
+    bool reported_ai_spline_manual_diagnostic = false;
+    bool window_has_keyboard_focus = true;
     apex::app::PresentationRecreationController recreation;
     while (!window_result.window->close_requested() &&
            (frame_limit == 0U || frames < frame_limit)) {
@@ -2215,14 +2248,37 @@ int run_window(int argc, char** argv) {
                 resized = true;
             switch (events[index].type) {
             case apex::platform::WindowEventType::key_down:
+                if (!window_has_keyboard_focus) break;
+                if (workspace_options.aiSplineUnlockEdit) {
+                    if (const auto key =
+                            workspace_ai_spline_manual_key_for_window_key(
+                                events[index].semantic_key);
+                        key.has_value())
+                        (void)ai_spline_manual_input.setPressed(*key, true);
+                }
                 if (const auto movement = workspace_camera_move_for_key(
-                        events[index].key); movement.has_value()) {
+                        events[index].semantic_key); movement.has_value()) {
                     if (track_camera_active) {
                         track_camera_active = false;
                         camera_mode_changed = true;
                     }
                     (void)camera_controller.move(*movement);
                 }
+                break;
+            case apex::platform::WindowEventType::key_up:
+                if (const auto key =
+                        workspace_ai_spline_manual_key_for_window_key(
+                            events[index].semantic_key);
+                    key.has_value())
+                    (void)ai_spline_manual_input.setPressed(*key, false);
+                break;
+            case apex::platform::WindowEventType::focus_lost:
+                window_has_keyboard_focus = false;
+                ai_spline_manual_input.setFocused(false);
+                break;
+            case apex::platform::WindowEventType::focus_gained:
+                window_has_keyboard_focus = true;
+                ai_spline_manual_input.setFocused(true);
                 break;
             case apex::platform::WindowEventType::mouse_button_down:
                 if (events[index].button == 1U) {
@@ -2270,6 +2326,7 @@ int run_window(int argc, char** argv) {
         const auto pixel_width = window_result.window->pixel_width();
         const auto pixel_height = window_result.window->pixel_height();
         if (apex::app::presentation_surface_is_zero_sized(pixel_width, pixel_height)) {
+            ai_spline_manual_input.clear();
             std::this_thread::sleep_for(std::chrono::milliseconds(16));
             continue;
         }
@@ -2347,6 +2404,41 @@ int run_window(int argc, char** argv) {
             std::cerr << "workspace shadow: " << viewport_diagnostic.code
                       << ": " << viewport_diagnostic.message << '\n';
             reported_shadow_diagnostic = true;
+        }
+        if (workspace_options.aiSplineUnlockEdit && viewport != nullptr) {
+            if (loaded_workspace.aiSplineController == nullptr) {
+                std::cerr << "AI spline manual edit: unavailable\n";
+                return 1;
+            }
+            const auto moved = loaded_workspace.aiSplineController
+                                   ->moveSelectedByManualInput(
+                                       *device_result.device, *viewport,
+                                       ai_spline_manual_input.movement(),
+                                       loaded_workspace.aiSplineController
+                                           ->revision());
+            if (!moved.ok()) {
+                if (!reported_ai_spline_manual_diagnostic) {
+                    std::cerr << "AI spline manual edit: "
+                              << moved.diagnostic.code << ": "
+                              << moved.diagnostic.message << '\n';
+                    reported_ai_spline_manual_diagnostic = true;
+                }
+                switch (moved.status) {
+                case apex::app::WorkspaceAiSplineControllerStatus::
+                    allocation_failed:
+                case apex::app::WorkspaceAiSplineControllerStatus::
+                    viewport_failed:
+                    break;
+                case apex::app::WorkspaceAiSplineControllerStatus::
+                    stale_revision:
+                    if (!prepare_viewport()) return 1;
+                    break;
+                default:
+                    return 1;
+                }
+            } else {
+                reported_ai_spline_manual_diagnostic = false;
+            }
         }
         recreation.record_successful_frame();
         ++frames;

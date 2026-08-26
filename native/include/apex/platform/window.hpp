@@ -40,6 +40,8 @@ enum class WindowEventType : std::uint8_t {
     close_requested,
     resized,
     pixel_size_changed,
+    focus_gained,
+    focus_lost,
     key_down,
     key_up,
     mouse_button_down,
@@ -48,9 +50,31 @@ enum class WindowEventType : std::uint8_t {
     mouse_wheel,
 };
 
+// Portable semantic keys used by application input controllers. Platform
+// backends translate their native key and scan codes at the window boundary.
+enum class WindowKey : std::uint8_t {
+    unknown,
+    w,
+    s,
+    a,
+    d,
+    q,
+    e,
+    keypad_2,
+    keypad_3,
+    keypad_4,
+    keypad_6,
+    keypad_8,
+    keypad_9,
+    left_control,
+    right_control,
+};
+
 struct WindowEvent {
     WindowEventType type = WindowEventType::close_requested;
+    // Keep the native key code for existing consumers and diagnostics.
     std::uint32_t key = 0U;
+    WindowKey semantic_key = WindowKey::unknown;
     std::uint32_t modifiers = 0U;
     std::uint32_t button = 0U;
     std::int32_t width = 0;
