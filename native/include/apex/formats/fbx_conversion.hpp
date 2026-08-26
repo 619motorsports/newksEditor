@@ -35,6 +35,21 @@ struct FbxNodeGeometry {
     std::uint32_t mesh = 0;
 };
 
+// A bounded source record for a file texture connected to an FBX material.
+// The converter does not read this file. A later application adapter must use
+// an explicit AssetSource grant and must apply the recovered channel order.
+struct FbxMaterialFileTextureCandidate {
+    scene::MaterialId material = scene::invalid_material_id;
+    std::int64_t texture_object_id = 0;
+    std::string channel;
+    // ksEditor discards the directory from FbxFileTexture::GetFileName before
+    // it searches its configured texture folders.
+    std::string basename;
+    // This is the zero-based index in the parsed Connections table. The
+    // converter uses it to retain source-object order within one channel.
+    std::size_t connection_order = 0;
+};
+
 // The native animation bridge intentionally exposes only the bounded subset
 // whose FBX evidence is available: local transform channels with explicit
 // linear key interpolation.  Unsupported curve interpolation/channel data is
@@ -60,6 +75,7 @@ struct FbxSceneConversion {
     std::vector<FbxStaticMesh> meshes;
     std::vector<FbxNodeTransform> transforms;
     std::vector<FbxNodeGeometry> node_geometry;
+    std::vector<FbxMaterialFileTextureCandidate> file_texture_candidates;
     std::vector<FbxAnimationClip> animations;
     std::vector<FbxConversionDiagnostic> diagnostics;
     bool complete = true;
@@ -68,6 +84,8 @@ struct FbxSceneConversion {
 struct FbxConversionLimits {
     std::size_t max_nodes = 1'000'000;
     std::size_t max_materials = 1'000'000;
+    std::size_t max_textures = 1'000'000;
+    std::size_t max_texture_references = 1'000'000;
     std::size_t max_meshes = 1'000'000;
     std::size_t max_vertices = 10'000'000;
     std::size_t max_indices = 30'000'000;
@@ -106,6 +124,7 @@ struct FbxConversionCapabilityDetail {
     bool static_geometry = true;
     bool node_transforms = true;
     bool material_assignment = true;
+    bool external_texture_references = false;
     bool skinning = false;
     bool animation = false;
     bool images = false;

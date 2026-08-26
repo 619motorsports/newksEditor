@@ -92,6 +92,20 @@ FbxDocument seamFixture() {
     return document;
 }
 
+FbxDocument fileTextureFixture(std::string fileName =
+                                   "C:\\cars\\example\\texture\\paint.png") {
+    auto document = fixture();
+    document.roots[0].children.push_back(node(
+        "Texture",
+        {std::int64_t(400), std::string("Texture::Paint"),
+         std::string("TextureVideoClip")},
+        {propertyNode("FileName", {std::move(fileName)})}));
+    document.roots[1].children.push_back(node(
+        "C", {std::string("OP"), std::int64_t(400), std::int64_t(300),
+              std::string("DiffuseColor")}));
+    return document;
+}
+
 FbxDocument geometricTransformFixture() {
     auto document = fixture();
     auto& properties = document.roots[0].children[0].children[0];
@@ -243,6 +257,96 @@ void appliesNativeGeometricMeshTransform() {
     auto malformed = geometricTransformFixture();
     malformed.roots[0].children[0].children[0].children.back().properties[0].values.pop_back();
     expectsError([&] { (void)apex::formats::convertFbxScene(malformed); }, "invalid_transform");
+}
+
+void preservesBoundedFileTextureCandidates() {
+    const auto result = apex::formats::convertFbxScene(fileTextureFixture());
+    require(result.file_texture_candidates.size() == 1u,
+            "FBX file texture connection becomes one candidate");
+    const auto& candidate = result.file_texture_candidates.front();
+    require(candidate.material == 0u && candidate.texture_object_id == 400 &&
+                candidate.channel == "DiffuseColor" &&
+                candidate.basename == "paint.png",
+            "FBX texture candidate keeps material, channel, and native basename");
+    require(candidate.basename.find("cars") == std::string::npos,
+            "FBX texture candidate does not expose the source directory");
+
+    auto ordered = fixture();
+    auto& orderedObjects = ordered.roots[0].children;
+    auto& orderedConnections = ordered.roots[1].children;
+    orderedObjects.push_back(node(
+        "Texture",
+        {std::int64_t(400), std::string("Texture::Ambient"),
+         std::string("TextureVideoClip")},
+        {propertyNode("FileName", {std::string("ambient.png")})}));
+    orderedObjects.push_back(node(
+        "Texture",
+        {std::int64_t(401), std::string("Texture::Diffuse"),
+         std::string("TextureVideoClip")},
+        {propertyNode("FileName", {std::string("diffuse.png")})}));
+    orderedObjects.push_back(node(
+        "Texture",
+        {std::int64_t(402), std::string("Texture::Normal"),
+         std::string("TextureVideoClip")},
+        {propertyNode("FileName", {std::string("normal.png")})}));
+    orderedConnections.push_back(node(
+        "C", {std::string("OP"), std::int64_t(400), std::int64_t(300),
+              std::string("AmbientColor")}));
+    orderedConnections.push_back(node(
+        "C", {std::string("OP"), std::int64_t(402), std::int64_t(300),
+              std::string("NormalMap")}));
+    orderedConnections.push_back(node(
+        "C", {std::string("OP"), std::int64_t(401), std::int64_t(300),
+              std::string("DiffuseColor")}));
+    const auto orderedResult = apex::formats::convertFbxScene(ordered);
+    require(orderedResult.file_texture_candidates.size() == 2u &&
+                orderedResult.file_texture_candidates[0].texture_object_id == 401 &&
+                orderedResult.file_texture_candidates[1].texture_object_id == 400,
+            "FBX texture candidates use the recovered eight-channel order");
+    require(orderedResult.file_texture_candidates[0].connection_order == 4u &&
+                orderedResult.file_texture_candidates[1].connection_order == 2u,
+            "FBX texture candidates retain raw connection provenance");
+
+    auto missingFileName = fileTextureFixture();
+    missingFileName.roots[0].children.back().children.clear();
+    const auto missingResult = apex::formats::convertFbxScene(missingFileName);
+    require(missingResult.file_texture_candidates.empty(),
+            "FBX texture without FileName remains unresolved");
+
+    auto truncatedFileName = fileTextureFixture();
+    truncatedFileName.roots[0].children.back().children.front().properties.clear();
+    expectsError(
+        [&] { (void)apex::formats::convertFbxScene(truncatedFileName); },
+        "invalid_texture");
+
+    auto duplicateFileName = fileTextureFixture();
+    duplicateFileName.roots[0].children.back().children.push_back(
+        propertyNode("FileName", {std::string("other.png")}));
+    expectsError(
+        [&] { (void)apex::formats::convertFbxScene(duplicateFileName); },
+        "invalid_texture");
+
+    auto unsafeBasename = fileTextureFixture("textures/..");
+    expectsError(
+        [&] { (void)apex::formats::convertFbxScene(unsafeBasename); },
+        "invalid_texture");
+
+    auto nullBasename = fileTextureFixture(std::string("paint\0.png", 10u));
+    expectsError(
+        [&] { (void)apex::formats::convertFbxScene(nullBasename); },
+        "invalid_texture");
+
+    auto limits = apex::formats::FbxConversionLimits{};
+    limits.max_texture_references = 0u;
+    expectsError(
+        [&] { (void)apex::formats::convertFbxScene(fileTextureFixture(), limits); },
+        "texture_reference_limit");
+
+    limits = apex::formats::FbxConversionLimits{};
+    limits.max_textures = 0u;
+    expectsError(
+        [&] { (void)apex::formats::convertFbxScene(fileTextureFixture(), limits); },
+        "count_limit");
 }
 
 void ignoresDisplayLayerMembershipEdges() {
@@ -717,8 +821,11 @@ void enforcesLimitsAndUnsupportedCapability() {
     expectsError([&] { (void)apex::formats::convertFbxScene(deep, depthLimited); }, "depth_limit");
 
     const auto capability = apex::formats::fbxSceneConversionCapability();
-    require(capability.static_geometry && capability.node_transforms && capability.material_assignment &&
-                !capability.skinning && capability.animation && !capability.images && !capability.layer_mappings,
+    require(capability.static_geometry && capability.node_transforms &&
+                capability.material_assignment &&
+                capability.external_texture_references && !capability.skinning &&
+                capability.animation && !capability.images &&
+                !capability.layer_mappings,
             "FBX conversion capability detail");
 }
 
@@ -748,6 +855,7 @@ int main() {
         convertsParsedAsciiTriangle();
         convertsStaticGeometryTransformsAndMaterials();
         appliesNativeGeometricMeshTransform();
+        preservesBoundedFileTextureCandidates();
         ignoresDisplayLayerMembershipEdges();
         handlesConstraintPoConnectionsStrictly();
         ignoresMissingOptionalAnimationCurveLinks();

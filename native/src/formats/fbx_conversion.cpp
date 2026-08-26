@@ -8,6 +8,7 @@
 #include <map>
 #include <set>
 #include <string_view>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -141,7 +142,53 @@ struct Link {
     std::int64_t source = 0;
     std::int64_t target = 0;
     std::string property;
+    std::size_t connection_order = 0;
 };
+
+constexpr std::array<std::string_view, 8u> kNativeFileTextureChannels = {
+    "DiffuseColor",   "DiffuseFactor",  "EmissiveColor", "EmissiveFactor",
+    "AmbientColor",   "AmbientFactor",  "SpecularColor", "SpecularFactor",
+};
+
+std::size_t nativeFileTextureChannelRank(std::string_view channel) {
+    const auto match = std::find(kNativeFileTextureChannels.begin(),
+                                 kNativeFileTextureChannels.end(), channel);
+    return static_cast<std::size_t>(match - kNativeFileTextureChannels.begin());
+}
+
+std::string fileTextureBasename(const ObjectRecord& record,
+                                const FbxConversionLimits& limits,
+                                Budget& budget, std::string_view path) {
+    const FbxNode* fileName = nullptr;
+    for (const auto& child : record.node->children) {
+        if (child.name != "FileName") continue;
+        if (fileName != nullptr)
+            fail("invalid_texture", "FBX file texture has duplicate FileName records",
+                 std::string(path));
+        fileName = &child;
+    }
+    if (fileName == nullptr) return {};
+    const auto flattened = values(*fileName, &budget, path);
+    if (flattened.size() != 1u || stringValue(flattened.front()) == nullptr)
+        fail("invalid_texture", "FBX FileName record must contain one string",
+             std::string(path));
+    const auto& source = *stringValue(flattened.front());
+    if (source.empty()) return {};
+    if (source.find('\0') != std::string::npos)
+        fail("invalid_texture", "FBX file texture path contains a null byte",
+             std::string(path));
+    const auto separator = source.find_last_of("/\\");
+    const auto basename = source.substr(
+        separator == std::string::npos ? 0u : separator + 1u);
+    if (basename.empty() || basename == "." || basename == "..")
+        fail("invalid_texture", "FBX file texture has no safe basename",
+             std::string(path));
+    if (basename.size() > limits.max_string_bytes)
+        fail("string_limit", "FBX file texture basename exceeds its limit",
+             std::string(path));
+    budget.add(basename.size(), path);
+    return basename;
+}
 
 constexpr std::size_t kAssociativeNodeOverhead = sizeof(void*) * 4u;
 
@@ -1316,8 +1363,8 @@ FbxConversionError::FbxConversionError(FbxConversionDiagnostic diagnostic)
     : std::runtime_error(diagnostic.message), diagnostic_(std::move(diagnostic)) {}
 
 FbxConversionCapabilityDetail fbxSceneConversionCapability() {
-    return {true, true, true, false, true, false, false,
-            "Static FBX geometry, transforms, material assignments, one bounded UV mapping, and an explicit-linear local-transform KSANIM bridge are converted; native-pivot evaluation, non-linear animation, skinning, and images remain unsupported"};
+    return {true, true, true, true, false, true, false, false,
+            "Static FBX geometry, transforms, material assignments, external file-texture candidates, one bounded UV mapping, and an explicit-linear local-transform KSANIM bridge are converted; file resolution, native-pivot evaluation, non-linear animation, skinning, and images remain unsupported"};
 }
 
 FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLimits limits) {
@@ -1343,13 +1390,16 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
         fail("node_limit", "FBX Objects count exceeds conversion limits", "Objects");
     std::size_t modelCount = 0u;
     std::size_t materialCount = 0u;
+    std::size_t textureCount = 0u;
     std::size_t geometryCount = 0u;
     for (const auto& node : objects->children) {
         if (node.name == "Model") ++modelCount;
         else if (node.name == "Material") ++materialCount;
+        else if (node.name == "Texture") ++textureCount;
         else if (node.name == "Geometry") ++geometryCount;
     }
-    if (modelCount > limits.max_nodes || materialCount > limits.max_materials || geometryCount > limits.max_meshes)
+    if (modelCount > limits.max_nodes || materialCount > limits.max_materials ||
+        textureCount > limits.max_textures || geometryCount > limits.max_meshes)
         fail("count_limit", "FBX scene object count exceeds conversion limits", "Objects");
     budget.add(checkedMultiply(objects->children.size(), sizeof(ObjectRecord), "records"), "records");
     budget.add(checkedMultiply(modelCount, sizeof(std::size_t), "model indexes"), "model indexes");
@@ -1436,7 +1486,9 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
             const auto kindBytes = kindValue->size();
             const auto propertyBytes = propertyValue == nullptr ? std::size_t{0u} : propertyValue->size();
             budget.add(checkedAdd(kindBytes, propertyBytes, path), path);
-            Link link{*kindValue, sourceId, targetId, propertyValue == nullptr ? std::string() : *propertyValue};
+            Link link{*kindValue, sourceId, targetId,
+                      propertyValue == nullptr ? std::string() : *propertyValue,
+                      index};
             const auto sourceRecord = byId.find(link.source);
             const auto targetRecord = link.target == 0 ? byId.end() : byId.find(link.target);
             const bool missingAnimationCurve =
@@ -1460,6 +1512,45 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
             links.push_back(std::move(link));
         }
     }
+    for (std::size_t connectionIndex = 0u; connectionIndex < links.size();
+         ++connectionIndex) {
+        const auto& link = links[connectionIndex];
+        if (link.kind != "OP" || link.property.empty() || link.target == 0) continue;
+        if (nativeFileTextureChannelRank(link.property) ==
+            kNativeFileTextureChannels.size())
+            continue;
+        const auto& source = records[byId.at(link.source)];
+        const auto& target = records[byId.at(link.target)];
+        if (source.node->name != "Texture" || target.node->name != "Material") continue;
+        const auto path = "Objects/Texture/" + std::to_string(source.id);
+        auto basename = fileTextureBasename(source, limits, budget, path);
+        if (basename.empty()) continue;
+        if (result.file_texture_candidates.size() >= limits.max_texture_references)
+            fail("texture_reference_limit",
+                 "FBX file texture reference count exceeds its limit", path);
+        const auto material = materialIds.find(target.id);
+        if (material == materialIds.end())
+            fail("invalid_reference", "FBX Texture references a missing Material", path);
+        budget.add(link.property.size(), path);
+        reserveForAppend(result.file_texture_candidates,
+                         result.file_texture_candidates.size() + 1u, budget,
+                         "scene/file texture candidates");
+        result.file_texture_candidates.push_back(
+            {material->second, source.id, link.property, std::move(basename),
+             link.connection_order});
+    }
+    std::sort(result.file_texture_candidates.begin(),
+              result.file_texture_candidates.end(),
+              [](const FbxMaterialFileTextureCandidate& left,
+                 const FbxMaterialFileTextureCandidate& right) {
+                  const auto leftKey = std::tuple{
+                      left.material, nativeFileTextureChannelRank(left.channel),
+                      left.connection_order};
+                  const auto rightKey = std::tuple{
+                      right.material, nativeFileTextureChannelRank(right.channel),
+                      right.connection_order};
+                  return leftKey < rightKey;
+              });
     std::map<std::int64_t, std::int64_t> parent;
     std::map<std::int64_t, std::vector<std::int64_t>> childrenByParent;
     std::map<std::int64_t, std::int64_t> geometryForModel;

@@ -18,9 +18,19 @@ The importer calls `Material::setVar(float)` at `0x100408B6` for these values.
 
 ## Native texture lookup
 
-The importer scans the 32 entries in `FbxLayerElement::sTextureChannelNames`.
-It accepts `FbxFileTexture` objects and converts each path to a basename. It
-then searches the configured folders and the sibling `texture` folder.
+The importer reads the first eight entries in
+`FbxLayerElement::sTextureChannelNames`. These entries end at
+`SpecularFactor`. The loop adds four to its byte offset and stops at `0x20`.
+The relevant instructions are at `0x10004BE8`, `0x10004BF0`, `0x1000507B`,
+and `0x10005086`.
+
+The importer accepts `FbxFileTexture` objects and converts each path to a
+basename. It then searches the configured folders and the sibling `texture`
+folder.
+
+The native order is `DiffuseColor`, `DiffuseFactor`, `EmissiveColor`,
+`EmissiveFactor`, `AmbientColor`, `AmbientFactor`, `SpecularColor`, and
+`SpecularFactor`. The loop does not reach `NormalMap` or later SDK entries.
 
 The first file that exists fills `txDiffuse`. Later channels do not replace
 this resource. The importer does not request `txNormal`.
@@ -57,3 +67,14 @@ contract for Vulkan and D3D12.
 
 This synthetic texture is WebGL and CSP compatibility behavior. It is not
 recovered ksEditor FBX behavior.
+
+## Native port boundary
+
+The C++ FBX converter retains bounded, material-scoped file-texture candidates.
+Each candidate contains the texture object, material, channel, and source basename.
+The converter does not read the referenced file or create image bytes.
+
+The converter applies the recovered eight-channel order. It retains source
+order within one channel. A later application adapter must resolve each
+basename through an explicit `AssetSource` grant. Direct native FBX image
+loading and viewport rendering remain unsupported.
