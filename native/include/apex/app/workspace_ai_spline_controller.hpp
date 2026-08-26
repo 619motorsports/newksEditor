@@ -123,7 +123,9 @@ struct WorkspaceAiSplineControllerResult {
 // the controller. Capture the controller input snapshot with the event.
 struct WorkspaceAiSplinePointSelectionRequest {
     std::uint32_t pointIndex = 0U;
+    std::array<float, 3U> pickedPosition{};
     bool controlPressed = false;
+    bool shiftPressed = false;
     WorkspaceAiSplineControllerInputSnapshot expected;
 };
 
@@ -134,7 +136,9 @@ struct WorkspaceAiSplinePointSelectionResult {
     WorkspaceAiSplineControllerInputSnapshot resultingInput;
     std::uint64_t revision = 0U;
     std::size_t selectionCount = 0U;
+    std::size_t temporaryPointCount = 0U;
     std::optional<std::uint32_t> lastSelectedIndex;
+    std::optional<std::size_t> movableTemporaryPoint;
     std::optional<float> normalizedPosition;
     std::size_t replacedPassCount = 0U;
     bool changed = false;
@@ -214,6 +218,10 @@ public:
     [[nodiscard]] bool canUndo() const noexcept;
     [[nodiscard]] bool canRedo() const noexcept;
     [[nodiscard]] bool editing() const noexcept;
+    [[nodiscard]] const std::vector<WorkspaceAiSplineTemporaryEditPoint>&
+    temporaryEditPoints() const noexcept;
+    [[nodiscard]] std::optional<std::size_t>
+    movableTemporaryPoint() const noexcept;
     [[nodiscard]] WorkspaceAiSplineControllerInputSnapshot
     inputSnapshot() const noexcept;
 
@@ -269,7 +277,8 @@ private:
         render::Device& device, WorkspaceViewport& viewport,
         const WorkspaceAiSplineControllerInputSnapshot& expected,
         bool editing,
-        bool clearSelection);
+        bool clearSelection,
+        bool clearTemporaryPoints);
     [[nodiscard]] bool inputMatches(
         const WorkspaceAiSplineControllerInputSnapshot& expected) const
         noexcept;

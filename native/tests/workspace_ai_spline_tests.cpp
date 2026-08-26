@@ -1135,6 +1135,119 @@ void resolvesAndValidatesRecoveredClosestPointGrid() {
             "direct malformed grid index must be rejected before traversal");
 }
 
+void buildsBoundedTemporaryEditGeometry() {
+    apex::formats::AiSpline spline;
+    spline.version = 7U;
+    spline.points = {point(0.0F, 1.0F, 0.0F),
+                     point(2.0F, 2.0F, 1.0F),
+                     point(4.0F, 3.0F, 0.0F),
+                     point(6.0F, 4.0F, -1.0F),
+                     point(8.0F, 5.0F, 0.0F),
+                     point(10.0F, 6.0F, 1.0F)};
+    const std::array<std::uint32_t, 2U> selected = {0U, 5U};
+    const std::array<apex::app::WorkspaceAiSplineTemporaryEditPoint, 5U>
+        temporary = {{
+            {{1.0F, 0.0F, 0.0F}, {1.0F, 1.0F, 1.0F}},
+            {{1.0F, 0.0F, 0.0F}, {3.0F, 2.0F, 2.0F}},
+            {{1.0F, 0.0F, 0.0F}, {5.0F, 3.0F, 1.0F}},
+            {{1.0F, 0.0F, 0.0F}, {7.0F, 4.0F, 0.0F}},
+            {{1.0F, 0.0F, 0.0F}, {9.0F, 5.0F, 1.0F}},
+        }};
+
+    const auto interpolation =
+        apex::app::buildWorkspaceAiSplineTemporaryInterpolationGeometry(
+            spline, selected, temporary);
+    require(interpolation.ok() &&
+                interpolation.geometry.pass ==
+                    apex::app::WorkspaceAiSplinePassKind::
+                        temporary_interpolation &&
+                interpolation.geometry.temporary_point_count == 5U &&
+                interpolation.geometry.sample_point_count ==
+                    apex::app::workspace_ai_spline_interpolated_sample_count &&
+                interpolation.geometry.vertices.size() == 10'000U,
+            "five temporary points must build the recovered green spline");
+    require(interpolation.geometry.vertices.front().position ==
+                spline.points.front().position,
+            "temporary interpolation must start at the first selected endpoint");
+    require(std::all_of(interpolation.geometry.vertices.begin(),
+                        interpolation.geometry.vertices.end(),
+                        [](const auto& vertex) {
+                            return vertex.color ==
+                                   apex::app::workspace_ai_spline_temporary_color;
+                        }),
+            "temporary interpolation must use the recovered green color");
+
+    const auto markers =
+        apex::app::buildWorkspaceAiSplineTemporaryMarkerGeometry(
+            spline, temporary, 2U);
+    require(markers.ok() && markers.geometry.temporary_point_count == 5U &&
+                markers.geometry.sample_point_count == 7U &&
+                markers.geometry.vertices.size() == 14U,
+            "temporary markers must include one line per point and two movable axes");
+    require(markers.geometry.vertices[10U].color ==
+                apex::app::workspace_ai_spline_temporary_forward_color &&
+                markers.geometry.vertices[12U].color ==
+                    apex::app::workspace_ai_spline_temporary_color,
+            "movable temporary axes must use recovered red and green colors");
+
+    const auto tooShort =
+        apex::app::buildWorkspaceAiSplineTemporaryInterpolationGeometry(
+            spline, selected,
+            std::span<const apex::app::WorkspaceAiSplineTemporaryEditPoint>(
+                temporary)
+                .first(4U));
+    require(!tooShort.ok(),
+            "four temporary points must not build an interpolation");
+    const auto invalidMovable =
+        apex::app::buildWorkspaceAiSplineTemporaryMarkerGeometry(
+            spline, temporary, temporary.size());
+    require(!invalidMovable.ok() &&
+                invalidMovable.diagnostic.code ==
+                    "workspace_ai_spline_temporary_movable_invalid",
+            "a malformed movable temporary index must be rejected");
+    auto malformed = temporary;
+    malformed[0U].position[0U] =
+        std::numeric_limits<float>::quiet_NaN();
+    const auto nonFinite =
+        apex::app::buildWorkspaceAiSplineTemporaryMarkerGeometry(
+            spline, malformed);
+    require(!nonFinite.ok() &&
+                nonFinite.diagnostic.code ==
+                    "workspace_ai_spline_temporary_point_non_finite",
+            "non-finite temporary points must be rejected");
+    const std::array<std::uint32_t, 3U> invalidSelection = {0U, 99U, 5U};
+    const auto invalidMiddle =
+        apex::app::buildWorkspaceAiSplineTemporaryInterpolationGeometry(
+            spline, invalidSelection, temporary);
+    require(!invalidMiddle.ok() &&
+                invalidMiddle.diagnostic.code ==
+                    "workspace_ai_spline_temporary_selection_invalid",
+            "a malformed middle selection index must be rejected");
+    const std::array<std::uint32_t, 2U> duplicateSelection = {0U, 0U};
+    const auto duplicateEndpoint =
+        apex::app::buildWorkspaceAiSplineTemporaryInterpolationGeometry(
+            spline, duplicateSelection, temporary);
+    require(!duplicateEndpoint.ok() &&
+                duplicateEndpoint.diagnostic.code ==
+                    "workspace_ai_spline_temporary_selection_invalid",
+            "duplicate temporary endpoints must be rejected");
+
+    apex::formats::AiSpline oversized;
+    oversized.version = 7U;
+    oversized.points.resize(
+        apex::app::workspace_ai_spline_max_interpolation_control_points + 1U);
+    const auto oversizedMarkers =
+        apex::app::buildWorkspaceAiSplineTemporaryMarkerGeometry(
+            oversized,
+            std::span<const apex::app::WorkspaceAiSplineTemporaryEditPoint>(
+                temporary)
+                .first(1U));
+    require(!oversizedMarkers.ok() &&
+                oversizedMarkers.status ==
+                    apex::app::WorkspaceAiSplineStatus::limit_exceeded,
+            "temporary markers must reject an oversized direct source");
+}
+
 } // namespace
 
 int main() {
@@ -1161,6 +1274,7 @@ int main() {
         rejectsUnsafeCurrentIndexMarkers();
         resolvesRecoveredClosestSplinePoint();
         resolvesAndValidatesRecoveredClosestPointGrid();
+        buildsBoundedTemporaryEditGeometry();
     } catch (const std::exception& error) {
         std::cerr << "workspace_ai_spline_tests: " << error.what() << '\n';
         return 1;

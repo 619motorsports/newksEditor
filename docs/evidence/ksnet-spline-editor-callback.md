@@ -222,6 +222,14 @@ This path does not add a spline index.
 The render path always shows each temporary visual indicator.
 It builds a green temporary interpolation after at least five records.
 
+The `EditPoint` constructor has token `0x06000104` and VA `0x1002F198`.
+It loads `content/objects3D/sphere.kn5` for the visual indicator.
+The installed file contains one mesh named `Sphere001` with radius `0.51664686`.
+Its material uses shader `GL`, normal depth, and no material properties.
+`EditPoint.render` has token `0x06000105` and VA `0x1002D938`.
+It places the visual object at the temporary position and invokes its renderer.
+The method does not set an explicit color or depth mode.
+
 Finish uses the first and final selected entries as its spline endpoints.
 It inserts all temporary positions between those endpoints in click order.
 For index `i` from the first endpoint through the index before the last, it
@@ -465,12 +473,21 @@ idle for each pass, so a Windows WARP cadence test remains necessary.
 The window retries transient allocation and viewport publication errors.
 It also clears held input while the presentation surface has no size.
 
-The C++ controller ports the exact mode and selection changes for start,
-finish, and cancel. These calls do not change model history or the revision.
+The C++ controller ports the mode and selection changes for start, finish, and
+cancel. Start and cancel do not change model history or the revision.
 The viewport retains a validated selection pipeline when the selection is
 empty. Thus, start and cancel can clear markers without viewport recreation.
-The temporary edit-point producer and five-point finish operation remain
-pending in the C++ port.
+The controller stores up to 1,024 temporary records in click order.
+Shift plus right mouse adds a record after two selected endpoints exist.
+The record uses picked X/Z, closest-point Y, and the cached forward.
+The controller selects the first temporary point within strict distance one.
+Keyboard input moves only this record with the recovered local transform.
+The marker pass adds the recovered red and green movable-point axes.
+The native sphere object has no backend-neutral line contract.
+The port labels its short green vertical marker as a portable translation.
+Five records enable the recovered green 5,001-sample interpolation.
+Finish writes positions in `[first, last)` as one session revision.
+Reverse endpoint order performs no point writes. Both paths clear temporary state.
 The controller accepts a validated point index and ports the recovered add,
 replace, and cyclic Control paths. It returns the final stored index divided by
 the point count. The safe port rejects invalid indices and zero point counts.
@@ -483,9 +500,9 @@ These counters reject queued ABA input and stale same-revision viewports.
 The controller rejects stale input before allocation. A successful selection
 keeps model bytes, history, revision, and dirty state. Publication replaces the
 staged overlay set atomically for Vulkan and D3D12 device contracts.
-The window cannot produce this point index at runtime. The native pick producer
-is recovered, but its bounded C++ implementation remains pending.
-The window also has no edit-mode, cancel, or refresh control.
+The window produces the point index through the bounded recovered picker.
+Enter starts or finishes editing. Escape cancels active editing.
+These keys are portable mappings for the installed editor buttons.
 The `--ai-spline-save-on-exit` option saves after a clean window exit.
 The `--save-ai-spline` command exposes the same rebuilt-grid save boundary.
 
@@ -493,7 +510,7 @@ Dirty state compares the current canonical bytes with the baseline bytes.
 Transactional undo, redo, and baseline reset use the same publication path.
 An unsafe version-7 authoring baseline stays on the read-only viewer path.
 
-The viewport test replaces all six passes after one committed batch edit. It
+The viewport test replaces all eight passes after one committed batch edit. It
 releases the input set, then compares each owned buffer with the rebuilt bytes.
 It also rejects a forged overrun chunk and an over-limit aggregate. An injected
 third buffer upload error keeps the controller and viewport at the prior
@@ -526,7 +543,7 @@ production WebGL suite passed 380 tests. It skipped 34 installed-fixture tests.
 SwiftShader executes the native line passes at 1x and 4x MSAA. The pixel test
 checks magenta and cyan depth rejection. It also checks blue depth-off output.
 The test checks red and green camber lines with normal depth.
-The current native suite discovered 80 tests. It passed 79 tests and skipped
+The current native suite discovered 81 tests. It passed 80 tests and skipped
 the unavailable Vulkan runtime probe. The affected controller test passed with
 GCC and Clang sanitizers.
 The complete sanitizer run reported one 183-byte NVIDIA driver leak after the

@@ -899,6 +899,248 @@ buildWorkspaceAiSplineSelectionGeometry(const formats::AiSpline &spline,
     return build_selection_geometry(spline, selected_indices);
 }
 
+WorkspaceAiSplineResult
+buildWorkspaceAiSplineTemporaryInterpolationGeometry(
+    const formats::AiSpline& spline,
+    std::span<const std::uint32_t> selected_indices,
+    std::span<const WorkspaceAiSplineTemporaryEditPoint> temporary_points) {
+    WorkspaceAiSplineResult result;
+    try {
+        if (spline.points.size() >
+                workspace_ai_spline_max_interpolation_control_points ||
+            spline.points.size() > static_cast<std::size_t>(
+                                       std::numeric_limits<std::uint32_t>::max())) {
+            result.status = WorkspaceAiSplineStatus::limit_exceeded;
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_temporary_source_limit",
+                "Temporary AI spline source points exceed the safety limit");
+            return result;
+        }
+        if (spline.version != 7U || selected_indices.size() < 2U ||
+            temporary_points.size() < 5U) {
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_temporary_interpolation_state_invalid",
+                "Temporary AI spline interpolation requires version 7, two selected endpoints, and five edit points");
+            return result;
+        }
+        if (selected_indices.size() > spline.points.size()) {
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_temporary_selection_invalid",
+                "Temporary AI spline selection exceeds the source point count");
+            return result;
+        }
+        std::vector<std::uint8_t> seen(spline.points.size(), 0U);
+        for (const std::uint32_t index : selected_indices) {
+            if (static_cast<std::size_t>(index) >= spline.points.size() ||
+                seen[index] != 0U) {
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_temporary_selection_invalid",
+                    "Temporary AI spline selection requires unique in-range indices");
+                return result;
+            }
+            seen[index] = 1U;
+        }
+        if (temporary_points.size() >
+            workspace_ai_spline_max_temporary_edit_points) {
+            result.status = WorkspaceAiSplineStatus::limit_exceeded;
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_temporary_point_limit",
+                "Temporary AI spline edit points exceed the safety limit");
+            return result;
+        }
+        const std::size_t first = selected_indices.front();
+        const std::size_t last = selected_indices.back();
+        if (first >= spline.points.size() || last >= spline.points.size()) {
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_temporary_endpoint_invalid",
+                "A temporary AI spline endpoint is outside the point array");
+            return result;
+        }
+
+        InstalledEditorSpline interpolating;
+        interpolating.points.reserve(temporary_points.size() + 2U);
+        interpolating.points.push_back(spline.points[first].position);
+        for (const auto& point : temporary_points) {
+            if (!finite_position(point.position) ||
+                !finite_position(point.forward)) {
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_temporary_point_non_finite",
+                    "Temporary AI spline edit points require finite positions and forwards");
+                return result;
+            }
+            interpolating.points.push_back(point.position);
+        }
+        interpolating.points.push_back(spline.points[last].position);
+        interpolating.closed = false;
+        if (!recomputeInstalledEditorSplineLengths(interpolating)) {
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_temporary_length_invalid",
+                "Temporary AI spline interpolation requires a positive finite path");
+            return result;
+        }
+
+        std::vector<std::array<float, 3U>> samples;
+        samples.reserve(workspace_ai_spline_interpolated_sample_count);
+        for (float position = 0.0F; position <= 1.0F;
+             position += workspace_ai_spline_interpolation_step) {
+            const auto sample =
+                sampleInstalledEditorSpline(interpolating, position);
+            if (!sample.has_value()) {
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_temporary_sample_invalid",
+                    "Temporary AI spline interpolation produced an invalid sample");
+                return result;
+            }
+            samples.push_back(*sample);
+            if (samples.size() >
+                workspace_ai_spline_interpolated_sample_count) {
+                result.status = WorkspaceAiSplineStatus::limit_exceeded;
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_temporary_sample_limit",
+                    "Temporary AI spline interpolation exceeds the recovered sample limit");
+                return result;
+            }
+        }
+        if (samples.size() !=
+            workspace_ai_spline_interpolated_sample_count) {
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_temporary_schedule_invalid",
+                "Temporary AI spline interpolation did not match the recovered sample schedule");
+            return result;
+        }
+
+        result.geometry.source_point_count =
+            static_cast<std::uint32_t>(spline.points.size());
+        result.geometry.temporary_point_count =
+            static_cast<std::uint32_t>(temporary_points.size());
+        result.geometry.mode = WorkspaceAiSplineDisplayMode::interpolated;
+        result.geometry.pass =
+            WorkspaceAiSplinePassKind::temporary_interpolation;
+        result.geometry.topology = WorkspaceAiSplineTopology::polyline;
+        build_line_list(result.geometry, samples,
+                        workspace_ai_spline_temporary_color);
+        result.status = WorkspaceAiSplineStatus::ready;
+        return result;
+    } catch (const std::bad_alloc&) {
+        result.status = WorkspaceAiSplineStatus::allocation_failed;
+        result.diagnostic = diagnostic(
+            "workspace_ai_spline_allocation_failed",
+            "Temporary AI spline geometry exceeded available allocation capacity");
+        return result;
+    }
+}
+
+WorkspaceAiSplineResult buildWorkspaceAiSplineTemporaryMarkerGeometry(
+    const formats::AiSpline& spline,
+    std::span<const WorkspaceAiSplineTemporaryEditPoint> temporary_points,
+    std::optional<std::size_t> movable_point) {
+    WorkspaceAiSplineResult result;
+    try {
+        if (spline.points.size() >
+                workspace_ai_spline_max_interpolation_control_points ||
+            spline.points.size() > static_cast<std::size_t>(
+                                       std::numeric_limits<std::uint32_t>::max())) {
+            result.status = WorkspaceAiSplineStatus::limit_exceeded;
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_temporary_source_limit",
+                "Temporary AI spline source points exceed the safety limit");
+            return result;
+        }
+        if (spline.version != 7U || temporary_points.empty()) {
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_temporary_marker_state_invalid",
+                "Temporary AI spline markers require version 7 and one edit point");
+            return result;
+        }
+        if (temporary_points.size() >
+            workspace_ai_spline_max_temporary_edit_points) {
+            result.status = WorkspaceAiSplineStatus::limit_exceeded;
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_temporary_point_limit",
+                "Temporary AI spline edit points exceed the safety limit");
+            return result;
+        }
+        if (movable_point.has_value() &&
+            *movable_point >= temporary_points.size()) {
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_temporary_movable_invalid",
+                "The movable temporary AI spline point is outside the edit-point array");
+            return result;
+        }
+        result.geometry.source_point_count =
+            static_cast<std::uint32_t>(spline.points.size());
+        result.geometry.temporary_point_count =
+            static_cast<std::uint32_t>(temporary_points.size());
+        result.geometry.mode = WorkspaceAiSplineDisplayMode::raw;
+        result.geometry.pass = WorkspaceAiSplinePassKind::temporary_markers;
+        result.geometry.topology =
+            WorkspaceAiSplineTopology::independent_lines;
+        result.geometry.vertices.reserve(
+            temporary_points.size() * 2U +
+            (movable_point.has_value() ? 4U : 0U));
+        for (const auto& point : temporary_points) {
+            if (!finite_position(point.position) ||
+                !finite_position(point.forward)) {
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_temporary_point_non_finite",
+                    "Temporary AI spline edit points require finite positions and forwards");
+                result.geometry = {};
+                return result;
+            }
+            auto end = point.position;
+            end[1] += workspace_ai_spline_temporary_marker_height;
+            if (!finite_position(end)) {
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_temporary_marker_non_finite",
+                    "A temporary AI spline marker produced a non-finite point");
+                result.geometry = {};
+                return result;
+            }
+            result.geometry.vertices.push_back(
+                {point.position, workspace_ai_spline_temporary_color});
+            result.geometry.vertices.push_back(
+                {end, workspace_ai_spline_temporary_color});
+        }
+        if (movable_point.has_value()) {
+            const auto& point = temporary_points[*movable_point];
+            const std::array<float, 3U> forwardEnd = {
+                point.position[0U] + point.forward[0U] * 3.0F,
+                point.position[1U] + point.forward[1U] * 3.0F,
+                point.position[2U] + point.forward[2U] * 3.0F};
+            const std::array<float, 3U> sideEnd = {
+                point.position[0U] - point.forward[2U] * 3.0F,
+                point.position[1U],
+                point.position[2U] + point.forward[0U] * 3.0F};
+            if (!finite_position(forwardEnd) || !finite_position(sideEnd)) {
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_temporary_axis_non_finite",
+                    "The movable temporary AI spline axes produced a non-finite point");
+                result.geometry = {};
+                return result;
+            }
+            result.geometry.vertices.push_back(
+                {point.position,
+                 workspace_ai_spline_temporary_forward_color});
+            result.geometry.vertices.push_back(
+                {forwardEnd, workspace_ai_spline_temporary_forward_color});
+            result.geometry.vertices.push_back(
+                {point.position, workspace_ai_spline_temporary_color});
+            result.geometry.vertices.push_back(
+                {sideEnd, workspace_ai_spline_temporary_color});
+        }
+        build_independent_line_chunks(result.geometry);
+        result.status = WorkspaceAiSplineStatus::ready;
+        return result;
+    } catch (const std::bad_alloc&) {
+        result.status = WorkspaceAiSplineStatus::allocation_failed;
+        result.diagnostic = diagnostic(
+            "workspace_ai_spline_allocation_failed",
+            "Temporary AI spline geometry exceeded available allocation capacity");
+        result.geometry = {};
+        return result;
+    }
+}
+
 WorkspaceAiSplineOverlayResult
 buildWorkspaceAiSplineOverlays(const formats::AiSpline &spline,
                                const WorkspaceAiSplineOverlayRequest &request) {
@@ -954,6 +1196,31 @@ buildWorkspaceAiSplineOverlays(const formats::AiSpline &spline,
             return result;
         }
         result.overlays.selection = std::move(selection.geometry);
+    }
+    if (request.temporary_edit_points.size() >= 5U &&
+        request.selected_indices.size() >= 2U) {
+        auto temporary = buildWorkspaceAiSplineTemporaryInterpolationGeometry(
+            spline, request.selected_indices, request.temporary_edit_points);
+        if (!temporary.ok()) {
+            result.status = temporary.status;
+            result.diagnostic = std::move(temporary.diagnostic);
+            result.overlays = {};
+            return result;
+        }
+        result.overlays.temporaryInterpolation =
+            std::move(temporary.geometry);
+    }
+    if (!request.temporary_edit_points.empty()) {
+        auto markers = buildWorkspaceAiSplineTemporaryMarkerGeometry(
+            spline, request.temporary_edit_points,
+            request.movable_temporary_point);
+        if (!markers.ok()) {
+            result.status = markers.status;
+            result.diagnostic = std::move(markers.diagnostic);
+            result.overlays = {};
+            return result;
+        }
+        result.overlays.temporaryMarkers = std::move(markers.geometry);
     }
     if (request.show_camber) {
         auto camber = buildWorkspaceAiSplineCamberGeometry(spline);

@@ -19,14 +19,24 @@ namespace {
     return {code, message};
 }
 
+[[nodiscard]] bool finitePosition(
+    const std::array<float, 3U>& position) noexcept {
+    return std::all_of(position.begin(), position.end(),
+                       [](float value) { return std::isfinite(value); });
+}
+
 [[nodiscard]] WorkspaceAiSplineOverlayRequest overlayRequest(
-    const WorkspaceAiSplineControllerConfiguration& configuration) noexcept {
+    const WorkspaceAiSplineControllerConfiguration& configuration,
+    std::span<const WorkspaceAiSplineTemporaryEditPoint> temporaryPoints = {},
+    std::optional<std::size_t> movableTemporaryPoint = std::nullopt) noexcept {
     WorkspaceAiSplineOverlayRequest request;
     request.mode = configuration.mode;
     request.interval = configuration.interval;
     request.show_left = configuration.showLeft;
     request.show_right = configuration.showRight;
     request.selected_indices = configuration.selectedIndices;
+    request.temporary_edit_points = temporaryPoints;
+    request.movable_temporary_point = movableTemporaryPoint;
     request.show_camber = configuration.showCamber;
     return request;
 }
@@ -223,6 +233,8 @@ struct WorkspaceAiSplineController::State {
     WorkspaceAiSplineControllerConfiguration configuration;
     WorkspaceAiSplineOverlaySet overlays;
     std::vector<std::array<float, 2U>> movementForwards;
+    std::vector<WorkspaceAiSplineTemporaryEditPoint> temporaryEditPoints;
+    std::optional<std::size_t> movableTemporaryPoint;
     WorkspaceViewportAiSplineGeneration generation;
     std::uint64_t inputEpoch = 0U;
     bool editing = false;
@@ -233,11 +245,17 @@ struct WorkspaceAiSplineController::State {
           std::vector<std::array<float, 2U>> candidateMovementForwards,
           WorkspaceViewportAiSplineGeneration candidateGeneration,
           std::uint64_t candidateInputEpoch = 0U,
-          bool candidateEditing = false)
+          bool candidateEditing = false,
+          std::vector<WorkspaceAiSplineTemporaryEditPoint>
+              candidateTemporaryEditPoints = {},
+          std::optional<std::size_t> candidateMovableTemporaryPoint =
+              std::nullopt)
         : session(std::move(candidateSession)),
           configuration(std::move(candidateConfiguration)),
           overlays(std::move(candidateOverlays)),
           movementForwards(std::move(candidateMovementForwards)),
+          temporaryEditPoints(std::move(candidateTemporaryEditPoints)),
+          movableTemporaryPoint(candidateMovableTemporaryPoint),
           generation(std::move(candidateGeneration)),
           inputEpoch(candidateInputEpoch),
           editing(candidateEditing) {}
@@ -359,6 +377,16 @@ bool WorkspaceAiSplineController::canRedo() const noexcept {
 
 bool WorkspaceAiSplineController::editing() const noexcept {
     return state_->editing;
+}
+
+const std::vector<WorkspaceAiSplineTemporaryEditPoint>&
+WorkspaceAiSplineController::temporaryEditPoints() const noexcept {
+    return state_->temporaryEditPoints;
+}
+
+std::optional<std::size_t>
+WorkspaceAiSplineController::movableTemporaryPoint() const noexcept {
+    return state_->movableTemporaryPoint;
 }
 
 WorkspaceAiSplineControllerInputSnapshot
@@ -485,7 +513,10 @@ WorkspaceAiSplineController::publishCandidate(
 
     try {
         auto built = buildWorkspaceAiSplineOverlays(
-            candidate.current(), overlayRequest(state_->configuration));
+            candidate.current(),
+            overlayRequest(state_->configuration,
+                           state_->temporaryEditPoints,
+                           state_->movableTemporaryPoint));
         if (!built.ok()) {
             auto result = currentResult();
             result.status = overlayFailureStatus(built.status);
@@ -499,7 +530,8 @@ WorkspaceAiSplineController::publishCandidate(
         auto nextState = std::make_unique<State>(
             std::move(candidate), state_->configuration,
             std::move(built.overlays), state_->movementForwards,
-            std::move(nextGeneration), state_->inputEpoch, state_->editing);
+            std::move(nextGeneration), state_->inputEpoch, state_->editing,
+            state_->temporaryEditPoints, state_->movableTemporaryPoint);
         const auto replaced =
             viewport.replaceAiSplineOverlays(
                 device, nextState->overlays,
@@ -548,7 +580,7 @@ WorkspaceAiSplineControllerResult
 WorkspaceAiSplineController::updateEditingState(
     render::Device& device, WorkspaceViewport& viewport,
     const WorkspaceAiSplineControllerInputSnapshot& expected, bool editing,
-    bool clearSelection) {
+    bool clearSelection, bool clearTemporaryPoints) {
     if (!inputMatches(expected)) {
         auto result = currentResult();
         result.status = WorkspaceAiSplineControllerStatus::stale_input;
@@ -563,7 +595,10 @@ WorkspaceAiSplineController::updateEditingState(
 
     const bool selectionChanged =
         clearSelection && !state_->configuration.selectedIndices.empty();
-    if (!selectionChanged && state_->editing == editing) {
+    const bool temporaryChanged =
+        clearTemporaryPoints && !state_->temporaryEditPoints.empty();
+    if (!selectionChanged && !temporaryChanged &&
+        state_->editing == editing) {
         auto result = currentResult();
         result.status = WorkspaceAiSplineControllerStatus::unchanged;
         return result;
@@ -578,7 +613,7 @@ WorkspaceAiSplineController::updateEditingState(
         return result;
     }
     const std::uint64_t nextInputEpoch = state_->inputEpoch + 1U;
-    if (!selectionChanged) {
+    if (!selectionChanged && !temporaryChanged) {
         state_->editing = editing;
         state_->inputEpoch = nextInputEpoch;
         auto result = currentResult();
@@ -598,9 +633,15 @@ WorkspaceAiSplineController::updateEditingState(
 
     try {
         auto candidateConfiguration = state_->configuration;
-        candidateConfiguration.selectedIndices.clear();
+        if (clearSelection) candidateConfiguration.selectedIndices.clear();
+        auto candidateTemporaryPoints = state_->temporaryEditPoints;
+        if (clearTemporaryPoints) candidateTemporaryPoints.clear();
         auto built = buildWorkspaceAiSplineOverlays(
-            state_->session.current(), overlayRequest(candidateConfiguration));
+            state_->session.current(),
+            overlayRequest(candidateConfiguration, candidateTemporaryPoints,
+                           clearTemporaryPoints
+                               ? std::nullopt
+                               : state_->movableTemporaryPoint));
         if (!built.ok()) {
             auto result = currentResult();
             result.status = overlayFailureStatus(built.status);
@@ -610,7 +651,10 @@ WorkspaceAiSplineController::updateEditingState(
         auto nextState = std::make_unique<State>(
             state_->session, std::move(candidateConfiguration),
             std::move(built.overlays), state_->movementForwards,
-            state_->generation, nextInputEpoch, editing);
+            state_->generation, nextInputEpoch, editing,
+            std::move(candidateTemporaryPoints),
+            clearTemporaryPoints ? std::nullopt
+                                 : state_->movableTemporaryPoint);
         ++nextState->generation.publication;
         const auto revision = state_->session.revision();
         const auto replaced = viewport.replaceAiSplineOverlays(
@@ -658,19 +702,161 @@ WorkspaceAiSplineController::updateEditingState(
 WorkspaceAiSplineControllerResult WorkspaceAiSplineController::startEditing(
     render::Device& device, WorkspaceViewport& viewport,
     const WorkspaceAiSplineControllerInputSnapshot& expected) {
-    return updateEditingState(device, viewport, expected, true, true);
+    return updateEditingState(device, viewport, expected, true, true, false);
 }
 
 WorkspaceAiSplineControllerResult WorkspaceAiSplineController::finishEditing(
     render::Device& device, WorkspaceViewport& viewport,
     const WorkspaceAiSplineControllerInputSnapshot& expected) {
-    return updateEditingState(device, viewport, expected, false, false);
+    if (!inputMatches(expected)) {
+        auto result = currentResult();
+        result.status = WorkspaceAiSplineControllerStatus::stale_input;
+        result.diagnostic = diagnostic(
+            "workspace_ai_spline_controller_input_stale",
+            "AI spline input snapshot does not match the current controller state");
+        return result;
+    }
+    if (!viewportMatches(viewport)) return viewportBindingResult();
+    if (state_->temporaryEditPoints.size() < 5U ||
+        state_->configuration.selectedIndices.size() < 2U ||
+        state_->configuration.selectedIndices.front() >=
+            state_->configuration.selectedIndices.back()) {
+        return updateEditingState(device, viewport, expected, false, false,
+                                  true);
+    }
+
+    try {
+        const std::size_t first =
+            state_->configuration.selectedIndices.front();
+        const std::size_t last =
+            state_->configuration.selectedIndices.back();
+        if (last >= state_->session.current().points.size()) {
+            auto result = currentResult();
+            result.status = WorkspaceAiSplineControllerStatus::invalid_edit;
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_controller_temporary_endpoint_invalid",
+                "A temporary AI spline endpoint is outside the point array");
+            return result;
+        }
+        InstalledEditorSpline interpolating;
+        interpolating.points.reserve(state_->temporaryEditPoints.size() + 2U);
+        interpolating.points.push_back(
+            state_->session.current().points[first].position);
+        for (const auto& point : state_->temporaryEditPoints)
+            interpolating.points.push_back(point.position);
+        interpolating.points.push_back(
+            state_->session.current().points[last].position);
+        interpolating.closed = false;
+        if (!recomputeInstalledEditorSplineLengths(interpolating)) {
+            auto result = currentResult();
+            result.status = WorkspaceAiSplineControllerStatus::invalid_edit;
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_controller_temporary_length_invalid",
+                "Temporary AI spline interpolation requires a positive finite path");
+            return result;
+        }
+        std::vector<authoring::AiSplinePointPositionEdit> edits;
+        edits.reserve(last - first);
+        const float denominator = static_cast<float>(last - first);
+        for (std::size_t index = first; index < last; ++index) {
+            const float position =
+                static_cast<float>(index - first) / denominator;
+            const auto sample =
+                sampleInstalledEditorSpline(interpolating, position);
+            if (!sample.has_value()) {
+                auto result = currentResult();
+                result.status =
+                    WorkspaceAiSplineControllerStatus::invalid_edit;
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_controller_temporary_sample_invalid",
+                    "Temporary AI spline finish produced an invalid point");
+                return result;
+            }
+            edits.push_back({static_cast<std::uint32_t>(index), *sample});
+        }
+        auto candidate = state_->session;
+        auto sessionResult = candidate.setPointPositions(edits);
+        if (!sessionResult.ok()) {
+            auto result = sessionFailure(sessionResult,
+                                         state_->session.revision());
+            result.resultingInput = inputSnapshot();
+            return result;
+        }
+        if (!sessionResult.changed)
+            return updateEditingState(device, viewport, expected, false,
+                                      false, true);
+
+        auto built = buildWorkspaceAiSplineOverlays(
+            candidate.current(), overlayRequest(state_->configuration));
+        if (!built.ok()) {
+            auto result = currentResult();
+            result.status = overlayFailureStatus(built.status);
+            result.diagnostic = std::move(built.diagnostic);
+            return result;
+        }
+        if (state_->generation.publication ==
+                std::numeric_limits<std::uint64_t>::max() ||
+            state_->inputEpoch == std::numeric_limits<std::uint64_t>::max()) {
+            auto result = currentResult();
+            result.status = WorkspaceAiSplineControllerStatus::unsupported;
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_controller_counter_exhausted",
+                "AI spline temporary finish cannot advance its state counters");
+            return result;
+        }
+        auto nextGeneration = state_->generation;
+        nextGeneration.revision = sessionResult.revision;
+        ++nextGeneration.publication;
+        auto nextState = std::make_unique<State>(
+            std::move(candidate), state_->configuration,
+            std::move(built.overlays), state_->movementForwards,
+            std::move(nextGeneration), state_->inputEpoch + 1U, false);
+        const auto replaced = viewport.replaceAiSplineOverlays(
+            device, nextState->overlays,
+            WorkspaceViewportAiSplineGenerationTransition{
+                state_->generation, nextState->generation});
+        if (!replaced.ok()) {
+            auto result = currentResult();
+            result.status =
+                replaced.status ==
+                        WorkspaceViewportAiSplineUpdateStatus::unsupported
+                    ? WorkspaceAiSplineControllerStatus::unsupported
+                : replaced.status == WorkspaceViewportAiSplineUpdateStatus::
+                                         allocation_failed
+                    ? WorkspaceAiSplineControllerStatus::allocation_failed
+                    : WorkspaceAiSplineControllerStatus::viewport_failed;
+            result.diagnostic = replaced.diagnostic;
+            return result;
+        }
+        auto result = currentResult();
+        result.status = WorkspaceAiSplineControllerStatus::ready;
+        result.revision = sessionResult.revision;
+        result.applied = sessionResult.applied;
+        result.replacedPassCount = replaced.replaced_pass_count;
+        result.changed = true;
+        state_.swap(nextState);
+        result.resultingInput = inputSnapshot();
+        return result;
+    } catch (const std::bad_alloc&) {
+        auto result = currentResult();
+        result.status = WorkspaceAiSplineControllerStatus::allocation_failed;
+        result.diagnostic = diagnostic(
+            "workspace_ai_spline_controller_allocation_failed",
+            "Temporary AI spline finish exceeded available allocation capacity");
+        return result;
+    } catch (const std::exception& error) {
+        auto result = currentResult();
+        result.diagnostic = {
+            "workspace_ai_spline_controller_temporary_finish_failed",
+            error.what()};
+        return result;
+    }
 }
 
 WorkspaceAiSplineControllerResult WorkspaceAiSplineController::cancelEditing(
     render::Device& device, WorkspaceViewport& viewport,
     const WorkspaceAiSplineControllerInputSnapshot& expected) {
-    return updateEditingState(device, viewport, expected, false, true);
+    return updateEditingState(device, viewport, expected, false, true, true);
 }
 
 WorkspaceAiSplinePointSelectionResult
@@ -683,6 +869,8 @@ WorkspaceAiSplineController::selectPoint(
         result.revision = state_->session.revision();
         result.selectionCount =
             state_->configuration.selectedIndices.size();
+        result.temporaryPointCount = state_->temporaryEditPoints.size();
+        result.movableTemporaryPoint = state_->movableTemporaryPoint;
         return result;
     };
     const auto staleResult = [&](const char* code, const char* message) {
@@ -721,8 +909,177 @@ WorkspaceAiSplineController::selectPoint(
             "AI spline point selection index is outside the point array");
         return result;
     }
+    if ((request.shiftPressed || !state_->temporaryEditPoints.empty()) &&
+        !finitePosition(request.pickedPosition)) {
+        auto result = baseResult();
+        result.status = WorkspaceAiSplineControllerStatus::invalid_edit;
+        result.diagnostic = diagnostic(
+            "workspace_ai_spline_controller_pick_position_non_finite",
+            "AI spline point selection requires a finite picked position");
+        return result;
+    }
 
     try {
+        if (state_->editing && request.shiftPressed) {
+            if (state_->configuration.selectedIndices.size() <= 1U) {
+                auto result = baseResult();
+                result.status = WorkspaceAiSplineControllerStatus::unchanged;
+                return result;
+            }
+            if (state_->temporaryEditPoints.size() >=
+                workspace_ai_spline_max_temporary_edit_points) {
+                auto result = baseResult();
+                result.status = WorkspaceAiSplineControllerStatus::invalid_edit;
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_controller_temporary_point_limit",
+                    "Temporary AI spline edit points exceed the safety limit");
+                return result;
+            }
+            if (state_->inputEpoch ==
+                    std::numeric_limits<std::uint64_t>::max() ||
+                state_->generation.publication ==
+                    std::numeric_limits<std::uint64_t>::max()) {
+                auto result = baseResult();
+                result.status = WorkspaceAiSplineControllerStatus::unsupported;
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_controller_counter_exhausted",
+                    "AI spline temporary selection cannot advance its state counters");
+                return result;
+            }
+            auto candidateTemporaryPoints = state_->temporaryEditPoints;
+            WorkspaceAiSplineTemporaryEditPoint point;
+            point.forward = {
+                state_->movementForwards[request.pointIndex][0U], 0.0F,
+                state_->movementForwards[request.pointIndex][1U]};
+            point.position = {
+                request.pickedPosition[0U],
+                state_->session.current().points[request.pointIndex]
+                    .position[1U],
+                request.pickedPosition[2U]};
+            candidateTemporaryPoints.push_back(point);
+            auto built = buildWorkspaceAiSplineOverlays(
+                state_->session.current(),
+                overlayRequest(state_->configuration,
+                               candidateTemporaryPoints,
+                               state_->movableTemporaryPoint));
+            if (!built.ok()) {
+                auto result = baseResult();
+                result.status = overlayFailureStatus(built.status);
+                result.diagnostic = std::move(built.diagnostic);
+                return result;
+            }
+            auto nextState = std::make_unique<State>(
+                state_->session, state_->configuration,
+                std::move(built.overlays), state_->movementForwards,
+                state_->generation, state_->inputEpoch + 1U, state_->editing,
+                std::move(candidateTemporaryPoints),
+                state_->movableTemporaryPoint);
+            ++nextState->generation.publication;
+            const auto replaced = viewport.replaceAiSplineOverlays(
+                device, nextState->overlays,
+                WorkspaceViewportAiSplineGenerationTransition{
+                    state_->generation, nextState->generation});
+            if (!replaced.ok()) {
+                auto result = baseResult();
+                result.status =
+                    replaced.status ==
+                            WorkspaceViewportAiSplineUpdateStatus::unsupported
+                        ? WorkspaceAiSplineControllerStatus::unsupported
+                    : replaced.status == WorkspaceViewportAiSplineUpdateStatus::
+                                             allocation_failed
+                        ? WorkspaceAiSplineControllerStatus::allocation_failed
+                        : WorkspaceAiSplineControllerStatus::viewport_failed;
+                result.diagnostic = replaced.diagnostic;
+                return result;
+            }
+            auto result = baseResult();
+            result.status = WorkspaceAiSplineControllerStatus::ready;
+            result.resultingInput = {nextState->generation,
+                                     nextState->inputEpoch,
+                                     nextState->editing};
+            result.temporaryPointCount =
+                nextState->temporaryEditPoints.size();
+            result.replacedPassCount = replaced.replaced_pass_count;
+            result.changed = true;
+            state_.swap(nextState);
+            return result;
+        }
+
+        if (state_->editing && !request.shiftPressed) {
+            for (std::size_t index = 0U;
+                 index < state_->temporaryEditPoints.size(); ++index) {
+                if (installedEditorSplinePointDistance(
+                        state_->temporaryEditPoints[index].position,
+                        request.pickedPosition) < 1.0F) {
+                    if (state_->movableTemporaryPoint == index) {
+                        auto result = baseResult();
+                        result.status =
+                            WorkspaceAiSplineControllerStatus::unchanged;
+                        return result;
+                    }
+                    if (state_->inputEpoch ==
+                            std::numeric_limits<std::uint64_t>::max() ||
+                        state_->generation.publication ==
+                            std::numeric_limits<std::uint64_t>::max()) {
+                        auto result = baseResult();
+                        result.status =
+                            WorkspaceAiSplineControllerStatus::unsupported;
+                        result.diagnostic = diagnostic(
+                            "workspace_ai_spline_controller_input_epoch_exhausted",
+                            "AI spline input epoch cannot advance without overflow");
+                        return result;
+                    }
+                    auto built = buildWorkspaceAiSplineOverlays(
+                        state_->session.current(),
+                        overlayRequest(state_->configuration,
+                                       state_->temporaryEditPoints, index));
+                    if (!built.ok()) {
+                        auto result = baseResult();
+                        result.status = overlayFailureStatus(built.status);
+                        result.diagnostic = std::move(built.diagnostic);
+                        return result;
+                    }
+                    auto nextState = std::make_unique<State>(
+                        state_->session, state_->configuration,
+                        std::move(built.overlays), state_->movementForwards,
+                        state_->generation, state_->inputEpoch + 1U,
+                        state_->editing, state_->temporaryEditPoints, index);
+                    ++nextState->generation.publication;
+                    const auto replaced = viewport.replaceAiSplineOverlays(
+                        device, nextState->overlays,
+                        WorkspaceViewportAiSplineGenerationTransition{
+                            state_->generation, nextState->generation});
+                    if (!replaced.ok()) {
+                        auto result = baseResult();
+                        result.status =
+                            replaced.status ==
+                                    WorkspaceViewportAiSplineUpdateStatus::
+                                        unsupported
+                                ? WorkspaceAiSplineControllerStatus::unsupported
+                            : replaced.status ==
+                                    WorkspaceViewportAiSplineUpdateStatus::
+                                        allocation_failed
+                                ? WorkspaceAiSplineControllerStatus::
+                                      allocation_failed
+                                : WorkspaceAiSplineControllerStatus::
+                                      viewport_failed;
+                        result.diagnostic = replaced.diagnostic;
+                        return result;
+                    }
+                    auto result = baseResult();
+                    result.status = WorkspaceAiSplineControllerStatus::ready;
+                    result.changed = true;
+                    result.resultingInput = {nextState->generation,
+                                             nextState->inputEpoch,
+                                             nextState->editing};
+                    result.movableTemporaryPoint = index;
+                    result.replacedPassCount = replaced.replaced_pass_count;
+                    state_.swap(nextState);
+                    return result;
+                }
+            }
+        }
+
         auto candidateConfiguration = state_->configuration;
         auto& selected = candidateConfiguration.selectedIndices;
         std::unordered_set<std::uint32_t> seen;
@@ -798,7 +1155,8 @@ WorkspaceAiSplineController::selectPoint(
         const std::uint32_t lastSelected = selected.back();
         const float normalized = static_cast<float>(lastSelected) /
                                  static_cast<float>(pointCount);
-        if (selected == state_->configuration.selectedIndices) {
+        if (selected == state_->configuration.selectedIndices &&
+            !state_->movableTemporaryPoint.has_value()) {
             auto result = baseResult();
             result.status = WorkspaceAiSplineControllerStatus::unchanged;
             result.lastSelectedIndex = lastSelected;
@@ -827,7 +1185,9 @@ WorkspaceAiSplineController::selectPoint(
         const std::uint64_t nextInputEpoch = state_->inputEpoch + 1U;
 
         auto built = buildWorkspaceAiSplineOverlays(
-            state_->session.current(), overlayRequest(candidateConfiguration));
+            state_->session.current(),
+            overlayRequest(candidateConfiguration,
+                           state_->temporaryEditPoints));
         if (!built.ok()) {
             auto result = baseResult();
             result.status = overlayFailureStatus(built.status);
@@ -837,7 +1197,8 @@ WorkspaceAiSplineController::selectPoint(
         auto nextState = std::make_unique<State>(
             state_->session, std::move(candidateConfiguration),
             std::move(built.overlays), state_->movementForwards,
-            state_->generation, nextInputEpoch, state_->editing);
+            state_->generation, nextInputEpoch, state_->editing,
+            state_->temporaryEditPoints, std::nullopt);
         ++nextState->generation.publication;
         const auto replaced = viewport.replaceAiSplineOverlays(
             device, nextState->overlays,
@@ -927,9 +1288,93 @@ WorkspaceAiSplineController::moveSelectedByManualInput(
         return viewportBindingResult();
     try {
         const auto local = workspaceAiSplineManualLocalDelta(movement);
-        if (state_->configuration.selectedIndices.empty() ||
-            (local[0U] == 0.0F && local[1U] == 0.0F &&
-             local[2U] == 0.0F)) {
+        if (local[0U] == 0.0F && local[1U] == 0.0F &&
+            local[2U] == 0.0F) {
+            auto result = currentResult();
+            result.status = WorkspaceAiSplineControllerStatus::unchanged;
+            return result;
+        }
+        if (state_->movableTemporaryPoint.has_value()) {
+            const std::size_t index = *state_->movableTemporaryPoint;
+            if (index >= state_->temporaryEditPoints.size()) {
+                auto result = currentResult();
+                result.status = WorkspaceAiSplineControllerStatus::invalid_edit;
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_controller_temporary_movable_invalid",
+                    "The movable temporary AI spline point is outside the edit-point array");
+                return result;
+            }
+            if (state_->inputEpoch ==
+                    std::numeric_limits<std::uint64_t>::max() ||
+                state_->generation.publication ==
+                    std::numeric_limits<std::uint64_t>::max()) {
+                auto result = currentResult();
+                result.status = WorkspaceAiSplineControllerStatus::unsupported;
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_controller_counter_exhausted",
+                    "Temporary AI spline movement cannot advance its state counters");
+                return result;
+            }
+            const auto& point = state_->temporaryEditPoints[index];
+            const float headingX = point.forward[0U];
+            const float headingZ = point.forward[2U];
+            const std::array<float, 3U> worldDelta = {
+                -headingZ * local[0U] - headingX * local[2U], local[1U],
+                headingX * local[0U] - headingZ * local[2U]};
+            auto candidateTemporaryPoints = state_->temporaryEditPoints;
+            for (std::size_t axis = 0U; axis < 3U; ++axis)
+                candidateTemporaryPoints[index].position[axis] +=
+                    worldDelta[axis];
+            if (!finitePosition(candidateTemporaryPoints[index].position)) {
+                auto result = currentResult();
+                result.status = WorkspaceAiSplineControllerStatus::invalid_edit;
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_controller_temporary_movement_non_finite",
+                    "Temporary AI spline movement produced a non-finite point");
+                return result;
+            }
+            auto built = buildWorkspaceAiSplineOverlays(
+                state_->session.current(),
+                overlayRequest(state_->configuration,
+                               candidateTemporaryPoints, index));
+            if (!built.ok()) {
+                auto result = currentResult();
+                result.status = overlayFailureStatus(built.status);
+                result.diagnostic = std::move(built.diagnostic);
+                return result;
+            }
+            auto nextState = std::make_unique<State>(
+                state_->session, state_->configuration,
+                std::move(built.overlays), state_->movementForwards,
+                state_->generation, state_->inputEpoch + 1U, state_->editing,
+                std::move(candidateTemporaryPoints), index);
+            ++nextState->generation.publication;
+            const auto replaced = viewport.replaceAiSplineOverlays(
+                device, nextState->overlays,
+                WorkspaceViewportAiSplineGenerationTransition{
+                    state_->generation, nextState->generation});
+            if (!replaced.ok()) {
+                auto result = currentResult();
+                result.status =
+                    replaced.status ==
+                            WorkspaceViewportAiSplineUpdateStatus::unsupported
+                        ? WorkspaceAiSplineControllerStatus::unsupported
+                    : replaced.status == WorkspaceViewportAiSplineUpdateStatus::
+                                             allocation_failed
+                        ? WorkspaceAiSplineControllerStatus::allocation_failed
+                        : WorkspaceAiSplineControllerStatus::viewport_failed;
+                result.diagnostic = replaced.diagnostic;
+                return result;
+            }
+            auto result = currentResult();
+            result.status = WorkspaceAiSplineControllerStatus::ready;
+            result.replacedPassCount = replaced.replaced_pass_count;
+            result.changed = true;
+            state_.swap(nextState);
+            result.resultingInput = inputSnapshot();
+            return result;
+        }
+        if (state_->configuration.selectedIndices.empty()) {
             auto result = currentResult();
             result.status = WorkspaceAiSplineControllerStatus::unchanged;
             return result;

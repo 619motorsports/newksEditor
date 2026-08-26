@@ -156,6 +156,15 @@ struct WorkspaceViewportPrepareRequest {
     // This normal-depth pass follows the side splines and requires the primary.
     const WorkspaceAiSplineGeometry* ai_spline_selection_geometry = nullptr;
     std::optional<render::PipelineProgram> ai_spline_selection_pipeline;
+    // The temporary spline and portable point-marker passes are latent for a
+    // controller. Their pipelines remain prepared while edit state is empty.
+    const WorkspaceAiSplineGeometry*
+        ai_spline_temporary_interpolation_geometry = nullptr;
+    std::optional<render::PipelineProgram>
+        ai_spline_temporary_interpolation_pipeline;
+    const WorkspaceAiSplineGeometry* ai_spline_temporary_marker_geometry =
+        nullptr;
+    std::optional<render::PipelineProgram> ai_spline_temporary_marker_pipeline;
     const WorkspaceAiSplineGeometry* ai_spline_camber_geometry = nullptr;
     std::optional<render::PipelineProgram> ai_spline_camber_pipeline;
     // Optional recovered magenta selected-mesh pass. The selected packet must
@@ -331,6 +340,8 @@ private:
         const WorkspaceAiSplineGeometry* left = nullptr;
         const WorkspaceAiSplineGeometry* right = nullptr;
         const WorkspaceAiSplineGeometry* selection = nullptr;
+        const WorkspaceAiSplineGeometry* temporaryInterpolation = nullptr;
+        const WorkspaceAiSplineGeometry* temporaryMarkers = nullptr;
         const WorkspaceAiSplineGeometry* camber = nullptr;
     };
 

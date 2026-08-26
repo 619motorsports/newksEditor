@@ -318,8 +318,16 @@ The installed picker forwards its mesh-local hit point without a world transform
 The C++ resolver preserves this quirk before its grid-aware 3D point scan.
 Control on release extends the recovered cyclic selection.
 The picker validates direct geometry and grid ranges before traversal.
-The temporary edit-point interpolation path remains pending.
-The native window does not expose these lifecycle calls yet.
+Enter starts or finishes spline editing. Escape cancels active editing.
+This keyboard mapping is a portable control for the native button actions.
+Shift plus right mouse adds a temporary point after two endpoints exist.
+The point uses the picked X/Z, raw spline Y, and cached forward direction.
+Five temporary points enable the recovered green interpolation pass.
+Numpad movement changes only the temporary point selected within one meter.
+Finish writes the half-open endpoint range as one model revision.
+Cancel clears selection and temporary state without model writes.
+The native sphere marker uses `content/objects3D/sphere.kn5`.
+The port uses a labeled green vertical-line marker in the shared line ABI.
 `--save-ai-spline` accepts version 7 and rebuilds the native grid.
 Legacy version-2 conversion is not yet recovered.
 The command uses a temporary file and atomically replaces its output.

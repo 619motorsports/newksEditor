@@ -72,6 +72,9 @@ void release_video() noexcept {
     case SDL_SCANCODE_KP_9: return WindowKey::keypad_9;
     case SDL_SCANCODE_LCTRL: return WindowKey::left_control;
     case SDL_SCANCODE_RCTRL: return WindowKey::right_control;
+    case SDL_SCANCODE_RETURN:
+    case SDL_SCANCODE_KP_ENTER: return WindowKey::enter;
+    case SDL_SCANCODE_ESCAPE: return WindowKey::escape;
     default: break;
     }
     switch (event.key) {

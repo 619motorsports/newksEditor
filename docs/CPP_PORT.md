@@ -267,7 +267,7 @@ remains unchanged and feature-complete.
   Dirty state compares canonical current bytes with canonical baseline bytes.
   The controller also ports start, finish, and cancel edit-mode state.
   Start clears the selected indices. Finish preserves them. Cancel clears them.
-  These lifecycle calls preserve model bytes, revision, history, and dirty state.
+  Start and cancel do not change model bytes, revision, history, or dirty state.
   The controller also accepts one validated spline point index at runtime.
   The request includes one controller input snapshot.
   This snapshot contains the generation, input epoch, and edit mode.
@@ -295,7 +295,17 @@ remains unchanged and feature-complete.
   The grid-aware resolver scans raw spline points with 3D squared distance.
   Control extends the recovered cyclic selection through the existing controller.
   Direct malformed geometry and grid ranges fail before selection publication.
-  Temporary edit-point interpolation on finish remains pending.
+  Shift plus right mouse adds bounded temporary points after two endpoints exist.
+  The temporary record keeps click order, duplicate points, and cached forward.
+  It uses picked X/Z and copies Y from the closest raw spline point.
+  A strict distance below one selects the first temporary point for movement.
+  The selected point displays the recovered red and green three-unit axes.
+  Five points enable the recovered green 5,001-sample interpolation pass.
+  Finish samples the first-to-final endpoint range and writes `[first, last)`.
+  One successful finish creates one model revision and clears temporary state.
+  Reverse endpoint order clears temporary state without point writes.
+  Temporary overlays use two latent backend-neutral line passes.
+  The native sphere marker has no line ABI. The port uses a labeled green line.
   The native window option `--ai-spline-edit-point` applies one scripted batch
   after viewport setup.
   The first frame uses the accepted model and all derived passes.
@@ -322,7 +332,8 @@ remains unchanged and feature-complete.
   A save error keeps the prior destination and the complete session state.
   This atomic replace differs from the original direct file truncation.
   Replacement can also change destination permissions or access-control metadata.
-  Runtime point picking and window lifecycle controls remain pending.
+  Enter maps to the native edit/finish button actions. Escape maps to cancel.
+  These keys are portable controls. The installed editor uses UI buttons.
   Another version-7 option adds the recovered vertical camber lines after the
   side passes. Positive values are green. Other values are red.
   The selected pass uses solid fill, front-face culling, opaque blend state,

@@ -75,21 +75,29 @@ validateAiSplineGeometry(const WorkspaceAiSplineGeometry &geometry,
         expected_first += chunk.vertex_count;
     }
 
-    const std::size_t expected_vertices =
-        geometry.topology == WorkspaceAiSplineTopology::independent_lines
-            ? static_cast<std::size_t>(geometry.sample_point_count) * 2U
-        : geometry.topology == WorkspaceAiSplineTopology::polyline &&
-                geometry.sample_point_count > 2U
-            ? (static_cast<std::size_t>(geometry.sample_point_count) - 1U) * 2U
-            : 0U;
+    std::optional<std::size_t> expected_vertices;
+    const std::size_t sample_count = geometry.sample_point_count;
+    if (geometry.topology == WorkspaceAiSplineTopology::independent_lines) {
+        if (sample_count <= std::numeric_limits<std::size_t>::max() / 2U)
+            expected_vertices = sample_count * 2U;
+    } else if (geometry.topology == WorkspaceAiSplineTopology::polyline) {
+        if (sample_count <= 2U) {
+            expected_vertices = 0U;
+        } else if (sample_count - 1U <=
+                   std::numeric_limits<std::size_t>::max() / 2U) {
+            expected_vertices = (sample_count - 1U) * 2U;
+        }
+    }
     const bool selection_state_empty =
         geometry.selected_point_count == 0U &&
         !geometry.last_selected_index.has_value();
+    const bool temporary_state_empty =
+        geometry.temporary_point_count == 0U;
     const bool primary_metadata_valid =
         kind == WorkspaceAiSplinePassKind::primary &&
         geometry.pass == WorkspaceAiSplinePassKind::primary &&
         geometry.topology == WorkspaceAiSplineTopology::polyline &&
-        selection_state_empty &&
+        selection_state_empty && temporary_state_empty &&
         (geometry.mode == WorkspaceAiSplineDisplayMode::raw
              ? geometry.sample_point_count == geometry.source_point_count
              : geometry.mode == WorkspaceAiSplineDisplayMode::interpolated &&
@@ -101,7 +109,8 @@ validateAiSplineGeometry(const WorkspaceAiSplineGeometry &geometry,
         geometry.pass == WorkspaceAiSplinePassKind::interval &&
         geometry.topology == WorkspaceAiSplineTopology::polyline &&
         geometry.mode == WorkspaceAiSplineDisplayMode::interpolated &&
-        selection_state_empty && geometry.source_point_count >= 4U &&
+        selection_state_empty && temporary_state_empty &&
+        geometry.source_point_count >= 4U &&
         geometry.sample_point_count >= 1U &&
         geometry.sample_point_count <=
             workspace_ai_spline_interpolated_sample_count;
@@ -111,7 +120,7 @@ validateAiSplineGeometry(const WorkspaceAiSplineGeometry &geometry,
         geometry.pass == kind &&
         geometry.topology == WorkspaceAiSplineTopology::polyline &&
         geometry.mode == WorkspaceAiSplineDisplayMode::raw &&
-        selection_state_empty &&
+        selection_state_empty && temporary_state_empty &&
         geometry.sample_point_count <= geometry.source_point_count &&
         geometry.source_point_count <=
             render::max_overlay_line_total_vertices / 2U + 1U &&
@@ -122,6 +131,7 @@ validateAiSplineGeometry(const WorkspaceAiSplineGeometry &geometry,
         geometry.pass == WorkspaceAiSplinePassKind::selection &&
         geometry.topology == WorkspaceAiSplineTopology::independent_lines &&
         geometry.mode == WorkspaceAiSplineDisplayMode::raw &&
+        temporary_state_empty &&
         geometry.selected_point_count >= 1U &&
         geometry.selected_point_count <= geometry.source_point_count &&
         geometry.last_selected_index.has_value() &&
@@ -133,23 +143,50 @@ validateAiSplineGeometry(const WorkspaceAiSplineGeometry &geometry,
             workspace_ai_spline_max_interpolation_control_points &&
         primary != nullptr &&
         geometry.source_point_count == primary->source_point_count;
+    const bool temporary_interpolation_metadata_valid =
+        kind == WorkspaceAiSplinePassKind::temporary_interpolation &&
+        geometry.pass == WorkspaceAiSplinePassKind::temporary_interpolation &&
+        geometry.topology == WorkspaceAiSplineTopology::polyline &&
+        geometry.mode == WorkspaceAiSplineDisplayMode::interpolated &&
+        selection_state_empty && geometry.temporary_point_count >= 5U &&
+        geometry.temporary_point_count <=
+            workspace_ai_spline_max_temporary_edit_points &&
+        geometry.sample_point_count ==
+            workspace_ai_spline_interpolated_sample_count &&
+        primary != nullptr &&
+        geometry.source_point_count == primary->source_point_count;
+    const bool temporary_marker_metadata_valid =
+        kind == WorkspaceAiSplinePassKind::temporary_markers &&
+        geometry.pass == WorkspaceAiSplinePassKind::temporary_markers &&
+        geometry.topology == WorkspaceAiSplineTopology::independent_lines &&
+        geometry.mode == WorkspaceAiSplineDisplayMode::raw &&
+        selection_state_empty && geometry.temporary_point_count >= 1U &&
+        geometry.temporary_point_count <=
+            workspace_ai_spline_max_temporary_edit_points &&
+        (geometry.sample_point_count == geometry.temporary_point_count ||
+         geometry.sample_point_count ==
+             geometry.temporary_point_count + 2U) &&
+        primary != nullptr &&
+        geometry.source_point_count == primary->source_point_count;
     const bool camber_metadata_valid =
         kind == WorkspaceAiSplinePassKind::camber &&
         geometry.pass == WorkspaceAiSplinePassKind::camber &&
         geometry.topology == WorkspaceAiSplineTopology::independent_lines &&
         geometry.mode == WorkspaceAiSplineDisplayMode::raw &&
-        selection_state_empty &&
+        selection_state_empty && temporary_state_empty &&
         geometry.sample_point_count == geometry.source_point_count &&
         geometry.source_point_count <=
             render::max_overlay_line_total_vertices / 2U &&
         primary != nullptr &&
         geometry.source_point_count == primary->source_point_count;
-    if (expected_first != geometry.vertices.size() ||
+    if (!expected_vertices.has_value() ||
+        expected_first != geometry.vertices.size() ||
         (geometry.vertices.empty() != geometry.chunks.empty()) ||
-        geometry.vertices.size() != expected_vertices ||
+        geometry.vertices.size() != *expected_vertices ||
         !(primary_metadata_valid || interval_metadata_valid ||
           side_metadata_valid || selection_metadata_valid ||
-          camber_metadata_valid)) {
+          temporary_interpolation_metadata_valid ||
+          temporary_marker_metadata_valid || camber_metadata_valid)) {
         output_diagnostic = diagnostic(
             "workspace_viewport_ai_spline_geometry_invalid",
             "AI spline geometry does not match its display mode, sample "
@@ -171,6 +208,12 @@ validateAiSplineGeometry(const WorkspaceAiSplineGeometry &geometry,
             : kind == WorkspaceAiSplinePassKind::selection
                 ? vertex.color == workspace_ai_spline_selection_color ||
                       vertex.color == workspace_ai_spline_selection_side_color
+            : kind == WorkspaceAiSplinePassKind::temporary_interpolation ||
+                      kind == WorkspaceAiSplinePassKind::temporary_markers
+                ? vertex.color == workspace_ai_spline_temporary_color ||
+                      (kind == WorkspaceAiSplinePassKind::temporary_markers &&
+                       vertex.color ==
+                           workspace_ai_spline_temporary_forward_color)
                 : vertex.color == expected_color;
         if (!finite_vector(vertex.position) || !color_valid) {
             output_diagnostic = diagnostic(
@@ -241,6 +284,73 @@ validateAiSplineGeometry(const WorkspaceAiSplineGeometry &geometry,
                     "workspace_viewport_ai_spline_camber_line_invalid",
                     "AI spline camber lines must be vertical, upward, and one "
                     "color");
+                return false;
+            }
+        }
+    }
+    if (kind == WorkspaceAiSplinePassKind::temporary_markers) {
+        const std::size_t marker_vertex_count =
+            static_cast<std::size_t>(geometry.temporary_point_count) * 2U;
+        for (std::size_t vertex = 0U; vertex < marker_vertex_count;
+             vertex += 2U) {
+            const auto& begin = geometry.vertices[vertex];
+            const auto& end = geometry.vertices[vertex + 1U];
+            if (begin.position[0] != end.position[0] ||
+                begin.position[2] != end.position[2] ||
+                end.position[1] != begin.position[1] +
+                                       workspace_ai_spline_temporary_marker_height) {
+                output_diagnostic = diagnostic(
+                    "workspace_viewport_ai_spline_temporary_marker_invalid",
+                    "Temporary AI spline markers must match the portable vertical-line contract");
+                return false;
+            }
+        }
+        if (geometry.vertices.size() > marker_vertex_count) {
+            const auto& forwardBegin = geometry.vertices[marker_vertex_count];
+            const auto& forwardEnd =
+                geometry.vertices[marker_vertex_count + 1U];
+            const auto& sideBegin =
+                geometry.vertices[marker_vertex_count + 2U];
+            const auto& sideEnd =
+                geometry.vertices[marker_vertex_count + 3U];
+            const std::array<float, 3U> forwardDelta = {
+                forwardEnd.position[0U] - forwardBegin.position[0U],
+                forwardEnd.position[1U] - forwardBegin.position[1U],
+                forwardEnd.position[2U] - forwardBegin.position[2U]};
+            const std::array<float, 3U> sideDelta = {
+                sideEnd.position[0U] - sideBegin.position[0U],
+                sideEnd.position[1U] - sideBegin.position[1U],
+                sideEnd.position[2U] - sideBegin.position[2U]};
+            const float forwardLengthSquared =
+                forwardDelta[0U] * forwardDelta[0U] +
+                forwardDelta[1U] * forwardDelta[1U] +
+                forwardDelta[2U] * forwardDelta[2U];
+            const float sideLengthSquared =
+                sideDelta[0U] * sideDelta[0U] +
+                sideDelta[1U] * sideDelta[1U] +
+                sideDelta[2U] * sideDelta[2U];
+            const float axisDot =
+                forwardDelta[0U] * sideDelta[0U] +
+                forwardDelta[1U] * sideDelta[1U] +
+                forwardDelta[2U] * sideDelta[2U];
+            const bool recoveredLength =
+                (std::abs(forwardLengthSquared - 9.0F) <= 0.0001F &&
+                 std::abs(sideLengthSquared - 9.0F) <= 0.0001F) ||
+                (forwardLengthSquared == 0.0F &&
+                 sideLengthSquared == 0.0F);
+            if (forwardBegin.color !=
+                    workspace_ai_spline_temporary_forward_color ||
+                forwardEnd.color !=
+                    workspace_ai_spline_temporary_forward_color ||
+                sideBegin.color != workspace_ai_spline_temporary_color ||
+                sideEnd.color != workspace_ai_spline_temporary_color ||
+                forwardBegin.position != sideBegin.position ||
+                forwardDelta[1U] != 0.0F || sideDelta[1U] != 0.0F ||
+                !recoveredLength ||
+                std::abs(axisDot) > 0.0001F) {
+                output_diagnostic = diagnostic(
+                    "workspace_viewport_ai_spline_temporary_axis_invalid",
+                    "Movable temporary AI spline axes must use the recovered colors, origin, length, and perpendicular directions");
                 return false;
             }
         }
@@ -840,8 +950,14 @@ WorkspaceViewport::replaceAiSplineOverlaysBorrowed(
 
     const std::array<const WorkspaceAiSplineGeometry *,
                      workspace_ai_spline_pass_count>
-        geometries = {request.primary, request.interval,  request.left,
-                      request.right,   request.selection, request.camber};
+        geometries = {request.primary,
+                      request.interval,
+                      request.left,
+                      request.right,
+                      request.selection,
+                      request.temporaryInterpolation,
+                      request.temporaryMarkers,
+                      request.camber};
     constexpr std::array<WorkspaceAiSplinePassKind,
                          workspace_ai_spline_pass_count>
         kinds = {WorkspaceAiSplinePassKind::primary,
@@ -849,18 +965,23 @@ WorkspaceViewport::replaceAiSplineOverlaysBorrowed(
                  WorkspaceAiSplinePassKind::left_side,
                  WorkspaceAiSplinePassKind::right_side,
                  WorkspaceAiSplinePassKind::selection,
+                 WorkspaceAiSplinePassKind::temporary_interpolation,
+                 WorkspaceAiSplinePassKind::temporary_markers,
                  WorkspaceAiSplinePassKind::camber};
 
     for (std::size_t index = 0U; index < geometries.size(); ++index) {
-        const bool selectionMayBeEmpty =
-            kinds[index] == WorkspaceAiSplinePassKind::selection &&
+        const bool dynamicPassMayBeEmpty =
+            (kinds[index] == WorkspaceAiSplinePassKind::selection ||
+             kinds[index] ==
+                 WorkspaceAiSplinePassKind::temporary_interpolation ||
+             kinds[index] == WorkspaceAiSplinePassKind::temporary_markers) &&
             geometries[index] == nullptr &&
             ai_spline_passes_[index].pipeline.has_value();
         if ((geometries[index] != nullptr &&
              !ai_spline_passes_[index].pipeline.has_value()) ||
             (geometries[index] == nullptr &&
              ai_spline_passes_[index].pipeline.has_value() &&
-             !selectionMayBeEmpty)) {
+             !dynamicPassMayBeEmpty)) {
             result.diagnostic = diagnostic(
                 "workspace_viewport_ai_spline_update_configuration_invalid",
                 "AI spline replacement must preserve prepared pass presence");
@@ -869,7 +990,8 @@ WorkspaceViewport::replaceAiSplineOverlaysBorrowed(
     }
     if ((request.interval != nullptr || request.left != nullptr ||
          request.right != nullptr || request.selection != nullptr ||
-         request.camber != nullptr) &&
+         request.temporaryInterpolation != nullptr ||
+         request.temporaryMarkers != nullptr || request.camber != nullptr) &&
         request.primary == nullptr) {
         result.diagnostic =
             diagnostic("workspace_viewport_ai_spline_overlay_primary_missing",
@@ -1024,6 +1146,13 @@ WorkspaceViewport::replaceAiSplineOverlays(
     request.right = overlays.right.has_value() ? &*overlays.right : nullptr;
     request.selection =
         overlays.selection.has_value() ? &*overlays.selection : nullptr;
+    request.temporaryInterpolation =
+        overlays.temporaryInterpolation.has_value()
+            ? &*overlays.temporaryInterpolation
+            : nullptr;
+    request.temporaryMarkers = overlays.temporaryMarkers.has_value()
+                                   ? &*overlays.temporaryMarkers
+                                   : nullptr;
     request.camber = overlays.camber.has_value() ? &*overlays.camber : nullptr;
     return replaceAiSplineOverlaysBorrowed(device, request, generation);
 }
@@ -1771,17 +1900,26 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 {request.ai_spline_selection_geometry,
                  &request.ai_spline_selection_pipeline,
                  WorkspaceAiSplinePassKind::selection},
+                {request.ai_spline_temporary_interpolation_geometry,
+                 &request.ai_spline_temporary_interpolation_pipeline,
+                 WorkspaceAiSplinePassKind::temporary_interpolation},
+                {request.ai_spline_temporary_marker_geometry,
+                 &request.ai_spline_temporary_marker_pipeline,
+                 WorkspaceAiSplinePassKind::temporary_markers},
                 {request.ai_spline_camber_geometry,
                  &request.ai_spline_camber_pipeline,
                  WorkspaceAiSplinePassKind::camber},
             }};
         for (const AiSplinePassInput &input : ai_spline_inputs) {
-            const bool latent_selection =
-                input.kind == WorkspaceAiSplinePassKind::selection &&
+            const bool latent_dynamic_pass =
+                (input.kind == WorkspaceAiSplinePassKind::selection ||
+                 input.kind ==
+                     WorkspaceAiSplinePassKind::temporary_interpolation ||
+                 input.kind == WorkspaceAiSplinePassKind::temporary_markers) &&
                 input.geometry == nullptr && input.pipeline->has_value();
             if ((input.geometry != nullptr && !input.pipeline->has_value()) ||
                 (input.geometry == nullptr && input.pipeline->has_value() &&
-                 !latent_selection)) {
+                 !latent_dynamic_pass)) {
                 result.status = WorkspaceViewportStatus::invalid;
                 result.diagnostic = diagnostic(
                     "workspace_viewport_ai_spline_configuration_invalid",
@@ -1809,6 +1947,8 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
              request.ai_spline_left_geometry != nullptr ||
              request.ai_spline_right_geometry != nullptr ||
              request.ai_spline_selection_geometry != nullptr ||
+             request.ai_spline_temporary_interpolation_geometry != nullptr ||
+             request.ai_spline_temporary_marker_geometry != nullptr ||
              request.ai_spline_camber_geometry != nullptr) &&
             request.ai_spline_geometry == nullptr) {
             result.status = WorkspaceViewportStatus::invalid;

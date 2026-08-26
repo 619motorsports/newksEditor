@@ -2670,6 +2670,203 @@ void publishes_recovered_ai_spline_edit_lifecycle() {
             "lifecycle and selection results chain their input snapshots");
 }
 
+void publishes_temporary_ai_spline_edit_transaction() {
+    apex::formats::AiSpline spline;
+    spline.source = "controller-temporary-edit.ai";
+    spline.version = 7U;
+    spline.points.resize(10U);
+    spline.payloads.resize(10U);
+    for (std::size_t index = 0U; index < spline.points.size(); ++index) {
+        spline.points[index].position = {
+            static_cast<float>(index) * 10.0F,
+            static_cast<float>(index), 0.0F};
+        spline.points[index].tag = static_cast<std::int32_t>(index);
+    }
+    auto created = apex::app::WorkspaceAiSplineController::create(
+        spline, {});
+    require(created.ok(), "temporary-edit controller creates");
+    auto controller = std::move(created.controller);
+
+    auto value = fixture();
+    auto request = request_for(value);
+    request.ai_spline_geometry = &controller->overlays().primary;
+    request.ai_spline_generation = controller->generation();
+    request.ai_spline_pipeline = ai_spline_pipeline(value);
+    request.ai_spline_selection_pipeline = ai_spline_camber_pipeline(value);
+    request.ai_spline_temporary_interpolation_pipeline =
+        ai_spline_camber_pipeline(value);
+    request.ai_spline_temporary_marker_pipeline =
+        ai_spline_camber_pipeline(value);
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok(),
+            "temporary-edit viewport prepares latent dynamic passes");
+
+    const auto baselineBytes = controller->currentBytes();
+    const auto started = controller->startEditing(
+        device, *prepared.viewport, controller->inputSnapshot());
+    require(started.ok() && started.changed && controller->editing(),
+            "temporary-edit mode starts");
+    const auto select = [&](std::uint32_t index,
+                            std::array<float, 3U> picked,
+                            bool shift) {
+        apex::app::WorkspaceAiSplinePointSelectionRequest selection;
+        selection.pointIndex = index;
+        selection.pickedPosition = picked;
+        selection.shiftPressed = shift;
+        selection.expected = controller->inputSnapshot();
+        return controller->selectPoint(device, *prepared.viewport, selection);
+    };
+    const auto firstEndpoint =
+        select(1U, {10.0F, 1.0F, 0.0F}, false);
+    const auto prematureTemporary =
+        select(2U, {20.5F, 500.0F, 1.0F}, true);
+    const auto finalEndpoint =
+        select(8U, {80.0F, 8.0F, 0.0F}, false);
+    require(firstEndpoint.ok() && prematureTemporary.ok() &&
+                !prematureTemporary.changed &&
+                controller->temporaryEditPoints().empty() &&
+                finalEndpoint.ok() &&
+                controller->configuration().selectedIndices ==
+                    std::vector<std::uint32_t>({1U, 8U}),
+            "Shift-click requires two ordered endpoint selections");
+
+    const auto beforeFailedPoint = controller->inputSnapshot();
+    device.fail_buffer_call = device.buffer_calls + 1U;
+    device.fail_buffer_status = BufferStatus::upload_failed;
+    const auto failedPoint = select(2U, {20.5F, 500.0F, 1.0F}, true);
+    require(!failedPoint.ok() &&
+                failedPoint.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::
+                        viewport_failed &&
+                controller->temporaryEditPoints().empty() &&
+                controller->inputSnapshot() == beforeFailedPoint &&
+                controller->currentBytes() == baselineBytes,
+            "failed temporary-point upload preserves all controller state");
+    device.fail_buffer_call = 0U;
+
+    const std::array<std::array<float, 3U>, 5U> picked = {{
+        {20.5F, 500.0F, 1.0F},
+        {30.5F, 500.0F, 2.0F},
+        {40.5F, 500.0F, 1.0F},
+        {50.5F, 500.0F, 0.0F},
+        {20.5F, 500.0F, 1.0F},
+    }};
+    for (std::size_t index = 0U; index < picked.size(); ++index) {
+        const auto added = select(static_cast<std::uint32_t>(index + 2U),
+                                  picked[index], true);
+        require(added.ok() && added.changed &&
+                    added.temporaryPointCount == index + 1U,
+                "Shift-click appends one temporary point");
+        require(controller->overlays().temporaryMarkers.has_value(),
+                "every temporary point has a visible marker pass");
+        require(controller->overlays().temporaryInterpolation.has_value() ==
+                    (index + 1U >= 5U),
+                "temporary interpolation starts at five records");
+    }
+    require(controller->temporaryEditPoints()[0U].position ==
+                std::array<float, 3U>{20.5F, 2.0F, 1.0F} &&
+                controller->temporaryEditPoints()[4U].position ==
+                    std::array<float, 3U>{20.5F, 6.0F, 1.0F},
+            "temporary points preserve duplicate XZ clicks and snap Y to the closest raw point");
+    require(controller->revision() == 0U &&
+                controller->currentBytes() == baselineBytes &&
+                !controller->canUndo(),
+            "temporary points do not change model history");
+
+    const auto boundary = select(1U, {21.5F, 2.0F, 1.0F}, false);
+    require(boundary.ok() && !boundary.changed &&
+                !controller->movableTemporaryPoint().has_value(),
+            "a temporary-point distance of exactly one does not hit");
+    const auto movable = select(2U, {20.5F, 2.0F, 1.0F}, false);
+    require(movable.ok() && movable.changed &&
+                controller->movableTemporaryPoint() == 0U &&
+                controller->overlays().temporaryMarkers->sample_point_count ==
+                    7U,
+            "first strict temporary hit exposes recovered movable axes");
+    auto forgedOverlays = controller->overlays();
+    const std::size_t forgedAxisEnd =
+        static_cast<std::size_t>(
+            forgedOverlays.temporaryMarkers->temporary_point_count) *
+            2U +
+        1U;
+    forgedOverlays.temporaryMarkers->vertices[forgedAxisEnd].position[0U] +=
+        1.0F;
+    auto forgedGeneration = controller->generation();
+    ++forgedGeneration.publication;
+    const auto forged = prepared.viewport->replaceAiSplineOverlays(
+        device, forgedOverlays,
+        apex::app::WorkspaceViewportAiSplineGenerationTransition{
+            controller->generation(), forgedGeneration});
+    require(!forged.ok() &&
+                forged.diagnostic.code ==
+                    "workspace_viewport_ai_spline_temporary_axis_invalid" &&
+                prepared.viewport->aiSplineGenerationIdentity() ==
+                    controller->generation(),
+            "forged temporary-axis length fails before viewport publication");
+    const auto beforeMovement = controller->temporaryEditPoints();
+    apex::app::WorkspaceAiSplineManualMovement movement;
+    movement.forward = true;
+    const auto moved = controller->moveSelectedByManualInput(
+        device, *prepared.viewport, movement, controller->inputSnapshot());
+    require(moved.ok() && moved.changed && controller->revision() == 0U &&
+                controller->temporaryEditPoints()[0U].position[0U] >
+                    beforeMovement[0U].position[0U] &&
+                std::equal(controller->temporaryEditPoints().begin() + 1,
+                           controller->temporaryEditPoints().end(),
+                           beforeMovement.begin() + 1),
+            "manual input moves only the selected temporary point");
+
+    const auto lastEndpoint = controller->current().points[8U].position;
+    const auto finished = controller->finishEditing(
+        device, *prepared.viewport, controller->inputSnapshot());
+    require(finished.ok() && finished.changed && !controller->editing() &&
+                controller->temporaryEditPoints().empty() &&
+                !controller->movableTemporaryPoint().has_value() &&
+                !controller->overlays().temporaryInterpolation.has_value() &&
+                !controller->overlays().temporaryMarkers.has_value() &&
+                controller->configuration().selectedIndices ==
+                    std::vector<std::uint32_t>({1U, 8U}) &&
+                controller->revision() == 1U && controller->canUndo() &&
+                controller->current().points[8U].position == lastEndpoint,
+            "five-point finish commits one revision, preserves selection, and leaves the final endpoint unchanged");
+
+    const auto committedBytes = controller->currentBytes();
+    require(controller->startEditing(device, *prepared.viewport,
+                                     controller->inputSnapshot()).ok() &&
+                select(8U, {80.0F, 8.0F, 0.0F}, false).ok() &&
+                select(1U, {10.0F, 1.0F, 0.0F}, false).ok(),
+            "reverse-range edit setup succeeds");
+    for (std::size_t index = 0U; index < picked.size(); ++index)
+        require(select(static_cast<std::uint32_t>(index + 2U), picked[index],
+                       true)
+                    .ok(),
+                "reverse-range temporary point appends");
+    const auto reverseFinished = controller->finishEditing(
+        device, *prepared.viewport, controller->inputSnapshot());
+    require(reverseFinished.ok() && reverseFinished.changed &&
+                controller->revision() == 1U &&
+                controller->currentBytes() == committedBytes &&
+                controller->temporaryEditPoints().empty(),
+            "reverse endpoint order clears temporary state without point writes");
+
+    require(controller->startEditing(device, *prepared.viewport,
+                                     controller->inputSnapshot()).ok() &&
+                select(1U, {10.0F, 1.0F, 0.0F}, false).ok() &&
+                select(8U, {80.0F, 8.0F, 0.0F}, false).ok() &&
+                select(2U, picked[0U], true).ok(),
+            "temporary cancel setup succeeds");
+    const auto cancelled = controller->cancelEditing(
+        device, *prepared.viewport, controller->inputSnapshot());
+    require(cancelled.ok() && cancelled.changed && !controller->editing() &&
+                controller->configuration().selectedIndices.empty() &&
+                controller->temporaryEditPoints().empty() &&
+                controller->currentBytes() == committedBytes &&
+                controller->revision() == 1U,
+            "cancel clears selection and temporary state without model writes");
+}
+
 void publishes_recovered_ai_spline_point_selection() {
     apex::formats::AiSpline spline;
     spline.source = "controller-selection.ai";
@@ -3371,6 +3568,10 @@ void publishes_controller_through_d3d12_metadata_contract() {
     request.ai_spline_selection_geometry =
         &*controller->overlays().selection;
     request.ai_spline_selection_pipeline = ai_spline_camber_pipeline(value);
+    request.ai_spline_temporary_interpolation_pipeline =
+        ai_spline_camber_pipeline(value);
+    request.ai_spline_temporary_marker_pipeline =
+        ai_spline_camber_pipeline(value);
     FakeDevice device(Backend::D3D12);
     auto prepared =
         apex::app::prepareWorkspaceViewport(device, value.document, request);
@@ -3386,7 +3587,7 @@ void publishes_controller_through_d3d12_metadata_contract() {
     movement.forward = true;
     const auto changed = controller->moveSelectedByManualInput(
         device, *prepared.viewport, movement, controller->inputSnapshot());
-    require(changed.ok() && changed.changed && changed.replacedPassCount == 2U,
+    require(changed.ok() && changed.changed && changed.replacedPassCount == 4U,
             "D3D12 contract accepts one manual controller generation");
 
     const auto publicationBeforeSelection =
@@ -3397,13 +3598,40 @@ void publishes_controller_through_d3d12_metadata_contract() {
     const auto selected = controller->selectPoint(
         device, *prepared.viewport, selection);
     require(selected.ok() && selected.changed &&
-                selected.replacedPassCount == 2U &&
+                selected.replacedPassCount == 4U &&
                 selected.resultingInput.generation.publication ==
                     publicationBeforeSelection + 1U &&
                 controller->configuration().selectedIndices ==
                     std::vector<std::uint32_t>({3U}) &&
                 controller->revision() == changed.revision,
             "D3D12 contract accepts one point selection transaction");
+
+    require(controller->startEditing(device, *prepared.viewport,
+                                     controller->inputSnapshot()).ok(),
+            "D3D12 contract starts temporary editing");
+    const auto select = [&](std::uint32_t index,
+                            std::array<float, 3U> picked,
+                            bool shift) {
+        apex::app::WorkspaceAiSplinePointSelectionRequest point;
+        point.pointIndex = index;
+        point.pickedPosition = picked;
+        point.shiftPressed = shift;
+        point.expected = controller->inputSnapshot();
+        return controller->selectPoint(device, *prepared.viewport, point);
+    };
+    require(select(0U, {0.0F, 0.0F, 0.0F}, false).ok() &&
+                select(3U, {300.0F, 0.0F, 0.0F}, false).ok(),
+            "D3D12 contract selects temporary endpoints");
+    for (std::uint32_t index = 0U; index < 5U; ++index)
+        require(select(1U,
+                       {50.0F + static_cast<float>(index) * 40.0F, 0.0F,
+                        static_cast<float>(index % 2U)},
+                       true)
+                    .ok(),
+                "D3D12 contract publishes a temporary control point");
+    require(controller->overlays().temporaryInterpolation.has_value() &&
+                controller->overlays().temporaryMarkers.has_value(),
+            "D3D12 contract owns both temporary overlay passes");
 
     FakeTarget target(request.presentation, Backend::D3D12);
     WorkspaceViewportFrameRequest frame;
@@ -3413,8 +3641,8 @@ void publishes_controller_through_d3d12_metadata_contract() {
     require(
         prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
                 WorkspaceViewportFrameStatus::ready &&
-            device.overlay_buffers.size() == 2U,
-        "D3D12 contract draws the accepted controller generation");
+            device.overlay_buffers.size() == 6U,
+        "D3D12 contract draws the accepted eight-pass controller generation");
 }
 
 void draws_selected_mesh_with_recovered_fade_boundary() {
@@ -4100,6 +4328,7 @@ int main() {
         tracks_recovered_ai_spline_manual_input();
         publishes_ai_spline_controller_transactions();
         publishes_recovered_ai_spline_edit_lifecycle();
+        publishes_temporary_ai_spline_edit_transaction();
         publishes_recovered_ai_spline_point_selection();
         rejects_foreign_ai_spline_controller_generations();
         rejects_unsafe_ai_spline_controller_candidates();

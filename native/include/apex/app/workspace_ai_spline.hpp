@@ -4,6 +4,7 @@
 #include "apex/render/device.hpp"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -25,10 +26,17 @@ inline constexpr std::array<float, 3U>
     workspace_ai_spline_selection_color = {3.0F, 3.0F, 0.0F};
 inline constexpr std::array<float, 3U>
     workspace_ai_spline_selection_side_color = {0.0F, 3.0F, 3.0F};
+inline constexpr std::array<float, 3U>
+    workspace_ai_spline_temporary_color = {0.0F, 3.0F, 0.0F};
+inline constexpr std::array<float, 3U>
+    workspace_ai_spline_temporary_forward_color = {3.0F, 0.0F, 0.0F};
 inline constexpr float workspace_ai_spline_camber_height_scale = 1'000.0F;
 inline constexpr float workspace_ai_spline_selection_height = 40.0F;
 inline constexpr float workspace_ai_spline_selection_side_half_height = 20.0F;
-inline constexpr std::size_t workspace_ai_spline_pass_count = 6U;
+// The installed temporary marker is an owned graphics object. The portable
+// line ABI represents it with one short vertical line at the picked point.
+inline constexpr float workspace_ai_spline_temporary_marker_height = 2.0F;
+inline constexpr std::size_t workspace_ai_spline_pass_count = 8U;
 inline constexpr float workspace_ai_spline_interpolation_step = 0.0002F;
 inline constexpr std::uint32_t
     workspace_ai_spline_interpolated_sample_count = 5'001U;
@@ -36,6 +44,10 @@ inline constexpr std::size_t
     workspace_ai_spline_max_interpolation_control_points = 65'536U;
 inline constexpr std::size_t workspace_ai_spline_max_selection_points =
     render::max_overlay_line_total_vertices / 2U;
+// This safety bound limits hostile click streams and the O(control-count)
+// length work for every temporary spline segment.
+inline constexpr std::size_t workspace_ai_spline_max_temporary_edit_points =
+    1'024U;
 inline constexpr float workspace_ai_spline_closest_initial_distance_squared =
     9'999'999.0F;
 
@@ -50,6 +62,8 @@ enum class WorkspaceAiSplinePassKind : std::uint8_t {
     left_side,
     right_side,
     selection,
+    temporary_interpolation,
+    temporary_markers,
     camber,
 };
 
@@ -84,12 +98,22 @@ struct WorkspaceAiSplineGeometry {
     std::uint32_t source_point_count = 0U;
     std::uint32_t sample_point_count = 0U;
     std::uint32_t selected_point_count = 0U;
+    std::uint32_t temporary_point_count = 0U;
     std::optional<std::uint32_t> last_selected_index;
     WorkspaceAiSplineDisplayMode mode = WorkspaceAiSplineDisplayMode::raw;
     WorkspaceAiSplinePassKind pass = WorkspaceAiSplinePassKind::primary;
     WorkspaceAiSplineTopology topology = WorkspaceAiSplineTopology::polyline;
     std::vector<render::OverlayLineVertex> vertices;
     std::vector<WorkspaceAiSplineChunk> chunks;
+};
+
+struct WorkspaceAiSplineTemporaryEditPoint {
+    std::array<float, 3U> forward{};
+    std::array<float, 3U> position{};
+
+    friend bool operator==(const WorkspaceAiSplineTemporaryEditPoint&,
+                           const WorkspaceAiSplineTemporaryEditPoint&) =
+        default;
 };
 
 struct WorkspaceAiSplineResult {
@@ -108,6 +132,9 @@ struct WorkspaceAiSplineOverlayRequest {
     bool show_left = false;
     bool show_right = false;
     std::span<const std::uint32_t> selected_indices{};
+    std::span<const WorkspaceAiSplineTemporaryEditPoint>
+        temporary_edit_points{};
+    std::optional<std::size_t> movable_temporary_point;
     bool show_camber = false;
 };
 
@@ -147,6 +174,8 @@ struct WorkspaceAiSplineOverlaySet {
     std::optional<WorkspaceAiSplineGeometry> left;
     std::optional<WorkspaceAiSplineGeometry> right;
     std::optional<WorkspaceAiSplineGeometry> selection;
+    std::optional<WorkspaceAiSplineGeometry> temporaryInterpolation;
+    std::optional<WorkspaceAiSplineGeometry> temporaryMarkers;
     std::optional<WorkspaceAiSplineGeometry> camber;
 };
 
@@ -207,6 +236,22 @@ buildWorkspaceAiSplineGeometry(
 // selected-index vector.
 [[nodiscard]] WorkspaceAiSplineResult buildWorkspaceAiSplineSelectionGeometry(
     const formats::AiSpline& spline, std::uint32_t selected_index);
+
+// Build the source-matched green temporary spline after five edit records.
+// The first and final selected entries are the committed endpoint controls.
+[[nodiscard]] WorkspaceAiSplineResult
+buildWorkspaceAiSplineTemporaryInterpolationGeometry(
+    const formats::AiSpline& spline,
+    std::span<const std::uint32_t> selected_indices,
+    std::span<const WorkspaceAiSplineTemporaryEditPoint> temporary_points);
+
+// Represent each native temporary indicator object with a bounded green line.
+// This is a labeled portable translation for the shared Vulkan/D3D12 ABI.
+[[nodiscard]] WorkspaceAiSplineResult
+buildWorkspaceAiSplineTemporaryMarkerGeometry(
+    const formats::AiSpline& spline,
+    std::span<const WorkspaceAiSplineTemporaryEditPoint> temporary_points,
+    std::optional<std::size_t> movable_point = std::nullopt);
 
 [[nodiscard]] const char* workspace_ai_spline_display_mode_name(
     WorkspaceAiSplineDisplayMode mode) noexcept;

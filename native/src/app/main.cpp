@@ -2056,6 +2056,23 @@ int run_window(int argc, char** argv) {
                 request.ai_spline_selection_pipeline =
                     std::move(selection_pipeline);
             }
+            if (loaded_workspace.aiSplineController != nullptr) {
+                auto temporary_pipeline = pipeline;
+                temporary_pipeline.name =
+                    "workspace-ai-spline-temporary-interpolation";
+                if (ai.temporaryInterpolation.has_value())
+                    request.ai_spline_temporary_interpolation_geometry =
+                        &*ai.temporaryInterpolation;
+                request.ai_spline_temporary_interpolation_pipeline =
+                    temporary_pipeline;
+                temporary_pipeline.name =
+                    "workspace-ai-spline-temporary-markers";
+                if (ai.temporaryMarkers.has_value())
+                    request.ai_spline_temporary_marker_geometry =
+                        &*ai.temporaryMarkers;
+                request.ai_spline_temporary_marker_pipeline =
+                    std::move(temporary_pipeline);
+            }
             if (ai.camber.has_value()) {
                 auto camber_pipeline = pipeline;
                 camber_pipeline.name = "workspace-ai-spline-camber";
@@ -2203,10 +2220,15 @@ int run_window(int argc, char** argv) {
                 return;
             apex::app::WorkspaceAiSplinePointSelectionRequest selection;
             selection.pointIndex = closest.point_index;
+            selection.pickedPosition = mesh_hit.hit->callback_position;
             selection.controlPressed =
                 apex::platform::window_modifier_active(
                     event.modifiers,
                     apex::platform::WindowModifier::control);
+            selection.shiftPressed =
+                apex::platform::window_modifier_active(
+                    event.modifiers,
+                    apex::platform::WindowModifier::shift);
             selection.expected =
                 loaded_workspace.aiSplineController->inputSnapshot();
             const auto selected =
@@ -2216,6 +2238,35 @@ int run_window(int argc, char** argv) {
                 std::cerr << "AI spline point selection: "
                           << selected.diagnostic.code << ": "
                           << selected.diagnostic.message << '\n';
+            }
+        };
+    const auto change_ai_spline_editing =
+        [&](apex::platform::WindowKey key) {
+            if (loaded_workspace.aiSplineController == nullptr ||
+                viewport == nullptr)
+                return;
+            const auto expected =
+                loaded_workspace.aiSplineController->inputSnapshot();
+            apex::app::WorkspaceAiSplineControllerResult changed;
+            if (key == apex::platform::WindowKey::enter) {
+                changed = loaded_workspace.aiSplineController->editing()
+                              ? loaded_workspace.aiSplineController
+                                    ->finishEditing(*device_result.device,
+                                                    *viewport, expected)
+                              : loaded_workspace.aiSplineController
+                                    ->startEditing(*device_result.device,
+                                                   *viewport, expected);
+            } else if (key == apex::platform::WindowKey::escape &&
+                       loaded_workspace.aiSplineController->editing()) {
+                changed = loaded_workspace.aiSplineController->cancelEditing(
+                    *device_result.device, *viewport, expected);
+            } else {
+                return;
+            }
+            if (!changed.ok()) {
+                std::cerr << "AI spline edit mode: "
+                          << changed.diagnostic.code << ": "
+                          << changed.diagnostic.message << '\n';
             }
         };
     while (!window_result.window->close_requested() &&
@@ -2229,6 +2280,12 @@ int run_window(int argc, char** argv) {
             switch (events[index].type) {
             case apex::platform::WindowEventType::key_down:
                 if (!window_has_keyboard_focus) break;
+                if (!events[index].repeat &&
+                    (events[index].semantic_key ==
+                         apex::platform::WindowKey::enter ||
+                     events[index].semantic_key ==
+                         apex::platform::WindowKey::escape))
+                    change_ai_spline_editing(events[index].semantic_key);
                 if (workspace_options.aiSplineUnlockEdit) {
                     if (const auto key =
                             workspace_ai_spline_manual_key_for_window_key(
