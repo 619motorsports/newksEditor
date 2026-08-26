@@ -26,6 +26,7 @@ class Device;
 class StockKsPerPixelNativeShaderProgram;
 class StockKsPerPixelNativeConstantBuffers;
 class StockKsPerPixelNativeSamplers;
+class ValidatedStockKsPerPixelVulkanSourceProgram;
 
 /** Graphics APIs supported by the native renderer. */
 enum class Backend {
@@ -463,6 +464,9 @@ enum class IndexedShaderAuthority : std::uint8_t {
     packet_contract,
     explicit_pipeline,
     explicit_stock_ks_per_pixel_native,
+    // Checked-in SPIR-V implementing the recovered native equations and ABI.
+    // The move-only program owner supplies exact module identity.
+    explicit_stock_ks_per_pixel_vulkan_source_equivalent,
     // Structural Vulkan transport probe for the recovered native ABI. This
     // does not claim exact installed shader behavior or translated DXBC.
     explicit_stock_ks_per_pixel_vulkan_abi_probe,
@@ -501,16 +505,16 @@ enum class StockKsPerPixelVulkanAbiUniformSlot : std::uint8_t {
     count,
 };
 
-// Non-owning descriptor views for the recovered Vulkan ABI probe. Every view
-// is one bounded 256-byte uniform record; the actual recovered records occupy
-// only the first 224/64/160/208/32 bytes respectively.
+// Non-owning descriptor views for the recovered Vulkan native ABI. Every
+// view is one bounded 256-byte uniform record; the actual recovered records
+// occupy only the first 224/64/160/208/32 bytes respectively.
 struct StockKsPerPixelVulkanAbiUniformBufferView {
     const Buffer* buffer = nullptr;
     std::uint64_t offset_bytes = 0U;
     std::uint32_t range_bytes = 0U;
 };
 
-struct StockKsPerPixelVulkanAbiProbeDrawBinding {
+struct StockKsPerPixelVulkanNativeAbiDrawBinding {
     std::array<StockKsPerPixelVulkanAbiUniformBufferView,
                static_cast<std::size_t>(
                    StockKsPerPixelVulkanAbiUniformSlot::count)>
@@ -519,6 +523,17 @@ struct StockKsPerPixelVulkanAbiProbeDrawBinding {
     std::array<const DepthAttachment*, 3U> shadow_maps{};
     const Sampler* linear_sampler = nullptr;
     const Sampler* shadow_sampler = nullptr;
+};
+
+// Backward-compatible name for the structural probe resource transport. The
+// source-equivalent authority uses the same native register projection but a
+// separate owner and request binding below.
+using StockKsPerPixelVulkanAbiProbeDrawBinding =
+    StockKsPerPixelVulkanNativeAbiDrawBinding;
+
+struct StockKsPerPixelVulkanSourceDrawBinding {
+    const ValidatedStockKsPerPixelVulkanSourceProgram* program = nullptr;
+    StockKsPerPixelVulkanNativeAbiDrawBinding resources;
 };
 
 // Recovered stock ksShadowGenAT cbMaterial packing. The installed pixel
@@ -768,6 +783,8 @@ struct IndexedStaticMeshDrawRequest {
     const StockKsPerPixelNativeDrawBinding* stock_ks_per_pixel_native = nullptr;
     const StockKsPerPixelVulkanAbiProbeDrawBinding*
         stock_ks_per_pixel_vulkan_abi_probe = nullptr;
+    const StockKsPerPixelVulkanSourceDrawBinding*
+        stock_ks_per_pixel_vulkan_source = nullptr;
 };
 
 // A recovered selected-mesh draw reuses one static 44-byte-stride mesh. The

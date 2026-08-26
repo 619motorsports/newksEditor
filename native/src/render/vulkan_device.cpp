@@ -1847,15 +1847,15 @@ struct VulkanIndexedBatchDraw {
     VkDeviceSize alpha_material_range = 0U;
     std::uint32_t alpha_mip_levels = 0U;
     const VkImageLayout* alpha_layout = nullptr;
-    bool has_stock_ks_per_pixel_vulkan_abi_probe = false;
-    std::array<VkBuffer, 5U> stock_probe_uniform_buffers{};
-    std::array<VkDeviceSize, 5U> stock_probe_uniform_offsets{};
-    std::array<VkDeviceSize, 5U> stock_probe_uniform_ranges{};
-    VkImageView stock_probe_diffuse_view = VK_NULL_HANDLE;
-    VkSampler stock_probe_linear_sampler = VK_NULL_HANDLE;
-    std::array<VulkanDepthAttachment*, 3U> stock_probe_shadow_attachments{};
-    std::array<VkImageView, 3U> stock_probe_shadow_views{};
-    VkSampler stock_probe_shadow_sampler = VK_NULL_HANDLE;
+    bool has_stock_ks_per_pixel_vulkan_native_abi = false;
+    std::array<VkBuffer, 5U> stock_native_abi_uniform_buffers{};
+    std::array<VkDeviceSize, 5U> stock_native_abi_uniform_offsets{};
+    std::array<VkDeviceSize, 5U> stock_native_abi_uniform_ranges{};
+    VkImageView stock_native_abi_diffuse_view = VK_NULL_HANDLE;
+    VkSampler stock_native_abi_linear_sampler = VK_NULL_HANDLE;
+    std::array<VulkanDepthAttachment*, 3U> stock_native_abi_shadow_attachments{};
+    std::array<VkImageView, 3U> stock_native_abi_shadow_views{};
+    VkSampler stock_native_abi_shadow_sampler = VK_NULL_HANDLE;
 };
 
 // The portable resource ABI uses one sampled image, one sampler, and an
@@ -1969,16 +1969,16 @@ struct VulkanTransientSelectedDescriptors {
 // The recovered ksPerPixel Vulkan ABI uses three descriptor sets to preserve
 // D3D's independent b/t/s namespaces. These objects are per-draw and are
 // destroyed after the synchronous fence completes.
-struct VulkanTransientStockProbeDescriptors {
+struct VulkanTransientStockNativeAbiDescriptors {
     std::shared_ptr<VulkanContext> context;
     std::array<VkDescriptorSetLayout, 3U> layouts{};
     VkDescriptorPool pool = VK_NULL_HANDLE;
     std::array<VkDescriptorSet, 3U> sets{};
 
-    VulkanTransientStockProbeDescriptors() = default;
-    VulkanTransientStockProbeDescriptors(const VulkanTransientStockProbeDescriptors&) = delete;
-    VulkanTransientStockProbeDescriptors& operator=(const VulkanTransientStockProbeDescriptors&) = delete;
-    ~VulkanTransientStockProbeDescriptors() { reset(); }
+    VulkanTransientStockNativeAbiDescriptors() = default;
+    VulkanTransientStockNativeAbiDescriptors(const VulkanTransientStockNativeAbiDescriptors&) = delete;
+    VulkanTransientStockNativeAbiDescriptors& operator=(const VulkanTransientStockNativeAbiDescriptors&) = delete;
+    ~VulkanTransientStockNativeAbiDescriptors() { reset(); }
 
     void reset() noexcept {
         if (context && context->device != VK_NULL_HANDLE) {
@@ -1999,7 +1999,7 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
                                     const std::shared_ptr<VulkanContext>& context,
                                     VulkanIndexedBatchDraw& draw,
                                     Diagnostic& diagnostic);
-bool prepare_vulkan_stock_ks_per_pixel_probe_binding(
+bool prepare_vulkan_stock_ks_per_pixel_native_abi_binding(
     const IndexedStaticMeshDrawRequest& request,
     const std::shared_ptr<VulkanContext>& context,
     VulkanIndexedBatchDraw& draw,
@@ -2042,10 +2042,10 @@ struct VulkanBatchPipeline {
     }
 };
 
-bool create_stock_probe_descriptors(
+bool create_stock_native_abi_descriptors(
     const std::shared_ptr<VulkanContext>& context,
     const VulkanIndexedBatchDraw& draw,
-    VulkanTransientStockProbeDescriptors& descriptors,
+    VulkanTransientStockNativeAbiDescriptors& descriptors,
     Diagnostic& diagnostic) {
     descriptors.reset();
     descriptors.context = context;
@@ -2058,7 +2058,7 @@ bool create_stock_probe_descriptors(
         properties.limits.maxPerStageDescriptorSampledImages < 4U ||
         properties.limits.maxDescriptorSetSamplers < 2U ||
         properties.limits.maxPerStageDescriptorSamplers < 2U) {
-        diagnostic = {"vulkan_stock_abi_probe_descriptor_limit_unsupported",
+        diagnostic = {"vulkan_stock_native_abi_descriptor_limit_unsupported",
                       "The selected Vulkan device cannot bind the recovered three-set descriptor manifest"};
         descriptors.reset();
         return false;
@@ -2092,7 +2092,7 @@ bool create_stock_probe_descriptors(
         const VkResult result = vkCreateDescriptorSetLayout(
             context->device, &layout_info, nullptr, &descriptors.layouts[set]);
         if (result != VK_SUCCESS) {
-            diagnostic = vk_error("vkCreateDescriptorSetLayout(stock ABI probe)", result);
+            diagnostic = vk_error("vkCreateDescriptorSetLayout(stock native ABI)", result);
             diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost"
                                                                : "vulkan_descriptor_layout_failed";
             descriptors.reset();
@@ -2111,7 +2111,7 @@ bool create_stock_probe_descriptors(
     VkResult result = vkCreateDescriptorPool(context->device, &pool_info, nullptr,
                                               &descriptors.pool);
     if (result != VK_SUCCESS) {
-        diagnostic = vk_error("vkCreateDescriptorPool(stock ABI probe)", result);
+        diagnostic = vk_error("vkCreateDescriptorPool(stock native ABI)", result);
         diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost"
                                                            : "vulkan_descriptor_pool_failed";
         descriptors.reset();
@@ -2124,7 +2124,7 @@ bool create_stock_probe_descriptors(
     allocation.pSetLayouts = descriptors.layouts.data();
     result = vkAllocateDescriptorSets(context->device, &allocation, descriptors.sets.data());
     if (result != VK_SUCCESS) {
-        diagnostic = vk_error("vkAllocateDescriptorSets(stock ABI probe)", result);
+        diagnostic = vk_error("vkAllocateDescriptorSets(stock native ABI)", result);
         diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost"
                                                            : "vulkan_descriptor_allocation_failed";
         descriptors.reset();
@@ -2136,16 +2136,16 @@ bool create_stock_probe_descriptors(
     VkDescriptorImageInfo linear_info{};
     VkDescriptorImageInfo sampler_info{};
     for (std::size_t index = 0U; index < uniform_infos.size(); ++index) {
-        uniform_infos[index] = {draw.stock_probe_uniform_buffers[index],
-                                draw.stock_probe_uniform_offsets[index],
-                                draw.stock_probe_uniform_ranges[index]};
+        uniform_infos[index] = {draw.stock_native_abi_uniform_buffers[index],
+                                draw.stock_native_abi_uniform_offsets[index],
+                                draw.stock_native_abi_uniform_ranges[index]};
     }
-    diffuse_info.imageView = draw.stock_probe_diffuse_view;
+    diffuse_info.imageView = draw.stock_native_abi_diffuse_view;
     diffuse_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    linear_info.sampler = draw.stock_probe_linear_sampler;
-    sampler_info.sampler = draw.stock_probe_shadow_sampler;
+    linear_info.sampler = draw.stock_native_abi_linear_sampler;
+    sampler_info.sampler = draw.stock_native_abi_shadow_sampler;
     for (std::size_t index = 0U; index < shadow_infos.size(); ++index) {
-        shadow_infos[index].imageView = draw.stock_probe_shadow_views[index];
+        shadow_infos[index].imageView = draw.stock_native_abi_shadow_views[index];
         shadow_infos[index].imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
     }
     std::array<VkWriteDescriptorSet, 11U> writes{};
@@ -3646,13 +3646,13 @@ bool draw_indexed_batch_and_readback(
             return false;
         }
     }
-    const bool has_stock_probe = std::any_of(
+    const bool has_stock_native_abi = std::any_of(
         draws.begin(), draws.end(), [](const VulkanIndexedBatchDraw& draw) {
-            return draw.has_stock_ks_per_pixel_vulkan_abi_probe;
+            return draw.has_stock_ks_per_pixel_vulkan_native_abi;
         });
     VkPhysicalDeviceProperties properties{};
     vkGetPhysicalDeviceProperties(context->physical_device, &properties);
-    if (!has_stock_probe &&
+    if (!has_stock_native_abi &&
         properties.limits.maxPushConstantsSize < sizeof(DrawMatrices)) {
         diagnostic = {"vulkan_draw_transform_limit_unsupported",
                       "Vulkan device push-constant limit is smaller than the draw-matrices contract"};
@@ -3717,15 +3717,15 @@ bool draw_indexed_batch_and_readback(
     std::vector<VulkanDepthAttachment*> sampled_shadow_attachments;
     if (has_directional_shadow_binding || std::any_of(
             draws.begin(), draws.end(), [](const VulkanIndexedBatchDraw& draw) {
-                return draw.has_stock_ks_per_pixel_vulkan_abi_probe;
+                return draw.has_stock_ks_per_pixel_vulkan_native_abi;
             })) {
         sampled_shadow_attachments.reserve(
             draws.size() * indexed_directional_shadow_cascade_count);
         for (const VulkanIndexedBatchDraw& draw : draws) {
             if (!draw.has_directional_shadow_binding &&
-                !draw.has_stock_ks_per_pixel_vulkan_abi_probe) continue;
-            const auto& attachments = draw.has_stock_ks_per_pixel_vulkan_abi_probe
-                                          ? draw.stock_probe_shadow_attachments
+                !draw.has_stock_ks_per_pixel_vulkan_native_abi) continue;
+            const auto& attachments = draw.has_stock_ks_per_pixel_vulkan_native_abi
+                                          ? draw.stock_native_abi_shadow_attachments
                                           : draw.shadow_attachments;
             for (VulkanDepthAttachment* attachment : attachments) {
                 if (attachment != nullptr &&
@@ -3757,17 +3757,17 @@ bool draw_indexed_batch_and_readback(
         !create_selected_descriptor_layout(context, selected_descriptors,
                                            diagnostic))
         return false;
-    VulkanTransientStockProbeDescriptors stock_probe_descriptors;
-    bool created_stock_probe = false;
+    VulkanTransientStockNativeAbiDescriptors stock_native_abi_descriptors;
+    bool created_stock_native_abi = false;
     for (const VulkanIndexedBatchDraw& draw : draws) {
-        if (!draw.has_stock_ks_per_pixel_vulkan_abi_probe) continue;
-        if (created_stock_probe || draws.size() != 1U) {
-            diagnostic = {"vulkan_stock_abi_probe_batch_unsupported",
-                          "The Vulkan ksPerPixel ABI probe supports one draw only"};
+        if (!draw.has_stock_ks_per_pixel_vulkan_native_abi) continue;
+        if (created_stock_native_abi || draws.size() != 1U) {
+            diagnostic = {"vulkan_stock_native_abi_batch_unsupported",
+                          "The Vulkan ksPerPixel native ABI executor supports one draw only"};
             return false;
         }
-        created_stock_probe = true;
-        if (!create_stock_probe_descriptors(context, draw, stock_probe_descriptors,
+        created_stock_native_abi = true;
+        if (!create_stock_native_abi_descriptors(context, draw, stock_native_abi_descriptors,
                                             diagnostic))
             return false;
     }
@@ -3867,8 +3867,8 @@ bool draw_indexed_batch_and_readback(
         }
         pipelines.emplace_back();
         std::span<const VkDescriptorSetLayout> draw_descriptor_layouts;
-        if (draw.has_stock_ks_per_pixel_vulkan_abi_probe) {
-            draw_descriptor_layouts = stock_probe_descriptors.layouts;
+        if (draw.has_stock_ks_per_pixel_vulkan_native_abi) {
+            draw_descriptor_layouts = stock_native_abi_descriptors.layouts;
         } else if (draw.has_selected_color) {
             draw_descriptor_layouts =
                 std::span<const VkDescriptorSetLayout>(&selected_descriptors.layout, 1U);
@@ -3879,7 +3879,7 @@ bool draw_indexed_batch_and_readback(
         if (!create_batch_pipeline(context, render_pass, description.width, description.height,
                                    description.samples, *draw.program, true,
                                    depth_attachment != nullptr, draw_descriptor_layouts,
-                                   !draw.has_stock_ks_per_pixel_vulkan_abi_probe,
+                                   !draw.has_stock_ks_per_pixel_vulkan_native_abi,
                                    pipelines.back(), diagnostic)) {
             pipelines.clear();
             vkDestroyFramebuffer(context->device, framebuffer, nullptr);
@@ -4040,13 +4040,13 @@ bool draw_indexed_batch_and_readback(
             const VkBuffer vertex_buffer = draw.vertices->raw().buffer;
             const VkDeviceSize vertex_offset = draw.vertex_offset;
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline);
-            if (!draw.has_stock_ks_per_pixel_vulkan_abi_probe)
+            if (!draw.has_stock_ks_per_pixel_vulkan_native_abi)
                 vkCmdPushConstants(command, pipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0U,
                                    static_cast<std::uint32_t>(sizeof(DrawMatrices)), &draw.matrices);
-            if (draw.has_stock_ks_per_pixel_vulkan_abi_probe) {
+            if (draw.has_stock_ks_per_pixel_vulkan_native_abi) {
                 vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                         pipeline.layout, 0U, 3U,
-                                        stock_probe_descriptors.sets.data(), 0U, nullptr);
+                                        stock_native_abi_descriptors.sets.data(), 0U, nullptr);
             } else if (!descriptor_sets.empty() && descriptor_sets[index] != VK_NULL_HANDLE) {
                 vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.layout,
                                         0U, 1U, &descriptor_sets[index], 0U, nullptr);
@@ -4639,11 +4639,16 @@ public:
                                           &index_buffer.raw(),
                                           static_cast<VkDeviceSize>(index_offset), 0U,
                                           packet.index_count, VK_INDEX_TYPE_UINT16};
-        const bool stock_probe =
+        const bool stock_vulkan_source =
             request.shader_authority ==
-            IndexedShaderAuthority::explicit_stock_ks_per_pixel_vulkan_abi_probe;
+            IndexedShaderAuthority::
+                explicit_stock_ks_per_pixel_vulkan_source_equivalent;
+        const bool stock_native_abi = stock_vulkan_source ||
+            request.shader_authority ==
+                IndexedShaderAuthority::
+                    explicit_stock_ks_per_pixel_vulkan_abi_probe;
         DrawMatrices draw_matrices{};
-        if (!stock_probe)
+        if (!stock_native_abi)
             draw_matrices = {packet.world_matrix, request.camera_frame->view_projection};
         VulkanDepthAttachment* depth_attachment = nullptr;
         if (request.depth_attachment != nullptr) {
@@ -4659,7 +4664,7 @@ public:
                 return false;
             }
         }
-        if (stock_probe) {
+        if (stock_native_abi) {
             VulkanIndexedBatchDraw draw;
             draw.program = request.pipeline;
             draw.vertices = &vertex_buffer;
@@ -4667,9 +4672,18 @@ public:
             draw.vertex_offset = static_cast<VkDeviceSize>(vertex_offset);
             draw.index_offset = static_cast<VkDeviceSize>(index_offset);
             draw.index_count = packet.index_count;
-            if (!prepare_vulkan_stock_ks_per_pixel_probe_binding(request, context_, draw,
-                                                                 diagnostic))
+            if (!prepare_vulkan_stock_ks_per_pixel_native_abi_binding(
+                    request, context_, draw, diagnostic)) {
+                if (stock_vulkan_source) {
+                    constexpr std::string_view prefix =
+                        "vulkan_stock_abi_probe_";
+                    if (diagnostic.code.starts_with(prefix)) {
+                        diagnostic.code = "vulkan_stock_source_" +
+                            diagnostic.code.substr(prefix.size());
+                    }
+                }
                 return false;
+            }
             const std::array<VulkanIndexedBatchDraw, 1> draws = {draw};
             const bool drawn = draw_indexed_batch_and_readback(
                 context_, raw_, info_.description, draws, depth_attachment, request.load_color,
@@ -5585,23 +5599,25 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
     return true;
 }
 
-bool prepare_vulkan_stock_ks_per_pixel_probe_binding(
+bool prepare_vulkan_stock_ks_per_pixel_native_abi_binding(
     const IndexedStaticMeshDrawRequest& request,
     const std::shared_ptr<VulkanContext>& context,
     VulkanIndexedBatchDraw& draw,
     Diagnostic& diagnostic) {
-    if (request.stock_ks_per_pixel_vulkan_abi_probe == nullptr) {
+    const StockKsPerPixelVulkanNativeAbiDrawBinding* binding =
+        request.stock_ks_per_pixel_vulkan_source != nullptr
+            ? &request.stock_ks_per_pixel_vulkan_source->resources
+            : request.stock_ks_per_pixel_vulkan_abi_probe;
+    if (binding == nullptr) {
         diagnostic = {"vulkan_stock_abi_probe_binding_missing",
                       "The Vulkan ksPerPixel ABI probe binding is missing"};
         return false;
     }
-    const StockKsPerPixelVulkanAbiProbeDrawBinding& binding =
-        *request.stock_ks_per_pixel_vulkan_abi_probe;
     VkPhysicalDeviceProperties properties{};
     vkGetPhysicalDeviceProperties(context->physical_device, &properties);
-    for (std::size_t index = 0U; index < binding.uniform_buffers.size(); ++index) {
+    for (std::size_t index = 0U; index < binding->uniform_buffers.size(); ++index) {
         const StockKsPerPixelVulkanAbiUniformBufferView& view =
-            binding.uniform_buffers[index];
+            binding->uniform_buffers[index];
         const auto* buffer = dynamic_cast<const VulkanBuffer*>(
             view.buffer);
         if (buffer == nullptr || buffer->raw().buffer == VK_NULL_HANDLE) {
@@ -5620,13 +5636,13 @@ bool prepare_vulkan_stock_ks_per_pixel_probe_binding(
                           "A Vulkan ksPerPixel ABI probe uniform view exceeds the selected device limits"};
             return false;
         }
-        draw.stock_probe_uniform_buffers[index] = buffer->raw().buffer;
-        draw.stock_probe_uniform_offsets[index] = view.offset_bytes;
-        draw.stock_probe_uniform_ranges[index] = view.range_bytes;
+        draw.stock_native_abi_uniform_buffers[index] = buffer->raw().buffer;
+        draw.stock_native_abi_uniform_offsets[index] = view.offset_bytes;
+        draw.stock_native_abi_uniform_ranges[index] = view.range_bytes;
     }
-    const auto* diffuse = dynamic_cast<const VulkanTexture*>(binding.diffuse_texture);
-    const auto* linear = dynamic_cast<const VulkanSampler*>(binding.linear_sampler);
-    const auto* shadow_sampler = dynamic_cast<const VulkanSampler*>(binding.shadow_sampler);
+    const auto* diffuse = dynamic_cast<const VulkanTexture*>(binding->diffuse_texture);
+    const auto* linear = dynamic_cast<const VulkanSampler*>(binding->linear_sampler);
+    const auto* shadow_sampler = dynamic_cast<const VulkanSampler*>(binding->shadow_sampler);
     if (diffuse == nullptr || linear == nullptr || shadow_sampler == nullptr ||
         diffuse->image() == VK_NULL_HANDLE ||
         diffuse->view() == VK_NULL_HANDLE || linear->sampler() == VK_NULL_HANDLE ||
@@ -5643,12 +5659,12 @@ bool prepare_vulkan_stock_ks_per_pixel_probe_binding(
                       "Every Vulkan ksPerPixel ABI probe resource must belong to the target device"};
         return false;
     }
-    draw.stock_probe_diffuse_view = diffuse->view();
-    draw.stock_probe_linear_sampler = linear->sampler();
-    draw.stock_probe_shadow_sampler = shadow_sampler->sampler();
-    for (std::size_t index = 0U; index < binding.shadow_maps.size(); ++index) {
+    draw.stock_native_abi_diffuse_view = diffuse->view();
+    draw.stock_native_abi_linear_sampler = linear->sampler();
+    draw.stock_native_abi_shadow_sampler = shadow_sampler->sampler();
+    for (std::size_t index = 0U; index < binding->shadow_maps.size(); ++index) {
         auto* shadow = dynamic_cast<VulkanDepthAttachment*>(
-            const_cast<DepthAttachment*>(binding.shadow_maps[index]));
+            const_cast<DepthAttachment*>(binding->shadow_maps[index]));
         if (shadow == nullptr || !shadow->initialized() ||
             shadow->image() == VK_NULL_HANDLE || shadow->view() == VK_NULL_HANDLE) {
             diagnostic = {"vulkan_stock_abi_probe_shadow_resource_invalid",
@@ -5660,10 +5676,10 @@ bool prepare_vulkan_stock_ks_per_pixel_probe_binding(
                           "Every Vulkan ksPerPixel ABI probe resource must belong to the target device"};
             return false;
         }
-        draw.stock_probe_shadow_attachments[index] = shadow;
-        draw.stock_probe_shadow_views[index] = shadow->view();
+        draw.stock_native_abi_shadow_attachments[index] = shadow;
+        draw.stock_native_abi_shadow_views[index] = shadow->view();
     }
-    draw.has_stock_ks_per_pixel_vulkan_abi_probe = true;
+    draw.has_stock_ks_per_pixel_vulkan_native_abi = true;
     return true;
 }
 

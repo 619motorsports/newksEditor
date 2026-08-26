@@ -1459,13 +1459,12 @@ void allocates_exact_native_d3d12_constant_buffer_views() {
             "invalid native constants reject before buffer allocation");
 
     FakeShaderDevice vulkan(Backend::Vulkan);
-    const auto rejected_vulkan =
+    auto allocated_vulkan =
         allocate_stock_ks_per_pixel_native_constant_buffers(vulkan, constants);
-    require(!rejected_vulkan.ok() &&
-                rejected_vulkan.status ==
-                    StockKsPerPixelNativeConstantBufferStatus::backend_unsupported &&
-                vulkan.buffer_calls == 0U,
-            "Vulkan rejects the native D3D12 constant-buffer path");
+    require(allocated_vulkan.ok() && vulkan.buffer_calls == 5U &&
+                allocated_vulkan.buffers->device() == &vulkan,
+            "Vulkan allocates the recovered native-ABI constant records");
+    allocated_vulkan.buffers.reset();
 
     FakeShaderDevice partial_failure(Backend::D3D12);
     partial_failure.buffer_fail_call = 3U;

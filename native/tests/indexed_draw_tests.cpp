@@ -1,6 +1,7 @@
 #include "apex/render/draw_packet.hpp"
 #include "apex/render/device.hpp"
 #include "apex/render/selected_mesh.hpp"
+#include "apex/render/stock_ks_per_pixel_vulkan.hpp"
 #include "apex/render/stock_ks_per_pixel_vulkan_abi.hpp"
 #include "../src/render/backend_internal.hpp"
 
@@ -2866,6 +2867,77 @@ void validates_stock_vulkan_abi_probe_authority() {
                 diagnostic.code ==
                     "indexed_stock_vulkan_abi_probe_sampler_contract_invalid",
             "Vulkan ABI probe rejects comparison-sampler drift");
+
+    StockKsPerPixelVulkanSourceProgramResult source_program =
+        create_builtin_stock_ks_per_pixel_vulkan_source_program(
+            StockKsPerPixelVariant::base);
+    require(source_program.ok(),
+            "built-in Vulkan source-equivalent program fixture");
+    StockKsPerPixelVulkanSourceDrawBinding source_binding;
+    source_binding.program = &*source_program.program;
+    source_binding.resources = binding;
+    IndexedStaticMeshDrawRequest source_request = request;
+    source_request.pipeline = &source_program.program->pipeline();
+    source_request.shader_authority = IndexedShaderAuthority::
+        explicit_stock_ks_per_pixel_vulkan_source_equivalent;
+    source_request.stock_ks_per_pixel_vulkan_abi_probe = nullptr;
+    source_request.stock_ks_per_pixel_vulkan_source = &source_binding;
+    require(validate_indexed_static_mesh_draw_request(
+                target, source_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            diagnostic.code.empty()
+                ? "complete Vulkan source-equivalent draw passes preflight"
+                : diagnostic.code.c_str());
+
+    const std::array source_draws = {source_request};
+    batch.draws = source_draws;
+    require(validate_indexed_static_mesh_batch_description(
+                target, batch, diagnostic) ==
+                IndexedStaticMeshBatchStatus::unsupported &&
+                diagnostic.code ==
+                    "indexed_stock_vulkan_source_batch_unsupported",
+            "Vulkan source-equivalent batches remain explicitly staged");
+
+    PipelineProgram copied_source_pipeline =
+        source_program.program->pipeline();
+    malformed_request = source_request;
+    malformed_request.pipeline = &copied_source_pipeline;
+    require(validate_indexed_static_mesh_draw_request(
+                target, malformed_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_stock_vulkan_source_owner_mismatch",
+            "a copied pipeline cannot escape the immutable source owner");
+
+    auto missing_source_uniform = source_binding;
+    missing_source_uniform.resources.uniform_buffers[3U].buffer = nullptr;
+    malformed_request = source_request;
+    malformed_request.stock_ks_per_pixel_vulkan_source =
+        &missing_source_uniform;
+    require(validate_indexed_static_mesh_draw_request(
+                target, malformed_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_stock_vulkan_source_uniform_missing",
+            "source-equivalent draw rejects a missing native uniform slot");
+
+    malformed_request = source_request;
+    malformed_request.stock_ks_per_pixel_vulkan_abi_probe = &binding;
+    require(validate_indexed_static_mesh_draw_request(
+                target, malformed_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_stock_vulkan_source_binding_overlap",
+            "source-equivalent authority rejects probe binding overlap");
+
+    malformed_request = source_request;
+    malformed_request.sampled_binding.texture = &diffuse;
+    require(validate_indexed_static_mesh_draw_request(
+                target, malformed_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_stock_vulkan_source_portable_binding_overlap",
+            "source-equivalent authority rejects portable binding overlap");
 }
 
 void visits_generalized_batch_in_requested_phase_order() {

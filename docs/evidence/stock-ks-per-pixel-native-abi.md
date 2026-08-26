@@ -361,9 +361,23 @@ program. D3D12 allocates the vertex and pixel module objects in stage order.
 The function rejects Vulkan DXBC before it calls the device.
 
 `allocate_stock_ks_per_pixel_native_constant_buffers` validates the five
-native records before allocation. D3D12 creates one mutable 256-byte view for
-each reflected buffer. The allocator clears all bytes after each record.
-It releases earlier buffers if a later allocation fails.
+native records before allocation. Vulkan and D3D12 each create one mutable
+256-byte view for every reflected buffer. The allocator clears all bytes
+after each record. It releases earlier buffers if a later allocation fails.
+
+The Vulkan draw request uses
+`explicit_stock_ks_per_pixel_vulkan_source_equivalent`. It requires the exact
+move-only source owner and a separate native-ABI resource binding. Common
+preflight rejects copied pipelines, probe/source authority overlap, portable
+resource overlap, variant/sample-state drift, missing records, and descriptor
+contract drift. The Vulkan backend reuses the three-set native-ABI descriptor
+executor without relabeling the structural probe as source-equivalent.
+
+The SwiftShader runtime test executes both variants. The base path uses a
+single-sample target. The AT path uses a 4x target and resolves it for
+readback. Both center pixels are checked against the recovered CPU equation.
+This test executes the generated SPIR-V; it does not execute the installed
+DXBC.
 
 The CPU evaluator follows the recovered pixel equation. It rejects non-finite
 records and degenerate normalization inputs before evaluation. This evaluator

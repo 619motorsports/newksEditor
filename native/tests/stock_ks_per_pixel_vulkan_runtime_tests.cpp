@@ -1,10 +1,13 @@
 #include "apex/render/device.hpp"
 #include "apex/render/draw_packet.hpp"
+#include "apex/render/stock_ks_per_pixel_vulkan.hpp"
 #include "apex/render/stock_ks_per_pixel_vulkan_abi.hpp"
 
 #include "stock_vulkan_abi_probe_spirv.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -288,9 +291,136 @@ int run_runtime_probe() {
             "Vulkan ABI runtime rejects a foreign-device descriptor resource");
     binding.uniform_buffers[0].buffer = uniform_buffers[0].get();
 
+    StockKsPerPixelNativeConstantData source_constants;
+    source_constants.camera.view = apex::scene::identity_matrix;
+    source_constants.camera.projection = apex::scene::identity_matrix;
+    source_constants.camera.mvp_inverse = apex::scene::identity_matrix;
+    source_constants.camera.camera_position = {0.0F, 0.0F, 2.0F};
+    source_constants.camera.near_plane = 0.1F;
+    source_constants.camera.far_plane = 100.0F;
+    source_constants.camera.field_of_view = 1.0F;
+    source_constants.object.world = apex::scene::identity_matrix;
+    source_constants.lighting.light_direction = {0.0F, -1.0F, 0.0F};
+    source_constants.lighting.ambient_color = {0.1F, 0.1F, 0.1F, 1.0F};
+    source_constants.lighting.light_color = {0.4F, 0.4F, 0.4F};
+    source_constants.lighting.fog_linear = 100.0F;
+    source_constants.lighting.fog_blend = 0.0F;
+    source_constants.lighting.fog_color = {0.0F, 0.0F, 0.0F};
+    source_constants.shadow_maps.shadow_matrices.fill(
+        apex::scene::identity_matrix);
+    source_constants.shadow_maps.biases = {0.0F, 0.0F, 0.0F};
+    source_constants.shadow_maps.texture_size = 1.0F / 32.0F;
+    source_constants.material.ambient = 0.5F;
+    source_constants.material.diffuse = 0.75F;
+    source_constants.material.specular = 0.0F;
+    source_constants.material.specular_exponent = 1.0F;
+    StockKsPerPixelNativeConstantBufferResult source_buffers =
+        allocate_stock_ks_per_pixel_native_constant_buffers(
+            device, source_constants);
+    require(source_buffers.ok(),
+            "Vulkan source-equivalent native constant allocation");
+
+    StockKsPerPixelVulkanSourceProgramResult source_program =
+        create_builtin_stock_ks_per_pixel_vulkan_source_program(
+            StockKsPerPixelVariant::base);
+    require(source_program.ok(),
+            "Vulkan source-equivalent base program creation");
+    StockKsPerPixelVulkanSourceDrawBinding source_binding;
+    source_binding.program = &*source_program.program;
+    for (std::size_t index = 0U;
+         index < source_binding.resources.uniform_buffers.size(); ++index) {
+        source_binding.resources.uniform_buffers[index] = {
+            source_buffers.buffers->buffer(
+                static_cast<StockKsPerPixelNativeConstantSlot>(index)),
+            0U, stock_ks_per_pixel_native_constant_buffer_view_bytes};
+    }
+    source_binding.resources.diffuse_texture = diffuse.texture.get();
+    source_binding.resources.shadow_maps = {
+        shadows[0].get(), shadows[1].get(), shadows[2].get()};
+    source_binding.resources.linear_sampler = linear_sampler.sampler.get();
+    source_binding.resources.shadow_sampler = shadow_sampler.sampler.get();
+
+    IndexedStaticMeshDrawRequest source_request = request;
+    source_request.pipeline = &source_program.program->pipeline();
+    source_request.shader_authority = IndexedShaderAuthority::
+        explicit_stock_ks_per_pixel_vulkan_source_equivalent;
+    source_request.stock_ks_per_pixel_vulkan_abi_probe = nullptr;
+    source_request.stock_ks_per_pixel_vulkan_source = &source_binding;
+    const IndexedStaticMeshDrawResult source_draw =
+        device.draw_indexed_static_mesh_and_readback(
+            *target.texture, source_request);
+    require(source_draw.ok(),
+            source_draw.diagnostic.code.empty()
+                ? "Vulkan source-equivalent base draw"
+                : source_draw.diagnostic.code);
+    const StockKsPerPixelEvaluationResult expected = evaluate_stock_ks_per_pixel(
+        {{0.0F, 1.0F, 0.0F},
+         {0.0F, 0.0F, -2.0F},
+         {1.0F, 0.0F, 0.0F, 1.0F},
+         0.0F,
+         1.0F},
+        source_constants.lighting, source_constants.material,
+        StockKsPerPixelVariant::base);
+    require(expected.ok(), "CPU source-equivalent reference evaluation");
+    const auto expected_byte = [](float value) {
+        return static_cast<std::uint8_t>(std::lround(
+            std::clamp(value, 0.0F, 1.0F) * 255.0F));
+    };
+    for (std::size_t channel = 0U; channel < 4U; ++channel) {
+        const int actual = std::to_integer<std::uint8_t>(
+            source_draw.rgba8[center + channel]);
+        const int reference = expected_byte(expected.rgba[channel]);
+        require(std::abs(actual - reference) <= 1,
+                "Vulkan source-equivalent center matches recovered CPU equation");
+    }
+
+    TextureDescription alpha_target_description = target_description;
+    alpha_target_description.samples = 4U;
+    TextureResult alpha_target =
+        device.create_texture(alpha_target_description);
+    require(alpha_target.ok(),
+            "Vulkan source-equivalent 4x target creation");
+    StockKsPerPixelVulkanSourceProgramResult alpha_program =
+        create_builtin_stock_ks_per_pixel_vulkan_source_program(
+            StockKsPerPixelVariant::alpha_to_coverage);
+    require(alpha_program.ok(),
+            "Vulkan source-equivalent AT program creation");
+    StockKsPerPixelVulkanSourceDrawBinding alpha_binding = source_binding;
+    alpha_binding.program = &*alpha_program.program;
+    DrawPacket alpha_packet = packet;
+    alpha_packet.flags.alpha_to_coverage = true;
+    IndexedStaticMeshDrawRequest alpha_request = source_request;
+    alpha_request.packet = &alpha_packet;
+    alpha_request.pipeline = &alpha_program.program->pipeline();
+    alpha_request.stock_ks_per_pixel_vulkan_source = &alpha_binding;
+    const IndexedStaticMeshDrawResult alpha_draw =
+        device.draw_indexed_static_mesh_and_readback(
+            *alpha_target.texture, alpha_request);
+    require(alpha_draw.ok(),
+            alpha_draw.diagnostic.code.empty()
+                ? "Vulkan source-equivalent AT draw"
+                : alpha_draw.diagnostic.code);
+    const StockKsPerPixelEvaluationResult expected_alpha =
+        evaluate_stock_ks_per_pixel(
+            {{0.0F, 1.0F, 0.0F},
+             {0.0F, 0.0F, -2.0F},
+             {1.0F, 0.0F, 0.0F, 1.0F},
+             0.0F,
+             1.0F},
+            source_constants.lighting, source_constants.material,
+            StockKsPerPixelVariant::alpha_to_coverage);
+    require(expected_alpha.ok(), "CPU AT reference evaluation");
+    for (std::size_t channel = 0U; channel < 4U; ++channel) {
+        const int actual = std::to_integer<std::uint8_t>(
+            alpha_draw.rgba8[center + channel]);
+        const int reference = expected_byte(expected_alpha.rgba[channel]);
+        require(std::abs(actual - reference) <= 1,
+                "Vulkan AT center matches recovered CPU equation after resolve");
+    }
+
     device.wait_idle();
     peer_result.device->wait_idle();
-    std::cout << "stock ksPerPixel Vulkan ABI runtime transport probe passed\n";
+    std::cout << "stock ksPerPixel Vulkan ABI probe and source-equivalent runtime draw passed\n";
     return 0;
 }
 
@@ -300,7 +430,7 @@ int main() {
     try {
         return run_runtime_probe();
     } catch (const std::exception& error) {
-        std::cerr << "stock ksPerPixel Vulkan ABI runtime transport probe failed: "
+        std::cerr << "stock ksPerPixel Vulkan ABI/source runtime test failed: "
                   << error.what() << '\n';
         return 1;
     }
