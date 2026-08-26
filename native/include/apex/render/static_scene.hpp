@@ -113,6 +113,11 @@ struct StaticSceneFrameDescription {
     // contain only 0 (hidden) or 1 (visible). Hidden packets keep their stable
     // prepared contract but do not draw or update retained skinned geometry.
     std::span<const std::uint8_t> packet_visibility{};
+    // Optional color-pass permutation in prepared packet-index space. Empty
+    // preserves prepared order. A supplied span must contain every prepared
+    // index exactly once. Visibility and refreshed state remain keyed by the
+    // prepared index. Directional shadows have an independent order.
+    std::span<const std::uint32_t> color_packet_order{};
     // When false, skinned uploads are restored to their bind-pose bytes. When
     // true, each skinned upload is CPU-skinned from refreshed_packets (or the
     // prepared packets when the span is empty) before the batch is submitted.

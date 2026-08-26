@@ -12,6 +12,7 @@
 #include <cstring>
 #include <limits>
 #include <new>
+#include <numeric>
 #include <utility>
 #include <vector>
 
@@ -892,7 +893,7 @@ WorkspaceViewport::WorkspaceViewport(
     std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps,
     std::optional<WorkspaceViewportDirectionalShadowOptions>
         directional_shadows,
-    std::optional<VisibilityCatalog> visibility_catalog)
+    std::optional<FrameCatalog> frame_catalog)
     : device_(device), backend_(backend), presentation_(presentation),
       color_(std::move(color)), resolved_color_(std::move(resolved_color)),
       depth_(std::move(depth)), execution_(std::move(execution)),
@@ -909,7 +910,7 @@ WorkspaceViewport::WorkspaceViewport(
       selected_mesh_color_buffer_(std::move(selected_mesh_color_buffer)),
       shadow_maps_(std::move(shadow_maps)),
       directional_shadows_(std::move(directional_shadows)),
-      visibility_catalog_(std::move(visibility_catalog)) {}
+      frame_catalog_(std::move(frame_catalog)) {}
 
 WorkspaceViewport::~WorkspaceViewport() = default;
 
@@ -1240,10 +1241,21 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
         return WorkspaceViewportFrameStatus::invalid;
     }
 
+    const auto prepared_packets = execution_->resources->prepared_packets();
+    std::span<const render::DrawPacket> frame_packets = prepared_packets;
+    if (frame_catalog_.has_value() && !request.refreshed_packets.empty()) {
+        if (request.refreshed_packets.size() != prepared_packets.size()) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_refreshed_packet_count_invalid",
+                "Refreshed packets must match the prepared packet count");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        frame_packets = request.refreshed_packets;
+    }
+
     std::span<const std::uint8_t> packet_visibility = request.packet_visibility;
-    if (request.packet_visibility.empty() && visibility_catalog_.has_value()) {
-        auto& catalog = *visibility_catalog_;
-        const auto prepared_packets = execution_->resources->prepared_packets();
+    if (request.packet_visibility.empty() && frame_catalog_.has_value()) {
+        auto& catalog = *frame_catalog_;
         if (catalog.frame_visibility.size() != prepared_packets.size() ||
             (!catalog.mesh_filters.empty() &&
              catalog.mesh_filters.size() != prepared_packets.size())) {
@@ -1290,22 +1302,12 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
             }
         }
         if (!catalog.mesh_filters.empty()) {
-            std::span<const render::DrawPacket> filter_packets = prepared_packets;
-            if (!request.refreshed_packets.empty()) {
-                if (request.refreshed_packets.size() != prepared_packets.size()) {
-                    output_diagnostic = diagnostic(
-                        "workspace_viewport_refreshed_packet_count_invalid",
-                        "Refreshed packets must match the prepared packet count");
-                    return WorkspaceViewportFrameStatus::invalid;
-                }
-                filter_packets = request.refreshed_packets;
-            }
             for (std::size_t index = 0U; index < catalog.mesh_filters.size();
                  ++index) {
                 if (!catalog.mesh_filters[index].has_value()) continue;
                 render::CameraMeshFilterRequest filter_request;
                 filter_request.renderable = *catalog.mesh_filters[index];
-                filter_request.world_matrix = filter_packets[index].world_matrix;
+                filter_request.world_matrix = frame_packets[index].world_matrix;
                 filter_request.camera = &request.camera;
                 filter_request.pass = filter_request.renderable.transparent
                                           ? render::CameraMeshPass::transparent
@@ -1326,6 +1328,72 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
         packet_visibility = catalog.frame_visibility;
     }
 
+    std::span<const std::uint32_t> color_packet_order;
+    if (frame_catalog_.has_value() &&
+        frame_catalog_->webgl_live_transparent_order) {
+        auto& catalog = *frame_catalog_;
+        if (catalog.color_order_packets.size() != prepared_packets.size() ||
+            catalog.frame_color_order.size() != prepared_packets.size() ||
+            catalog.frame_color_distance_squared.size() !=
+                prepared_packets.size()) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_color_order_catalog_invalid",
+                "The retained color-order catalog is not dense");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        if (!finite_vector(request.camera.position)) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_color_order_camera_invalid",
+                "Live transparent ordering requires a finite camera position");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        std::iota(catalog.frame_color_order.begin(),
+                  catalog.frame_color_order.end(), 0U);
+        for (std::size_t index = 0U; index < prepared_packets.size(); ++index) {
+            const auto& local =
+                catalog.color_order_packets[index].local_aabb_center;
+            const auto& world = frame_packets[index].world_matrix;
+            double distance_squared = 0.0;
+            for (std::size_t row = 0U; row < 3U; ++row) {
+                const double center =
+                    static_cast<double>(world[row]) * local[0] +
+                    static_cast<double>(world[4U + row]) * local[1] +
+                    static_cast<double>(world[8U + row]) * local[2] +
+                    static_cast<double>(world[12U + row]);
+                const double delta =
+                    center - static_cast<double>(request.camera.position[row]);
+                distance_squared += delta * delta;
+            }
+            if (!std::isfinite(distance_squared)) {
+                output_diagnostic = diagnostic(
+                    "workspace_viewport_color_order_bounds_invalid",
+                    "A transformed transparent-sort center is not finite");
+                return WorkspaceViewportFrameStatus::invalid;
+            }
+            catalog.frame_color_distance_squared[index] = distance_squared;
+        }
+        std::stable_sort(
+            catalog.frame_color_order.begin(), catalog.frame_color_order.end(),
+            [&](std::uint32_t first, std::uint32_t second) {
+                const auto& first_packet = prepared_packets[first];
+                const auto& second_packet = prepared_packets[second];
+                if (first_packet.flags.transparent !=
+                    second_packet.flags.transparent) {
+                    return !first_packet.flags.transparent;
+                }
+                if (first_packet.layer != second_packet.layer)
+                    return first_packet.layer < second_packet.layer;
+                if (first_packet.flags.transparent &&
+                    catalog.frame_color_distance_squared[first] !=
+                        catalog.frame_color_distance_squared[second]) {
+                    return catalog.frame_color_distance_squared[first] >
+                           catalog.frame_color_distance_squared[second];
+                }
+                return false;
+            });
+        color_packet_order = catalog.frame_color_order;
+    }
+
     render::StaticSceneFrameDescription frame;
     frame.camera = request.camera;
     frame.depth_attachment = depth_.get();
@@ -1337,6 +1405,7 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
     frame.capture_rgba8 = false;
     frame.refreshed_packets = request.refreshed_packets;
     frame.packet_visibility = packet_visibility;
+    frame.color_packet_order = color_packet_order;
     frame.apply_skinning = request.apply_skinning;
     frame.frame_constants = request.frame_constants;
     if (request.selected_mesh_elapsed_ms.has_value() &&
@@ -1845,10 +1914,11 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             return result;
         }
 
-        std::optional<WorkspaceViewport::VisibilityCatalog> visibility_catalog;
+        std::optional<WorkspaceViewport::FrameCatalog> frame_catalog;
         if ((lod_resolution.has_value() && !render_options.isolated) ||
-            request.camera_mesh_filter) {
-            WorkspaceViewport::VisibilityCatalog catalog;
+            request.camera_mesh_filter ||
+            request.webgl_live_transparent_order) {
+            WorkspaceViewport::FrameCatalog catalog;
             const auto packets = execution->resources->prepared_packets();
             const auto& scene = document.scene.snapshot;
             if (lod_resolution.has_value() && !render_options.isolated) {
@@ -1931,8 +2001,33 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                     catalog.mesh_filters.push_back(item->camera_mesh_filter);
                 }
             }
+            if (request.webgl_live_transparent_order) {
+                catalog.webgl_live_transparent_order = true;
+                catalog.color_order_packets.reserve(packets.size());
+                for (const auto& packet : packets) {
+                    const auto* node = scene.find_node(packet.node);
+                    if (node == nullptr) {
+                        result.status = WorkspaceViewportStatus::invalid;
+                        result.diagnostic = diagnostic(
+                            "workspace_viewport_color_order_node_invalid",
+                            "A prepared packet references an unknown scene node");
+                        return result;
+                    }
+                    if (!node->local_aabb_center.has_value()) {
+                        result.status = WorkspaceViewportStatus::unsupported;
+                        result.diagnostic = diagnostic(
+                            "workspace_viewport_color_order_bounds_unavailable",
+                            "WebGL-compatible live ordering requires a vertex-AABB center for every packet");
+                        return result;
+                    }
+                    catalog.color_order_packets.push_back(
+                        {*node->local_aabb_center});
+                }
+                catalog.frame_color_order.resize(packets.size());
+                catalog.frame_color_distance_squared.resize(packets.size());
+            }
             catalog.frame_visibility.resize(packets.size(), 1U);
-            visibility_catalog = std::move(catalog);
+            frame_catalog = std::move(catalog);
         }
 
         std::optional<render::PipelineProgram> selected_mesh_pipeline;
@@ -2414,7 +2509,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             std::move(selected_mesh_pipeline),
             std::move(selected_mesh_color_buffer),
             std::move(shadow_maps), request.directional_shadows,
-            std::move(visibility_catalog)));
+            std::move(frame_catalog)));
         result.status = WorkspaceViewportStatus::ready;
         return result;
     } catch (const workspace::WorkspaceError& error) {

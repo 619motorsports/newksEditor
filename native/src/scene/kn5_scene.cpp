@@ -153,6 +153,46 @@ LocalBounds geometryBounds(const formats::Kn5Node& source, std::string_view path
     return result;
 }
 
+std::optional<Vector3> geometryAabbCenter(
+    const formats::Kn5Node& source, std::string_view path) {
+    if (source.vertices.empty()) return std::nullopt;
+    if (source.vertexStride < 3U ||
+        source.vertices.size() % source.vertexStride != 0U) {
+        invalid(path, "vertex data is not stride-aligned");
+    }
+
+    Vector3 minimum = {std::numeric_limits<float>::infinity(),
+                       std::numeric_limits<float>::infinity(),
+                       std::numeric_limits<float>::infinity()};
+    Vector3 maximum = {-std::numeric_limits<float>::infinity(),
+                       -std::numeric_limits<float>::infinity(),
+                       -std::numeric_limits<float>::infinity()};
+    for (std::size_t offset = 0U; offset < source.vertices.size();
+         offset += source.vertexStride) {
+        for (std::size_t axis = 0U; axis < 3U; ++axis) {
+            const float value = source.vertices[offset + axis];
+            requireFinite(value, path, "vertex position");
+            minimum[axis] = std::min(minimum[axis], value);
+            maximum[axis] = std::max(maximum[axis], value);
+        }
+    }
+
+    Vector3 center{};
+    for (std::size_t axis = 0U; axis < 3U; ++axis) {
+        const double value = static_cast<double>(minimum[axis]) +
+                             (static_cast<double>(maximum[axis]) -
+                              static_cast<double>(minimum[axis])) *
+                                 0.5;
+        if (!std::isfinite(value) ||
+            value < -static_cast<double>(std::numeric_limits<float>::max()) ||
+            value > static_cast<double>(std::numeric_limits<float>::max())) {
+            invalid(path, "vertex AABB center is outside float range");
+        }
+        center[axis] = static_cast<float>(value);
+    }
+    return center;
+}
+
 NodeKind nodeKind(std::uint32_t type, std::string_view path) {
     switch (type) {
         case 1: return NodeKind::node;
@@ -341,6 +381,7 @@ void appendNode(const formats::Kn5Node& source, NodeId parent, const Matrix4& pa
         node.local_bounds_source = kind == NodeKind::mesh
                                        ? LocalBoundsSource::kn5_serialized
                                        : LocalBoundsSource::kn5_vertex_mean;
+        node.local_aabb_center = geometryAabbCenter(source, path);
         node.bounds_center = transformPoint(world, bounds.center, path);
         node.bounds_radius = bounds.radius * maxScale(world, path);
         requireFinite(node.bounds_radius, path, "world bounds radius");

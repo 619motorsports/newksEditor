@@ -1311,6 +1311,23 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         return {IndexedStaticMeshBatchStatus::invalid_request,
                 {"static_scene_frame_visibility_mask_value_invalid",
                  "Static-scene packet visibility values must be 0 or 1"}, {}};
+    if (!frame.color_packet_order.empty() &&
+        frame.color_packet_order.size() != packets_.size())
+        return {IndexedStaticMeshBatchStatus::invalid_request,
+                {"static_scene_frame_color_order_count_invalid",
+                 "Static-scene color order must contain every prepared packet"}, {}};
+    std::array<bool, max_indexed_static_mesh_batch_draws> ordered_packets{};
+    for (const std::uint32_t packet_index : frame.color_packet_order) {
+        if (static_cast<std::size_t>(packet_index) >= packets_.size())
+            return {IndexedStaticMeshBatchStatus::invalid_request,
+                    {"static_scene_frame_color_order_index_invalid",
+                     "Static-scene color order contains an out-of-range packet index"}, {}};
+        if (ordered_packets[packet_index])
+            return {IndexedStaticMeshBatchStatus::invalid_request,
+                    {"static_scene_frame_color_order_duplicate",
+                     "Static-scene color order contains a duplicate packet index"}, {}};
+        ordered_packets[packet_index] = true;
+    }
     if (has_texture_resources_ &&
         texture_authority_ == StaticSceneTextureAuthority::caller_tables &&
         (frame.textures_by_global_index.size() != texture_count_ ||
@@ -1566,7 +1583,11 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
     }
     std::vector<IndexedStaticMeshDrawRequest> draws;
     draws.reserve(packets_.size());
-    for (std::size_t index = 0U; index < packets_.size(); ++index) {
+    for (std::size_t order = 0U; order < packets_.size(); ++order) {
+        const std::size_t index = frame.color_packet_order.empty()
+                                      ? order
+                                      : static_cast<std::size_t>(
+                                            frame.color_packet_order[order]);
         if (!packet_visible(index)) continue;
         const DrawPacket& packet = packet_for_frame(index);
         const bool upload_index_invalid =

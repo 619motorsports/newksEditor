@@ -145,6 +145,11 @@ struct WorkspaceViewportPrepareRequest {
     // Packets without a recovered KN5 local sphere remain conservatively visible.
     bool camera_mesh_filter = false;
     std::uint32_t camera_mesh_max_layer = 5U;
+    // Recompute the retained browser viewport's color order from the current
+    // camera and transformed vertex-AABB centers on every frame. This is an
+    // explicit WebGL compatibility mode; the recovered editor uses traversal
+    // order for its Classic transparent pass.
+    bool webgl_live_transparent_order = false;
     render::DrawPacketOptions packets{};
     bool evaluate_damage_preview = false;
     std::optional<bool> damage_broken_visible;
@@ -365,7 +370,11 @@ private:
         const WorkspaceAiSplineGeometry* camber = nullptr;
     };
 
-    struct VisibilityCatalog {
+    struct FrameCatalog {
+        struct ColorOrderPacket {
+            apex::scene::Vector3 local_aabb_center{};
+        };
+
         bool workspace_lod = false;
         apex::scene::Vector3 bounds_center{};
         std::optional<std::uint32_t> selected_index;
@@ -377,6 +386,10 @@ private:
         std::vector<std::optional<render::CameraMeshRenderable>> mesh_filters;
         std::uint32_t max_layer = 5U;
         std::vector<std::uint8_t> frame_visibility;
+        bool webgl_live_transparent_order = false;
+        std::vector<ColorOrderPacket> color_order_packets;
+        std::vector<std::uint32_t> frame_color_order;
+        std::vector<double> frame_color_distance_squared;
     };
 
     struct AiSplinePassResources {
@@ -414,7 +427,7 @@ private:
         std::unique_ptr<render::Buffer> selected_mesh_color_buffer,
         std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps,
         std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows,
-        std::optional<VisibilityCatalog> visibility_catalog);
+        std::optional<FrameCatalog> frame_catalog);
 
     render::Device* device_ = nullptr;
     render::Backend backend_ = render::Backend::Vulkan;
@@ -439,7 +452,7 @@ private:
         std::chrono::steady_clock::now();
     std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps_;
     std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows_;
-    std::optional<VisibilityCatalog> visibility_catalog_;
+    std::optional<FrameCatalog> frame_catalog_;
 
     friend struct WorkspaceViewportPrepareResult;
     friend WorkspaceViewportPrepareResult prepareWorkspaceViewport(

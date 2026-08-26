@@ -217,6 +217,10 @@ void convertsStaticGeometryTransformsAndMaterials() {
             "FBX local and world transforms");
     require(result.snapshot.nodes[1].bounds_radius > 0.7F && result.snapshot.nodes[1].bounds_center[2] > 2.9F && !result.complete,
             "FBX bounds and incomplete capability status");
+    require(result.snapshot.nodes[1].local_aabb_center.has_value() &&
+                *result.snapshot.nodes[1].local_aabb_center ==
+                    apex::scene::Vector3{0.5F, 0.5F, 0.0F},
+            "FBX conversion retains the exact local vertex-AABB center");
     require(!result.diagnostics.empty() && result.diagnostics[0].code == "unsupported_layer_mapping",
             "FBX layer mapping diagnostic");
     require(result.snapshot.materials[0].name == "Paint" && result.snapshot.materials[0].shader == "Phong",

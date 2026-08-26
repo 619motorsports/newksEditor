@@ -511,8 +511,17 @@ remains unchanged and feature-complete.
   The mesh mask combines with workspace-file LOD by logical AND. An explicit
   caller mask stays authoritative. Packets without recovered KN5 bounds remain
   conservatively visible. Fractional CSP layers use the same labeled fallback.
-  Runtime `noCull` and `isStatic` mutations remain staged. Transparent ordering
-  also remains fixed after preparation.
+  Runtime `noCull` and `isStatic` mutations remain staged. KN5 and FBX scene
+  conversion now retain exact local vertex-AABB centers for color ordering.
+  The production viewport recomputes a stable packet-index permutation for each
+  frame. It keeps opaque packets first, sorts layers in ascending order, and
+  sorts transparent packets by descending squared camera distance. Visibility,
+  refreshed transforms, and resources stay in prepared packet-index space. The
+  static-scene layer validates the complete permutation before mutable updates.
+  Vulkan and D3D12 consume the same backend-neutral order. This behavior keeps
+  the retained WebGL feature. It is not original-editor parity. Ghidra evidence
+  shows that the original Classic transparent pass uses traversal order.
+  Directional-shadow submission keeps its independent order.
   Shadows, reflections, sky, CSP lights, and post-processing remain staged
   with explicit evidence.
 - P1 is partial. Bounded readers support KN5 v4/v5/v6, DDS, ACD, INI/CSP,

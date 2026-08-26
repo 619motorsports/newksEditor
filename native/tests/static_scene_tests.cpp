@@ -687,6 +687,46 @@ void prepares_mixed_static_and_skinned_scene_and_updates_only_after_preflight() 
             "non-binary packet visibility fails before update or color submission");
     frame.packet_visibility = {};
 
+    const std::size_t updates_before_invalid_order = device.update_calls;
+    const std::size_t batches_before_invalid_order = device.batch_calls;
+    const std::array<std::uint32_t, 2U> short_order = {0U, 1U};
+    frame.color_packet_order = short_order;
+    const auto invalid_order_count =
+        prepared.resources->draw_and_readback(device, target, frame);
+    require(invalid_order_count.status ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                invalid_order_count.diagnostic.code ==
+                    "static_scene_frame_color_order_count_invalid" &&
+                device.update_calls == updates_before_invalid_order &&
+                device.batch_calls == batches_before_invalid_order,
+            "short color order fails before skinned updates or submission");
+
+    const std::array<std::uint32_t, 3U> out_of_range_order = {
+        0U, 1U, std::numeric_limits<std::uint32_t>::max()};
+    frame.color_packet_order = out_of_range_order;
+    const auto invalid_order_index =
+        prepared.resources->draw_and_readback(device, target, frame);
+    require(invalid_order_index.status ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                invalid_order_index.diagnostic.code ==
+                    "static_scene_frame_color_order_index_invalid" &&
+                device.update_calls == updates_before_invalid_order &&
+                device.batch_calls == batches_before_invalid_order,
+            "out-of-range color order fails before skinned updates or submission");
+
+    const std::array<std::uint32_t, 3U> duplicate_order = {0U, 0U, 2U};
+    frame.color_packet_order = duplicate_order;
+    const auto invalid_order_duplicate =
+        prepared.resources->draw_and_readback(device, target, frame);
+    require(invalid_order_duplicate.status ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                invalid_order_duplicate.diagnostic.code ==
+                    "static_scene_frame_color_order_duplicate" &&
+                device.update_calls == updates_before_invalid_order &&
+                device.batch_calls == batches_before_invalid_order,
+            "duplicate color order fails before skinned updates or submission");
+    frame.color_packet_order = {};
+
     const std::size_t updates_before_invalid = device.update_calls;
     const std::array<DrawPacket, 1> short_refresh = {refreshed.front()};
     frame.refreshed_packets = short_refresh;
@@ -778,6 +818,20 @@ void prepares_deduplicated_resources_and_executes_one_ordered_batch() {
     require(device.authorities == std::vector<IndexedShaderAuthority>(
                                       3U, IndexedShaderAuthority::explicit_pipeline),
             "each local request carries explicit executable-pipeline authority");
+
+    const std::array<std::uint32_t, 3U> color_order = {2U, 0U, 1U};
+    frame.color_packet_order = color_order;
+    const auto reordered =
+        prepared.resources->draw_and_readback(device, target, frame);
+    require(reordered.ok() &&
+                device.nodes ==
+                    std::vector<apex::scene::NodeId>({1U, 1U, 2U}) &&
+                device.pipeline_names ==
+                    std::vector<std::string>({"material-zero", "material-zero",
+                                              "material-one"}) &&
+                device.transparent_flags ==
+                    std::vector<bool>({false, false, true}),
+            "explicit color order changes submission without remapping packet resources");
 }
 
 void schedules_selected_and_view_axis_at_transparent_boundary() {

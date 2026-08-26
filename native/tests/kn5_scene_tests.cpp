@@ -6,6 +6,7 @@
 #include <exception>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -107,6 +108,10 @@ void test_world_conversion_and_metadata() {
                 snapshot.nodes[2].local_bounds_source ==
                     apex::scene::LocalBoundsSource::kn5_serialized,
             "serialized mesh keeps native local bounds");
+    require(snapshot.nodes[2].local_aabb_center ==
+                std::optional<apex::scene::Vector3>{
+                    apex::scene::Vector3{0.0F, 0.0F, 0.0F}},
+            "static mesh keeps its exact vertex-AABB center separately");
     require(snapshot.nodes[3].local_bounds_center == apex::scene::Vector3{0.0F, 0.0F, 0.0F} &&
                 snapshot.nodes[3].local_bounds_radius == 0.0F &&
                 snapshot.nodes[3].local_bounds_source ==
@@ -149,6 +154,10 @@ void test_skinned_bounds_use_native_vertex_mean() {
     const auto& node = conversion.snapshot.nodes[3];
     require(node.local_bounds_center == apex::scene::Vector3{2.0F, 0.0F, 0.0F},
             "skinned local sphere center is arithmetic vertex mean");
+    require(node.local_aabb_center ==
+                std::optional<apex::scene::Vector3>{
+                    apex::scene::Vector3{1.5F, 0.0F, 0.0F}},
+            "skinned vertex-AABB center remains distinct from its native sphere");
     require(node.local_bounds_radius == 2.0F,
             "skinned local sphere radius is maximum distance from mean");
     require(node.bounds_center == apex::scene::Vector3{12.0F, 2.0F, 0.0F} &&
@@ -191,6 +200,10 @@ void test_preview_bounds_follow_transformed_authored_visibility() {
     model.root.children.push_back(std::move(inactive));
 
     const auto conversion = apex::scene::convertKn5Scene(model);
+    require(conversion.snapshot.nodes[1U].local_aabb_center ==
+                std::optional<apex::scene::Vector3>{
+                    apex::scene::Vector3{1.0F, 2.0F, 3.0F}},
+            "per-mesh vertex-AABB center is retained for live transparent ordering");
     require(conversion.preview_bounds.has_value(), "visible preview bounds exist");
     const auto& bounds = *conversion.preview_bounds;
     require(bounds.minimum == apex::scene::Vector3({8.0F, 1.0F, -3.0F}) &&
@@ -230,6 +243,13 @@ void test_invalid_references_and_boundaries() {
     auto badStride = fixture();
     badStride.root.children[0].children[0].vertexStride = 10;
     requireError([&] { (void)apex::scene::convertKn5Scene(badStride); }, "vertex stride");
+
+    auto shortPositionStride = fixture();
+    shortPositionStride.root.children[0].children[0].vertexStride = 2;
+    shortPositionStride.root.children[0].children[0].vertices.resize(6U);
+    requireError(
+        [&] { (void)apex::scene::convertKn5Scene(shortPositionStride); },
+        "vertex stride shorter than a position");
 
     auto badMatrix = fixture();
     badMatrix.root.transform[0] = std::numeric_limits<float>::quiet_NaN();

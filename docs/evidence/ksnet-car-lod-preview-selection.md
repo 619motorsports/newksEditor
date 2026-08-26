@@ -179,16 +179,27 @@ uses this conservative fallback because the native field is an integer. These
 fallbacks are explicit and do not claim native culling parity.
 
 The production native window enables the live filter. The WebGL renderer keeps
-its existing visibility path. Prepared transparent order also stays fixed after
-camera movement.
+its existing visibility path.
+
+The production native window also enables WebGL-compatible live color order.
+KN5 conversion retains each local vertex-AABB center separately from the native
+culling sphere. Each frame transforms these centers and sorts packet indices.
+
+The sort keeps opaque packets first and uses ascending layers. It sorts
+transparent packets by descending squared camera distance. Stable ties keep the
+prepared traversal order.
+
+This sort retains the existing WebGL feature. It does not reproduce the
+original editor's transparent order. The original Classic pass uses scene
+traversal order, as recorded in `ksnet-transparent-pass-order.md`.
 
 Two active-path gaps remain. Runtime mutation of `noCull` and `isStatic` is not
 connected. The existing render plan also removes invisible shadow casters before
 the native shadow-pass visibility difference can apply.
 
-The opt-in mode implements only the recovered PVS-array distance stage. It
-does not implement the complete active `CameraMeshFilter` path. In particular,
-it does not add pass-specific frustum tests or dynamic bound transforms.
+The separate PVS-array option implements only the recovered array distance
+stage. It does not implement the active `CameraMeshFilter` path. The production
+viewport uses the complete live filter described above.
 
 `Camera::Camera` at `0x1006421E` sets the native default FOV to 60 degrees.
 The port's workspace cameras commonly start at 45 degrees. For this reason,

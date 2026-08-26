@@ -567,6 +567,52 @@ Fixture car_lod_fixture() {
     return result;
 }
 
+Fixture transparent_order_fixture() {
+    auto result = fixture();
+    auto& model = result.document.assembly.model;
+    apex::formats::Kn5Node near_model = model.root.children.front();
+    near_model.name = "GLASS_NEAR";
+    near_model.children.clear();
+    near_model.transparent = true;
+    near_model.layer = 1U;
+    apex::formats::Kn5Node far_model = near_model;
+    far_model.name = "GLASS_FAR";
+    model.root.children.push_back(std::move(near_model));
+    model.root.children.push_back(std::move(far_model));
+
+    auto& scene = result.document.scene.snapshot;
+    scene.nodes[1U].local_aabb_center =
+        apex::scene::Vector3{0.0F, 0.0F, 0.0F};
+    apex::scene::SceneNode near;
+    near.name = "GLASS_NEAR";
+    near.kind = apex::scene::NodeKind::mesh;
+    near.material = 0U;
+    near.renderable = true;
+    near.visible = true;
+    near.active = true;
+    near.transparent = true;
+    near.layer = 1U;
+    near.local_aabb_center = apex::scene::Vector3{0.0F, 0.0F, 0.0F};
+    near.transform[14U] = 2.0F;
+    const auto near_id = scene.add_node(std::move(near), scene.root);
+
+    apex::scene::SceneNode far;
+    far.name = "GLASS_FAR";
+    far.kind = apex::scene::NodeKind::mesh;
+    far.material = 0U;
+    far.renderable = true;
+    far.visible = true;
+    far.active = true;
+    far.transparent = true;
+    far.layer = 1U;
+    far.local_aabb_center = apex::scene::Vector3{0.0F, 0.0F, 0.0F};
+    far.transform[14U] = 8.0F;
+    const auto far_id = scene.add_node(std::move(far), scene.root);
+    (void)near_id;
+    (void)far_id;
+    return result;
+}
+
 WorkspaceViewportPrepareRequest request_for(const Fixture& fixture_value) {
     WorkspaceViewportPrepareRequest request;
     request.presentation.width = 32U;
@@ -4711,6 +4757,108 @@ void applies_live_camera_mesh_filter_without_resource_rebuild() {
             "invalid live frustum fails before draw and present work");
 }
 
+void updates_webgl_compatible_transparent_order_per_frame() {
+    auto value = transparent_order_fixture();
+    const auto body_id = value.document.scene.snapshot.nodes[1U].id;
+    const auto near_id = value.document.scene.snapshot.nodes[3U].id;
+    const auto far_id = value.document.scene.snapshot.nodes[4U].id;
+    auto request = request_for(value);
+    request.webgl_live_transparent_order = true;
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok() &&
+                prepared.viewport->preparation().resources->draw_count() == 3U,
+            "WebGL-compatible live transparent-order viewport prepares");
+    const auto prepared_buffers = device.buffer_calls;
+    const auto prepared_textures = device.texture_calls;
+    const auto prepared_depth = device.depth_calls;
+    const auto prepared_samplers = device.sampler_calls;
+
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.camera.position = {0.0F, 0.0F, 0.0F};
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    Diagnostic diagnostic;
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.draw_nodes.back() ==
+                    std::vector<apex::scene::NodeId>{body_id, far_id, near_id},
+            "transparent packets sort back-to-front from the current camera");
+
+    frame.camera.position = {0.0F, 0.0F, 10.0F};
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.draw_nodes.back() ==
+                    std::vector<apex::scene::NodeId>{body_id, near_id, far_id},
+            "camera movement reverses transparent order without re-preparation");
+
+    const auto prepared_packets =
+        prepared.viewport->preparation().resources->prepared_packets();
+    std::vector<DrawPacket> refreshed_packets(prepared_packets.begin(),
+                                               prepared_packets.end());
+    const auto near_packet = std::find_if(
+        refreshed_packets.begin(), refreshed_packets.end(),
+        [&](const DrawPacket& packet) { return packet.node == near_id; });
+    require(near_packet != refreshed_packets.end(),
+            "transparent-order fixture retains the near packet");
+    near_packet->world_matrix[14U] = 20.0F;
+    frame.camera.position = {0.0F, 0.0F, 0.0F};
+    frame.refreshed_packets = refreshed_packets;
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.draw_nodes.back() ==
+                    std::vector<apex::scene::NodeId>{body_id, near_id, far_id},
+            "refreshed world transforms update order in prepared packet-index space");
+
+    require(device.buffer_calls == prepared_buffers &&
+                device.texture_calls == prepared_textures &&
+                device.depth_calls == prepared_depth &&
+                device.sampler_calls == prepared_samplers,
+            "live transparent ordering reuses all prepared graphics resources");
+
+    near_packet->world_matrix[14U] =
+        std::numeric_limits<float>::quiet_NaN();
+    frame.refreshed_packets = refreshed_packets;
+    const auto draws_before_invalid = device.draw_calls;
+    const auto presents_before_invalid = device.present_calls;
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code ==
+                    "workspace_viewport_color_order_bounds_invalid" &&
+                device.draw_calls == draws_before_invalid &&
+                device.present_calls == presents_before_invalid,
+            "non-finite live sort bounds fail before draw and present work");
+
+    auto d3d_value = transparent_order_fixture();
+    for (auto& module : d3d_value.modules) {
+        module.format = PipelineShaderFormat::dxil;
+        module.bytes = dxbc_shader_bytes();
+    }
+    auto d3d_request = request_for(d3d_value);
+    d3d_request.webgl_live_transparent_order = true;
+    FakeDevice d3d_device(Backend::D3D12);
+    auto d3d_prepared = apex::app::prepareWorkspaceViewport(
+        d3d_device, d3d_value.document, d3d_request);
+    FakeTarget d3d_target(d3d_request.presentation, Backend::D3D12);
+    WorkspaceViewportFrameRequest d3d_frame;
+    d3d_frame.camera.clip_space = CameraClipSpace::d3d12;
+    d3d_frame.camera.position = {0.0F, 0.0F, 0.0F};
+    d3d_frame.frame_constants = KsPerPixelFrameConstants{};
+    const auto d3d_body = d3d_value.document.scene.snapshot.nodes[1U].id;
+    const auto d3d_near = d3d_value.document.scene.snapshot.nodes[3U].id;
+    const auto d3d_far = d3d_value.document.scene.snapshot.nodes[4U].id;
+    require(d3d_prepared.ok() &&
+                d3d_prepared.viewport->drawAndPresent(
+                    d3d_device, d3d_target, d3d_frame, diagnostic) ==
+                    WorkspaceViewportFrameStatus::ready &&
+                d3d_device.draw_nodes.back() ==
+                    std::vector<apex::scene::NodeId>{d3d_body, d3d_far,
+                                                     d3d_near},
+            "D3D12 consumes the same backend-neutral live color order");
+}
+
 void combines_workspace_lod_and_live_mesh_visibility() {
     auto value = car_lod_fixture();
     const auto lod0_node = value.document.sceneBinding.file_root_nodes[0U];
@@ -5015,6 +5163,7 @@ int main() {
         accepts_track_and_car_lod_documents();
         selects_car_lod_roots_at_viewport_boundary();
         applies_live_camera_mesh_filter_without_resource_rebuild();
+        updates_webgl_compatible_transparent_order_per_frame();
         combines_workspace_lod_and_live_mesh_visibility();
         resolves_preview_state_without_mutating_document();
         camera_controller_matches_bounded_editor_gestures();

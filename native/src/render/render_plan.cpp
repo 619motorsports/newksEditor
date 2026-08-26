@@ -36,6 +36,26 @@ struct WalkState {
     return static_cast<float>(distance);
 }
 
+[[nodiscard]] std::optional<apex::scene::Vector3> safe_transform_point(
+    const apex::scene::Matrix4& matrix,
+    const apex::scene::Vector3& point) noexcept {
+    apex::scene::Vector3 output{};
+    for (std::size_t row = 0U; row < 3U; ++row) {
+        const double value =
+            static_cast<double>(matrix[row]) * point[0] +
+            static_cast<double>(matrix[4U + row]) * point[1] +
+            static_cast<double>(matrix[8U + row]) * point[2] +
+            static_cast<double>(matrix[12U + row]);
+        if (!std::isfinite(value) ||
+            value < -static_cast<double>(std::numeric_limits<float>::max()) ||
+            value > static_cast<double>(std::numeric_limits<float>::max())) {
+            return std::nullopt;
+        }
+        output[row] = static_cast<float>(value);
+    }
+    return output;
+}
+
 [[nodiscard]] bool lod_visible(double lod_in, double lod_out,
                                float distance) noexcept {
     // A finite authored LOD interval is required. A non-positive OUT means
@@ -210,7 +230,14 @@ RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
         const bool geometry = node->kind == apex::scene::NodeKind::mesh ||
                               node->kind == apex::scene::NodeKind::skinned_mesh;
         const bool isolated_item = isolated && node->id == options.isolated_node;
-        const float distance = safe_distance(node->bounds_center, options.camera_position);
+        const std::optional<apex::scene::Vector3> aabb_center =
+            node->local_aabb_center.has_value()
+                ? safe_transform_point(node->transform,
+                                       *node->local_aabb_center)
+                : std::nullopt;
+        const float distance = safe_distance(
+            aabb_center.value_or(node->bounds_center),
+            options.camera_position);
         const NodeRenderStateOverride* state_override = node_state_overrides[node_index];
         const double lod_in = state_override != nullptr && state_override->lod_in.has_value()
                                   ? *state_override->lod_in

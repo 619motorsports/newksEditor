@@ -3123,3 +3123,27 @@ The bounded C++ `NativeCameraPose` preserves these movement and rotation semanti
 without depending on the original matrix field ordering. It converts to the existing
 backend-specific frame builder. The projection keeps explicit WebGL/Vulkan/D3D12
 clip remapping; native `mat44f::createPerspective` internals remain unrecovered.
+
+## ksNet transparent-pass ordering evidence
+
+`CameraShadowMapped::renderPass` at `0x1005E681` starts the transparent pass in
+`PvsRenderMode::Classic`. It calls the root render function at `0x1005E89A`.
+
+`Node::render` at `0x1003F5DC` visits active children in vector order.
+`Mesh::render` at `0x100494FF` and `SkinnedMesh::render` at `0x1004A87E` send
+draws immediately. These functions do not calculate a camera-distance key.
+
+`PvsProcessor::compareDrawCalls` at `0x1006587B` has no distance key. Default
+mode uses this comparator. The transparent Classic mode does not use it.
+
+The original transparent pass therefore keeps its current traversal order. The
+retained WebGL viewport has different behavior. It sorts transparent geometry
+back-to-front for each frame.
+
+The production native viewport now retains the WebGL behavior explicitly. KN5
+and FBX conversion keep each local vertex-AABB center. The viewport transforms
+these centers with current packet matrices and compares squared double values.
+
+The shared static-scene frame accepts a complete packet-index permutation. It
+validates count, range, and uniqueness before any mutable backend update. Color
+submission uses the permutation. Shadow submission keeps its separate order.

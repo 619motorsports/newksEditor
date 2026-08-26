@@ -298,6 +298,36 @@ void color_order_matches_viewport() {
     require(plan.opaque_items.size() == 2U && plan.transparent_items.size() == 1U, "pass partitions");
 }
 
+void color_order_uses_vertex_aabb_center_when_available() {
+    apex::scene::SceneSnapshot scene;
+    const auto material = scene.add_material(
+        {"glass", "ksPerPixel", apex::scene::BlendMode::alpha_blend});
+    apex::scene::SceneNode root;
+    root.name = "ROOT";
+    const auto root_id = scene.add_node(std::move(root));
+
+    apex::scene::SceneNode near;
+    near.name = "NEAR_AABB";
+    near.kind = apex::scene::NodeKind::mesh;
+    near.material = material;
+    near.bounds_center = {0.0F, 0.0F, 100.0F};
+    near.local_aabb_center = apex::scene::Vector3{0.0F, 0.0F, 1.0F};
+    const auto near_id = scene.add_node(std::move(near), root_id);
+
+    apex::scene::SceneNode far;
+    far.name = "FAR_AABB";
+    far.kind = apex::scene::NodeKind::mesh;
+    far.material = material;
+    far.bounds_center = {0.0F, 0.0F, 0.0F};
+    far.local_aabb_center = apex::scene::Vector3{0.0F, 0.0F, 10.0F};
+    const auto far_id = scene.add_node(std::move(far), root_id);
+
+    const auto plan = apex::render::build_render_plan(scene);
+    require(plan.items.size() == 2U && plan.items[0].node == far_id &&
+                plan.items[1].node == near_id,
+            "WebGL-compatible ordering uses vertex-AABB centers instead of culling spheres");
+}
+
 void preview_visibility_precedence_is_immutable() {
     auto scene = fixture();
     const auto environment = scene.nodes[1U].id;
@@ -430,6 +460,7 @@ int main() {
         malformed_generic_lod_inputs_fail_closed();
         deferred_camera_filter_retains_exact_kn5_descriptor();
         color_order_matches_viewport();
+        color_order_uses_vertex_aabb_center_when_available();
         preview_visibility_precedence_is_immutable();
         csp_node_state_controls_order_lod_transparency_and_shadows();
         reflection_selection_matches_js_contract();

@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -93,6 +94,10 @@ struct SceneNode {
     Vector3 local_bounds_center = {0.0F, 0.0F, 0.0F};
     float local_bounds_radius = 0.0F;
     LocalBoundsSource local_bounds_source = LocalBoundsSource::unavailable;
+    // The browser viewport sorts transparent geometry from the transformed
+    // center of the vertex AABB, not from the native culling sphere above.
+    // Loaded nonempty KN5 geometry always supplies this exact local center.
+    std::optional<Vector3> local_aabb_center;
 };
 
 /**

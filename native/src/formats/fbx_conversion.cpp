@@ -1391,7 +1391,7 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
     result.meshes.reserve(geometryIndexes.size());
     result.transforms.reserve(modelIndexes.size());
     result.node_geometry.reserve(geometryIndexes.size());
-    result.snapshot.nodes.push_back({0u, scene::invalid_node_id, "FBX", scene::NodeKind::node, true, true, false, false, true, 0u, 0.0F, 0.0F, scene::invalid_material_id, {0.0F, 0.0F, 0.0F}, 0.0F, scene::identity_matrix, {}, {}, {}});
+    result.snapshot.nodes.push_back({0u, scene::invalid_node_id, "FBX", scene::NodeKind::node, true, true, false, false, true, 0u, 0.0F, 0.0F, scene::invalid_material_id, {0.0F, 0.0F, 0.0F}, 0.0F, scene::identity_matrix, {}, {}, {}, {}, 0.0F, scene::LocalBoundsSource::unavailable, {}});
     result.snapshot.root = 0u;
     std::map<std::int64_t, std::uint32_t> materialIds;
     for (std::size_t index = 0; index < materialIndexes.size(); ++index) {
@@ -1601,24 +1601,44 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
                                    : world;
         finiteMatrix(meshWorld, path);
         budget.add(record.name.size(), path);
-        scene::SceneNode node{id, parentId, record.name, kind, modelVisible(*record.node, &budget), modelVisible(*record.node, &budget), kind == scene::NodeKind::mesh, false, true, 0u, 0.0F, 0.0F, material, {0.0F, 0.0F, 0.0F}, 0.0F, meshWorld, {}, {}, {}};
+        scene::SceneNode node{id, parentId, record.name, kind, modelVisible(*record.node, &budget), modelVisible(*record.node, &budget), kind == scene::NodeKind::mesh, false, true, 0u, 0.0F, 0.0F, material, {0.0F, 0.0F, 0.0F}, 0.0F, meshWorld, {}, {}, {}, {}, 0.0F, scene::LocalBoundsSource::unavailable, {}};
         if (kind == scene::NodeKind::mesh) {
             const auto& mesh = result.meshes[meshIndex];
             std::array<double, 3> minimum = {std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity()};
             std::array<double, 3> maximum = {-std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()};
+            std::array<double, 3> localMinimum = minimum;
+            std::array<double, 3> localMaximum = maximum;
             const auto transformedPoint = [&](std::size_t index) {
                 return std::array<double, 3>{static_cast<double>(meshWorld[0]) * mesh.positions[index] + static_cast<double>(meshWorld[4]) * mesh.positions[index + 1u] + static_cast<double>(meshWorld[8]) * mesh.positions[index + 2u] + static_cast<double>(meshWorld[12]), static_cast<double>(meshWorld[1]) * mesh.positions[index] + static_cast<double>(meshWorld[5]) * mesh.positions[index + 1u] + static_cast<double>(meshWorld[9]) * mesh.positions[index + 2u] + static_cast<double>(meshWorld[13]), static_cast<double>(meshWorld[2]) * mesh.positions[index] + static_cast<double>(meshWorld[6]) * mesh.positions[index + 1u] + static_cast<double>(meshWorld[10]) * mesh.positions[index + 2u] + static_cast<double>(meshWorld[14])};
             };
             for (std::size_t index = 0; index < mesh.positions.size(); index += 3u) {
                 const auto transformed = transformedPoint(index);
                 for (const auto value : transformed) if (!std::isfinite(value) || std::abs(value) > static_cast<double>(std::numeric_limits<float>::max())) fail("non_finite", "FBX world position is not representable as float", path);
-                for (std::size_t axis = 0; axis < 3u; ++axis) { minimum[axis] = std::min(minimum[axis], transformed[axis]); maximum[axis] = std::max(maximum[axis], transformed[axis]); }
+                for (std::size_t axis = 0; axis < 3u; ++axis) {
+                    minimum[axis] = std::min(minimum[axis], transformed[axis]);
+                    maximum[axis] = std::max(maximum[axis], transformed[axis]);
+                    const double localPosition =
+                        static_cast<double>(mesh.positions[index + axis]);
+                    localMinimum[axis] =
+                        std::min(localMinimum[axis], localPosition);
+                    localMaximum[axis] =
+                        std::max(localMaximum[axis], localPosition);
+                }
             }
             const std::array<double, 3> center = {(minimum[0] + maximum[0]) * 0.5, (minimum[1] + maximum[1]) * 0.5, (minimum[2] + maximum[2]) * 0.5};
+            scene::Vector3 localCenter{};
             for (std::size_t axis = 0; axis < 3u; ++axis) {
                 if (!std::isfinite(center[axis]) || std::abs(center[axis]) > static_cast<double>(std::numeric_limits<float>::max())) fail("non_finite", "FBX bounds center is not representable as float", path);
                 node.bounds_center[axis] = static_cast<float>(center[axis]);
+                const double localCenterValue =
+                    (localMinimum[axis] + localMaximum[axis]) * 0.5;
+                if (!std::isfinite(localCenterValue) ||
+                    std::abs(localCenterValue) > static_cast<double>(
+                                                     std::numeric_limits<float>::max()))
+                    fail("non_finite", "FBX local bounds center is not representable as float", path);
+                localCenter[axis] = static_cast<float>(localCenterValue);
             }
+            node.local_aabb_center = localCenter;
             double radius = 0.0;
             for (std::size_t index = 0; index < mesh.positions.size(); index += 3u) {
                 const auto point = transformedPoint(index);
