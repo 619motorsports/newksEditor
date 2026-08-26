@@ -96,7 +96,19 @@ function.
 The native port now exposes a bounded per-mesh predicate as
 `ksnet_mesh_lod_visible()`. It preserves the strict comparisons, FOV scale
 `0.0125`, radius floor, zero-limit bypass, initial PVS state, and explicit
-`NO_CULL` input. The render planner does not enable this rule yet.
+`NO_CULL` input.
+
+The render planner now has an opt-in `KsNetMeshLodOptions` mode. Each caller
+must supply the camera FOV. The mode accepts default and per-node PVS and
+`NO_CULL` state. It uses each node's world-space center and radius. It also
+uses effective LOD limits after CSP node-state overrides.
+
+The stock-scene facade rejects invalid state IDs, duplicate state IDs, and
+non-finite inputs. It also rejects LOD overrides that do not fit in a float.
+Its preflight budget includes the optional per-node state array. The planner
+saturates finite distances that exceed the float range. It rejects non-finite
+distances before it applies the opt-in predicate.
+The default planner path still uses the WebGL-compatible distance rule.
 
 Further disassembly identifies `CameraMeshFilter::isVisible` at `0x10064C8C`
 as the active installed runtime path. `Mesh::render` at `0x100494FF` and
@@ -115,6 +127,14 @@ The active path reads `Renderable` fields directly. These fields are
 `isStatic +220`. Thus, PVS array population is not an integration dependency.
 The port still needs explicit pass, static-bound, frustum, and `NO_CULL` state
 before it can claim exact render-plan integration.
+
+The opt-in mode implements only the recovered PVS-array distance stage. It
+does not implement the complete active `CameraMeshFilter` path. In particular,
+it does not add pass-specific frustum tests or dynamic bound transforms.
+
+`Camera::Camera` at `0x1006421E` sets the native default FOV to 60 degrees.
+The port's workspace cameras commonly start at 45 degrees. For this reason,
+the opt-in mode has no implicit FOV value.
 
 The predicate does not reinterpret the editor's LOD1–LOD4 menu as an
 automatic distance selector.

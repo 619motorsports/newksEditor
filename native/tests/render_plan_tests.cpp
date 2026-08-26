@@ -157,6 +157,100 @@ void recovered_ksnet_mesh_lod_rule_is_bounded_and_inclusive() {
             "ksNet zero-limit bypass does not read unused camera values");
 }
 
+void recovered_ksnet_mesh_lod_rule_reaches_opt_in_plan() {
+    apex::scene::SceneSnapshot scene;
+    const auto material = scene.add_material(
+        {"opaque", "ksPerPixel", apex::scene::BlendMode::opaque});
+    apex::scene::SceneNode root;
+    root.name = "ROOT";
+    const auto root_id = scene.add_node(std::move(root));
+    apex::scene::SceneNode mesh;
+    mesh.name = "LOD_MESH";
+    mesh.kind = apex::scene::NodeKind::mesh;
+    mesh.material = material;
+    mesh.bounds_center = {0.0F, 0.0F, 6.0F};
+    mesh.bounds_radius = 6.0F;
+    mesh.lod_in = 5.0F;
+    mesh.lod_out = 4.0F;
+    const auto mesh_id = scene.add_node(std::move(mesh), root_id);
+
+    apex::render::RenderPlanOptions options;
+    options.ksnet_mesh_lod.emplace(80.0F);
+    auto plan = apex::render::build_render_plan(scene, options);
+    require(plan.items.size() == 1U && plan.shadow_casters.size() == 1U,
+            "opt-in plan uses inclusive radius-floored ksNet LOD");
+
+    options.ksnet_mesh_lod->camera_fov_degrees = 40.0F;
+    plan = apex::render::build_render_plan(scene, options);
+    require(plan.items.empty() && plan.shadow_casters.empty(),
+            "opt-in plan applies ksNet FOV scaling to every pass partition");
+
+    const std::array<apex::render::KsNetMeshLodNodeState, 1U> absent = {{
+        {mesh_id, false, true},
+    }};
+    options.ksnet_mesh_lod->camera_fov_degrees = 80.0F;
+    options.ksnet_mesh_lod->node_states = absent;
+    plan = apex::render::build_render_plan(scene, options);
+    require(plan.items.empty(),
+            "an absent PVS entry remains hidden even when NO_CULL is set");
+
+    const std::array<apex::render::KsNetMeshLodNodeState, 1U> no_cull = {{
+        {mesh_id, true, true},
+    }};
+    options.camera_position = {0.0F, 0.0F,
+                               -std::numeric_limits<float>::max()};
+    options.ksnet_mesh_lod->node_states = no_cull;
+    plan = apex::render::build_render_plan(scene, options);
+    require(plan.items.size() == 1U && std::isfinite(plan.items.front().distance),
+            "explicit NO_CULL retains a finite-distance item outside its interval");
+
+    const std::array<apex::render::NodeRenderStateOverride, 1U> override_lod = {{
+        {mesh_id, std::nullopt, std::nullopt, 7.0, 7.0, std::nullopt},
+    }};
+    options.camera_position = {};
+    options.ksnet_mesh_lod->node_states = {};
+    options.node_state_overrides = override_lod;
+    plan = apex::render::build_render_plan(scene, options);
+    require(plan.items.empty(),
+            "CSP LOD state is resolved before the recovered predicate");
+
+    const std::array<apex::render::NodeRenderStateOverride, 1U> zero_lod = {{
+        {mesh_id, std::nullopt, std::nullopt, 0.0, 0.0, std::nullopt},
+    }};
+    options.camera_position = {0.0F, 0.0F,
+                               -std::numeric_limits<float>::max()};
+    options.node_state_overrides = zero_lod;
+    plan = apex::render::build_render_plan(scene, options);
+    require(plan.items.size() == 1U && std::isfinite(plan.items.front().distance),
+            "effective zero limits retain a finite-distance plan item");
+}
+
+void malformed_generic_lod_inputs_fail_closed() {
+    auto scene = fixture();
+    apex::render::RenderPlanOptions options;
+    options.camera_position = {-std::numeric_limits<float>::max(), 0.0F, 0.0F};
+    scene.nodes[2U].bounds_center = {
+        std::numeric_limits<float>::max(), 0.0F, 0.0F};
+    auto plan = apex::render::build_render_plan(scene, options);
+    const auto extreme_item = std::find_if(
+        plan.items.begin(), plan.items.end(), [&](const auto& item) {
+            return item.node == scene.nodes[2U].id;
+        });
+    require(extreme_item != plan.items.end() &&
+                extreme_item->distance == std::numeric_limits<float>::max(),
+            "finite coordinate overflow saturates instead of producing a non-finite item");
+
+    options.camera_position = {};
+    scene.nodes[2U].bounds_center = {0.0F, 0.0F, 8.0F};
+    scene.nodes[2U].lod_in = std::numeric_limits<float>::quiet_NaN();
+    plan = apex::render::build_render_plan(scene, options);
+    require(std::none_of(plan.items.begin(), plan.items.end(),
+                         [&](const auto& item) {
+                             return item.node == scene.nodes[2U].id;
+                         }),
+            "non-finite generic LOD limits fail closed");
+}
+
 void color_order_matches_viewport() {
     const auto scene = fixture();
     apex::render::RenderPlanOptions options;
@@ -297,6 +391,8 @@ int main() {
         visibility_lod_and_shadow();
         lod_uses_each_item_world_distance_and_inclusive_out();
         recovered_ksnet_mesh_lod_rule_is_bounded_and_inclusive();
+        recovered_ksnet_mesh_lod_rule_reaches_opt_in_plan();
+        malformed_generic_lod_inputs_fail_closed();
         color_order_matches_viewport();
         preview_visibility_precedence_is_immutable();
         csp_node_state_controls_order_lod_transparency_and_shadows();

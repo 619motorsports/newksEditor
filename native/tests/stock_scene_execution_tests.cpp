@@ -427,6 +427,116 @@ void test_damage_preview_reaches_scene_and_material_handoff() {
             "bounded damage resolution must fail before backend allocation");
 }
 
+void test_ksnet_lod_integration_and_validation() {
+    Fixture valid_fixture = fixture();
+    valid_fixture.scene.nodes[1U].lod_out = 1.0F;
+    valid_fixture.scene.nodes[1U].bounds_radius = 2.0F;
+    FakeDevice valid_device;
+    auto valid_request = request_for(valid_fixture);
+    valid_request.render.ksnet_mesh_lod.emplace(80.0F);
+    const auto valid = prepare_stock_scene_execution(valid_device, valid_request);
+    require(valid.ok() &&
+                std::any_of(valid.render_plan.items.begin(), valid.render_plan.items.end(),
+                            [&](const RenderItem& item) {
+                                return item.node == valid_fixture.scene.nodes[1U].id;
+                            }),
+            "opt-in stock scene must use each mesh radius in the recovered LOD rule");
+
+    Fixture budget_fixture = fixture();
+    FakeDevice budget_device;
+    const auto minimum_preflight_budget = [&](bool ksnet) {
+        std::uint64_t low = 1U;
+        std::uint64_t high = 1U << 20U;
+        while (low < high) {
+            const std::uint64_t middle = low + (high - low) / 2U;
+            auto budget_request = request_for(budget_fixture);
+            budget_request.shader_modules = {};
+            budget_request.limits.max_plan_bytes = middle;
+            if (ksnet) budget_request.render.ksnet_mesh_lod.emplace(80.0F);
+            const auto budget_result =
+                prepare_stock_scene_execution(budget_device, budget_request);
+            if (budget_result.diagnostic.code == "stock_scene_plan_preflight_limit") {
+                low = middle + 1U;
+            } else {
+                high = middle;
+            }
+        }
+        return low;
+    };
+    const std::uint64_t legacy_budget = minimum_preflight_budget(false);
+    const std::uint64_t ksnet_budget = minimum_preflight_budget(true);
+    require(ksnet_budget >= legacy_budget +
+                                budget_fixture.scene.nodes.size() *
+                                    sizeof(const KsNetMeshLodNodeState*) &&
+                budget_device.buffer_calls == 0U,
+            "preflight must charge the opt-in ksNet node-state pointer array");
+
+    Fixture invalid_fixture = fixture();
+    FakeDevice invalid_device;
+    auto request = request_for(invalid_fixture);
+    request.render.ksnet_mesh_lod.emplace(std::numeric_limits<float>::quiet_NaN());
+    auto result = prepare_stock_scene_execution(invalid_device, request);
+    require(result.diagnostic.code == "stock_scene_ksnet_lod_fov_non_finite",
+            "non-finite ksNet LOD FOV needs a precise diagnostic");
+
+    request = request_for(invalid_fixture);
+    request.render.ksnet_mesh_lod.emplace(80.0F);
+    request.render.camera_position[0] = std::numeric_limits<float>::infinity();
+    result = prepare_stock_scene_execution(invalid_device, request);
+    require(result.diagnostic.code == "stock_scene_ksnet_lod_camera_non_finite",
+            "non-finite ksNet LOD camera needs a precise diagnostic");
+
+    const std::array<KsNetMeshLodNodeState, 1U> invalid_state = {{
+        {invalid_fixture.scene.root, true, false},
+    }};
+    request = request_for(invalid_fixture);
+    request.render.ksnet_mesh_lod.emplace(80.0F);
+    request.render.ksnet_mesh_lod->node_states = invalid_state;
+    result = prepare_stock_scene_execution(invalid_device, request);
+    require(result.diagnostic.code == "stock_scene_ksnet_lod_state_invalid",
+            "non-mesh ksNet LOD state needs a precise diagnostic");
+
+    const std::array<KsNetMeshLodNodeState, 2U> duplicate_state = {{
+        {invalid_fixture.scene.nodes[1U].id, true, false},
+        {invalid_fixture.scene.nodes[1U].id, false, true},
+    }};
+    request = request_for(invalid_fixture);
+    request.render.ksnet_mesh_lod.emplace(80.0F);
+    request.render.ksnet_mesh_lod->node_states = duplicate_state;
+    result = prepare_stock_scene_execution(invalid_device, request);
+    require(result.diagnostic.code == "stock_scene_ksnet_lod_state_duplicate",
+            "duplicate ksNet LOD state needs a precise diagnostic");
+
+    request = request_for(invalid_fixture);
+    request.render.ksnet_mesh_lod.emplace(80.0F);
+    std::vector<KsNetMeshLodNodeState> too_many(invalid_fixture.scene.nodes.size() + 1U);
+    request.render.ksnet_mesh_lod->node_states = too_many;
+    result = prepare_stock_scene_execution(invalid_device, request);
+    require(result.diagnostic.code == "stock_scene_render_option_limit",
+            "ksNet LOD state count must be bounded by scene size");
+
+    request = request_for(invalid_fixture);
+    request.render.ksnet_mesh_lod.emplace(80.0F);
+    invalid_fixture.scene.nodes[1U].bounds_radius = std::numeric_limits<float>::quiet_NaN();
+    result = prepare_stock_scene_execution(invalid_device, request);
+    require(result.diagnostic.code == "stock_scene_ksnet_lod_mesh_non_finite",
+            "malformed mesh bounds must fail before recovered LOD planning");
+    invalid_fixture.scene.nodes[1U].bounds_radius = 0.0F;
+
+    const std::array<NodeRenderStateOverride, 1U> out_of_range = {{
+        {invalid_fixture.scene.nodes[1U].id, std::nullopt, std::nullopt,
+         std::numeric_limits<double>::max(), std::nullopt, std::nullopt},
+    }};
+    request = request_for(invalid_fixture);
+    request.render.ksnet_mesh_lod.emplace(80.0F);
+    request.render.node_state_overrides = out_of_range;
+    result = prepare_stock_scene_execution(invalid_device, request);
+    require(result.diagnostic.code ==
+                "stock_scene_ksnet_lod_override_out_of_range" &&
+                invalid_device.buffer_calls == 0U,
+            "out-of-range recovered LOD overrides must fail before allocation");
+}
+
 void test_preflight_and_missing_modules() {
     Fixture fixture_value = fixture();
     FakeDevice device;
@@ -591,6 +701,7 @@ int main() {
         test_resolved_subtree_filter_and_isolation_reach_facade();
         test_csp_node_state_reaches_per_packet_pipelines();
         test_damage_preview_reaches_scene_and_material_handoff();
+        test_ksnet_lod_integration_and_validation();
         test_preflight_and_missing_modules();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

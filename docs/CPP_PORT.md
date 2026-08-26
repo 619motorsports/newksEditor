@@ -491,10 +491,15 @@ remains unchanged and feature-complete.
   ksNet per-mesh culling. The cockpit pair follows `src/cockpit-preview.js`.
   A separate bounded predicate implements the recovered ksNet per-mesh rule.
   It includes the FOV scale, radius floor, inclusive limits, and zero-limit
-  bypass. Reverse engineering now identifies `CameraMeshFilter::isVisible` as
-  the active path. It reads each `Renderable` directly and does not populate
-  `PvsProcessor` arrays. Render-plan integration remains staged until the port
-  adds exact pass, layer, static-bound, frustum, and `NO_CULL` inputs.
+  bypass. An opt-in render-plan mode now applies this predicate. Callers supply
+  the FOV and explicit default or per-node PVS and `NO_CULL` state. The
+  stock-scene facade rejects malformed state before backend allocation. The
+  default plan keeps the WebGL-compatible distance rule.
+  Reverse engineering identifies `CameraMeshFilter::isVisible` as the active
+  path. It reads each `Renderable` directly and does not populate
+  `PvsProcessor` arrays. Exact active-path integration remains staged. The port
+  still needs per-frame reculling, static-bound behavior, frustum tests, and
+  pass-specific inputs.
   Shadows, reflections, sky, CSP lights, and post-processing remain staged
   with explicit evidence.
 - P1 is partial. Bounded readers support KN5 v4/v5/v6, DDS, ACD, INI/CSP,

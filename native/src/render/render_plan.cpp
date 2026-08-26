@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <utility>
 
 namespace apex::render {
@@ -19,21 +20,29 @@ struct WalkState {
 
 [[nodiscard]] float safe_distance(const apex::scene::Vector3& point,
                                   const apex::scene::Vector3& camera) noexcept {
-    const float dx = point[0] - camera[0];
-    const float dy = point[1] - camera[1];
-    const float dz = point[2] - camera[2];
-    const float squared = dx * dx + dy * dy + dz * dz;
-    if (!std::isfinite(squared)) return 0.0F;
-    return std::sqrt(std::max(0.0F, squared));
+    double squared = 0.0;
+    for (std::size_t axis = 0U; axis < 3U; ++axis) {
+        if (!std::isfinite(point[axis]) || !std::isfinite(camera[axis]))
+            return std::numeric_limits<float>::infinity();
+        const double delta = static_cast<double>(point[axis]) -
+                             static_cast<double>(camera[axis]);
+        squared += delta * delta;
+    }
+    const double distance = std::sqrt(squared);
+    if (!std::isfinite(distance))
+        return std::numeric_limits<float>::infinity();
+    if (distance > static_cast<double>(std::numeric_limits<float>::max()))
+        return std::numeric_limits<float>::max();
+    return static_cast<float>(distance);
 }
 
 [[nodiscard]] bool lod_visible(double lod_in, double lod_out,
                                float distance) noexcept {
     // A finite authored LOD interval is required. A non-positive OUT means
     // open-ended, matching the current JS viewport condition.
-    lod_in = std::isfinite(lod_in) ? lod_in : 0.0;
-    lod_out = std::isfinite(lod_out) ? lod_out : 0.0;
-    if (!std::isfinite(distance)) return false;
+    if (!std::isfinite(lod_in) || !std::isfinite(lod_out) ||
+        !std::isfinite(distance))
+        return false;
     return distance >= lod_in && (lod_out <= 0.0F || distance <= lod_out);
 }
 
@@ -140,6 +149,16 @@ RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
     std::vector<bool> suppressed_roots(scene.nodes.size(), false);
     std::vector<std::int8_t> activity_overrides(scene.nodes.size(), -1);
     std::vector<const NodeRenderStateOverride*> node_state_overrides(scene.nodes.size(), nullptr);
+    std::vector<const KsNetMeshLodNodeState*> ksnet_node_states;
+    if (options.ksnet_mesh_lod.has_value()) {
+        ksnet_node_states.resize(scene.nodes.size(), nullptr);
+        for (const KsNetMeshLodNodeState& state : options.ksnet_mesh_lod->node_states) {
+            if (state.node != apex::scene::invalid_node_id &&
+                static_cast<std::size_t>(state.node) < ksnet_node_states.size()) {
+                ksnet_node_states[static_cast<std::size_t>(state.node)] = &state;
+            }
+        }
+    }
     for (const apex::scene::NodeId id : options.excluded_subtree_roots) {
         if (id != apex::scene::invalid_node_id &&
             static_cast<std::size_t>(id) < excluded_roots.size()) {
@@ -199,11 +218,31 @@ RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
         const double lod_out = state_override != nullptr && state_override->lod_out.has_value()
                                    ? *state_override->lod_out
                                    : static_cast<double>(node->lod_out);
+        const bool lod_is_visible = [&]() noexcept {
+            if (!std::isfinite(distance)) return false;
+            if (!options.ksnet_mesh_lod.has_value())
+                return lod_visible(lod_in, lod_out, distance);
+            const KsNetMeshLodNodeState* lod_state = ksnet_node_states[node_index];
+            KsNetMeshLodRequest request;
+            request.camera_position = options.camera_position;
+            request.bounds_center = node->bounds_center;
+            request.camera_fov_degrees = options.ksnet_mesh_lod->camera_fov_degrees;
+            request.lod_in = static_cast<float>(lod_in);
+            request.lod_out = static_cast<float>(lod_out);
+            request.bounds_radius = node->bounds_radius;
+            request.in_pvs = lod_state != nullptr
+                                 ? lod_state->in_pvs
+                                 : options.ksnet_mesh_lod->default_in_pvs;
+            request.no_cull = lod_state != nullptr
+                                  ? lod_state->no_cull
+                                  : options.ksnet_mesh_lod->default_no_cull;
+            return ksnet_mesh_lod_visible(request);
+        }();
         const bool normally_visible =
             !isolated && !excluded && branch_active &&
             (options.show_hidden || (node->visible && node->renderable)) &&
-            lod_visible(lod_in, lod_out, distance);
-        const bool isolated_visible = isolated_item && lod_visible(lod_in, lod_out, distance);
+            lod_is_visible;
+        const bool isolated_visible = isolated_item && lod_is_visible;
         if (geometry && (isolated_visible || normally_visible)) {
             const apex::scene::SceneMaterial* material = scene.find_material(node->material);
             const bool material_alpha_blend = material != nullptr &&

@@ -45,9 +45,41 @@ struct KsNetMeshLodRequest {
     bool no_cull = false;
 };
 
-/** Apply the recovered inclusive FOV-scaled ksNet per-mesh LOD predicate. */
+/**
+ * Apply the recovered inclusive FOV-scaled ksNet per-mesh LOD predicate.
+ * Native NO_CULL and zero-limit bypasses do not read the remaining inputs.
+ * Callers that require finite retained values must validate those inputs.
+ */
 [[nodiscard]] bool ksnet_mesh_lod_visible(
     const KsNetMeshLodRequest& request) noexcept;
+
+/** Explicit per-node inputs for the recovered ksNet PVS-array LOD rule. */
+struct KsNetMeshLodNodeState {
+    apex::scene::NodeId node = apex::scene::invalid_node_id;
+    bool in_pvs = true;
+    bool no_cull = false;
+};
+
+/**
+ * Opt-in render-plan inputs for the recovered ksNet PVS-array LOD rule.
+ *
+ * The defaults describe ordinary loaded KN5 meshes. They are explicit here
+ * because PVS and NO_CULL are not serialized in the SceneNode snapshot.
+ * Per-node entries replace both defaults for their referenced mesh.
+ * Direct planner callers must supply valid, unique mesh IDs. The stock-scene
+ * facade validates this requirement before it builds a plan.
+ */
+struct KsNetMeshLodOptions {
+    constexpr explicit KsNetMeshLodOptions(float camera_fov) noexcept
+        : camera_fov_degrees(camera_fov) {}
+
+    // Required explicitly because the installed Camera default is 60 degrees,
+    // while the port's workspace cameras commonly start at 45 degrees.
+    float camera_fov_degrees;
+    bool default_in_pvs = true;
+    bool default_no_cull = false;
+    std::span<const KsNetMeshLodNodeState> node_states{};
+};
 
 struct RenderPlanOptions {
     // Camera position is used for each item's LOD interval and transparent order.
@@ -78,6 +110,10 @@ struct RenderPlanOptions {
     apex::scene::NodeId explicit_reflection_root = apex::scene::invalid_node_id;
     std::string workspace_kind;
     float bounds_radius = 0.0F;
+    // Absent preserves the existing WebGL-compatible center-distance rule.
+    // Present applies the recovered ksNet PVS-array distance/LOD predicate.
+    // This does not claim full CameraMeshFilter pass or frustum parity.
+    std::optional<KsNetMeshLodOptions> ksnet_mesh_lod;
 };
 
 struct RenderItem {

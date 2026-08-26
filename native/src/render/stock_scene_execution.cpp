@@ -101,7 +101,8 @@ bool merge_damage_activity_overrides(
 }
 
 bool preplan_within_limit(const apex::scene::SceneSnapshot& scene,
-                          std::uint64_t limit, Diagnostic& diagnostic) {
+                          bool include_ksnet_node_states, std::uint64_t limit,
+                          Diagnostic& diagnostic) {
     if (limit == 0U) {
         diagnostic = {"stock_scene_plan_preflight_limit",
                       "The stock-scene plan preparation budget must be nonzero"};
@@ -238,12 +239,15 @@ bool preplan_within_limit(const apex::scene::SceneSnapshot& scene,
     }
 
     // build_render_plan allocates visited, hard-exclusion, suppression, and
-    // activity-override and node-state pointer arrays plus a LIFO WalkState
-    // stack. The stack capacity
+    // activity-override arrays. It also allocates node-state pointer arrays,
+    // including the opt-in ksNet array, plus a LIFO WalkState stack. The stack capacity
     // can approach the node count on a wide tree. Ancestor vectors are charged
     // separately with the authored maximum depth.
+    const std::size_t state_pointer_bytes =
+        sizeof(const NodeRenderStateOverride*) +
+        (include_ksnet_node_states ? sizeof(const KsNetMeshLodNodeState*) : 0U);
     if (!add_count(node_count, 3U * sizeof(bool) + sizeof(std::int8_t) +
-                                   sizeof(const NodeRenderStateOverride*), bytes,
+                                   state_pointer_bytes, bytes,
                    limit) ||
         !add_count(node_count, sizeof(std::uint32_t) + sizeof(bool) +
                                2U * sizeof(std::string) + sizeof(std::vector<std::uint32_t>),
@@ -358,6 +362,68 @@ bool validate_render_options(const apex::scene::SceneSnapshot& scene,
             return false;
         }
         seen[index] = true;
+    }
+    if (options.ksnet_mesh_lod.has_value()) {
+        const KsNetMeshLodOptions& lod = *options.ksnet_mesh_lod;
+        if (!std::isfinite(lod.camera_fov_degrees)) {
+            diagnostic = {"stock_scene_ksnet_lod_fov_non_finite",
+                          "The ksNet mesh-LOD camera FOV must be finite"};
+            return false;
+        }
+        for (const float coordinate : options.camera_position) {
+            if (!std::isfinite(coordinate)) {
+                diagnostic = {"stock_scene_ksnet_lod_camera_non_finite",
+                              "The ksNet mesh-LOD camera position must be finite"};
+                return false;
+            }
+        }
+        if (lod.node_states.size() > node_count) {
+            diagnostic = {"stock_scene_render_option_limit",
+                          "ksNet mesh-LOD node-state count exceeds the scene node count"};
+            return false;
+        }
+        reset_seen();
+        for (const KsNetMeshLodNodeState& state : lod.node_states) {
+            const apex::scene::SceneNode* node = scene.find_node(state.node);
+            if (node == nullptr ||
+                (node->kind != apex::scene::NodeKind::mesh &&
+                 node->kind != apex::scene::NodeKind::skinned_mesh)) {
+                diagnostic = {"stock_scene_ksnet_lod_state_invalid",
+                              "A ksNet mesh-LOD state references an unknown or non-mesh scene node"};
+                return false;
+            }
+            const std::size_t index = static_cast<std::size_t>(state.node);
+            if (seen[index]) {
+                diagnostic = {"stock_scene_ksnet_lod_state_duplicate",
+                              "ksNet mesh-LOD states contain a duplicate scene node"};
+                return false;
+            }
+            seen[index] = true;
+        }
+        for (const apex::scene::SceneNode& node : scene.nodes) {
+            if (node.kind != apex::scene::NodeKind::mesh &&
+                node.kind != apex::scene::NodeKind::skinned_mesh)
+                continue;
+            if (!std::isfinite(node.lod_in) || !std::isfinite(node.lod_out) ||
+                !std::isfinite(node.bounds_radius) || node.bounds_radius < 0.0F ||
+                std::any_of(node.bounds_center.begin(), node.bounds_center.end(),
+                            [](float value) { return !std::isfinite(value); })) {
+                diagnostic = {"stock_scene_ksnet_lod_mesh_non_finite",
+                              "ksNet mesh-LOD inputs require finite mesh bounds and LOD limits"};
+                return false;
+            }
+        }
+        const double max_float = static_cast<double>(std::numeric_limits<float>::max());
+        for (const NodeRenderStateOverride& override_value : options.node_state_overrides) {
+            if ((override_value.lod_in.has_value() &&
+                 std::abs(*override_value.lod_in) > max_float) ||
+                (override_value.lod_out.has_value() &&
+                 std::abs(*override_value.lod_out) > max_float)) {
+                diagnostic = {"stock_scene_ksnet_lod_override_out_of_range",
+                              "ksNet mesh-LOD overrides must fit in finite float values"};
+                return false;
+            }
+        }
     }
     if (!validate_roots(options.excluded_subtree_roots, "stock_scene_exclusion_invalid",
                         "stock_scene_exclusion_duplicate", "Subtree exclusions")) {
@@ -497,7 +563,9 @@ StockSceneExecutionResult prepare_stock_scene_execution(
         }
 
         Diagnostic preflight_diagnostic;
-        if (!preplan_within_limit(*request.scene, request.limits.max_plan_bytes,
+        if (!preplan_within_limit(*request.scene,
+                                  render_options.ksnet_mesh_lod.has_value(),
+                                  request.limits.max_plan_bytes,
                                   preflight_diagnostic)) {
             result.status = StaticSceneResourceStatus::invalid_request;
             result.diagnostic = std::move(preflight_diagnostic);
