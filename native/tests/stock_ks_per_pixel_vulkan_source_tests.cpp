@@ -213,6 +213,64 @@ void rejectsUnsupportedTargetSpecializations() {
             "source owner rejects an unsupported depth format");
 }
 
+void preservesValidatedRenderPlanState() {
+    StockKsPerPixelVulkanSourcePipelineState state;
+    state.targets.colors.push_back(
+        {PipelineRenderTargetFormat::bgra8_srgb, 4U});
+    state.targets.has_depth = true;
+    state.targets.depth = {
+        PipelineRenderTargetFormat::depth32_float, 4U};
+    state.raster.cull = PipelineCullMode::front;
+    state.raster.front_face = PipelineFrontFace::clockwise;
+    state.raster.fill = PipelineFillMode::wireframe;
+    state.blend.enabled = true;
+    state.blend.source_color = PipelineBlendFactor::source_alpha;
+    state.blend.destination_color =
+        PipelineBlendFactor::one_minus_source_alpha;
+    state.blend.source_alpha = PipelineBlendFactor::one;
+    state.blend.destination_alpha =
+        PipelineBlendFactor::one_minus_source_alpha;
+    state.depth.test_enabled = true;
+    state.depth.write_enabled = false;
+    state.depth.compare = PipelineCompareOperation::less_or_equal;
+    auto program = make_program(StockKsPerPixelVariant::base, state.targets);
+    StockKsPerPixelVulkanSourceProgramResult specialized =
+        create_builtin_stock_ks_per_pixel_vulkan_source_program(
+            StockKsPerPixelVariant::base, state);
+    require(specialized.ok(),
+            "validated render-plan state specializes a source owner");
+    const PipelineProgram& pipeline = specialized.program->pipeline();
+    require(pipeline.raster.cull == state.raster.cull &&
+                pipeline.raster.front_face == state.raster.front_face &&
+                pipeline.raster.fill == state.raster.fill &&
+                pipeline.blend.enabled == state.blend.enabled &&
+                pipeline.blend.source_color == state.blend.source_color &&
+                pipeline.blend.destination_color ==
+                    state.blend.destination_color &&
+                pipeline.depth.test_enabled == state.depth.test_enabled &&
+                pipeline.depth.write_enabled == state.depth.write_enabled &&
+                pipeline.depth.compare == state.depth.compare,
+            "immutable source owner retains raster, blend, and depth state");
+    require(program.pipeline().shaders.size() == pipeline.shaders.size() &&
+                program.pipeline().shaders[0].bytes ==
+                    pipeline.shaders[0].bytes &&
+                program.pipeline().shaders[1].bytes ==
+                    pipeline.shaders[1].bytes &&
+                program.pipeline().shaders[0].provenance ==
+                    pipeline.shaders[0].provenance &&
+                program.pipeline().shaders[1].provenance ==
+                    pipeline.shaders[1].provenance,
+            "render-plan specialization does not alter built-in shader modules");
+
+    state.blend.alpha_to_coverage = true;
+    specialized = create_builtin_stock_ks_per_pixel_vulkan_source_program(
+        StockKsPerPixelVariant::base, std::move(state));
+    require(!specialized.ok() &&
+                specialized.status ==
+                    StockKsPerPixelVulkanSourceStatus::variant_state_mismatch,
+            "render-plan A2C state cannot disagree with the shader variant");
+}
+
 void rejectsInvalidVariant() {
     constexpr auto invalid = static_cast<StockKsPerPixelVariant>(0xffU);
     const auto result =
@@ -230,6 +288,7 @@ int main() {
     try {
         acceptsBothImmutableBuiltIns();
         acceptsProductionTargetSpecializations();
+        preservesValidatedRenderPlanState();
         rejectsRelabelingAndModuleDrift();
         rejectsAbiAndVariantDrift();
         rejectsUnsupportedTargetSpecializations();

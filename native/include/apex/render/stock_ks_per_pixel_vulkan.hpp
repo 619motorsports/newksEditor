@@ -51,6 +51,16 @@ validate_stock_ks_per_pixel_vulkan_source_program(
 
 struct StockKsPerPixelVulkanSourceProgramResult;
 
+// Pipeline state remains render-plan authority rather than shader authority.
+// This value specializes an immutable source owner without permitting caller
+// shader modules, resource layouts, vertex layouts, or transform contracts.
+struct StockKsPerPixelVulkanSourcePipelineState {
+    PipelineRenderTargets targets;
+    PipelineRasterState raster;
+    PipelineBlendState blend;
+    PipelineDepthState depth;
+};
+
 class ValidatedStockKsPerPixelVulkanSourceProgram {
 public:
     ValidatedStockKsPerPixelVulkanSourceProgram(
@@ -85,6 +95,10 @@ private:
     friend StockKsPerPixelVulkanSourceProgramResult
     create_builtin_stock_ks_per_pixel_vulkan_source_program(
         StockKsPerPixelVariant variant, PipelineRenderTargets targets);
+    friend StockKsPerPixelVulkanSourceProgramResult
+    create_builtin_stock_ks_per_pixel_vulkan_source_program(
+        StockKsPerPixelVariant variant,
+        StockKsPerPixelVulkanSourcePipelineState state);
 
     ValidatedStockKsPerPixelVulkanSourceProgram(
         PipelineProgram pipeline, StockKsPerPixelVariant variant,
@@ -121,5 +135,13 @@ create_builtin_stock_ks_per_pixel_vulkan_source_program(
 [[nodiscard]] StockKsPerPixelVulkanSourceProgramResult
 create_builtin_stock_ks_per_pixel_vulkan_source_program(
     StockKsPerPixelVariant variant, PipelineRenderTargets targets);
+
+// Specializes the same immutable shader/ABI package with caller-selected
+// render-plan state. Alpha-to-coverage must still match the selected shader
+// variant, and the complete resulting pipeline must pass normal validation.
+[[nodiscard]] StockKsPerPixelVulkanSourceProgramResult
+create_builtin_stock_ks_per_pixel_vulkan_source_program(
+    StockKsPerPixelVariant variant,
+    StockKsPerPixelVulkanSourcePipelineState state);
 
 } // namespace apex::render
