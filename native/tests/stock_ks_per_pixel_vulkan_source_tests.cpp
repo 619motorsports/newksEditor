@@ -1,5 +1,6 @@
 #include "apex/render/stock_ks_per_pixel_vulkan.hpp"
 
+#include <array>
 #include <cstdint>
 #include <iostream>
 #include <stdexcept>
@@ -31,6 +32,15 @@ ValidatedStockKsPerPixelVulkanSourceProgram make_program(
     StockKsPerPixelVulkanSourceProgramResult result =
         create_builtin_stock_ks_per_pixel_vulkan_source_program(variant);
     require(result.ok(), "built-in Vulkan source program creation");
+    return std::move(*result.program);
+}
+
+ValidatedStockKsPerPixelVulkanSourceProgram make_program(
+    StockKsPerPixelVariant variant, PipelineRenderTargets targets) {
+    StockKsPerPixelVulkanSourceProgramResult result =
+        create_builtin_stock_ks_per_pixel_vulkan_source_program(
+            variant, std::move(targets));
+    require(result.ok(), "target-specialized Vulkan source program creation");
     return std::move(*result.program);
 }
 
@@ -105,11 +115,11 @@ void rejectsAbiAndVariantDrift() {
             "recovered mesh layout drift is rejected");
 
     pipeline = base.pipeline();
-    pipeline.targets.colors[0].samples = 4U;
+    pipeline.targets.colors[0].samples = 2U;
     require(validate_stock_ks_per_pixel_vulkan_source_program(
                 pipeline, StockKsPerPixelVariant::base) ==
                 StockKsPerPixelVulkanSourceStatus::target_contract_mismatch,
-            "base sample-count drift is rejected");
+            "unsupported base sample-count drift is rejected");
 
     pipeline = base.pipeline();
     pipeline.blend.alpha_to_coverage = true;
@@ -123,6 +133,84 @@ void rejectsAbiAndVariantDrift() {
                 StockKsPerPixelVariant::alpha_to_coverage) ==
                 StockKsPerPixelVulkanSourceStatus::shader_identity_mismatch,
             "base modules cannot enter the AT variant");
+}
+
+void acceptsProductionTargetSpecializations() {
+    constexpr std::array color_formats = {
+        PipelineRenderTargetFormat::rgba8_unorm,
+        PipelineRenderTargetFormat::rgba8_srgb,
+        PipelineRenderTargetFormat::bgra8_unorm,
+        PipelineRenderTargetFormat::bgra8_srgb,
+    };
+    for (PipelineRenderTargetFormat format : color_formats) {
+        PipelineRenderTargets targets;
+        targets.colors.push_back({format, 1U});
+        auto base = make_program(StockKsPerPixelVariant::base,
+                                 std::move(targets));
+        require(base.pipeline().targets.colors[0].format == format &&
+                    base.pipeline().targets.colors[0].samples == 1U,
+                "base owner retains each supported single-sample format");
+    }
+
+    PipelineRenderTargets shared_msaa_targets;
+    shared_msaa_targets.colors.push_back(
+        {PipelineRenderTargetFormat::bgra8_srgb, 4U});
+    shared_msaa_targets.has_depth = true;
+    shared_msaa_targets.depth = {
+        PipelineRenderTargetFormat::depth32_float, 4U};
+    auto base = make_program(StockKsPerPixelVariant::base,
+                             shared_msaa_targets);
+    auto alpha = make_program(StockKsPerPixelVariant::alpha_to_coverage,
+                              shared_msaa_targets);
+    require(base.pipeline().targets.colors.size() == 1U &&
+                alpha.pipeline().targets.colors.size() == 1U &&
+                base.pipeline().targets.colors[0].format ==
+                    alpha.pipeline().targets.colors[0].format &&
+                base.pipeline().targets.colors[0].samples ==
+                    alpha.pipeline().targets.colors[0].samples &&
+                base.pipeline().targets.has_depth &&
+                alpha.pipeline().targets.has_depth &&
+                !base.pipeline().blend.alpha_to_coverage &&
+                alpha.pipeline().blend.alpha_to_coverage,
+            "base and AT owners share one production 4x color/depth pass");
+}
+
+void rejectsUnsupportedTargetSpecializations() {
+    PipelineRenderTargets targets;
+    targets.colors.push_back(
+        {PipelineRenderTargetFormat::bgra8_srgb, 1U});
+    auto result = create_builtin_stock_ks_per_pixel_vulkan_source_program(
+        StockKsPerPixelVariant::alpha_to_coverage, targets);
+    require(!result.ok() &&
+                result.status ==
+                    StockKsPerPixelVulkanSourceStatus::target_contract_mismatch,
+            "AT owner rejects a single-sample target");
+
+    targets.colors[0] = {PipelineRenderTargetFormat::rgba16_float, 4U};
+    result = create_builtin_stock_ks_per_pixel_vulkan_source_program(
+        StockKsPerPixelVariant::base, targets);
+    require(!result.ok() &&
+                result.status ==
+                    StockKsPerPixelVulkanSourceStatus::target_contract_mismatch,
+            "source owner rejects an unsupported color format");
+
+    targets.colors[0] = {PipelineRenderTargetFormat::bgra8_unorm, 4U};
+    targets.has_depth = true;
+    targets.depth = {PipelineRenderTargetFormat::depth32_float, 1U};
+    result = create_builtin_stock_ks_per_pixel_vulkan_source_program(
+        StockKsPerPixelVariant::base, targets);
+    require(!result.ok() &&
+                result.status ==
+                    StockKsPerPixelVulkanSourceStatus::target_contract_mismatch,
+            "source owner rejects mismatched color/depth samples");
+
+    targets.depth = {PipelineRenderTargetFormat::depth24_stencil8, 4U};
+    result = create_builtin_stock_ks_per_pixel_vulkan_source_program(
+        StockKsPerPixelVariant::base, std::move(targets));
+    require(!result.ok() &&
+                result.status ==
+                    StockKsPerPixelVulkanSourceStatus::target_contract_mismatch,
+            "source owner rejects an unsupported depth format");
 }
 
 void rejectsInvalidVariant() {
@@ -141,8 +229,10 @@ void rejectsInvalidVariant() {
 int main() {
     try {
         acceptsBothImmutableBuiltIns();
+        acceptsProductionTargetSpecializations();
         rejectsRelabelingAndModuleDrift();
         rejectsAbiAndVariantDrift();
+        rejectsUnsupportedTargetSpecializations();
         rejectsInvalidVariant();
         std::cout << "stock ksPerPixel Vulkan source tests passed\n";
         return 0;

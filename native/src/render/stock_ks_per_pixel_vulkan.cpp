@@ -108,7 +108,42 @@ bool exact_resources(const PipelineProgram& program) noexcept {
     return true;
 }
 
-PipelineProgram built_in_pipeline(StockKsPerPixelVariant variant) {
+PipelineRenderTargets default_targets(StockKsPerPixelVariant variant) {
+    PipelineRenderTargets targets;
+    targets.colors.push_back(
+        {PipelineRenderTargetFormat::rgba8_unorm,
+         variant == StockKsPerPixelVariant::alpha_to_coverage ? 4U : 1U});
+    return targets;
+}
+
+bool supported_color_format(PipelineRenderTargetFormat format) noexcept {
+    return format == PipelineRenderTargetFormat::rgba8_unorm ||
+           format == PipelineRenderTargetFormat::rgba8_srgb ||
+           format == PipelineRenderTargetFormat::bgra8_unorm ||
+           format == PipelineRenderTargetFormat::bgra8_srgb;
+}
+
+bool supported_targets(const PipelineRenderTargets& targets,
+                       StockKsPerPixelVariant variant) noexcept {
+    if (targets.colors.size() != 1U ||
+        !supported_color_format(targets.colors[0].format))
+        return false;
+    const std::uint32_t samples = targets.colors[0].samples;
+    if (variant == StockKsPerPixelVariant::base) {
+        if (samples != 1U && samples != 4U) return false;
+    } else if (variant == StockKsPerPixelVariant::alpha_to_coverage) {
+        if (samples != 4U) return false;
+    } else {
+        return false;
+    }
+    return !targets.has_depth ||
+           (targets.depth.format ==
+                PipelineRenderTargetFormat::depth32_float &&
+            targets.depth.samples == samples);
+}
+
+PipelineProgram built_in_pipeline(StockKsPerPixelVariant variant,
+                                  PipelineRenderTargets targets) {
     const bool alpha_to_coverage =
         variant == StockKsPerPixelVariant::alpha_to_coverage;
     PipelineProgram program;
@@ -134,9 +169,7 @@ PipelineProgram built_in_pipeline(StockKsPerPixelVariant variant) {
         {PipelineVertexSemantic::tangent,
          PipelineVertexAttributeFormat::float32x3, 3U, 32U},
     };
-    program.targets.colors.push_back(
-        {PipelineRenderTargetFormat::rgba8_unorm,
-         alpha_to_coverage ? 4U : 1U});
+    program.targets = std::move(targets);
     program.raster.cull = PipelineCullMode::none;
     program.blend.alpha_to_coverage = alpha_to_coverage;
     program.depth.test_enabled = false;
@@ -203,7 +236,7 @@ const char* stock_ks_per_pixel_vulkan_source_status_name(
 StockKsPerPixelVulkanSourceStatus
 validate_stock_ks_per_pixel_vulkan_source_program(
     const PipelineProgram& program,
-    StockKsPerPixelVariant variant) noexcept {
+    StockKsPerPixelVariant variant) {
     if (variant != StockKsPerPixelVariant::base &&
         variant != StockKsPerPixelVariant::alpha_to_coverage)
         return StockKsPerPixelVulkanSourceStatus::invalid_variant;
@@ -232,11 +265,7 @@ validate_stock_ks_per_pixel_vulkan_source_program(
         return StockKsPerPixelVulkanSourceStatus::vertex_layout_mismatch;
     const bool alpha_to_coverage =
         variant == StockKsPerPixelVariant::alpha_to_coverage;
-    if (program.targets.colors.size() != 1U || program.targets.has_depth ||
-        program.targets.colors[0].format !=
-            PipelineRenderTargetFormat::rgba8_unorm ||
-        program.targets.colors[0].samples !=
-            (alpha_to_coverage ? 4U : 1U))
+    if (!supported_targets(program.targets, variant))
         return StockKsPerPixelVulkanSourceStatus::target_contract_mismatch;
     if (program.blend.alpha_to_coverage != alpha_to_coverage)
         return StockKsPerPixelVulkanSourceStatus::variant_state_mismatch;
@@ -248,11 +277,21 @@ validate_stock_ks_per_pixel_vulkan_source_program(
 StockKsPerPixelVulkanSourceProgramResult
 create_builtin_stock_ks_per_pixel_vulkan_source_program(
     StockKsPerPixelVariant variant) {
+    return create_builtin_stock_ks_per_pixel_vulkan_source_program(
+        variant, default_targets(variant));
+}
+
+StockKsPerPixelVulkanSourceProgramResult
+create_builtin_stock_ks_per_pixel_vulkan_source_program(
+    StockKsPerPixelVariant variant, PipelineRenderTargets targets) {
     if (variant != StockKsPerPixelVariant::base &&
         variant != StockKsPerPixelVariant::alpha_to_coverage)
         return {StockKsPerPixelVulkanSourceStatus::invalid_variant,
                 std::nullopt};
-    PipelineProgram pipeline = built_in_pipeline(variant);
+    if (!supported_targets(targets, variant))
+        return {StockKsPerPixelVulkanSourceStatus::target_contract_mismatch,
+                std::nullopt};
+    PipelineProgram pipeline = built_in_pipeline(variant, std::move(targets));
     const StockKsPerPixelVulkanSourceStatus status =
         validate_stock_ks_per_pixel_vulkan_source_program(pipeline, variant);
     if (status != StockKsPerPixelVulkanSourceStatus::ready)

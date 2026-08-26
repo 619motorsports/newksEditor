@@ -47,7 +47,7 @@ enum class StockKsPerPixelVulkanSourceStatus : std::uint8_t {
 [[nodiscard]] StockKsPerPixelVulkanSourceStatus
 validate_stock_ks_per_pixel_vulkan_source_program(
     const PipelineProgram& program,
-    StockKsPerPixelVariant variant) noexcept;
+    StockKsPerPixelVariant variant);
 
 struct StockKsPerPixelVulkanSourceProgramResult;
 
@@ -73,7 +73,7 @@ public:
         return evidence_;
     }
     [[nodiscard]] StockKsPerPixelVulkanSourceStatus validation_status()
-        const noexcept {
+        const {
         return validate_stock_ks_per_pixel_vulkan_source_program(
             pipeline_, variant_);
     }
@@ -82,6 +82,9 @@ private:
     friend StockKsPerPixelVulkanSourceProgramResult
     create_builtin_stock_ks_per_pixel_vulkan_source_program(
         StockKsPerPixelVariant variant);
+    friend StockKsPerPixelVulkanSourceProgramResult
+    create_builtin_stock_ks_per_pixel_vulkan_source_program(
+        StockKsPerPixelVariant variant, PipelineRenderTargets targets);
 
     ValidatedStockKsPerPixelVulkanSourceProgram(
         PipelineProgram pipeline, StockKsPerPixelVariant variant,
@@ -105,9 +108,18 @@ struct StockKsPerPixelVulkanSourceProgramResult {
 };
 
 // Selects private checked-in modules by variant. There is intentionally no
-// caller byte-span overload.
+// caller byte-span overload. The compatibility overload retains the original
+// RGBA8-unorm contract: base uses 1x and alpha-to-coverage uses 4x.
 [[nodiscard]] StockKsPerPixelVulkanSourceProgramResult
 create_builtin_stock_ks_per_pixel_vulkan_source_program(
     StockKsPerPixelVariant variant);
+
+// Specializes the immutable owner for one production render pass. Supported
+// color targets are RGBA8/BGRA8, linear or sRGB. Base accepts 1x or 4x;
+// alpha-to-coverage requires 4x. An optional depth target must be D32 with the
+// same sample count. Unsupported contracts return target_contract_mismatch.
+[[nodiscard]] StockKsPerPixelVulkanSourceProgramResult
+create_builtin_stock_ks_per_pixel_vulkan_source_program(
+    StockKsPerPixelVariant variant, PipelineRenderTargets targets);
 
 } // namespace apex::render

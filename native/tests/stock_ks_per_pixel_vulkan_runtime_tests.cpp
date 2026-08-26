@@ -488,6 +488,69 @@ int run_runtime_probe() {
                 "Vulkan AT center matches recovered CPU equation after resolve");
     }
 
+    TextureDescription production_target_description =
+        alpha_target_description;
+    production_target_description.format = TextureFormat::bgra8_srgb;
+    TextureResult production_target =
+        device.create_texture(production_target_description);
+    require(production_target.ok(),
+            "Vulkan source production-format target creation");
+    const DepthAttachmentDescription production_depth_description{
+        32U, 32U, 4U, DepthAttachmentFormat::d32_float, false};
+    DepthAttachmentResult production_depth =
+        device.create_depth_attachment(production_depth_description);
+    require(production_depth.ok(),
+            "Vulkan source production-format depth creation");
+    PipelineRenderTargets production_targets;
+    production_targets.colors.push_back(
+        {PipelineRenderTargetFormat::bgra8_srgb, 4U});
+    production_targets.has_depth = true;
+    production_targets.depth = {
+        PipelineRenderTargetFormat::depth32_float, 4U};
+    StockKsPerPixelVulkanSourceProgramResult production_base_program =
+        create_builtin_stock_ks_per_pixel_vulkan_source_program(
+            StockKsPerPixelVariant::base, production_targets);
+    StockKsPerPixelVulkanSourceProgramResult production_alpha_program =
+        create_builtin_stock_ks_per_pixel_vulkan_source_program(
+            StockKsPerPixelVariant::alpha_to_coverage,
+            production_targets);
+    require(production_base_program.ok() && production_alpha_program.ok(),
+            "Vulkan source production-format owner creation");
+    StockKsPerPixelVulkanSourceDrawBinding production_base_binding =
+        source_binding;
+    production_base_binding.program = &*production_base_program.program;
+    StockKsPerPixelVulkanSourceDrawBinding production_alpha_binding =
+        source_binding;
+    production_alpha_binding.program = &*production_alpha_program.program;
+    IndexedStaticMeshDrawRequest production_base_request = source_request;
+    production_base_request.pipeline =
+        &production_base_program.program->pipeline();
+    production_base_request.stock_ks_per_pixel_vulkan_source =
+        &production_base_binding;
+    IndexedStaticMeshDrawRequest production_alpha_request = alpha_request;
+    production_alpha_request.pipeline =
+        &production_alpha_program.program->pipeline();
+    production_alpha_request.stock_ks_per_pixel_vulkan_source =
+        &production_alpha_binding;
+    const std::array production_requests = {
+        production_base_request, production_alpha_request};
+    IndexedStaticMeshBatchDescription production_batch;
+    production_batch.draws = production_requests;
+    production_batch.depth_attachment = production_depth.attachment.get();
+    production_batch.clear_depth = true;
+    const IndexedStaticMeshBatchResult production_draw =
+        device.draw_indexed_static_mesh_batch_and_readback(
+            *production_target.texture, production_batch);
+    require(production_draw.ok() &&
+                production_draw.rgba8.size() == 32U * 32U * 4U,
+            production_draw.diagnostic.code.empty()
+                ? "mixed base/AT production-format Vulkan source batch"
+                : production_draw.diagnostic.code);
+    require(production_draw.rgba8[center] != std::byte{0} ||
+                production_draw.rgba8[center + 1U] != std::byte{0} ||
+                production_draw.rgba8[center + 2U] != std::byte{0},
+            "mixed base/AT production-format Vulkan source batch renders");
+
     device.wait_idle();
     peer_result.device->wait_idle();
     std::cout << "stock ksPerPixel Vulkan ABI probe and source-equivalent runtime draw passed\n";

@@ -1482,15 +1482,18 @@ IndexedStaticMeshDrawStatus validate_stock_ks_per_pixel_vulkan_source_binding(
             "The Vulkan source-equivalent owner, packet, and pipeline A2C state must match"};
         return IndexedStaticMeshDrawStatus::invalid_request;
     }
-    const std::uint32_t required_samples = alpha_to_coverage ? 4U : 1U;
-    if (target.info().description.samples != required_samples) {
+    const std::uint32_t target_samples =
+        target.info().description.samples;
+    if ((alpha_to_coverage && target_samples != 4U) ||
+        (!alpha_to_coverage && target_samples != 1U &&
+         target_samples != 4U)) {
         diagnostic = {
             alpha_to_coverage
                 ? "indexed_stock_vulkan_source_a2c_target_samples_invalid"
                 : "indexed_stock_vulkan_source_base_target_samples_invalid",
             alpha_to_coverage
                 ? "Vulkan source-equivalent alpha-to-coverage requires a 4x target"
-                : "Vulkan source-equivalent base rendering requires a single-sample target"};
+                : "Vulkan source-equivalent base rendering requires a 1x or 4x target"};
         return IndexedStaticMeshDrawStatus::unsupported;
     }
     const IndexedStaticMeshDrawStatus status =
