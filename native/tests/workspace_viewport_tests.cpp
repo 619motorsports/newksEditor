@@ -2406,6 +2406,208 @@ void publishes_ai_spline_controller_transactions() {
             "controller reports save resource limits without string matching");
 }
 
+void publishes_recovered_ai_spline_edit_lifecycle() {
+    apex::formats::AiSpline spline;
+    spline.source = "controller-lifecycle.ai";
+    spline.version = 7U;
+    spline.points.resize(4U);
+    spline.payloads.resize(4U);
+    for (std::size_t index = 0U; index < spline.points.size(); ++index) {
+        spline.points[index].position = {
+            static_cast<float>(index) * 10.0F, 0.0F,
+            static_cast<float>(index)};
+        spline.points[index].tag = static_cast<std::int32_t>(index);
+        spline.payloads[index].side0 = 1.0F;
+        spline.payloads[index].side1 = 2.0F;
+    }
+
+    const auto createController = [&]() {
+        apex::app::WorkspaceAiSplineControllerConfiguration configuration;
+        configuration.selectedIndices = {0U, 1U};
+        return apex::app::WorkspaceAiSplineController::create(
+            spline, std::move(configuration));
+    };
+    const auto prepareController = [&](FakeDevice& device,
+                                       apex::app::WorkspaceAiSplineController&
+                                           controller) {
+        auto value = fixture();
+        auto request = request_for(value);
+        request.ai_spline_geometry = &controller.overlays().primary;
+        request.ai_spline_generation = controller.revision();
+        request.ai_spline_pipeline = ai_spline_pipeline(value);
+        request.ai_spline_selection_geometry =
+            &*controller.overlays().selection;
+        request.ai_spline_selection_pipeline =
+            ai_spline_camber_pipeline(value);
+        return apex::app::prepareWorkspaceViewport(device, value.document,
+                                                    request);
+    };
+
+    auto created = createController();
+    require(created.ok() && !created.controller->editing(),
+            "AI spline lifecycle controller starts outside edit mode");
+    auto controller = std::move(created.controller);
+    FakeDevice device;
+    auto prepared = prepareController(device, *controller);
+    require(prepared.ok(), "AI spline lifecycle viewport prepares");
+
+    const auto baselineBytes = controller->currentBytes();
+    const auto baselineRevision = controller->revision();
+    const auto baselineLiveBuffers = *device.live_buffer_count;
+    const auto baselineBufferCalls = device.buffer_calls;
+    const auto finishBeforeStart = controller->finishEditing(
+        device, *prepared.viewport, baselineRevision);
+    require(finishBeforeStart.ok() && !finishBeforeStart.changed &&
+                !controller->editing() &&
+                controller->configuration().selectedIndices ==
+                    std::vector<std::uint32_t>({0U, 1U}) &&
+                device.buffer_calls == baselineBufferCalls,
+            "finish preserves selection outside edit mode");
+
+    const auto stale =
+        controller->startEditing(device, *prepared.viewport, 99U);
+    require(!stale.ok() &&
+                stale.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::
+                        stale_revision &&
+                !controller->editing() &&
+                controller->configuration().selectedIndices ==
+                    std::vector<std::uint32_t>({0U, 1U}) &&
+                device.buffer_calls == baselineBufferCalls,
+            "start rejects a stale revision before lifecycle allocation");
+
+    device.fail_buffer_call = device.buffer_calls + 1U;
+    device.fail_buffer_status = BufferStatus::upload_failed;
+    const auto uploadFailed = controller->startEditing(
+        device, *prepared.viewport, controller->revision());
+    require(!uploadFailed.ok() &&
+                uploadFailed.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::
+                        viewport_failed &&
+                !controller->editing() &&
+                controller->configuration().selectedIndices ==
+                    std::vector<std::uint32_t>({0U, 1U}) &&
+                controller->currentBytes() == baselineBytes &&
+                controller->revision() == baselineRevision &&
+                prepared.viewport->aiSplineGeneration() == baselineRevision &&
+                *device.live_buffer_count == baselineLiveBuffers,
+            "failed upload keeps lifecycle and viewport state");
+    device.fail_buffer_call = device.buffer_calls + 1U;
+    device.fail_buffer_status = BufferStatus::allocation_failed;
+    const auto allocationFailed = controller->startEditing(
+        device, *prepared.viewport, controller->revision());
+    require(!allocationFailed.ok() &&
+                allocationFailed.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::
+                        allocation_failed &&
+                !controller->editing() &&
+                controller->configuration().selectedIndices ==
+                    std::vector<std::uint32_t>({0U, 1U}) &&
+                controller->currentBytes() == baselineBytes &&
+                controller->revision() == baselineRevision &&
+                !controller->dirty() && !controller->canUndo() &&
+                !controller->canRedo() &&
+                prepared.viewport->aiSplineGeneration() == baselineRevision &&
+                *device.live_buffer_count == baselineLiveBuffers,
+            "failed allocation keeps selection, history, and visible buffers");
+    device.fail_buffer_call = 0U;
+
+    PresentationTargetDescription targetDescription;
+    targetDescription.width = 32U;
+    targetDescription.height = 32U;
+    targetDescription.format = TextureFormat::rgba8_unorm;
+    FakeTarget target(targetDescription);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    Diagnostic drawDiagnostic;
+    require(prepared.viewport->drawAndPresent(device, target, frame,
+                                              drawDiagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.overlay_counts.back() == 2U,
+            "failed start leaves selection markers drawable");
+
+    const auto callsBeforeStart = device.buffer_calls;
+    const auto started = controller->startEditing(
+        device, *prepared.viewport, controller->revision());
+    require(started.ok() && started.changed && controller->editing() &&
+                started.revision == baselineRevision &&
+                started.replacedPassCount == 2U &&
+                controller->configuration().selectedIndices.empty() &&
+                !controller->overlays().selection.has_value() &&
+                controller->currentBytes() == baselineBytes &&
+                !controller->dirty() && !controller->canUndo() &&
+                !controller->canRedo() &&
+                device.buffer_calls == callsBeforeStart + 1U,
+            "start clears selection without changing authoring history");
+    require(prepared.viewport->drawAndPresent(device, target, frame,
+                                              drawDiagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.overlay_counts.back() == 1U,
+            "started edit mode omits cleared selection markers");
+
+    const auto callsBeforeRepeatedStart = device.buffer_calls;
+    const auto repeatedStart = controller->startEditing(
+        device, *prepared.viewport, controller->revision());
+    require(repeatedStart.ok() && !repeatedStart.changed &&
+                controller->editing() &&
+                device.buffer_calls == callsBeforeRepeatedStart,
+            "repeated start with no selection performs no viewport work");
+    const auto finished = controller->finishEditing(
+        device, *prepared.viewport, controller->revision());
+    require(finished.ok() && finished.changed && !controller->editing() &&
+                finished.replacedPassCount == 0U &&
+                controller->revision() == baselineRevision &&
+                controller->currentBytes() == baselineBytes &&
+                device.buffer_calls == callsBeforeRepeatedStart,
+            "short finish exits mode without model or viewport changes");
+
+    auto cancelCreated = createController();
+    require(cancelCreated.ok(), "AI spline cancel controller creates");
+    auto cancelController = std::move(cancelCreated.controller);
+    FakeDevice cancelDevice;
+    auto cancelPrepared = prepareController(cancelDevice, *cancelController);
+    require(cancelPrepared.ok(), "AI spline cancel viewport prepares");
+    const auto cancelled = cancelController->cancelEditing(
+        cancelDevice, *cancelPrepared.viewport,
+        cancelController->revision());
+    require(cancelled.ok() && cancelled.changed &&
+                !cancelController->editing() &&
+                cancelController->configuration().selectedIndices.empty() &&
+                !cancelController->overlays().selection.has_value() &&
+                cancelController->revision() == 0U &&
+                !cancelController->dirty() &&
+                !cancelController->canUndo() &&
+                !cancelController->canRedo(),
+            "cancel clears selection without restoring the baseline");
+
+    apex::app::WorkspaceAiSplineControllerConfiguration emptyConfiguration;
+    auto emptyCreated = apex::app::WorkspaceAiSplineController::create(
+        spline, std::move(emptyConfiguration));
+    require(emptyCreated.ok(), "empty-selection lifecycle controller creates");
+    auto emptyController = std::move(emptyCreated.controller);
+    auto value = fixture();
+    auto emptyRequest = request_for(value);
+    emptyRequest.ai_spline_geometry = &emptyController->overlays().primary;
+    emptyRequest.ai_spline_generation = emptyController->revision();
+    emptyRequest.ai_spline_pipeline = ai_spline_pipeline(value);
+    emptyRequest.ai_spline_selection_pipeline =
+        ai_spline_camber_pipeline(value);
+    FakeDevice emptyDevice;
+    auto emptyPrepared = apex::app::prepareWorkspaceViewport(
+        emptyDevice, value.document, emptyRequest);
+    require(emptyPrepared.ok(),
+            "controller viewport prepares a latent selection pipeline");
+    const auto emptyBufferCalls = emptyDevice.buffer_calls;
+    const auto emptyStarted = emptyController->startEditing(
+        emptyDevice, *emptyPrepared.viewport, emptyController->revision());
+    require(emptyStarted.ok() && emptyStarted.changed &&
+                emptyStarted.replacedPassCount == 0U &&
+                emptyController->editing() &&
+                emptyDevice.buffer_calls == emptyBufferCalls,
+            "empty-selection start changes only controller edit mode");
+}
+
 void rejects_unsafe_ai_spline_controller_candidates() {
     apex::formats::AiSpline legacy;
     legacy.source = "legacy-controller.ai";
@@ -3284,6 +3486,7 @@ int main() {
         replaces_committed_ai_spline_overlays_atomically();
         tracks_recovered_ai_spline_manual_input();
         publishes_ai_spline_controller_transactions();
+        publishes_recovered_ai_spline_edit_lifecycle();
         rejects_unsafe_ai_spline_controller_candidates();
         handles_degenerate_ai_spline_manual_forwards();
         publishes_controller_through_d3d12_metadata_contract();

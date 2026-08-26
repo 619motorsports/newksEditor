@@ -3050,6 +3050,16 @@ becomes `SplineEditor.backupSpline` at field offset 8.
 replace the backup. Refresh, resample, finish, cancel, and save also keep the
 load-time backup. Thus, a save does not establish a new reset point.
 
+`SplineEditor.finishEditing` has token `0x06000112` and VA `0x1002f324`.
+It clears edit mode but preserves the selected-index vector.
+It changes points and refreshes derived spline state only with five or more
+temporary edit points. It always cleans and clears the temporary edit points.
+
+`SplineEditor.cancelEditing` has token `0x0600011a` and VA `0x1002f55c`.
+It clears edit mode, the selected-index vector, and temporary edit points.
+It cleans temporary visual indicators but does not change spline points.
+It does not refresh the derived spline state.
+
 `SplineEditor.setSelectedIndicesToDefault` has token `0x06000113` and RVA
 `0x30c14`. It copies each selected point and tagged payload from the backup.
 It uses raw selection order and keeps the selection. An empty selection does

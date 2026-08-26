@@ -2046,10 +2046,12 @@ int run_window(int argc, char** argv) {
                 request.ai_spline_right_geometry = &*ai.right;
                 request.ai_spline_right_pipeline = std::move(side_pipeline);
             }
-            if (ai.selection.has_value()) {
+            if (loaded_workspace.aiSplineController != nullptr ||
+                ai.selection.has_value()) {
                 auto selection_pipeline = pipeline;
                 selection_pipeline.name = "workspace-ai-spline-selection";
-                request.ai_spline_selection_geometry = &*ai.selection;
+                if (ai.selection.has_value())
+                    request.ai_spline_selection_geometry = &*ai.selection;
                 request.ai_spline_selection_pipeline =
                     std::move(selection_pipeline);
             }

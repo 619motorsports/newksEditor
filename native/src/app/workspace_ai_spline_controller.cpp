@@ -206,15 +206,18 @@ struct WorkspaceAiSplineController::State {
     WorkspaceAiSplineControllerConfiguration configuration;
     WorkspaceAiSplineOverlaySet overlays;
     std::vector<std::array<float, 2U>> movementForwards;
+    bool editing = false;
 
     State(authoring::AiSplineSession candidateSession,
           WorkspaceAiSplineControllerConfiguration candidateConfiguration,
           WorkspaceAiSplineOverlaySet candidateOverlays,
-          std::vector<std::array<float, 2U>> candidateMovementForwards)
+          std::vector<std::array<float, 2U>> candidateMovementForwards,
+          bool candidateEditing = false)
         : session(std::move(candidateSession)),
           configuration(std::move(candidateConfiguration)),
           overlays(std::move(candidateOverlays)),
-          movementForwards(std::move(candidateMovementForwards)) {}
+          movementForwards(std::move(candidateMovementForwards)),
+          editing(candidateEditing) {}
 };
 
 WorkspaceAiSplineController::WorkspaceAiSplineController(
@@ -321,6 +324,10 @@ bool WorkspaceAiSplineController::canRedo() const noexcept {
     return state_->session.canRedo();
 }
 
+bool WorkspaceAiSplineController::editing() const noexcept {
+    return state_->editing;
+}
+
 WorkspaceAiSplineControllerSaveResult
 WorkspaceAiSplineController::buildSaveBytes(
     std::uint64_t expectedRevision) const {
@@ -421,7 +428,8 @@ WorkspaceAiSplineController::publishCandidate(
         }
         auto nextState = std::make_unique<State>(
             std::move(candidate), state_->configuration,
-            std::move(built.overlays), state_->movementForwards);
+            std::move(built.overlays), state_->movementForwards,
+            state_->editing);
         const auto replaced =
             viewport.replaceAiSplineOverlays(
                 device, nextState->overlays,
@@ -466,6 +474,110 @@ WorkspaceAiSplineController::publishCandidate(
             "workspace_ai_spline_controller_publish_failed", error.what()};
         return result;
     }
+}
+
+WorkspaceAiSplineControllerResult
+WorkspaceAiSplineController::updateEditingState(
+    render::Device& device, WorkspaceViewport& viewport,
+    std::uint64_t expectedRevision, bool editing, bool clearSelection) {
+    if (expectedRevision != state_->session.revision())
+        return staleResult();
+    if (viewport.aiSplineGeneration() != state_->session.revision())
+        return viewportBindingResult();
+
+    const bool selectionChanged =
+        clearSelection && !state_->configuration.selectedIndices.empty();
+    if (!selectionChanged && state_->editing == editing) {
+        WorkspaceAiSplineControllerResult result;
+        result.status = WorkspaceAiSplineControllerStatus::unchanged;
+        result.revision = state_->session.revision();
+        return result;
+    }
+    if (!selectionChanged) {
+        state_->editing = editing;
+        WorkspaceAiSplineControllerResult result;
+        result.status = WorkspaceAiSplineControllerStatus::ready;
+        result.revision = state_->session.revision();
+        result.changed = true;
+        return result;
+    }
+
+    try {
+        auto candidateConfiguration = state_->configuration;
+        candidateConfiguration.selectedIndices.clear();
+        auto built = buildWorkspaceAiSplineOverlays(
+            state_->session.current(), overlayRequest(candidateConfiguration));
+        if (!built.ok()) {
+            WorkspaceAiSplineControllerResult result;
+            result.status = overlayFailureStatus(built.status);
+            result.diagnostic = std::move(built.diagnostic);
+            result.revision = state_->session.revision();
+            return result;
+        }
+        auto nextState = std::make_unique<State>(
+            state_->session, std::move(candidateConfiguration),
+            std::move(built.overlays), state_->movementForwards, editing);
+        const auto revision = state_->session.revision();
+        const auto replaced = viewport.replaceAiSplineOverlays(
+            device, nextState->overlays,
+            WorkspaceViewportAiSplineGenerationTransition{revision,
+                                                          revision});
+        if (!replaced.ok()) {
+            WorkspaceAiSplineControllerResult result;
+            result.status =
+                replaced.status ==
+                        WorkspaceViewportAiSplineUpdateStatus::unsupported
+                    ? WorkspaceAiSplineControllerStatus::unsupported
+                : replaced.status == WorkspaceViewportAiSplineUpdateStatus::
+                                         allocation_failed
+                    ? WorkspaceAiSplineControllerStatus::allocation_failed
+                    : WorkspaceAiSplineControllerStatus::viewport_failed;
+            result.diagnostic = replaced.diagnostic;
+            result.revision = revision;
+            return result;
+        }
+
+        WorkspaceAiSplineControllerResult result;
+        result.status = WorkspaceAiSplineControllerStatus::ready;
+        result.revision = revision;
+        result.replacedPassCount = replaced.replaced_pass_count;
+        result.changed = true;
+        state_.swap(nextState);
+        return result;
+    } catch (const std::bad_alloc&) {
+        WorkspaceAiSplineControllerResult result;
+        result.status = WorkspaceAiSplineControllerStatus::allocation_failed;
+        result.revision = state_->session.revision();
+        result.diagnostic = diagnostic(
+            "workspace_ai_spline_controller_allocation_failed",
+            "AI spline edit lifecycle exceeded available allocation capacity");
+        return result;
+    } catch (const std::exception& error) {
+        WorkspaceAiSplineControllerResult result;
+        result.revision = state_->session.revision();
+        result.diagnostic = {
+            "workspace_ai_spline_controller_lifecycle_failed", error.what()};
+        return result;
+    }
+}
+
+WorkspaceAiSplineControllerResult WorkspaceAiSplineController::startEditing(
+    render::Device& device, WorkspaceViewport& viewport,
+    std::uint64_t expectedRevision) {
+    return updateEditingState(device, viewport, expectedRevision, true, true);
+}
+
+WorkspaceAiSplineControllerResult WorkspaceAiSplineController::finishEditing(
+    render::Device& device, WorkspaceViewport& viewport,
+    std::uint64_t expectedRevision) {
+    return updateEditingState(device, viewport, expectedRevision, false,
+                              false);
+}
+
+WorkspaceAiSplineControllerResult WorkspaceAiSplineController::cancelEditing(
+    render::Device& device, WorkspaceViewport& viewport,
+    std::uint64_t expectedRevision) {
+    return updateEditingState(device, viewport, expectedRevision, false, true);
 }
 
 WorkspaceAiSplineControllerResult

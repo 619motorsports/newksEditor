@@ -127,8 +127,9 @@ struct WorkspaceViewportPrepareRequest {
     std::optional<render::PipelineProgram> ai_spline_left_pipeline;
     const WorkspaceAiSplineGeometry* ai_spline_right_geometry = nullptr;
     std::optional<render::PipelineProgram> ai_spline_right_pipeline;
-    // Optional recovered selected-index markers. This normal-depth pass
-    // follows the side splines and requires the primary spline pass.
+    // Optional recovered selected-index markers. A controller can supply the
+    // pipeline without geometry to retain an empty interactive selection pass.
+    // This normal-depth pass follows the side splines and requires the primary.
     const WorkspaceAiSplineGeometry* ai_spline_selection_geometry = nullptr;
     std::optional<render::PipelineProgram> ai_spline_selection_pipeline;
     const WorkspaceAiSplineGeometry* ai_spline_camber_geometry = nullptr;

@@ -165,6 +165,7 @@ public:
     [[nodiscard]] bool dirty() const noexcept;
     [[nodiscard]] bool canUndo() const noexcept;
     [[nodiscard]] bool canRedo() const noexcept;
+    [[nodiscard]] bool editing() const noexcept;
 
     // Build recovered save bytes without changing visible or authoring state.
     [[nodiscard]] WorkspaceAiSplineControllerSaveResult
@@ -177,6 +178,15 @@ public:
     [[nodiscard]] WorkspaceAiSplineControllerResult moveSelectedByManualInput(
         render::Device& device, WorkspaceViewport& viewport,
         const WorkspaceAiSplineManualMovement& movement,
+        std::uint64_t expectedRevision);
+    [[nodiscard]] WorkspaceAiSplineControllerResult startEditing(
+        render::Device& device, WorkspaceViewport& viewport,
+        std::uint64_t expectedRevision);
+    [[nodiscard]] WorkspaceAiSplineControllerResult finishEditing(
+        render::Device& device, WorkspaceViewport& viewport,
+        std::uint64_t expectedRevision);
+    [[nodiscard]] WorkspaceAiSplineControllerResult cancelEditing(
+        render::Device& device, WorkspaceViewport& viewport,
         std::uint64_t expectedRevision);
     [[nodiscard]] WorkspaceAiSplineControllerResult undo(
         render::Device& device, WorkspaceViewport& viewport,
@@ -199,6 +209,10 @@ private:
     [[nodiscard]] WorkspaceAiSplineControllerResult staleResult() const;
     [[nodiscard]] WorkspaceAiSplineControllerResult
     viewportBindingResult() const;
+    [[nodiscard]] WorkspaceAiSplineControllerResult updateEditingState(
+        render::Device& device, WorkspaceViewport& viewport,
+        std::uint64_t expectedRevision, bool editing,
+        bool clearSelection);
 
     std::unique_ptr<State> state_;
 };

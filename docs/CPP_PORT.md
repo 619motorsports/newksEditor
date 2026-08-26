@@ -252,12 +252,18 @@ remains unchanged and feature-complete.
   Replacement uses the device that prepared the viewport. The operation stays
   on the render thread between synchronous frames. It uses the shared Vulkan
   and D3D12 device API. A change to pass presence still recreates the viewport.
+  The selection pass is the explicit exception. A controller viewport retains
+  its validated pipeline while the selected-index vector is empty.
   The controller edits a copied session and builds a complete next state.
   It publishes the model only after the viewport accepts all candidate buffers.
   An error keeps the prior model revision and the prior visible generation.
   The viewport binds each controller update to its expected visible revision.
   Transactional undo, redo, and baseline reset use the same publication path.
   Dirty state compares canonical current bytes with canonical baseline bytes.
+  The controller also ports start, finish, and cancel edit-mode state.
+  Start clears the selected indices. Finish preserves them. Cancel clears them.
+  These lifecycle calls preserve model bytes, revision, history, and dirty state.
+  Temporary edit-point interpolation on finish remains pending.
   The native window option `--ai-spline-edit-point` applies one scripted batch
   after viewport setup.
   The first frame uses the accepted model and all derived passes.
@@ -284,7 +290,7 @@ remains unchanged and feature-complete.
   A save error keeps the prior destination and the complete session state.
   This atomic replace differs from the original direct file truncation.
   Replacement can also change destination permissions or access-control metadata.
-  Runtime point picking and edit-mode controls remain pending.
+  Runtime point picking and window lifecycle controls remain pending.
   Another version-7 option adds the recovered vertical camber lines after the
   side passes. Positive values are green. Other values are red.
   The selected pass uses solid fill, front-face culling, opaque blend state,

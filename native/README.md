@@ -284,6 +284,13 @@ The Vulkan and D3D12 line list is a labeled translation of the OpenGL line
 strip. The translation keeps all segments at portable chunk boundaries.
 The marker option does not start a mutable edit. Use `--edit-ai-spline` for the
 recovered single-selection payload edit.
+The live controller exposes the recovered start, finish, and cancel lifecycle.
+Start clears the selected indices. Finish preserves them. Cancel clears them.
+These operations do not change spline bytes, history, revision, or dirty state.
+A controller viewport retains the validated selection pipeline while no marker
+geometry exists. This permits atomic marker removal without viewport recreation.
+The temporary edit-point interpolation path remains pending.
+The native window does not expose these lifecycle calls yet.
 `--save-ai-spline` accepts version 7 and rebuilds the native grid.
 Legacy version-2 conversion is not yet recovered.
 The command uses a temporary file and atomically replaces its output.

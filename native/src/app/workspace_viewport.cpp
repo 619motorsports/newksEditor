@@ -825,8 +825,15 @@ WorkspaceViewport::replaceAiSplineOverlaysBorrowed(
                  WorkspaceAiSplinePassKind::camber};
 
     for (std::size_t index = 0U; index < geometries.size(); ++index) {
-        if ((geometries[index] != nullptr) !=
-            ai_spline_passes_[index].pipeline.has_value()) {
+        const bool selectionMayBeEmpty =
+            kinds[index] == WorkspaceAiSplinePassKind::selection &&
+            geometries[index] == nullptr &&
+            ai_spline_passes_[index].pipeline.has_value();
+        if ((geometries[index] != nullptr &&
+             !ai_spline_passes_[index].pipeline.has_value()) ||
+            (geometries[index] == nullptr &&
+             ai_spline_passes_[index].pipeline.has_value() &&
+             !selectionMayBeEmpty)) {
             result.diagnostic = diagnostic(
                 "workspace_viewport_ai_spline_update_configuration_invalid",
                 "AI spline replacement must preserve prepared pass presence");
@@ -891,8 +898,8 @@ WorkspaceViewport::replaceAiSplineOverlaysBorrowed(
             candidate;
         for (std::size_t index = 0U; index < geometries.size(); ++index) {
             const WorkspaceAiSplineGeometry *geometry = geometries[index];
-            if (geometry == nullptr) continue;
             candidate[index].pipeline = ai_spline_passes_[index].pipeline;
+            if (geometry == nullptr) continue;
             candidate[index].chunks = geometry->chunks;
             if (geometry->vertices.empty()) continue;
 
@@ -952,14 +959,15 @@ WorkspaceViewport::replaceAiSplineOverlaysBorrowed(
             }
             candidate[index].buffer = std::move(buffer.buffer);
         }
+        const std::size_t replacedPassCount =
+            static_cast<std::size_t>(std::count_if(
+                candidate.begin(), candidate.end(), [](const auto& pass) {
+                    return pass.pipeline.has_value();
+                }));
         ai_spline_passes_.swap(candidate);
         if (generation.has_value())
             ai_spline_generation_ = generation->replacement;
-        result.replaced_pass_count = static_cast<std::size_t>(
-            std::count_if(geometries.begin(), geometries.end(),
-                          [](const WorkspaceAiSplineGeometry *geometry) {
-                              return geometry != nullptr;
-                          }));
+        result.replaced_pass_count = replacedPassCount;
         result.status = WorkspaceViewportAiSplineUpdateStatus::ready;
         return result;
     } catch (const std::bad_alloc &) {
@@ -1741,11 +1749,16 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                  WorkspaceAiSplinePassKind::camber},
             }};
         for (const AiSplinePassInput &input : ai_spline_inputs) {
-            if ((input.geometry != nullptr) != input.pipeline->has_value()) {
+            const bool latent_selection =
+                input.kind == WorkspaceAiSplinePassKind::selection &&
+                input.geometry == nullptr && input.pipeline->has_value();
+            if ((input.geometry != nullptr && !input.pipeline->has_value()) ||
+                (input.geometry == nullptr && input.pipeline->has_value() &&
+                 !latent_selection)) {
                 result.status = WorkspaceViewportStatus::invalid;
                 result.diagnostic = diagnostic(
                     "workspace_viewport_ai_spline_configuration_invalid",
-                    "Each AI spline pass requires geometry and a pipeline");
+                    "Each AI spline geometry requires a matching pipeline");
                 return result;
             }
         }
@@ -1810,7 +1823,17 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         for (std::size_t pass_index = 0U; pass_index < ai_spline_inputs.size();
              ++pass_index) {
             const AiSplinePassInput &input = ai_spline_inputs[pass_index];
-            if (input.geometry == nullptr) continue;
+            if (input.geometry == nullptr) {
+                if (input.pipeline->has_value()) {
+                    if (!validateAiSplineDepth(**input.pipeline, input.kind,
+                                               result.diagnostic)) {
+                        result.status = WorkspaceViewportStatus::invalid;
+                        return result;
+                    }
+                    ai_spline_passes[pass_index].pipeline = **input.pipeline;
+                }
+                continue;
+            }
             const WorkspaceAiSplineGeometry &geometry = *input.geometry;
             if (!validateAiSplineGeometry(geometry, input.kind,
                                           request.ai_spline_geometry,

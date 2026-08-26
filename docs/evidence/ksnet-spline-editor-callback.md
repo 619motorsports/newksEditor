@@ -118,6 +118,22 @@ calls `computeLeftRightSplines`. Then it calls `AISpline.buildGrid`.
 `finishEditing` calls `refreshSplines` only when it applies five or more edit
 points. The shorter path changes no point and does not refresh derived state.
 
+`startEditing` has token `0x06000111` and execution VA `0x1002F2D8`.
+It sets `isInEditMode`, at offset 72, and clears `selectedIndices`.
+It does not change the backup, active points, cached forwards, movable point,
+or temporary edit points.
+
+`finishEditing` has token `0x06000112` and execution VA `0x1002F324`.
+It clears `isInEditMode` but preserves `selectedIndices`.
+It cleans the temporary visual indicators and clears the temporary edit points.
+The method does not change the backup, cached forwards, or movable point.
+
+`cancelEditing` has token `0x0600011A` and execution VA `0x1002F55C`.
+It clears `isInEditMode`, `selectedIndices`, and the temporary edit points.
+It cleans the temporary visual indicators but does not write active points.
+It does not refresh the spline or change the backup, cached forwards, or
+movable point.
+
 The keyboard path supplies a local movement vector to `editSplineManual`.
 The method converts this vector with the cached horizontal forward direction.
 The C++ point-position API accepts an absolute position. This API is a
@@ -150,7 +166,8 @@ opposite direction. Duplicate XZ points produce a zero cached heading.
 `cbUnlockSplineEditClicked` is at RVA `0x68B5`. It calls
 `ksGraphics.allowSplineEdit` and controls a separate movement flag. The render
 callback tests this flag, but it does not test the edit-mode flag.
-Finish and cancel do not clear the movement flag or the selected indices.
+Finish preserves the selected indices. Cancel clears them.
+Neither method changes the movement flag.
 
 `movePointByKeyboard` has token `0x06000110` and execution VA `0x1002DFF4`.
 It polls these numeric-keypad virtual keys through `GetAsyncKeyState`:
@@ -353,8 +370,14 @@ idle for each pass, so a Windows WARP cadence test remains necessary.
 The window retries transient allocation and viewport publication errors.
 It also clears held input while the presentation surface has no size.
 
+The C++ controller ports the exact mode and selection changes for start,
+finish, and cancel. These calls do not change model history or the revision.
+The viewport retains a validated selection pipeline when the selection is
+empty. Thus, start and cancel can clear markers without viewport recreation.
+The temporary edit-point producer and five-point finish operation remain
+pending in the C++ port.
 The window cannot change the selected AI indices at runtime. It also has no
-edit-mode, cancel, or refresh control for this path.
+control for edit mode, cancel, or refresh.
 The `--ai-spline-save-on-exit` option saves after a clean window exit.
 The `--save-ai-spline` command exposes the same rebuilt-grid save boundary.
 
