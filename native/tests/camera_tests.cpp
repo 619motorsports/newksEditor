@@ -183,6 +183,50 @@ void rejects_malformed_camera_inputs() {
     require(build_camera_frame(request).code == "camera_clip_space_invalid", "unknown clip space rejected");
 }
 
+void inverts_checked_camera_matrices() {
+    const auto identity_inverse = invert_camera_matrix(
+        apex::scene::identity_matrix);
+    require(identity_inverse.has_value() &&
+                *identity_inverse == apex::scene::identity_matrix,
+            "checked camera inverse preserves identity");
+
+    CameraFrameRequest request;
+    request.eye = {3.0F, 2.0F, 7.0F};
+    request.target = {-1.0F, 1.0F, 0.0F};
+    request.up = {0.0F, 1.0F, 0.0F};
+    request.fov_radians = 0.9F;
+    request.aspect = 1.5F;
+    request.near_plane = 0.1F;
+    request.far_plane = 200.0F;
+    request.clip_space = CameraClipSpace::vulkan;
+    const auto built = build_camera_frame(request);
+    require(built.ok(), "nontrivial camera frame builds for inverse coverage");
+    const auto frame_inverse = invert_camera_matrix(built.frame->view_projection);
+    require(frame_inverse.has_value(),
+            "checked camera inverse accepts a nontrivial view-projection");
+    const auto recovered = multiply_camera_matrices(
+        *frame_inverse, built.frame->view_projection);
+    for (std::size_t index = 0U; index < recovered.size(); ++index)
+        require(std::abs(recovered[index] -
+                         apex::scene::identity_matrix[index]) < 1.0e-4F,
+                "view-projection inverse composes to identity");
+
+    apex::scene::Matrix4 singular{};
+    singular[15] = 1.0F;
+    require(!invert_camera_matrix(singular).has_value(),
+            "checked camera inverse rejects a singular matrix");
+
+    auto non_finite = apex::scene::identity_matrix;
+    non_finite[0] = std::numeric_limits<float>::quiet_NaN();
+    require(!invert_camera_matrix(non_finite).has_value(),
+            "checked camera inverse rejects non-finite input");
+
+    auto near_singular = apex::scene::identity_matrix;
+    near_singular[0] = 1.0e-12F;
+    require(!invert_camera_matrix(near_singular).has_value(),
+            "checked camera inverse rejects finite near-singular input");
+}
+
 CameraFrame identity_filter_camera(CameraClipSpace clip_space) {
     CameraFrame camera;
     camera.view_projection = apex::scene::identity_matrix;
@@ -325,6 +369,7 @@ int main() {
         matches_native_fov_and_aspect_fallback();
         rejects_invalid_native_pose_operations();
         rejects_malformed_camera_inputs();
+        inverts_checked_camera_matrices();
         recovers_native_frustum_planes_and_tangency();
         recovers_native_sphere_transform_scale_rule();
         applies_native_camera_mesh_filter_gates();

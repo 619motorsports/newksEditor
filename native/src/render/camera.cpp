@@ -15,6 +15,7 @@ using Vector3 = apex::scene::Vector3;
 
 constexpr float pi = 3.14159265358979323846F;
 constexpr float minimum_basis_length = 1.0e-6F;
+constexpr float minimum_matrix_determinant = 1.0e-8F;
 constexpr float native_degrees_to_radians = 0.01745299994945526F;
 
 [[nodiscard]] bool finite_vector(const Vector3& value) noexcept {
@@ -202,6 +203,70 @@ Matrix4 multiply_camera_matrices(const Matrix4& left, const Matrix4& right) noex
         }
     }
     return output;
+}
+
+std::optional<Matrix4> invert_camera_matrix(const Matrix4& input) noexcept {
+    if (!finite_matrix(input)) return std::nullopt;
+    Matrix4 inverse{};
+    inverse[0] = input[5] * input[10] * input[15] - input[5] * input[11] * input[14] -
+                 input[9] * input[6] * input[15] + input[9] * input[7] * input[14] +
+                 input[13] * input[6] * input[11] - input[13] * input[7] * input[10];
+    inverse[4] = -input[4] * input[10] * input[15] + input[4] * input[11] * input[14] +
+                 input[8] * input[6] * input[15] - input[8] * input[7] * input[14] -
+                 input[12] * input[6] * input[11] + input[12] * input[7] * input[10];
+    inverse[8] = input[4] * input[9] * input[15] - input[4] * input[11] * input[13] -
+                 input[8] * input[5] * input[15] + input[8] * input[7] * input[13] +
+                 input[12] * input[5] * input[11] - input[12] * input[7] * input[9];
+    inverse[12] = -input[4] * input[9] * input[14] + input[4] * input[10] * input[13] +
+                  input[8] * input[5] * input[14] - input[8] * input[6] * input[13] -
+                  input[12] * input[5] * input[10] + input[12] * input[6] * input[9];
+    inverse[1] = -input[1] * input[10] * input[15] + input[1] * input[11] * input[14] +
+                 input[9] * input[2] * input[15] - input[9] * input[3] * input[14] -
+                 input[13] * input[2] * input[11] + input[13] * input[3] * input[10];
+    inverse[5] = input[0] * input[10] * input[15] - input[0] * input[11] * input[14] -
+                 input[8] * input[2] * input[15] + input[8] * input[3] * input[14] +
+                 input[12] * input[2] * input[11] - input[12] * input[3] * input[10];
+    inverse[9] = -input[0] * input[9] * input[15] + input[0] * input[11] * input[13] +
+                 input[8] * input[1] * input[15] - input[8] * input[3] * input[13] -
+                 input[12] * input[1] * input[11] + input[12] * input[3] * input[9];
+    inverse[13] = input[0] * input[9] * input[14] - input[0] * input[10] * input[13] -
+                  input[8] * input[1] * input[14] + input[8] * input[2] * input[13] +
+                  input[12] * input[1] * input[10] - input[12] * input[2] * input[9];
+    inverse[2] = input[1] * input[6] * input[15] - input[1] * input[7] * input[14] -
+                 input[5] * input[2] * input[15] + input[5] * input[3] * input[14] +
+                 input[13] * input[2] * input[7] - input[13] * input[3] * input[6];
+    inverse[6] = -input[0] * input[6] * input[15] + input[0] * input[7] * input[14] +
+                 input[4] * input[2] * input[15] - input[4] * input[3] * input[14] -
+                 input[12] * input[2] * input[7] + input[12] * input[3] * input[6];
+    inverse[10] = input[0] * input[5] * input[15] - input[0] * input[7] * input[13] -
+                  input[4] * input[1] * input[15] + input[4] * input[3] * input[13] +
+                  input[12] * input[1] * input[7] - input[12] * input[3] * input[5];
+    inverse[14] = -input[0] * input[5] * input[14] + input[0] * input[6] * input[13] +
+                  input[4] * input[1] * input[14] - input[4] * input[2] * input[13] -
+                  input[12] * input[1] * input[6] + input[12] * input[2] * input[5];
+    inverse[3] = -input[1] * input[6] * input[11] + input[1] * input[7] * input[10] +
+                 input[5] * input[2] * input[11] - input[5] * input[3] * input[10] -
+                 input[9] * input[2] * input[7] + input[9] * input[3] * input[6];
+    inverse[7] = input[0] * input[6] * input[11] - input[0] * input[7] * input[10] -
+                 input[4] * input[2] * input[11] + input[4] * input[3] * input[10] +
+                 input[8] * input[2] * input[7] - input[8] * input[3] * input[6];
+    inverse[11] = -input[0] * input[5] * input[11] + input[0] * input[7] * input[9] +
+                  input[4] * input[1] * input[11] - input[4] * input[3] * input[9] -
+                  input[8] * input[1] * input[7] + input[8] * input[3] * input[5];
+    inverse[15] = input[0] * input[5] * input[10] - input[0] * input[6] * input[9] -
+                  input[4] * input[1] * input[10] + input[4] * input[2] * input[9] +
+                  input[8] * input[1] * input[6] - input[8] * input[2] * input[5];
+    const float determinant = input[0] * inverse[0] + input[1] * inverse[4] +
+                              input[2] * inverse[8] + input[3] * inverse[12];
+    if (!std::isfinite(determinant) ||
+        std::abs(determinant) <= minimum_matrix_determinant)
+        return std::nullopt;
+    const float scale_factor = 1.0F / determinant;
+    for (float& component : inverse) {
+        component *= scale_factor;
+        if (!std::isfinite(component)) return std::nullopt;
+    }
+    return inverse;
 }
 
 CameraFrameResult build_camera_frame(const CameraFrameRequest& request) {

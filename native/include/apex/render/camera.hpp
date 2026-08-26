@@ -82,6 +82,12 @@ struct NativeCameraPose {
     const apex::scene::Matrix4& left,
     const apex::scene::Matrix4& right) noexcept;
 
+// Returns the inverse of a finite, well-conditioned column-major matrix.
+// Singular and near-singular inputs are rejected instead of propagating
+// non-finite values into camera or picking state.
+[[nodiscard]] std::optional<apex::scene::Matrix4> invert_camera_matrix(
+    const apex::scene::Matrix4& input) noexcept;
+
 // Builds the source-evidenced WebGL look-at/perspective camera. Vulkan and
 // D3D12 variants retain the same view math and explicitly remap clip space.
 [[nodiscard]] CameraFrameResult build_camera_frame(const CameraFrameRequest& request);

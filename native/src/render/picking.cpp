@@ -14,7 +14,6 @@ using Vector3 = apex::scene::Vector3;
 
 constexpr float minimum_distance = 1.0e-5F;
 constexpr float minimum_determinant = 1.0e-5F;
-constexpr float minimum_matrix_determinant = 1.0e-8F;
 constexpr float minimum_length = 1.0e-8F;
 
 [[nodiscard]] bool finite_vector(const Vector3& value) noexcept {
@@ -109,72 +108,6 @@ constexpr float minimum_length = 1.0e-8F;
             if (!std::isfinite(value)) return false;
             output[column * 4U + row] = value;
         }
-    }
-    return true;
-}
-
-// Column-major matrix inversion, matching SceneNode::transform. This is
-// local to picking so the render contract does not acquire a matrix utility.
-[[nodiscard]] bool invert_matrix(const Matrix4& input, Matrix4& output) noexcept {
-    if (!finite_matrix(input)) return false;
-    float inverse[16]{};
-    inverse[0] = input[5] * input[10] * input[15] - input[5] * input[11] * input[14] -
-                 input[9] * input[6] * input[15] + input[9] * input[7] * input[14] +
-                 input[13] * input[6] * input[11] - input[13] * input[7] * input[10];
-    inverse[4] = -input[4] * input[10] * input[15] + input[4] * input[11] * input[14] +
-                 input[8] * input[6] * input[15] - input[8] * input[7] * input[14] -
-                 input[12] * input[6] * input[11] + input[12] * input[7] * input[10];
-    inverse[8] = input[4] * input[9] * input[15] - input[4] * input[11] * input[13] -
-                 input[8] * input[5] * input[15] + input[8] * input[7] * input[13] +
-                 input[12] * input[5] * input[11] - input[12] * input[7] * input[9];
-    inverse[12] = -input[4] * input[9] * input[14] + input[4] * input[10] * input[13] +
-                  input[8] * input[5] * input[14] - input[8] * input[6] * input[13] -
-                  input[12] * input[5] * input[10] + input[12] * input[6] * input[9];
-    inverse[1] = -input[1] * input[10] * input[15] + input[1] * input[11] * input[14] +
-                 input[9] * input[2] * input[15] - input[9] * input[3] * input[14] -
-                 input[13] * input[2] * input[11] + input[13] * input[3] * input[10];
-    inverse[5] = input[0] * input[10] * input[15] - input[0] * input[11] * input[14] -
-                 input[8] * input[2] * input[15] + input[8] * input[3] * input[14] +
-                 input[12] * input[2] * input[11] - input[12] * input[3] * input[10];
-    inverse[9] = -input[0] * input[9] * input[15] + input[0] * input[11] * input[13] +
-                 input[8] * input[1] * input[15] - input[8] * input[3] * input[13] -
-                 input[12] * input[1] * input[11] + input[12] * input[3] * input[9];
-    inverse[13] = input[0] * input[9] * input[14] - input[0] * input[10] * input[13] -
-                  input[8] * input[1] * input[14] + input[8] * input[2] * input[13] +
-                  input[12] * input[1] * input[10] - input[12] * input[2] * input[9];
-    inverse[2] = input[1] * input[6] * input[15] - input[1] * input[7] * input[14] -
-                 input[5] * input[2] * input[15] + input[5] * input[3] * input[14] +
-                 input[13] * input[2] * input[7] - input[13] * input[3] * input[6];
-    inverse[6] = -input[0] * input[6] * input[15] + input[0] * input[7] * input[14] +
-                 input[4] * input[2] * input[15] - input[4] * input[3] * input[14] -
-                 input[12] * input[2] * input[7] + input[12] * input[3] * input[6];
-    inverse[10] = input[0] * input[5] * input[15] - input[0] * input[7] * input[13] -
-                  input[4] * input[1] * input[15] + input[4] * input[3] * input[13] +
-                  input[12] * input[1] * input[7] - input[12] * input[3] * input[5];
-    inverse[14] = -input[0] * input[5] * input[14] + input[0] * input[6] * input[13] +
-                  input[4] * input[1] * input[14] - input[4] * input[2] * input[13] -
-                  input[12] * input[1] * input[6] + input[12] * input[2] * input[5];
-    inverse[3] = -input[1] * input[6] * input[11] + input[1] * input[7] * input[10] +
-                 input[5] * input[2] * input[11] - input[5] * input[3] * input[10] -
-                 input[9] * input[2] * input[7] + input[9] * input[3] * input[6];
-    inverse[7] = input[0] * input[6] * input[11] - input[0] * input[7] * input[10] -
-                 input[4] * input[2] * input[11] + input[4] * input[3] * input[10] +
-                 input[8] * input[2] * input[7] - input[8] * input[3] * input[6];
-    inverse[11] = -input[0] * input[5] * input[11] + input[0] * input[7] * input[9] +
-                  input[4] * input[1] * input[11] - input[4] * input[3] * input[9] -
-                  input[8] * input[1] * input[7] + input[8] * input[3] * input[5];
-    inverse[15] = input[0] * input[5] * input[10] - input[0] * input[6] * input[9] -
-                  input[4] * input[1] * input[10] + input[4] * input[2] * input[9] +
-                  input[8] * input[1] * input[6] - input[8] * input[2] * input[5];
-    const float determinant = input[0] * inverse[0] + input[1] * inverse[4] +
-                              input[2] * inverse[8] + input[3] * inverse[12];
-    if (!std::isfinite(determinant) ||
-        std::abs(determinant) <= minimum_matrix_determinant)
-        return false;
-    const float scale_factor = 1.0F / determinant;
-    for (std::size_t index = 0U; index < 16U; ++index) {
-        output[index] = inverse[index] * scale_factor;
-        if (!std::isfinite(output[index])) return false;
     }
     return true;
 }
@@ -325,12 +258,12 @@ TrianglePickResult pick_mesh(const PickRay& world_ray, const PickMeshView& mesh,
             return triangle_failure(PickStatus::invalid_request, "pick_mesh_index_out_of_range",
                                     "A mesh index is outside the vertex stream");
     }
-    Matrix4 world_to_mesh{};
-    if (!invert_matrix(mesh_to_world, world_to_mesh))
+    const auto world_to_mesh = invert_camera_matrix(mesh_to_world);
+    if (!world_to_mesh)
         return triangle_failure(PickStatus::invalid_request, "pick_mesh_transform_invalid",
                                 "Mesh transform is singular or non-finite");
-    const Vector3 local_origin = transform_point(world_to_mesh, world_ray.origin);
-    const Vector3 local_direction_raw = transform_vector(world_to_mesh, world_ray.direction);
+    const Vector3 local_origin = transform_point(*world_to_mesh, world_ray.origin);
+    const Vector3 local_direction_raw = transform_vector(*world_to_mesh, world_ray.direction);
     const float local_direction_length = length(local_direction_raw);
     if (!finite_vector(local_origin) || !finite_vector(local_direction_raw) ||
         !(local_direction_length > minimum_length))
