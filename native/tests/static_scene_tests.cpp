@@ -220,6 +220,10 @@ public:
         directional_shadow_samplers.clear();
         directional_shadow_buffers.clear();
         directional_shadow_ranges.clear();
+        stock_vulkan_source_programs.clear();
+        stock_vulkan_source_diffuse_textures.clear();
+        stock_vulkan_source_uniform_buffers.clear();
+        stock_vulkan_source_shadow_maps.clear();
         overlay_positions.clear();
         overlay_buffers.clear();
         selected_positions.clear();
@@ -258,6 +262,23 @@ public:
                 draw.directional_shadow_binding.constants);
             directional_shadow_ranges.push_back(
                 draw.directional_shadow_binding.constants_range_bytes);
+            if (draw.stock_ks_per_pixel_vulkan_source != nullptr) {
+                stock_vulkan_source_programs.push_back(
+                    draw.stock_ks_per_pixel_vulkan_source->program);
+                stock_vulkan_source_diffuse_textures.push_back(
+                    draw.stock_ks_per_pixel_vulkan_source->resources
+                        .diffuse_texture);
+                std::array<const Buffer*, 5U> uniforms{};
+                for (std::size_t index = 0U; index < uniforms.size(); ++index)
+                    uniforms[index] =
+                        draw.stock_ks_per_pixel_vulkan_source->resources
+                            .uniform_buffers[index]
+                            .buffer;
+                stock_vulkan_source_uniform_buffers.push_back(uniforms);
+                stock_vulkan_source_shadow_maps.push_back(
+                    draw.stock_ks_per_pixel_vulkan_source->resources
+                        .shadow_maps);
+            }
         }
         for (const auto& draw : batch.selected_mesh_draws)
             selected_positions.push_back(draw.scene_position);
@@ -372,6 +393,13 @@ public:
     std::vector<const Sampler*> directional_shadow_samplers;
     std::vector<const Buffer*> directional_shadow_buffers;
     std::vector<std::uint32_t> directional_shadow_ranges;
+    std::vector<const ValidatedStockKsPerPixelVulkanSourceProgram*>
+        stock_vulkan_source_programs;
+    std::vector<const Texture*> stock_vulkan_source_diffuse_textures;
+    std::vector<std::array<const Buffer*, 5U>>
+        stock_vulkan_source_uniform_buffers;
+    std::vector<std::array<const DepthAttachment*, 3U>>
+        stock_vulkan_source_shadow_maps;
     std::vector<std::uint32_t> overlay_positions;
     std::vector<const Buffer*> overlay_buffers;
     std::vector<std::uint32_t> selected_positions;
@@ -3433,6 +3461,318 @@ void executes_explicit_alpha_directional_casters_with_owned_constants() {
             "missing opaque pipeline stages opaque casters without dereferencing it");
 }
 
+std::shared_ptr<const ValidatedStockKsPerPixelVulkanSourceProgram>
+make_static_scene_source_owner(StockKsPerPixelVariant variant) {
+    StockKsPerPixelVulkanSourceProgramResult result =
+        create_builtin_stock_ks_per_pixel_vulkan_source_program(variant);
+    require(result.ok(), "static-scene source owner creation");
+    return std::make_shared<const ValidatedStockKsPerPixelVulkanSourceProgram>(
+        std::move(*result.program));
+}
+
+void prepares_mixed_source_and_portable_scene_with_retained_owner() {
+    const auto run_variant = [](StockKsPerPixelVariant variant) {
+        Fixture value = fixture();
+        const std::array<std::uint8_t, 4U> white = {255U, 255U, 255U, 255U};
+        configure_embedded_diffuse(value, rgba8_dds(false, white));
+        value.model.materials[0].shader = "ksPerPixel";
+        value.packets[0].material_profile.shader = "ksPerPixel";
+        value.packets[2].material_profile.shader = "ksPerPixel";
+        std::array<StockKsPerPixelMaterialConstants, 2U> materials{};
+        materials[0].ambient = 0.1F;
+        materials[0].diffuse = 0.8F;
+        materials[0].specular = 0.0F;
+        materials[0].specular_exponent = 1.0F;
+
+        if (variant == StockKsPerPixelVariant::alpha_to_coverage) {
+            for (DrawPacket& packet : value.packets)
+                packet.flags.alpha_to_coverage = true;
+            value.second_pipeline.targets.colors[0].samples = 4U;
+            value.second_pipeline.blend.alpha_to_coverage = true;
+        }
+        auto source_owner = make_static_scene_source_owner(variant);
+        const std::string source_name = source_owner->pipeline().name;
+        RecordingDevice device;
+        std::unique_ptr<StaticSceneResources> resources;
+        {
+            const std::array<const PipelineProgram*, 2U> pipelines = {
+                &source_owner->pipeline(), &value.second_pipeline};
+            const std::array<std::shared_ptr<const
+                ValidatedStockKsPerPixelVulkanSourceProgram>, 1U>
+                source_owners = {source_owner};
+            const std::array<std::uint32_t, 3U> source_by_packet = {
+                0U, invalid_static_scene_source_program_index, 0U};
+            StaticScenePrepareRequest request = request_for(value);
+            request.pipelines_by_material = pipelines;
+            request.stock_vulkan_source_programs = source_owners;
+            request.stock_vulkan_source_program_by_packet = source_by_packet;
+            request.stock_vulkan_source_material_constants_by_material = materials;
+            request.stock_vulkan_source_sampler_settings = {8.0F, -0.5F};
+            auto prepared = prepare_static_scene_resources(device, request);
+            require(prepared.ok() && prepared.resources->unique_pipeline_count() == 2U,
+                    "mixed source and portable scene preparation retains one owner");
+            resources = std::move(prepared.resources);
+        }
+        // The source owner and request tables are intentionally out of scope at
+        // draw time. StaticSceneResources must retain the validated owner and
+        // its exact native pipeline identity.
+        source_owner.reset();
+        require(resources != nullptr, "mixed source scene resources retained");
+        require(device.sampler_descriptions.size() == 2U &&
+                    device.sampler_descriptions[0].max_anisotropy == 8.0F &&
+                    device.sampler_descriptions[0].mip_lod_bias == -0.5F &&
+                    device.sampler_descriptions[1].compare ==
+                        SamplerCompare::less,
+                "source preparation preserves runtime anisotropy, LOD bias, and comparison sampling");
+
+        const TextureDescription diffuse_description{
+            1U, 1U, 1U, 1U, TextureFormat::rgba8_unorm, TextureUsage::sampled,
+            TextureMemory::device_local, TextureMutability::immutable};
+        FakeTexture diffuse(diffuse_description);
+        const std::array<const Texture*, 1U> textures = {&diffuse};
+        std::array<FakeDepthAttachment, 3U> shadow_maps = {
+            FakeDepthAttachment({32U, 32U, 1U, DepthAttachmentFormat::d32_float,
+                                 true}),
+            FakeDepthAttachment({32U, 32U, 1U, DepthAttachmentFormat::d32_float,
+                                 true}),
+            FakeDepthAttachment({32U, 32U, 1U, DepthAttachmentFormat::d32_float,
+                                 true})};
+        StaticSceneFrameDescription::StockVulkanSourceFrame source_frame;
+        source_frame.camera = make_stock_ks_per_pixel_camera_constants(
+            apex::scene::identity_matrix, apex::scene::identity_matrix,
+            apex::scene::identity_matrix, {0.0F, 0.0F, 2.0F}, 0.1F, 100.0F,
+            1.0F);
+        source_frame.lighting.light_direction = {0.0F, 0.0F, -1.0F};
+        source_frame.lighting.ambient_color = {0.1F, 0.1F, 0.1F, 1.0F};
+        source_frame.lighting.light_color = {0.8F, 0.8F, 0.8F};
+        source_frame.shadow_constants = make_stock_directional_shadow_receiver_constants(
+            {apex::scene::identity_matrix, apex::scene::identity_matrix,
+             apex::scene::identity_matrix}, {0.0F, 0.0F, 0.0F}, 32U);
+        source_frame.shadow_maps = {
+            &shadow_maps[0], &shadow_maps[1], &shadow_maps[2]};
+
+        const TextureDescription target_description{
+            1U, 1U, 1U, 1U, TextureFormat::rgba8_unorm,
+            TextureUsage::color_attachment | TextureUsage::transfer_source,
+            TextureMemory::device_local, TextureMutability::mutable_data,
+            variant == StockKsPerPixelVariant::alpha_to_coverage ? 4U : 1U};
+        FakeTexture target(target_description);
+        StaticSceneFrameDescription frame;
+        frame.camera.clip_space = CameraClipSpace::vulkan;
+        frame.textures_by_global_index = textures;
+        frame.stock_vulkan_source_frame = source_frame;
+        const auto drawn = resources->draw_and_readback(device, target, frame);
+        require(drawn.ok() && device.batch_calls == 1U &&
+                    device.authorities == std::vector<IndexedShaderAuthority>({
+                        IndexedShaderAuthority::explicit_stock_ks_per_pixel_vulkan_source_equivalent,
+                        IndexedShaderAuthority::explicit_pipeline,
+                        IndexedShaderAuthority::explicit_stock_ks_per_pixel_vulkan_source_equivalent}),
+                "mixed source and portable scene submits both authority paths");
+        require(device.pipeline_names.size() == 3U &&
+                    device.pipeline_names[0] == source_name &&
+                    device.pipeline_names[1] == value.second_pipeline.name &&
+                    device.pipeline_names[2] == source_name &&
+                    device.stock_vulkan_source_programs.size() == 2U,
+                "mixed scene keeps source pipeline identity per packet");
+        for (const auto* owner : device.stock_vulkan_source_programs)
+            require(owner != nullptr && owner->validation_status() ==
+                                      StockKsPerPixelVulkanSourceStatus::ready &&
+                        owner->variant() == variant,
+                    "draw binding points at a retained validated source owner");
+        require(device.stock_vulkan_source_diffuse_textures ==
+                    std::vector<const Texture*>({&diffuse, &diffuse}) &&
+                    device.stock_vulkan_source_uniform_buffers.size() == 2U &&
+                    std::all_of(device.stock_vulkan_source_uniform_buffers.begin(),
+                                device.stock_vulkan_source_uniform_buffers.end(),
+                                [](const auto& buffers) {
+                                    return std::all_of(
+                                        buffers.begin(), buffers.end(),
+                                        [](const Buffer* buffer) {
+                                            return buffer != nullptr;
+                                        });
+                                }),
+                "source draws bind diffuse and all five native constant records");
+        require(device.stock_vulkan_source_shadow_maps.size() == 2U &&
+                    std::all_of(device.stock_vulkan_source_shadow_maps.begin(),
+                                device.stock_vulkan_source_shadow_maps.end(),
+                                [&](const auto& maps) {
+                                    return maps == std::array<const DepthAttachment*, 3U>(
+                                                       {&shadow_maps[0], &shadow_maps[1],
+                                                        &shadow_maps[2]});
+                                }),
+                "source draws bind all three exact shadow attachments");
+
+        require(device.update_calls == 8U && device.updated_bytes.size() == 8U,
+                "each visible source packet updates four native frame records");
+        StockKsPerPixelCameraConstants camera;
+        StockKsPerPixelObjectConstants object;
+        StockKsPerPixelLightingConstants lighting;
+        StockDirectionalShadowReceiverConstants shadows;
+        std::memcpy(&camera, device.updated_bytes[0].data(), sizeof(camera));
+        std::memcpy(&object, device.updated_bytes[1].data(), sizeof(object));
+        std::memcpy(&lighting, device.updated_bytes[2].data(), sizeof(lighting));
+        std::memcpy(&shadows, device.updated_bytes[3].data(), sizeof(shadows));
+        require(std::memcmp(&camera, &source_frame.camera, sizeof(camera)) == 0 &&
+                    object.world == make_stock_ks_per_pixel_object_constants(
+                        value.packets[0].world_matrix).world &&
+                    std::memcmp(&lighting, &source_frame.lighting, sizeof(lighting)) == 0 &&
+                    std::memcmp(&shadows, &source_frame.shadow_constants,
+                                sizeof(shadows)) == 0,
+                "source frame updates preserve exact camera, object, lighting, and shadow records");
+        std::memcpy(&object, device.updated_bytes[5].data(), sizeof(object));
+        require(object.world == make_stock_ks_per_pixel_object_constants(
+                                  value.packets[2].world_matrix).world,
+                "source object record follows each packet world transform");
+
+        std::vector<DrawPacket> refreshed = value.packets;
+        refreshed[2].world_matrix[12] = 9.0F;
+        frame.refreshed_packets = refreshed;
+        const auto refreshed_draw =
+            resources->draw_and_readback(device, target, frame);
+        require(refreshed_draw.ok() && device.update_calls == 16U &&
+                    device.batch_calls == 2U,
+                "a refreshed source frame updates and resubmits both source packets");
+        std::memcpy(&object, device.updated_bytes[13].data(), sizeof(object));
+        require(object.world == make_stock_ks_per_pixel_object_constants(
+                                  refreshed[2].world_matrix).world,
+                "refreshed source object constants follow the current packet transform");
+    };
+
+    run_variant(StockKsPerPixelVariant::base);
+    run_variant(StockKsPerPixelVariant::alpha_to_coverage);
+}
+
+void rejects_invalid_static_scene_source_owner_and_frame_inputs() {
+    Fixture value = fixture();
+    const std::array<std::uint8_t, 4U> white = {255U, 255U, 255U, 255U};
+    configure_embedded_diffuse(value, rgba8_dds(false, white));
+    value.model.materials[0].shader = "ksPerPixel";
+    value.packets[0].material_profile.shader = "ksPerPixel";
+    value.packets[2].material_profile.shader = "ksPerPixel";
+    const auto owner = make_static_scene_source_owner(StockKsPerPixelVariant::base);
+    const std::array<const PipelineProgram*, 2U> pipelines = {
+        &owner->pipeline(), &value.second_pipeline};
+    const std::array<std::shared_ptr<const
+        ValidatedStockKsPerPixelVulkanSourceProgram>, 1U>
+        owners = {owner};
+    const std::array<std::uint32_t, 3U> source_by_packet = {
+        0U, invalid_static_scene_source_program_index, 0U};
+    const std::array<StockKsPerPixelMaterialConstants, 2U> materials{};
+
+    auto base_request = request_for(value);
+    base_request.pipelines_by_material = pipelines;
+    base_request.stock_vulkan_source_programs = owners;
+    base_request.stock_vulkan_source_program_by_packet = source_by_packet;
+    base_request.stock_vulkan_source_material_constants_by_material = materials;
+
+    RecordingDevice invalid_owner_device;
+    auto invalid_owner_request = base_request;
+    invalid_owner_request.stock_vulkan_source_programs = {};
+    const auto invalid_owner = prepare_static_scene_resources(
+        invalid_owner_device, invalid_owner_request);
+    require(!invalid_owner.ok() &&
+                invalid_owner.diagnostic.code ==
+                    "static_scene_stock_vulkan_source_owner_index_invalid" &&
+                invalid_owner_device.buffer_calls == 0U,
+            "an out-of-range source owner fails before backend allocation");
+
+    RecordingDevice mismatch_device;
+    auto mismatch_request = base_request;
+    const std::array<const PipelineProgram*, 2U> mismatch_pipelines = {
+        &value.first_pipeline, &value.second_pipeline};
+    mismatch_request.pipelines_by_material = mismatch_pipelines;
+    const auto mismatch = prepare_static_scene_resources(
+        mismatch_device, mismatch_request);
+    require(!mismatch.ok() &&
+                mismatch.diagnostic.code ==
+                    "static_scene_stock_vulkan_source_owner_mismatch" &&
+                mismatch_device.buffer_calls == 0U,
+            "a source packet with a different pipeline owner is rejected atomically");
+
+    RecordingDevice profile_device;
+    auto profile_request = base_request;
+    std::vector<DrawPacket> mismatched_profile_packets = value.packets;
+    mismatched_profile_packets[0].material_profile.shader = "ksPerPixelNM";
+    profile_request.packets = mismatched_profile_packets;
+    const auto profile_mismatch = prepare_static_scene_resources(
+        profile_device, profile_request);
+    require(!profile_mismatch.ok() &&
+                profile_mismatch.diagnostic.code ==
+                    "static_scene_stock_vulkan_source_material_unsupported" &&
+                profile_device.buffer_calls == 0U,
+            "a non-ksPerPixel resolved packet profile cannot select source authority");
+
+    RecordingDevice invalid_sampler_device;
+    auto invalid_sampler_request = base_request;
+    invalid_sampler_request.stock_vulkan_source_sampler_settings.max_anisotropy =
+        3.5F;
+    const auto invalid_sampler = prepare_static_scene_resources(
+        invalid_sampler_device, invalid_sampler_request);
+    require(!invalid_sampler.ok() &&
+                invalid_sampler.diagnostic.code ==
+                    "static_scene_stock_vulkan_source_sampler_settings_invalid" &&
+                invalid_sampler_device.buffer_calls == 0U &&
+                invalid_sampler_device.sampler_calls == 0U,
+            "invalid source sampler settings fail before backend allocation");
+
+    RecordingDevice device;
+    auto prepared = prepare_static_scene_resources(device, base_request);
+    require(prepared.ok(), "valid source scene prepares for frame validation");
+    const TextureDescription diffuse_description{
+        1U, 1U, 1U, 1U, TextureFormat::rgba8_unorm, TextureUsage::sampled,
+        TextureMemory::device_local, TextureMutability::immutable};
+    FakeTexture diffuse(diffuse_description);
+    FakeSampler diffuse_sampler;
+    const std::array<const Texture*, 1U> textures = {&diffuse};
+    const std::array<const Sampler*, 1U> samplers = {&diffuse_sampler};
+    FakeTexture target;
+    StaticSceneFrameDescription frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.textures_by_global_index = textures;
+    frame.samplers_by_global_index = samplers;
+    const std::size_t updates_before_missing = device.update_calls;
+    const std::size_t batches_before_missing = device.batch_calls;
+    const auto missing = prepared.resources->draw_and_readback(device, target, frame);
+    require(missing.status == IndexedStaticMeshBatchStatus::invalid_request &&
+                missing.diagnostic.code ==
+                    "static_scene_stock_vulkan_source_frame_missing" &&
+                device.update_calls == updates_before_missing &&
+                device.batch_calls == batches_before_missing,
+            "a source scene requires its complete native frame before updates");
+
+    StaticSceneFrameDescription::StockVulkanSourceFrame source_frame;
+    source_frame.camera = make_stock_ks_per_pixel_camera_constants(
+        apex::scene::identity_matrix, apex::scene::identity_matrix,
+        apex::scene::identity_matrix, {0.0F, 0.0F, 2.0F}, 0.1F, 100.0F, 1.0F);
+    source_frame.shadow_constants = make_stock_directional_shadow_receiver_constants(
+        {apex::scene::identity_matrix, apex::scene::identity_matrix,
+         apex::scene::identity_matrix}, {0.0F, 0.0F, 0.0F}, 32U);
+    std::array<FakeDepthAttachment, 3U> maps = {
+        FakeDepthAttachment({32U, 32U, 1U, DepthAttachmentFormat::d32_float, true}),
+        FakeDepthAttachment({32U, 32U, 1U, DepthAttachmentFormat::d32_float, true}),
+        FakeDepthAttachment({32U, 32U, 1U, DepthAttachmentFormat::d32_float, true})};
+    source_frame.shadow_maps = {&maps[0], nullptr, &maps[2]};
+    frame.stock_vulkan_source_frame = source_frame;
+    const auto missing_shadow = prepared.resources->draw_and_readback(device, target, frame);
+    require(missing_shadow.status == IndexedStaticMeshBatchStatus::invalid_request &&
+                missing_shadow.diagnostic.code ==
+                    "static_scene_stock_vulkan_source_shadow_map_missing" &&
+                device.update_calls == updates_before_missing &&
+                device.batch_calls == batches_before_missing,
+            "a source frame requires exactly three shadow attachments");
+
+    source_frame.shadow_maps = {&maps[0], &maps[1], &maps[2]};
+    source_frame.camera.near_plane = std::numeric_limits<float>::quiet_NaN();
+    frame.stock_vulkan_source_frame = source_frame;
+    const auto invalid_frame = prepared.resources->draw_and_readback(device, target, frame);
+    require(invalid_frame.status == IndexedStaticMeshBatchStatus::invalid_request &&
+                invalid_frame.diagnostic.code ==
+                    "static_scene_stock_vulkan_source_frame_invalid" &&
+                device.update_calls == updates_before_missing &&
+                device.batch_calls == batches_before_missing,
+            "non-finite source frame records fail before mutable updates");
+}
+
 void binds_retained_directional_maps_through_static_scene_frames() {
     const auto configure_receiver = [](Fixture& value) {
         value.model.textures.push_back(
@@ -3699,6 +4039,8 @@ int main() {
         propagates_upload_and_batch_failures();
         retains_three_directional_maps_and_executes_only_opaque_static_casters();
         executes_explicit_alpha_directional_casters_with_owned_constants();
+        prepares_mixed_source_and_portable_scene_with_retained_owner();
+        rejects_invalid_static_scene_source_owner_and_frame_inputs();
         binds_retained_directional_maps_through_static_scene_frames();
         require(std::string(static_scene_resource_status_name(StaticSceneResourceStatus::ready)) ==
                     "ready",

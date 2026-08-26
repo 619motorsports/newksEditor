@@ -5,6 +5,7 @@
 #include "apex/render/kn5_scene_node_map.hpp"
 #include "apex/render/directional_shadow.hpp"
 #include "apex/render/skinned_mesh_upload.hpp"
+#include "apex/render/stock_ks_per_pixel_vulkan.hpp"
 #include "apex/render/texture_payload_authority.hpp"
 #include "apex/render/static_mesh_upload.hpp"
 #include "apex/scene/scene.hpp"
@@ -12,12 +13,16 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
 #include <vector>
 
 namespace apex::render {
+
+inline constexpr std::uint32_t invalid_static_scene_source_program_index =
+    std::numeric_limits<std::uint32_t>::max();
 
 struct StaticSceneResourceLimits {
     Kn5SceneNodeMapLimits node_map{};
@@ -36,6 +41,10 @@ struct StaticSceneResourceLimits {
     std::uint64_t max_total_index_bytes = 256ULL * 1024ULL * 1024ULL;
     std::uint64_t max_total_shader_bytes = 64ULL * 1024ULL * 1024ULL;
     std::uint64_t max_total_material_constant_bytes = 1ULL * 1024ULL * 1024ULL;
+    // A selected Vulkan source-equivalent draw owns five aligned native
+    // records. This limit is separate from the portable material table.
+    std::uint64_t max_total_stock_vulkan_source_constant_bytes =
+        32ULL * 1024ULL * 1024ULL;
     // One D3D12/Vulkan-aligned frame record is allocated when a prepared
     // pipeline declares the portable frame binding.
     std::uint64_t max_total_frame_constant_bytes = portable_frame_buffer_view_bytes;
@@ -63,6 +72,24 @@ struct StaticScenePrepareRequest {
     // Indexed by packet. This preserves source-evidenced per-node CSP render
     // state when meshes share one material but require different pipelines.
     std::span<const PipelineProgram* const> pipelines_by_packet{};
+    // Optional retained Vulkan source-equivalent owners. The packet-index
+    // table must be empty or match packets exactly. Portable packets use
+    // invalid_static_scene_source_program_index. A selected packet's pipeline
+    // pointer must be the exact pipeline owned by the indexed program.
+    std::span<const std::shared_ptr<const
+        ValidatedStockKsPerPixelVulkanSourceProgram>>
+        stock_vulkan_source_programs{};
+    std::span<const std::uint32_t>
+        stock_vulkan_source_program_by_packet{};
+    // Exact recovered 32-byte b4 records, indexed by final material ID.
+    // Required as a complete table when any source program is selected.
+    std::span<const StockKsPerPixelMaterialConstants>
+        stock_vulkan_source_material_constants_by_material{};
+    // Source evidence makes anisotropy and mip bias runtime settings. The
+    // defaults match the native sampler allocator; callers can supply the
+    // active video/render settings without changing shader authority.
+    StockKsPerPixelNativeSamplerSettings
+        stock_vulkan_source_sampler_settings{};
     // This optional table uses the same material order. A used pipeline that
     // declares the portable constants binding requires the complete table.
     // Preparation copies each used value into an owned 256-byte GPU record.
@@ -121,6 +148,18 @@ struct StaticSceneFrameDescription {
     // ordered batch is recorded. It always derives the record's camera
     // position from camera.position.
     std::optional<KsPerPixelFrameConstants> frame_constants;
+    struct StockVulkanSourceFrame {
+        StockKsPerPixelCameraConstants camera{};
+        StockKsPerPixelLightingConstants lighting{};
+        StockDirectionalShadowReceiverConstants shadow_constants{};
+        std::array<const DepthAttachment*,
+                   stock_ks_per_pixel_shadow_cascade_count>
+            shadow_maps{};
+    };
+    // Complete recovered-native frame ABI for retained source-equivalent
+    // packets. Portable frame constants are never reinterpreted as these
+    // records.
+    std::optional<StockVulkanSourceFrame> stock_vulkan_source_frame;
     // Optional retained maps for pipelines that declare the directional
     // receiver extension. The maps must come from the same device and remain
     // alive through this synchronous call. Caster execution remains an
@@ -171,7 +210,7 @@ public:
         return packets_;
     }
     [[nodiscard]] std::size_t unique_pipeline_count() const noexcept {
-        return pipelines_.size();
+        return pipelines_.size() + stock_vulkan_source_programs_.size();
     }
     [[nodiscard]] std::size_t unique_geometry_count() const noexcept {
         return uploads_.size() + skinned_uploads_.size();
@@ -241,6 +280,12 @@ private:
     std::vector<std::size_t> upload_for_packet_;
     std::vector<std::size_t> skinned_upload_for_packet_;
     std::vector<std::size_t> pipeline_for_packet_;
+    std::vector<std::shared_ptr<const
+        ValidatedStockKsPerPixelVulkanSourceProgram>>
+        stock_vulkan_source_programs_;
+    std::vector<std::uint32_t> stock_vulkan_source_program_for_packet_;
+    std::vector<std::unique_ptr<StockKsPerPixelNativeConstantBuffers>>
+        stock_vulkan_source_constants_for_packet_;
     std::vector<PacketTextureIndices> textures_for_packet_;
     std::vector<std::size_t> material_constant_for_packet_;
     std::vector<std::size_t> stock_shadow_constant_for_material_;
@@ -251,8 +296,11 @@ private:
     std::unique_ptr<Buffer> owned_directional_shadow_constants_;
     std::unique_ptr<Sampler> owned_directional_shadow_sampler_;
     std::unique_ptr<Sampler> owned_sampler_;
+    std::unique_ptr<Sampler> stock_vulkan_source_linear_sampler_;
+    std::unique_ptr<Sampler> stock_vulkan_source_shadow_sampler_;
     std::size_t texture_count_ = 0U;
     bool has_texture_resources_ = false;
+    bool has_portable_texture_resources_ = false;
     StaticSceneTextureAuthority texture_authority_ =
         StaticSceneTextureAuthority::caller_tables;
 

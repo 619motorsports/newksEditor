@@ -2889,6 +2889,18 @@ void validates_stock_vulkan_abi_probe_authority() {
                 ? "complete Vulkan source-equivalent draw passes preflight"
                 : diagnostic.code.c_str());
 
+    DrawPacket source_packet_with_texture_identity = packet;
+    source_packet_with_texture_identity.resources.push_back(
+        {"txDiffuse", 0U, 0U, "body.dds"});
+    source_request.packet = &source_packet_with_texture_identity;
+    require(validate_indexed_static_mesh_draw_request(
+                target, source_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            diagnostic.code.empty()
+                ? "source-equivalent draw accepts declarative packet texture identity"
+                : diagnostic.code.c_str());
+    source_request.packet = &packet;
+
     const std::array source_draws = {source_request, source_request};
     batch.draws = source_draws;
     require(validate_indexed_static_mesh_batch_description(

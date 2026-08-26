@@ -1227,7 +1227,8 @@ IndexedStaticMeshDrawStatus validate_native_ks_per_pixel_binding(
 }
 
 bool has_portable_stock_resource_binding(
-    const IndexedStaticMeshDrawRequest& request) noexcept {
+    const IndexedStaticMeshDrawRequest& request,
+    bool include_packet_resources = true) noexcept {
     return request.sampled_binding.texture != nullptr ||
            request.sampled_binding.sampler != nullptr ||
            request.normal_binding.texture != nullptr ||
@@ -1257,7 +1258,7 @@ bool has_portable_stock_resource_binding(
            request.directional_shadow_binding.constants != nullptr ||
            request.directional_shadow_binding.constants_offset_bytes != 0U ||
            request.directional_shadow_binding.constants_range_bytes != 0U ||
-           !request.packet->resources.empty() ||
+           (include_packet_resources && !request.packet->resources.empty()) ||
            request.resource_authority !=
                IndexedResourceAuthority::packet_contract;
 }
@@ -1746,7 +1747,10 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                 "The Vulkan source-equivalent authority cannot receive installed-native or probe bindings"};
             return IndexedStaticMeshDrawStatus::invalid_request;
         }
-        if (has_portable_stock_resource_binding(request)) {
+        // Source preparation retains packet texture identity as declarative
+        // metadata. The actual GPU resources still come exclusively from the
+        // recovered native ABI binding below.
+        if (has_portable_stock_resource_binding(request, false)) {
             diagnostic = {
                 "indexed_stock_vulkan_source_portable_binding_overlap",
                 "The Vulkan source-equivalent authority cannot receive portable material bindings"};
@@ -1958,7 +1962,8 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                           "A resource-free pipeline cannot receive explicit material bindings"};
             return IndexedStaticMeshDrawStatus::invalid_request;
         }
-        if (!packet.resources.empty() && !stock_native) {
+        if (!packet.resources.empty() && !stock_native &&
+            !stock_vulkan_source) {
             diagnostic = {"indexed_static_mesh_resources_unsupported",
                           "The resource-free indexed baseline cannot execute material packet resources"};
             return IndexedStaticMeshDrawStatus::unsupported;

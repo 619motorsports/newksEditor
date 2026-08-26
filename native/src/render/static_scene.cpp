@@ -267,7 +267,7 @@ struct ExecutorPipelineValidation {
 
 ExecutorPipelineValidation validate_executor_pipeline(
     Backend backend, const PipelineProgram& pipeline, const DrawPacket& packet,
-    const PipelineLimits& limits) {
+    const PipelineLimits& limits, bool stock_vulkan_source) {
     const PipelineValidationResult validation = validate_pipeline(pipeline, limits);
     if (!validation.valid) {
         if (!validation.diagnostics.empty())
@@ -277,11 +277,18 @@ ExecutorPipelineValidation validate_executor_pipeline(
                 "Pipeline validation failed without a diagnostic", 0U};
     }
     const auto shader_bytes = static_cast<std::uint64_t>(validation.shader_bytes);
-    if (pipeline.transform_contract != PipelineTransformContract::draw_matrices)
+    const PipelineTransformContract required_transform =
+        stock_vulkan_source ? PipelineTransformContract::none
+                            : PipelineTransformContract::draw_matrices;
+    if (pipeline.transform_contract != required_transform)
         return {StaticSceneResourceStatus::unsupported,
-                "Static-scene execution requires the draw-matrices transform contract", 0U};
-    if (classify_indexed_portable_resource_layout(pipeline) ==
-        IndexedPortableResourceLayout::unsupported)
+                stock_vulkan_source
+                    ? "Vulkan source-equivalent static scenes require the native constant-buffer transform contract"
+                    : "Static-scene execution requires the draw-matrices transform contract",
+                0U};
+    if (!stock_vulkan_source &&
+        classify_indexed_portable_resource_layout(pipeline) ==
+            IndexedPortableResourceLayout::unsupported)
         return {StaticSceneResourceStatus::unsupported,
                 "Static-scene material execution requires the portable diffuse layout with optional constants", 0U};
     if (pipeline.resources.empty() != packet.resources.empty())
@@ -429,6 +436,70 @@ StaticSceneResourceResult prepare_static_scene_resources(
         (!material_pipeline_table && !packet_pipeline_table))
         return fail(StaticSceneResourceStatus::invalid_request, "static_scene_material_table_invalid",
                     "Model and scene material tables must match, with one complete pipeline authority");
+    const bool has_stock_vulkan_source_table =
+        !request.stock_vulkan_source_program_by_packet.empty();
+    if (has_stock_vulkan_source_table &&
+        request.stock_vulkan_source_program_by_packet.size() !=
+            request.packets.size())
+        return fail(
+            StaticSceneResourceStatus::invalid_request,
+            "static_scene_stock_vulkan_source_packet_table_invalid",
+            "The Vulkan source-program packet table must match the prepared packet count");
+    if (!has_stock_vulkan_source_table &&
+        !request.stock_vulkan_source_programs.empty())
+        return fail(
+            StaticSceneResourceStatus::invalid_request,
+            "static_scene_stock_vulkan_source_owner_table_unreferenced",
+            "A Vulkan source-program owner table requires a packet-index table");
+    bool has_stock_vulkan_source = false;
+    if (has_stock_vulkan_source_table) {
+        for (const std::uint32_t raw_index :
+             request.stock_vulkan_source_program_by_packet) {
+            if (raw_index == invalid_static_scene_source_program_index)
+                continue;
+            has_stock_vulkan_source = true;
+            if (device.info().backend != Backend::Vulkan)
+                return fail(
+                    StaticSceneResourceStatus::unsupported,
+                    "static_scene_stock_vulkan_source_backend_unsupported",
+                    "Retained Vulkan source-equivalent programs require a Vulkan device");
+            if (static_cast<std::size_t>(raw_index) >=
+                    request.stock_vulkan_source_programs.size() ||
+                request.stock_vulkan_source_programs[raw_index] == nullptr)
+                return fail(
+                    StaticSceneResourceStatus::invalid_request,
+                    "static_scene_stock_vulkan_source_owner_index_invalid",
+                    "A retained Vulkan source-program index has no valid owner");
+        }
+    }
+    if (has_stock_vulkan_source &&
+        request.stock_vulkan_source_material_constants_by_material.size() !=
+            model.materials.size())
+        return fail(
+            StaticSceneResourceStatus::invalid_request,
+            "static_scene_stock_vulkan_source_material_table_invalid",
+            "Vulkan source-equivalent material constants must match the final material table");
+    if (has_stock_vulkan_source &&
+        limits.max_total_stock_vulkan_source_constant_bytes == 0U)
+        return fail(
+            StaticSceneResourceStatus::invalid_request,
+            "static_scene_stock_vulkan_source_constant_limits_invalid",
+            "The Vulkan source-equivalent constant-buffer limit must be nonzero");
+    const StockKsPerPixelNativeSamplerSettings& source_sampler_settings =
+        request.stock_vulkan_source_sampler_settings;
+    if (has_stock_vulkan_source &&
+        (!std::isfinite(source_sampler_settings.max_anisotropy) ||
+         source_sampler_settings.max_anisotropy < 2.0F ||
+         source_sampler_settings.max_anisotropy > 16.0F ||
+         std::trunc(source_sampler_settings.max_anisotropy) !=
+             source_sampler_settings.max_anisotropy ||
+         !std::isfinite(source_sampler_settings.mip_lod_bias) ||
+         source_sampler_settings.mip_lod_bias < -16.0F ||
+         source_sampler_settings.mip_lod_bias > 16.0F))
+        return fail(
+            StaticSceneResourceStatus::invalid_request,
+            "static_scene_stock_vulkan_source_sampler_settings_invalid",
+            "Vulkan source sampler settings require integer anisotropy from 2 through 16 and LOD bias from -16 through 16");
     if (!request.stock_shadow_constants_by_material.empty() &&
         request.stock_shadow_constants_by_material.size() != model.materials.size())
         return fail(StaticSceneResourceStatus::invalid_request,
@@ -460,6 +531,13 @@ StaticSceneResourceResult prepare_static_scene_resources(
         !charge(request.packets.size(),
                 sizeof(DrawPacket) + 4U * sizeof(std::size_t) +
                     sizeof(StaticSceneResources::PacketTextureIndices)) ||
+        (has_stock_vulkan_source &&
+         (!charge(request.packets.size(), sizeof(std::uint32_t) +
+                  sizeof(std::unique_ptr<
+                      StockKsPerPixelNativeConstantBuffers>)) ||
+          !charge(request.stock_vulkan_source_programs.size(),
+                  sizeof(std::shared_ptr<const
+                      ValidatedStockKsPerPixelVulkanSourceProgram>)))) ||
         !charge(model.materials.size(), 3U * sizeof(std::size_t)) ||
         !charge(request.packets.size(),
                 4U * sizeof(std::size_t) + 2U * sizeof(const formats::Kn5Node*)) ||
@@ -538,6 +616,14 @@ StaticSceneResourceResult prepare_static_scene_resources(
     std::vector<std::size_t> upload_for_packet(request.packets.size(), invalid_resource_index);
     std::vector<std::size_t> skinned_upload_for_packet(request.packets.size(), invalid_resource_index);
     std::vector<std::size_t> pipeline_for_packet(request.packets.size(), invalid_resource_index);
+    std::vector<std::uint32_t> stock_vulkan_source_program_for_packet(
+        request.packets.size(), invalid_static_scene_source_program_index);
+    if (has_stock_vulkan_source_table)
+        stock_vulkan_source_program_for_packet.assign(
+            request.stock_vulkan_source_program_by_packet.begin(),
+            request.stock_vulkan_source_program_by_packet.end());
+    std::vector<bool> stock_vulkan_source_program_used(
+        request.stock_vulkan_source_programs.size(), false);
     std::map<const PipelineProgram*, std::size_t> packet_pipeline_indices;
     std::vector<StaticSceneResources::PacketTextureIndices> textures_for_packet(
         request.packets.size());
@@ -569,6 +655,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
     std::uint64_t total_shader_bytes = 0U;
     std::uint64_t total_material_constant_bytes = 0U;
     std::uint64_t total_shadow_material_constant_bytes = 0U;
+    std::uint64_t total_stock_vulkan_source_constant_bytes = 0U;
     std::uint64_t total_update_bytes = 0U;
     std::uint64_t validation_bytes = 0U;
     std::optional<bool> batch_has_depth;
@@ -670,8 +757,54 @@ StaticSceneResourceResult prepare_static_scene_resources(
             return fail(StaticSceneResourceStatus::invalid_request,
                         "static_scene_material_pipeline_missing",
                         "A used static-scene material has no executable pipeline");
+        const std::uint32_t raw_source_program =
+            stock_vulkan_source_program_for_packet[packet_index];
+        const bool stock_vulkan_source =
+            raw_source_program != invalid_static_scene_source_program_index;
+        const std::shared_ptr<const
+            ValidatedStockKsPerPixelVulkanSourceProgram>* source_program =
+            stock_vulkan_source
+                ? &request.stock_vulkan_source_programs[
+                      static_cast<std::size_t>(raw_source_program)]
+                : nullptr;
+        if (stock_vulkan_source) {
+            if (!static_mesh ||
+                !canonical_resource_equals(
+                    model.materials[material_index].shader, "ksperpixel") ||
+                !canonical_resource_equals(
+                    packet.material_profile.shader, "ksperpixel"))
+                return fail(
+                    StaticSceneResourceStatus::unsupported,
+                    "static_scene_stock_vulkan_source_material_unsupported",
+                    "Vulkan source-equivalent execution supports only resolved static ksPerPixel packets");
+            if (source_program == nullptr || *source_program == nullptr ||
+                &(*source_program)->pipeline() != pipeline ||
+                (*source_program)->validation_status() !=
+                    StockKsPerPixelVulkanSourceStatus::ready)
+                return fail(
+                    StaticSceneResourceStatus::invalid_request,
+                    "static_scene_stock_vulkan_source_owner_mismatch",
+                    "A Vulkan source-equivalent packet must use its retained owner's exact validated pipeline");
+            const bool expected_a2c =
+                (*source_program)->variant() ==
+                StockKsPerPixelVariant::alpha_to_coverage;
+            if (packet.flags.alpha_to_coverage != expected_a2c ||
+                pipeline->blend.alpha_to_coverage != expected_a2c)
+                return fail(
+                    StaticSceneResourceStatus::invalid_request,
+                    "static_scene_stock_vulkan_source_variant_mismatch",
+                    "The retained Vulkan source variant must match packet and pipeline A2C state");
+            if (!valid_stock_ks_per_pixel_material_constants(
+                    request.stock_vulkan_source_material_constants_by_material[
+                        material_index]))
+                return fail(
+                    StaticSceneResourceStatus::invalid_request,
+                    "static_scene_stock_vulkan_source_material_non_finite",
+                    "A retained Vulkan source material record contains non-finite values");
+        }
         const ExecutorPipelineValidation pipeline_validation = validate_executor_pipeline(
-            device.info().backend, *pipeline, packet, limits.pipeline);
+            device.info().backend, *pipeline, packet, limits.pipeline,
+            stock_vulkan_source);
         if (!pipeline_validation.ok())
             return fail(pipeline_validation.status,
                         pipeline_validation.status == StaticSceneResourceStatus::invalid_request
@@ -679,10 +812,13 @@ StaticSceneResourceResult prepare_static_scene_resources(
                             : "static_scene_material_pipeline_unsupported",
                         pipeline_validation.error);
         const IndexedPortableResourceLayout material_layout =
-            classify_indexed_portable_resource_layout(*pipeline);
+            stock_vulkan_source
+                ? IndexedPortableResourceLayout::resource_free
+                : classify_indexed_portable_resource_layout(*pipeline);
         requires_directional_shadow_receiver =
             requires_directional_shadow_receiver ||
-            pipeline_declares_directional_shadow_receiver(*pipeline);
+            (!stock_vulkan_source &&
+             pipeline_declares_directional_shadow_receiver(*pipeline));
         const bool normal_layout =
             material_layout ==
             IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame;
@@ -958,6 +1094,51 @@ StaticSceneResourceResult prepare_static_scene_resources(
                 stock_shadow_constants.size();
             stock_shadow_constants.push_back(constants);
         }
+        if (stock_vulkan_source) {
+            constexpr std::uint64_t per_draw_constant_bytes =
+                static_cast<std::uint64_t>(
+                    stock_ks_per_pixel_native_constant_buffer_view_bytes) *
+                static_cast<std::uint64_t>(
+                    StockKsPerPixelNativeConstantSlot::count);
+            if (!checked_add(per_draw_constant_bytes,
+                             total_stock_vulkan_source_constant_bytes) ||
+                total_stock_vulkan_source_constant_bytes >
+                    limits.max_total_stock_vulkan_source_constant_bytes)
+                return fail(
+                    StaticSceneResourceStatus::invalid_request,
+                    "static_scene_stock_vulkan_source_constant_aggregate_limit",
+                    "Retained Vulkan source native constants exceed the aggregate limit");
+            constexpr std::uint64_t per_draw_update_bytes =
+                static_cast<std::uint64_t>(
+                    stock_ks_per_pixel_native_constant_buffer_view_bytes) *
+                4U;
+            if (!checked_add(per_draw_update_bytes, total_update_bytes) ||
+                total_update_bytes > limits.max_total_update_bytes)
+                return fail(
+                    StaticSceneResourceStatus::invalid_request,
+                    "static_scene_stock_vulkan_source_update_aggregate_limit",
+                    "Retained Vulkan source frame updates exceed the aggregate limit");
+            if (batch_has_depth.has_value() &&
+                *batch_has_depth != pipeline->targets.has_depth)
+                return fail(
+                    StaticSceneResourceStatus::unsupported,
+                    "static_scene_mixed_depth_targets_unsupported",
+                    "One ordered static-scene batch requires one depth-target contract");
+            batch_has_depth = pipeline->targets.has_depth;
+            const std::size_t source_index =
+                static_cast<std::size_t>(raw_source_program);
+            if (!stock_vulkan_source_program_used[source_index]) {
+                if (!checked_add(pipeline_validation.shader_bytes,
+                                 total_shader_bytes) ||
+                    total_shader_bytes > limits.max_total_shader_bytes)
+                    return fail(
+                        StaticSceneResourceStatus::invalid_request,
+                        "static_scene_shader_aggregate_limit",
+                        "Used static-scene pipelines exceed the aggregate shader byte limit");
+                stock_vulkan_source_program_used[source_index] = true;
+            }
+            continue;
+        }
         if (packet_pipeline_table) {
             const auto existing_pipeline = packet_pipeline_indices.find(pipeline);
             if (existing_pipeline != packet_pipeline_indices.end()) {
@@ -1141,6 +1322,36 @@ StaticSceneResourceResult prepare_static_scene_resources(
         }
     }
 
+    std::vector<std::shared_ptr<const
+        ValidatedStockKsPerPixelVulkanSourceProgram>>
+        retained_stock_vulkan_source_programs;
+    retained_stock_vulkan_source_programs.reserve(
+        request.stock_vulkan_source_programs.size());
+    std::vector<std::uint32_t> retained_source_program_indices(
+        request.stock_vulkan_source_programs.size(),
+        invalid_static_scene_source_program_index);
+    for (std::size_t index = 0U;
+         index < stock_vulkan_source_program_used.size(); ++index) {
+        if (!stock_vulkan_source_program_used[index]) continue;
+        if (retained_stock_vulkan_source_programs.size() >=
+            static_cast<std::size_t>(
+                invalid_static_scene_source_program_index))
+            return fail(
+                StaticSceneResourceStatus::invalid_request,
+                "static_scene_stock_vulkan_source_owner_limit",
+                "Retained Vulkan source-program owners exceed index capacity");
+        retained_source_program_indices[index] =
+            static_cast<std::uint32_t>(
+                retained_stock_vulkan_source_programs.size());
+        retained_stock_vulkan_source_programs.push_back(
+            request.stock_vulkan_source_programs[index]);
+    }
+    for (std::uint32_t& index :
+         stock_vulkan_source_program_for_packet) {
+        if (index == invalid_static_scene_source_program_index) continue;
+        index = retained_source_program_indices[index];
+    }
+
     auto resources = std::make_unique<StaticSceneResources>();
     resources->backend_ = device.info().backend;
     resources->device_ = &device;
@@ -1149,6 +1360,10 @@ StaticSceneResourceResult prepare_static_scene_resources(
     resources->upload_for_packet_ = std::move(upload_for_packet);
     resources->skinned_upload_for_packet_ = std::move(skinned_upload_for_packet);
     resources->pipeline_for_packet_ = std::move(pipeline_for_packet);
+    resources->stock_vulkan_source_programs_ =
+        std::move(retained_stock_vulkan_source_programs);
+    resources->stock_vulkan_source_program_for_packet_ =
+        std::move(stock_vulkan_source_program_for_packet);
     resources->textures_for_packet_ = std::move(textures_for_packet);
     resources->material_constant_for_packet_ =
         std::move(material_constant_for_packet);
@@ -1156,17 +1371,27 @@ StaticSceneResourceResult prepare_static_scene_resources(
         std::move(stock_shadow_constant_for_material);
     resources->texture_count_ = model.textures.size();
     resources->texture_authority_ = request.texture_authority;
-    for (const StaticSceneResources::PacketTextureIndices& indices :
-         resources->textures_for_packet_)
-        resources->has_texture_resources_ = resources->has_texture_resources_ ||
-                                            indices.diffuse != invalid_draw_texture_index ||
-                                            indices.normal != invalid_draw_texture_index ||
-                                            indices.maps != invalid_draw_texture_index ||
-                                            indices.detail != invalid_draw_texture_index ||
-                                            indices.normal_detail != invalid_draw_texture_index ||
-                                            indices.dust != invalid_draw_texture_index ||
-                                            indices.damage != invalid_draw_texture_index ||
-                                            indices.damage_mask != invalid_draw_texture_index;
+    for (std::size_t packet_index = 0U;
+         packet_index < resources->textures_for_packet_.size(); ++packet_index) {
+        const StaticSceneResources::PacketTextureIndices& indices =
+            resources->textures_for_packet_[packet_index];
+        const bool has_packet_textures =
+            indices.diffuse != invalid_draw_texture_index ||
+            indices.normal != invalid_draw_texture_index ||
+            indices.maps != invalid_draw_texture_index ||
+            indices.detail != invalid_draw_texture_index ||
+            indices.normal_detail != invalid_draw_texture_index ||
+            indices.dust != invalid_draw_texture_index ||
+            indices.damage != invalid_draw_texture_index ||
+            indices.damage_mask != invalid_draw_texture_index;
+        resources->has_texture_resources_ =
+            resources->has_texture_resources_ || has_packet_textures;
+        resources->has_portable_texture_resources_ =
+            resources->has_portable_texture_resources_ ||
+            (has_packet_textures &&
+             resources->stock_vulkan_source_program_for_packet_[packet_index] ==
+                 invalid_static_scene_source_program_index);
+    }
     resources->owned_material_constants_.reserve(material_constants.size());
     for (const KsPerPixelMaterialConstants& constants : material_constants) {
         std::array<std::byte, portable_material_buffer_view_bytes> bytes{};
@@ -1190,6 +1415,85 @@ StaticSceneResourceResult prepare_static_scene_resources(
         if (!buffer.ok())
             return {map_buffer_status(buffer.status), std::move(buffer.diagnostic), nullptr};
         resources->owned_stock_shadow_constants_.push_back(std::move(buffer.buffer));
+    }
+    resources->stock_vulkan_source_constants_for_packet_.resize(
+        resources->packets_.size());
+    if (has_stock_vulkan_source) {
+        for (std::size_t packet_index = 0U;
+             packet_index < resources->packets_.size(); ++packet_index) {
+            if (resources->stock_vulkan_source_program_for_packet_[packet_index] ==
+                invalid_static_scene_source_program_index)
+                continue;
+            StockKsPerPixelNativeConstantData constants;
+            constants.camera = make_stock_ks_per_pixel_camera_constants(
+                apex::scene::identity_matrix, apex::scene::identity_matrix,
+                apex::scene::identity_matrix, {0.0F, 0.0F, 0.0F}, 0.1F,
+                100.0F, 1.0F);
+            constants.object = make_stock_ks_per_pixel_object_constants(
+                resources->packets_[packet_index].world_matrix);
+            constants.shadow_maps.shadow_matrices.fill(
+                apex::scene::identity_matrix);
+            constants.shadow_maps.texture_size = 1.0F;
+            constants.material =
+                request.stock_vulkan_source_material_constants_by_material[
+                    static_cast<std::size_t>(
+                        resources->packets_[packet_index].material)];
+            StockKsPerPixelNativeConstantBufferResult allocated =
+                allocate_stock_ks_per_pixel_native_constant_buffers(
+                    device, constants);
+            if (!allocated.ok())
+                return {allocated.status ==
+                                StockKsPerPixelNativeConstantBufferStatus::
+                                    backend_unsupported
+                            ? StaticSceneResourceStatus::unsupported
+                        : allocated.status ==
+                                  StockKsPerPixelNativeConstantBufferStatus::
+                                      invalid_constants ||
+                              allocated.status ==
+                                  StockKsPerPixelNativeConstantBufferStatus::
+                                      invalid_buffer
+                            ? StaticSceneResourceStatus::invalid_request
+                        : allocated.status ==
+                                  StockKsPerPixelNativeConstantBufferStatus::
+                                      allocation_failed
+                            ? StaticSceneResourceStatus::allocation_failed
+                            : StaticSceneResourceStatus::upload_failed,
+                        std::move(allocated.diagnostic), nullptr};
+            resources->stock_vulkan_source_constants_for_packet_[packet_index] =
+                std::move(allocated.buffers);
+        }
+
+        SamplerDescription linear_description;
+        linear_description.min_filter = SamplerFilter::anisotropic;
+        linear_description.mag_filter = SamplerFilter::anisotropic;
+        linear_description.mip_filter = SamplerFilter::anisotropic;
+        linear_description.mip_lod_bias =
+            source_sampler_settings.mip_lod_bias;
+        linear_description.max_anisotropy =
+            source_sampler_settings.max_anisotropy;
+        linear_description.max_lod = std::numeric_limits<float>::max();
+        SamplerResult linear = device.create_sampler(linear_description);
+        if (!linear.ok())
+            return {map_sampler_status(linear.status),
+                    std::move(linear.diagnostic), nullptr};
+        resources->stock_vulkan_source_linear_sampler_ =
+            std::move(linear.sampler);
+
+        SamplerDescription shadow_description;
+        shadow_description.min_filter = SamplerFilter::linear;
+        shadow_description.mag_filter = SamplerFilter::linear;
+        shadow_description.mip_filter = SamplerFilter::nearest;
+        shadow_description.address_u = SamplerAddressMode::clamp_to_edge;
+        shadow_description.address_v = SamplerAddressMode::clamp_to_edge;
+        shadow_description.address_w = SamplerAddressMode::clamp_to_edge;
+        shadow_description.compare = SamplerCompare::less;
+        shadow_description.max_lod = std::numeric_limits<float>::max();
+        SamplerResult shadow = device.create_sampler(shadow_description);
+        if (!shadow.ok())
+            return {map_sampler_status(shadow.status),
+                    std::move(shadow.diagnostic), nullptr};
+        resources->stock_vulkan_source_shadow_sampler_ =
+            std::move(shadow.sampler);
     }
     if (requires_frame_constants) {
         std::array<std::byte, portable_frame_buffer_view_bytes> bytes{};
@@ -1345,7 +1649,11 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         packets_.size() != pipeline_for_packet_.size() ||
         packets_.size() != textures_for_packet_.size() ||
         packets_.size() != material_constant_for_packet_.size() ||
-        packets_.size() != skinned_upload_for_packet_.size())
+        packets_.size() != skinned_upload_for_packet_.size() ||
+        packets_.size() !=
+            stock_vulkan_source_program_for_packet_.size() ||
+        packets_.size() !=
+            stock_vulkan_source_constants_for_packet_.size())
         return {IndexedStaticMeshBatchStatus::invalid_request,
                 {"static_scene_resources_invalid", "Static-scene resource mappings are incomplete"}, {}};
     if (!frame.refreshed_packets.empty() &&
@@ -1383,10 +1691,63 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
     if (has_texture_resources_ &&
         texture_authority_ == StaticSceneTextureAuthority::caller_tables &&
         (frame.textures_by_global_index.size() != texture_count_ ||
-         frame.samplers_by_global_index.size() != texture_count_))
+         (has_portable_texture_resources_ &&
+          frame.samplers_by_global_index.size() != texture_count_)))
         return {IndexedStaticMeshBatchStatus::invalid_request,
                 {"static_scene_resource_table_size_invalid",
-                 "Static-scene texture and sampler tables must match the final KN5 texture count"}, {}};
+                 has_portable_texture_resources_
+                     ? "Static-scene texture and sampler tables must match the final KN5 texture count"
+                     : "The static-scene texture table must match the final KN5 texture count"}, {}};
+
+    const bool has_stock_vulkan_source =
+        !stock_vulkan_source_programs_.empty();
+    if (has_stock_vulkan_source !=
+        frame.stock_vulkan_source_frame.has_value())
+        return {IndexedStaticMeshBatchStatus::invalid_request,
+                {has_stock_vulkan_source
+                     ? "static_scene_stock_vulkan_source_frame_missing"
+                     : "static_scene_stock_vulkan_source_frame_unexpected",
+                 has_stock_vulkan_source
+                     ? "Retained Vulkan source-equivalent draws require a complete native frame record"
+                     : "A native Vulkan source frame was supplied to a portable-only scene"},
+                {}};
+    if (has_stock_vulkan_source) {
+        if (backend_ != Backend::Vulkan ||
+            stock_vulkan_source_linear_sampler_ == nullptr ||
+            stock_vulkan_source_shadow_sampler_ == nullptr)
+            return {IndexedStaticMeshBatchStatus::invalid_request,
+                    {"static_scene_stock_vulkan_source_resources_invalid",
+                     "Retained Vulkan source-equivalent sampler ownership is incomplete"},
+                    {}};
+        const StaticSceneFrameDescription::StockVulkanSourceFrame& source_frame =
+            *frame.stock_vulkan_source_frame;
+        if (!valid_stock_ks_per_pixel_camera_constants(source_frame.camera) ||
+            !valid_stock_ks_per_pixel_lighting_constants(
+                source_frame.lighting) ||
+            !valid_stock_directional_shadow_receiver_constants(
+                source_frame.shadow_constants))
+            return {IndexedStaticMeshBatchStatus::invalid_request,
+                    {"static_scene_stock_vulkan_source_frame_invalid",
+                     "Native Vulkan source frame records must be finite and complete"},
+                    {}};
+        for (const DepthAttachment* shadow : source_frame.shadow_maps) {
+            if (shadow == nullptr)
+                return {IndexedStaticMeshBatchStatus::invalid_request,
+                        {"static_scene_stock_vulkan_source_shadow_map_missing",
+                         "Native Vulkan source frames require exactly three shadow maps"},
+                        {}};
+            const DepthAttachmentDescription& description =
+                shadow->info().description;
+            if (shadow->backend() != Backend::Vulkan ||
+                description.samples != 1U ||
+                description.format != DepthAttachmentFormat::d32_float ||
+                !description.shader_readable)
+                return {IndexedStaticMeshBatchStatus::unsupported,
+                        {"static_scene_stock_vulkan_source_shadow_map_unsupported",
+                         "Native Vulkan source shadow maps must be shader-readable single-sample D32 attachments"},
+                        {}};
+        }
+    }
 
     const bool has_directional_shadow_maps =
         frame.directional_shadow_maps != nullptr;
@@ -1635,8 +1996,59 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         }
         pending_skin_updates.push_back(std::move(pending));
     }
+    struct PendingStockVulkanSourceUpdate {
+        Buffer* buffer = nullptr;
+        std::array<std::byte,
+                   stock_ks_per_pixel_native_constant_buffer_view_bytes>
+            bytes{};
+    };
+    std::vector<PendingStockVulkanSourceUpdate>
+        pending_stock_vulkan_source_updates;
+    if (has_stock_vulkan_source) {
+        pending_stock_vulkan_source_updates.reserve(packets_.size() * 4U);
+        const auto append_update = [&]<typename Record>(Buffer* buffer,
+                                                        const Record& record) {
+            PendingStockVulkanSourceUpdate pending;
+            pending.buffer = buffer;
+            std::memcpy(pending.bytes.data(), &record, sizeof(record));
+            pending_stock_vulkan_source_updates.push_back(std::move(pending));
+        };
+        const StaticSceneFrameDescription::StockVulkanSourceFrame& source_frame =
+            *frame.stock_vulkan_source_frame;
+        for (std::size_t index = 0U; index < packets_.size(); ++index) {
+            if (!packet_visible(index) ||
+                stock_vulkan_source_program_for_packet_[index] ==
+                    invalid_static_scene_source_program_index)
+                continue;
+            StockKsPerPixelNativeConstantBuffers* constants =
+                stock_vulkan_source_constants_for_packet_[index].get();
+            if (constants == nullptr || !constants->ready())
+                return {IndexedStaticMeshBatchStatus::invalid_request,
+                        {"static_scene_stock_vulkan_source_resources_invalid",
+                         "A retained Vulkan source draw has incomplete native constant ownership"},
+                        {}};
+            const StockKsPerPixelObjectConstants object =
+                make_stock_ks_per_pixel_object_constants(
+                    packet_for_frame(index).world_matrix);
+            append_update(constants->buffer(
+                              StockKsPerPixelNativeConstantSlot::camera),
+                          source_frame.camera);
+            append_update(constants->buffer(
+                              StockKsPerPixelNativeConstantSlot::object),
+                          object);
+            append_update(constants->buffer(
+                              StockKsPerPixelNativeConstantSlot::lighting),
+                          source_frame.lighting);
+            append_update(constants->buffer(
+                              StockKsPerPixelNativeConstantSlot::shadow_maps),
+                          source_frame.shadow_constants);
+        }
+    }
     std::vector<IndexedStaticMeshDrawRequest> draws;
     draws.reserve(packets_.size());
+    std::vector<StockKsPerPixelVulkanSourceDrawBinding>
+        stock_vulkan_source_bindings;
+    stock_vulkan_source_bindings.reserve(packets_.size());
     for (std::size_t order = 0U; order < packets_.size(); ++order) {
         const std::size_t index = frame.color_packet_order.empty()
                                       ? order
@@ -1648,9 +2060,22 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
             packet.primitive == DrawPrimitiveKind::skinned_mesh
                 ? skinned_upload_for_packet_[index] >= skinned_uploads_.size()
                 : upload_for_packet_[index] >= uploads_.size();
-        if (upload_index_invalid || pipeline_for_packet_[index] >= pipelines_.size())
+        const std::uint32_t raw_source_program =
+            stock_vulkan_source_program_for_packet_[index];
+        const bool stock_vulkan_source =
+            raw_source_program != invalid_static_scene_source_program_index;
+        const bool pipeline_index_invalid =
+            stock_vulkan_source
+                ? static_cast<std::size_t>(raw_source_program) >=
+                      stock_vulkan_source_programs_.size()
+                : pipeline_for_packet_[index] >= pipelines_.size();
+        if (upload_index_invalid || pipeline_index_invalid)
             return {IndexedStaticMeshBatchStatus::invalid_request,
                     {"static_scene_resources_invalid", "Static-scene resource index is invalid"}, {}};
+        const PipelineProgram& pipeline =
+            stock_vulkan_source
+                ? stock_vulkan_source_programs_[raw_source_program]->pipeline()
+                : pipelines_[pipeline_for_packet_[index]];
         Diagnostic diagnostic;
         std::optional<IndexedStaticMeshDrawRequest> draw;
         if (packet.primitive == DrawPrimitiveKind::skinned_mesh) {
@@ -1658,53 +2083,103 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
                 return {IndexedStaticMeshBatchStatus::invalid_request,
                         {"static_scene_resources_invalid", "Skinned static-scene resource index is invalid"}, {}};
             draw = skinned_uploads_[skinned_upload_for_packet_[index]]->make_request(
-                packet, pipelines_[pipeline_for_packet_[index]], frame.camera,
+                packet, pipeline, frame.camera,
                 0U, 0U, {0.0F, 0.0F, 0.0F, 1.0F}, diagnostic);
         } else {
             draw = uploads_[upload_for_packet_[index]]->make_request(
-                packet, pipelines_[pipeline_for_packet_[index]], frame.camera,
+                packet, pipeline, frame.camera,
                 0U, 0U, {0.0F, 0.0F, 0.0F, 1.0F}, diagnostic);
         }
         if (!draw.has_value())
             return {IndexedStaticMeshBatchStatus::invalid_request, std::move(diagnostic), {}};
-        draw->shader_authority = IndexedShaderAuthority::explicit_pipeline;
         const PacketTextureIndices texture_indices = textures_for_packet_[index];
         std::optional<IndexedStaticMeshBatchResult> resource_failure;
         const auto resolve_texture = [&](std::uint32_t raw_index,
-                                         std::string_view role) {
+                                         std::string_view role,
+                                         bool require_sampler = true) {
             IndexedSampledTextureBinding binding;
             if (raw_index == invalid_draw_texture_index) return binding;
             const std::size_t resource_index = static_cast<std::size_t>(raw_index);
             if (texture_authority_ ==
                 StaticSceneTextureAuthority::owned_model_payloads) {
                 if (resource_index >= owned_textures_.size() ||
-                    owned_textures_[resource_index] == nullptr || owned_sampler_ == nullptr) {
+                    owned_textures_[resource_index] == nullptr ||
+                    (require_sampler && owned_sampler_ == nullptr)) {
                     resource_failure = IndexedStaticMeshBatchResult{
                         IndexedStaticMeshBatchStatus::invalid_request,
                         {"static_scene_owned_resource_missing",
                          "A used static-scene " + std::string(role) +
-                             " texture has no owned texture or sampler"}, {}};
+                             (require_sampler
+                                  ? " texture has no owned texture or sampler"
+                                  : " texture has no owned texture")}, {}};
                     return binding;
                 }
-                binding = {owned_textures_[resource_index].get(), owned_sampler_.get()};
+                binding = {owned_textures_[resource_index].get(),
+                           require_sampler ? owned_sampler_.get() : nullptr};
             } else {
                 if (resource_index >= texture_count_ ||
                     frame.textures_by_global_index[resource_index] == nullptr ||
-                    frame.samplers_by_global_index[resource_index] == nullptr) {
+                    (require_sampler &&
+                     frame.samplers_by_global_index[resource_index] == nullptr)) {
                     resource_failure = IndexedStaticMeshBatchResult{
                         IndexedStaticMeshBatchStatus::invalid_request,
                         {"static_scene_resource_table_entry_missing",
                          "A used static-scene " + std::string(role) +
-                             " table entry has no texture or sampler handle"}, {}};
+                             (require_sampler
+                                  ? " table entry has no texture or sampler handle"
+                                  : " table entry has no texture handle")}, {}};
                     return binding;
                 }
                 binding = {frame.textures_by_global_index[resource_index],
-                           frame.samplers_by_global_index[resource_index]};
+                           require_sampler
+                               ? frame.samplers_by_global_index[resource_index]
+                               : nullptr};
             }
             return binding;
         };
-        draw->sampled_binding = resolve_texture(texture_indices.diffuse, "diffuse");
+        const IndexedSampledTextureBinding diffuse_binding =
+            resolve_texture(texture_indices.diffuse, "diffuse",
+                            !stock_vulkan_source);
         if (resource_failure.has_value()) return std::move(*resource_failure);
+        if (stock_vulkan_source) {
+            if (diffuse_binding.texture == nullptr ||
+                index >= stock_vulkan_source_constants_for_packet_.size() ||
+                stock_vulkan_source_constants_for_packet_[index] == nullptr ||
+                !stock_vulkan_source_constants_for_packet_[index]->ready() ||
+                !frame.stock_vulkan_source_frame.has_value())
+                return {IndexedStaticMeshBatchStatus::invalid_request,
+                        {"static_scene_stock_vulkan_source_resources_invalid",
+                         "A retained Vulkan source draw has incomplete native resources"},
+                        {}};
+            StockKsPerPixelVulkanSourceDrawBinding& source_binding =
+                stock_vulkan_source_bindings.emplace_back();
+            source_binding.program =
+                stock_vulkan_source_programs_[raw_source_program].get();
+            for (std::size_t slot = 0U;
+                 slot < source_binding.resources.uniform_buffers.size();
+                 ++slot) {
+                source_binding.resources.uniform_buffers[slot] = {
+                    stock_vulkan_source_constants_for_packet_[index]->buffer(
+                        static_cast<StockKsPerPixelNativeConstantSlot>(slot)),
+                    0U,
+                    stock_ks_per_pixel_native_constant_buffer_view_bytes};
+            }
+            source_binding.resources.diffuse_texture =
+                diffuse_binding.texture;
+            source_binding.resources.shadow_maps =
+                frame.stock_vulkan_source_frame->shadow_maps;
+            source_binding.resources.linear_sampler =
+                stock_vulkan_source_linear_sampler_.get();
+            source_binding.resources.shadow_sampler =
+                stock_vulkan_source_shadow_sampler_.get();
+            draw->shader_authority = IndexedShaderAuthority::
+                explicit_stock_ks_per_pixel_vulkan_source_equivalent;
+            draw->stock_ks_per_pixel_vulkan_source = &source_binding;
+            draws.push_back(std::move(*draw));
+            continue;
+        }
+        draw->shader_authority = IndexedShaderAuthority::explicit_pipeline;
+        draw->sampled_binding = diffuse_binding;
         draw->normal_binding = resolve_texture(texture_indices.normal, "normal");
         if (resource_failure.has_value()) return std::move(*resource_failure);
         draw->maps_binding = resolve_texture(texture_indices.maps, "maps");
@@ -1881,13 +2356,47 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         validate_indexed_static_mesh_batch_description(target, batch, batch_diagnostic);
     if (batch_validation != IndexedStaticMeshBatchStatus::ready)
         return {batch_validation, std::move(batch_diagnostic), {}};
+    for (const PendingStockVulkanSourceUpdate& pending :
+         pending_stock_vulkan_source_updates) {
+        if (pending.buffer == nullptr)
+            return {IndexedStaticMeshBatchStatus::invalid_request,
+                    {"static_scene_stock_vulkan_source_constant_missing",
+                     "A retained Vulkan source constant slot has no buffer"},
+                    {}};
+        Diagnostic update_diagnostic;
+        const BufferStatus range_status = validate_buffer_update(
+            *pending.buffer, 0U, pending.bytes.size(), update_diagnostic);
+        if (range_status != BufferStatus::ready)
+            return {range_status == BufferStatus::unsupported
+                        ? IndexedStaticMeshBatchStatus::unsupported
+                        : IndexedStaticMeshBatchStatus::invalid_request,
+                    {"static_scene_stock_vulkan_source_constant_range_invalid",
+                     update_diagnostic.message},
+                    {}};
+    }
     // Every frame pose, frame/resource mapping, and draw contract is now
     // validated. Backend updates are sequential, so a runtime upload failure
     // can leave earlier mutable uploads committed even though no batch is
-    // submitted. A caller can safely retry the complete frame. Commit the
-    // directional receiver record first so its update failure cannot advance
-    // skinning. Commit the shared lighting frame record last so a failed skin
-    // upload cannot advance lighting independently of the requested pose.
+    // submitted. A caller can safely retry the complete frame. Commit source
+    // ABI records before the portable directional receiver and skinning; the
+    // shared portable lighting record remains last so a failed skin upload
+    // cannot advance it independently of the requested pose.
+    for (PendingStockVulkanSourceUpdate& pending :
+         pending_stock_vulkan_source_updates) {
+        const BufferUpdateResult updated =
+            device.update_buffer(*pending.buffer, 0U, pending.bytes);
+        if (!updated.ok())
+            return {updated.status == BufferStatus::unsupported
+                        ? IndexedStaticMeshBatchStatus::unsupported
+                        : updated.status == BufferStatus::invalid_description
+                              ? IndexedStaticMeshBatchStatus::invalid_request
+                              : IndexedStaticMeshBatchStatus::execution_failed,
+                    {updated.diagnostic.code.empty()
+                         ? "static_scene_stock_vulkan_source_constant_update_failed"
+                         : updated.diagnostic.code,
+                     updated.diagnostic.message},
+                    {}};
+    }
     if (requires_directional_shadow_receiver) {
         Diagnostic update_diagnostic;
         const BufferStatus range_status = validate_buffer_update(
