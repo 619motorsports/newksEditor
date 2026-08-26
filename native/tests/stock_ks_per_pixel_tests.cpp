@@ -1688,6 +1688,89 @@ void validates_complete_native_draw_bindings_before_execution() {
             diagnostic.code.empty() ?
                 "complete native binding passes before command recording" :
                 diagnostic.code.c_str());
+    const auto expect_missing_binding_field =
+        [&](const StockKsPerPixelNativeDrawBinding& candidate,
+            const char* description) {
+            auto candidate_request = request;
+            candidate_request.stock_ks_per_pixel_native = &candidate;
+            require(validate_indexed_static_mesh_draw_request(
+                        target, candidate_request, diagnostic) ==
+                        IndexedStaticMeshDrawStatus::invalid_request &&
+                        diagnostic.code == "indexed_stock_native_binding_missing",
+                    description);
+        };
+    auto missing_shader = binding;
+    missing_shader.shader_program = nullptr;
+    expect_missing_binding_field(missing_shader,
+                                 "missing native shader owner is rejected");
+    auto missing_constants = binding;
+    missing_constants.constant_buffers = nullptr;
+    expect_missing_binding_field(
+        missing_constants, "missing native constant owner is rejected");
+    auto missing_samplers = binding;
+    missing_samplers.samplers = nullptr;
+    expect_missing_binding_field(missing_samplers,
+                                 "missing native sampler owner is rejected");
+    auto missing_diffuse = binding;
+    missing_diffuse.diffuse_texture = nullptr;
+    expect_missing_binding_field(missing_diffuse,
+                                 "missing native diffuse texture is rejected");
+    for (std::size_t shadow_index = 0U;
+         shadow_index < binding.shadow_maps.size(); ++shadow_index) {
+        auto missing_shadow = binding;
+        missing_shadow.shadow_maps[shadow_index] = nullptr;
+        expect_missing_binding_field(
+            missing_shadow, "missing native shadow map is rejected");
+    }
+
+    auto duplicate_shadow = binding;
+    duplicate_shadow.shadow_maps[1U] = duplicate_shadow.shadow_maps[0U];
+    auto duplicate_request = request;
+    duplicate_request.stock_ks_per_pixel_native = &duplicate_shadow;
+    require(validate_indexed_static_mesh_draw_request(
+                target, duplicate_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_stock_native_shadow_map_duplicate",
+            "duplicate native shadow maps are rejected");
+
+    auto diffuse_target_alias = binding;
+    diffuse_target_alias.diffuse_texture = &target;
+    auto diffuse_target_request = request;
+    diffuse_target_request.stock_ks_per_pixel_native = &diffuse_target_alias;
+    require(validate_indexed_static_mesh_draw_request(
+                target, diffuse_target_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_stock_native_diffuse_feedback_loop",
+            "native diffuse and color target alias is rejected");
+
+    FakeNativeDepth main_depth(Backend::D3D12,
+                               {16U, 16U, 1U, DepthAttachmentFormat::d32_float,
+                                true});
+    auto shadow_depth_alias = binding;
+    shadow_depth_alias.shadow_maps[0U] = &main_depth;
+    auto shadow_depth_request = request;
+    shadow_depth_request.depth_attachment = &main_depth;
+    shadow_depth_request.stock_ks_per_pixel_native = &shadow_depth_alias;
+    require(validate_indexed_static_mesh_draw_request(
+                target, shadow_depth_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_stock_native_shadow_feedback_loop",
+            "native shadow and main depth alias is rejected");
+
+    FakeNativeDepth mismatched_shadow(
+        Backend::D3D12,
+        {16U, 16U, 1U, DepthAttachmentFormat::d32_float, true});
+    auto mismatched_dimensions = binding;
+    mismatched_dimensions.shadow_maps[1U] = &mismatched_shadow;
+    auto mismatched_dimensions_request = request;
+    mismatched_dimensions_request.stock_ks_per_pixel_native =
+        &mismatched_dimensions;
+    require(validate_indexed_static_mesh_draw_request(
+                target, mismatched_dimensions_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_stock_native_shadow_dimensions_mismatch",
+            "native shadow dimensions must match");
+
     auto missing = request;
     missing.stock_ks_per_pixel_native = nullptr;
     require(validate_indexed_static_mesh_draw_request(target, missing, diagnostic) ==
