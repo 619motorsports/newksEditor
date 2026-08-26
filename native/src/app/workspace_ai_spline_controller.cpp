@@ -321,6 +321,56 @@ bool WorkspaceAiSplineController::canRedo() const noexcept {
     return state_->session.canRedo();
 }
 
+WorkspaceAiSplineControllerSaveResult
+WorkspaceAiSplineController::buildSaveBytes(
+    std::uint64_t expectedRevision) const {
+    if (expectedRevision != state_->session.revision()) {
+        WorkspaceAiSplineControllerSaveResult result;
+        result.status =
+            WorkspaceAiSplineControllerSaveStatus::stale_revision;
+        result.revision = state_->session.revision();
+        result.diagnostic = diagnostic(
+            "workspace_ai_spline_controller_revision_stale",
+            "AI spline save revision does not match the current revision");
+        return result;
+    }
+    auto saved = state_->session.buildSaveBytes();
+    WorkspaceAiSplineControllerSaveResult result;
+    result.revision = saved.revision;
+    if (saved.ok()) {
+        result.status = WorkspaceAiSplineControllerSaveStatus::ready;
+        result.bytes = std::move(saved.bytes);
+        return result;
+    }
+    switch (saved.status) {
+    case authoring::AiSplineSessionSaveStatus::ok:
+        result.status = WorkspaceAiSplineControllerSaveStatus::ready;
+        break;
+    case authoring::AiSplineSessionSaveStatus::invalid:
+        result.status = WorkspaceAiSplineControllerSaveStatus::invalid;
+        break;
+    case authoring::AiSplineSessionSaveStatus::unsupported:
+        result.status = WorkspaceAiSplineControllerSaveStatus::unsupported;
+        break;
+    case authoring::AiSplineSessionSaveStatus::resource_limit:
+        result.status =
+            WorkspaceAiSplineControllerSaveStatus::resource_limit;
+        break;
+    case authoring::AiSplineSessionSaveStatus::failed:
+        result.status = WorkspaceAiSplineControllerSaveStatus::failed;
+        break;
+    }
+    if (saved.diagnostics.empty()) {
+        result.diagnostic = diagnostic(
+            "workspace_ai_spline_controller_save_failed",
+            "AI spline save failed without a diagnostic");
+    } else {
+        result.diagnostic.code = saved.diagnostics.front().code;
+        result.diagnostic.message = saved.diagnostics.front().message;
+    }
+    return result;
+}
+
 WorkspaceAiSplineControllerResult
 WorkspaceAiSplineController::staleResult() const {
     WorkspaceAiSplineControllerResult result;

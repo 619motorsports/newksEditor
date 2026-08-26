@@ -2364,6 +2364,46 @@ void publishes_ai_spline_controller_transactions() {
     require(idle.ok() && !idle.changed && idle.revision == 8U &&
                 device.buffer_calls == callsBeforeIdle,
             "released manual input performs no session or buffer work");
+
+    const auto beforeSave = controller->currentBytes();
+    const auto beforeSaveRevision = controller->revision();
+    const bool beforeSaveDirty = controller->dirty();
+    const bool beforeSaveUndo = controller->canUndo();
+    const bool beforeSaveRedo = controller->canRedo();
+    const auto staleSave = controller->buildSaveBytes(99U);
+    require(!staleSave.ok() && staleSave.bytes.empty() &&
+                staleSave.status ==
+                    apex::app::WorkspaceAiSplineControllerSaveStatus::
+                        stale_revision &&
+                staleSave.revision == beforeSaveRevision,
+            "controller save rejects a stale revision without bytes");
+    const auto saved = controller->buildSaveBytes(beforeSaveRevision);
+    const auto parsedSaved = apex::formats::parseAiSpline(
+        saved.bytes, "controller-save-roundtrip.ai");
+    require(saved.ok() && saved.revision == beforeSaveRevision &&
+                parsedSaved.grid.has_value() &&
+                controller->currentBytes() == beforeSave &&
+                controller->revision() == beforeSaveRevision &&
+                controller->dirty() == beforeSaveDirty &&
+                controller->canUndo() == beforeSaveUndo &&
+                controller->canRedo() == beforeSaveRedo &&
+                device.buffer_calls == callsBeforeIdle,
+            "controller save bytes preserve visible and authoring state");
+
+    auto limitedSpline = controller->current();
+    apex::authoring::AiSplineSessionLimits saveLimits;
+    saveLimits.grid.maxGridRows = 0U;
+    auto limitedController = apex::app::WorkspaceAiSplineController::create(
+        std::move(limitedSpline), {}, saveLimits);
+    require(limitedController.ok(), "save-limited controller creates");
+    const auto limitedSave =
+        limitedController.controller->buildSaveBytes(0U);
+    require(!limitedSave.ok() && limitedSave.bytes.empty() &&
+                limitedSave.status ==
+                    apex::app::WorkspaceAiSplineControllerSaveStatus::
+                        resource_limit &&
+                limitedSave.diagnostic.code == "COUNT_LIMIT",
+            "controller reports save resource limits without string matching");
 }
 
 void rejects_unsafe_ai_spline_controller_candidates() {

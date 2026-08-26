@@ -230,7 +230,7 @@ remains unchanged and feature-complete.
   The session restores selected records from the backup. Camber inversion uses
   raw selection order in the library.
   The CLI ignores duplicate indices, as the native selection method does.
-  The CLI writes validated session bytes without replacing an existing file.
+  The edit CLI commands write validated bytes without replacing an output.
   Payload edits preserve the valid grid. A bounded format-layer builder ports
   the recovered grid algorithm. It reproduces the checked-in native pit-lane
   fixture byte for byte. The session can set one absolute point position.
@@ -277,7 +277,14 @@ remains unchanged and feature-complete.
   The controller rejects an overflowed cached-forward normalization.
   The window retries transient allocation and viewport publication errors.
   Open splines clamp the final cached forward. Closed splines wrap it.
-  Runtime point picking, edit-mode controls, and durable save remain pending.
+  `--save-ai-spline` accepts version 7, rebuilds the grid, and atomically
+  replaces its output. Legacy version-2 conversion is not yet recovered.
+  `--ai-spline-save-on-exit` saves the live controller after a clean exit.
+  Save does not change the revision, history, baseline, selection, or dirty state.
+  A save error keeps the prior destination and the complete session state.
+  This atomic replace differs from the original direct file truncation.
+  Replacement can also change destination permissions or access-control metadata.
+  Runtime point picking and edit-mode controls remain pending.
   Another version-7 option adds the recovered vertical camber lines after the
   side passes. Positive values are green. Other values are red.
   The selected pass uses solid fill, front-face culling, opaque blend state,

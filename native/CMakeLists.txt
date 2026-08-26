@@ -170,6 +170,7 @@ target_link_libraries(apex_app
 )
 
 add_library(apex_platform STATIC
+  src/platform/file_output.cpp
   src/platform/security.cpp
   src/platform/window.cpp
 )
@@ -254,6 +255,9 @@ if(NOT BUILD_TESTING OR NOT APEX_BUILD_TESTS)
   return()
 endif()
 
+add_executable(ai_spline_cli_fixture tests/ai_spline_cli_fixture.cpp)
+target_link_libraries(ai_spline_cli_fixture PRIVATE ApexEditor::Formats)
+
 add_test(NAME apex_native_cli_usage
   COMMAND ${CMAKE_COMMAND}
     "-DAPEX_NATIVE_COMMAND=$<TARGET_FILE:apex_native_app>"
@@ -264,12 +268,13 @@ set_tests_properties(apex_native_cli_usage PROPERTIES LABELS "unit;security")
 add_test(NAME apex_native_ai_spline_edit_cli
   COMMAND ${CMAKE_COMMAND}
     "-DAPEX_NATIVE_COMMAND=$<TARGET_FILE:apex_native_app>"
+    "-DAPEX_AI_SPLINE_FIXTURE_COMMAND=$<TARGET_FILE:ai_spline_cli_fixture>"
     "-DAPEX_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
     "-DAPEX_BINARY_DIR=${CMAKE_BINARY_DIR}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ai_spline_edit_cli_test.cmake"
 )
 set_tests_properties(apex_native_ai_spline_edit_cli
-  PROPERTIES LABELS "unit;malformed;security")
+  PROPERTIES LABELS "unit;malformed;security" TIMEOUT 120)
 
 add_test(NAME apex_native_workspace_cli
   COMMAND ${CMAKE_COMMAND}
@@ -311,6 +316,7 @@ apex_add_native_test(ai_spline_tests.cpp ai_spline_tests ApexEditor::Formats)
 apex_add_native_test(ai_spline_grid_tests.cpp ai_spline_grid_tests ApexEditor::Formats)
 apex_add_native_test(javascript_number_tests.cpp javascript_number_tests ApexEditor::Core)
 apex_add_native_test(sha256_tests.cpp sha256_tests ApexEditor::Core)
+apex_add_native_test(file_output_tests.cpp file_output_tests ApexEditor::Platform)
 apex_add_native_test(knh_tests.cpp knh_tests ApexEditor::Formats)
 apex_add_native_test(kn5_tests.cpp kn5_tests ApexEditor::Formats)
 apex_add_native_test(kn5_write_tests.cpp kn5_write_tests ApexEditor::Formats)

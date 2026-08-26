@@ -45,6 +45,25 @@ struct AiSplineSessionResult {
     }
 };
 
+enum class AiSplineSessionSaveStatus : std::uint8_t {
+    ok,
+    invalid,
+    unsupported,
+    resource_limit,
+    failed,
+};
+
+struct AiSplineSessionSaveResult {
+    AiSplineSessionSaveStatus status = AiSplineSessionSaveStatus::failed;
+    std::vector<AiSplineWaypointDiagnostic> diagnostics;
+    std::vector<std::uint8_t> bytes;
+    std::uint64_t revision = 0U;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == AiSplineSessionSaveStatus::ok;
+    }
+};
+
 // An AI spline editing session keeps the native editor's independent, immutable
 // load-time backup. Each snapshot owns a parsed model and its validated,
 // canonical writer bytes. Position edits rebuild the derived native grid
@@ -71,6 +90,10 @@ public:
     [[nodiscard]] std::size_t redoCount() const noexcept {
         return redo_.size();
     }
+
+    // Rebuild the recovered grid and serialize a complete save candidate.
+    // This operation does not change the session, history, or baseline.
+    [[nodiscard]] AiSplineSessionSaveResult buildSaveBytes() const;
 
     [[nodiscard]] AiSplineSessionResult
     commitWaypointEdit(std::uint32_t pointIndex,

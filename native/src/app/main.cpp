@@ -21,6 +21,7 @@
 #include "apex/formats/kn5.hpp"
 #include "apex/formats/ksanim.hpp"
 #include "apex/formats/vao.hpp"
+#include "apex/platform/file_output.hpp"
 #include "apex/platform/window.hpp"
 #include "apex/render/device.hpp"
 
@@ -40,20 +41,10 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <thread>
 #include <unordered_set>
 #include <utility>
 #include <vector>
-
-#if defined(_WIN32)
-#define NOMINMAX
-#include <windows.h>
-#else
-#include <cerrno>
-#include <fcntl.h>
-#include <unistd.h>
-#endif
 
 namespace {
 
@@ -71,6 +62,7 @@ void usage(std::ostream& output) {
               "                       [--ai-spline <file> [--ai-spline-mode raw|interpolated] [--ai-spline-interval <in> <out>]]\n"
               "                       [--ai-spline-show-left] [--ai-spline-show-right] [--ai-spline-index <index> ...] [--ai-spline-show-camber]\n"
               "                       [--ai-spline-edit-point <index> <x> <y> <z> ...] [--ai-spline-unlock-edit]\n"
+              "                       [--ai-spline-save-on-exit <file>]\n"
               "                       [--node-search <query>] [--selected-node <id> [--isolate-selected]]\n"
               "                       [--show-hidden] [--wireframe] [--grid] [--view-axis]\n"
               "                       [--weather <stock-id>] [--sun-heading <degrees>] [--sun-height <degrees>]\n"
@@ -94,6 +86,7 @@ void usage(std::ostream& output) {
            << "  apex-native --invert-ai-spline <input.ai> <output.ai> --index <point-index> [--index <point-index> ...]\n"
            << "  apex-native --set-ai-spline-point <input.ai> <output.ai> --index <point-index> --position <x> <y> <z>\n"
            << "  apex-native --set-ai-spline-points <input.ai> <output.ai> --point <point-index> <x> <y> <z> [--point ...]\n"
+           << "  apex-native --save-ai-spline <input.ai> <output.ai>\n"
            << "  apex-native --export-project kn5|csp <source.kn5> <project.apex.json> <output>\n"
            << "  apex-native --export-project collider|damage|bottom-colliders|surfaces|models|lods <source.kn5> "
               "<project.apex.json> <secondary-input> <output>\n";
@@ -117,132 +110,6 @@ std::vector<std::uint8_t> read_file(const std::filesystem::path& path) {
 std::string bytes_as_text(const std::vector<std::uint8_t>& bytes) {
     if (bytes.empty()) return {};
     return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
-}
-
-std::filesystem::path write_temporary_exclusive(
-    const std::filesystem::path& path, std::span<const std::uint8_t> bytes) {
-    constexpr std::size_t maxAttempts = 1'024U;
-    for (std::size_t attempt = 0; attempt < maxAttempts; ++attempt) {
-        auto temporary = path;
-        temporary += ".apex-tmp-" + std::to_string(attempt);
-
-#if defined(_WIN32)
-        const HANDLE handle = CreateFileW(
-            temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
-            FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (handle == INVALID_HANDLE_VALUE) {
-            const auto error = GetLastError();
-            if (error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS) continue;
-            throw std::system_error(static_cast<int>(error), std::system_category(),
-                                    "cannot create " + temporary.string());
-        }
-        std::size_t offset = 0;
-        bool succeeded = true;
-        while (offset < bytes.size()) {
-            const auto remaining = bytes.size() - offset;
-            const auto chunk = static_cast<DWORD>(std::min<std::size_t>(
-                remaining, static_cast<std::size_t>(std::numeric_limits<DWORD>::max())));
-            DWORD written = 0;
-            if (WriteFile(handle, bytes.data() + offset, chunk, &written, nullptr) == FALSE ||
-                written == 0U) {
-                succeeded = false;
-                break;
-            }
-            offset += written;
-        }
-        if (succeeded) succeeded = FlushFileBuffers(handle) != FALSE;
-        const auto writeError = succeeded ? ERROR_SUCCESS : GetLastError();
-        const bool closed = CloseHandle(handle) != FALSE;
-        if (!succeeded || !closed) {
-            std::error_code ignored;
-            (void)std::filesystem::remove(temporary, ignored);
-            const auto error = writeError != ERROR_SUCCESS ? writeError : GetLastError();
-            throw std::system_error(static_cast<int>(error), std::system_category(),
-                                    "cannot write " + temporary.string());
-        }
-#else
-        const int descriptor = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
-                                      0666);
-        if (descriptor < 0) {
-            if (errno == EEXIST) continue;
-            throw std::system_error(errno, std::generic_category(),
-                                    "cannot create " + temporary.string());
-        }
-        std::size_t offset = 0;
-        int writeError = 0;
-        while (offset < bytes.size()) {
-            const auto remaining = bytes.size() - offset;
-            const auto chunk = std::min<std::size_t>(
-                remaining, static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()));
-            const auto written = ::write(descriptor, bytes.data() + offset, chunk);
-            if (written < 0) {
-                if (errno == EINTR) continue;
-                writeError = errno;
-                break;
-            }
-            if (written == 0) {
-                writeError = EIO;
-                break;
-            }
-            offset += static_cast<std::size_t>(written);
-        }
-        if (writeError == 0 && ::fsync(descriptor) != 0) writeError = errno;
-        if (::close(descriptor) != 0 && writeError == 0) writeError = errno;
-        if (writeError != 0) {
-            std::error_code ignored;
-            (void)std::filesystem::remove(temporary, ignored);
-            throw std::system_error(writeError, std::generic_category(),
-                                    "cannot write " + temporary.string());
-        }
-#endif
-        return temporary;
-    }
-    throw std::runtime_error("cannot allocate a temporary output beside " + path.string());
-}
-
-void promote_temporary_no_replace(const std::filesystem::path& temporary,
-                                  const std::filesystem::path& path) {
-#if defined(_WIN32)
-    if (MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_WRITE_THROUGH) == FALSE) {
-        const auto error = GetLastError();
-        if (error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS)
-            throw std::runtime_error("output already exists: " + path.string());
-        throw std::system_error(static_cast<int>(error), std::system_category(),
-                                "cannot finalize " + path.string());
-    }
-#else
-    if (::link(temporary.c_str(), path.c_str()) != 0) {
-        if (errno == EEXIST)
-            throw std::runtime_error("output already exists: " + path.string());
-        throw std::system_error(errno, std::generic_category(),
-                                "cannot finalize " + path.string());
-    }
-    if (::unlink(temporary.c_str()) != 0) {
-        const auto cleanupError = errno;
-        (void)::unlink(path.c_str());
-        throw std::system_error(cleanupError, std::generic_category(),
-                                "cannot remove temporary output " + temporary.string());
-    }
-#endif
-}
-
-void write_file_exclusive(const std::filesystem::path& path,
-                          std::span<const std::uint8_t> bytes) {
-    if (path.empty()) throw std::runtime_error("output path is empty");
-    const auto temporary = write_temporary_exclusive(path, bytes);
-    try {
-        promote_temporary_no_replace(temporary, path);
-    } catch (...) {
-        std::error_code ignored;
-        (void)std::filesystem::remove(temporary, ignored);
-        throw;
-    }
-}
-
-void write_file_exclusive(const std::filesystem::path& path,
-                          std::string_view text) {
-    const auto* data = reinterpret_cast<const std::uint8_t*>(text.data());
-    write_file_exclusive(path, std::span<const std::uint8_t>(data, text.size()));
 }
 
 template <typename Result>
@@ -308,14 +175,15 @@ int export_project(int argc, char** argv) {
             const auto exported = service.exportPrimaryKn5();
             if (!exported.ok()) return report_authoring_failure("export KN5", exported);
             report_authoring_diagnostics(exported);
-            write_file_exclusive(outputPath, exported.bytes);
+            apex::platform::writeFileExclusive(outputPath, exported.bytes);
             std::cout << outputPath.string() << ": " << exported.bytes.size()
                       << " bytes, revision " << exported.revision << '\n';
         } else {
             const auto exported = service.exportCsp();
             if (!exported.ok()) return report_authoring_failure("export CSP", exported);
             report_authoring_diagnostics(exported);
-            write_file_exclusive(outputPath, std::string_view(exported.text));
+            apex::platform::writeFileExclusive(
+                outputPath, std::string_view(exported.text));
             std::cout << outputPath.string() << ": " << exported.text.size()
                       << " bytes, revision " << exported.revision << '\n';
         }
@@ -333,7 +201,7 @@ int export_project(int argc, char** argv) {
         const auto exported = service.exportColliderKn5();
         if (!exported.ok()) return report_authoring_failure("export collider", exported);
         report_authoring_diagnostics(exported);
-        write_file_exclusive(outputPath, exported.bytes);
+        apex::platform::writeFileExclusive(outputPath, exported.bytes);
         std::cout << outputPath.string() << ": " << exported.bytes.size()
                   << " bytes, revision " << exported.revision << '\n';
     } else if (kind == "damage") {
@@ -343,7 +211,8 @@ int export_project(int argc, char** argv) {
         const auto exported = service.exportDamageIni();
         if (!exported.ok()) return report_authoring_failure("export damage.ini", exported);
         report_authoring_diagnostics(exported);
-        write_file_exclusive(outputPath, std::string_view(exported.text));
+        apex::platform::writeFileExclusive(
+            outputPath, std::string_view(exported.text));
         std::cout << outputPath.string() << ": " << exported.text.size()
                   << " bytes, revision " << exported.revision << '\n';
     } else if (kind == "bottom-colliders") {
@@ -354,7 +223,8 @@ int export_project(int argc, char** argv) {
         if (!exported.ok())
             return report_authoring_failure("export colliders.ini", exported);
         report_authoring_diagnostics(exported);
-        write_file_exclusive(outputPath, std::string_view(exported.text));
+        apex::platform::writeFileExclusive(
+            outputPath, std::string_view(exported.text));
         std::cout << outputPath.string() << ": " << exported.text.size()
                   << " bytes, revision " << exported.revision << '\n';
     } else if (kind == "surfaces") {
@@ -365,7 +235,8 @@ int export_project(int argc, char** argv) {
         if (!exported.ok())
             return report_authoring_failure("export surfaces.ini", exported);
         report_authoring_diagnostics(exported);
-        write_file_exclusive(outputPath, std::string_view(exported.text));
+        apex::platform::writeFileExclusive(
+            outputPath, std::string_view(exported.text));
         std::cout << outputPath.string() << ": " << exported.text.size()
                   << " bytes, revision " << exported.revision << '\n';
     } else {
@@ -381,7 +252,8 @@ int export_project(int argc, char** argv) {
         if (!exported.ok())
             return report_authoring_failure("export workspace manifest", exported);
         report_authoring_diagnostics(exported);
-        write_file_exclusive(outputPath, std::string_view(exported.text));
+        apex::platform::writeFileExclusive(
+            outputPath, std::string_view(exported.text));
         std::cout << outputPath.string() << ": " << exported.text.size()
                   << " bytes, revision " << exported.revision << '\n';
     }
@@ -578,6 +450,7 @@ struct WindowWorkspaceOptions {
     bool aiSplineShowCamber = false;
     std::vector<apex::authoring::AiSplinePointPositionEdit> aiSplineEdits;
     bool aiSplineUnlockEdit = false;
+    std::optional<std::filesystem::path> aiSplineSaveOnExit;
     std::optional<std::string> nodeSearch;
     std::optional<apex::scene::NodeId> selectedNode;
     bool isolateSelected = false;
@@ -771,11 +644,42 @@ int edit_ai_spline(int argc, char** argv) {
         throw std::runtime_error(diagnostic.code + ": " + diagnostic.message);
     }
 
-    write_file_exclusive(output_path, session.currentBytes());
+    apex::platform::writeFileExclusive(output_path, session.currentBytes());
     std::cout << "AI spline waypoint edited: point=" << *result.pointIndex
               << ", payload=" << *result.payloadIndex
               << ", changed=" << (result.changed ? "yes" : "no")
               << ", output=";
+    write_cli_text(std::cout, output_path.string());
+    std::cout << '\n';
+    return 0;
+}
+
+int save_ai_spline(int argc, char** argv) {
+    if (argc != 4)
+        throw std::runtime_error("invalid --save-ai-spline arguments");
+
+    const std::filesystem::path input_path = argv[2];
+    const std::filesystem::path output_path = argv[3];
+    const auto input_bytes = read_file(input_path);
+    auto spline =
+        apex::formats::parseAiSpline(input_bytes, input_path.string());
+    if (spline.version != 7U) {
+        throw std::runtime_error(
+            "--save-ai-spline requires version 7; legacy conversion is not recovered");
+    }
+    apex::authoring::AiSplineSession session(std::move(spline));
+    const auto saved = session.buildSaveBytes();
+    if (!saved.ok()) {
+        if (saved.diagnostics.empty())
+            throw std::runtime_error("AI spline save failed");
+        const auto& diagnostic = saved.diagnostics.back();
+        throw std::runtime_error(diagnostic.code + ": " +
+                                 diagnostic.message);
+    }
+
+    apex::platform::writeFileAtomicReplace(output_path, saved.bytes);
+    std::cout << "AI spline saved: revision=" << saved.revision
+              << ", grid=rebuilt, output=";
     write_cli_text(std::cout, output_path.string());
     std::cout << '\n';
     return 0;
@@ -821,7 +725,7 @@ int invert_ai_spline(int argc, char** argv) {
         throw std::runtime_error(diagnostic.code + ": " + diagnostic.message);
     }
 
-    write_file_exclusive(output_path, session.currentBytes());
+    apex::platform::writeFileExclusive(output_path, session.currentBytes());
     std::cout << "AI spline camber inverted: selected=" << selection.size()
               << ", changed=" << (result.changed ? "yes" : "no")
               << ", output=";
@@ -878,7 +782,7 @@ int set_ai_spline_point(int argc, char** argv) {
         throw std::runtime_error(diagnostic.code + ": " + diagnostic.message);
     }
 
-    write_file_exclusive(output_path, session.currentBytes());
+    apex::platform::writeFileExclusive(output_path, session.currentBytes());
     std::cout << "AI spline point position set: point=" << *result.pointIndex
               << ", changed=" << (result.changed ? "yes" : "no")
               << ", grid=" << (result.changed ? "rebuilt" : "preserved")
@@ -927,7 +831,7 @@ int set_ai_spline_points(int argc, char** argv) {
         throw std::runtime_error(diagnostic.code + ": " + diagnostic.message);
     }
 
-    write_file_exclusive(output_path, session.currentBytes());
+    apex::platform::writeFileExclusive(output_path, session.currentBytes());
     std::cout << "AI spline point positions set: requested=" << edits.size()
               << ", applied=" << result.applied
               << ", last-point=" << *result.pointIndex
@@ -1172,6 +1076,12 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
                 throw std::runtime_error(
                     "duplicate --ai-spline-unlock-edit option");
             result.aiSplineUnlockEdit = true;
+        } else if (option == "--ai-spline-save-on-exit") {
+            if (result.aiSplineSaveOnExit.has_value())
+                throw std::runtime_error(
+                    "duplicate --ai-spline-save-on-exit option");
+            result.aiSplineSaveOnExit = std::filesystem::path(
+                require_value("--ai-spline-save-on-exit"));
         } else if (option == "--node-search") {
             if (result.nodeSearch.has_value())
                 throw std::runtime_error("duplicate --node-search option");
@@ -1397,7 +1307,7 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
     if ((result.aiSplineShowLeft || result.aiSplineShowRight ||
          !result.aiSplineIndices.empty() ||
          result.aiSplineShowCamber || !result.aiSplineEdits.empty() ||
-         result.aiSplineUnlockEdit) &&
+         result.aiSplineUnlockEdit || result.aiSplineSaveOnExit.has_value()) &&
         !result.aiSpline.has_value())
         throw std::runtime_error(
             "AI spline overlays require --ai-spline");
@@ -1613,7 +1523,8 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
                 loaded.aiSplineController = std::move(created.controller);
                 overlay_set = &loaded.aiSplineController->overlays();
             } else if (!options.aiSplineEdits.empty() ||
-                       options.aiSplineUnlockEdit) {
+                       options.aiSplineUnlockEdit ||
+                       options.aiSplineSaveOnExit.has_value()) {
                 throw std::runtime_error(created.diagnostic.code + ": " +
                                          created.diagnostic.message);
             } else {
@@ -1625,9 +1536,10 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
         }
         if (read_only) {
             if (!options.aiSplineEdits.empty() ||
-                options.aiSplineUnlockEdit)
+                options.aiSplineUnlockEdit ||
+                options.aiSplineSaveOnExit.has_value())
                 throw std::runtime_error(
-                    "AI spline live editing requires version 7");
+                    "AI spline live editing and save require version 7");
             apex::app::WorkspaceAiSplineOverlayRequest overlay_request;
             overlay_request.mode = options.aiSplineMode;
             overlay_request.interval = options.aiSplineInterval;
@@ -2444,6 +2356,27 @@ int run_window(int argc, char** argv) {
         ++frames;
     }
     device_result.device->wait_idle();
+    if (workspace_options.aiSplineSaveOnExit.has_value()) {
+        if (loaded_workspace.aiSplineController == nullptr) {
+            std::cerr << "AI spline save: unavailable\n";
+            return 1;
+        }
+        const auto saved =
+            loaded_workspace.aiSplineController->buildSaveBytes(
+                loaded_workspace.aiSplineController->revision());
+        if (!saved.ok()) {
+            std::cerr << "AI spline save: " << saved.diagnostic.code << ": "
+                      << saved.diagnostic.message << '\n';
+            return 1;
+        }
+        apex::platform::writeFileAtomicReplace(
+            *workspace_options.aiSplineSaveOnExit, saved.bytes);
+        std::cout << "AI spline saved: revision=" << saved.revision
+                  << ", grid=rebuilt, output=";
+        write_cli_text(std::cout,
+                       workspace_options.aiSplineSaveOnExit->string());
+        std::cout << '\n';
+    }
     std::cout << apex::render::backend_name(backend) << ": "
               << device_result.device->info().name << ", window="
               << window_result.window->pixel_width() << 'x'
@@ -2465,6 +2398,13 @@ int main(int argc, char** argv) {
                 return 2;
             }
             return edit_ai_spline(argc, argv);
+        }
+        if (argc >= 2 && std::string_view(argv[1]) == "--save-ai-spline") {
+            if (argc != 4) {
+                usage(std::cerr);
+                return 2;
+            }
+            return save_ai_spline(argc, argv);
         }
         if (argc >= 2 && std::string_view(argv[1]) == "--invert-ai-spline") {
             if (argc < 6) {

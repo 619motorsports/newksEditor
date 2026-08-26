@@ -99,6 +99,27 @@ struct WorkspaceAiSplineControllerResult {
     }
 };
 
+enum class WorkspaceAiSplineControllerSaveStatus : std::uint8_t {
+    ready,
+    stale_revision,
+    invalid,
+    unsupported,
+    resource_limit,
+    failed,
+};
+
+struct WorkspaceAiSplineControllerSaveResult {
+    WorkspaceAiSplineControllerSaveStatus status =
+        WorkspaceAiSplineControllerSaveStatus::failed;
+    render::Diagnostic diagnostic;
+    std::vector<std::uint8_t> bytes;
+    std::uint64_t revision = 0U;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == WorkspaceAiSplineControllerSaveStatus::ready;
+    }
+};
+
 class WorkspaceAiSplineController;
 
 struct WorkspaceAiSplineControllerCreateResult {
@@ -144,6 +165,10 @@ public:
     [[nodiscard]] bool dirty() const noexcept;
     [[nodiscard]] bool canUndo() const noexcept;
     [[nodiscard]] bool canRedo() const noexcept;
+
+    // Build recovered save bytes without changing visible or authoring state.
+    [[nodiscard]] WorkspaceAiSplineControllerSaveResult
+    buildSaveBytes(std::uint64_t expectedRevision) const;
 
     [[nodiscard]] WorkspaceAiSplineControllerResult setPointPositions(
         render::Device& device, WorkspaceViewport& viewport,

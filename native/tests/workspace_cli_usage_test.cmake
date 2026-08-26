@@ -227,6 +227,23 @@ endif()
 
 execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --ai-spline-save-on-exit saved.ai
+  RESULT_VARIABLE detached_ai_save_result
+  ERROR_VARIABLE detached_ai_save_error
+)
+if(NOT detached_ai_save_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached AI save returned ${detached_ai_save_result}: ${detached_ai_save_error}")
+endif()
+string(FIND "${detached_ai_save_error}"
+  "AI spline overlays require --ai-spline" detached_ai_save_position)
+if(detached_ai_save_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached AI save was not diagnosed: ${detached_ai_save_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
           --ai-spline-edit-point 0 nan 2 3
   RESULT_VARIABLE nonfinite_ai_edit_result
   ERROR_VARIABLE nonfinite_ai_edit_error

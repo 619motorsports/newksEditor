@@ -258,14 +258,31 @@ geometry from the current session state after an edit.
 
 The managed `saveAISpline` wrapper has token `0x060003CC` and RVA `0x25C54`.
 If a spline exists, it calls `AISpline.buildGrid` and then `AISpline.save`.
+`AISpline.buildGrid` has token `0x06000228` and native VA `0x10068A86`.
 `AISpline.save` has token `0x06000227` and RVA `0x6A3B9`. It always writes
 version 7. It writes zero for the header and payload reserved words.
 
+`Form1.saveToolStripMenuItem1_Click` has RVA `0x5DA0`. It opens a save dialog.
+The handler continues only when the dialog result is one.
+It calls `ksGraphics.saveAISpline` through MemberRef token `0x0A00016C`.
+Then it shows a success message.
+The wrapper returns silently when no spline exists.
+
 The native save method truncates the destination directly. It does not use a
 temporary file or inspect stream errors. The UI reports success after the
-call. The C++ format writer implements the recovered byte layout. The CLI uses
-a temporary file and does not replace an existing destination. Payload edits
-preserve the parsed grid.
+call. Save does not change the backup, selection, edit mode, or dirty state.
+The C++ format writer implements the recovered byte layout.
+The C++ save boundary rebuilds the grid before serialization.
+It writes a temporary file, then atomically replaces the destination.
+An error keeps the old destination and the complete session state.
+Save does not change the revision, history, baseline, or dirty state.
+This file-safety behavior is an explicit portable difference.
+Replacement can change destination permissions or access-control metadata.
+The POSIX path does not sync the parent directory after replacement.
+It does not promise persistence after a power loss.
+The current save boundary accepts version 7 only.
+The native version-2-to-version-7 payload conversion is not yet recovered.
+Other edit commands do not replace an existing destination.
 
 The format layer now includes a bounded port of `AISpline.buildGrid`. The port
 reproduces the checked-in native pit-lane grid byte for byte. The session changes
@@ -337,7 +354,9 @@ The window retries transient allocation and viewport publication errors.
 It also clears held input while the presentation surface has no size.
 
 The window cannot change the selected AI indices at runtime. It also has no
-edit-mode, cancel, refresh, or durable save control for this path.
+edit-mode, cancel, or refresh control for this path.
+The `--ai-spline-save-on-exit` option saves after a clean window exit.
+The `--save-ai-spline` command exposes the same rebuilt-grid save boundary.
 
 Dirty state compares the current canonical bytes with the baseline bytes.
 Transactional undo, redo, and baseline reset use the same publication path.
@@ -356,6 +375,11 @@ The manual-input test covers repeated key-down events and simultaneous keys.
 It covers both Control keys, opposite-key cancellation, and focus-state clear.
 The viewport test covers the exact local transform for two selected points.
 It also covers cached forwards, zero forwards, upload failure, and retry.
+The save tests cover rebuilt grids, reload, limit errors, and in-place output.
+They also prove that a failed save preserves the existing destination.
+The file-output test covers temporary-name collisions and promotion failure.
+Headless tests cover controller bytes and direct command output.
+They do not run the successful window-exit save path.
 
 The production WebGL source has no AI-spline load or render path. A source
 search found no AI-spline or `fast_lane.ai` identifiers. Thus, a direct WebGL

@@ -156,12 +156,14 @@ out/native/dev/native/apex-native --edit-ai-spline fast_lane.ai edited.ai \
   --index 42 --set-radius 20 --add-camber-degrees -0.5
 out/native/dev/native/apex-native --invert-ai-spline fast_lane.ai inverted.ai \
   --index 42 --index 84
+out/native/dev/native/apex-native --save-ai-spline fast_lane.ai fast_lane.ai
 out/native/dev/native/apex-native --window vulkan --frames 300
 out/native/dev/native/apex-native --window vulkan --model car.kn5 \
   --analog-instruments data/analog_instruments.ini --rpm 6000 \
   --animation animations/car_door_l.ksanim --animation-position 0.5 \
   --ai-spline data/fast_lane.ai --ai-spline-mode interpolated \
   --ai-spline-interval 0.25 0.75 \
+  --ai-spline-unlock-edit --ai-spline-save-on-exit saved_fast_lane.ai \
   --node-search door --selected-node 42 --isolate-selected --wireframe --grid \
   --weather 5_light_clouds --sun-heading 40 --sun-height 55 \
   --shader-family ksPerPixel --shader-vertex stock.vert.spv \
@@ -252,7 +254,7 @@ The session keeps an immutable backup from load time and bounded undo history.
 It can undo, redo, restore selected records, or restore the complete backup.
 The history byte limit counts canonical serialized bytes. Writer limits bound
 the additional parsed models. A separate limit bounds raw selection entries.
-Point-position edits remain staged until the recovered grid builder is ported.
+Point-position edits rebuild the recovered grid in the same session revision.
 The default `raw` mode draws the recovered raw magenta spline.
 `--ai-spline-mode interpolated` draws the recovered Catmull-Rom curve.
 This mode recomputes the native arc-length table and ignores stored point
@@ -282,6 +284,13 @@ The Vulkan and D3D12 line list is a labeled translation of the OpenGL line
 strip. The translation keeps all segments at portable chunk boundaries.
 The marker option does not start a mutable edit. Use `--edit-ai-spline` for the
 recovered single-selection payload edit.
+`--save-ai-spline` accepts version 7 and rebuilds the native grid.
+Legacy version-2 conversion is not yet recovered.
+The command uses a temporary file and atomically replaces its output.
+The input and output can be the same path.
+Replacement can change destination permissions or access-control metadata.
+`--ai-spline-save-on-exit` saves live window edits after a clean exit.
+Neither save path changes the session revision, history, baseline, or dirty state.
 The old `--selection-axis-vertex` and `--selection-axis-fragment` names remain aliases.
 The grid starts hidden. `--grid` shows the recovered 10 m magenta grid.
 The view axis starts hidden. `--view-axis` shows the recovered one-meter

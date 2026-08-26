@@ -580,6 +580,66 @@ void keepsFailuresAtomic() {
     require(rejected, "session construction rejects legacy version 2");
 }
 
+void buildsRecoveredSaveBytesWithoutChangingSession() {
+    auto noGrid = movableFixture(false);
+    AiSplineSession session(noGrid);
+    AiSplineWaypointEdit edit;
+    edit.additive.radius = 1.0F;
+    require(session.commitWaypointEdit(0U, edit).ok(),
+            "save-byte fixture edit commits");
+    const auto before = session.currentBytes();
+    const auto baseline = session.baselineBytes();
+    const auto revision = session.revision();
+    const auto undoCount = session.undoCount();
+    const auto redoCount = session.redoCount();
+
+    const auto saved = session.buildSaveBytes();
+    auto expected = session.current();
+    expected.grid = apex::formats::buildAiSplineGrid(expected);
+    const auto expectedBytes = apex::formats::serializeAiSpline(expected);
+    const auto parsed = apex::formats::parseAiSpline(
+        saved.bytes, "saved-session-fixture.ai");
+    require(saved.ok() && saved.revision == revision &&
+                saved.bytes == expectedBytes && parsed.grid.has_value() &&
+                sameGrid(*parsed.grid, *expected.grid),
+            "save bytes rebuild the recovered grid and parse again");
+    require(session.currentBytes() == before &&
+                session.baselineBytes() == baseline &&
+                session.revision() == revision &&
+                session.undoCount() == undoCount &&
+                session.redoCount() == redoCount,
+            "save bytes do not change session state or history");
+
+    AiSplineSessionLimits gridLimits;
+    gridLimits.grid.maxGridRows = 0U;
+    AiSplineSession gridLimited(noGrid, gridLimits);
+    const auto gridLimitedBefore = gridLimited.currentBytes();
+    const auto gridFailure = gridLimited.buildSaveBytes();
+    require(!gridFailure.ok() && gridFailure.bytes.empty() &&
+                gridFailure.status ==
+                    apex::authoring::AiSplineSessionSaveStatus::resource_limit &&
+                !gridFailure.diagnostics.empty() &&
+                gridFailure.diagnostics.back().code == "COUNT_LIMIT" &&
+                gridLimited.currentBytes() == gridLimitedBefore &&
+                gridLimited.revision() == 0U && !gridLimited.canUndo(),
+            "save grid limit leaves the session unchanged");
+
+    AiSplineSessionLimits outputLimits;
+    outputLimits.write.maxOutputBytes =
+        apex::formats::serializeAiSpline(noGrid).size();
+    AiSplineSession outputLimited(noGrid, outputLimits);
+    const auto outputLimitedBefore = outputLimited.currentBytes();
+    const auto outputFailure = outputLimited.buildSaveBytes();
+    require(!outputFailure.ok() && outputFailure.bytes.empty() &&
+                outputFailure.status ==
+                    apex::authoring::AiSplineSessionSaveStatus::resource_limit &&
+                !outputFailure.diagnostics.empty() &&
+                outputFailure.diagnostics.back().code == "OUTPUT_LIMIT" &&
+                outputLimited.currentBytes() == outputLimitedBefore &&
+                outputLimited.revision() == 0U && !outputLimited.canUndo(),
+            "save output limit leaves the session unchanged");
+}
+
 void boundsHistoryAndClearsRedo() {
     const auto bytes = apex::formats::serializeAiSpline(fixture());
     AiSplineSessionLimits byteLimits;
@@ -653,6 +713,7 @@ int main() {
         movesMultiplePointPositionsInOneRevision();
         keepsFailuresAtomic();
         keepsPointPositionFailuresAtomic();
+        buildsRecoveredSaveBytesWithoutChangingSession();
         boundsHistoryAndClearsRedo();
         std::cout << "ai_spline_session_tests: ok\n";
         return 0;

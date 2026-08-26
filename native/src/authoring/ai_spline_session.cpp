@@ -9,12 +9,20 @@
 #include <new>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace apex::authoring {
 namespace {
 
 void fail(AiSplineSessionResult& result, AiSplineWaypointStatus status,
+          std::string code, std::string path, std::string message) {
+    result.status = status;
+    result.diagnostics.push_back(
+        {std::move(code), std::move(path), std::move(message)});
+}
+
+void fail(AiSplineSessionSaveResult& result, AiSplineSessionSaveStatus status,
           std::string code, std::string path, std::string message) {
     result.status = status;
     result.diagnostics.push_back(
@@ -37,6 +45,21 @@ statusForGridError(const formats::AiSplineGridBuildError& error) noexcept {
     if (error.code() == "ALLOCATION_FAILED")
         return AiSplineWaypointStatus::failed;
     return AiSplineWaypointStatus::invalid;
+}
+
+[[nodiscard]] bool isSaveResourceLimit(std::string_view code) noexcept {
+    return code == "ALLOCATION_FAILED" || code == "COUNT_LIMIT" ||
+           code == "MEMORY_LIMIT" || code == "OUTPUT_LIMIT" ||
+           code == "SORT_WORK_LIMIT" || code == "WORK_LIMIT";
+}
+
+[[nodiscard]] AiSplineSessionSaveStatus
+saveStatusForError(std::string_view code) noexcept {
+    if (code == "UNSUPPORTED_VERSION")
+        return AiSplineSessionSaveStatus::unsupported;
+    if (isSaveResourceLimit(code))
+        return AiSplineSessionSaveStatus::resource_limit;
+    return AiSplineSessionSaveStatus::invalid;
 }
 
 [[nodiscard]] bool checkedCharge(std::size_t count, std::size_t elementBytes,
@@ -138,6 +161,38 @@ const formats::AiSpline& AiSplineSession::current() const noexcept {
 const std::vector<std::uint8_t>&
 AiSplineSession::currentBytes() const noexcept {
     return current_->bytes;
+}
+
+AiSplineSessionSaveResult AiSplineSession::buildSaveBytes() const {
+    AiSplineSessionSaveResult result;
+    result.revision = revision_;
+    try {
+        auto candidate = current_->spline;
+        candidate.grid =
+            formats::buildAiSplineGrid(candidate, sessionGridLimits(limits_));
+        result.bytes = formats::serializeAiSpline(candidate, limits_.write);
+        result.status = AiSplineSessionSaveStatus::ok;
+        return result;
+    } catch (const formats::AiSplineGridBuildError& error) {
+        fail(result, saveStatusForError(error.code()), error.code(),
+             current_->spline.source, error.what());
+        return result;
+    } catch (const formats::AiSplineWriteError& error) {
+        fail(result, saveStatusForError(error.code()), error.code(),
+             current_->spline.source, error.what());
+        return result;
+    } catch (const std::bad_alloc&) {
+        fail(result, AiSplineSessionSaveStatus::resource_limit,
+             "ALLOCATION_FAILED",
+             current_->spline.source,
+             "AI spline save exceeded available allocation capacity");
+        return result;
+    } catch (const std::exception& error) {
+        fail(result, AiSplineSessionSaveStatus::failed,
+             "SESSION_SAVE_FAILED",
+             current_->spline.source, error.what());
+        return result;
+    }
 }
 
 AiSplineSession::SnapshotPtr

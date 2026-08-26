@@ -1,5 +1,6 @@
-if(NOT DEFINED APEX_NATIVE_COMMAND OR NOT DEFINED APEX_SOURCE_DIR OR
-   NOT DEFINED APEX_BINARY_DIR)
+if(NOT DEFINED APEX_NATIVE_COMMAND OR
+   NOT DEFINED APEX_AI_SPLINE_FIXTURE_COMMAND OR
+   NOT DEFINED APEX_SOURCE_DIR OR NOT DEFINED APEX_BINARY_DIR)
   message(FATAL_ERROR "AI spline CLI test paths are required")
 endif()
 
@@ -14,10 +15,97 @@ set(point_output "${APEX_BINARY_DIR}/ai spline point output.ai")
 set(point_roundtrip "${APEX_BINARY_DIR}/ai spline point roundtrip.ai")
 set(point_invalid "${APEX_BINARY_DIR}/ai spline point invalid.ai")
 set(point_truncated "${APEX_BINARY_DIR}/ai spline point truncated.ai")
+set(save_input "${APEX_BINARY_DIR}/ai spline save input.ai")
+set(legacy_save_input "${APEX_BINARY_DIR}/ai spline legacy save input.ai")
+set(legacy_save_output "${APEX_BINARY_DIR}/ai spline legacy save output.ai")
+set(save_output "${APEX_BINARY_DIR}/ai spline save output.ai")
+set(save_roundtrip "${APEX_BINARY_DIR}/ai spline save roundtrip.ai")
 file(REMOVE "${output}" "${roundtrip_output}" "${invert_output}"
      "${invert_roundtrip}" "${point_output}" "${point_roundtrip}"
-     "${point_invalid}" "${point_truncated}")
+     "${point_invalid}" "${point_truncated}" "${save_input}"
+     "${legacy_save_input}" "${legacy_save_output}" "${save_output}"
+     "${save_roundtrip}")
 file(WRITE "${point_truncated}" "x")
+execute_process(
+  COMMAND "${APEX_AI_SPLINE_FIXTURE_COMMAND}" "${save_input}"
+          "${legacy_save_input}"
+  RESULT_VARIABLE save_fixture_result
+)
+if(NOT save_fixture_result STREQUAL "0")
+  message(FATAL_ERROR "AI spline save fixtures were not created")
+endif()
+configure_file("${save_input}" "${save_output}" COPYONLY)
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --save-ai-spline "${save_output}"
+          "${save_output}"
+  RESULT_VARIABLE in_place_save_result
+  OUTPUT_VARIABLE in_place_save_output
+  ERROR_VARIABLE in_place_save_error
+)
+if(NOT in_place_save_result STREQUAL "0")
+  message(FATAL_ERROR
+    "in-place AI spline save failed; stderr: ${in_place_save_error}")
+endif()
+string(FIND "${in_place_save_output}" "grid=rebuilt" save_grid_position)
+if(save_grid_position EQUAL -1)
+  message(FATAL_ERROR "AI spline save did not report its rebuilt grid")
+endif()
+file(SHA256 "${save_output}" save_hash)
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --save-ai-spline "${point_truncated}"
+          "${save_output}"
+  RESULT_VARIABLE failed_save_result
+  ERROR_VARIABLE failed_save_error
+)
+if(NOT failed_save_result STREQUAL "1")
+  message(FATAL_ERROR "truncated AI spline save was not rejected")
+endif()
+file(SHA256 "${save_output}" failed_save_hash)
+if(NOT save_hash STREQUAL failed_save_hash)
+  message(FATAL_ERROR "failed AI spline save changed the existing output")
+endif()
+file(GLOB save_temporary_files "${save_output}.apex-tmp-*")
+if(save_temporary_files)
+  message(FATAL_ERROR "AI spline save left temporary output files")
+endif()
+
+file(WRITE "${legacy_save_output}" "legacy destination")
+file(SHA256 "${legacy_save_output}" legacy_before_hash)
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --save-ai-spline "${legacy_save_input}"
+          "${legacy_save_output}"
+  RESULT_VARIABLE legacy_save_result
+  ERROR_VARIABLE legacy_save_error
+)
+if(NOT legacy_save_result STREQUAL "1")
+  message(FATAL_ERROR "legacy AI spline save was not rejected")
+endif()
+string(FIND "${legacy_save_error}" "requires version 7" legacy_error_position)
+if(legacy_error_position EQUAL -1)
+  message(FATAL_ERROR "legacy AI spline save did not report its version limit")
+endif()
+file(SHA256 "${legacy_save_output}" legacy_after_hash)
+if(NOT legacy_before_hash STREQUAL legacy_after_hash)
+  message(FATAL_ERROR "legacy AI spline save changed the existing output")
+endif()
+file(GLOB legacy_temporary_files "${legacy_save_output}.apex-tmp-*")
+if(legacy_temporary_files)
+  message(FATAL_ERROR "legacy AI spline save left temporary output files")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --set-ai-spline-point "${save_output}"
+          "${save_roundtrip}" --index 0 --position 375.941 3.949335 72.81585
+  RESULT_VARIABLE save_roundtrip_result
+  ERROR_VARIABLE save_roundtrip_error
+)
+if(NOT save_roundtrip_result STREQUAL "0" OR
+   NOT EXISTS "${save_roundtrip}")
+  message(FATAL_ERROR
+    "saved AI spline did not parse again; stderr: ${save_roundtrip_error}")
+endif()
 
 execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --edit-ai-spline "${input}" "${output}"
@@ -251,4 +339,6 @@ endif()
 
 file(REMOVE "${output}" "${roundtrip_output}" "${invert_output}"
      "${invert_roundtrip}" "${point_output}" "${point_roundtrip}"
-     "${point_invalid}" "${point_truncated}")
+     "${point_invalid}" "${point_truncated}" "${save_input}"
+     "${legacy_save_input}" "${legacy_save_output}" "${save_output}"
+     "${save_roundtrip}")
