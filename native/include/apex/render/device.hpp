@@ -463,6 +463,9 @@ enum class IndexedShaderAuthority : std::uint8_t {
     packet_contract,
     explicit_pipeline,
     explicit_stock_ks_per_pixel_native,
+    // Structural Vulkan transport probe for the recovered native ABI. This
+    // does not claim exact installed shader behavior or translated DXBC.
+    explicit_stock_ks_per_pixel_vulkan_abi_probe,
 };
 
 // Material resources remain staged unless a caller supplies the complete
@@ -487,6 +490,35 @@ struct StockKsPerPixelNativeDrawBinding {
     const StockKsPerPixelNativeDrawResources* resources = nullptr;
     const Texture* diffuse_texture = nullptr;
     std::array<const DepthAttachment*, 3U> shadow_maps{};
+};
+
+enum class StockKsPerPixelVulkanAbiUniformSlot : std::uint8_t {
+    camera,
+    object,
+    lighting,
+    shadow_maps,
+    material,
+    count,
+};
+
+// Non-owning descriptor views for the recovered Vulkan ABI probe. Every view
+// is one bounded 256-byte uniform record; the actual recovered records occupy
+// only the first 224/64/160/208/32 bytes respectively.
+struct StockKsPerPixelVulkanAbiUniformBufferView {
+    const Buffer* buffer = nullptr;
+    std::uint64_t offset_bytes = 0U;
+    std::uint32_t range_bytes = 0U;
+};
+
+struct StockKsPerPixelVulkanAbiProbeDrawBinding {
+    std::array<StockKsPerPixelVulkanAbiUniformBufferView,
+               static_cast<std::size_t>(
+                   StockKsPerPixelVulkanAbiUniformSlot::count)>
+        uniform_buffers{};
+    const Texture* diffuse_texture = nullptr;
+    std::array<const DepthAttachment*, 3U> shadow_maps{};
+    const Sampler* linear_sampler = nullptr;
+    const Sampler* shadow_sampler = nullptr;
 };
 
 // Recovered stock ksShadowGenAT cbMaterial packing. The installed pixel
@@ -734,6 +766,8 @@ struct IndexedStaticMeshDrawRequest {
     IndexedFrameBufferBinding frame_binding{};
     IndexedDirectionalShadowBinding directional_shadow_binding{};
     const StockKsPerPixelNativeDrawBinding* stock_ks_per_pixel_native = nullptr;
+    const StockKsPerPixelVulkanAbiProbeDrawBinding*
+        stock_ks_per_pixel_vulkan_abi_probe = nullptr;
 };
 
 // A recovered selected-mesh draw reuses one static 44-byte-stride mesh. The

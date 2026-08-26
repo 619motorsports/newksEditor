@@ -1,6 +1,7 @@
 #include "apex/render/device.hpp"
 #include "apex/render/selected_mesh.hpp"
 #include "apex/render/draw_packet.hpp"
+#include "apex/render/stock_ks_per_pixel_vulkan_abi.hpp"
 #include "backend_internal.hpp"
 #include "dxbc_reader.hpp"
 
@@ -1224,6 +1225,182 @@ IndexedStaticMeshDrawStatus validate_native_ks_per_pixel_binding(
     return IndexedStaticMeshDrawStatus::ready;
 }
 
+IndexedStaticMeshDrawStatus validate_stock_ks_per_pixel_vulkan_abi_probe_binding(
+    const Texture& target, const IndexedStaticMeshDrawRequest& request,
+    Diagnostic& diagnostic) {
+    const auto* binding = request.stock_ks_per_pixel_vulkan_abi_probe;
+    if (binding == nullptr) {
+        diagnostic = {"indexed_stock_vulkan_abi_probe_binding_missing",
+                      "Vulkan ABI probe drawing requires its complete non-owning binding"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (target.backend() != Backend::Vulkan) {
+        diagnostic = {"indexed_stock_vulkan_abi_probe_backend_unsupported",
+                      "The recovered Vulkan ABI probe requires a Vulkan color target"};
+        return IndexedStaticMeshDrawStatus::unsupported;
+    }
+    constexpr std::array<std::uint32_t, 5U> record_bytes = {
+        224U, 64U, 160U, 208U, 32U};
+    for (std::size_t index = 0U; index < binding->uniform_buffers.size(); ++index) {
+        const StockKsPerPixelVulkanAbiUniformBufferView& view =
+            binding->uniform_buffers[index];
+        if (view.buffer == nullptr) {
+            diagnostic = {"indexed_stock_vulkan_abi_probe_uniform_missing",
+                          "The Vulkan ABI probe requires all five uniform-buffer views"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        if (view.buffer->backend() != Backend::Vulkan) {
+            diagnostic = {"indexed_stock_vulkan_abi_probe_uniform_backend_mismatch",
+                          "Vulkan ABI probe uniform buffers must belong to Vulkan"};
+            return IndexedStaticMeshDrawStatus::unsupported;
+        }
+        const BufferDescription& description = view.buffer->info().description;
+        if (description.usage != BufferUsage::uniform ||
+            view.offset_bytes % stock_ks_per_pixel_native_constant_buffer_view_bytes != 0U ||
+            view.range_bytes != stock_ks_per_pixel_native_constant_buffer_view_bytes ||
+            view.range_bytes < record_bytes[index] ||
+            view.offset_bytes > description.size_bytes ||
+            static_cast<std::uint64_t>(view.range_bytes) >
+                description.size_bytes - view.offset_bytes) {
+            diagnostic = {"indexed_stock_vulkan_abi_probe_uniform_view_invalid",
+                          "Vulkan ABI probe uniform views require aligned bounded 256-byte uniform ranges"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+    }
+
+    const Texture* diffuse = binding->diffuse_texture;
+    if (diffuse == nullptr) {
+        diagnostic = {"indexed_stock_vulkan_abi_probe_diffuse_missing",
+                      "Vulkan ABI probe drawing requires a diffuse texture"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (diffuse == &target) {
+        diagnostic = {"indexed_stock_vulkan_abi_probe_diffuse_feedback_loop",
+                      "The Vulkan ABI probe diffuse texture cannot also be the color target"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (diffuse->backend() != Backend::Vulkan) {
+        diagnostic = {"indexed_stock_vulkan_abi_probe_diffuse_backend_mismatch",
+                      "The Vulkan ABI probe diffuse texture must belong to Vulkan"};
+        return IndexedStaticMeshDrawStatus::unsupported;
+    }
+    const TextureDescription& diffuse_description = diffuse->info().description;
+    const std::uint32_t diffuse_usage =
+        static_cast<std::uint32_t>(diffuse_description.usage);
+    if ((diffuse_usage & static_cast<std::uint32_t>(TextureUsage::sampled)) == 0U ||
+        (diffuse_usage & (static_cast<std::uint32_t>(TextureUsage::color_attachment) |
+                          static_cast<std::uint32_t>(TextureUsage::storage))) != 0U ||
+        diffuse_description.width == 0U || diffuse_description.height == 0U ||
+        diffuse_description.mip_levels == 0U || diffuse_description.array_layers != 1U ||
+        diffuse_description.samples != 1U ||
+        !portable_sampled_color_format(diffuse_description.format, true)) {
+        diagnostic = {"indexed_stock_vulkan_abi_probe_diffuse_invalid",
+                      "The Vulkan ABI probe diffuse texture must be a one-layer sampled color image"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+
+    const DepthAttachmentDescription* first_shadow = nullptr;
+    for (std::size_t index = 0U; index < binding->shadow_maps.size(); ++index) {
+        const DepthAttachment* shadow = binding->shadow_maps[index];
+        if (shadow == nullptr) {
+            diagnostic = {"indexed_stock_vulkan_abi_probe_shadow_missing",
+                          "The Vulkan ABI probe requires all three shadow maps"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        for (std::size_t previous = 0U; previous < index; ++previous) {
+            if (shadow == binding->shadow_maps[previous]) {
+                diagnostic = {"indexed_stock_vulkan_abi_probe_shadow_duplicate",
+                              "Vulkan ABI probe shadow slots require three distinct maps"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+        }
+        if (shadow == request.depth_attachment) {
+            diagnostic = {"indexed_stock_vulkan_abi_probe_shadow_feedback_loop",
+                          "A writable main-pass depth attachment cannot be a Vulkan ABI probe shadow map"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        if (shadow->backend() != Backend::Vulkan) {
+            diagnostic = {"indexed_stock_vulkan_abi_probe_shadow_backend_mismatch",
+                          "Vulkan ABI probe shadow maps must belong to Vulkan"};
+            return IndexedStaticMeshDrawStatus::unsupported;
+        }
+        const DepthAttachmentDescription& description = shadow->info().description;
+        if (!description.shader_readable || description.samples != 1U ||
+            description.format != DepthAttachmentFormat::d32_float) {
+            diagnostic = {"indexed_stock_vulkan_abi_probe_shadow_invalid",
+                          "Vulkan ABI probe shadows require shader-readable single-sample D32 maps"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        if (first_shadow != nullptr &&
+            (description.width != first_shadow->width ||
+             description.height != first_shadow->height)) {
+            diagnostic = {"indexed_stock_vulkan_abi_probe_shadow_dimensions_mismatch",
+                          "Vulkan ABI probe shadow maps must have equal dimensions"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        first_shadow = &description;
+    }
+
+    const Sampler* linear = binding->linear_sampler;
+    const Sampler* shadow = binding->shadow_sampler;
+    if (linear == nullptr || shadow == nullptr) {
+        diagnostic = {"indexed_stock_vulkan_abi_probe_sampler_missing",
+                      "Vulkan ABI probe drawing requires linear and comparison samplers"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (linear->backend() != Backend::Vulkan || shadow->backend() != Backend::Vulkan) {
+        diagnostic = {"indexed_stock_vulkan_abi_probe_sampler_backend_mismatch",
+                      "Vulkan ABI probe samplers must belong to Vulkan"};
+        return IndexedStaticMeshDrawStatus::unsupported;
+    }
+    Diagnostic sampler_diagnostic;
+    if (validate_sampler_description(linear->info().description, sampler_diagnostic) !=
+            SamplerStatus::ready ||
+        validate_sampler_description(shadow->info().description, sampler_diagnostic) !=
+            SamplerStatus::ready) {
+        diagnostic = {"indexed_stock_vulkan_abi_probe_sampler_invalid",
+                      "Vulkan ABI probe samplers must pass sampler description validation"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    const SamplerDescription& linear_description = linear->info().description;
+    const SamplerDescription& shadow_description = shadow->info().description;
+    const SamplerDescription expected_linear = [] {
+        SamplerDescription description;
+        description.min_filter = SamplerFilter::anisotropic;
+        description.mag_filter = SamplerFilter::anisotropic;
+        description.mip_filter = SamplerFilter::anisotropic;
+        description.max_lod = std::numeric_limits<float>::max();
+        return description;
+    }();
+    SamplerDescription linear_contract = expected_linear;
+    linear_contract.max_anisotropy = linear_description.max_anisotropy;
+    linear_contract.mip_lod_bias = linear_description.mip_lod_bias;
+    SamplerDescription expected_shadow;
+    expected_shadow.min_filter = SamplerFilter::linear;
+    expected_shadow.mag_filter = SamplerFilter::linear;
+    expected_shadow.mip_filter = SamplerFilter::nearest;
+    expected_shadow.address_u = SamplerAddressMode::clamp_to_edge;
+    expected_shadow.address_v = SamplerAddressMode::clamp_to_edge;
+    expected_shadow.address_w = SamplerAddressMode::clamp_to_edge;
+    expected_shadow.compare = SamplerCompare::less;
+    expected_shadow.max_lod = std::numeric_limits<float>::max();
+    if (!std::isfinite(linear_description.max_anisotropy) ||
+        linear_description.max_anisotropy < 2.0F ||
+        linear_description.max_anisotropy > 16.0F ||
+        std::trunc(linear_description.max_anisotropy) !=
+            linear_description.max_anisotropy ||
+        !std::isfinite(linear_description.mip_lod_bias) ||
+        linear_description.mip_lod_bias < -16.0F ||
+        linear_description.mip_lod_bias > 16.0F ||
+        !native_sampler_matches(linear_description, linear_contract) ||
+        !native_sampler_matches(shadow_description, expected_shadow)) {
+        diagnostic = {"indexed_stock_vulkan_abi_probe_sampler_contract_invalid",
+                      "Vulkan ABI probe samplers do not match the recovered s0 and s1 contract"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    return IndexedStaticMeshDrawStatus::ready;
+}
+
 } // namespace
 
 IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
@@ -1304,6 +1481,8 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     const bool skinned_mesh = packet.primitive == DrawPrimitiveKind::skinned_mesh;
     const bool stock_native = request.shader_authority ==
         IndexedShaderAuthority::explicit_stock_ks_per_pixel_native;
+    const bool stock_vulkan_abi_probe = request.shader_authority ==
+        IndexedShaderAuthority::explicit_stock_ks_per_pixel_vulkan_abi_probe;
     if (!static_mesh && !skinned_mesh) {
         diagnostic = {"indexed_static_mesh_primitive_unsupported",
                       "Indexed drawing requires a static or skinned mesh primitive"};
@@ -1311,7 +1490,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     }
     if (!packet.shader_execution_supported &&
         request.shader_authority != IndexedShaderAuthority::explicit_pipeline &&
-        !stock_native) {
+        !stock_native && !stock_vulkan_abi_probe) {
         diagnostic = {"indexed_shader_execution_staged",
                       "The draw packet does not contain an executable shader contract"};
         return IndexedStaticMeshDrawStatus::unsupported;
@@ -1326,23 +1505,26 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                       "Skinned indexed drawing requires a non-empty bone palette"};
         return IndexedStaticMeshDrawStatus::unsupported;
     }
-    if (stock_native && !static_mesh) {
-        diagnostic = {"indexed_stock_native_primitive_unsupported",
-                      "Native ksPerPixel execution supports only static mesh draws"};
+    if ((stock_native || stock_vulkan_abi_probe) && !static_mesh) {
+        diagnostic = {stock_vulkan_abi_probe
+                          ? "indexed_stock_vulkan_abi_probe_primitive_unsupported"
+                          : "indexed_stock_native_primitive_unsupported",
+                      "Native ksPerPixel ABI execution supports only static mesh draws"};
         return IndexedStaticMeshDrawStatus::unsupported;
     }
-    if (!stock_native && request.pipeline->transform_contract !=
+    if (!stock_native && !stock_vulkan_abi_probe &&
+        request.pipeline->transform_contract !=
                              PipelineTransformContract::draw_matrices) {
         diagnostic = {"indexed_transform_contract_required",
                       "Indexed static-mesh execution requires the draw-matrices shader contract"};
         return IndexedStaticMeshDrawStatus::unsupported;
     }
-    if (!stock_native && !request.camera_frame.has_value()) {
+    if (!stock_native && !stock_vulkan_abi_probe && !request.camera_frame.has_value()) {
         diagnostic = {"indexed_camera_frame_missing",
                       "Indexed static-mesh transform execution requires a camera frame"};
         return IndexedStaticMeshDrawStatus::invalid_request;
     }
-    if (!stock_native) {
+    if (!stock_native && !stock_vulkan_abi_probe) {
         const CameraFrame& camera = *request.camera_frame;
         const CameraClipSpace expected_clip_space = texture.backend() == Backend::Vulkan
                                                         ? CameraClipSpace::vulkan
@@ -1390,13 +1572,77 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
         return IndexedStaticMeshDrawStatus::invalid_request;
     }
     if (stock_native) {
+        if (request.stock_ks_per_pixel_vulkan_abi_probe != nullptr) {
+            diagnostic = {"indexed_stock_vulkan_abi_probe_binding_unexpected",
+                          "The Vulkan ABI probe binding requires its matching shader authority"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
         const IndexedStaticMeshDrawStatus native_status =
             validate_native_ks_per_pixel_binding(texture, request, diagnostic);
         if (native_status != IndexedStaticMeshDrawStatus::ready)
             return native_status;
-    } else if (request.stock_ks_per_pixel_native != nullptr) {
-        diagnostic = {"indexed_stock_native_binding_unexpected",
-                      "A native ksPerPixel binding requires native shader authority"};
+    } else if (stock_vulkan_abi_probe) {
+        if (request.stock_ks_per_pixel_native != nullptr) {
+            diagnostic = {"indexed_stock_native_binding_unexpected",
+                          "The installed-native binding requires its matching shader authority"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        const bool has_portable_binding =
+            request.sampled_binding.texture != nullptr ||
+            request.sampled_binding.sampler != nullptr ||
+            request.normal_binding.texture != nullptr ||
+            request.normal_binding.sampler != nullptr ||
+            request.maps_binding.texture != nullptr ||
+            request.maps_binding.sampler != nullptr ||
+            request.detail_binding.texture != nullptr ||
+            request.detail_binding.sampler != nullptr ||
+            request.normal_detail_binding.texture != nullptr ||
+            request.normal_detail_binding.sampler != nullptr ||
+            request.damage_binding.texture != nullptr ||
+            request.damage_binding.sampler != nullptr ||
+            request.damage_mask_binding.texture != nullptr ||
+            request.damage_mask_binding.sampler != nullptr ||
+            request.material_binding.buffer != nullptr ||
+            request.material_binding.offset_bytes != 0U ||
+            request.material_binding.range_bytes != 0U ||
+            request.frame_binding.buffer != nullptr ||
+            request.frame_binding.offset_bytes != 0U ||
+            request.frame_binding.range_bytes != 0U ||
+            std::any_of(request.directional_shadow_binding.maps.begin(),
+                        request.directional_shadow_binding.maps.end(),
+                        [](const DepthAttachment* map) { return map != nullptr; }) ||
+            request.directional_shadow_binding.sampler != nullptr ||
+            request.directional_shadow_binding.constants != nullptr ||
+            request.directional_shadow_binding.constants_offset_bytes != 0U ||
+            request.directional_shadow_binding.constants_range_bytes != 0U ||
+            !request.packet->resources.empty() ||
+            request.resource_authority != IndexedResourceAuthority::packet_contract;
+        if (has_portable_binding) {
+            diagnostic = {"indexed_stock_vulkan_abi_probe_portable_binding_overlap",
+                          "The Vulkan ABI probe cannot receive portable material bindings"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        const StockKsPerPixelVulkanAbiStatus abi_status =
+            validate_stock_ks_per_pixel_vulkan_abi(*request.pipeline);
+        if (abi_status != StockKsPerPixelVulkanAbiStatus::ready) {
+            diagnostic = {"indexed_stock_vulkan_abi_probe_pipeline_" +
+                              std::string(stock_ks_per_pixel_vulkan_abi_status_name(abi_status)),
+                          "Vulkan ABI probe pipeline does not match the recovered manifest"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        const IndexedStaticMeshDrawStatus probe_status =
+            validate_stock_ks_per_pixel_vulkan_abi_probe_binding(texture, request, diagnostic);
+        if (probe_status != IndexedStaticMeshDrawStatus::ready)
+            return probe_status;
+    } else if (request.stock_ks_per_pixel_native != nullptr ||
+               request.stock_ks_per_pixel_vulkan_abi_probe != nullptr) {
+        diagnostic = request.stock_ks_per_pixel_native != nullptr
+                         ? Diagnostic{
+                               "indexed_stock_native_binding_unexpected",
+                               "A native ksPerPixel binding requires native shader authority"}
+                         : Diagnostic{
+                               "indexed_stock_vulkan_abi_probe_binding_unexpected",
+                               "The Vulkan ABI probe binding requires its matching shader authority"};
         return IndexedStaticMeshDrawStatus::invalid_request;
     }
 
@@ -1464,11 +1710,17 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                       "Pipeline blend state must match the draw packet"};
         return IndexedStaticMeshDrawStatus::invalid_request;
     }
-    if (stock_native) {
-        if (!request.pipeline->resources.empty() ||
-            request.pipeline->transform_contract != PipelineTransformContract::none) {
-            diagnostic = {"indexed_stock_native_pipeline_contract_invalid",
-                          "Native ksPerPixel state must not declare portable resources or transform constants"};
+    if (stock_native || stock_vulkan_abi_probe) {
+        const bool invalid_pipeline_contract =
+            (stock_native && !request.pipeline->resources.empty()) ||
+            request.pipeline->transform_contract != PipelineTransformContract::none;
+        if (invalid_pipeline_contract) {
+            diagnostic = {stock_vulkan_abi_probe
+                              ? "indexed_stock_vulkan_abi_probe_pipeline_contract_invalid"
+                              : "indexed_stock_native_pipeline_contract_invalid",
+                          stock_vulkan_abi_probe
+                              ? "The Vulkan ABI probe requires the recovered descriptor manifest and no transform constants"
+                              : "Native ksPerPixel state must not declare portable resources or transform constants"};
             return IndexedStaticMeshDrawStatus::invalid_request;
         }
         const PipelineVertexLayout& layout = request.pipeline->vertex_layout;
@@ -1490,20 +1742,24 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                      PipelineVertexAttributeFormat::float32x2, 2U, 24U) ||
             !matches(3U, PipelineVertexSemantic::tangent,
                      PipelineVertexAttributeFormat::float32x3, 3U, 32U)) {
-            diagnostic = {"indexed_stock_native_vertex_layout_invalid",
+            diagnostic = {stock_vulkan_abi_probe
+                              ? "indexed_stock_vulkan_abi_probe_vertex_layout_invalid"
+                              : "indexed_stock_native_vertex_layout_invalid",
                           "Native ksPerPixel drawing requires the exact 44-byte POSITION, NORMAL, TEXCOORD0, TANGENT layout"};
             return IndexedStaticMeshDrawStatus::invalid_request;
         }
-        const bool expected_a2c =
-            request.stock_ks_per_pixel_native->resources->shader_program().source().variant() ==
-            StockKsPerPixelVariant::alpha_to_coverage;
-        if (packet.flags.blend_enabled || pipeline.blend.enabled ||
-            packet.flags.alpha_to_coverage != expected_a2c ||
-            pipeline.blend.alpha_to_coverage != expected_a2c ||
-            (expected_a2c && target.samples != 4U)) {
-            diagnostic = {"indexed_stock_native_variant_state_mismatch",
-                          "Native ksPerPixel base and alpha-to-coverage packages require their exact blend and sample state"};
-            return IndexedStaticMeshDrawStatus::invalid_request;
+        if (stock_native) {
+            const bool expected_a2c =
+                request.stock_ks_per_pixel_native->resources->shader_program().source().variant() ==
+                StockKsPerPixelVariant::alpha_to_coverage;
+            if (packet.flags.blend_enabled || pipeline.blend.enabled ||
+                packet.flags.alpha_to_coverage != expected_a2c ||
+                pipeline.blend.alpha_to_coverage != expected_a2c ||
+                (expected_a2c && target.samples != 4U)) {
+                diagnostic = {"indexed_stock_native_variant_state_mismatch",
+                              "Native ksPerPixel base and alpha-to-coverage packages require their exact blend and sample state"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
         }
     }
     const bool has_sampled_texture = request.sampled_binding.texture != nullptr;
@@ -1546,8 +1802,12 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                       "A pipeline without the receiver extension cannot receive directional-shadow resources"};
         return IndexedStaticMeshDrawStatus::invalid_request;
     }
+    // The probe manifest was validated above. Use the resource-free control
+    // path only to prove that no request-local portable bindings overlap it.
     const IndexedPortableResourceLayout resource_layout =
-        classify_indexed_portable_resource_layout(pipeline);
+        stock_vulkan_abi_probe
+            ? IndexedPortableResourceLayout::resource_free
+            : classify_indexed_portable_resource_layout(pipeline);
     if (resource_layout == IndexedPortableResourceLayout::resource_free) {
         if (has_sampled_texture || has_sampler || has_normal_texture || has_normal_sampler ||
             has_maps_texture || has_maps_sampler ||
@@ -2662,6 +2922,18 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
         return target_status == IndexedStaticMeshDrawStatus::unsupported
                    ? IndexedStaticMeshBatchStatus::unsupported
                    : IndexedStaticMeshBatchStatus::invalid_request;
+    const bool has_vulkan_abi_probe = std::any_of(
+        description.draws.begin(), description.draws.end(),
+        [](const IndexedStaticMeshDrawRequest& request) {
+            return request.shader_authority ==
+                   IndexedShaderAuthority::explicit_stock_ks_per_pixel_vulkan_abi_probe;
+        });
+    if (has_vulkan_abi_probe) {
+        diagnostic = {
+            "indexed_stock_vulkan_abi_probe_batch_unsupported",
+            "The Vulkan ksPerPixel ABI probe is limited to single-draw validation"};
+        return IndexedStaticMeshBatchStatus::unsupported;
+    }
     const std::size_t native_draw_count = static_cast<std::size_t>(std::count_if(
         description.draws.begin(), description.draws.end(),
         [](const IndexedStaticMeshDrawRequest& request) {

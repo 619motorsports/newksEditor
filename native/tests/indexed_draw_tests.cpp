@@ -1,6 +1,7 @@
 #include "apex/render/draw_packet.hpp"
 #include "apex/render/device.hpp"
 #include "apex/render/selected_mesh.hpp"
+#include "apex/render/stock_ks_per_pixel_vulkan_abi.hpp"
 #include "../src/render/backend_internal.hpp"
 
 #include <array>
@@ -105,6 +106,54 @@ PipelineProgram pipeline_fixture() {
                                                    PipelineVertexAttributeFormat::float32x3, 0U, 0U});
     pipeline.shaders.push_back({PipelineShaderStage::vertex, PipelineShaderFormat::spirv, shader_fixture()});
     pipeline.shaders.push_back({PipelineShaderStage::fragment, PipelineShaderFormat::spirv, shader_fixture()});
+    return pipeline;
+}
+
+PipelineResourceKind probe_resource_kind(StockShaderDescriptorKind kind) {
+    switch (kind) {
+    case StockShaderDescriptorKind::uniform_buffer:
+        return PipelineResourceKind::uniform_buffer;
+    case StockShaderDescriptorKind::sampled_image:
+        return PipelineResourceKind::sampled_texture;
+    case StockShaderDescriptorKind::sampler:
+        return PipelineResourceKind::sampler;
+    }
+    return PipelineResourceKind::storage_buffer;
+}
+
+PipelineProgram vulkan_abi_probe_pipeline_fixture() {
+    PipelineProgram pipeline;
+    pipeline.name = "indexed-stock-vulkan-abi-probe";
+    pipeline.targets.colors.push_back(
+        {PipelineRenderTargetFormat::rgba8_unorm, 1U});
+    pipeline.raster.cull = PipelineCullMode::none;
+    pipeline.depth.test_enabled = false;
+    pipeline.depth.write_enabled = false;
+    pipeline.depth.compare = PipelineCompareOperation::less;
+    pipeline.transform_contract = PipelineTransformContract::none;
+    pipeline.vertex_layout.stride = stock_ks_per_pixel_vertex_stride_bytes;
+    pipeline.vertex_layout.attributes = {
+        {PipelineVertexSemantic::position,
+         PipelineVertexAttributeFormat::float32x3, 0U, 0U},
+        {PipelineVertexSemantic::normal,
+         PipelineVertexAttributeFormat::float32x3, 1U, 12U},
+        {PipelineVertexSemantic::texcoord0,
+         PipelineVertexAttributeFormat::float32x2, 2U, 24U},
+        {PipelineVertexSemantic::tangent,
+         PipelineVertexAttributeFormat::float32x3, 3U, 32U},
+    };
+    pipeline.shaders = {
+        {PipelineShaderStage::vertex, PipelineShaderFormat::spirv,
+         shader_fixture(), PipelineShaderProvenance::native_abi_probe},
+        {PipelineShaderStage::fragment, PipelineShaderFormat::spirv,
+         shader_fixture(), PipelineShaderProvenance::native_abi_probe},
+    };
+    for (const StockKsPerPixelBackendBinding& binding :
+         stock_ks_per_pixel_vulkan_abi_manifest.bindings) {
+        pipeline.resources.push_back(
+            {probe_resource_kind(binding.descriptor_kind), binding.vulkan_set,
+             binding.vulkan_binding, std::string(binding.name)});
+    }
     return pipeline;
 }
 
@@ -2620,6 +2669,205 @@ void validates_selected_mesh_draw_contract() {
             "selected pass rejects an approximate blended state");
 }
 
+void validates_stock_vulkan_abi_probe_authority() {
+    FakeTexture target(Backend::Vulkan, target_description());
+    PipelineProgram pipeline = vulkan_abi_probe_pipeline_fixture();
+    DrawPacket packet = packet_fixture();
+    packet.shader_execution_supported = false;
+
+    FakeBuffer vertices(
+        Backend::Vulkan,
+        {3U * stock_ks_per_pixel_vertex_stride_bytes, BufferUsage::vertex,
+         BufferMemory::device_local, BufferMutability::immutable});
+    FakeBuffer indices(
+        Backend::Vulkan,
+        {3U * sizeof(std::uint16_t), BufferUsage::index,
+         BufferMemory::device_local, BufferMutability::immutable});
+    std::array<FakeBuffer, 5U> uniforms = {
+        FakeBuffer(Backend::Vulkan,
+                   {256U, BufferUsage::uniform, BufferMemory::host_visible,
+                    BufferMutability::mutable_data}),
+        FakeBuffer(Backend::Vulkan,
+                   {256U, BufferUsage::uniform, BufferMemory::host_visible,
+                    BufferMutability::mutable_data}),
+        FakeBuffer(Backend::Vulkan,
+                   {256U, BufferUsage::uniform, BufferMemory::host_visible,
+                    BufferMutability::mutable_data}),
+        FakeBuffer(Backend::Vulkan,
+                   {256U, BufferUsage::uniform, BufferMemory::host_visible,
+                    BufferMutability::mutable_data}),
+        FakeBuffer(Backend::Vulkan,
+                   {256U, BufferUsage::uniform, BufferMemory::host_visible,
+                    BufferMutability::mutable_data}),
+    };
+    FakeTexture diffuse(
+        Backend::Vulkan,
+        {2U, 2U, 1U, 1U, TextureFormat::rgba8_unorm,
+         TextureUsage::sampled | TextureUsage::transfer_destination,
+         TextureMemory::device_local, TextureMutability::immutable});
+    const DepthAttachmentDescription shadow_description{
+        32U, 32U, 1U, DepthAttachmentFormat::d32_float, true};
+    FakeDepthAttachment shadow0(Backend::Vulkan, shadow_description);
+    FakeDepthAttachment shadow1(Backend::Vulkan, shadow_description);
+    FakeDepthAttachment shadow2(Backend::Vulkan, shadow_description);
+
+    SamplerDescription linear_description;
+    linear_description.min_filter = SamplerFilter::anisotropic;
+    linear_description.mag_filter = SamplerFilter::anisotropic;
+    linear_description.mip_filter = SamplerFilter::anisotropic;
+    linear_description.max_anisotropy = 4.0F;
+    linear_description.max_lod = std::numeric_limits<float>::max();
+    FakeSampler linear(Backend::Vulkan, linear_description);
+    SamplerDescription shadow_sampler_description;
+    shadow_sampler_description.min_filter = SamplerFilter::linear;
+    shadow_sampler_description.mag_filter = SamplerFilter::linear;
+    shadow_sampler_description.mip_filter = SamplerFilter::nearest;
+    shadow_sampler_description.address_u = SamplerAddressMode::clamp_to_edge;
+    shadow_sampler_description.address_v = SamplerAddressMode::clamp_to_edge;
+    shadow_sampler_description.address_w = SamplerAddressMode::clamp_to_edge;
+    shadow_sampler_description.compare = SamplerCompare::less;
+    shadow_sampler_description.max_lod = std::numeric_limits<float>::max();
+    FakeSampler shadow_sampler(Backend::Vulkan, shadow_sampler_description);
+
+    StockKsPerPixelVulkanAbiProbeDrawBinding binding;
+    for (std::size_t index = 0U; index < uniforms.size(); ++index) {
+        binding.uniform_buffers[index] = {&uniforms[index], 0U, 256U};
+    }
+    binding.diffuse_texture = &diffuse;
+    binding.shadow_maps = {&shadow0, &shadow1, &shadow2};
+    binding.linear_sampler = &linear;
+    binding.shadow_sampler = &shadow_sampler;
+
+    IndexedStaticMeshDrawRequest request;
+    request.packet = &packet;
+    request.pipeline = &pipeline;
+    request.vertex_buffer = &vertices;
+    request.index_buffer = &indices;
+    request.shader_authority = IndexedShaderAuthority::
+        explicit_stock_ks_per_pixel_vulkan_abi_probe;
+    request.stock_ks_per_pixel_vulkan_abi_probe = &binding;
+
+    Diagnostic diagnostic;
+    require(validate_indexed_static_mesh_draw_request(
+                target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            diagnostic.code.empty()
+                ? "complete Vulkan ABI probe passes common preflight"
+                : diagnostic.code.c_str());
+    require(!request.camera_frame.has_value(),
+            "Vulkan ABI probe does not require portable draw matrices");
+
+    const std::array draws = {request};
+    IndexedStaticMeshBatchDescription batch;
+    batch.draws = draws;
+    require(validate_indexed_static_mesh_batch_description(
+                target, batch, diagnostic) ==
+                IndexedStaticMeshBatchStatus::unsupported &&
+                diagnostic.code ==
+                    "indexed_stock_vulkan_abi_probe_batch_unsupported",
+            "Vulkan ABI probe batch execution remains explicitly staged");
+
+    auto missing_uniform = binding;
+    missing_uniform.uniform_buffers[2U].buffer = nullptr;
+    auto malformed_request = request;
+    malformed_request.stock_ks_per_pixel_vulkan_abi_probe = &missing_uniform;
+    require(validate_indexed_static_mesh_draw_request(
+                target, malformed_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_stock_vulkan_abi_probe_uniform_missing",
+            "Vulkan ABI probe rejects a missing recovered uniform slot");
+
+    auto truncated_uniform = binding;
+    truncated_uniform.uniform_buffers[4U].range_bytes = 32U;
+    malformed_request.stock_ks_per_pixel_vulkan_abi_probe =
+        &truncated_uniform;
+    require(validate_indexed_static_mesh_draw_request(
+                target, malformed_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_stock_vulkan_abi_probe_uniform_view_invalid",
+            "Vulkan ABI probe rejects a truncated uniform view");
+
+    FakeBuffer d3d_uniform(
+        Backend::D3D12,
+        {256U, BufferUsage::uniform, BufferMemory::host_visible,
+         BufferMutability::mutable_data});
+    auto foreign_uniform = binding;
+    foreign_uniform.uniform_buffers[0U].buffer = &d3d_uniform;
+    malformed_request.stock_ks_per_pixel_vulkan_abi_probe = &foreign_uniform;
+    require(validate_indexed_static_mesh_draw_request(
+                target, malformed_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code ==
+                    "indexed_stock_vulkan_abi_probe_uniform_backend_mismatch",
+            "Vulkan ABI probe rejects a non-Vulkan uniform buffer");
+
+    PipelineProgram drifted_pipeline = pipeline;
+    drifted_pipeline.resources[5U].binding = 5U;
+    malformed_request = request;
+    malformed_request.pipeline = &drifted_pipeline;
+    require(validate_indexed_static_mesh_draw_request(
+                target, malformed_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_stock_vulkan_abi_probe_pipeline_resource_binding_mismatch",
+            "Vulkan ABI probe rejects recovered descriptor drift");
+
+    malformed_request = request;
+    malformed_request.sampled_binding.texture = &diffuse;
+    require(validate_indexed_static_mesh_draw_request(
+                target, malformed_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_stock_vulkan_abi_probe_portable_binding_overlap",
+            "Vulkan ABI probe rejects portable binding overlap");
+
+    PipelineProgram wrong_layout = pipeline;
+    wrong_layout.vertex_layout.attributes[3U].location = 4U;
+    malformed_request = request;
+    malformed_request.pipeline = &wrong_layout;
+    require(validate_indexed_static_mesh_draw_request(
+                target, malformed_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_stock_vulkan_abi_probe_vertex_layout_invalid",
+            "Vulkan ABI probe rejects an approximate vertex layout");
+
+    StockKsPerPixelNativeDrawBinding native_overlap;
+    malformed_request = request;
+    malformed_request.stock_ks_per_pixel_native = &native_overlap;
+    require(validate_indexed_static_mesh_draw_request(
+                target, malformed_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_stock_native_binding_unexpected",
+            "Vulkan ABI probe rejects installed-native binding overlap");
+
+    malformed_request = request;
+    malformed_request.shader_authority =
+        IndexedShaderAuthority::explicit_stock_ks_per_pixel_native;
+    require(validate_indexed_static_mesh_draw_request(
+                target, malformed_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_stock_vulkan_abi_probe_binding_unexpected",
+            "installed-native authority rejects Vulkan probe binding overlap");
+
+    SamplerDescription wrong_shadow_description = shadow_sampler_description;
+    wrong_shadow_description.compare = SamplerCompare::less_equal;
+    FakeSampler wrong_shadow(Backend::Vulkan, wrong_shadow_description);
+    auto wrong_samplers = binding;
+    wrong_samplers.shadow_sampler = &wrong_shadow;
+    malformed_request = request;
+    malformed_request.stock_ks_per_pixel_vulkan_abi_probe = &wrong_samplers;
+    require(validate_indexed_static_mesh_draw_request(
+                target, malformed_request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_stock_vulkan_abi_probe_sampler_contract_invalid",
+            "Vulkan ABI probe rejects comparison-sampler drift");
+}
+
 void visits_generalized_batch_in_requested_phase_order() {
     std::array<IndexedStaticMeshDrawRequest, 2U> scene_draws{};
     SelectedMeshDrawRequest selected;
@@ -2689,6 +2937,7 @@ int main() {
         rejects_static_indexed_limits_and_ownership();
         rejects_staged_draw_packet();
         validates_selected_mesh_draw_contract();
+        validates_stock_vulkan_abi_probe_authority();
         visits_generalized_batch_in_requested_phase_order();
         std::cout << "indexed draw tests passed\n";
         return 0;
