@@ -62,6 +62,7 @@ void usage(std::ostream& output) {
               "                       [--fbx <file> --fbx-assets <directory>]\n"
               "                       [--analog-instruments <file> [--rpm <value>]]\n"
               "                       [--animation <file> [--animation-position <value>]]\n"
+              "                       [--fbx-animation <index> [--animation-position <value>]]\n"
            "                       [--lod-index <index>]\n"
               "                       [--track-camera-set <file> --track-camera-index <index>]\n"
               "                       [--track-camera-position <value>] [--track-camera-play]\n"
@@ -361,6 +362,15 @@ int inspect_fbx(const std::filesystem::path& path,
                   << result.animations.size() << " animations";
     }
     std::cout << '\n';
+    for (std::size_t index = 0U; index < result.animations.size(); ++index) {
+        const auto& clip = result.animations[index];
+        std::cout << "animation[" << index << "]: name=";
+        write_cli_text(std::cout, clip.name);
+        std::cout << ", duration=" << clip.duration
+                  << ", source-tracks=" << clip.source_track_count
+                  << ", tracks=" << clip.animation.tracks.size()
+                  << ", frames=" << clip.animation.frameCount << '\n';
+    }
     return result.ok() ? 0 : 1;
 }
 
@@ -486,6 +496,7 @@ struct WindowWorkspaceOptions {
     double rpm = 1'000.0;
     bool rpmSpecified = false;
     std::optional<std::filesystem::path> animation;
+    std::optional<std::uint32_t> fbxAnimation;
     double animationPosition = 0.0;
     bool animationPositionSpecified = false;
     std::optional<std::uint32_t> lodIndex;
@@ -1100,6 +1111,11 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             if (result.animation.has_value())
                 throw std::runtime_error("duplicate --animation option");
             result.animation = std::filesystem::path(require_value("--animation"));
+        } else if (option == "--fbx-animation") {
+            if (result.fbxAnimation.has_value())
+                throw std::runtime_error("duplicate --fbx-animation option");
+            result.fbxAnimation = parse_unsigned_index(
+                require_value("--fbx-animation"), "FBX animation index");
         } else if (option == "--animation-position") {
             if (result.animationPositionSpecified)
                 throw std::runtime_error("duplicate --animation-position option");
@@ -1422,13 +1438,20 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
     if (result.fbx.has_value() && result.analogInstruments.has_value())
         throw std::runtime_error(
             "--analog-instruments is not supported with --fbx");
-    if (result.animationPositionSpecified && !result.animation.has_value())
-        throw std::runtime_error("--animation-position requires --animation");
+    if (result.animation.has_value() && result.fbxAnimation.has_value())
+        throw std::runtime_error(
+            "--animation and --fbx-animation are mutually exclusive");
+    if (result.animationPositionSpecified && !result.animation.has_value() &&
+        !result.fbxAnimation.has_value())
+        throw std::runtime_error(
+            "--animation-position requires --animation or --fbx-animation");
     if (result.animation.has_value() &&
         !has_model_source)
         throw std::runtime_error("--animation requires a workspace model");
     if (result.fbx.has_value() && result.animation.has_value())
         throw std::runtime_error("--animation is not supported with --fbx");
+    if (result.fbxAnimation.has_value() && !result.fbx.has_value())
+        throw std::runtime_error("--fbx-animation requires --fbx");
     if (result.lodIndex.has_value() &&
         (!result.workspaceRoot.has_value() ||
          result.kind != apex::app::WorkspaceSessionKind::carLods)) {
@@ -1588,7 +1611,32 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
                   << ", matches=" << applied.matches
                   << ", rpm=" << applied.rpm << '\n';
     }
-    if (options.animation.has_value()) {
+    if (options.fbxAnimation.has_value()) {
+        if (!loaded.fbxPreview.has_value() ||
+            *options.fbxAnimation >= loaded.fbxPreview->animations.size())
+            throw std::runtime_error(
+                "selected FBX animation index is not present");
+        const auto& clip =
+            loaded.fbxPreview->animations[*options.fbxAnimation];
+        const auto clamped_position = static_cast<float>(
+            std::clamp(options.animationPosition, 0.0, 1.0));
+        const auto applied = apex::domain::apply_animation_preview(
+            document.assembly.model, clip.animation, clamped_position);
+        for (const auto& item : applied.diagnostics) {
+            std::cerr << item.code << " [" << item.source
+                      << "]: " << item.message << '\n';
+        }
+        model_changed = applied.matched_nodes > 0U || model_changed;
+        loaded.animationSkinningRequired = applied.skinning_required;
+        std::cout << "FBX animation: index=" << *options.fbxAnimation
+                  << ", name=";
+        write_cli_text(std::cout, clip.name);
+        std::cout << ", tracks=" << applied.tracks
+                  << ", animated=" << applied.animated_tracks
+                  << ", matched-tracks=" << applied.matched_tracks
+                  << ", matched-nodes=" << applied.matched_nodes
+                  << ", position=" << applied.position << '\n';
+    } else if (options.animation.has_value()) {
         const auto bytes = read_file(*options.animation);
         const auto animation = apex::formats::parseKsAnimation(
             bytes, options.animation->generic_string());

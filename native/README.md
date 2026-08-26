@@ -163,6 +163,7 @@ out/native/dev/native/apex-native --save-ai-spline fast_lane.ai fast_lane.ai
 out/native/dev/native/apex-native --window vulkan --frames 300
 out/native/dev/native/apex-native --window vulkan \
   --fbx model.fbx --fbx-assets path/to/authorized/assets \
+  --fbx-animation 0 --animation-position 0.5 \
   --shader-family ksPerPixel --shader-vertex stock.vert.spv \
   --shader-fragment stock.frag.spv
 out/native/dev/native/apex-native --window vulkan --model car.kn5 \
@@ -670,15 +671,20 @@ staged document before it creates a Vulkan or D3D12 resource.
 The `--inspect-fbx` command uses this application path without creating a GPU
 backend. It reports staged models when no asset directory is granted. The
 optional `--fbx-assets` directory is the only authority for external textures.
+The command also reports bounded clip metadata for each converted animation.
 Window rendering uses `--fbx` as a separate model source. It requires an
 explicit `--fbx-assets` directory and caller-supplied `ksPerPixel` modules for
-the selected backend. Invalid and staged FBX documents fail before the window
-or graphics device is created. Vulkan and D3D12 use the same owned document and
-the same staged-document gate.
+the selected backend. `--fbx-animation` selects one converted clip by index.
+`--animation-position` selects a fixed normalized position and clamps it to the
+range from zero to one. The shell applies the clip to exact-name node wrappers
+before it rebuilds the shared scene. Invalid and staged FBX documents, and
+invalid clip indices, fail before the window or graphics device is created.
+Vulkan and D3D12 use the same owned document and the same staged-document gate.
 The native shell frames FBX bounds with its existing workspace camera. This is
 shell behavior, not recovered ksEditor behavior; the installed editor keeps its
-current camera when it loads FBX geometry. FBX animation remains a separate
-unsupported window operation.
+current camera when it loads FBX geometry. Fixed-position FBX animation uses
+the bounded explicit-linear bridge. Real-time playback, pivot evaluation,
+non-linear interpolation, and skinning remain unsupported.
 The optional real-backend contract test also carries one supported ASCII FBX
 through parsing, external-texture authority, the canonical adapter, and the
 stock-scene draw/readback path. It requires visible color output on Vulkan and

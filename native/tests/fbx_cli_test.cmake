@@ -45,11 +45,26 @@ Objects: {
  Texture: 400, "Texture::Paint", "TextureVideoClip" {
   FileName: "C:\\car\\texture\\paint.dds"
  }
+ AnimationStack: 500, "AnimationStack::Take 001", "AnimationStack" {
+  LocalStart: 0
+  LocalStop: 100
+ }
+ AnimationLayer: 501, "AnimationLayer::BaseLayer", "AnimationLayer" { }
+ AnimationCurveNode: 502, "AnimationCurveNode::T", "AnimationCurveNode" { }
+ AnimationCurve: 503, "AnimationCurve::TX", "AnimationCurve" {
+  KeyTime: *2 { a: 0,100 }
+  KeyValueFloat: *2 { a: 0.0,10.0 }
+  KeyAttrFlags: *2 { a: 4,4 }
+ }
 }
 Connections: {
  C: "OO", 100, 200
  C: "OO", 300, 200
  C: "OP", 400, 300, "DiffuseColor"
+ C: "OO", 501, 500
+ C: "OO", 502, 501
+ C: "OP", 502, 200, "Lcl Translation"
+ C: "OP", 503, 502, "d|X"
 }
 ]=])
 file(WRITE "${truncated_fbx}" "Kaydara FBX Binary")
@@ -73,6 +88,12 @@ string(FIND "${staged_output}" "materials" staged_summary_position)
 if(staged_summary_position EQUAL -1)
   message(FATAL_ERROR
     "valid staged FBX did not report its scene summary: ${staged_output}")
+endif()
+string(FIND "${staged_output}"
+  "animation[0]: name=\"Take 001\"" animation_summary_position)
+if(animation_summary_position EQUAL -1)
+  message(FATAL_ERROR
+    "valid FBX did not report animation metadata: ${staged_output}")
 endif()
 
 execute_process(
@@ -253,9 +274,11 @@ file(COPY_FILE
 execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
           --fbx "${valid_fbx}" --fbx-assets "${ready_assets}"
+          --fbx-animation 0 --animation-position 0.5
           --shader-family ksPerPixel
           --shader-vertex missing.vert --shader-fragment missing.frag
   RESULT_VARIABLE ready_window_result
+  OUTPUT_VARIABLE ready_window_output
   ERROR_VARIABLE ready_window_error
 )
 if(NOT ready_window_result STREQUAL "1")
@@ -273,4 +296,36 @@ string(FIND "${ready_window_error}"
 if(NOT ready_staged_position EQUAL -1)
   message(FATAL_ERROR
     "ready FBX was incorrectly staged: ${ready_window_error}")
+endif()
+string(FIND "${ready_window_output}"
+  "FBX animation: index=0, name=\"Take 001\"" ready_animation_position)
+if(ready_animation_position EQUAL -1)
+  message(FATAL_ERROR
+    "ready FBX did not apply its selected animation: ${ready_window_output}")
+endif()
+string(FIND "${ready_window_output}"
+  "matched-nodes=1, position=0.5" ready_animation_pose_position)
+if(ready_animation_pose_position EQUAL -1)
+  message(FATAL_ERROR
+    "ready FBX did not report its applied pose: ${ready_window_output}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --fbx "${valid_fbx}" --fbx-assets "${ready_assets}"
+          --fbx-animation 1
+          --shader-family ksPerPixel
+          --shader-vertex missing.vert --shader-fragment missing.frag
+  RESULT_VARIABLE missing_animation_result
+  ERROR_VARIABLE missing_animation_error
+)
+if(NOT missing_animation_result STREQUAL "1")
+  message(FATAL_ERROR
+    "missing FBX animation returned ${missing_animation_result}: ${missing_animation_error}")
+endif()
+string(FIND "${missing_animation_error}"
+  "selected FBX animation index is not present" missing_animation_position)
+if(missing_animation_position EQUAL -1)
+  message(FATAL_ERROR
+    "missing FBX animation did not fail before shader loading: ${missing_animation_error}")
 endif()
