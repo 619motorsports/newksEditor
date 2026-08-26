@@ -142,6 +142,68 @@ Neither main pixel stage discards a fragment. The AT package flag selects
 alpha-to-coverage pipeline state. `ksAlphaRef` belongs to the separate shadow
 cutout path.
 
+## Vertex instruction evidence
+
+The base and AT packages contain the same 3,728-byte vertex stage. Its
+SHA-256 is
+`55451102bc40c0b7cca57bdc4e6e51d12456c85e18b59eb69ef79196f82700a5`.
+
+The vertex stage computes the world position with four `dp4` instructions:
+
+```text
+worldPos.x = dot(position, cbPerObject[0])
+worldPos.y = dot(position, cbPerObject[1])
+worldPos.z = dot(position, cbPerObject[2])
+worldPos.w = dot(position, cbPerObject[3])
+```
+
+It then applies the view and projection matrices with eight more `dp4`
+instructions. The host uploads transposed matrices. The native column-vector
+equation is:
+
+```text
+clip = projection * view * world * position
+```
+
+The vertex stage transforms the normal with the upper three rows of the world
+matrix. It does not normalize the result or apply an inverse-transpose matrix.
+
+```text
+normalOut.x = dot(normal, cbPerObject[0].xyz)
+normalOut.y = dot(normal, cbPerObject[1].xyz)
+normalOut.z = dot(normal, cbPerObject[2].xyz)
+```
+
+The camera-to-surface output uses the camera position at `cbCamera[12].xyz`:
+
+```text
+cameraToSurface = worldPos.xyz - cbCamera[12].xyz
+```
+
+The stage copies `texcoord0` without a change. It computes the fog output from
+the view-space depth and two lighting values:
+
+```text
+q = (-viewPos.z / cbLighting[5].w) * 5.77078009
+fogShape = saturate((exp(q) - exp(-q)) / (exp(-q) + exp(q)))
+fogOut = fogShape * cbLighting[6].x
+```
+
+`cbLighting[5].w` is the linear fog value at byte `0x5c`.
+`cbLighting[6].x` is the fog blend at byte `0x60`.
+
+The stage computes three four-component cascade coordinates. Each coordinate
+uses one 4-by-4 shadow matrix and four `dp4` instructions.
+
+| Output | `cbShadowMaps` registers | Byte offset |
+|---|---|---:|
+| `o4` | `0` through `3` | `0x00` |
+| `o5` | `4` through `7` | `0x40` |
+| `o6` | `8` through `11` | `0x80` |
+
+The vertex stage does not divide these coordinates by `w`. It does not read
+the bias and reciprocal-width record at `cbShadowMaps[12]`.
+
 ## Pixel instruction evidence
 
 The recovered equations come from the `SHDR` instructions in the two pixel
@@ -256,11 +318,11 @@ The CPU evaluator follows the recovered pixel equation. It rejects non-finite
 records and degenerate normalization inputs before evaluation. This evaluator
 does not execute the installed DXBC.
 
-The current Vulkan path remains a labeled portable ABI. A future translated
-path needs separate descriptor sets for constant buffers, textures, and
-samplers because Vulkan uses one binding namespace.
+The Vulkan ABI probe manifest uses separate descriptor sets for constant
+buffers, textures, and samplers. It validates structure only. The runtime does
+not execute this three-set probe yet.
 
-The D3D12 module and buffer objects do not create the native root signature or
-pipeline state. The D3D12 path still needs these objects and the exact texture
-and sampler bindings. A Windows WARP pipeline and readback test must pass
-before production selection becomes available.
+The D3D12 native draw path creates the root signature, pipeline state,
+descriptors, and command list. Its bounded batch path supports opaque base
+draws on a single-sample target. A Windows WARP pipeline and readback test must
+pass before production selection becomes available.
