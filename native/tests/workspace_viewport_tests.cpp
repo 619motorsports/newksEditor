@@ -26,6 +26,7 @@ using namespace apex::render;
 using apex::app::WorkspaceViewportFrameRequest;
 using apex::app::WorkspaceViewportFrameStatus;
 using apex::app::WorkspaceViewportPrepareRequest;
+using apex::app::WorkspaceViewportStockVulkanSourceFrame;
 
 namespace {
 
@@ -193,9 +194,9 @@ public:
         const DepthAttachmentDescription &description) override {
         ++depth_calls;
         created_depth_descriptions.push_back(description);
-        return {DepthAttachmentStatus::ready,
-                {},
-                std::make_unique<FakeDepth>(description, info_.backend)};
+        auto depth = std::make_unique<FakeDepth>(description, info_.backend);
+        created_depth_attachments.push_back(depth.get());
+        return {DepthAttachmentStatus::ready, {}, std::move(depth)};
     }
 
     TextureClearReadbackResult
@@ -243,6 +244,11 @@ public:
         if (!batch.draws.empty()) {
             receiver_maps.push_back(
                 batch.draws.front().directional_shadow_binding.maps);
+        }
+        for (const auto &draw : batch.draws) {
+            if (draw.stock_ks_per_pixel_vulkan_source != nullptr)
+                source_shadow_maps.push_back(
+                    draw.stock_ks_per_pixel_vulkan_source->resources.shadow_maps);
         }
         if (fail_draw)
             return {IndexedStaticMeshBatchStatus::execution_failed,
@@ -292,6 +298,7 @@ public:
     SamplerResult
     create_sampler(const SamplerDescription &description) override {
         ++sampler_calls;
+        sampler_descriptions.push_back(description);
         return {SamplerStatus::ready,
                 {},
                 std::make_unique<FakeSampler>(description, info_.backend)};
@@ -354,6 +361,11 @@ public:
     std::vector<std::vector<std::byte>> created_texture_bytes;
     std::vector<Texture *> created_textures;
     std::vector<DepthAttachmentDescription> created_depth_descriptions;
+    std::vector<DepthAttachment *> created_depth_attachments;
+    std::vector<SamplerDescription> sampler_descriptions;
+    std::vector<std::array<const DepthAttachment *,
+                           stock_ks_per_pixel_shadow_cascade_count>>
+        source_shadow_maps;
     std::vector<Texture *> resolve_targets;
     std::vector<bool> capture_requests;
     std::vector<Texture *> presented_textures;
@@ -1008,6 +1020,22 @@ CameraFrame valid_shadow_camera(
     const auto built = build_camera_frame(request);
     require(built.ok(), "directional shadow test camera builds");
     return *built.frame;
+}
+
+WorkspaceViewportStockVulkanSourceFrame valid_source_frame(
+    const CameraFrame& camera = CameraFrame{}) {
+    WorkspaceViewportStockVulkanSourceFrame frame;
+    frame.camera = make_stock_ks_per_pixel_camera_constants(
+        camera.view, camera.projection,
+        apex::scene::identity_matrix, {0.0F, 0.0F, 2.0F}, 0.1F, 100.0F,
+        camera.fov_radians);
+    frame.camera.camera_position = camera.position;
+    frame.camera.near_plane = camera.near_plane;
+    frame.camera.far_plane = camera.far_plane;
+    frame.lighting.light_direction = {0.0F, 0.0F, -1.0F};
+    frame.lighting.ambient_color = {0.1F, 0.1F, 0.1F, 1.0F};
+    frame.lighting.light_color = {0.8F, 0.8F, 0.8F};
+    return frame;
 }
 
 void evaluates_bounded_workspace_lighting() {
@@ -4531,6 +4559,193 @@ void schedules_directional_shadows_before_color_and_reuses_maps() {
             "staged caster branches remain labeled on a presented clear-map frame");
 }
 
+void prepares_and_draws_builtin_vulkan_source_viewport() {
+    auto value = fixture();
+    auto request = request_for(value);
+    request.shader_modules = {};
+    request.builtin_vulkan_source =
+        BuiltinVulkanStockSourceSelector::ks_per_pixel;
+    request.builtin_vulkan_source_sampler_settings = {4.0F, -2.5F};
+    FakeDevice missing_shadow_device;
+    const auto missing_shadows = apex::app::prepareWorkspaceViewport(
+        missing_shadow_device, value.document, request);
+    require(!missing_shadows.ok() &&
+                missing_shadows.diagnostic.code ==
+                    "workspace_viewport_stock_vulkan_source_shadows_missing",
+            "a selected source owner requires viewport-owned shadow maps");
+    request.directional_shadows =
+        apex::app::WorkspaceViewportDirectionalShadowOptions{};
+    request.directional_shadows->maps.lighting.map_size = 32U;
+
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok() &&
+                prepared.viewport->preparation().resources != nullptr &&
+                prepared.viewport->preparation().resources
+                        ->stock_vulkan_source_program_count() == 1U &&
+                device.sampler_descriptions.size() >= 3U &&
+                device.sampler_descriptions[0].max_anisotropy == 4.0F &&
+                device.sampler_descriptions[0].mip_lod_bias == -2.5F &&
+                device.sampler_descriptions[1].compare == SamplerCompare::less,
+            "viewport preparation forwards the Vulkan source selector and sampler settings");
+    require(device.created_depth_attachments.size() == 4U,
+            "source viewport owns main depth plus three directional cascades");
+
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera = valid_shadow_camera();
+    frame.stock_vulkan_source_frame = valid_source_frame(frame.camera);
+    Diagnostic diagnostic;
+    const auto source_status = prepared.viewport->drawAndPresent(
+        device, target, frame, diagnostic);
+    if (source_status != WorkspaceViewportFrameStatus::ready)
+        throw std::runtime_error("native source draw: " + diagnostic.code +
+                                 " " + diagnostic.message);
+    require(device.events == std::vector<std::string>(
+                {"shadow", "shadow", "shadow", "color", "present"}) &&
+                device.source_shadow_maps.size() == 1U,
+            "valid native source frame draws after refreshing the three cascades");
+    require(device.source_shadow_maps.front() ==
+                    std::array<const DepthAttachment *,
+                               stock_ks_per_pixel_shadow_cascade_count>{
+                        device.created_depth_attachments[1],
+                        device.created_depth_attachments[2],
+                        device.created_depth_attachments[3]},
+            "source draw binds the viewport-owned directional cascades");
+}
+
+void rejects_invalid_builtin_vulkan_source_frames_before_draw() {
+    auto value = fixture();
+    auto request = request_for(value);
+    request.shader_modules = {};
+    request.builtin_vulkan_source =
+        BuiltinVulkanStockSourceSelector::ks_per_pixel;
+    request.directional_shadows =
+        apex::app::WorkspaceViewportDirectionalShadowOptions{};
+    request.directional_shadows->maps.lighting.map_size = 32U;
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok(), "source viewport setup for frame validation succeeds");
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera = valid_shadow_camera();
+    Diagnostic diagnostic;
+    const auto shadow_before = device.depth_batch_calls;
+    const auto color_before = device.draw_calls;
+    const auto present_before = device.present_calls;
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code == "static_scene_stock_vulkan_source_frame_missing" &&
+                device.depth_batch_calls == shadow_before &&
+                device.draw_calls == color_before &&
+                device.present_calls == present_before,
+            "source viewport requires a native frame before any draw or present");
+
+    frame.stock_vulkan_source_frame = valid_source_frame(frame.camera);
+    frame.stock_vulkan_source_frame->camera.near_plane =
+        std::numeric_limits<float>::quiet_NaN();
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code == "static_scene_stock_vulkan_source_frame_invalid" &&
+                device.depth_batch_calls == shadow_before &&
+                device.draw_calls == color_before &&
+                device.present_calls == present_before,
+            "non-finite source camera records fail before shadow, color, or present work");
+
+    frame.stock_vulkan_source_frame = valid_source_frame(frame.camera);
+    frame.stock_vulkan_source_frame->lighting.light_direction[0] =
+        std::numeric_limits<float>::quiet_NaN();
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code == "static_scene_stock_vulkan_source_frame_invalid" &&
+                device.depth_batch_calls == shadow_before &&
+                device.draw_calls == color_before &&
+                device.present_calls == present_before,
+            "non-finite source records fail before shadow, color, or present work");
+
+    frame.stock_vulkan_source_frame = valid_source_frame(frame.camera);
+    frame.stock_vulkan_source_frame->camera.view[0] += 1.0F;
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code ==
+                    "workspace_viewport_stock_vulkan_source_camera_mismatch" &&
+                device.depth_batch_calls == shadow_before &&
+                device.draw_calls == color_before &&
+                device.present_calls == present_before,
+            "source camera mismatch fails before shadow, color, or present work");
+}
+
+void preserves_portable_and_d3d12_viewport_paths() {
+    auto value = fixture();
+    auto portable_request = request_for(value);
+    FakeDevice portable_device;
+    auto portable = apex::app::prepareWorkspaceViewport(
+        portable_device, value.document, portable_request);
+    require(portable.ok() &&
+                portable.viewport->preparation().resources
+                        ->stock_vulkan_source_program_count() == 0U,
+            "default viewport preparation remains portable");
+    FakeTarget portable_target(portable_request.presentation);
+    WorkspaceViewportFrameRequest portable_frame;
+    portable_frame.camera = valid_shadow_camera();
+    portable_frame.frame_constants = KsPerPixelFrameConstants{};
+    portable_frame.stock_vulkan_source_frame =
+        valid_source_frame(portable_frame.camera);
+    Diagnostic diagnostic;
+    require(portable.viewport->drawAndPresent(
+                portable_device, portable_target, portable_frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code == "static_scene_stock_vulkan_source_frame_unexpected" &&
+                portable_device.draw_calls == 0U &&
+                portable_device.present_calls == 0U,
+            "portable viewport rejects an unexpected native source frame");
+
+    auto d3d_value = fixture();
+    for (auto& module : d3d_value.modules) {
+        module.format = PipelineShaderFormat::dxbc;
+        module.bytes = dxbc_shader_bytes();
+    }
+    auto d3d_request = request_for(d3d_value);
+    d3d_request.shader_modules = {};
+    d3d_request.builtin_vulkan_source =
+        BuiltinVulkanStockSourceSelector::ks_per_pixel;
+    FakeDevice d3d_source_device(Backend::D3D12);
+    auto d3d_source = apex::app::prepareWorkspaceViewport(
+        d3d_source_device, d3d_value.document, d3d_request);
+    require(!d3d_source.ok() &&
+                d3d_source.status == apex::app::WorkspaceViewportStatus::unsupported &&
+                d3d_source.diagnostic.code ==
+                    "workspace_viewport_builtin_source_backend_unsupported" &&
+                d3d_source_device.buffer_calls == 0U &&
+                d3d_source_device.texture_calls == 0U &&
+                d3d_source_device.depth_calls == 0U &&
+                d3d_source_device.sampler_calls == 0U,
+            "D3D12 source fallback rejects before viewport allocation");
+
+    d3d_request = request_for(d3d_value);
+    d3d_request.builtin_vulkan_source =
+        BuiltinVulkanStockSourceSelector::ks_per_pixel;
+    FakeDevice d3d_explicit_device(Backend::D3D12);
+    auto d3d_explicit = apex::app::prepareWorkspaceViewport(
+        d3d_explicit_device, d3d_value.document, d3d_request);
+    require(d3d_explicit.ok() &&
+                d3d_explicit.viewport->preparation().resources
+                        ->stock_vulkan_source_program_count() == 0U,
+            "matching D3D12 modules remain authoritative with selector enabled");
+    FakeTarget d3d_target(d3d_request.presentation, Backend::D3D12);
+    WorkspaceViewportFrameRequest d3d_frame;
+    d3d_frame.camera = valid_shadow_camera(0.0F, CameraClipSpace::d3d12);
+    d3d_frame.frame_constants = KsPerPixelFrameConstants{};
+    require(d3d_explicit.viewport->drawAndPresent(
+                d3d_explicit_device, d3d_target, d3d_frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                d3d_explicit_device.draw_calls == 1U &&
+                d3d_explicit_device.present_calls == 1U,
+            "explicit D3D12 modules retain the portable viewport draw path");
+}
+
 void shares_live_camera_visibility_with_directional_shadows() {
     auto value = fixture();
     auto& body = value.document.scene.snapshot.nodes[1U];
@@ -5488,6 +5703,9 @@ int main() {
         camera_controller_matches_bounded_editor_gestures();
         camera_controller_supports_keyboard_translation();
         schedules_directional_shadows_before_color_and_reuses_maps();
+        prepares_and_draws_builtin_vulkan_source_viewport();
+        rejects_invalid_builtin_vulkan_source_frames_before_draw();
+        preserves_portable_and_d3d12_viewport_paths();
         shares_live_camera_visibility_with_directional_shadows();
         retains_independent_shadowgen_visibility();
         rejects_invalid_inputs();

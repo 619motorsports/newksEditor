@@ -216,6 +216,9 @@ public:
         noexcept {
         return stock_vulkan_source_programs_.size();
     }
+    [[nodiscard]] bool requires_stock_vulkan_source_frame() const noexcept {
+        return !stock_vulkan_source_programs_.empty();
+    }
     [[nodiscard]] std::size_t unique_geometry_count() const noexcept {
         return uploads_.size() + skinned_uploads_.size();
     }

@@ -136,6 +136,13 @@ struct WorkspaceViewportPrepareRequest {
     // an owned single-sample texture before presentation.
     std::uint32_t color_samples = 1U;
     std::span<const render::StockMaterialShaderModules> shader_modules{};
+    // Explicitly select the immutable source-equivalent package only when no
+    // caller module set matches a static ksPerPixel packet. This path is
+    // Vulkan-only and requires retained directional-shadow resources.
+    render::BuiltinVulkanStockSourceSelector builtin_vulkan_source =
+        render::BuiltinVulkanStockSourceSelector::disabled;
+    render::StockKsPerPixelNativeSamplerSettings
+        builtin_vulkan_source_sampler_settings{};
     std::span<const render::MaterialBindingOverrides> overrides_by_material{};
     // Presence requires at least one external request. The matching file
     // overrides are consumed into owned embedded payloads before render
@@ -212,6 +219,14 @@ struct WorkspaceViewportPrepareRequest {
     WorkspaceViewportWorkspaceOptions workspace{};
 };
 
+struct WorkspaceViewportStockVulkanSourceFrame {
+    // Exact recovered b0 and b2 host records. The viewport derives b3 and all
+    // three map bindings from its retained, freshly rendered cascades so a
+    // caller cannot substitute unrelated GPU resources.
+    render::StockKsPerPixelCameraConstants camera{};
+    render::StockKsPerPixelLightingConstants lighting{};
+};
+
 struct WorkspaceViewportFrameRequest {
     render::CameraFrame camera{};
     bool load_color = false;
@@ -234,6 +249,11 @@ struct WorkspaceViewportFrameRequest {
     std::span<const std::uint32_t> shadow_packet_order{};
     bool apply_skinning = false;
     std::optional<render::KsPerPixelFrameConstants> frame_constants;
+    // Required exactly when preparation selected at least one immutable
+    // Vulkan source program. Portable constants are never reinterpreted as
+    // this recovered native ABI.
+    std::optional<WorkspaceViewportStockVulkanSourceFrame>
+        stock_vulkan_source_frame;
     // Override the prepared grid state. A true value requires grid resources
     // to have been requested during viewport preparation.
     std::optional<bool> grid_visible;
