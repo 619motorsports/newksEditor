@@ -5,6 +5,12 @@
 The installed SDK editor supplies `ksPerPixel.shader` and
 `ksPerPixelAT.shader`. The repository does not redistribute these files.
 
+The native host evidence below comes from the installed 32-bit
+`sdk/editor/ksNet.dll` (17,211,904 bytes), whose SHA-256 is
+`b38dcb826a3311d7233cf0a6a58e5da16b6c8679f8490091e7b434bf730091ca`.
+The function addresses are loaded-image addresses from the matching Ghidra
+analysis.
+
 | Item | Bytes | SHA-256 |
 |---|---:|---|
 | `ksPerPixel.shader` | 11,254 | `255d0228faa70d5b8454a2abe618447bef16ef29612ffab4a0d684dbedcfdb0b` |
@@ -275,10 +281,22 @@ writes the shadow state through these functions:
 - `GraphicsManager::setShadowMapTexture` at `0x100468c7`
 - `CameraShadowMapped::endShadowMapPass` at `0x1005e57f`
 
-`GraphicsManager::initCBuffers` at `0x10045138` creates the five reflected
-buffer sizes. `CBuffer::CBuffer` at `0x1004ab2d` clears every buffer byte.
+`GraphicsManager::initCBuffers` at `0x10045138` creates the four shared system
+buffers (`b0` through `b3`), registers them by the names `cbCamera`,
+`cbPerObject`, `cbLighting`, and `cbShadowMaps`, and marks them as system
+buffers. `CBuffer::CBuffer` at `0x1004ab2d` clears every buffer byte.
 `GraphicsManager::commitShaderChanges` at `0x10044dc6` commits the updated
 camera, lighting, object, and shadow buffers.
+
+`KGLShader::reflectVars` at `0x1000fab0` obtains the low-level reflected
+constant-buffer, variable, and texture descriptions from `D3DReflect`.
+`Shader::reflectVars` at `0x1004b218` then applies the ownership boundary:
+for each reflected constant buffer it calls `GraphicsManager::getCBuffer`
+with the reflected name. A matching shared buffer is not appended to the
+shader's `cBuffers` vector. The same name lookup is performed for each
+reflected variable; variables in a shared system buffer are not added to the
+shader's material-variable list. Only buffers with no matching system record
+are created as shader-owned buffers.
 
 `Mesh::render` at `0x100494ff` applies the material before it binds the mesh.
 It then binds the vertex buffer and the index buffer.
@@ -305,12 +323,25 @@ range at `400` and `500`, and saturation at `1`. The constructors clear the
 remaining bytes. New material matrices are therefore zero matrices, not
 identity matrices.
 
-`Material::createCBuffers` at `0x1004026a` creates a material-owned buffer for
-every reflected constant buffer, including `b0` through `b3`. The PVS path
-commits shared `b0`, `b2`, and `b3` before traversal and later commits the
-material buffer vector when the material changes. No filter that removes the
-system buffers was recovered. This possible overwrite is an unresolved
-native quirk; the port must not copy it without a runtime confirmation.
+`Material::setShader` at `0x100407fc` calls `Material::createCBuffers` at
+`0x1004026a` after a shader change. That function allocates only the buffers
+already present in `Shader::cBuffers`. For stock `ksPerPixel` and
+`ksPerPixelAT`, system-buffer filtering leaves only `cbMaterial` at `b4`, so
+the material owns and commits only that 32-byte buffer. It does not own or
+overwrite `b0` through `b3`.
+
+`Material::apply` at `0x1004016e` binds material resources and the shader,
+then commits the material buffer vector. `PvsProcessor::doRenderCalls` at
+`0x10065b85` sorts its 100-byte draw records, commits shared camera, lighting,
+and shadow state, binds shadow maps at `t6` through `t8` (and the cube map at
+`t10` when present), and commits the material's `b4` buffer when the material
+changes. If a draw record has a world matrix, it writes and commits `b1`; if
+not, the previous `b1` value remains bound. It then issues the indexed draw.
+
+`PvsProcessor::doRenderClassic` at `0x10065e44` is the non-sorted traversal:
+it applies the material, sets the world matrix when present, binds geometry,
+calls `GraphicsManager::commitShaderChanges`, and draws. Neither PVS path
+replaces the shared `b0` through `b3` records with material-owned copies.
 
 ## Vulkan source-equivalent modules
 
