@@ -5812,6 +5812,20 @@ public:
     explicit D3D12Device(std::shared_ptr<D3D12Context> context) : context_(std::move(context)) {}
 
     const DeviceInfo& info() const noexcept override { return context_->info; }
+    bool owns_resource(const Texture& texture) const noexcept override {
+        const auto* native = dynamic_cast<const D3D12Texture*>(&texture);
+        return native != nullptr && native->context() == context_.get();
+    }
+    bool owns_resource(
+        const DepthAttachment& attachment) const noexcept override {
+        const auto* native =
+            dynamic_cast<const D3D12DepthAttachment*>(&attachment);
+        return native != nullptr && native->context() == context_.get();
+    }
+    bool owns_resource(const Sampler& sampler) const noexcept override {
+        const auto* native = dynamic_cast<const D3D12Sampler*>(&sampler);
+        return native != nullptr && native->context() == context_.get();
+    }
 
     PresentationCapabilities presentation_capabilities() const noexcept override {
         const bool context_ready = context_ != nullptr && context_->factory.Get() != nullptr &&

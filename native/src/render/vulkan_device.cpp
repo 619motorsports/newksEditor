@@ -6367,6 +6367,20 @@ public:
     explicit VulkanDevice(std::shared_ptr<VulkanContext> context) : context_(std::move(context)) {}
 
     const DeviceInfo& info() const noexcept override { return context_->info; }
+    bool owns_resource(const Texture& texture) const noexcept override {
+        const auto* native = dynamic_cast<const VulkanTexture*>(&texture);
+        return native != nullptr && native->context().get() == context_.get();
+    }
+    bool owns_resource(
+        const DepthAttachment& attachment) const noexcept override {
+        const auto* native =
+            dynamic_cast<const VulkanDepthAttachment*>(&attachment);
+        return native != nullptr && native->context().get() == context_.get();
+    }
+    bool owns_resource(const Sampler& sampler) const noexcept override {
+        const auto* native = dynamic_cast<const VulkanSampler*>(&sampler);
+        return native != nullptr && native->context().get() == context_.get();
+    }
 
     PresentationCapabilities presentation_capabilities() const noexcept override {
         return context_->presentation_capabilities;

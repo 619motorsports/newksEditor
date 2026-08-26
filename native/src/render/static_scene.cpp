@@ -2004,6 +2004,20 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         return {IndexedStaticMeshBatchStatus::unsupported,
                 {"static_scene_device_mismatch",
                  "Static-scene resources require their preparing device and backend"}, {}};
+    if (!device.owns_resource(target))
+        return {IndexedStaticMeshBatchStatus::unsupported,
+                {"static_scene_target_device_mismatch",
+                 "The color target belongs to another device context"}, {}};
+    if (frame.resolve_target != nullptr &&
+        !device.owns_resource(*frame.resolve_target))
+        return {IndexedStaticMeshBatchStatus::unsupported,
+                {"static_scene_resolve_target_device_mismatch",
+                 "The resolve target belongs to another device context"}, {}};
+    if (frame.depth_attachment != nullptr &&
+        !device.owns_resource(*frame.depth_attachment))
+        return {IndexedStaticMeshBatchStatus::unsupported,
+                {"static_scene_depth_attachment_device_mismatch",
+                 "The depth attachment belongs to another device context"}, {}};
     if (texture_authority_ != StaticSceneTextureAuthority::caller_tables &&
         texture_authority_ !=
             StaticSceneTextureAuthority::owned_model_payloads)
@@ -2067,6 +2081,41 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
                  has_portable_texture_resources_
                      ? "Static-scene texture and sampler tables must match the final KN5 texture count"
                      : "The static-scene texture table must match the final KN5 texture count"}, {}};
+    if (texture_authority_ == StaticSceneTextureAuthority::caller_tables) {
+        for (const PacketTextureIndices& indices : textures_for_packet_) {
+            const std::array<std::uint32_t, 8U> referenced = {
+                indices.diffuse, indices.normal, indices.maps, indices.detail,
+                indices.normal_detail, indices.dust, indices.damage,
+                indices.damage_mask};
+            for (const std::uint32_t raw_index : referenced) {
+                if (raw_index == invalid_draw_texture_index) continue;
+                const std::size_t index =
+                    static_cast<std::size_t>(raw_index);
+                if (index >= frame.textures_by_global_index.size())
+                    return {IndexedStaticMeshBatchStatus::invalid_request,
+                            {"static_scene_texture_index_invalid",
+                             "A prepared texture index is outside the caller table"},
+                            {}};
+                const Texture* texture =
+                    frame.textures_by_global_index[index];
+                if (texture != nullptr && !device.owns_resource(*texture))
+                    return {IndexedStaticMeshBatchStatus::unsupported,
+                            {"static_scene_texture_device_mismatch",
+                             "A referenced caller texture belongs to another device context"},
+                            {}};
+                if (has_portable_texture_resources_) {
+                    const Sampler* sampler =
+                        frame.samplers_by_global_index[index];
+                    if (sampler != nullptr &&
+                        !device.owns_resource(*sampler))
+                        return {IndexedStaticMeshBatchStatus::unsupported,
+                                {"static_scene_sampler_device_mismatch",
+                                 "A referenced caller sampler belongs to another device context"},
+                                {}};
+                }
+            }
+        }
+    }
 
     const bool has_stock_vulkan_source =
         !stock_vulkan_source_programs_.empty();
@@ -2115,6 +2164,11 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
                         {"static_scene_stock_vulkan_source_shadow_map_unsupported",
                          "Native Vulkan source shadow maps must be shader-readable single-sample D32 attachments"},
                         {}};
+            if (!device.owns_resource(*shadow))
+                return {IndexedStaticMeshBatchStatus::unsupported,
+                        {"static_scene_stock_vulkan_source_shadow_map_device_mismatch",
+                         "A native Vulkan source shadow map belongs to another device context"},
+                        {}};
         }
     }
 
@@ -2162,6 +2216,11 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
                 return {IndexedStaticMeshBatchStatus::unsupported,
                         {"static_scene_stock_d3d12_native_shadow_map_unsupported",
                          "Installed D3D12 native shadow maps must be shader-readable single-sample D32 attachments"},
+                        {}};
+            if (!device.owns_resource(*shadow))
+                return {IndexedStaticMeshBatchStatus::unsupported,
+                        {"static_scene_stock_d3d12_native_shadow_map_device_mismatch",
+                         "An installed D3D12 shadow map belongs to another device context"},
                         {}};
         }
     }

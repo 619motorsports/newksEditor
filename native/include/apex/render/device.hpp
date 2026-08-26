@@ -1515,6 +1515,23 @@ public:
 
     [[nodiscard]] virtual const DeviceInfo& info() const noexcept = 0;
 
+    // Backends with private device contexts override these checks. The
+    // backend-only defaults preserve lightweight fake and discovery devices.
+    // Callers can use the seam to reject same-backend foreign resources
+    // before they mutate retained per-frame state.
+    [[nodiscard]] virtual bool owns_resource(
+        const Texture& texture) const noexcept {
+        return texture.backend() == info().backend;
+    }
+    [[nodiscard]] virtual bool owns_resource(
+        const DepthAttachment& attachment) const noexcept {
+        return attachment.backend() == info().backend;
+    }
+    [[nodiscard]] virtual bool owns_resource(
+        const Sampler& sampler) const noexcept {
+        return sampler.backend() == info().backend;
+    }
+
     // The default preserves discovery-only and fake devices. Backends may
     // report prerequisites without exposing or creating native handles.
     [[nodiscard]] virtual PresentationCapabilities presentation_capabilities()

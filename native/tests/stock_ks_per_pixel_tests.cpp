@@ -120,24 +120,30 @@ private:
 
 class FakeNativeTexture final : public Texture {
 public:
-    FakeNativeTexture(Backend backend, TextureDescription description)
-        : backend_(backend), info_{description} {}
+    FakeNativeTexture(Backend backend, TextureDescription description,
+                      const Device* owner = nullptr)
+        : backend_(backend), info_{description}, owner_(owner) {}
     [[nodiscard]] Backend backend() const noexcept override { return backend_; }
     [[nodiscard]] const TextureInfo& info() const noexcept override { return info_; }
+    [[nodiscard]] const Device* owner() const noexcept { return owner_; }
 private:
     Backend backend_ = Backend::D3D12;
     TextureInfo info_{};
+    const Device* owner_ = nullptr;
 };
 
 class FakeNativeDepth final : public DepthAttachment {
 public:
-    FakeNativeDepth(Backend backend, DepthAttachmentDescription description)
-        : backend_(backend), info_{description} {}
+    FakeNativeDepth(Backend backend, DepthAttachmentDescription description,
+                    const Device* owner = nullptr)
+        : backend_(backend), info_{description}, owner_(owner) {}
     [[nodiscard]] Backend backend() const noexcept override { return backend_; }
     [[nodiscard]] const DepthAttachmentInfo& info() const noexcept override { return info_; }
+    [[nodiscard]] const Device* owner() const noexcept { return owner_; }
 private:
     Backend backend_ = Backend::D3D12;
     DepthAttachmentInfo info_{};
+    const Device* owner_ = nullptr;
 };
 
 class FakeShaderDevice final : public Device {
@@ -147,6 +153,17 @@ public:
 
     [[nodiscard]] const DeviceInfo& info() const noexcept override {
         return info_;
+    }
+    [[nodiscard]] bool owns_resource(
+        const Texture& texture) const noexcept override {
+        const auto* native = dynamic_cast<const FakeNativeTexture*>(&texture);
+        return native != nullptr && native->owner() == this;
+    }
+    [[nodiscard]] bool owns_resource(
+        const DepthAttachment& attachment) const noexcept override {
+        const auto* native =
+            dynamic_cast<const FakeNativeDepth*>(&attachment);
+        return native != nullptr && native->owner() == this;
     }
     [[nodiscard]] BufferResult create_buffer(
         const BufferDescription& description,
@@ -178,7 +195,7 @@ public:
         const TextureUploadPlan&) override {
         return {TextureStatus::ready, {},
                 std::make_unique<FakeNativeTexture>(info_.backend,
-                                                    description)};
+                                                    description, this)};
     }
     [[nodiscard]] TextureUpdateResult update_texture(
         Texture&, const TextureUploadPlan&) override {
@@ -1423,6 +1440,8 @@ void executes_a_validated_native_program_through_the_static_scene_batch() {
         {"txDiffuse", 0U, "body.dds"});
     model.textures.push_back(
         {true, "body.dds", 4U, {}, std::nullopt});
+    model.textures.push_back(
+        {true, "unused.dds", 4U, {}, std::nullopt});
     model.root.type = 1U;
     model.root.kind = "node";
     model.root.name = "ROOT";
@@ -1481,6 +1500,62 @@ void executes_a_validated_native_program_through_the_static_scene_batch() {
     request.targets.depth =
         {PipelineRenderTargetFormat::depth32_float, 1U};
 
+    constexpr std::array<PipelineRenderTargetFormat, 4U>
+        supported_native_formats = {
+            PipelineRenderTargetFormat::rgba8_unorm,
+            PipelineRenderTargetFormat::rgba8_srgb,
+            PipelineRenderTargetFormat::bgra8_unorm,
+            PipelineRenderTargetFormat::bgra8_srgb};
+    for (const PipelineRenderTargetFormat format :
+         supported_native_formats) {
+        FakeShaderDevice format_device(Backend::D3D12);
+        auto format_request = request;
+        format_request.targets.colors.front().format = format;
+        const auto accepted = prepare_stock_material_execution(
+            format_device, format_request);
+        require(accepted.ok() && format_device.shader_calls == 2U,
+                "native static scene accepts one-sample RGBA8 and BGRA8 targets");
+    }
+    FakeShaderDevice unsupported_format_device(Backend::D3D12);
+    auto unsupported_format_request = request;
+    unsupported_format_request.targets.colors.front().format =
+        PipelineRenderTargetFormat::rgba16_float;
+    const auto unsupported_format = prepare_stock_material_execution(
+        unsupported_format_device, unsupported_format_request);
+    require(!unsupported_format.ok() &&
+                unsupported_format.diagnostic.code ==
+                    "static_scene_material_pipeline_unsupported" &&
+                unsupported_format_device.shader_calls == 0U &&
+                unsupported_format_device.buffer_calls == 0U &&
+                unsupported_format_device.sampler_calls == 0U,
+            "native unsupported color formats reject before backend allocation");
+    FakeShaderDevice unsupported_depth_device(Backend::D3D12);
+    auto unsupported_depth_request = request;
+    unsupported_depth_request.targets.depth.format =
+        PipelineRenderTargetFormat::depth24_stencil8;
+    const auto unsupported_depth = prepare_stock_material_execution(
+        unsupported_depth_device, unsupported_depth_request);
+    require(!unsupported_depth.ok() &&
+                unsupported_depth.diagnostic.code ==
+                    "static_scene_material_pipeline_unsupported" &&
+                unsupported_depth_device.shader_calls == 0U &&
+                unsupported_depth_device.buffer_calls == 0U &&
+                unsupported_depth_device.sampler_calls == 0U,
+            "native unsupported depth formats reject before backend allocation");
+    FakeShaderDevice multisample_device(Backend::D3D12);
+    auto multisample_request = request;
+    multisample_request.targets.colors.front().samples = 4U;
+    multisample_request.targets.depth.samples = 4U;
+    const auto multisample = prepare_stock_material_execution(
+        multisample_device, multisample_request);
+    require(!multisample.ok() &&
+                multisample.diagnostic.code ==
+                    "stock_material_d3d12_native_target_unsupported" &&
+                multisample_device.shader_calls == 0U &&
+                multisample_device.buffer_calls == 0U &&
+                multisample_device.sampler_calls == 0U,
+            "native multisampling rejects before backend allocation");
+
     auto prepared = prepare_stock_material_execution(device, request);
     require(prepared.ok() && prepared.resources->draw_count() == 1U &&
                 prepared.resources->stock_d3d12_native_program_count() == 1U &&
@@ -1506,23 +1581,27 @@ void executes_a_validated_native_program_through_the_static_scene_batch() {
         1U, 1U, 1U, 1U, TextureFormat::rgba8_unorm,
         TextureUsage::sampled, TextureMemory::device_local,
         TextureMutability::immutable};
-    FakeNativeTexture diffuse(Backend::D3D12, sampled_description);
-    const std::array<const Texture*, 1U> textures = {&diffuse};
+    FakeNativeTexture diffuse(Backend::D3D12, sampled_description, &device);
+    const std::array<const Texture*, 2U> textures = {&diffuse, nullptr};
     std::array<FakeNativeDepth, 3U> shadow_maps = {
         FakeNativeDepth(Backend::D3D12,
-                        {32U, 32U, 1U, DepthAttachmentFormat::d32_float, true}),
+                        {32U, 32U, 1U, DepthAttachmentFormat::d32_float, true},
+                        &device),
         FakeNativeDepth(Backend::D3D12,
-                        {32U, 32U, 1U, DepthAttachmentFormat::d32_float, true}),
+                        {32U, 32U, 1U, DepthAttachmentFormat::d32_float, true},
+                        &device),
         FakeNativeDepth(Backend::D3D12,
-                        {32U, 32U, 1U, DepthAttachmentFormat::d32_float, true})};
+                        {32U, 32U, 1U, DepthAttachmentFormat::d32_float, true},
+                        &device)};
     FakeNativeDepth depth(
         Backend::D3D12,
-        {16U, 16U, 1U, DepthAttachmentFormat::d32_float, false});
+        {16U, 16U, 1U, DepthAttachmentFormat::d32_float, false}, &device);
     FakeNativeTexture target(
         Backend::D3D12,
         {16U, 16U, 1U, 1U, TextureFormat::rgba8_unorm,
          TextureUsage::color_attachment | TextureUsage::transfer_source,
-         TextureMemory::device_local, TextureMutability::mutable_data});
+         TextureMemory::device_local, TextureMutability::mutable_data},
+        &device);
 
     StaticSceneFrameDescription::StockNativeFrame native_frame;
     native_frame.camera = make_stock_ks_per_pixel_camera_constants(
@@ -1555,6 +1634,79 @@ void executes_a_validated_native_program_through_the_static_scene_batch() {
             drawn.diagnostic.code.empty()
                 ? "native static scene submits one exact D3D12 authority draw"
                 : drawn.diagnostic.code.c_str());
+
+    FakeShaderDevice foreign_device(Backend::D3D12);
+    FakeNativeTexture foreign_target(
+        Backend::D3D12, target.info().description, &foreign_device);
+    const std::size_t updates_before_rejection = device.buffer_update_calls;
+    const std::size_t batches_before_rejection = device.batch_calls;
+    auto rejected = prepared.resources->draw_and_readback(
+        device, foreign_target, frame);
+    require(!rejected.ok() &&
+                rejected.diagnostic.code ==
+                    "static_scene_target_device_mismatch" &&
+                device.buffer_update_calls == updates_before_rejection &&
+                device.batch_calls == batches_before_rejection,
+            "foreign same-backend targets reject before native updates");
+
+    frame.resolve_target = &foreign_target;
+    rejected = prepared.resources->draw_and_readback(device, target, frame);
+    require(!rejected.ok() &&
+                rejected.diagnostic.code ==
+                    "static_scene_resolve_target_device_mismatch" &&
+                device.buffer_update_calls == updates_before_rejection &&
+                device.batch_calls == batches_before_rejection,
+            "foreign same-backend resolve targets reject before native updates");
+    frame.resolve_target = nullptr;
+
+    FakeNativeDepth foreign_depth(
+        Backend::D3D12, depth.info().description, &foreign_device);
+    frame.depth_attachment = &foreign_depth;
+    rejected = prepared.resources->draw_and_readback(device, target, frame);
+    require(!rejected.ok() &&
+                rejected.diagnostic.code ==
+                    "static_scene_depth_attachment_device_mismatch" &&
+                device.buffer_update_calls == updates_before_rejection &&
+                device.batch_calls == batches_before_rejection,
+            "foreign same-backend depth rejects before native updates");
+    frame.depth_attachment = &depth;
+
+    FakeNativeTexture foreign_diffuse(
+        Backend::D3D12, diffuse.info().description, &foreign_device);
+    const std::array<const Texture*, 2U> foreign_textures = {
+        &foreign_diffuse, nullptr};
+    frame.textures_by_global_index = foreign_textures;
+    rejected = prepared.resources->draw_and_readback(device, target, frame);
+    require(!rejected.ok() &&
+                rejected.diagnostic.code ==
+                    "static_scene_texture_device_mismatch" &&
+                device.buffer_update_calls == updates_before_rejection &&
+                device.batch_calls == batches_before_rejection,
+            "foreign same-backend diffuse rejects before native updates");
+    frame.textures_by_global_index = textures;
+
+    FakeNativeDepth foreign_shadow(
+        Backend::D3D12, shadow_maps[0U].info().description,
+        &foreign_device);
+    frame.stock_d3d12_native_frame->shadow_maps[0U] = &foreign_shadow;
+    rejected = prepared.resources->draw_and_readback(device, target, frame);
+    require(!rejected.ok() &&
+                rejected.diagnostic.code ==
+                    "static_scene_stock_d3d12_native_shadow_map_device_mismatch" &&
+                device.buffer_update_calls == updates_before_rejection &&
+                device.batch_calls == batches_before_rejection,
+            "foreign same-backend native shadow maps reject before updates");
+
+    frame.stock_d3d12_native_frame->shadow_maps[0U] = &shadow_maps[0U];
+    const std::array<const Texture*, 2U> unused_foreign_texture = {
+        &diffuse, &foreign_diffuse};
+    frame.textures_by_global_index = unused_foreign_texture;
+    const auto unused_foreign = prepared.resources->draw_and_readback(
+        device, target, frame);
+    require(unused_foreign.ok() &&
+                device.buffer_update_calls == updates_before_rejection + 4U &&
+                device.batch_calls == batches_before_rejection + 1U,
+            "unused foreign caller-table entries do not reject a native draw");
 }
 
 void allocates_only_validated_native_d3d12_shader_objects() {
