@@ -1153,12 +1153,6 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                 [](std::uint32_t value) {
                     return value != invalid_static_scene_source_program_index;
                 }));
-        if (d3d12_native_packet_count != 0U &&
-            d3d12_native_packet_count != packets.size())
-            return fail(
-                StaticSceneResourceStatus::unsupported,
-                "stock_material_d3d12_native_mixed_scene_unsupported",
-                "The first installed D3D12 batch slice cannot mix native and portable packets");
         if (d3d12_native_packet_count >
             max_stock_ks_per_pixel_native_batch_draws)
             return fail(

@@ -258,7 +258,11 @@ public:
         ++batch_calls;
         native_draws = 0U;
         native_resource_owners.clear();
+        batch_nodes.clear();
         for (const IndexedStaticMeshDrawRequest& draw : batch.draws) {
+            batch_nodes.push_back(draw.packet == nullptr
+                                      ? apex::scene::invalid_node_id
+                                      : draw.packet->node);
             if (draw.shader_authority !=
                 IndexedShaderAuthority::explicit_stock_ks_per_pixel_native)
                 continue;
@@ -292,6 +296,7 @@ public:
     std::vector<SamplerDescription> sampler_descriptions;
     std::vector<const StockKsPerPixelNativeDrawResources*>
         native_resource_owners;
+    std::vector<apex::scene::NodeId> batch_nodes;
 
 private:
     DeviceInfo info_{};
@@ -1664,6 +1669,80 @@ void executes_a_validated_native_program_through_the_static_scene_batch() {
                 duplicate_mixed_device.sampler_calls == 0U,
             "combined native selection rejects duplicate base keys before allocation");
 
+    // A material-name module set makes the second packet explicitly portable
+    // while the first matching ksPerPixel material still selects the native
+    // owner. This is the sparse ownership handoff exercised by StaticScene.
+    auto sparse_model = model;
+    sparse_model.materials.push_back(model.materials[0U]);
+    sparse_model.materials[1U].name = "portable-body";
+    sparse_model.root.children[1U].materialId = 1U;
+    auto sparse_scene = scene;
+    sparse_scene.materials.push_back(
+        {"portable-body", "ksPerPixel", apex::scene::BlendMode::opaque});
+    sparse_scene.nodes[second_node_id].material = 1U;
+    auto sparse_packets = packets;
+    sparse_packets[1U].material = 1U;
+    auto sparse_portable_program = validated_program_fixture();
+    const std::array<PipelineShaderModule, 2U> sparse_portable_modules = {{
+        {PipelineShaderStage::vertex, PipelineShaderFormat::dxbc,
+         std::vector<std::uint8_t>(
+             sparse_portable_program.vertex_shader().begin(),
+             sparse_portable_program.vertex_shader().end())},
+        {PipelineShaderStage::fragment, PipelineShaderFormat::dxbc,
+         std::vector<std::uint8_t>(
+             sparse_portable_program.pixel_shader().begin(),
+             sparse_portable_program.pixel_shader().end())},
+    }};
+    const std::array<StockMaterialShaderModules, 1U> sparse_module_sets = {{
+        {StockMaterialShaderKeyKind::material_name, "portable-body",
+         sparse_portable_modules, StockMaterialShaderVariant::standard, false},
+    }};
+    auto sparse_request = request;
+    sparse_request.model = &sparse_model;
+    sparse_request.scene = &sparse_scene;
+    sparse_request.packets = sparse_packets;
+    sparse_request.shader_modules = sparse_module_sets;
+    FakeShaderDevice sparse_device(Backend::D3D12);
+    const auto sparse_prepared = prepare_stock_material_execution(
+        sparse_device, sparse_request);
+    require(sparse_prepared.ok() &&
+                sparse_prepared.resources->draw_count() == 2U &&
+                sparse_prepared.resources
+                        ->stock_d3d12_native_program_count() == 1U &&
+                sparse_prepared.resources
+                        ->requires_stock_d3d12_native_frame(),
+            sparse_prepared.diagnostic.code.empty()
+                ? "sparse native and portable scene preparation"
+                : sparse_prepared.diagnostic.code.c_str());
+
+    auto sparse_missing_owner_request = sparse_request;
+    sparse_missing_owner_request.builtin_d3d12_native_programs = {};
+    FakeShaderDevice sparse_missing_owner_device(Backend::D3D12);
+    const auto sparse_missing_owner = prepare_stock_material_execution(
+        sparse_missing_owner_device, sparse_missing_owner_request);
+    require(!sparse_missing_owner.ok() &&
+                sparse_missing_owner.diagnostic.code ==
+                    "stock_material_d3d12_native_program_count_invalid" &&
+                sparse_missing_owner_device.shader_calls == 0U &&
+                sparse_missing_owner_device.buffer_calls == 0U &&
+                sparse_missing_owner_device.sampler_calls == 0U,
+            "sparse native selection still requires its owner before allocation");
+
+    auto sparse_limit_request = sparse_request;
+    sparse_limit_request.limits.scene.max_total_update_bytes =
+        static_cast<std::uint64_t>(
+            stock_ks_per_pixel_native_constant_buffer_view_bytes) * 3U;
+    FakeShaderDevice sparse_limit_device(Backend::D3D12);
+    const auto sparse_limited = prepare_stock_material_execution(
+        sparse_limit_device, sparse_limit_request);
+    require(!sparse_limited.ok() &&
+                sparse_limited.diagnostic.code ==
+                    "static_scene_stock_d3d12_native_update_aggregate_limit" &&
+                sparse_limit_device.shader_calls == 0U &&
+                sparse_limit_device.buffer_calls == 0U &&
+                sparse_limit_device.sampler_calls == 0U,
+            "sparse native update limits reject before allocation");
+
     constexpr std::uint64_t per_draw_native_constant_bytes =
         static_cast<std::uint64_t>(
             stock_ks_per_pixel_native_constant_buffer_view_bytes) *
@@ -1865,6 +1944,79 @@ void executes_a_validated_native_program_through_the_static_scene_batch() {
                                        second_packet.world_matrix) &&
                 first_object.world != second_object.world,
             "separate native draws retain independent object transforms");
+
+    FakeNativeTexture sparse_diffuse(
+        Backend::D3D12, diffuse.info().description, &sparse_device);
+    FakeNativeSampler sparse_sampler(
+        Backend::D3D12, SamplerDescription{});
+    const std::array<const Texture*, 2U> sparse_textures = {
+        &sparse_diffuse, nullptr};
+    const std::array<const Sampler*, 2U> sparse_samplers = {
+        &sparse_sampler, nullptr};
+    std::array<FakeNativeDepth, 3U> sparse_shadow_maps = {
+        FakeNativeDepth(Backend::D3D12,
+                        {32U, 32U, 1U, DepthAttachmentFormat::d32_float, true},
+                        &sparse_device),
+        FakeNativeDepth(Backend::D3D12,
+                        {32U, 32U, 1U, DepthAttachmentFormat::d32_float, true},
+                        &sparse_device),
+        FakeNativeDepth(Backend::D3D12,
+                        {32U, 32U, 1U, DepthAttachmentFormat::d32_float, true},
+                        &sparse_device)};
+    FakeNativeDepth sparse_depth(
+        Backend::D3D12,
+        {16U, 16U, 1U, DepthAttachmentFormat::d32_float, false},
+        &sparse_device);
+    FakeNativeTexture sparse_target(
+        Backend::D3D12, target.info().description, &sparse_device);
+    StaticSceneFrameDescription::StockNativeFrame sparse_native_frame;
+    sparse_native_frame.camera = make_stock_ks_per_pixel_camera_constants(
+        camera.frame->view, camera.frame->projection,
+        apex::scene::identity_matrix, {0.0F, 0.0F, 2.0F}, 0.1F,
+        100.0F, camera.frame->fov_radians);
+    sparse_native_frame.lighting.light_direction = {0.0F, -1.0F, 0.0F};
+    sparse_native_frame.shadow_constants =
+        make_stock_directional_shadow_receiver_constants(
+            {apex::scene::identity_matrix, apex::scene::identity_matrix,
+             apex::scene::identity_matrix},
+            {0.0F, 0.0F, 0.0F}, 32U);
+    sparse_native_frame.shadow_maps = {
+        &sparse_shadow_maps[0U], &sparse_shadow_maps[1U],
+        &sparse_shadow_maps[2U]};
+    StaticSceneFrameDescription sparse_frame;
+    sparse_frame.camera = *camera.frame;
+    sparse_frame.depth_attachment = &sparse_depth;
+    sparse_frame.clear_depth = true;
+    sparse_frame.textures_by_global_index = sparse_textures;
+    sparse_frame.samplers_by_global_index = sparse_samplers;
+    sparse_frame.frame_constants = KsPerPixelFrameConstants{};
+    sparse_frame.stock_d3d12_native_frame = sparse_native_frame;
+    const auto sparse_draw = sparse_prepared.resources->draw_and_readback(
+        sparse_device, sparse_target, sparse_frame);
+    require(sparse_draw.ok() && sparse_device.batch_calls == 1U &&
+                sparse_device.native_draws == 1U &&
+                sparse_device.native_resource_owners.size() == 1U &&
+                sparse_device.native_resource_owners.front() != nullptr &&
+                sparse_device.native_resource_owners.front()->ready() &&
+                sparse_device.batch_nodes ==
+                    std::vector<apex::scene::NodeId>{node_id, second_node_id} &&
+                sparse_device.buffer_update_calls == 5U,
+            sparse_draw.diagnostic.code.empty()
+                ? "sparse scene updates and submits only its native packet"
+                : sparse_draw.diagnostic.code.c_str());
+    const std::array<std::uint32_t, 2U> sparse_reverse_order = {1U, 0U};
+    sparse_frame.color_packet_order = sparse_reverse_order;
+    const auto sparse_reverse_draw =
+        sparse_prepared.resources->draw_and_readback(
+            sparse_device, sparse_target, sparse_frame);
+    require(sparse_reverse_draw.ok() && sparse_device.batch_calls == 2U &&
+                sparse_device.native_draws == 1U &&
+                sparse_device.batch_nodes ==
+                    std::vector<apex::scene::NodeId>{second_node_id, node_id} &&
+                sparse_device.buffer_update_calls == 10U,
+            sparse_reverse_draw.diagnostic.code.empty()
+                ? "sparse scene preserves a caller-supplied reverse order"
+                : sparse_reverse_draw.diagnostic.code.c_str());
 
     FakeShaderDevice foreign_device(Backend::D3D12);
     FakeNativeTexture foreign_target(
@@ -2396,16 +2548,46 @@ void validates_complete_native_draw_bindings_before_execution() {
                 IndexedStaticMeshBatchStatus::unsupported &&
                 diagnostic.code == "indexed_stock_native_batch_draw_limit",
             "native-only batch preserves the D3D12 sampler-heap bound");
-    auto mixed_requests = native_requests;
-    mixed_requests[1U].shader_authority =
-        IndexedShaderAuthority::packet_contract;
-    native_batch.draws = mixed_requests;
-    require(validate_indexed_static_mesh_batch_description(
-                target, native_batch, diagnostic) ==
-                IndexedStaticMeshBatchStatus::unsupported &&
-                diagnostic.code ==
-                    "indexed_stock_native_batch_mixed_unsupported",
-            "mixed native and portable batch is explicitly unsupported");
+    // A sparse batch keeps the installed native authority on only one draw;
+    // the other draw uses an ordinary executable D3D12 pipeline.  Exercise
+    // both orderings because the first draw owns the batch clear/load state.
+    auto portable_program = validated_program_fixture();
+    PipelineProgram portable_pipeline = pipeline;
+    portable_pipeline.name = "portable-ks-per-pixel-batch-state";
+    portable_pipeline.transform_contract =
+        PipelineTransformContract::draw_matrices;
+    portable_pipeline.shaders = {
+        {PipelineShaderStage::vertex, PipelineShaderFormat::dxbc,
+         std::vector<std::uint8_t>(portable_program.vertex_shader().begin(),
+                                   portable_program.vertex_shader().end())},
+        {PipelineShaderStage::fragment, PipelineShaderFormat::dxbc,
+         std::vector<std::uint8_t>(portable_program.pixel_shader().begin(),
+                                   portable_program.pixel_shader().end())},
+    };
+    CameraFrame portable_camera;
+    portable_camera.clip_space = CameraClipSpace::d3d12;
+    DrawPacket portable_packet = packet;
+    portable_packet.shader_execution_supported = true;
+    IndexedStaticMeshDrawRequest portable_request = request;
+    portable_request.packet = &portable_packet;
+    portable_request.pipeline = &portable_pipeline;
+    portable_request.camera_frame = portable_camera;
+    portable_request.shader_authority =
+        IndexedShaderAuthority::explicit_pipeline;
+    portable_request.stock_ks_per_pixel_native = nullptr;
+    const std::array<IndexedStaticMeshDrawRequest, 2U> native_first = {
+        request, portable_request};
+    const std::array<IndexedStaticMeshDrawRequest, 2U> portable_first = {
+        portable_request, request};
+    for (const auto& ordered : {native_first, portable_first}) {
+        native_batch.draws = ordered;
+        require(validate_indexed_static_mesh_batch_description(
+                    target, native_batch, diagnostic) ==
+                    IndexedStaticMeshBatchStatus::ready,
+                diagnostic.code.empty()
+                    ? "sparse native and portable batch preserves either draw ordering"
+                    : diagnostic.code.c_str());
+    }
     native_batch.draws = native_requests;
     native_batch.capture_rgba8 = false;
     require(validate_indexed_static_mesh_batch_description(

@@ -548,19 +548,17 @@ StaticSceneResourceResult prepare_static_scene_resources(
                     "A retained D3D12 native-program index has no valid base or alpha-to-coverage owner");
         }
     }
-    if (has_stock_d3d12_native &&
-        std::any_of(
-            request.stock_d3d12_native_program_by_packet.begin(),
-            request.stock_d3d12_native_program_by_packet.end(),
-            [](std::uint32_t value) {
-                return value == invalid_static_scene_source_program_index;
-            }))
-        return fail(
-            StaticSceneResourceStatus::unsupported,
-            "static_scene_stock_d3d12_native_mixed_scene_unsupported",
-            "The first installed D3D12 batch slice cannot mix native and portable packets");
-    if (has_stock_d3d12_native &&
-        request.packets.size() > max_stock_ks_per_pixel_native_batch_draws)
+    const std::size_t stock_d3d12_native_packet_count =
+        has_stock_d3d12_native_table
+            ? static_cast<std::size_t>(std::count_if(
+                  request.stock_d3d12_native_program_by_packet.begin(),
+                  request.stock_d3d12_native_program_by_packet.end(),
+                  [](std::uint32_t value) {
+                      return value != invalid_static_scene_source_program_index;
+                  }))
+            : 0U;
+    if (stock_d3d12_native_packet_count >
+        max_stock_ks_per_pixel_native_batch_draws)
         return fail(
             StaticSceneResourceStatus::unsupported,
             "static_scene_stock_d3d12_native_draw_limit",

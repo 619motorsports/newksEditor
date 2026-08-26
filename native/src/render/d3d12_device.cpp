@@ -1470,6 +1470,36 @@ void configure_d3d12_blend_state(const PipelineBlendState& source,
     target.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
 }
 
+[[nodiscard]] D3D12_TEXTURE_ADDRESS_MODE d3d12_batch_sampler_address(
+    SamplerAddressMode mode) noexcept {
+    switch (mode) {
+    case SamplerAddressMode::repeat: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    case SamplerAddressMode::mirrored_repeat: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
+    case SamplerAddressMode::clamp_to_edge: return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    case SamplerAddressMode::clamp_to_border: return D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    }
+    return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+}
+
+[[nodiscard]] bool create_d3d12_batch_srv(ID3D12Device* device,
+                                           ID3D12Resource* resource,
+                                           DXGI_FORMAT format,
+                                           D3D12_CPU_DESCRIPTOR_HANDLE destination) noexcept {
+    if (device == nullptr || resource == nullptr) return false;
+    const D3D12_RESOURCE_DESC description = resource->GetDesc();
+    if (description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        description.Width == 0U || description.Height == 0U ||
+        description.MipLevels == 0U || description.SampleDesc.Count != 1U)
+        return false;
+    D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+    view.Format = format;
+    view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    view.Texture2D.MipLevels = description.MipLevels;
+    device->CreateShaderResourceView(resource, &view, destination);
+    return true;
+}
+
 struct D3D12GeometryDescriptor {
     ID3D12Resource* vertex_resource = nullptr;
     UINT64 vertex_offset = 0U;
@@ -1487,6 +1517,12 @@ struct D3D12IndexedBatchDraw {
     D3D12GeometryDescriptor geometry{};
     const PipelineProgram* pipeline = nullptr;
     const IndexedStaticMeshDrawRequest* scene_request = nullptr;
+    // Native stock ksPerPixel draws use a different root signature and
+    // descriptor ABI from the portable indexed path.  Keep the raw bridge
+    // record alongside the common geometry so a hybrid batch can select the
+    // correct pipeline at the original visitor position.
+    bool native_stock_ks_per_pixel = false;
+    D3D12StockKsPerPixelNativeBatchDraw native_stock_draw{};
     DrawMatrices matrices{};
     const D3D12Buffer* selected_color = nullptr;
     UINT64 selected_color_offset = 0U;
@@ -2471,7 +2507,10 @@ bool draw_indexed_static_mesh_batch_and_readback(
     bool has_damage_texture = false;
     bool has_damage_mask_texture = false;
     bool has_shadow_receiver = false;
-    for (const IndexedStaticMeshDrawRequest& request : batch.draws) {
+    for (const D3D12IndexedBatchDraw& draw : draws) {
+        if (draw.native_stock_ks_per_pixel || draw.scene_request == nullptr)
+            continue;
+        const IndexedStaticMeshDrawRequest& request = *draw.scene_request;
         if (!request.pipeline->resources.empty()) {
             has_material_resources = true;
             has_material_constants = has_material_constants ||
@@ -2532,7 +2571,9 @@ bool draw_indexed_static_mesh_batch_and_readback(
         }
         material_bindings.resize(draws.size());
         for (std::size_t index = 0; index < draws.size(); ++index) {
-            if (draws[index].scene_request == nullptr) continue;
+            if (draws[index].scene_request == nullptr ||
+                draws[index].native_stock_ks_per_pixel)
+                continue;
             const std::size_t descriptor_index = index * material_descriptor_stride;
             if (!prepare_d3d12_material_binding(context, *draws[index].scene_request, srv_heap.Get(),
                                                  static_cast<UINT>(descriptor_index),
@@ -2589,6 +2630,149 @@ bool draw_indexed_static_mesh_batch_and_readback(
         }
     }
 
+    constexpr std::size_t native_cbv_srv_descriptors_per_draw = 11U;
+    constexpr std::size_t native_sampler_descriptors_per_draw = 2U;
+    std::vector<UINT> native_descriptor_bases(draws.size(), std::numeric_limits<UINT>::max());
+    std::vector<UINT> native_sampler_bases(draws.size(), std::numeric_limits<UINT>::max());
+    std::size_t native_draw_count = 0U;
+    for (const D3D12IndexedBatchDraw& draw : draws)
+        native_draw_count += draw.native_stock_ks_per_pixel ? 1U : 0U;
+    ComPtr<ID3D12DescriptorHeap> native_srv_heap;
+    ComPtr<ID3D12DescriptorHeap> native_sampler_heap;
+    if (native_draw_count != 0U) {
+        if (native_draw_count > 4096U ||
+            native_draw_count > std::numeric_limits<std::size_t>::max() /
+                                    native_cbv_srv_descriptors_per_draw ||
+            native_draw_count * native_cbv_srv_descriptors_per_draw >
+                static_cast<std::size_t>(std::numeric_limits<UINT>::max()) ||
+            native_draw_count > D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE /
+                                    native_sampler_descriptors_per_draw) {
+            diagnostic = {"indexed_stock_native_batch_descriptor_count_invalid",
+                          "Hybrid D3D12 batch descriptor count exceeds bounded limits"};
+            return false;
+        }
+        D3D12_DESCRIPTOR_HEAP_DESC heap_description{};
+        heap_description.NumDescriptors = static_cast<UINT>(
+            native_draw_count * native_cbv_srv_descriptors_per_draw);
+        heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        result = context->device->CreateDescriptorHeap(&heap_description,
+                                                        IID_PPV_ARGS(&native_srv_heap));
+        if (FAILED(result)) {
+            diagnostic = hresult_error("CreateDescriptorHeap(hybrid native CBV/SRV)", result);
+            diagnostic.code = "indexed_static_mesh_batch_pipeline_failed";
+            return false;
+        }
+        heap_description.NumDescriptors = static_cast<UINT>(
+            native_draw_count * native_sampler_descriptors_per_draw);
+        heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+        result = context->device->CreateDescriptorHeap(&heap_description,
+                                                        IID_PPV_ARGS(&native_sampler_heap));
+        if (FAILED(result)) {
+            diagnostic = hresult_error("CreateDescriptorHeap(hybrid native sampler)", result);
+            diagnostic.code = "indexed_static_mesh_batch_pipeline_failed";
+            return false;
+        }
+        const UINT cbv_stride = context->device->GetDescriptorHandleIncrementSize(
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        const UINT sampler_stride = context->device->GetDescriptorHandleIncrementSize(
+            D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+        const auto cpu_handle = [](D3D12_CPU_DESCRIPTOR_HANDLE start, UINT stride,
+                                   std::size_t index_value) {
+            start.ptr += static_cast<SIZE_T>(index_value) * stride;
+            return start;
+        };
+        const D3D12_CPU_DESCRIPTOR_HANDLE cbv_start =
+            native_srv_heap->GetCPUDescriptorHandleForHeapStart();
+        const D3D12_CPU_DESCRIPTOR_HANDLE sampler_start =
+            native_sampler_heap->GetCPUDescriptorHandleForHeapStart();
+        std::size_t native_index = 0U;
+        for (std::size_t index = 0U; index < draws.size(); ++index) {
+            const D3D12IndexedBatchDraw& draw = draws[index];
+            if (!draw.native_stock_ks_per_pixel) continue;
+            const D3D12StockKsPerPixelNativeBatchDraw& native = draw.native_stock_draw;
+            if (native.shader_program == nullptr || native.constant_buffers == nullptr ||
+                native.samplers == nullptr || native.diffuse_texture == nullptr ||
+                native.diffuse_format == DXGI_FORMAT_UNKNOWN ||
+                std::any_of(native.constant_buffer_resources.begin(),
+                            native.constant_buffer_resources.end(),
+                            [](ID3D12Resource* value) { return value == nullptr; }) ||
+                std::any_of(native.shadow_maps.begin(), native.shadow_maps.end(),
+                            [](ID3D12Resource* value) { return value == nullptr; })) {
+                diagnostic = {"indexed_stock_native_batch_binding_missing",
+                              "Hybrid native draw binding is incomplete"};
+                return false;
+            }
+            const std::size_t base = native_index * native_cbv_srv_descriptors_per_draw;
+            native_descriptor_bases[index] = static_cast<UINT>(base);
+            native_sampler_bases[index] = static_cast<UINT>(native_index * native_sampler_descriptors_per_draw);
+            for (std::size_t constant_index = 0U; constant_index < 4U; ++constant_index) {
+                D3D12_CONSTANT_BUFFER_VIEW_DESC view{
+                    native.constant_buffer_resources[constant_index]->GetGPUVirtualAddress(), 256U};
+                context->device->CreateConstantBufferView(
+                    &view, cpu_handle(cbv_start, cbv_stride, base + constant_index));
+            }
+            constexpr std::array<std::size_t, 3U> pixel_sources = {2U, 3U, 4U};
+            for (std::size_t constant_index = 0U; constant_index < pixel_sources.size(); ++constant_index) {
+                D3D12_CONSTANT_BUFFER_VIEW_DESC view{
+                    native.constant_buffer_resources[pixel_sources[constant_index]]->GetGPUVirtualAddress(), 256U};
+                context->device->CreateConstantBufferView(
+                    &view, cpu_handle(cbv_start, cbv_stride, base + 4U + constant_index));
+            }
+            bool views_valid = create_d3d12_batch_srv(
+                context->device.Get(), native.diffuse_texture, native.diffuse_format,
+                cpu_handle(cbv_start, cbv_stride, base + 7U));
+            for (std::size_t shadow_index = 0U;
+                 shadow_index < native.shadow_maps.size() && views_valid; ++shadow_index) {
+                views_valid = create_d3d12_batch_srv(
+                    context->device.Get(), native.shadow_maps[shadow_index],
+                    DXGI_FORMAT_R32_FLOAT,
+                    cpu_handle(cbv_start, cbv_stride, base + 8U + shadow_index));
+            }
+            if (!views_valid) {
+                diagnostic = {"indexed_stock_native_batch_view_invalid",
+                              "Hybrid native draw SRV creation requires 2D textures"};
+                return false;
+            }
+            const Sampler* linear_sampler = native.samplers->sampler(
+                StockKsPerPixelNativeSamplerSlot::linear);
+            const Sampler* shadow_sampler = native.samplers->sampler(
+                StockKsPerPixelNativeSamplerSlot::shadow);
+            if (linear_sampler == nullptr || shadow_sampler == nullptr) {
+                diagnostic = {"indexed_stock_native_batch_sampler_missing",
+                              "Hybrid native draw samplers are incomplete"};
+                return false;
+            }
+            const SamplerDescription& linear = linear_sampler->info().description;
+            const SamplerDescription& shadow = shadow_sampler->info().description;
+            D3D12_SAMPLER_DESC linear_desc{};
+            linear_desc.Filter = D3D12_FILTER_ANISOTROPIC;
+            linear_desc.AddressU = d3d12_batch_sampler_address(linear.address_u);
+            linear_desc.AddressV = d3d12_batch_sampler_address(linear.address_v);
+            linear_desc.AddressW = d3d12_batch_sampler_address(linear.address_w);
+            linear_desc.MipLODBias = linear.mip_lod_bias;
+            linear_desc.MaxAnisotropy = static_cast<UINT>(linear.max_anisotropy);
+            linear_desc.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+            linear_desc.MinLOD = linear.min_lod;
+            linear_desc.MaxLOD = linear.max_lod;
+            context->device->CreateSampler(
+                &linear_desc, cpu_handle(sampler_start, sampler_stride,
+                                          native_index * native_sampler_descriptors_per_draw));
+            D3D12_SAMPLER_DESC shadow_desc{};
+            shadow_desc.Filter = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+            shadow_desc.AddressU = d3d12_batch_sampler_address(shadow.address_u);
+            shadow_desc.AddressV = d3d12_batch_sampler_address(shadow.address_v);
+            shadow_desc.AddressW = d3d12_batch_sampler_address(shadow.address_w);
+            shadow_desc.ComparisonFunc = D3D12_COMPARISON_FUNC_LESS;
+            shadow_desc.MinLOD = shadow.min_lod;
+            shadow_desc.MaxLOD = shadow.max_lod;
+            context->device->CreateSampler(
+                &shadow_desc, cpu_handle(sampler_start, sampler_stride,
+                                          native_index * native_sampler_descriptors_per_draw + 1U));
+            ++native_index;
+        }
+    }
+
     std::vector<ComPtr<ID3D12RootSignature>> root_signatures;
     std::vector<ComPtr<ID3D12PipelineState>> pipelines;
     std::vector<UINT> shadow_srv_root_indices(draws.size(), std::numeric_limits<UINT>::max());
@@ -2598,7 +2782,119 @@ bool draw_indexed_static_mesh_batch_and_readback(
                                                    std::numeric_limits<UINT>::max());
     root_signatures.resize(draws.size());
     pipelines.resize(draws.size());
+    const UINT target_sample_quality = destination->GetDesc().SampleDesc.Quality;
     for (std::size_t index = 0; index < draws.size(); ++index) {
+        if (draws[index].native_stock_ks_per_pixel) {
+            const PipelineProgram& program = *draws[index].pipeline;
+            const auto& native = draws[index].native_stock_draw;
+            std::array<D3D12_DESCRIPTOR_RANGE,
+                       stock_ks_per_pixel_d3d12_root_ranges.size()> ranges{};
+            std::array<D3D12_ROOT_PARAMETER,
+                       stock_ks_per_pixel_d3d12_root_ranges.size()> parameters{};
+            for (std::size_t range_index = 0U;
+                 range_index < stock_ks_per_pixel_d3d12_root_ranges.size(); ++range_index) {
+                const auto& source = stock_ks_per_pixel_d3d12_root_ranges[range_index];
+                auto& range = ranges[range_index];
+                range.RangeType = source.register_class == StockShaderRegisterClass::constant_buffer
+                                       ? D3D12_DESCRIPTOR_RANGE_TYPE_CBV
+                                   : source.register_class == StockShaderRegisterClass::sampled_texture
+                                       ? D3D12_DESCRIPTOR_RANGE_TYPE_SRV
+                                       : D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+                range.NumDescriptors = source.descriptor_count;
+                range.BaseShaderRegister = source.base_register;
+                range.RegisterSpace = source.register_space;
+                range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+                parameters[range_index].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                parameters[range_index].DescriptorTable.NumDescriptorRanges = 1U;
+                parameters[range_index].DescriptorTable.pDescriptorRanges = &range;
+                parameters[range_index].ShaderVisibility = source.stages == StockShaderStageMask::vertex
+                                                                 ? D3D12_SHADER_VISIBILITY_VERTEX
+                                                                 : D3D12_SHADER_VISIBILITY_PIXEL;
+            }
+            D3D12_ROOT_SIGNATURE_DESC root_description{};
+            root_description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+            root_description.NumParameters = static_cast<UINT>(parameters.size());
+            root_description.pParameters = parameters.data();
+            ComPtr<ID3DBlob> root_blob;
+            ComPtr<ID3DBlob> root_error;
+            result = D3D12SerializeRootSignature(&root_description, D3D_ROOT_SIGNATURE_VERSION_1,
+                                                 &root_blob, &root_error);
+            if (FAILED(result)) {
+                diagnostic = hresult_error("D3D12SerializeRootSignature(hybrid native)", result);
+                diagnostic.code = "indexed_static_mesh_batch_pipeline_failed";
+                return false;
+            }
+            result = context->device->CreateRootSignature(0U, root_blob->GetBufferPointer(),
+                                                           root_blob->GetBufferSize(),
+                                                           IID_PPV_ARGS(&root_signatures[index]));
+            if (FAILED(result)) {
+                diagnostic = hresult_error("CreateRootSignature(hybrid native)", result);
+                diagnostic.code = "indexed_static_mesh_batch_pipeline_failed";
+                return false;
+            }
+            const D3D12_INPUT_ELEMENT_DESC input[] = {
+                {"POSITION", 0U, DXGI_FORMAT_R32G32B32_FLOAT, 0U, 0U,
+                 D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0U},
+                {"NORMAL", 0U, DXGI_FORMAT_R32G32B32_FLOAT, 0U, 12U,
+                 D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0U},
+                {"TEXCOORD", 0U, DXGI_FORMAT_R32G32_FLOAT, 0U, 24U,
+                 D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0U},
+                {"TANGENT", 0U, DXGI_FORMAT_R32G32B32_FLOAT, 0U, 32U,
+                 D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0U}};
+            const auto vs = native.shader_program->source().vertex_shader();
+            const auto ps = native.shader_program->source().pixel_shader();
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_description{};
+            pipeline_description.pRootSignature = root_signatures[index].Get();
+            pipeline_description.VS = {vs.data(), vs.size()};
+            pipeline_description.PS = {ps.data(), ps.size()};
+            pipeline_description.InputLayout = {input, 4U};
+            pipeline_description.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            pipeline_description.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+            pipeline_description.RasterizerState.CullMode =
+                program.raster.cull == PipelineCullMode::none ? D3D12_CULL_MODE_NONE
+                : program.raster.cull == PipelineCullMode::front ? D3D12_CULL_MODE_FRONT
+                : D3D12_CULL_MODE_BACK;
+            pipeline_description.RasterizerState.FrontCounterClockwise =
+                program.raster.front_face == PipelineFrontFace::counter_clockwise;
+            pipeline_description.RasterizerState.DepthClipEnable = TRUE;
+            pipeline_description.BlendState.AlphaToCoverageEnable =
+                program.blend.alpha_to_coverage ? TRUE : FALSE;
+            pipeline_description.BlendState.RenderTarget[0].SrcBlend =
+                d3d12_pipeline_blend_factor(program.blend.source_color);
+            pipeline_description.BlendState.RenderTarget[0].DestBlend =
+                d3d12_pipeline_blend_factor(program.blend.destination_color);
+            pipeline_description.BlendState.RenderTarget[0].BlendOp =
+                d3d12_pipeline_blend_operation(program.blend.color_operation);
+            pipeline_description.BlendState.RenderTarget[0].SrcBlendAlpha =
+                d3d12_pipeline_blend_factor(program.blend.source_alpha);
+            pipeline_description.BlendState.RenderTarget[0].DestBlendAlpha =
+                d3d12_pipeline_blend_factor(program.blend.destination_alpha);
+            pipeline_description.BlendState.RenderTarget[0].BlendOpAlpha =
+                d3d12_pipeline_blend_operation(program.blend.alpha_operation);
+            pipeline_description.BlendState.RenderTarget[0].RenderTargetWriteMask =
+                D3D12_COLOR_WRITE_ENABLE_ALL;
+            pipeline_description.DepthStencilState.DepthEnable =
+                use_depth && program.depth.test_enabled ? TRUE : FALSE;
+            pipeline_description.DepthStencilState.DepthWriteMask =
+                use_depth && program.depth.write_enabled ? D3D12_DEPTH_WRITE_MASK_ALL
+                                                         : D3D12_DEPTH_WRITE_MASK_ZERO;
+            pipeline_description.DepthStencilState.DepthFunc = use_depth
+                ? d3d12_pipeline_compare(program.depth.compare) : D3D12_COMPARISON_FUNC_ALWAYS;
+            pipeline_description.NumRenderTargets = 1U;
+            pipeline_description.RTVFormats[0] = dxgi_texture_format(description.format);
+            pipeline_description.DSVFormat = use_depth ? DXGI_FORMAT_D32_FLOAT : DXGI_FORMAT_UNKNOWN;
+            pipeline_description.SampleMask = std::numeric_limits<UINT>::max();
+            pipeline_description.SampleDesc.Count = description.samples;
+            pipeline_description.SampleDesc.Quality = target_sample_quality;
+            result = context->device->CreateGraphicsPipelineState(
+                &pipeline_description, IID_PPV_ARGS(&pipelines[index]));
+            if (FAILED(result)) {
+                diagnostic = hresult_error("CreateGraphicsPipelineState(hybrid native)", result);
+                diagnostic.code = "indexed_static_mesh_batch_pipeline_failed";
+                return false;
+            }
+            continue;
+        }
         const PipelineProgram& program = *draws[index].pipeline;
         const PipelineShaderModule* vertex_shader = nullptr;
         const PipelineShaderModule* fragment_shader = nullptr;
@@ -2926,7 +3222,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
         pipeline_description.DSVFormat = use_depth ? DXGI_FORMAT_D32_FLOAT : DXGI_FORMAT_UNKNOWN;
         pipeline_description.SampleMask = std::numeric_limits<UINT>::max();
         pipeline_description.SampleDesc.Count = description.samples;
-        pipeline_description.SampleDesc.Quality = 0U;
+        pipeline_description.SampleDesc.Quality = target_sample_quality;
         result = context->device->CreateGraphicsPipelineState(&pipeline_description, IID_PPV_ARGS(&pipelines[index]));
         if (FAILED(result)) {
             diagnostic = hresult_error("CreateGraphicsPipelineState(indexed batch)", result);
@@ -3065,12 +3361,63 @@ bool draw_indexed_static_mesh_batch_and_readback(
             }
         }
     }
+    struct NativeSampledResource {
+        ID3D12Resource* resource = nullptr;
+        D3D12_RESOURCE_STATES* state = nullptr;
+        D3D12_RESOURCE_STATES before = D3D12_RESOURCE_STATE_COMMON;
+    };
+    std::vector<NativeSampledResource> native_sampled_resources;
+    const auto add_native_sampled_resource = [&](ID3D12Resource* resource,
+                                                  D3D12_RESOURCE_STATES* state) {
+        if (resource == nullptr || state == nullptr) return false;
+        for (std::size_t shadow_index = 0U;
+             shadow_index < shadow_attachments.size(); ++shadow_index) {
+            if (shadow_attachments[shadow_index]->resource() == resource) {
+                if (*state != shadow_states[shadow_index]) return false;
+                return true;
+            }
+        }
+        for (const NativeSampledResource& existing : native_sampled_resources) {
+            if (existing.resource == resource) {
+                return existing.before == *state;
+            }
+        }
+        native_sampled_resources.push_back({resource, state, *state});
+        return true;
+    };
+    for (const D3D12IndexedBatchDraw& draw : draws) {
+        if (!draw.native_stock_ks_per_pixel) continue;
+        const auto& native = draw.native_stock_draw;
+        if (!add_native_sampled_resource(native.diffuse_texture, native.diffuse_state)) {
+            diagnostic = {"indexed_stock_native_batch_resource_alias_invalid",
+                          "Hybrid native sampled resources have inconsistent state tracking"};
+            return false;
+        }
+        for (std::size_t shadow_index = 0U; shadow_index < native.shadow_maps.size(); ++shadow_index) {
+            if (!add_native_sampled_resource(native.shadow_maps[shadow_index],
+                                             native.shadow_states[shadow_index])) {
+                diagnostic = {"indexed_stock_native_batch_resource_alias_invalid",
+                              "Hybrid native sampled resources have inconsistent state tracking"};
+                return false;
+            }
+        }
+    }
     for (std::size_t shadow_index = 0U; shadow_index < shadow_attachments.size(); ++shadow_index) {
         if (shadow_states[shadow_index] == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) continue;
         D3D12_RESOURCE_BARRIER barrier{};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barrier.Transition.pResource = shadow_attachments[shadow_index]->resource();
         barrier.Transition.StateBefore = shadow_states[shadow_index];
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
+    }
+    for (const NativeSampledResource& sampled : native_sampled_resources) {
+        if (sampled.before == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) continue;
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = sampled.resource;
+        barrier.Transition.StateBefore = sampled.before;
         barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         list->ResourceBarrier(1U, &barrier);
@@ -3099,11 +3446,6 @@ bool draw_indexed_static_mesh_batch_and_readback(
         list->ClearDepthStencilView(depth_attachment->dsv(true), D3D12_CLEAR_FLAG_DEPTH,
                                     batch.depth_clear_value, 0U, 0U, nullptr);
     if (!batch.load_color) list->ClearRenderTargetView(rtv, batch.clear_color.data(), 0U, nullptr);
-    if (has_material_resources) {
-        ID3D12DescriptorHeap* descriptor_heaps[] = {srv_heap.Get(), context->sampler_heap.Get()};
-        list->SetDescriptorHeaps(2U, descriptor_heaps);
-    }
-
     for (std::size_t index = 0; index < draws.size(); ++index) {
         const auto& draw = draws[index];
         const bool depth_write = use_depth && draw.pipeline->depth.write_enabled;
@@ -3123,6 +3465,38 @@ bool draw_indexed_static_mesh_batch_and_readback(
         if (use_depth) dsv = depth_attachment->dsv(depth_write);
         list->OMSetRenderTargets(1U, &rtv, FALSE, use_depth ? &dsv : nullptr);
         list->SetGraphicsRootSignature(root_signatures[index].Get());
+        if (draw.native_stock_ks_per_pixel) {
+            ID3D12DescriptorHeap* descriptor_heaps[] = {
+                native_srv_heap.Get(), native_sampler_heap.Get()};
+            list->SetDescriptorHeaps(2U, descriptor_heaps);
+            const UINT cbv_base = native_descriptor_bases[index];
+            const UINT sampler_base = native_sampler_bases[index];
+            const UINT cbv_stride = context->device->GetDescriptorHandleIncrementSize(
+                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            const UINT sampler_stride = context->device->GetDescriptorHandleIncrementSize(
+                D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+            D3D12_GPU_DESCRIPTOR_HANDLE cbv_start =
+                native_srv_heap->GetGPUDescriptorHandleForHeapStart();
+            cbv_start.ptr += static_cast<UINT64>(cbv_base) * cbv_stride;
+            D3D12_GPU_DESCRIPTOR_HANDLE sampler_start =
+                native_sampler_heap->GetGPUDescriptorHandleForHeapStart();
+            sampler_start.ptr += static_cast<UINT64>(sampler_base) * sampler_stride;
+            D3D12_GPU_DESCRIPTOR_HANDLE pixel_cbv = cbv_start;
+            pixel_cbv.ptr += static_cast<UINT64>(4U) * cbv_stride;
+            D3D12_GPU_DESCRIPTOR_HANDLE diffuse = cbv_start;
+            diffuse.ptr += static_cast<UINT64>(7U) * cbv_stride;
+            D3D12_GPU_DESCRIPTOR_HANDLE shadows = cbv_start;
+            shadows.ptr += static_cast<UINT64>(8U) * cbv_stride;
+            list->SetGraphicsRootDescriptorTable(0U, cbv_start);
+            list->SetGraphicsRootDescriptorTable(1U, pixel_cbv);
+            list->SetGraphicsRootDescriptorTable(2U, diffuse);
+            list->SetGraphicsRootDescriptorTable(3U, shadows);
+            list->SetGraphicsRootDescriptorTable(4U, sampler_start);
+        } else {
+            if (has_material_resources) {
+                ID3D12DescriptorHeap* descriptor_heaps[] = {srv_heap.Get(), context->sampler_heap.Get()};
+                list->SetDescriptorHeaps(2U, descriptor_heaps);
+            }
         list->SetGraphicsRoot32BitConstants(0U, static_cast<UINT>(sizeof(DrawMatrices) / sizeof(std::uint32_t)),
                                              &draw.matrices, 0U);
         if (draw.selected_color != nullptr &&
@@ -3212,8 +3586,11 @@ bool draw_indexed_static_mesh_batch_and_readback(
                                                       material_bindings[index].shadow_cbv_gpu);
             }
         }
+        }
         list->SetPipelineState(pipelines[index].Get());
-        list->IASetPrimitiveTopology(d3d12_pipeline_topology(draw.pipeline->raster.fill));
+        list->IASetPrimitiveTopology(draw.native_stock_ks_per_pixel
+                                          ? D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST
+                                          : d3d12_pipeline_topology(draw.pipeline->raster.fill));
         D3D12_VERTEX_BUFFER_VIEW vertex_view{};
         vertex_view.BufferLocation = draw.geometry.vertex_resource->GetGPUVirtualAddress() + draw.geometry.vertex_offset;
         vertex_view.SizeInBytes = draw.geometry.vertex_size;
@@ -3247,6 +3624,16 @@ bool draw_indexed_static_mesh_batch_and_readback(
         barrier.Transition.pResource = shadow_attachments[shadow_index]->resource();
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         barrier.Transition.StateAfter = shadow_states[shadow_index];
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
+    }
+    for (const NativeSampledResource& sampled : native_sampled_resources) {
+        if (sampled.before == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) continue;
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = sampled.resource;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        barrier.Transition.StateAfter = sampled.before;
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         list->ResourceBarrier(1U, &barrier);
     }
@@ -3366,6 +3753,9 @@ bool draw_indexed_static_mesh_batch_and_readback(
         for (std::size_t shadow_index = 0U; shadow_index < shadow_attachments.size(); ++shadow_index)
             shadow_attachments[shadow_index]->set_state(
                 drained ? shadow_states[shadow_index] : D3D12_RESOURCE_STATE_COMMON);
+        for (const NativeSampledResource& sampled : native_sampled_resources)
+            if (sampled.state != nullptr)
+                *sampled.state = drained ? sampled.before : D3D12_RESOURCE_STATE_COMMON;
         diagnostic = hresult_error("D3D12 indexed batch fence", result);
         diagnostic.code = result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET
                               ? "d3d12_device_removed" : "indexed_static_mesh_batch_execution_failed";
@@ -3382,6 +3772,8 @@ bool draw_indexed_static_mesh_batch_and_readback(
     }
     for (std::size_t shadow_index = 0U; shadow_index < shadow_attachments.size(); ++shadow_index)
         shadow_attachments[shadow_index]->set_state(shadow_states[shadow_index]);
+    for (const NativeSampledResource& sampled : native_sampled_resources)
+        if (sampled.state != nullptr) *sampled.state = sampled.before;
     if (!batch.capture_rgba8) {
         output.clear();
         diagnostic = {};
@@ -6379,7 +6771,9 @@ public:
                     {"indexed_static_mesh_batch_context_mismatch",
                      "Batch resources belong to another D3D12 device"}, {}};
         }
-        const bool native_only = !batch.draws.empty() && std::all_of(
+        const bool native_only = batch.selected_mesh_draws.empty() &&
+                                  batch.overlay_draws.empty() &&
+                                  !batch.draws.empty() && std::all_of(
             batch.draws.begin(), batch.draws.end(),
             [](const IndexedStaticMeshDrawRequest& request) {
                 return request.shader_authority ==
@@ -6643,6 +7037,104 @@ public:
                 draw.selected_color = color;
                 draw.selected_color_offset =
                     selected_request->color_offset_bytes;
+            }
+            if (scene_request != nullptr &&
+                scene_request->shader_authority ==
+                    IndexedShaderAuthority::explicit_stock_ks_per_pixel_native) {
+                const StockKsPerPixelNativeDrawBinding* binding =
+                    scene_request->stock_ks_per_pixel_native;
+                const StockKsPerPixelNativeDrawResources* resources =
+                    binding != nullptr ? binding->resources : nullptr;
+                if (resources == nullptr || resources->device() != this ||
+                    !resources->ready() || binding->diffuse_texture == nullptr) {
+                    assembly_status = IndexedStaticMeshBatchStatus::unsupported;
+                    diagnostic = {"indexed_stock_native_batch_binding_missing",
+                                  "Hybrid native draw binding is incomplete"};
+                    return false;
+                }
+                auto* diffuse = const_cast<D3D12Texture*>(dynamic_cast<const D3D12Texture*>(
+                    binding->diffuse_texture));
+                const auto* vertex_shader = dynamic_cast<const D3D12ShaderModule*>(
+                    &resources->shader_program().vertex_shader());
+                const auto* pixel_shader = dynamic_cast<const D3D12ShaderModule*>(
+                    &resources->shader_program().pixel_shader());
+                const auto* linear_sampler = dynamic_cast<const D3D12Sampler*>(
+                    resources->samplers().sampler(StockKsPerPixelNativeSamplerSlot::linear));
+                const auto* shadow_sampler = dynamic_cast<const D3D12Sampler*>(
+                    resources->samplers().sampler(StockKsPerPixelNativeSamplerSlot::shadow));
+                std::array<const D3D12Buffer*, 5U> constants{};
+                for (std::size_t constant_index = 0U;
+                     constant_index < constants.size(); ++constant_index) {
+                    constants[constant_index] = dynamic_cast<const D3D12Buffer*>(
+                        resources->constant_buffers().buffer(
+                            static_cast<StockKsPerPixelNativeConstantSlot>(constant_index)));
+                }
+                std::array<D3D12DepthAttachment*, 3U> shadows{};
+                for (std::size_t shadow_index = 0U;
+                     shadow_index < shadows.size(); ++shadow_index) {
+                    shadows[shadow_index] = const_cast<D3D12DepthAttachment*>(
+                        dynamic_cast<const D3D12DepthAttachment*>(
+                            binding->shadow_maps[shadow_index]));
+                }
+                const bool missing_type =
+                    diffuse == nullptr || vertex_shader == nullptr || pixel_shader == nullptr ||
+                    linear_sampler == nullptr || shadow_sampler == nullptr ||
+                    std::any_of(constants.begin(), constants.end(),
+                                [](const D3D12Buffer* value) { return value == nullptr; }) ||
+                    std::any_of(shadows.begin(), shadows.end(),
+                                [](const D3D12DepthAttachment* value) { return value == nullptr; });
+                const bool foreign_context =
+                    !missing_type &&
+                    (diffuse->context() != context || vertex_shader->context() != context ||
+                     pixel_shader->context() != context || linear_sampler->context() != context ||
+                     shadow_sampler->context() != context ||
+                     std::any_of(constants.begin(), constants.end(),
+                                 [&](const D3D12Buffer* value) { return value->context() != context; }) ||
+                     std::any_of(shadows.begin(), shadows.end(),
+                                 [&](const D3D12DepthAttachment* value) { return value->context() != context; }));
+                if (missing_type || foreign_context) {
+                    assembly_status = IndexedStaticMeshBatchStatus::unsupported;
+                    diagnostic = {foreign_context ? "indexed_stock_native_batch_context_mismatch"
+                                                   : "indexed_stock_native_batch_type_unsupported",
+                                  foreign_context
+                                      ? "Hybrid native resources belong to a different D3D12 device"
+                                      : "Hybrid native binding contains an unknown D3D12 resource handle"};
+                    return false;
+                }
+                if (!diffuse->initialized() ||
+                    std::any_of(shadows.begin(), shadows.end(),
+                                [](const D3D12DepthAttachment* value) { return !value->cleared(); })) {
+                    assembly_status = IndexedStaticMeshBatchStatus::invalid_request;
+                    diagnostic = {"indexed_stock_native_batch_resource_uninitialized",
+                                  "Hybrid native textures and shadow maps must be initialized"};
+                    return false;
+                }
+                D3D12StockKsPerPixelNativeBatchDraw native_draw;
+                native_draw.packet = scene_request->packet;
+                native_draw.pipeline = scene_request->pipeline;
+                native_draw.index_type = scene_request->index_type;
+                native_draw.vertex_buffer = vertex->resource();
+                native_draw.vertex_state = vertex->state();
+                native_draw.index_buffer = index->resource();
+                native_draw.index_state = index->state();
+                native_draw.shader_program = &resources->shader_program();
+                native_draw.constant_buffers = &resources->constant_buffers();
+                native_draw.samplers = &resources->samplers();
+                for (std::size_t constant_index = 0U;
+                     constant_index < constants.size(); ++constant_index)
+                    native_draw.constant_buffer_resources[constant_index] =
+                        constants[constant_index]->resource();
+                native_draw.diffuse_texture = diffuse->resource();
+                native_draw.diffuse_format =
+                    dxgi_texture_format(diffuse->info().description.format);
+                native_draw.diffuse_state = diffuse->state_pointer();
+                for (std::size_t shadow_index = 0U;
+                     shadow_index < shadows.size(); ++shadow_index) {
+                    native_draw.shadow_maps[shadow_index] = shadows[shadow_index]->resource();
+                    native_draw.shadow_states[shadow_index] = shadows[shadow_index]->state_pointer();
+                }
+                draw.native_stock_ks_per_pixel = true;
+                draw.native_stock_draw = native_draw;
             }
             draws.push_back(draw);
             return true;

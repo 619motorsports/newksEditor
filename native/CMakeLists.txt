@@ -441,6 +441,12 @@ if(TARGET render_backend_tests AND WIN32)
   target_link_libraries(render_backend_tests PRIVATE d3dcompiler)
 endif()
 
+if(TARGET stock_ks_per_pixel_d3d12_tests AND WIN32)
+  # The hybrid WARP test compiles a small portable shader pair so one command
+  # list exercises both the caller and recovered native root ABIs.
+  target_link_libraries(stock_ks_per_pixel_d3d12_tests PRIVATE d3dcompiler)
+endif()
+
 if(WIN32 AND APEX_ENABLE_D3D12 AND APEX_NATIVE_WINDOW_AVAILABLE)
   add_executable(d3d12_presentation_tests tests/d3d12_presentation_tests.cpp)
   target_link_libraries(d3d12_presentation_tests PRIVATE ApexEditor::Render ApexEditor::Platform)

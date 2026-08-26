@@ -18,6 +18,11 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#include <d3dcompiler.h>
+#include <wrl/client.h>
+#endif
+
 namespace {
 
 using namespace apex::render;
@@ -101,6 +106,55 @@ PipelineProgram native_pipeline() {
   };
   return pipeline;
 }
+
+#if defined(_WIN32)
+std::vector<std::uint8_t> compile_d3d_shader(std::string_view source,
+                                             std::string_view profile) {
+  using Microsoft::WRL::ComPtr;
+  ComPtr<ID3DBlob> bytecode;
+  ComPtr<ID3DBlob> errors;
+  const HRESULT result = D3DCompile(
+      source.data(), source.size(), "stock_ks_per_pixel_hybrid_warp", nullptr,
+      nullptr, "main", profile.data(), D3DCOMPILE_ENABLE_STRICTNESS, 0U,
+      &bytecode, &errors);
+  if (FAILED(result)) {
+    const std::string message =
+        errors == nullptr
+            ? "D3DCompile failed"
+            : std::string(static_cast<const char *>(errors->GetBufferPointer()),
+                          errors->GetBufferSize());
+    throw std::runtime_error(message);
+  }
+  const auto *begin =
+      static_cast<const std::uint8_t *>(bytecode->GetBufferPointer());
+  return {begin, begin + bytecode->GetBufferSize()};
+}
+
+PipelineProgram portable_magenta_pipeline() {
+  constexpr std::string_view vertex_source = R"(
+struct Input { float3 position : POSITION; };
+struct Output { float4 position : SV_Position; };
+Output main(Input input) {
+  Output output;
+  output.position = float4(input.position, 1.0);
+  return output;
+}
+)";
+  constexpr std::string_view fragment_source = R"(
+float4 main() : SV_Target { return float4(1.0, 0.0, 1.0, 1.0); }
+)";
+  PipelineProgram pipeline = native_pipeline();
+  pipeline.name = "portable-magenta-hybrid-warp";
+  pipeline.targets.colors[0].samples = 4U;
+  pipeline.shaders = {
+      {PipelineShaderStage::vertex, PipelineShaderFormat::dxbc,
+       compile_d3d_shader(vertex_source, "vs_5_0")},
+      {PipelineShaderStage::fragment, PipelineShaderFormat::dxbc,
+       compile_d3d_shader(fragment_source, "ps_5_0")},
+  };
+  return pipeline;
+}
+#endif
 
 apex::formats::Kn5Node triangle_mesh() {
   apex::formats::Kn5Node mesh;
@@ -480,6 +534,53 @@ apex::formats::Kn5Node triangle_mesh() {
           mixed_batch_draw.diagnostic.code.empty()
               ? "mixed base and A2C WARP batch preserves ordered 4x execution"
               : mixed_batch_draw.diagnostic.code);
+
+#if defined(_WIN32)
+  PipelineProgram portable_pipeline = portable_magenta_pipeline();
+  IndexedStaticMeshDrawRequest portable_request =
+      mesh_upload.upload->make_request(portable_pipeline, *camera.frame);
+  portable_request.shader_authority = IndexedShaderAuthority::explicit_pipeline;
+  portable_request.stock_ks_per_pixel_native = nullptr;
+  const std::array<IndexedStaticMeshDrawRequest, 2U>
+      native_then_portable_requests = {base_multisample_request,
+                                       portable_request};
+  IndexedStaticMeshBatchDescription native_then_portable_batch;
+  native_then_portable_batch.draws = native_then_portable_requests;
+  native_then_portable_batch.clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
+  native_then_portable_batch.resolve_target = alpha_resolve.texture.get();
+  const IndexedStaticMeshBatchResult native_then_portable_draw =
+      device_result.device->draw_indexed_static_mesh_batch_and_readback(
+          *alpha_target.texture, native_then_portable_batch);
+  require(native_then_portable_draw.ok() &&
+              native_then_portable_draw.rgba8.size() == 32U * 32U * 4U,
+          native_then_portable_draw.diagnostic.code.empty()
+              ? "native then portable hybrid WARP batch/readback"
+              : native_then_portable_draw.diagnostic.code);
+  require(native_then_portable_draw.rgba8[center] == std::byte{255} &&
+              native_then_portable_draw.rgba8[center + 1U] == std::byte{0} &&
+              native_then_portable_draw.rgba8[center + 2U] == std::byte{255} &&
+              native_then_portable_draw.rgba8[center + 3U] == std::byte{255},
+          "portable draw executes after native draw in visitor order");
+
+  const std::array<IndexedStaticMeshDrawRequest, 2U>
+      portable_then_native_requests = {portable_request,
+                                       base_multisample_request};
+  IndexedStaticMeshBatchDescription portable_then_native_batch =
+      native_then_portable_batch;
+  portable_then_native_batch.draws = portable_then_native_requests;
+  const IndexedStaticMeshBatchResult portable_then_native_draw =
+      device_result.device->draw_indexed_static_mesh_batch_and_readback(
+          *alpha_target.texture, portable_then_native_batch);
+  require(portable_then_native_draw.ok() &&
+              portable_then_native_draw.rgba8.size() == 32U * 32U * 4U,
+          portable_then_native_draw.diagnostic.code.empty()
+              ? "portable then native hybrid WARP batch/readback"
+              : portable_then_native_draw.diagnostic.code);
+  require(portable_then_native_draw.rgba8[center] != std::byte{255} ||
+              portable_then_native_draw.rgba8[center + 1U] != std::byte{0} ||
+              portable_then_native_draw.rgba8[center + 2U] != std::byte{255},
+          "native draw executes after portable draw in visitor order");
+#endif
 
   alpha_batch.capture_rgba8 = false;
   const IndexedStaticMeshBatchResult retained_alpha_batch =

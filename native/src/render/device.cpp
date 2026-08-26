@@ -3079,23 +3079,15 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
             return request.shader_authority ==
                    IndexedShaderAuthority::explicit_stock_ks_per_pixel_native;
         }));
-    const bool native_only =
-        native_draw_count != 0U && native_draw_count == description.draws.size();
-    if (native_draw_count != 0U && !native_only) {
-        diagnostic = {
-            "indexed_stock_native_batch_mixed_unsupported",
-            "A native ksPerPixel batch cannot mix native and portable scene draws"};
-        return IndexedStaticMeshBatchStatus::unsupported;
-    }
-    if (native_only &&
-        description.draws.size() >
+    if (native_draw_count != 0U &&
+        native_draw_count >
             max_stock_ks_per_pixel_native_batch_draws) {
         diagnostic = {
             "indexed_stock_native_batch_draw_limit",
             "The native ksPerPixel batch exceeds its D3D12 sampler-heap draw limit"};
         return IndexedStaticMeshBatchStatus::unsupported;
     }
-    if (native_only &&
+    if (native_draw_count != 0U &&
         (!description.overlay_draws.empty() ||
          !description.selected_mesh_draws.empty())) {
         diagnostic = {
@@ -3347,7 +3339,8 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
                        ? IndexedStaticMeshBatchStatus::unsupported
                        : IndexedStaticMeshBatchStatus::invalid_request;
         }
-        if (native_only) {
+        if (source.shader_authority ==
+            IndexedShaderAuthority::explicit_stock_ks_per_pixel_native) {
             const StockKsPerPixelVariant variant =
                 source.stock_ks_per_pixel_native->resources->shader_program()
                     .source()
@@ -3371,7 +3364,7 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
             }
         }
     }
-    if (native_only) {
+    if (native_draw_count != 0U) {
         const std::uint32_t target_samples =
             texture.info().description.samples;
         if ((native_has_alpha_to_coverage && target_samples != 4U) ||
