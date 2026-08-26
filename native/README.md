@@ -287,21 +287,31 @@ recovered single-selection payload edit.
 The live controller exposes the recovered start, finish, and cancel lifecycle.
 Start clears the selected indices. Finish preserves them. Cancel clears them.
 These operations do not change spline bytes, history, revision, or dirty state.
-A generation identity combines one controller owner with its model revision.
+A generation identity combines one controller owner, model revision, and
+publication number.
 This identity rejects a foreign controller at the same numeric revision.
-It also rejects owner changes, revision rollback, and skipped revisions.
+It also rejects stale publications, owner changes, revision rollback, and
+skipped revisions.
 A controller viewport retains the validated selection pipeline while no marker
 geometry exists. This permits atomic marker removal without viewport recreation.
 The controller can apply one validated point index at runtime.
 View mode replaces the selection unless Control is active.
 Control appends the recovered shorter cyclic range from the final stored index.
 Equal distances use the clicked-to-anchor route. Edit mode always appends.
-The request carries the generation identity and expected edit mode.
-Invalid, foreign, and stale input fails before viewport publication.
+The request carries one snapshot with the generation, input epoch, and mode.
+Each selection or lifecycle change advances the input epoch.
+This rejects queued input after an ABA change in the selection or mode.
+Manual movement requires the snapshot that captured its selected points.
+Each result returns the current snapshot for the next queued command.
+Each overlay swap advances the publication number.
+This rejects stale viewports that have the same model revision.
+Stale input and stale viewport bindings have different status values.
+Invalid, foreign, and stale inputs fail before viewport publication.
 Successful selection keeps spline bytes, history, revision, and dirty state.
 The result contains the final stored index and its normalized point position.
-This API does not resolve a mouse position. Native screen hit testing remains
-pending, and the native window does not expose the point-index operation yet.
+This API does not resolve a mouse position. The native screen-hit producer is
+recovered, but its bounded C++ implementation remains pending.
+The native window does not expose the point-index operation yet.
 The temporary edit-point interpolation path remains pending.
 The native window does not expose these lifecycle calls yet.
 `--save-ai-spline` accepts version 7 and rebuilds the native grid.

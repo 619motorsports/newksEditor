@@ -804,21 +804,29 @@ WorkspaceViewport::replaceAiSplineOverlaysBorrowed(
         return result;
     }
     if (generation.has_value()) {
-        const bool nextRevision =
+        const bool nextModelRevision =
             generation->expected.revision !=
                 std::numeric_limits<std::uint64_t>::max() &&
             generation->replacement.revision ==
                 generation->expected.revision + 1U;
+        const bool validModelRevision =
+            generation->replacement.revision ==
+                generation->expected.revision ||
+            nextModelRevision;
+        const bool nextPublication =
+            generation->expected.publication !=
+                std::numeric_limits<std::uint64_t>::max() &&
+            generation->replacement.publication ==
+                generation->expected.publication + 1U;
         if (!generation->expected.valid() ||
             !generation->replacement.valid() ||
             !generation->expected.sameOwner(generation->replacement) ||
-            (generation->replacement.revision !=
-                 generation->expected.revision &&
-             !nextRevision)) {
+            !validModelRevision || !nextPublication) {
             result.diagnostic = diagnostic(
                 "workspace_viewport_ai_spline_generation_transition_invalid",
                 "AI spline generation replacement must retain its owner and "
-                "use the current or next revision");
+                "use the next publication with the current or next model "
+                "revision");
             return result;
         }
         if (generation->expected != *ai_spline_generation_) {

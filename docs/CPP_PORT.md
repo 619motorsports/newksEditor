@@ -257,30 +257,40 @@ remains unchanged and feature-complete.
   The controller edits a copied session and builds a complete next state.
   It publishes the model only after the viewport accepts all candidate buffers.
   An error keeps the prior model revision and the prior visible generation.
-  The viewport binds each controller update to an owner and model revision.
+  The viewport binds each controller update to an owner, model revision, and
+  publication number.
   A controller cannot use a viewport that belongs to another controller.
-  A replacement keeps its owner and uses the current or next revision.
-  Equal revisions support selection-only lifecycle updates without history.
+  Each replacement keeps its owner and uses the next publication number.
+  The model revision stays current or advances by one.
+  Thus, selection-only publications do not create model history.
   Transactional undo, redo, and baseline reset use the same publication path.
   Dirty state compares canonical current bytes with canonical baseline bytes.
   The controller also ports start, finish, and cancel edit-mode state.
   Start clears the selected indices. Finish preserves them. Cancel clears them.
   These lifecycle calls preserve model bytes, revision, history, and dirty state.
   The controller also accepts one validated spline point index at runtime.
-  The request includes the controller generation and the expected edit mode.
-  This rejects foreign controllers, stale model revisions, and queued input from
-  another edit mode before buffer allocation.
+  The request includes one controller input snapshot.
+  This snapshot contains the generation, input epoch, and edit mode.
+  Each selection or lifecycle change advances the input epoch.
+  This rejects queued input after selection and lifecycle ABA changes.
+  Manual movement also requires the snapshot that captured its selection.
+  Thus, a delayed movement cannot act on replacement selected points.
+  Each visible overlay replacement also advances the publication number.
+  Thus, the controller rejects a stale viewport at the same model revision.
   Edit mode appends the point and ignores Control for range selection.
   View mode without Control replaces the selection with the point.
   Control appends the shorter cyclic range from the final stored index.
   Equal cyclic distances use the clicked-to-anchor route.
   Each addition keeps first-seen order and ignores an existing index.
-  The result returns the final stored index and its normalized point position.
+  Each result returns the current input snapshot for the next queued command.
+  A selection result also returns the final index and normalized position.
+  Stale input and stale viewport bindings have different status values.
   A selection update keeps model bytes, revision, history, and dirty state.
-  It publishes the complete staged overlay set with the current generation.
+  It publishes the complete staged overlay set with the next publication.
   Invalid indices and publication errors keep the old selection and buffers.
-  The request consumes an already resolved index. Native screen hit testing
-  remains pending, so the C++ port does not claim mouse-picking parity.
+  The request consumes an already resolved index. The native screen-hit
+  producer is recovered, but its bounded C++ implementation remains pending.
+  Thus, the C++ port does not claim mouse-picking parity.
   Temporary edit-point interpolation on finish remains pending.
   The native window option `--ai-spline-edit-point` applies one scripted batch
   after viewport setup.

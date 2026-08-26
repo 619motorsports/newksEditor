@@ -224,6 +224,7 @@ struct WorkspaceAiSplineController::State {
     WorkspaceAiSplineOverlaySet overlays;
     std::vector<std::array<float, 2U>> movementForwards;
     WorkspaceViewportAiSplineGeneration generation;
+    std::uint64_t inputEpoch = 0U;
     bool editing = false;
 
     State(authoring::AiSplineSession candidateSession,
@@ -231,12 +232,14 @@ struct WorkspaceAiSplineController::State {
           WorkspaceAiSplineOverlaySet candidateOverlays,
           std::vector<std::array<float, 2U>> candidateMovementForwards,
           WorkspaceViewportAiSplineGeneration candidateGeneration,
+          std::uint64_t candidateInputEpoch = 0U,
           bool candidateEditing = false)
         : session(std::move(candidateSession)),
           configuration(std::move(candidateConfiguration)),
           overlays(std::move(candidateOverlays)),
           movementForwards(std::move(candidateMovementForwards)),
           generation(std::move(candidateGeneration)),
+          inputEpoch(candidateInputEpoch),
           editing(candidateEditing) {}
 };
 
@@ -358,6 +361,19 @@ bool WorkspaceAiSplineController::editing() const noexcept {
     return state_->editing;
 }
 
+WorkspaceAiSplineControllerInputSnapshot
+WorkspaceAiSplineController::inputSnapshot() const noexcept {
+    return {state_->generation, state_->inputEpoch, state_->editing};
+}
+
+WorkspaceAiSplineControllerResult
+WorkspaceAiSplineController::currentResult() const {
+    WorkspaceAiSplineControllerResult result;
+    result.resultingInput = inputSnapshot();
+    result.revision = state_->session.revision();
+    return result;
+}
+
 WorkspaceAiSplineControllerSaveResult
 WorkspaceAiSplineController::buildSaveBytes(
     std::uint64_t expectedRevision) const {
@@ -410,9 +426,8 @@ WorkspaceAiSplineController::buildSaveBytes(
 
 WorkspaceAiSplineControllerResult
 WorkspaceAiSplineController::staleResult() const {
-    WorkspaceAiSplineControllerResult result;
+    auto result = currentResult();
     result.status = WorkspaceAiSplineControllerStatus::stale_revision;
-    result.revision = state_->session.revision();
     result.diagnostic = diagnostic(
         "workspace_ai_spline_controller_revision_stale",
         "AI spline edit revision does not match the current revision");
@@ -421,9 +436,8 @@ WorkspaceAiSplineController::staleResult() const {
 
 WorkspaceAiSplineControllerResult
 WorkspaceAiSplineController::viewportBindingResult() const {
-    WorkspaceAiSplineControllerResult result;
-    result.status = WorkspaceAiSplineControllerStatus::stale_revision;
-    result.revision = state_->session.revision();
+    auto result = currentResult();
+    result.status = WorkspaceAiSplineControllerStatus::stale_state;
     result.diagnostic = diagnostic(
         "workspace_ai_spline_controller_viewport_generation_mismatch",
         "AI spline viewport does not show the current controller revision");
@@ -436,18 +450,36 @@ bool WorkspaceAiSplineController::viewportMatches(
            *viewport.aiSplineGenerationIdentity() == state_->generation;
 }
 
+bool WorkspaceAiSplineController::inputMatches(
+    const WorkspaceAiSplineControllerInputSnapshot& expected) const noexcept {
+    return expected.valid() && expected == inputSnapshot();
+}
+
 WorkspaceAiSplineControllerResult
 WorkspaceAiSplineController::publishCandidate(
     render::Device& device, WorkspaceViewport& viewport,
     authoring::AiSplineSession candidate,
     authoring::AiSplineSessionResult sessionResult) {
-    if (!sessionResult.ok())
-        return sessionFailure(sessionResult, state_->session.revision());
+    if (!sessionResult.ok()) {
+        auto result =
+            sessionFailure(sessionResult, state_->session.revision());
+        result.resultingInput = inputSnapshot();
+        return result;
+    }
     if (!sessionResult.changed) {
-        WorkspaceAiSplineControllerResult result;
+        auto result = currentResult();
         result.status = WorkspaceAiSplineControllerStatus::unchanged;
-        result.revision = state_->session.revision();
         result.applied = sessionResult.applied;
+        return result;
+    }
+    if (state_->generation.publication ==
+        std::numeric_limits<std::uint64_t>::max()) {
+        auto result = currentResult();
+        result.status = WorkspaceAiSplineControllerStatus::unsupported;
+        result.applied = sessionResult.applied;
+        result.diagnostic = diagnostic(
+            "workspace_ai_spline_controller_publication_exhausted",
+            "AI spline overlay publication cannot advance without overflow");
         return result;
     }
 
@@ -455,26 +487,26 @@ WorkspaceAiSplineController::publishCandidate(
         auto built = buildWorkspaceAiSplineOverlays(
             candidate.current(), overlayRequest(state_->configuration));
         if (!built.ok()) {
-            WorkspaceAiSplineControllerResult result;
+            auto result = currentResult();
             result.status = overlayFailureStatus(built.status);
             result.diagnostic = std::move(built.diagnostic);
-            result.revision = state_->session.revision();
             result.applied = sessionResult.applied;
             return result;
         }
         auto nextGeneration = state_->generation;
         nextGeneration.revision = sessionResult.revision;
+        ++nextGeneration.publication;
         auto nextState = std::make_unique<State>(
             std::move(candidate), state_->configuration,
             std::move(built.overlays), state_->movementForwards,
-            std::move(nextGeneration), state_->editing);
+            std::move(nextGeneration), state_->inputEpoch, state_->editing);
         const auto replaced =
             viewport.replaceAiSplineOverlays(
                 device, nextState->overlays,
                 WorkspaceViewportAiSplineGenerationTransition{
                     state_->generation, nextState->generation});
         if (!replaced.ok()) {
-            WorkspaceAiSplineControllerResult result;
+            auto result = currentResult();
             result.status =
                 replaced.status ==
                         WorkspaceViewportAiSplineUpdateStatus::unsupported
@@ -484,30 +516,28 @@ WorkspaceAiSplineController::publishCandidate(
                     ? WorkspaceAiSplineControllerStatus::allocation_failed
                     : WorkspaceAiSplineControllerStatus::viewport_failed;
             result.diagnostic = replaced.diagnostic;
-            result.revision = state_->session.revision();
             result.applied = sessionResult.applied;
             return result;
         }
 
-        WorkspaceAiSplineControllerResult result;
+        auto result = currentResult();
         result.status = WorkspaceAiSplineControllerStatus::ready;
         result.revision = sessionResult.revision;
         result.applied = sessionResult.applied;
         result.replacedPassCount = replaced.replaced_pass_count;
         result.changed = true;
         state_.swap(nextState);
+        result.resultingInput = inputSnapshot();
         return result;
     } catch (const std::bad_alloc&) {
-        WorkspaceAiSplineControllerResult result;
+        auto result = currentResult();
         result.status = WorkspaceAiSplineControllerStatus::allocation_failed;
-        result.revision = state_->session.revision();
         result.diagnostic = diagnostic(
             "workspace_ai_spline_controller_allocation_failed",
             "AI spline edit exceeded available allocation capacity");
         return result;
     } catch (const std::exception& error) {
-        WorkspaceAiSplineControllerResult result;
-        result.revision = state_->session.revision();
+        auto result = currentResult();
         result.diagnostic = {
             "workspace_ai_spline_controller_publish_failed", error.what()};
         return result;
@@ -517,26 +547,52 @@ WorkspaceAiSplineController::publishCandidate(
 WorkspaceAiSplineControllerResult
 WorkspaceAiSplineController::updateEditingState(
     render::Device& device, WorkspaceViewport& viewport,
-    std::uint64_t expectedRevision, bool editing, bool clearSelection) {
-    if (expectedRevision != state_->session.revision())
-        return staleResult();
+    const WorkspaceAiSplineControllerInputSnapshot& expected, bool editing,
+    bool clearSelection) {
+    if (!inputMatches(expected)) {
+        auto result = currentResult();
+        result.status = WorkspaceAiSplineControllerStatus::stale_input;
+        result.diagnostic = diagnostic(
+            "workspace_ai_spline_controller_input_stale",
+            "AI spline input snapshot does not match the current "
+            "controller state");
+        return result;
+    }
     if (!viewportMatches(viewport))
         return viewportBindingResult();
 
     const bool selectionChanged =
         clearSelection && !state_->configuration.selectedIndices.empty();
     if (!selectionChanged && state_->editing == editing) {
-        WorkspaceAiSplineControllerResult result;
+        auto result = currentResult();
         result.status = WorkspaceAiSplineControllerStatus::unchanged;
-        result.revision = state_->session.revision();
         return result;
     }
+    if (state_->inputEpoch ==
+        std::numeric_limits<std::uint64_t>::max()) {
+        auto result = currentResult();
+        result.status = WorkspaceAiSplineControllerStatus::unsupported;
+        result.diagnostic = diagnostic(
+            "workspace_ai_spline_controller_input_epoch_exhausted",
+            "AI spline input epoch cannot advance without overflow");
+        return result;
+    }
+    const std::uint64_t nextInputEpoch = state_->inputEpoch + 1U;
     if (!selectionChanged) {
         state_->editing = editing;
-        WorkspaceAiSplineControllerResult result;
+        state_->inputEpoch = nextInputEpoch;
+        auto result = currentResult();
         result.status = WorkspaceAiSplineControllerStatus::ready;
-        result.revision = state_->session.revision();
         result.changed = true;
+        return result;
+    }
+    if (state_->generation.publication ==
+        std::numeric_limits<std::uint64_t>::max()) {
+        auto result = currentResult();
+        result.status = WorkspaceAiSplineControllerStatus::unsupported;
+        result.diagnostic = diagnostic(
+            "workspace_ai_spline_controller_publication_exhausted",
+            "AI spline overlay publication cannot advance without overflow");
         return result;
     }
 
@@ -546,23 +602,23 @@ WorkspaceAiSplineController::updateEditingState(
         auto built = buildWorkspaceAiSplineOverlays(
             state_->session.current(), overlayRequest(candidateConfiguration));
         if (!built.ok()) {
-            WorkspaceAiSplineControllerResult result;
+            auto result = currentResult();
             result.status = overlayFailureStatus(built.status);
             result.diagnostic = std::move(built.diagnostic);
-            result.revision = state_->session.revision();
             return result;
         }
         auto nextState = std::make_unique<State>(
             state_->session, std::move(candidateConfiguration),
             std::move(built.overlays), state_->movementForwards,
-            state_->generation, editing);
+            state_->generation, nextInputEpoch, editing);
+        ++nextState->generation.publication;
         const auto revision = state_->session.revision();
         const auto replaced = viewport.replaceAiSplineOverlays(
             device, nextState->overlays,
             WorkspaceViewportAiSplineGenerationTransition{
                 state_->generation, nextState->generation});
         if (!replaced.ok()) {
-            WorkspaceAiSplineControllerResult result;
+            auto result = currentResult();
             result.status =
                 replaced.status ==
                         WorkspaceViewportAiSplineUpdateStatus::unsupported
@@ -576,24 +632,23 @@ WorkspaceAiSplineController::updateEditingState(
             return result;
         }
 
-        WorkspaceAiSplineControllerResult result;
+        auto result = currentResult();
         result.status = WorkspaceAiSplineControllerStatus::ready;
         result.revision = revision;
         result.replacedPassCount = replaced.replaced_pass_count;
         result.changed = true;
         state_.swap(nextState);
+        result.resultingInput = inputSnapshot();
         return result;
     } catch (const std::bad_alloc&) {
-        WorkspaceAiSplineControllerResult result;
+        auto result = currentResult();
         result.status = WorkspaceAiSplineControllerStatus::allocation_failed;
-        result.revision = state_->session.revision();
         result.diagnostic = diagnostic(
             "workspace_ai_spline_controller_allocation_failed",
             "AI spline edit lifecycle exceeded available allocation capacity");
         return result;
     } catch (const std::exception& error) {
-        WorkspaceAiSplineControllerResult result;
-        result.revision = state_->session.revision();
+        auto result = currentResult();
         result.diagnostic = {
             "workspace_ai_spline_controller_lifecycle_failed", error.what()};
         return result;
@@ -602,21 +657,20 @@ WorkspaceAiSplineController::updateEditingState(
 
 WorkspaceAiSplineControllerResult WorkspaceAiSplineController::startEditing(
     render::Device& device, WorkspaceViewport& viewport,
-    std::uint64_t expectedRevision) {
-    return updateEditingState(device, viewport, expectedRevision, true, true);
+    const WorkspaceAiSplineControllerInputSnapshot& expected) {
+    return updateEditingState(device, viewport, expected, true, true);
 }
 
 WorkspaceAiSplineControllerResult WorkspaceAiSplineController::finishEditing(
     render::Device& device, WorkspaceViewport& viewport,
-    std::uint64_t expectedRevision) {
-    return updateEditingState(device, viewport, expectedRevision, false,
-                              false);
+    const WorkspaceAiSplineControllerInputSnapshot& expected) {
+    return updateEditingState(device, viewport, expected, false, false);
 }
 
 WorkspaceAiSplineControllerResult WorkspaceAiSplineController::cancelEditing(
     render::Device& device, WorkspaceViewport& viewport,
-    std::uint64_t expectedRevision) {
-    return updateEditingState(device, viewport, expectedRevision, false, true);
+    const WorkspaceAiSplineControllerInputSnapshot& expected) {
+    return updateEditingState(device, viewport, expected, false, true);
 }
 
 WorkspaceAiSplinePointSelectionResult
@@ -625,7 +679,7 @@ WorkspaceAiSplineController::selectPoint(
     const WorkspaceAiSplinePointSelectionRequest& request) {
     const auto baseResult = [&]() {
         WorkspaceAiSplinePointSelectionResult result;
-        result.generation = state_->generation;
+        result.resultingInput = inputSnapshot();
         result.revision = state_->session.revision();
         result.selectionCount =
             state_->configuration.selectedIndices.size();
@@ -633,29 +687,25 @@ WorkspaceAiSplineController::selectPoint(
     };
     const auto staleResult = [&](const char* code, const char* message) {
         auto result = baseResult();
-        result.status = WorkspaceAiSplineControllerStatus::stale_revision;
+        result.status = WorkspaceAiSplineControllerStatus::stale_input;
         result.diagnostic = diagnostic(code, message);
         return result;
     };
 
-    if (!request.expectedGeneration.valid() ||
-        request.expectedGeneration != state_->generation) {
+    if (!inputMatches(request.expected)) {
         return staleResult(
-            "workspace_ai_spline_controller_selection_generation_stale",
-            "AI spline point selection generation does not match the "
-            "current controller");
-    }
-    if (request.expectedEditing != state_->editing) {
-        return staleResult(
-            "workspace_ai_spline_controller_selection_mode_stale",
-            "AI spline point selection edit mode does not match the current "
-            "controller");
+            "workspace_ai_spline_controller_selection_input_stale",
+            "AI spline point selection snapshot does not match the current "
+            "controller state");
     }
     if (!viewportMatches(viewport)) {
-        return staleResult(
+        auto result = baseResult();
+        result.status = WorkspaceAiSplineControllerStatus::stale_state;
+        result.diagnostic = diagnostic(
             "workspace_ai_spline_controller_viewport_generation_mismatch",
             "AI spline viewport does not show the current controller "
             "revision");
+        return result;
     }
 
     const std::size_t pointCount = state_->session.current().points.size();
@@ -755,6 +805,26 @@ WorkspaceAiSplineController::selectPoint(
             result.normalizedPosition = normalized;
             return result;
         }
+        if (state_->inputEpoch ==
+            std::numeric_limits<std::uint64_t>::max()) {
+            auto result = baseResult();
+            result.status = WorkspaceAiSplineControllerStatus::unsupported;
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_controller_input_epoch_exhausted",
+                "AI spline input epoch cannot advance without overflow");
+            return result;
+        }
+        if (state_->generation.publication ==
+            std::numeric_limits<std::uint64_t>::max()) {
+            auto result = baseResult();
+            result.status = WorkspaceAiSplineControllerStatus::unsupported;
+            result.diagnostic = diagnostic(
+                "workspace_ai_spline_controller_publication_exhausted",
+                "AI spline overlay publication cannot advance without "
+                "overflow");
+            return result;
+        }
+        const std::uint64_t nextInputEpoch = state_->inputEpoch + 1U;
 
         auto built = buildWorkspaceAiSplineOverlays(
             state_->session.current(), overlayRequest(candidateConfiguration));
@@ -767,7 +837,8 @@ WorkspaceAiSplineController::selectPoint(
         auto nextState = std::make_unique<State>(
             state_->session, std::move(candidateConfiguration),
             std::move(built.overlays), state_->movementForwards,
-            state_->generation, state_->editing);
+            state_->generation, nextInputEpoch, state_->editing);
+        ++nextState->generation.publication;
         const auto replaced = viewport.replaceAiSplineOverlays(
             device, nextState->overlays,
             WorkspaceViewportAiSplineGenerationTransition{
@@ -788,6 +859,9 @@ WorkspaceAiSplineController::selectPoint(
 
         auto result = baseResult();
         result.status = WorkspaceAiSplineControllerStatus::ready;
+        result.resultingInput = {nextState->generation,
+                                 nextState->inputEpoch,
+                                 nextState->editing};
         result.selectionCount = nextState->configuration.selectedIndices.size();
         result.lastSelectedIndex = lastSelected;
         result.normalizedPosition = normalized;
@@ -826,9 +900,8 @@ WorkspaceAiSplineController::setPointPositions(
         return publishCandidate(device, viewport, std::move(candidate),
                                 std::move(sessionResult));
     } catch (const std::bad_alloc&) {
-        WorkspaceAiSplineControllerResult result;
+        auto result = currentResult();
         result.status = WorkspaceAiSplineControllerStatus::allocation_failed;
-        result.revision = state_->session.revision();
         result.diagnostic = diagnostic(
             "workspace_ai_spline_controller_allocation_failed",
             "AI spline edit exceeded available allocation capacity");
@@ -840,9 +913,16 @@ WorkspaceAiSplineControllerResult
 WorkspaceAiSplineController::moveSelectedByManualInput(
     render::Device& device, WorkspaceViewport& viewport,
     const WorkspaceAiSplineManualMovement& movement,
-    std::uint64_t expectedRevision) {
-    if (expectedRevision != state_->session.revision())
-        return staleResult();
+    const WorkspaceAiSplineControllerInputSnapshot& expected) {
+    if (!inputMatches(expected)) {
+        auto result = currentResult();
+        result.status = WorkspaceAiSplineControllerStatus::stale_input;
+        result.diagnostic = diagnostic(
+            "workspace_ai_spline_controller_input_stale",
+            "AI spline input snapshot does not match the current "
+            "controller state");
+        return result;
+    }
     if (!viewportMatches(viewport))
         return viewportBindingResult();
     try {
@@ -850,9 +930,8 @@ WorkspaceAiSplineController::moveSelectedByManualInput(
         if (state_->configuration.selectedIndices.empty() ||
             (local[0U] == 0.0F && local[1U] == 0.0F &&
              local[2U] == 0.0F)) {
-            WorkspaceAiSplineControllerResult result;
+            auto result = currentResult();
             result.status = WorkspaceAiSplineControllerStatus::unchanged;
-            result.revision = state_->session.revision();
             return result;
         }
         std::vector<authoring::AiSplinePointPositionEdit> edits;
@@ -862,10 +941,9 @@ WorkspaceAiSplineController::moveSelectedByManualInput(
             const auto index = static_cast<std::size_t>(selectedIndex);
             if (index >= state_->session.current().points.size() ||
                 index >= state_->movementForwards.size()) {
-                WorkspaceAiSplineControllerResult result;
+                auto result = currentResult();
                 result.status =
                     WorkspaceAiSplineControllerStatus::invalid_edit;
-                result.revision = state_->session.revision();
                 result.diagnostic = diagnostic(
                     "workspace_ai_spline_controller_selection_invalid",
                     "AI spline manual movement selection is outside the "
@@ -888,11 +966,11 @@ WorkspaceAiSplineController::moveSelectedByManualInput(
                 position[2U] + worldDelta[2U]};
             edits.push_back(edit);
         }
-        return setPointPositions(device, viewport, edits, expectedRevision);
+        return setPointPositions(device, viewport, edits,
+                                 expected.generation.revision);
     } catch (const std::bad_alloc&) {
-        WorkspaceAiSplineControllerResult result;
+        auto result = currentResult();
         result.status = WorkspaceAiSplineControllerStatus::allocation_failed;
-        result.revision = state_->session.revision();
         result.diagnostic = diagnostic(
             "workspace_ai_spline_controller_allocation_failed",
             "AI spline manual movement exceeded available allocation "
@@ -914,9 +992,8 @@ WorkspaceAiSplineControllerResult WorkspaceAiSplineController::undo(
         return publishCandidate(device, viewport, std::move(candidate),
                                 std::move(sessionResult));
     } catch (const std::bad_alloc&) {
-        WorkspaceAiSplineControllerResult result;
+        auto result = currentResult();
         result.status = WorkspaceAiSplineControllerStatus::allocation_failed;
-        result.revision = state_->session.revision();
         result.diagnostic = diagnostic(
             "workspace_ai_spline_controller_allocation_failed",
             "AI spline undo exceeded available allocation capacity");
@@ -937,9 +1014,8 @@ WorkspaceAiSplineControllerResult WorkspaceAiSplineController::redo(
         return publishCandidate(device, viewport, std::move(candidate),
                                 std::move(sessionResult));
     } catch (const std::bad_alloc&) {
-        WorkspaceAiSplineControllerResult result;
+        auto result = currentResult();
         result.status = WorkspaceAiSplineControllerStatus::allocation_failed;
-        result.revision = state_->session.revision();
         result.diagnostic = diagnostic(
             "workspace_ai_spline_controller_allocation_failed",
             "AI spline redo exceeded available allocation capacity");
@@ -961,9 +1037,8 @@ WorkspaceAiSplineController::restoreBaseline(
         return publishCandidate(device, viewport, std::move(candidate),
                                 std::move(sessionResult));
     } catch (const std::bad_alloc&) {
-        WorkspaceAiSplineControllerResult result;
+        auto result = currentResult();
         result.status = WorkspaceAiSplineControllerStatus::allocation_failed;
-        result.revision = state_->session.revision();
         result.diagnostic = diagnostic(
             "workspace_ai_spline_controller_allocation_failed",
             "AI spline reset exceeded available allocation capacity");
@@ -980,6 +1055,10 @@ const char* workspace_ai_spline_controller_status_name(
         return "unchanged";
     case WorkspaceAiSplineControllerStatus::stale_revision:
         return "stale_revision";
+    case WorkspaceAiSplineControllerStatus::stale_input:
+        return "stale_input";
+    case WorkspaceAiSplineControllerStatus::stale_state:
+        return "stale_state";
     case WorkspaceAiSplineControllerStatus::invalid_edit:
         return "invalid_edit";
     case WorkspaceAiSplineControllerStatus::overlay_failed:

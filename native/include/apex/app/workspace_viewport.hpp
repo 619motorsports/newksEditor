@@ -99,6 +99,8 @@ struct WorkspaceViewportAiSplineGenerationOwner final {};
 struct WorkspaceViewportAiSplineGeneration {
     std::shared_ptr<const WorkspaceViewportAiSplineGenerationOwner> owner;
     std::uint64_t revision = 0U;
+    // This counter identifies each visible overlay publication for one owner.
+    std::uint64_t publication = 0U;
 
     [[nodiscard]] bool valid() const noexcept { return owner != nullptr; }
     [[nodiscard]] bool sameOwner(
@@ -110,7 +112,9 @@ struct WorkspaceViewportAiSplineGeneration {
     friend bool operator==(const WorkspaceViewportAiSplineGeneration& left,
                            const WorkspaceViewportAiSplineGeneration& right)
         noexcept {
-        return left.revision == right.revision && left.sameOwner(right);
+        return left.revision == right.revision &&
+               left.publication == right.publication &&
+               left.sameOwner(right);
     }
 };
 

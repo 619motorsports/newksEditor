@@ -2293,17 +2293,19 @@ void publishes_ai_spline_controller_transactions() {
     (void)manualInput.setPressed(apex::app::WorkspaceAiSplineManualKey::up,
                                  true);
     const auto callsBeforeManual = device.buffer_calls;
+    auto staleManualInput = controller->inputSnapshot();
+    ++staleManualInput.inputEpoch;
     const auto staleManual = controller->moveSelectedByManualInput(
-        device, *prepared.viewport, manualInput.movement(), 99U);
+        device, *prepared.viewport, manualInput.movement(), staleManualInput);
     require(!staleManual.ok() &&
                 staleManual.status ==
                     apex::app::WorkspaceAiSplineControllerStatus::
-                        stale_revision &&
+                        stale_input &&
                 device.buffer_calls == callsBeforeManual,
-            "manual movement rejects a stale controller revision");
+            "manual movement rejects a stale input snapshot");
     const auto moved = controller->moveSelectedByManualInput(
         device, *prepared.viewport, manualInput.movement(),
-        controller->revision());
+        controller->inputSnapshot());
     const float amount = apex::app::workspace_ai_spline_manual_speed *
                          apex::app::workspace_ai_spline_manual_fixed_delta;
     const float diagonalLength = std::sqrt(125.0F);
@@ -2337,7 +2339,7 @@ void publishes_ai_spline_controller_transactions() {
     device.fail_buffer_status = BufferStatus::upload_failed;
     const auto failedManual = controller->moveSelectedByManualInput(
         device, *prepared.viewport, manualInput.movement(),
-        controller->revision());
+        controller->inputSnapshot());
     require(!failedManual.ok() && controller->revision() == 7U &&
                 controller->current().points[1U].position ==
                     pointOneBeforeRetry,
@@ -2345,7 +2347,7 @@ void publishes_ai_spline_controller_transactions() {
     device.fail_buffer_call = 0U;
     const auto retriedManual = controller->moveSelectedByManualInput(
         device, *prepared.viewport, manualInput.movement(),
-        controller->revision());
+        controller->inputSnapshot());
     require(retriedManual.ok() && retriedManual.revision == 8U &&
                 std::abs(controller->current().points[1U].position[0U] -
                          (pointOneBeforeRetry[0U] + headingX * amount)) <
@@ -2360,7 +2362,7 @@ void publishes_ai_spline_controller_transactions() {
     const auto callsBeforeIdle = device.buffer_calls;
     const auto idle = controller->moveSelectedByManualInput(
         device, *prepared.viewport, manualInput.movement(),
-        controller->revision());
+        controller->inputSnapshot());
     require(idle.ok() && !idle.changed && idle.revision == 8U &&
                 device.buffer_calls == callsBeforeIdle,
             "released manual input performs no session or buffer work");
@@ -2447,39 +2449,46 @@ void publishes_recovered_ai_spline_edit_lifecycle() {
     require(created.ok() && !created.controller->editing(),
             "AI spline lifecycle controller starts outside edit mode");
     auto controller = std::move(created.controller);
+    require(controller->inputSnapshot().inputEpoch == 0U,
+            "AI spline lifecycle input epoch starts at zero");
     FakeDevice device;
     auto prepared = prepareController(device, *controller);
     require(prepared.ok(), "AI spline lifecycle viewport prepares");
 
     const auto baselineBytes = controller->currentBytes();
     const auto baselineRevision = controller->revision();
+    const auto initialInput = controller->inputSnapshot();
     const auto baselineLiveBuffers = *device.live_buffer_count;
     const auto baselineBufferCalls = device.buffer_calls;
     const auto finishBeforeStart = controller->finishEditing(
-        device, *prepared.viewport, baselineRevision);
+        device, *prepared.viewport, controller->inputSnapshot());
     require(finishBeforeStart.ok() && !finishBeforeStart.changed &&
                 !controller->editing() &&
                 controller->configuration().selectedIndices ==
                     std::vector<std::uint32_t>({0U, 1U}) &&
+                controller->inputSnapshot().inputEpoch == 0U &&
                 device.buffer_calls == baselineBufferCalls,
             "finish preserves selection outside edit mode");
 
-    const auto stale =
-        controller->startEditing(device, *prepared.viewport, 99U);
+    auto staleInput = controller->inputSnapshot();
+    staleInput.generation.revision = 99U;
+    const auto stale = controller->startEditing(
+        device, *prepared.viewport, staleInput);
     require(!stale.ok() &&
                 stale.status ==
                     apex::app::WorkspaceAiSplineControllerStatus::
-                        stale_revision &&
+                        stale_input &&
                 !controller->editing() &&
                 controller->configuration().selectedIndices ==
                     std::vector<std::uint32_t>({0U, 1U}) &&
+                controller->inputSnapshot().inputEpoch == 0U &&
                 device.buffer_calls == baselineBufferCalls,
             "start rejects a stale revision before lifecycle allocation");
 
     device.fail_buffer_call = device.buffer_calls + 1U;
     device.fail_buffer_status = BufferStatus::upload_failed;
     const auto uploadFailed = controller->startEditing(
-        device, *prepared.viewport, controller->revision());
+        device, *prepared.viewport, controller->inputSnapshot());
     require(!uploadFailed.ok() &&
                 uploadFailed.status ==
                     apex::app::WorkspaceAiSplineControllerStatus::
@@ -2489,13 +2498,14 @@ void publishes_recovered_ai_spline_edit_lifecycle() {
                     std::vector<std::uint32_t>({0U, 1U}) &&
                 controller->currentBytes() == baselineBytes &&
                 controller->revision() == baselineRevision &&
+                controller->inputSnapshot().inputEpoch == 0U &&
                 prepared.viewport->aiSplineRevision() == baselineRevision &&
                 *device.live_buffer_count == baselineLiveBuffers,
             "failed upload keeps lifecycle and viewport state");
     device.fail_buffer_call = device.buffer_calls + 1U;
     device.fail_buffer_status = BufferStatus::allocation_failed;
     const auto allocationFailed = controller->startEditing(
-        device, *prepared.viewport, controller->revision());
+        device, *prepared.viewport, controller->inputSnapshot());
     require(!allocationFailed.ok() &&
                 allocationFailed.status ==
                     apex::app::WorkspaceAiSplineControllerStatus::
@@ -2507,6 +2517,7 @@ void publishes_recovered_ai_spline_edit_lifecycle() {
                 controller->revision() == baselineRevision &&
                 !controller->dirty() && !controller->canUndo() &&
                 !controller->canRedo() &&
+                controller->inputSnapshot().inputEpoch == 0U &&
                 prepared.viewport->aiSplineRevision() == baselineRevision &&
                 *device.live_buffer_count == baselineLiveBuffers,
             "failed allocation keeps selection, history, and visible buffers");
@@ -2529,12 +2540,14 @@ void publishes_recovered_ai_spline_edit_lifecycle() {
 
     const auto callsBeforeStart = device.buffer_calls;
     const auto started = controller->startEditing(
-        device, *prepared.viewport, controller->revision());
+        device, *prepared.viewport, controller->inputSnapshot());
     require(started.ok() && started.changed && controller->editing() &&
                 started.revision == baselineRevision &&
                 started.replacedPassCount == 2U &&
                 controller->configuration().selectedIndices.empty() &&
                 !controller->overlays().selection.has_value() &&
+                controller->inputSnapshot().inputEpoch == 1U &&
+                controller->inputSnapshot().editing &&
                 controller->currentBytes() == baselineBytes &&
                 !controller->dirty() && !controller->canUndo() &&
                 !controller->canRedo() &&
@@ -2548,19 +2561,39 @@ void publishes_recovered_ai_spline_edit_lifecycle() {
 
     const auto callsBeforeRepeatedStart = device.buffer_calls;
     const auto repeatedStart = controller->startEditing(
-        device, *prepared.viewport, controller->revision());
+        device, *prepared.viewport, controller->inputSnapshot());
     require(repeatedStart.ok() && !repeatedStart.changed &&
                 controller->editing() &&
+                controller->inputSnapshot().inputEpoch == 1U &&
                 device.buffer_calls == callsBeforeRepeatedStart,
             "repeated start with no selection performs no viewport work");
     const auto finished = controller->finishEditing(
-        device, *prepared.viewport, controller->revision());
+        device, *prepared.viewport, controller->inputSnapshot());
     require(finished.ok() && finished.changed && !controller->editing() &&
                 finished.replacedPassCount == 0U &&
+                controller->inputSnapshot().inputEpoch == 2U &&
+                !controller->inputSnapshot().editing &&
+                finished.resultingInput == controller->inputSnapshot() &&
+                controller->inputSnapshot().generation.publication == 1U &&
+                prepared.viewport->aiSplineGenerationIdentity().has_value() &&
+                controller->inputSnapshot().generation ==
+                    *prepared.viewport->aiSplineGenerationIdentity() &&
                 controller->revision() == baselineRevision &&
                 controller->currentBytes() == baselineBytes &&
                 device.buffer_calls == callsBeforeRepeatedStart,
             "short finish exits mode without model or viewport changes");
+    const auto callsBeforeLifecycleAba = device.buffer_calls;
+    const auto lifecycleAba = controller->cancelEditing(
+        device, *prepared.viewport, initialInput);
+    require(!lifecycleAba.ok() &&
+                lifecycleAba.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::
+                        stale_input &&
+                lifecycleAba.diagnostic.code ==
+                    "workspace_ai_spline_controller_input_stale" &&
+                controller->inputSnapshot().inputEpoch == 2U &&
+                device.buffer_calls == callsBeforeLifecycleAba,
+            "lifecycle input rejects a false-true-false ABA sequence");
 
     auto cancelCreated = createController();
     require(cancelCreated.ok(), "AI spline cancel controller creates");
@@ -2570,7 +2603,7 @@ void publishes_recovered_ai_spline_edit_lifecycle() {
     require(cancelPrepared.ok(), "AI spline cancel viewport prepares");
     const auto cancelled = cancelController->cancelEditing(
         cancelDevice, *cancelPrepared.viewport,
-        cancelController->revision());
+        cancelController->inputSnapshot());
     require(cancelled.ok() && cancelled.changed &&
                 !cancelController->editing() &&
                 cancelController->configuration().selectedIndices.empty() &&
@@ -2578,7 +2611,8 @@ void publishes_recovered_ai_spline_edit_lifecycle() {
                 cancelController->revision() == 0U &&
                 !cancelController->dirty() &&
                 !cancelController->canUndo() &&
-                !cancelController->canRedo(),
+                !cancelController->canRedo() &&
+                cancelController->inputSnapshot().inputEpoch == 1U,
             "cancel clears selection without restoring the baseline");
 
     apex::app::WorkspaceAiSplineControllerConfiguration emptyConfiguration;
@@ -2600,12 +2634,40 @@ void publishes_recovered_ai_spline_edit_lifecycle() {
             "controller viewport prepares a latent selection pipeline");
     const auto emptyBufferCalls = emptyDevice.buffer_calls;
     const auto emptyStarted = emptyController->startEditing(
-        emptyDevice, *emptyPrepared.viewport, emptyController->revision());
+        emptyDevice, *emptyPrepared.viewport,
+        emptyController->inputSnapshot());
     require(emptyStarted.ok() && emptyStarted.changed &&
                 emptyStarted.replacedPassCount == 0U &&
                 emptyController->editing() &&
+                emptyController->inputSnapshot().inputEpoch == 1U &&
+                emptyStarted.resultingInput ==
+                    emptyController->inputSnapshot() &&
+                emptyController->inputSnapshot().generation.publication ==
+                    0U &&
+                emptyPrepared.viewport->aiSplineGenerationIdentity()
+                    .has_value() &&
+                emptyController->inputSnapshot().generation ==
+                    *emptyPrepared.viewport->aiSplineGenerationIdentity() &&
                 emptyDevice.buffer_calls == emptyBufferCalls,
             "empty-selection start changes only controller edit mode");
+
+    apex::app::WorkspaceAiSplinePointSelectionRequest chainSelection;
+    chainSelection.pointIndex = 0U;
+    chainSelection.expected = emptyStarted.resultingInput;
+    const auto chainSelected = emptyController->selectPoint(
+        emptyDevice, *emptyPrepared.viewport, chainSelection);
+    const auto chainFinished = emptyController->finishEditing(
+        emptyDevice, *emptyPrepared.viewport,
+        chainSelected.resultingInput);
+    require(chainSelected.ok() && chainSelected.changed &&
+                chainFinished.ok() && chainFinished.changed &&
+                chainFinished.resultingInput.inputEpoch == 3U &&
+                !chainFinished.resultingInput.editing &&
+                chainFinished.resultingInput ==
+                    emptyController->inputSnapshot() &&
+                chainFinished.resultingInput.generation ==
+                    *emptyPrepared.viewport->aiSplineGenerationIdentity(),
+            "lifecycle and selection results chain their input snapshots");
 }
 
 void publishes_recovered_ai_spline_point_selection() {
@@ -2640,6 +2702,10 @@ void publishes_recovered_ai_spline_point_selection() {
     auto prepared = apex::app::prepareWorkspaceViewport(
         device, value.document, request);
     require(prepared.ok(), "AI spline selection viewport prepares");
+    auto stalePrepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(stalePrepared.ok(),
+            "second AI spline selection viewport prepares");
 
     const auto baselineBytes = controller->currentBytes();
     const auto baselineGeneration = controller->generation();
@@ -2648,35 +2714,99 @@ void publishes_recovered_ai_spline_point_selection() {
         apex::app::WorkspaceAiSplinePointSelectionRequest selection;
         selection.pointIndex = index;
         selection.controlPressed = control;
-        selection.expectedEditing = controller->editing();
-        selection.expectedGeneration = controller->generation();
+        selection.expected = controller->inputSnapshot();
         return controller->selectPoint(device, *prepared.viewport, selection);
     };
     const auto preservesAuthoringState = [&]() {
         return controller->currentBytes() == baselineBytes &&
                controller->revision() == baselineRevision &&
-               controller->generation() == baselineGeneration &&
+               controller->generation().sameOwner(baselineGeneration) &&
+               controller->generation().revision ==
+                   baselineGeneration.revision &&
                !controller->dirty() && !controller->canUndo() &&
                !controller->canRedo();
     };
 
+    const auto queuedMovementInput = controller->inputSnapshot();
     const auto replaced = select(6U, false);
     require(replaced.ok() && replaced.changed && replaced.selectionCount == 1U &&
                 replaced.lastSelectedIndex == 6U &&
                 replaced.normalizedPosition == 0.6F &&
+                replaced.resultingInput.inputEpoch == 1U &&
+                replaced.resultingInput.generation.publication == 1U &&
+                replaced.resultingInput == controller->inputSnapshot() &&
                 replaced.replacedPassCount == 2U &&
                 controller->configuration().selectedIndices ==
                     std::vector<std::uint32_t>({6U}) &&
                 preservesAuthoringState(),
             "plain selection replaces indices without authoring changes");
+    apex::app::WorkspaceAiSplineManualMovement queuedMovement;
+    queuedMovement.forward = true;
+    const auto pointSixBeforeQueuedMovement =
+        controller->current().points[6U].position;
+    const auto callsBeforeQueuedMovement = device.buffer_calls;
+    const auto staleMovement = controller->moveSelectedByManualInput(
+        device, *prepared.viewport, queuedMovement, queuedMovementInput);
+    require(!staleMovement.ok() &&
+                staleMovement.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::
+                        stale_input &&
+                staleMovement.diagnostic.code ==
+                    "workspace_ai_spline_controller_input_stale" &&
+                controller->current().points[6U].position ==
+                    pointSixBeforeQueuedMovement &&
+                controller->configuration().selectedIndices ==
+                    std::vector<std::uint32_t>({6U}) &&
+                device.buffer_calls == callsBeforeQueuedMovement &&
+                preservesAuthoringState(),
+            "queued movement cannot move a replacement selection");
+    apex::app::WorkspaceAiSplinePointSelectionRequest staleViewportRequest;
+    staleViewportRequest.pointIndex = 7U;
+    staleViewportRequest.expected = controller->inputSnapshot();
+    const auto callsBeforeStaleViewport = device.buffer_calls;
+    const auto staleViewport = controller->selectPoint(
+        device, *stalePrepared.viewport, staleViewportRequest);
+    require(!staleViewport.ok() &&
+                staleViewport.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::
+                        stale_state &&
+                staleViewport.diagnostic.code ==
+                    "workspace_ai_spline_controller_viewport_generation_mismatch" &&
+                controller->configuration().selectedIndices ==
+                    std::vector<std::uint32_t>({6U}) &&
+                device.buffer_calls == callsBeforeStaleViewport,
+            "selection rejects a stale equal-model-revision viewport");
     const auto callsBeforeDuplicate = device.buffer_calls;
     const auto duplicate = select(6U, false);
     require(duplicate.ok() && !duplicate.changed &&
                 duplicate.lastSelectedIndex == 6U &&
                 duplicate.normalizedPosition == 0.6F &&
                 device.buffer_calls == callsBeforeDuplicate &&
+                controller->inputSnapshot().inputEpoch == 1U &&
                 preservesAuthoringState(),
             "duplicate plain selection performs no viewport work");
+
+    apex::app::WorkspaceAiSplinePointSelectionRequest queuedRange;
+    queuedRange.pointIndex = 1U;
+    queuedRange.controlPressed = true;
+    queuedRange.expected = controller->inputSnapshot();
+    require(select(4U, false).ok(),
+            "intervening selection advances the input epoch");
+    const auto callsBeforeSelectionAba = device.buffer_calls;
+    const auto selectionAba = controller->selectPoint(
+        device, *prepared.viewport, queuedRange);
+    require(!selectionAba.ok() &&
+                selectionAba.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::
+                        stale_input &&
+                selectionAba.diagnostic.code ==
+                    "workspace_ai_spline_controller_selection_input_stale" &&
+                controller->configuration().selectedIndices ==
+                    std::vector<std::uint32_t>({4U}) &&
+                device.buffer_calls == callsBeforeSelectionAba,
+            "queued selection rejects an equal-generation anchor ABA");
+    require(select(6U, false).ok(),
+            "plain selection restores the tied-range fixture");
 
     const auto tiedRange = select(1U, true);
     require(tiedRange.ok() && tiedRange.changed &&
@@ -2707,35 +2837,47 @@ void publishes_recovered_ai_spline_point_selection() {
     auto invalidRequest =
         apex::app::WorkspaceAiSplinePointSelectionRequest{};
     invalidRequest.pointIndex = std::numeric_limits<std::uint32_t>::max();
-    invalidRequest.expectedEditing = controller->editing();
-    invalidRequest.expectedGeneration = controller->generation();
+    invalidRequest.expected = controller->inputSnapshot();
     const auto invalid = controller->selectPoint(
         device, *prepared.viewport, invalidRequest);
+    auto boundaryRequest = invalidRequest;
+    boundaryRequest.pointIndex =
+        static_cast<std::uint32_t>(controller->current().points.size());
+    const auto boundary = controller->selectPoint(
+        device, *prepared.viewport, boundaryRequest);
+    auto invalidSnapshotRequest = invalidRequest;
+    invalidSnapshotRequest.pointIndex = 3U;
+    invalidSnapshotRequest.expected = {};
+    const auto invalidSnapshot = controller->selectPoint(
+        device, *prepared.viewport, invalidSnapshotRequest);
     auto foreignCreated = apex::app::WorkspaceAiSplineController::create(
         spline, {});
     require(foreignCreated.ok(), "foreign selection controller creates");
     auto foreignRequest = invalidRequest;
     foreignRequest.pointIndex = 3U;
-    foreignRequest.expectedGeneration =
-        foreignCreated.controller->generation();
+    foreignRequest.expected = foreignCreated.controller->inputSnapshot();
     const auto foreign = controller->selectPoint(
         device, *prepared.viewport, foreignRequest);
     auto staleRequest = invalidRequest;
     staleRequest.pointIndex = 3U;
-    staleRequest.expectedGeneration = controller->generation();
-    ++staleRequest.expectedGeneration.revision;
+    staleRequest.expected = controller->inputSnapshot();
+    ++staleRequest.expected.generation.revision;
     const auto stale = controller->selectPoint(
         device, *prepared.viewport, staleRequest);
-    require(!invalid.ok() &&
+    require(!invalid.ok() && !boundary.ok() && !invalidSnapshot.ok() &&
                 invalid.diagnostic.code ==
                     "workspace_ai_spline_controller_selection_index_invalid" &&
+                boundary.diagnostic.code ==
+                    "workspace_ai_spline_controller_selection_index_invalid" &&
+                invalidSnapshot.diagnostic.code ==
+                    "workspace_ai_spline_controller_selection_input_stale" &&
                 !foreign.ok() && !stale.ok() &&
                 foreign.status ==
                     apex::app::WorkspaceAiSplineControllerStatus::
-                        stale_revision &&
+                        stale_input &&
                 stale.status ==
                     apex::app::WorkspaceAiSplineControllerStatus::
-                        stale_revision &&
+                        stale_input &&
                 device.buffer_calls == callsBeforeInvalid &&
                 preservesAuthoringState(),
             "selection rejects invalid, foreign, and stale input before upload");
@@ -2772,15 +2914,14 @@ void publishes_recovered_ai_spline_point_selection() {
 
     apex::app::WorkspaceAiSplinePointSelectionRequest beforeEdit;
     beforeEdit.pointIndex = 7U;
-    beforeEdit.expectedEditing = false;
-    beforeEdit.expectedGeneration = controller->generation();
+    beforeEdit.expected = controller->inputSnapshot();
     const auto started = controller->startEditing(
-        device, *prepared.viewport, controller->revision());
+        device, *prepared.viewport, controller->inputSnapshot());
     const auto staleMode = controller->selectPoint(
         device, *prepared.viewport, beforeEdit);
     require(started.ok() && controller->editing() && !staleMode.ok() &&
                 staleMode.diagnostic.code ==
-                    "workspace_ai_spline_controller_selection_mode_stale",
+                    "workspace_ai_spline_controller_selection_input_stale",
             "queued selection rejects an edit-mode transition");
     const auto editFirst = select(4U, false);
     const auto editControl = select(6U, true);
@@ -2790,7 +2931,19 @@ void publishes_recovered_ai_spline_point_selection() {
                 preservesAuthoringState(),
             "edit mode appends and ignores the Control range modifier");
     const auto cancelled = controller->cancelEditing(
-        device, *prepared.viewport, controller->revision());
+        device, *prepared.viewport, controller->inputSnapshot());
+    const auto emptyInput = controller->inputSnapshot();
+    const auto liveBeforeLatentFailure = *device.live_buffer_count;
+    device.fail_buffer_call = device.buffer_calls + 2U;
+    device.fail_buffer_status = BufferStatus::upload_failed;
+    const auto latentFailed = select(9U, true);
+    require(cancelled.ok() && !latentFailed.ok() &&
+                controller->configuration().selectedIndices.empty() &&
+                !controller->overlays().selection.has_value() &&
+                controller->inputSnapshot() == emptyInput &&
+                *device.live_buffer_count == liveBeforeLatentFailure,
+            "latent selection publication failure keeps the empty pass");
+    device.fail_buffer_call = 0U;
     const auto controlEmpty = select(9U, true);
     require(cancelled.ok() && controlEmpty.ok() &&
                 controller->configuration().selectedIndices ==
@@ -2842,7 +2995,7 @@ void rejects_foreign_ai_spline_controller_generations() {
     require(!foreign.ok() &&
                 foreign.status ==
                     apex::app::WorkspaceAiSplineControllerStatus::
-                        stale_revision &&
+                        stale_state &&
                 foreign.diagnostic.code ==
                     "workspace_ai_spline_controller_viewport_generation_mismatch" &&
                 first->revision() == 0U && second->revision() == 0U &&
@@ -2850,9 +3003,12 @@ void rejects_foreign_ai_spline_controller_generations() {
             "equal-revision controller cannot publish to a foreign viewport");
 
     const auto secondGeneration = second->generation();
+    const auto secondInput = second->inputSnapshot();
     apex::app::WorkspaceAiSplineController moved(std::move(*second));
-    require(moved.generation() == secondGeneration && moved.revision() == 0U,
-            "controller move preserves its generation owner");
+    require(moved.generation() == secondGeneration &&
+                moved.inputSnapshot() == secondInput &&
+                moved.revision() == 0U,
+            "controller move preserves its generation owner and input epoch");
 
     auto reprepareCreated =
         apex::app::WorkspaceAiSplineController::create(spline, {});
@@ -2906,6 +3062,7 @@ void rejects_foreign_ai_spline_controller_generations() {
 
     auto next = first->generation();
     next.revision = 1U;
+    next.publication = 1U;
     const auto advanced = prepared.viewport->replaceAiSplineOverlays(
         device, first->overlays(),
         apex::app::WorkspaceViewportAiSplineGenerationTransition{
@@ -2929,6 +3086,7 @@ void rejects_foreign_ai_spline_controller_generations() {
 
     auto leap = next;
     leap.revision = 3U;
+    leap.publication = 2U;
     const auto skipped = prepared.viewport->replaceAiSplineOverlays(
         device, first->overlays(),
         apex::app::WorkspaceViewportAiSplineGenerationTransition{next,
@@ -2941,6 +3099,7 @@ void rejects_foreign_ai_spline_controller_generations() {
 
     auto foreignReplacement = moved.generation();
     foreignReplacement.revision = 2U;
+    foreignReplacement.publication = 2U;
     const auto ownerChanged = prepared.viewport->replaceAiSplineOverlays(
         device, first->overlays(),
         apex::app::WorkspaceViewportAiSplineGenerationTransition{
@@ -2953,6 +3112,7 @@ void rejects_foreign_ai_spline_controller_generations() {
 
     auto staleReplacement = moved.generation();
     staleReplacement.revision = 1U;
+    staleReplacement.publication = 1U;
     const auto staleOwner = prepared.viewport->replaceAiSplineOverlays(
         device, first->overlays(),
         apex::app::WorkspaceViewportAiSplineGenerationTransition{
@@ -2962,6 +3122,36 @@ void rejects_foreign_ai_spline_controller_generations() {
                     "workspace_viewport_ai_spline_generation_stale" &&
                 device.buffer_calls == callsAfterAdvance,
             "generation transition rejects a stale foreign expected owner");
+
+    auto assignmentCreated =
+        apex::app::WorkspaceAiSplineController::create(spline, {});
+    require(assignmentCreated.ok(), "move-assignment controller creates");
+    auto assignmentRequest = request_for(value);
+    assignmentRequest.ai_spline_geometry =
+        &assignmentCreated.controller->overlays().primary;
+    assignmentRequest.ai_spline_generation =
+        assignmentCreated.controller->generation();
+    assignmentRequest.ai_spline_pipeline = ai_spline_pipeline(value);
+    FakeDevice assignmentDevice;
+    auto assignmentPrepared = apex::app::prepareWorkspaceViewport(
+        assignmentDevice, value.document, assignmentRequest);
+    require(assignmentPrepared.ok(),
+            "move-assignment owner viewport prepares");
+    const auto movedInput = moved.inputSnapshot();
+    *assignmentCreated.controller = std::move(moved);
+    require(assignmentCreated.controller->inputSnapshot() == movedInput,
+            "controller move assignment preserves the input snapshot");
+    const auto assignmentCalls = assignmentDevice.buffer_calls;
+    const auto replacedOwnerEdit =
+        assignmentCreated.controller->setPointPositions(
+            assignmentDevice, *assignmentPrepared.viewport, edit,
+            assignmentCreated.controller->revision());
+    require(!replacedOwnerEdit.ok() &&
+                replacedOwnerEdit.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::
+                        stale_state &&
+                assignmentDevice.buffer_calls == assignmentCalls,
+            "move assignment rejects a viewport for the replaced owner");
 
     auto invalidRequest = request;
     invalidRequest.ai_spline_generation =
@@ -2982,6 +3172,7 @@ void rejects_foreign_ai_spline_controller_generations() {
     require(maximumPrepared.ok(), "maximum owned generation prepares");
     auto wrapped = maximum;
     wrapped.revision = 0U;
+    wrapped.publication = 1U;
     const auto overflow = maximumPrepared.viewport->replaceAiSplineOverlays(
         device, first->overlays(),
         apex::app::WorkspaceViewportAiSplineGenerationTransition{maximum,
@@ -2990,6 +3181,28 @@ void rejects_foreign_ai_spline_controller_generations() {
                 overflow.diagnostic.code ==
                     "workspace_viewport_ai_spline_generation_transition_invalid",
             "maximum generation cannot wrap to zero");
+
+    auto maximumPublicationRequest = request;
+    auto maximumPublication = first->generation();
+    maximumPublication.publication =
+        std::numeric_limits<std::uint64_t>::max();
+    maximumPublicationRequest.ai_spline_generation = maximumPublication;
+    auto maximumPublicationPrepared =
+        apex::app::prepareWorkspaceViewport(
+            device, value.document, maximumPublicationRequest);
+    require(maximumPublicationPrepared.ok(),
+            "maximum publication generation prepares");
+    auto wrappedPublication = maximumPublication;
+    wrappedPublication.publication = 0U;
+    const auto publicationOverflow =
+        maximumPublicationPrepared.viewport->replaceAiSplineOverlays(
+            device, first->overlays(),
+            apex::app::WorkspaceViewportAiSplineGenerationTransition{
+                maximumPublication, wrappedPublication});
+    require(!publicationOverflow.ok() &&
+                publicationOverflow.diagnostic.code ==
+                    "workspace_viewport_ai_spline_generation_transition_invalid",
+            "maximum publication cannot wrap to zero");
 }
 
 void rejects_unsafe_ai_spline_controller_candidates() {
@@ -3095,7 +3308,7 @@ void handles_degenerate_ai_spline_manual_forwards() {
     horizontal.forward = true;
     const auto bufferCalls = device.buffer_calls;
     const auto unchanged = controller->moveSelectedByManualInput(
-        device, *prepared.viewport, horizontal, controller->revision());
+        device, *prepared.viewport, horizontal, controller->inputSnapshot());
     require(unchanged.ok() && !unchanged.changed &&
                 controller->revision() == 0U &&
                 device.buffer_calls == bufferCalls,
@@ -3104,7 +3317,7 @@ void handles_degenerate_ai_spline_manual_forwards() {
     apex::app::WorkspaceAiSplineManualMovement vertical;
     vertical.up = true;
     const auto changed = controller->moveSelectedByManualInput(
-        device, *prepared.viewport, vertical, controller->revision());
+        device, *prepared.viewport, vertical, controller->inputSnapshot());
     const float amount = apex::app::workspace_ai_spline_manual_speed *
                          apex::app::workspace_ai_spline_manual_fixed_delta;
     require(changed.ok() && changed.changed && changed.revision == 1U &&
@@ -3172,18 +3385,21 @@ void publishes_controller_through_d3d12_metadata_contract() {
     apex::app::WorkspaceAiSplineManualMovement movement;
     movement.forward = true;
     const auto changed = controller->moveSelectedByManualInput(
-        device, *prepared.viewport, movement, controller->revision());
+        device, *prepared.viewport, movement, controller->inputSnapshot());
     require(changed.ok() && changed.changed && changed.replacedPassCount == 2U,
             "D3D12 contract accepts one manual controller generation");
 
+    const auto publicationBeforeSelection =
+        controller->generation().publication;
     apex::app::WorkspaceAiSplinePointSelectionRequest selection;
     selection.pointIndex = 3U;
-    selection.expectedEditing = controller->editing();
-    selection.expectedGeneration = controller->generation();
+    selection.expected = controller->inputSnapshot();
     const auto selected = controller->selectPoint(
         device, *prepared.viewport, selection);
     require(selected.ok() && selected.changed &&
                 selected.replacedPassCount == 2U &&
+                selected.resultingInput.generation.publication ==
+                    publicationBeforeSelection + 1U &&
                 controller->configuration().selectedIndices ==
                     std::vector<std::uint32_t>({3U}) &&
                 controller->revision() == changed.revision,

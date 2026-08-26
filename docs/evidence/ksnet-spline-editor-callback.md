@@ -111,6 +111,33 @@ The return reads the final selected vector entry. It divides this index by the
 active spline point count. The method does not validate the input position,
 the selected index, or a zero point count.
 
+### World-space pick producer
+
+`Form1.panScene_MouseClick` has RVA `0x6490` in `ksEditor.exe`.
+It ignores all mouse buttons except the WinForms right button (`0x200000`).
+It passes the mouse X/Y and panel width/height to `ksGraphics.pickMesh`.
+That wrapper has RVA `0x28A80` in `ksNet`.
+
+`ksGraphics.pickMesh` constructs a `RayPicker` and calls `RayPicker::pick`.
+`RayPicker::pick` has VA `0x100638FA` and RVA `0x628FA`.
+It uses the camera FOV, near plane, far plane, and panel aspect ratio.
+It converts pixels with `2*pixel/size - 1` and reverses the Y sign.
+It transforms the ray into world space and traverses the supplied root node.
+
+The traverser skips an inactive node and its children.
+It transforms the ray into each active mesh local space.
+`Collisions::rayMeshIntersect` has VA `0x10066E2B` and RVA `0x65E2B`.
+It tests triangles in index-buffer order and accepts the first triangle hit.
+The triangle test accepts barycentric boundary equality.
+It rejects absolute determinants and ray distances less than `1e-5`.
+
+The node traversal keeps the smallest hit distance with a strict comparison.
+Thus, equal-distance node hits keep the first traversal result.
+The wrapper passes `RayPicker.pickedPoint` to `SplineEditor.onPickedPoint`.
+A null mesh returns without a spline selection.
+The native collision path trusts mesh indices and vertex ranges.
+The safe C++ path must validate these untrusted KN5 ranges before traversal.
+
 `onNodeRender` has method RVA `0x2F754` and execution VA `0x1002F760`.
 It calls `showCurrentSplineIndexInfo` for each selected index. The first entry
 does not have a special movement role. During mutable editing, the method calls
@@ -156,6 +183,26 @@ It clears `isInEditMode`, `selectedIndices`, and the temporary edit points.
 It cleans the temporary visual indicators but does not write active points.
 It does not refresh the spline or change the backup, cached forwards, or
 movable point.
+
+The temporary `editPoints` vector starts at offset 76.
+Each 28-byte record stores a forward, position, and visual-indicator pointer.
+Shift adds a record only in edit mode with more than one selected index.
+The record uses the picked X/Z and the closest spline point Y.
+It copies the cached forward for that spline index.
+Temporary records keep click order and permit duplicates.
+
+Without Shift, the method tests each temporary point before spline selection.
+A distance less than `1.0` selects that temporary-vector index for movement.
+This path does not add a spline index.
+The render path always shows each temporary visual indicator.
+It builds a green temporary interpolation after at least five records.
+
+Finish uses the first and final selected entries as its spline endpoints.
+It inserts all temporary positions between those endpoints in click order.
+For index `i` from the first endpoint through the index before the last, it
+samples at `(i-first)/(last-first)` and writes only the point position.
+When the first endpoint is not less than the last, the loop writes no points.
+The five-record path still calls `refreshSplines` after this empty loop.
 
 The keyboard path supplies a local movement vector to `editSplineManual`.
 The method converts this vector with the cached horizontal forward direction.
@@ -403,13 +450,17 @@ The controller accepts a validated point index and ports the recovered add,
 replace, and cyclic Control paths. It returns the final stored index divided by
 the point count. The safe port rejects invalid indices and zero point counts.
 The native method does not provide these checks.
-The controller request includes the owner, revision, and expected edit mode.
-It rejects stale input before allocation. A successful selection keeps model
-bytes, history, revision, and dirty state. Publication replaces the staged
-overlay set atomically for Vulkan and D3D12 device contracts.
-The window cannot produce this point index at runtime. Native screen hit
-testing remains pending. The window also has no edit-mode, cancel, or refresh
-control.
+The controller request includes an input snapshot. The snapshot contains the
+owner, model revision, publication number, input epoch, and edit mode.
+Each selection or lifecycle change advances the input epoch.
+Each overlay replacement advances the publication number.
+These counters reject queued ABA input and stale same-revision viewports.
+The controller rejects stale input before allocation. A successful selection
+keeps model bytes, history, revision, and dirty state. Publication replaces the
+staged overlay set atomically for Vulkan and D3D12 device contracts.
+The window cannot produce this point index at runtime. The native pick producer
+is recovered, but its bounded C++ implementation remains pending.
+The window also has no edit-mode, cancel, or refresh control.
 The `--ai-spline-save-on-exit` option saves after a clean window exit.
 The `--save-ai-spline` command exposes the same rebuilt-grid save boundary.
 
@@ -438,6 +489,9 @@ They do not run the successful window-exit save path.
 The point-selection test covers plain replacement and duplicate suppression.
 It covers both cyclic routes, the equal-distance route, and edit-mode append.
 It also covers stale input, invalid indices, failed publication, and retry.
+The input tests reject selection and lifecycle ABA changes.
+They reject delayed movement after a replacement selection.
+They also reject a stale viewport with the same model revision.
 
 The production WebGL source has no AI-spline load or render path. A source
 search found no AI-spline or `fast_lane.ai` identifiers. Thus, a direct WebGL

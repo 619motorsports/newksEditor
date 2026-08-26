@@ -77,6 +77,8 @@ enum class WorkspaceAiSplineControllerStatus : std::uint8_t {
     ready,
     unchanged,
     stale_revision,
+    stale_input,
+    stale_state,
     invalid_edit,
     overlay_failed,
     viewport_failed,
@@ -84,10 +86,27 @@ enum class WorkspaceAiSplineControllerStatus : std::uint8_t {
     allocation_failed,
 };
 
+// This snapshot identifies the controller state that produced one input
+// event. The input epoch changes after each selection or edit-mode change.
+struct WorkspaceAiSplineControllerInputSnapshot {
+    WorkspaceViewportAiSplineGeneration generation;
+    std::uint64_t inputEpoch = 0U;
+    bool editing = false;
+
+    [[nodiscard]] bool valid() const noexcept {
+        return generation.valid();
+    }
+
+    friend bool operator==(
+        const WorkspaceAiSplineControllerInputSnapshot&,
+        const WorkspaceAiSplineControllerInputSnapshot&) = default;
+};
+
 struct WorkspaceAiSplineControllerResult {
     WorkspaceAiSplineControllerStatus status =
         WorkspaceAiSplineControllerStatus::invalid_edit;
     render::Diagnostic diagnostic;
+    WorkspaceAiSplineControllerInputSnapshot resultingInput;
     std::uint64_t revision = 0U;
     std::size_t applied = 0U;
     std::size_t replacedPassCount = 0U;
@@ -101,19 +120,18 @@ struct WorkspaceAiSplineControllerResult {
 
 // A caller creates this request after it resolves a viewport hit to one
 // validated spline point. Screen-space hit testing is intentionally outside
-// the controller. Snapshot both controller fields with the input event.
+// the controller. Capture the controller input snapshot with the event.
 struct WorkspaceAiSplinePointSelectionRequest {
     std::uint32_t pointIndex = 0U;
     bool controlPressed = false;
-    bool expectedEditing = false;
-    WorkspaceViewportAiSplineGeneration expectedGeneration;
+    WorkspaceAiSplineControllerInputSnapshot expected;
 };
 
 struct WorkspaceAiSplinePointSelectionResult {
     WorkspaceAiSplineControllerStatus status =
         WorkspaceAiSplineControllerStatus::invalid_edit;
     render::Diagnostic diagnostic;
-    WorkspaceViewportAiSplineGeneration generation;
+    WorkspaceAiSplineControllerInputSnapshot resultingInput;
     std::uint64_t revision = 0U;
     std::size_t selectionCount = 0U;
     std::optional<std::uint32_t> lastSelectedIndex;
@@ -196,6 +214,8 @@ public:
     [[nodiscard]] bool canUndo() const noexcept;
     [[nodiscard]] bool canRedo() const noexcept;
     [[nodiscard]] bool editing() const noexcept;
+    [[nodiscard]] WorkspaceAiSplineControllerInputSnapshot
+    inputSnapshot() const noexcept;
 
     // Build recovered save bytes without changing visible or authoring state.
     [[nodiscard]] WorkspaceAiSplineControllerSaveResult
@@ -208,16 +228,16 @@ public:
     [[nodiscard]] WorkspaceAiSplineControllerResult moveSelectedByManualInput(
         render::Device& device, WorkspaceViewport& viewport,
         const WorkspaceAiSplineManualMovement& movement,
-        std::uint64_t expectedRevision);
+        const WorkspaceAiSplineControllerInputSnapshot& expected);
     [[nodiscard]] WorkspaceAiSplineControllerResult startEditing(
         render::Device& device, WorkspaceViewport& viewport,
-        std::uint64_t expectedRevision);
+        const WorkspaceAiSplineControllerInputSnapshot& expected);
     [[nodiscard]] WorkspaceAiSplineControllerResult finishEditing(
         render::Device& device, WorkspaceViewport& viewport,
-        std::uint64_t expectedRevision);
+        const WorkspaceAiSplineControllerInputSnapshot& expected);
     [[nodiscard]] WorkspaceAiSplineControllerResult cancelEditing(
         render::Device& device, WorkspaceViewport& viewport,
-        std::uint64_t expectedRevision);
+        const WorkspaceAiSplineControllerInputSnapshot& expected);
     [[nodiscard]] WorkspaceAiSplinePointSelectionResult selectPoint(
         render::Device& device, WorkspaceViewport& viewport,
         const WorkspaceAiSplinePointSelectionRequest& request);
@@ -239,6 +259,7 @@ private:
         render::Device& device, WorkspaceViewport& viewport,
         authoring::AiSplineSession candidate,
         authoring::AiSplineSessionResult sessionResult);
+    [[nodiscard]] WorkspaceAiSplineControllerResult currentResult() const;
     [[nodiscard]] WorkspaceAiSplineControllerResult staleResult() const;
     [[nodiscard]] WorkspaceAiSplineControllerResult
     viewportBindingResult() const;
@@ -246,8 +267,12 @@ private:
         const WorkspaceViewport& viewport) const noexcept;
     [[nodiscard]] WorkspaceAiSplineControllerResult updateEditingState(
         render::Device& device, WorkspaceViewport& viewport,
-        std::uint64_t expectedRevision, bool editing,
+        const WorkspaceAiSplineControllerInputSnapshot& expected,
+        bool editing,
         bool clearSelection);
+    [[nodiscard]] bool inputMatches(
+        const WorkspaceAiSplineControllerInputSnapshot& expected) const
+        noexcept;
 
     std::unique_ptr<State> state_;
 };

@@ -2329,7 +2329,7 @@ int run_window(int argc, char** argv) {
                                        *device_result.device, *viewport,
                                        ai_spline_manual_input.movement(),
                                        loaded_workspace.aiSplineController
-                                           ->revision());
+                                           ->inputSnapshot());
             if (!moved.ok()) {
                 if (!reported_ai_spline_manual_diagnostic) {
                     std::cerr << "AI spline manual edit: "
@@ -2345,6 +2345,13 @@ int run_window(int argc, char** argv) {
                     break;
                 case apex::app::WorkspaceAiSplineControllerStatus::
                     stale_revision:
+                    if (!prepare_viewport()) return 1;
+                    break;
+                case apex::app::WorkspaceAiSplineControllerStatus::
+                    stale_input:
+                    break;
+                case apex::app::WorkspaceAiSplineControllerStatus::
+                    stale_state:
                     if (!prepare_viewport()) return 1;
                     break;
                 default:
