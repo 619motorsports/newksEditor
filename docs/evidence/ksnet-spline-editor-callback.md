@@ -92,7 +92,24 @@ This key is Control. Shift is virtual key 16.
 
 `onPickedPoint` has token `0x0600010A` and execution VA `0x1002FED0`.
 A null active spline returns `-1.0`. Otherwise, the method finds the closest
-interpolated point before it applies selection state.
+raw spline point before it applies selection state.
+
+`InterpolatingSpline::closestPointIndex` is at `0x10035BB5`.
+It calls `closestPointIndexGrid` when a grid exists.
+Otherwise, it calls `Spline::closestPointIndex` at `0x100336CE`.
+The base method starts with squared distance `9,999,999.0F` and index zero.
+It scans raw 20-byte points in source order.
+It uses single-precision squared distance across X, Y, and Z.
+A strict less-than comparison keeps the earlier point when distances match.
+An empty spline or non-finite query returns index zero.
+
+`InterpolatingSpline::closestPointIndexGrid` is at `0x10035BDC`.
+It calculates the X row and Z cell from the stored minimum and sampling density.
+An out-of-range row or cell uses the base scan.
+An in-range cell scans its stored candidate order with the same 3D distance.
+An empty in-range cell returns index zero.
+The native method clamps each stored candidate to the point array.
+The safe C++ port rejects a malformed direct grid candidate instead.
 
 Edit mode always adds the point without clearing the existing selection.
 Outside edit mode, a click without Control clears the selection before add.
@@ -111,7 +128,7 @@ The return reads the final selected vector entry. It divides this index by the
 active spline point count. The method does not validate the input position,
 the selected index, or a zero point count.
 
-### World-space pick producer
+### Screen-to-mesh pick producer
 
 `Form1.panScene_MouseClick` has RVA `0x6490` in `ksEditor.exe`.
 It ignores all mouse buttons except the WinForms right button (`0x200000`).
@@ -120,23 +137,31 @@ That wrapper has RVA `0x28A80` in `ksNet`.
 
 `ksGraphics.pickMesh` constructs a `RayPicker` and calls `RayPicker::pick`.
 `RayPicker::pick` has VA `0x100638FA` and RVA `0x628FA`.
-It uses the camera FOV, near plane, far plane, and panel aspect ratio.
+It uses the camera FOV and panel aspect ratio.
 It converts pixels with `2*pixel/size - 1` and reverses the Y sign.
-It transforms the ray into world space and traverses the supplied root node.
+The source direction has Z equal to `-1` before normalization.
+The ray starts at the camera translation.
+It does not use the near or far planes to clip the ray.
+The traversal starts with a best distance of `1e11`.
 
 The traverser skips an inactive node and its children.
 It transforms the ray into each active mesh local space.
+It does not normalize the inverse-transformed local direction.
+It accepts ordinary `Mesh` nodes and skips sibling `SkinnedMesh` nodes.
 `Collisions::rayMeshIntersect` has VA `0x10066E2B` and RVA `0x65E2B`.
 It tests triangles in index-buffer order and accepts the first triangle hit.
 The triangle test accepts barycentric boundary equality.
-It rejects absolute determinants and ray distances less than `1e-5`.
+It rejects an absolute determinant below `1e-5`.
+It also requires a ray distance greater than `1e-5`.
 
 The node traversal keeps the smallest hit distance with a strict comparison.
 Thus, equal-distance node hits keep the first traversal result.
-The wrapper passes `RayPicker.pickedPoint` to `SplineEditor.onPickedPoint`.
+The traverser calculates the hit from the local origin and local direction.
+The wrapper passes this mesh-local point directly to `SplineEditor.onPickedPoint`.
+It does not transform the point back to world space.
 A null mesh returns without a spline selection.
 The native collision path trusts mesh indices and vertex ranges.
-The safe C++ path must validate these untrusted KN5 ranges before traversal.
+The C++ path validates finite geometry, strides, indices, transforms, and work limits.
 
 `onNodeRender` has method RVA `0x2F754` and execution VA `0x1002F760`.
 It calls `showCurrentSplineIndexInfo` for each selected index. The first entry

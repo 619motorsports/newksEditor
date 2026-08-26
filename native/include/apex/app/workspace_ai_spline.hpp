@@ -36,6 +36,8 @@ inline constexpr std::size_t
     workspace_ai_spline_max_interpolation_control_points = 65'536U;
 inline constexpr std::size_t workspace_ai_spline_max_selection_points =
     render::max_overlay_line_total_vertices / 2U;
+inline constexpr float workspace_ai_spline_closest_initial_distance_squared =
+    9'999'999.0F;
 
 enum class WorkspaceAiSplineDisplayMode : std::uint8_t {
     raw,
@@ -108,6 +110,34 @@ struct WorkspaceAiSplineOverlayRequest {
     std::span<const std::uint32_t> selected_indices{};
     bool show_camber = false;
 };
+
+struct WorkspaceAiSplineClosestPointLimits {
+    std::size_t max_points = 1'000'000U;
+    std::size_t max_grid_rows = 1'000'000U;
+    std::size_t max_grid_cells = 1'000'000U;
+    std::size_t max_grid_indices = 10'000'000U;
+    std::size_t max_grid_neighbors = 1'000'000U;
+};
+
+struct WorkspaceAiSplineClosestPointResult {
+    WorkspaceAiSplineStatus status = WorkspaceAiSplineStatus::invalid_source;
+    render::Diagnostic diagnostic;
+    std::uint32_t point_index = 0U;
+    bool used_grid = false;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == WorkspaceAiSplineStatus::ready;
+    }
+};
+
+// Resolve the recovered InterpolatingSpline::closestPointIndex result. Empty
+// splines and non-finite queries return index zero. A valid in-range grid cell
+// restricts the 3D scan to its stored candidate order.
+[[nodiscard]] WorkspaceAiSplineClosestPointResult
+resolveWorkspaceAiSplineClosestPoint(
+    const formats::AiSpline& spline,
+    const std::array<float, 3U>& query,
+    const WorkspaceAiSplineClosestPointLimits& limits = {});
 
 // One owned generation of every enabled spline pass. Building this set from
 // one model snapshot prevents derived passes from observing mixed revisions.

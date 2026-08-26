@@ -50,6 +50,27 @@ enum class WindowEventType : std::uint8_t {
     mouse_wheel,
 };
 
+enum class WindowMouseButton : std::uint8_t {
+    left = 1U,
+    middle = 2U,
+    right = 3U,
+};
+
+enum class WindowModifier : std::uint32_t {
+    control = 1U << 0U,
+    shift = 1U << 1U,
+};
+
+[[nodiscard]] constexpr std::uint32_t window_mouse_button_code(
+    WindowMouseButton button) noexcept {
+    return static_cast<std::uint32_t>(button);
+}
+
+[[nodiscard]] constexpr bool window_modifier_active(
+    std::uint32_t modifiers, WindowModifier modifier) noexcept {
+    return (modifiers & static_cast<std::uint32_t>(modifier)) != 0U;
+}
+
 // Portable semantic keys used by application input controllers. Platform
 // backends translate their native key and scan codes at the window boundary.
 enum class WindowKey : std::uint8_t {
@@ -75,10 +96,12 @@ struct WindowEvent {
     // Keep the native key code for existing consumers and diagnostics.
     std::uint32_t key = 0U;
     WindowKey semantic_key = WindowKey::unknown;
+    // Portable modifier bits. Platform-specific values do not cross this API.
     std::uint32_t modifiers = 0U;
     std::uint32_t button = 0U;
     std::int32_t width = 0;
     std::int32_t height = 0;
+    // Mouse positions and relative motion use logical window coordinates.
     float x = 0.0F;
     float y = 0.0F;
     float x_relative = 0.0F;

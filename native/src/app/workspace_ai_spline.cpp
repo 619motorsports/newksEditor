@@ -3,7 +3,9 @@
 #include "apex/app/installed_editor_spline.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
+#include <limits>
 #include <new>
 #include <span>
 
@@ -17,6 +19,69 @@ render::Diagnostic diagnostic(const char* code, const char* message) {
 bool finite_position(const std::array<float, 3U>& position) noexcept {
     return std::isfinite(position[0]) && std::isfinite(position[1]) &&
            std::isfinite(position[2]);
+}
+
+[[nodiscard]] float native_float(float value) noexcept {
+    volatile float rounded = value;
+    return rounded;
+}
+
+[[nodiscard]] float native_distance_squared(
+    const std::array<float, 3U>& left,
+    const std::array<float, 3U>& right) noexcept {
+    const float dx = native_float(left[0] - right[0]);
+    const float dy = native_float(left[1] - right[1]);
+    const float dz = native_float(left[2] - right[2]);
+    const float x2 = native_float(dx * dx);
+    const float y2 = native_float(dy * dy);
+    const float z2 = native_float(dz * dz);
+    return native_float(native_float(x2 + y2) + z2);
+}
+
+[[nodiscard]] std::optional<std::size_t> native_grid_index(
+    float coordinate, float minimum, float density) noexcept {
+    const float relative = native_float(coordinate - minimum);
+    const float scaled = native_float(relative / density);
+    if (!std::isfinite(scaled) || scaled < 0.0F ||
+        scaled >= 4'294'967'296.0F)
+        return std::nullopt;
+    return static_cast<std::size_t>(static_cast<std::uint32_t>(scaled));
+}
+
+[[nodiscard]] WorkspaceAiSplineClosestPointResult closest_failure(
+    WorkspaceAiSplineStatus status, const char* code, const char* message) {
+    WorkspaceAiSplineClosestPointResult result;
+    result.status = status;
+    result.diagnostic = diagnostic(code, message);
+    return result;
+}
+
+[[nodiscard]] std::uint32_t scan_closest_points(
+    const formats::AiSpline& spline,
+    const std::array<float, 3U>& query,
+    std::span<const std::uint32_t> candidates) noexcept {
+    float best = std::bit_cast<float>(std::uint32_t{0x4B18967FU});
+    std::uint32_t best_index = 0U;
+    if (candidates.empty()) {
+        for (std::size_t index = 0U; index < spline.points.size(); ++index) {
+            const float distance = native_distance_squared(
+                query, spline.points[index].position);
+            if (distance < best) {
+                best = distance;
+                best_index = static_cast<std::uint32_t>(index);
+            }
+        }
+        return best_index;
+    }
+    for (const std::uint32_t index : candidates) {
+        const float distance = native_distance_squared(
+            query, spline.points[static_cast<std::size_t>(index)].position);
+        if (distance < best) {
+            best = distance;
+            best_index = index;
+        }
+    }
+    return best_index;
 }
 
 const formats::AiSplinePayload* payload_for_point(
@@ -697,6 +762,106 @@ WorkspaceAiSplineResult build_selection_geometry(
 }
 
 } // namespace
+
+WorkspaceAiSplineClosestPointResult
+resolveWorkspaceAiSplineClosestPoint(
+    const formats::AiSpline& spline,
+    const std::array<float, 3U>& query,
+    const WorkspaceAiSplineClosestPointLimits& limits) {
+    WorkspaceAiSplineClosestPointResult result;
+    result.status = WorkspaceAiSplineStatus::ready;
+    if (spline.points.empty() || !finite_position(query)) return result;
+    if (limits.max_points == 0U || limits.max_grid_rows == 0U ||
+        limits.max_grid_cells == 0U || limits.max_grid_indices == 0U ||
+        limits.max_grid_neighbors == 0U ||
+        spline.points.size() > limits.max_points ||
+        spline.points.size() >
+            static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+        return closest_failure(
+            WorkspaceAiSplineStatus::limit_exceeded,
+            "workspace_ai_spline_closest_limit_exceeded",
+            "AI spline closest-point input exceeds its configured limit");
+    }
+    for (const formats::AiSplinePoint& point : spline.points) {
+        if (!finite_position(point.position)) {
+            return closest_failure(
+                WorkspaceAiSplineStatus::invalid_source,
+                "workspace_ai_spline_closest_point_non_finite",
+                "AI spline closest-point input contains a non-finite point");
+        }
+    }
+    if (!spline.grid.has_value()) {
+        result.point_index = scan_closest_points(spline, query, {});
+        return result;
+    }
+
+    const formats::AiSplineGrid& grid = *spline.grid;
+    if (!finite_position(grid.minimum) || !finite_position(grid.maximum) ||
+        !std::isfinite(grid.samplingDensity) ||
+        !(grid.samplingDensity > 0.0F) ||
+        grid.maximum[0] < grid.minimum[0] ||
+        grid.maximum[2] < grid.minimum[2]) {
+        return closest_failure(
+            WorkspaceAiSplineStatus::invalid_source,
+            "workspace_ai_spline_closest_grid_invalid",
+            "AI spline closest-point grid metadata is invalid");
+    }
+    if (grid.neighborCount > limits.max_grid_neighbors ||
+        grid.rows.size() > limits.max_grid_rows) {
+        return closest_failure(
+            WorkspaceAiSplineStatus::limit_exceeded,
+            "workspace_ai_spline_closest_limit_exceeded",
+            "AI spline closest-point grid exceeds its configured limit");
+    }
+    std::size_t cell_count = 0U;
+    std::size_t candidate_count = 0U;
+    for (const formats::AiSplineGridRow& row : grid.rows) {
+        if (row.cells.size() > limits.max_grid_cells - cell_count) {
+            return closest_failure(
+                WorkspaceAiSplineStatus::limit_exceeded,
+                "workspace_ai_spline_closest_limit_exceeded",
+                "AI spline closest-point cells exceed their configured limit");
+        }
+        cell_count += row.cells.size();
+        for (const formats::AiSplineGridCell& cell : row.cells) {
+            if (cell.pointIndices.size() >
+                limits.max_grid_indices - candidate_count) {
+                return closest_failure(
+                    WorkspaceAiSplineStatus::limit_exceeded,
+                    "workspace_ai_spline_closest_limit_exceeded",
+                    "AI spline closest-point candidates exceed their configured limit");
+            }
+            candidate_count += cell.pointIndices.size();
+            for (const std::uint32_t index : cell.pointIndices) {
+                if (static_cast<std::size_t>(index) >= spline.points.size()) {
+                    return closest_failure(
+                        WorkspaceAiSplineStatus::invalid_source,
+                        "workspace_ai_spline_closest_grid_index_invalid",
+                        "AI spline closest-point grid references a missing point");
+                }
+            }
+        }
+    }
+
+    const auto row_index = native_grid_index(
+        query[0], grid.minimum[0], grid.samplingDensity);
+    if (!row_index.has_value() || *row_index >= grid.rows.size()) {
+        result.point_index = scan_closest_points(spline, query, {});
+        return result;
+    }
+    const formats::AiSplineGridRow& row = grid.rows[*row_index];
+    const auto cell_index = native_grid_index(
+        query[2], grid.minimum[2], grid.samplingDensity);
+    if (!cell_index.has_value() || *cell_index >= row.cells.size()) {
+        result.point_index = scan_closest_points(spline, query, {});
+        return result;
+    }
+    result.used_grid = true;
+    const auto& candidates = row.cells[*cell_index].pointIndices;
+    if (candidates.empty()) return result;
+    result.point_index = scan_closest_points(spline, query, candidates);
+    return result;
+}
 
 WorkspaceAiSplineResult
 buildWorkspaceAiSplineGeometry(const formats::AiSpline& spline,

@@ -24,6 +24,7 @@
 #include "apex/platform/file_output.hpp"
 #include "apex/platform/window.hpp"
 #include "apex/render/device.hpp"
+#include "apex/render/picking.hpp"
 
 #include <algorithm>
 #include <array>
@@ -2152,6 +2153,71 @@ int run_window(int argc, char** argv) {
     bool reported_ai_spline_manual_diagnostic = false;
     bool window_has_keyboard_focus = true;
     apex::app::PresentationRecreationController recreation;
+    auto pick_ai_spline_point =
+        [&](const apex::platform::WindowEvent& event) {
+            if (loaded_workspace.aiSplineController == nullptr ||
+                !loaded_workspace.document.has_value() || viewport == nullptr)
+                return;
+            const std::uint32_t width = window_result.window->width();
+            const std::uint32_t height = window_result.window->height();
+            if (width == 0U || height == 0U || !std::isfinite(event.x) ||
+                !std::isfinite(event.y))
+                return;
+            const auto camera = current_camera(width, height);
+            if (!camera.ok()) {
+                std::cerr << "AI spline pick camera: " << camera.code << ": "
+                          << camera.message << '\n';
+                return;
+            }
+            // WinForms supplied integer MouseEventArgs coordinates to the
+            // installed RayPicker. Truncate SDL's logical float coordinates.
+            const float pixel_x = std::trunc(event.x);
+            const float pixel_y = std::trunc(event.y);
+            const auto ray = apex::render::build_screen_ray(
+                *camera.frame, pixel_x, pixel_y, width, height);
+            if (!ray.ok()) {
+                std::cerr << "AI spline pick ray: " << ray.diagnostic.code
+                          << ": " << ray.diagnostic.message << '\n';
+                return;
+            }
+            const auto mesh_hit = apex::render::pick_kn5_scene(
+                *ray.ray, loaded_workspace.document->assembly.model.root);
+            if (mesh_hit.status == apex::render::PickStatus::invalid_request) {
+                std::cerr << "AI spline mesh pick: "
+                          << mesh_hit.diagnostic.code << ": "
+                          << mesh_hit.diagnostic.message << '\n';
+                return;
+            }
+            if (!mesh_hit.ok()) return;
+            const auto closest =
+                apex::app::resolveWorkspaceAiSplineClosestPoint(
+                    loaded_workspace.aiSplineController->current(),
+                    mesh_hit.hit->callback_position);
+            if (!closest.ok()) {
+                std::cerr << "AI spline point pick: "
+                          << closest.diagnostic.code << ": "
+                          << closest.diagnostic.message << '\n';
+                return;
+            }
+            if (loaded_workspace.aiSplineController->current().points.empty())
+                return;
+            apex::app::WorkspaceAiSplinePointSelectionRequest selection;
+            selection.pointIndex = closest.point_index;
+            selection.controlPressed =
+                apex::platform::window_modifier_active(
+                    event.modifiers,
+                    apex::platform::WindowModifier::control);
+            selection.expected =
+                loaded_workspace.aiSplineController->inputSnapshot();
+            const auto selected =
+                loaded_workspace.aiSplineController->selectPoint(
+                    *device_result.device, *viewport, selection);
+            if (!selected.ok()) {
+                std::cerr << "AI spline point selection: "
+                          << selected.diagnostic.code << ": "
+                          << selected.diagnostic.message << '\n';
+            }
+        };
     while (!window_result.window->close_requested() &&
            (frame_limit == 0U || frames < frame_limit)) {
         bool resized = false;
@@ -2195,7 +2261,9 @@ int run_window(int argc, char** argv) {
                 ai_spline_manual_input.setFocused(true);
                 break;
             case apex::platform::WindowEventType::mouse_button_down:
-                if (events[index].button == 1U) {
+                if (events[index].button ==
+                    apex::platform::window_mouse_button_code(
+                        apex::platform::WindowMouseButton::left)) {
                     if (track_camera_active) {
                         track_camera_active = false;
                         camera_mode_changed = true;
@@ -2203,7 +2271,9 @@ int run_window(int argc, char** argv) {
                     (void)camera_controller.apply({
                         apex::app::WorkspaceViewportCameraGesture::begin_orbit,
                         0.0F, 0.0F});
-                } else if (events[index].button == 2U) {
+                } else if (events[index].button ==
+                           apex::platform::window_mouse_button_code(
+                               apex::platform::WindowMouseButton::middle)) {
                     if (track_camera_active) {
                         track_camera_active = false;
                         camera_mode_changed = true;
@@ -2214,9 +2284,20 @@ int run_window(int argc, char** argv) {
                 }
                 break;
             case apex::platform::WindowEventType::mouse_button_up:
-                (void)camera_controller.apply({
-                    apex::app::WorkspaceViewportCameraGesture::end_drag,
-                    0.0F, 0.0F});
+                if (events[index].button ==
+                        apex::platform::window_mouse_button_code(
+                            apex::platform::WindowMouseButton::right)) {
+                    pick_ai_spline_point(events[index]);
+                } else if (events[index].button ==
+                               apex::platform::window_mouse_button_code(
+                                   apex::platform::WindowMouseButton::left) ||
+                           events[index].button ==
+                               apex::platform::window_mouse_button_code(
+                                   apex::platform::WindowMouseButton::middle)) {
+                    (void)camera_controller.apply({
+                        apex::app::WorkspaceViewportCameraGesture::end_drag,
+                        0.0F, 0.0F});
+                }
                 break;
             case apex::platform::WindowEventType::mouse_motion:
                 (void)camera_controller.apply({

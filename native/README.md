@@ -309,9 +309,15 @@ Stale input and stale viewport bindings have different status values.
 Invalid, foreign, and stale inputs fail before viewport publication.
 Successful selection keeps spline bytes, history, revision, and dirty state.
 The result contains the final stored index and its normalized point position.
-This API does not resolve a mouse position. The native screen-hit producer is
-recovered, but its bounded C++ implementation remains pending.
-The native window does not expose the point-index operation yet.
+The native window resolves a right-button release through the recovered picker.
+It uses logical integer mouse coordinates and the backend-neutral camera frame.
+The ray traverses active static KN5 meshes in depth-first source order.
+It skips skinned meshes, as the installed `RayPicker` does.
+The first triangle hit in each mesh competes by strict ray distance.
+The installed picker forwards its mesh-local hit point without a world transform.
+The C++ resolver preserves this quirk before its grid-aware 3D point scan.
+Control on release extends the recovered cyclic selection.
+The picker validates direct geometry and grid ranges before traversal.
 The temporary edit-point interpolation path remains pending.
 The native window does not expose these lifecycle calls yet.
 `--save-ai-spline` accepts version 7 and rebuilds the native grid.

@@ -202,6 +202,7 @@ add_library(apex_render STATIC
   src/render/material_binding.cpp
   src/render/material_profile.cpp
   src/render/pipeline.cpp
+  src/render/picking.cpp
   src/render/render_plan.cpp
   src/render/selection_axis.cpp
   src/render/selected_mesh.cpp
@@ -386,6 +387,7 @@ apex_add_native_test(lighting_tests.cpp lighting_tests ApexEditor::Render)
 apex_add_native_test(material_binding_tests.cpp material_binding_tests ApexEditor::Render)
 apex_add_native_test(material_profile_tests.cpp material_profile_tests ApexEditor::Render)
 apex_add_native_test(pipeline_tests.cpp pipeline_tests ApexEditor::Render)
+apex_add_native_test(picking_tests.cpp picking_tests ApexEditor::Render)
 apex_add_native_test(render_plan_tests.cpp render_plan_tests ApexEditor::Render)
 apex_add_native_test(selection_axis_tests.cpp selection_axis_tests ApexEditor::Render)
 apex_add_native_test(selected_mesh_tests.cpp selected_mesh_tests ApexEditor::Render)

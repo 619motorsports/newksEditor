@@ -288,9 +288,13 @@ remains unchanged and feature-complete.
   A selection update keeps model bytes, revision, history, and dirty state.
   It publishes the complete staged overlay set with the next publication.
   Invalid indices and publication errors keep the old selection and buffers.
-  The request consumes an already resolved index. The native screen-hit
-  producer is recovered, but its bounded C++ implementation remains pending.
-  Thus, the C++ port does not claim mouse-picking parity.
+  A right-button release now runs the recovered screen-to-mesh picker.
+  It traverses active static KN5 meshes and skips skinned meshes.
+  It preserves first-triangle order and strict nearest-node ordering.
+  It also preserves the native mesh-local callback-position quirk.
+  The grid-aware resolver scans raw spline points with 3D squared distance.
+  Control extends the recovered cyclic selection through the existing controller.
+  Direct malformed geometry and grid ranges fail before selection publication.
   Temporary edit-point interpolation on finish remains pending.
   The native window option `--ai-spline-edit-point` applies one scripted batch
   after viewport setup.

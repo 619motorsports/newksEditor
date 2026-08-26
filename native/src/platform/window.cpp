@@ -35,6 +35,15 @@ namespace {
 
 #if defined(APEX_HAS_SDL3)
 
+[[nodiscard]] std::uint32_t semantic_modifiers(SDL_Keymod modifiers) noexcept {
+    std::uint32_t result = 0U;
+    if ((modifiers & SDL_KMOD_CTRL) != 0U)
+        result |= static_cast<std::uint32_t>(WindowModifier::control);
+    if ((modifiers & SDL_KMOD_SHIFT) != 0U)
+        result |= static_cast<std::uint32_t>(WindowModifier::shift);
+    return result;
+}
+
 std::size_t video_users = 0U;
 
 [[nodiscard]] bool acquire_video() noexcept {
@@ -331,7 +340,7 @@ std::size_t Window::poll_events(std::span<WindowEvent> events) noexcept {
                                                                 : WindowEventType::key_up;
             translated.key = static_cast<std::uint32_t>(event.key.key);
             translated.semantic_key = semantic_key(event.key);
-            translated.modifiers = static_cast<std::uint32_t>(event.key.mod);
+            translated.modifiers = semantic_modifiers(event.key.mod);
             translated.repeat = event.key.repeat;
             relevant = true;
             break;
@@ -342,6 +351,7 @@ std::size_t Window::poll_events(std::span<WindowEvent> events) noexcept {
                                   ? WindowEventType::mouse_button_down
                                   : WindowEventType::mouse_button_up;
             translated.button = static_cast<std::uint32_t>(event.button.button);
+            translated.modifiers = semantic_modifiers(SDL_GetModState());
             translated.x = event.button.x;
             translated.y = event.button.y;
             relevant = true;

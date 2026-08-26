@@ -43,6 +43,28 @@ void test_invalid_descriptions() {
             "over-sized window dimension must be rejected");
 }
 
+void test_portable_mouse_semantics() {
+    using apex::platform::WindowModifier;
+    using apex::platform::WindowMouseButton;
+    require(apex::platform::window_mouse_button_code(
+                WindowMouseButton::left) == 1U &&
+                apex::platform::window_mouse_button_code(
+                    WindowMouseButton::middle) == 2U &&
+                apex::platform::window_mouse_button_code(
+                    WindowMouseButton::right) == 3U,
+            "portable mouse buttons must match SDL button codes");
+    const auto modifiers =
+        static_cast<std::uint32_t>(WindowModifier::control) |
+        static_cast<std::uint32_t>(WindowModifier::shift);
+    require(apex::platform::window_modifier_active(
+                modifiers, WindowModifier::control) &&
+                apex::platform::window_modifier_active(
+                    modifiers, WindowModifier::shift) &&
+                !apex::platform::window_modifier_active(
+                    0U, WindowModifier::control),
+            "portable modifier test must preserve semantic bits");
+}
+
 int test_display_smoke() {
     using apex::platform::Window;
     using apex::platform::WindowDescription;
@@ -98,6 +120,7 @@ int test_vulkan_source_smoke() {
 int main() {
     try {
         test_invalid_descriptions();
+        test_portable_mouse_semantics();
         const int display_status = test_display_smoke();
         if (display_status != 0) return display_status;
         const int vulkan_status = test_vulkan_source_smoke();

@@ -1070,6 +1070,71 @@ void rejectsUnsafeCamberSources() {
             "camber geometry source bound must be enforced");
 }
 
+void resolvesRecoveredClosestSplinePoint() {
+    apex::formats::AiSpline spline;
+    spline.points = {point(0.0F, 0.0F, 0.0F),
+                     point(0.0F, 10.0F, 0.0F)};
+    auto result = apex::app::resolveWorkspaceAiSplineClosestPoint(
+        spline, {0.0F, 9.0F, 0.0F});
+    require(result.ok() && result.point_index == 1U && !result.used_grid,
+            "closest-point scan must use full 3D distance");
+
+    spline.points[1U].position = spline.points[0U].position;
+    result = apex::app::resolveWorkspaceAiSplineClosestPoint(
+        spline, {0.0F, 0.0F, 0.0F});
+    require(result.ok() && result.point_index == 0U,
+            "equal raw distances must retain source order");
+
+    apex::formats::AiSpline empty;
+    result = apex::app::resolveWorkspaceAiSplineClosestPoint(
+        empty, {0.0F, 0.0F, 0.0F});
+    require(result.ok() && result.point_index == 0U,
+            "empty spline must preserve native index-zero default");
+    result = apex::app::resolveWorkspaceAiSplineClosestPoint(
+        spline, {std::numeric_limits<float>::quiet_NaN(), 0.0F, 0.0F});
+    require(result.ok() && result.point_index == 0U,
+            "non-finite query must preserve native index-zero default");
+}
+
+void resolvesAndValidatesRecoveredClosestPointGrid() {
+    apex::formats::AiSpline spline;
+    spline.points = {point(-1.0F, 0.0F, 0.0F),
+                     point(50.0F, 0.0F, 0.0F),
+                     point(1.0F, 0.0F, 0.0F)};
+    apex::formats::AiSplineGrid grid;
+    grid.minimum = {0.0F, 0.0F, 0.0F};
+    grid.maximum = {10.0F, 0.0F, 10.0F};
+    grid.neighborCount = 2U;
+    grid.samplingDensity = 10.0F;
+    grid.rows = {apex::formats::AiSplineGridRow{
+        {apex::formats::AiSplineGridCell{{2U, 0U}}}}};
+    spline.grid = grid;
+
+    auto result = apex::app::resolveWorkspaceAiSplineClosestPoint(
+        spline, {0.0F, 0.0F, 0.0F});
+    require(result.ok() && result.used_grid && result.point_index == 2U,
+            "equal grid distances must retain candidate order");
+
+    spline.grid->rows[0U].cells[0U].pointIndices.clear();
+    result = apex::app::resolveWorkspaceAiSplineClosestPoint(
+        spline, {0.0F, 0.0F, 0.0F});
+    require(result.ok() && result.used_grid && result.point_index == 0U,
+            "empty in-range grid cell must return native index-zero default");
+
+    result = apex::app::resolveWorkspaceAiSplineClosestPoint(
+        spline, {50.0F, 0.0F, 0.0F});
+    require(result.ok() && !result.used_grid && result.point_index == 1U,
+            "out-of-range grid query must use the full scan");
+
+    spline.grid->rows[0U].cells[0U].pointIndices = {3U};
+    result = apex::app::resolveWorkspaceAiSplineClosestPoint(
+        spline, {0.0F, 0.0F, 0.0F});
+    require(!result.ok() &&
+                result.diagnostic.code ==
+                    "workspace_ai_spline_closest_grid_index_invalid",
+            "direct malformed grid index must be rejected before traversal");
+}
+
 } // namespace
 
 int main() {
@@ -1094,6 +1159,8 @@ int main() {
         buildsRecoveredCurrentIndexMarker();
         buildsRecoveredSelectedIndexMarkers();
         rejectsUnsafeCurrentIndexMarkers();
+        resolvesRecoveredClosestSplinePoint();
+        resolvesAndValidatesRecoveredClosestPointGrid();
     } catch (const std::exception& error) {
         std::cerr << "workspace_ai_spline_tests: " << error.what() << '\n';
         return 1;
