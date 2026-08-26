@@ -154,7 +154,8 @@ void rejectsMalformedValues() {
                       "COUNT_INVALID");
 
     std::vector<std::uint8_t> invalidUtf8;
-    u32(invalidUtf8, 2); u32(invalidUtf8, 1); u32(invalidUtf8, 1); invalidUtf8.push_back(0xff);
+    u32(invalidUtf8, 2); u32(invalidUtf8, 1); u32(invalidUtf8, 1);
+    invalidUtf8.push_back(0xff); u32(invalidUtf8, 0);
     expectsParseError([&] { parseKsAnimation(invalidUtf8); }, "INVALID_UTF8");
 
     auto truncatedFrame = version2({{"NODE", {frame({0, 0, 0})}}});
