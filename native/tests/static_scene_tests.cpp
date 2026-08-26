@@ -3050,6 +3050,26 @@ void retains_three_directional_maps_and_executes_only_opaque_static_casters() {
                     std::vector<apex::scene::NodeId>({1U, 2U, 1U}),
             "explicit skinned shadow pipeline takes precedence over non-opaque material state");
 
+    const std::array<std::uint32_t, 3U> reordered_shadow_packets = {
+        1U, 2U, 0U};
+    mixed_frame.shadow_packet_order = reordered_shadow_packets;
+    const auto reordered_shadow_start = mixed_device.depth_nodes.size();
+    const auto reordered_shadow =
+        mixed_prepared.resources->draw_opaque_directional_shadows(
+            mixed_device, mixed_frame);
+    require(reordered_shadow.ok() &&
+                mixed_device.depth_nodes.size() ==
+                    reordered_shadow_start +
+                        directional_shadow_cascade_count &&
+                std::all_of(
+                    mixed_device.depth_nodes.begin() +
+                        static_cast<std::ptrdiff_t>(reordered_shadow_start),
+                    mixed_device.depth_nodes.end(), [](const auto& nodes) {
+                        return nodes ==
+                               std::vector<apex::scene::NodeId>({2U, 1U, 1U});
+                    }),
+            "each cascade uses the complete prepared-index shadow order");
+
     const std::array<std::uint8_t, 3U> hide_shadow_skin = {1U, 0U, 1U};
     mixed_frame.packet_visibility = hide_shadow_skin;
     const std::size_t updates_before_hidden_shadow_skin = mixed_device.update_calls;
@@ -3075,6 +3095,47 @@ void retains_three_directional_maps_and_executes_only_opaque_static_casters() {
                     std::vector<apex::scene::NodeId>({2U}),
             "visible skinned shadow packet executes without hidden static casters");
     mixed_frame.packet_visibility = {};
+    mixed_frame.shadow_packet_order = {};
+
+    const std::array<std::uint32_t, 2U> short_shadow_order = {0U, 1U};
+    frame.packet_visibility = hide_all_shadow_packets;
+    frame.shadow_packet_order = short_shadow_order;
+    const std::size_t shadow_calls_before_invalid_order =
+        device.depth_batch_calls;
+    const auto invalid_shadow_order_count =
+        prepared.resources->draw_opaque_directional_shadows(device, frame);
+    require(invalid_shadow_order_count.status ==
+                StaticSceneDirectionalShadowStatus::invalid_request &&
+                invalid_shadow_order_count.diagnostic.code ==
+                    "directional_shadow_packet_order_count_invalid" &&
+                device.depth_batch_calls == shadow_calls_before_invalid_order,
+            "a short order fails before an all-hidden frame clears a cascade");
+
+    const std::array<std::uint32_t, 3U> out_of_range_shadow_order = {
+        0U, 1U, 3U};
+    frame.shadow_packet_order = out_of_range_shadow_order;
+    const auto invalid_shadow_order_index =
+        prepared.resources->draw_opaque_directional_shadows(device, frame);
+    require(invalid_shadow_order_index.status ==
+                StaticSceneDirectionalShadowStatus::invalid_request &&
+                invalid_shadow_order_index.diagnostic.code ==
+                    "directional_shadow_packet_order_index_invalid" &&
+                device.depth_batch_calls == shadow_calls_before_invalid_order,
+            "an out-of-range order fails before an all-hidden cascade clear");
+
+    const std::array<std::uint32_t, 3U> duplicate_shadow_order = {
+        0U, 0U, 2U};
+    frame.shadow_packet_order = duplicate_shadow_order;
+    const auto invalid_shadow_order_duplicate =
+        prepared.resources->draw_opaque_directional_shadows(device, frame);
+    require(invalid_shadow_order_duplicate.status ==
+                StaticSceneDirectionalShadowStatus::invalid_request &&
+                invalid_shadow_order_duplicate.diagnostic.code ==
+                    "directional_shadow_packet_order_duplicate" &&
+                device.depth_batch_calls == shadow_calls_before_invalid_order,
+            "a duplicate order fails before an all-hidden cascade clear");
+    frame.packet_visibility = {};
+    frame.shadow_packet_order = {};
 
     const std::array<std::uint8_t, 1U> short_shadow_visibility = {1U};
     frame.packet_visibility = short_shadow_visibility;

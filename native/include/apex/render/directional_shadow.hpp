@@ -141,6 +141,9 @@ struct StaticSceneDirectionalShadowFrameDescription {
     // Independent Shadowgen byte mask in prepared packet order. Empty selects
     // all retained casters. Hidden entries are not selected or skinned.
     std::span<const std::uint8_t> packet_visibility{};
+    // Optional complete permutation in prepared packet-index space. Empty
+    // preserves prepared order. A supplied span must contain every index once.
+    std::span<const std::uint32_t> shadow_packet_order{};
     // Optional caller-supplied depth-only pipeline for already-retained CPU
     // skinned geometry. A missing pipeline keeps skinned casters staged; this
     // seam does not infer or synthesize a stock ksShadowGen shader.

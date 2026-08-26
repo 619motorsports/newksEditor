@@ -1247,6 +1247,13 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
             "A shadow packet mask requires prepared directional shadows");
         return WorkspaceViewportFrameStatus::invalid;
     }
+    if (!request.shadow_packet_order.empty() &&
+        !directional_shadows_.has_value()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_shadow_order_unprepared",
+            "A shadow packet order requires prepared directional shadows");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
 
     const auto prepared_packets = execution_->resources->prepared_packets();
     std::span<const render::DrawPacket> frame_packets = prepared_packets;
@@ -1293,6 +1300,35 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
     if (!execution_->resources->validate_refreshed_packets(
             request.refreshed_packets, output_diagnostic)) {
         return WorkspaceViewportFrameStatus::invalid;
+    }
+
+    std::span<const std::uint32_t> shadow_packet_order =
+        request.shadow_packet_order.empty()
+            ? std::span<const std::uint32_t>(execution_->shadow_packet_order)
+            : request.shadow_packet_order;
+    if (!shadow_packet_order.empty() &&
+        shadow_packet_order.size() != prepared_packets.size()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_shadow_order_count_invalid",
+            "Shadow packet order must contain every prepared packet");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    std::array<bool, render::max_indexed_static_mesh_batch_draws>
+        ordered_shadow_packets{};
+    for (const std::uint32_t packet_index : shadow_packet_order) {
+        if (static_cast<std::size_t>(packet_index) >= prepared_packets.size()) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_shadow_order_index_invalid",
+                "Shadow packet order contains an out-of-range index");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        if (ordered_shadow_packets[packet_index]) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_shadow_order_duplicate",
+                "Shadow packet order contains a duplicate index");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        ordered_shadow_packets[packet_index] = true;
     }
 
     std::span<const std::uint8_t> packet_visibility = request.packet_visibility;
@@ -1696,6 +1732,7 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
                 : nullptr;
         shadow_frame.refreshed_packets = request.refreshed_packets;
         shadow_frame.packet_visibility = shadow_packet_visibility;
+        shadow_frame.shadow_packet_order = shadow_packet_order;
         const auto shadowed =
             execution_->resources->draw_opaque_directional_shadows(
                 device, shadow_frame);

@@ -528,7 +528,13 @@ remains unchanged and feature-complete.
   Vulkan and D3D12 consume the same backend-neutral order. This behavior keeps
   the retained WebGL feature. It is not original-editor parity. Ghidra evidence
   shows that the original Classic transparent pass uses traversal order.
-  Directional-shadow submission keeps its independent order.
+  Directional-shadow submission now keeps its independent scene traversal.
+  Packet preparation carries a complete prepared-index permutation for this
+  pass. The shadow boundary validates its count, range, and uniqueness before
+  a depth write. Visibility and refreshed state remain in prepared-index space.
+  All three cascades use the same order. Vulkan and D3D12 consume this shared
+  backend-neutral contract. The port does not claim parity with the original
+  one-time `SceneGraphOptimizer` child reorder.
   Shadows, reflections, sky, CSP lights, and post-processing remain staged
   with explicit evidence.
 - P1 is partial. Bounded readers support KN5 v4/v5/v6, DDS, ACD, INI/CSP,

@@ -45,6 +45,28 @@ dispatches `doRenderClassic` for `Shadows`. Thus, the native loop renders three
 independent depth passes. It does not render all cascades in one pass. It does
 not select a cascade from the receiver distance during caster traversal.
 
+`Node::render` at `0x1003F5DC` reads the child vector from start to end. It
+calls each active child through virtual slot `0x0C`.
+
+`Mesh::render` draws immediately at `0x10049599` and does not render children.
+`SkinnedMesh::render` draws at `0x1004A909`. It calls `Node::render` afterward
+at `0x1004A90F`, so its active children follow the parent draw.
+
+The function repeats this depth-first traversal for each cascade. No cascade
+adds a caster sort. The three cascades use the same current scene-vector order.
+
+`Node::addChild` at `0x1003F0FD` removes a child from its old parent. It then
+adds the child at the end of the new parent vector. The render traversal has no
+separate duplicate set. A malformed repeated pointer can draw more than once.
+
+The bounded port rejects repeated or cyclic scene references. This safety rule
+does not claim parity for malformed native graphs. Valid scenes retain the
+current bounded traversal through a complete prepared-index permutation.
+
+`SceneGraphOptimizer::compareNodes` at `0x1006061A` can reorder child vectors
+before rendering. The port does not reproduce this one-time optimization. The
+new permutation preserves the current bounded scene order.
+
 `beginShadowMapPass` sets back-face culling and normal depth. It computes the
 level matrix from the camera matrix, near/far values, light direction, and
 camera height. Then it sets the viewport from the level render target. It
@@ -193,6 +215,7 @@ A native backend integration can use this recovered boundary as follows:
 
 - Retain three depth targets and three matrices.
 - Run an ordered caster traversal once per cascade with `Shadows` mode.
+- Keep the current depth-first scene order for all three cascades.
 - Bind each completed depth target at `t6 + level`.
 - Transpose each matrix into the 64-byte cascade slot in a 208-byte `b3`
   record.

@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <numeric>
 #include <optional>
 #include <set>
 #include <string_view>
@@ -360,6 +361,11 @@ DrawPacketBuildResult build_draw_packets(
         }
     }
     std::stable_sort(items.begin(), items.end(), node_order_less);
+    std::vector<std::size_t> prepared_source_orders;
+    prepared_source_orders.reserve(items.size() +
+                                   (options.include_shadow_casters
+                                        ? plan.shadow_only_items.size()
+                                        : 0U));
     const std::size_t color_item_count = items.size();
     if (options.include_shadow_casters) {
         std::vector<bool> retained_nodes(scene.nodes.size(), false);
@@ -668,9 +674,72 @@ DrawPacketBuildResult build_draw_packets(
             }
             result.total_bytes = new_total_bytes;
             result.packets.push_back(std::move(packet));
+            prepared_source_orders.push_back(item.source_order);
         }
     next_item:
         continue;
+    }
+    if (!result.supported) return result;
+    if (prepared_source_orders.size() != result.packets.size()) {
+        add_diagnostic(result, limits, DrawPacketDiagnostic::Severity::error,
+                       "INVALID_SOURCE_ORDER",
+                       "Prepared packet source-order metadata is incomplete");
+        return result;
+    }
+    const bool has_source_order = std::any_of(
+        prepared_source_orders.begin(), prepared_source_orders.end(),
+        [](std::size_t order) {
+            return order != invalid_render_item_source_order;
+        });
+    if (has_source_order) {
+        if (std::any_of(prepared_source_orders.begin(),
+                        prepared_source_orders.end(), [](std::size_t order) {
+                            return order == invalid_render_item_source_order;
+                        })) {
+            add_diagnostic(result, limits, DrawPacketDiagnostic::Severity::error,
+                           "INVALID_SOURCE_ORDER",
+                           "Prepared packet source-order metadata is partial");
+            return result;
+        }
+        std::size_t order_bytes = 0U;
+        std::size_t charged_total = 0U;
+        if (result.packets.size() >
+                static_cast<std::size_t>(
+                    std::numeric_limits<std::uint32_t>::max()) ||
+            !checked_mul(result.packets.size(), sizeof(std::uint32_t),
+                         limits.max_total_bytes, order_bytes) ||
+            !checked_add(result.total_bytes, order_bytes,
+                         limits.max_total_bytes, charged_total)) {
+            add_diagnostic(result, limits, DrawPacketDiagnostic::Severity::error,
+                           "TOTAL_BYTE_LIMIT",
+                           "Shadow packet order exceeds the draw-packet byte budget");
+            result.limit_exceeded = true;
+            return result;
+        }
+        result.shadow_packet_order.resize(result.packets.size());
+        std::iota(result.shadow_packet_order.begin(),
+                  result.shadow_packet_order.end(), 0U);
+        std::stable_sort(
+            result.shadow_packet_order.begin(), result.shadow_packet_order.end(),
+            [&](std::uint32_t first, std::uint32_t second) {
+                return prepared_source_orders[first] <
+                       prepared_source_orders[second];
+            });
+        for (std::size_t index = 1U;
+             index < result.shadow_packet_order.size(); ++index) {
+            const auto previous = result.shadow_packet_order[index - 1U];
+            const auto current = result.shadow_packet_order[index];
+            if (prepared_source_orders[previous] ==
+                prepared_source_orders[current]) {
+                result.shadow_packet_order.clear();
+                add_diagnostic(
+                    result, limits, DrawPacketDiagnostic::Severity::error,
+                    "INVALID_SOURCE_ORDER",
+                    "Prepared packets contain duplicate source-order metadata");
+                return result;
+            }
+        }
+        result.total_bytes = charged_total;
     }
     return result;
 }

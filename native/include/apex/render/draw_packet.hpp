@@ -121,6 +121,9 @@ struct DrawPacketOptions {
 
 struct DrawPacketBuildResult {
     std::vector<DrawPacket> packets;
+    // Complete prepared-packet permutation in source traversal order. Empty
+    // keeps prepared order for manually assembled legacy plans.
+    std::vector<std::uint32_t> shadow_packet_order;
     std::vector<DrawPacketDiagnostic> diagnostics;
     std::vector<DrawPacketUnsupportedEffect> unsupported_effects;
     // supported describes acceptance of the backend-neutral packet contract;

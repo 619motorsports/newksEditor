@@ -3169,3 +3169,26 @@ Shadowgen masks. Vulkan and D3D12 consume the same packet-index masks.
 
 An explicit shadow mask replaces the automatic shadow result. If it is absent,
 an explicit color mask keeps the earlier shared-mask contract.
+
+## ksNet shadow traversal order
+
+`CameraShadowMapped::shadowMapPass` repeats the root traversal three times at
+`0x1005EC2A–0x1005EC74`. Each traversal uses `PvsRenderMode::Shadows`.
+
+`Node::render` at `0x1003F5DC` reads children from the current vector in order.
+`Mesh::render` draws immediately at `0x10049599`. `SkinnedMesh::render` draws
+at `0x1004A909`, then renders its children at `0x1004A90F`.
+
+The Classic shadow path does not sort or remove repeated entries. All three
+cascades therefore use the same depth-first scene order.
+
+The native port carries a full prepared-index permutation from scene planning.
+It validates the permutation before frame updates or depth writes. Both backend
+implementations preserve the supplied draw order.
+
+`SceneGraphOptimizer` can change child-vector order before rendering. The port
+does not reproduce this one-time optimization. It preserves its retained scene
+order and reproduces the recovered per-cascade traversal.
+
+The bounded scene graph rejects repeated or cyclic node references. It does not
+copy unsafe repeated draws from the original renderer for malformed graphs.

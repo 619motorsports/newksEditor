@@ -633,6 +633,14 @@ Fixture shadow_only_fixture() {
     hidden_caster.castShadows = true;
     hidden_caster.bounds = {0.0F, 0.0F, 0.0F, 1.0F};
     model.root.children.push_back(std::move(hidden_caster));
+    apex::formats::Kn5Node visible_caster = model.root.children.front();
+    visible_caster.name = "VISIBLE_CASTER";
+    visible_caster.children.clear();
+    visible_caster.visible = true;
+    visible_caster.renderable = true;
+    visible_caster.castShadows = true;
+    visible_caster.bounds = {0.0F, 0.0F, 0.0F, 1.0F};
+    model.root.children.push_back(std::move(visible_caster));
 
     auto& scene = result.document.scene.snapshot;
     auto& body = scene.nodes[1U];
@@ -653,6 +661,19 @@ Fixture shadow_only_fixture() {
     caster.local_bounds_radius = 1.0F;
     caster.local_aabb_center = apex::scene::Vector3{};
     (void)scene.add_node(std::move(caster), scene.root);
+    apex::scene::SceneNode visible;
+    visible.name = "VISIBLE_CASTER";
+    visible.kind = apex::scene::NodeKind::mesh;
+    visible.material = 0U;
+    visible.renderable = true;
+    visible.visible = true;
+    visible.active = true;
+    visible.cast_shadows = true;
+    visible.local_bounds_source =
+        apex::scene::LocalBoundsSource::kn5_serialized;
+    visible.local_bounds_radius = 1.0F;
+    visible.local_aabb_center = apex::scene::Vector3{};
+    (void)scene.add_node(std::move(visible), scene.root);
     return result;
 }
 
@@ -4583,12 +4604,15 @@ void retains_independent_shadowgen_visibility() {
             device, value.document, request);
         const auto body_id = value.document.scene.snapshot.nodes[1U].id;
         const auto caster_id = value.document.scene.snapshot.nodes[3U].id;
+        const auto visible_id = value.document.scene.snapshot.nodes[4U].id;
         require(prepared.ok() &&
-                    prepared.viewport->renderPlan().items.size() == 1U &&
+                    prepared.viewport->renderPlan().items.size() == 2U &&
                     prepared.viewport->renderPlan().shadow_only_items.size() ==
                         1U &&
                     prepared.viewport->preparation().resources->draw_count() ==
-                        2U,
+                        3U &&
+                    prepared.viewport->preparation().shadow_packet_order ==
+                        std::vector<std::uint32_t>({0U, 2U, 1U}),
                 "native viewport retains one invisible Shadowgen candidate");
         const auto prepared_buffers = device.buffer_calls;
         const auto prepared_textures = device.texture_calls;
@@ -4606,19 +4630,33 @@ void retains_independent_shadowgen_visibility() {
                     device, target, frame, diagnostic) ==
                     WorkspaceViewportFrameStatus::ready &&
                     device.draw_nodes.back() ==
-                        std::vector<apex::scene::NodeId>{body_id} &&
+                        std::vector<apex::scene::NodeId>{body_id, visible_id} &&
                     device.depth_nodes.size() == 3U &&
                     std::all_of(
                         device.depth_nodes.begin(), device.depth_nodes.end(),
                         [&](const auto& nodes) {
                             return nodes ==
-                                   std::vector<apex::scene::NodeId>{body_id,
-                                                                    caster_id};
+                                   std::vector<apex::scene::NodeId>{
+                                       body_id, caster_id, visible_id};
                         }),
                 "Shadowgen ignores isVisible while color keeps the mesh hidden");
 
-        const std::array<std::uint8_t, 2U> color_hidden = {0U, 0U};
-        const std::array<std::uint8_t, 2U> all_shadow = {1U, 1U};
+        const std::array<std::uint32_t, 3U> prepared_shadow_order = {
+            0U, 1U, 2U};
+        frame.shadow_packet_order = prepared_shadow_order;
+        require(prepared.viewport->drawAndPresent(
+                    device, target, frame, diagnostic) ==
+                    WorkspaceViewportFrameStatus::ready &&
+                    device.draw_nodes.back() ==
+                        std::vector<apex::scene::NodeId>{body_id, visible_id} &&
+                    device.depth_nodes.back() ==
+                        std::vector<apex::scene::NodeId>{body_id, visible_id,
+                                                        caster_id},
+                "an explicit full permutation overrides retained shadow order");
+        frame.shadow_packet_order = {};
+
+        const std::array<std::uint8_t, 3U> color_hidden = {0U, 0U, 0U};
+        const std::array<std::uint8_t, 3U> all_shadow = {1U, 1U, 1U};
         frame.packet_visibility = color_hidden;
         require(prepared.viewport->drawAndPresent(
                     device, target, frame, diagnostic) ==
@@ -4633,18 +4671,19 @@ void retains_independent_shadowgen_visibility() {
                     WorkspaceViewportFrameStatus::ready &&
                     device.draw_nodes.back().empty() &&
                     device.depth_nodes.back() ==
-                        std::vector<apex::scene::NodeId>{body_id, caster_id},
+                        std::vector<apex::scene::NodeId>{body_id, caster_id,
+                                                        visible_id},
                 "an independent shadow mask does not authorize color packets");
 
-        const std::array<std::uint8_t, 2U> all_color = {1U, 1U};
-        const std::array<std::uint8_t, 2U> caster_shadow = {0U, 1U};
+        const std::array<std::uint8_t, 3U> all_color = {1U, 1U, 1U};
+        const std::array<std::uint8_t, 3U> caster_shadow = {0U, 0U, 1U};
         frame.packet_visibility = all_color;
         frame.shadow_packet_visibility = caster_shadow;
         require(prepared.viewport->drawAndPresent(
                     device, target, frame, diagnostic) ==
                     WorkspaceViewportFrameStatus::ready &&
                     device.draw_nodes.back() ==
-                        std::vector<apex::scene::NodeId>{body_id} &&
+                        std::vector<apex::scene::NodeId>{body_id, visible_id} &&
                     device.depth_nodes.back() ==
                         std::vector<apex::scene::NodeId>{caster_id},
                 "an independent color mask cannot show a shadow-only packet");
@@ -4667,7 +4706,7 @@ void retains_independent_shadowgen_visibility() {
                 "a short shadow mask fails before all mutable frame work");
 
         frame.shadow_packet_visibility = all_shadow;
-        const std::array<std::uint8_t, 2U> invalid_color = {1U, 2U};
+        const std::array<std::uint8_t, 3U> invalid_color = {1U, 2U, 1U};
         frame.packet_visibility = invalid_color;
         require(prepared.viewport->drawAndPresent(
                     device, target, frame, diagnostic) ==
@@ -4679,6 +4718,50 @@ void retains_independent_shadowgen_visibility() {
                     device.draw_calls == color_calls_before_invalid &&
                     device.present_calls == presents_before_invalid,
                 "a non-binary color mask fails before all mutable frame work");
+
+        frame.packet_visibility = all_color;
+        frame.shadow_packet_visibility = all_shadow;
+        const std::array<std::uint32_t, 1U> short_shadow_order = {0U};
+        frame.shadow_packet_order = short_shadow_order;
+        require(prepared.viewport->drawAndPresent(
+                    device, target, frame, diagnostic) ==
+                    WorkspaceViewportFrameStatus::invalid &&
+                    diagnostic.code ==
+                        "workspace_viewport_shadow_order_count_invalid" &&
+                    device.buffer_updates.size() == updates_before_invalid &&
+                    device.depth_batch_calls == shadow_calls_before_invalid &&
+                    device.draw_calls == color_calls_before_invalid &&
+                    device.present_calls == presents_before_invalid,
+                "a short shadow order fails before all mutable frame work");
+
+        const std::array<std::uint32_t, 3U> duplicate_shadow_order = {
+            0U, 0U, 2U};
+        frame.shadow_packet_order = duplicate_shadow_order;
+        require(prepared.viewport->drawAndPresent(
+                    device, target, frame, diagnostic) ==
+                    WorkspaceViewportFrameStatus::invalid &&
+                    diagnostic.code ==
+                        "workspace_viewport_shadow_order_duplicate" &&
+                    device.buffer_updates.size() == updates_before_invalid &&
+                    device.depth_batch_calls == shadow_calls_before_invalid &&
+                    device.draw_calls == color_calls_before_invalid &&
+                    device.present_calls == presents_before_invalid,
+                "a duplicate shadow order fails before all mutable frame work");
+
+        const std::array<std::uint32_t, 3U> invalid_shadow_order = {
+            0U, 1U, 3U};
+        frame.shadow_packet_order = invalid_shadow_order;
+        require(prepared.viewport->drawAndPresent(
+                    device, target, frame, diagnostic) ==
+                    WorkspaceViewportFrameStatus::invalid &&
+                    diagnostic.code ==
+                        "workspace_viewport_shadow_order_index_invalid" &&
+                    device.buffer_updates.size() == updates_before_invalid &&
+                    device.depth_batch_calls == shadow_calls_before_invalid &&
+                    device.draw_calls == color_calls_before_invalid &&
+                    device.present_calls == presents_before_invalid,
+                "an out-of-range shadow order fails before mutable frame work");
+        frame.shadow_packet_order = {};
 
         std::vector<DrawPacket> malformed_packets(
             prepared.viewport->preparation().resources->prepared_packets().begin(),

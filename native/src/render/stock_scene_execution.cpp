@@ -657,6 +657,8 @@ StockSceneExecutionResult prepare_stock_scene_execution(
             }
             return result;
         }
+        result.shadow_packet_order =
+            std::move(packet_result.shadow_packet_order);
 
         StockMaterialExecutionRequest material_request;
         material_request.model = request.model;

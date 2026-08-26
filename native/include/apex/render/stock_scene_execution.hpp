@@ -60,6 +60,9 @@ struct StockSceneExecutionResult {
     // execution fails. StaticSceneResources owns its own packet copy, so this
     // result intentionally does not make a second retained packet copy.
     RenderPlan render_plan;
+    // Complete prepared-packet permutation for native Shadowgen traversal.
+    // Visibility and refreshed state remain keyed by prepared packet index.
+    std::vector<std::uint32_t> shadow_packet_order;
     std::vector<DrawPacketDiagnostic> packet_diagnostics;
     std::vector<DrawPacketUnsupportedEffect> packet_unsupported_effects;
     // Retain the bounded F4 audit, including diagnostics, when requested.

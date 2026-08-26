@@ -206,6 +206,7 @@ RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
     }
     stack.push_back({scene.root, true, false, {}, {}, {}});
     std::vector<bool> visited(scene.nodes.size(), false);
+    std::size_t source_order = 0U;
     while (!stack.empty()) {
         WalkState state = std::move(stack.back());
         stack.pop_back();
@@ -229,6 +230,8 @@ RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
 
         const bool geometry = node->kind == apex::scene::NodeKind::mesh ||
                               node->kind == apex::scene::NodeKind::skinned_mesh;
+        const std::size_t item_source_order =
+            geometry ? source_order++ : invalid_render_item_source_order;
         const bool isolated_item = isolated && node->id == options.isolated_node;
         const std::optional<apex::scene::Vector3> aabb_center =
             node->local_aabb_center.has_value()
@@ -312,6 +315,7 @@ RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
                 ancestors,
                 std::nullopt,
             };
+            item.source_order = item_source_order;
             if (options.defer_camera_mesh_filter &&
                 node->local_bounds_source != apex::scene::LocalBoundsSource::unavailable &&
                 lod_in >= -static_cast<double>(std::numeric_limits<float>::max()) &&

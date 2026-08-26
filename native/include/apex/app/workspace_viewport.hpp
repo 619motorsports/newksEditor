@@ -228,6 +228,9 @@ struct WorkspaceViewportFrameRequest {
     // a nonempty packet_visibility mask keeps the former shared-mask behavior.
     // When both spans are empty, the prepared catalog derives each pass mask.
     std::span<const std::uint8_t> shadow_packet_visibility{};
+    // Optional complete Shadowgen permutation in prepared packet-index space.
+    // Empty uses the retained source traversal from viewport preparation.
+    std::span<const std::uint32_t> shadow_packet_order{};
     bool apply_skinning = false;
     std::optional<render::KsPerPixelFrameConstants> frame_constants;
     // Override the prepared grid state. A true value requires grid resources

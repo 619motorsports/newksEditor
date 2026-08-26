@@ -3,13 +3,18 @@
 #include "apex/render/camera_mesh_filter.hpp"
 #include "apex/scene/scene.hpp"
 
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
 #include <vector>
 
 namespace apex::render {
+
+inline constexpr std::size_t invalid_render_item_source_order =
+    std::numeric_limits<std::size_t>::max();
 
 // A render-time projection of one CSP MESH_ADJUSTMENT. Optional fields retain
 // the difference between an explicit false/zero and an absent override.
@@ -136,6 +141,9 @@ struct RenderItem {
     // Present only when defer_camera_mesh_filter requested an exact KN5 local
     // sphere. An absent value requires a conservative visible fallback.
     std::optional<CameraMeshRenderable> camera_mesh_filter;
+    // Stable depth-first scene occurrence before any color-pass sort. The
+    // packet bridge uses this token to recover the native shadow traversal.
+    std::size_t source_order = invalid_render_item_source_order;
 };
 
 struct UnsupportedEffect {

@@ -1995,6 +1995,23 @@ StaticSceneResources::draw_opaque_directional_shadows(
         return fail(StaticSceneDirectionalShadowStatus::invalid_request,
                     "directional_shadow_visibility_mask_value_invalid",
                     "Shadow packet visibility values must be 0 or 1");
+    if (!frame.shadow_packet_order.empty() &&
+        frame.shadow_packet_order.size() != packets_.size())
+        return fail(StaticSceneDirectionalShadowStatus::invalid_request,
+                    "directional_shadow_packet_order_count_invalid",
+                    "Shadow packet order must contain every prepared packet");
+    std::array<bool, max_indexed_static_mesh_batch_draws> ordered_packets{};
+    for (const std::uint32_t packet_index : frame.shadow_packet_order) {
+        if (static_cast<std::size_t>(packet_index) >= packets_.size())
+            return fail(StaticSceneDirectionalShadowStatus::invalid_request,
+                        "directional_shadow_packet_order_index_invalid",
+                        "Shadow packet order contains an out-of-range index");
+        if (ordered_packets[packet_index])
+            return fail(StaticSceneDirectionalShadowStatus::invalid_request,
+                        "directional_shadow_packet_order_duplicate",
+                        "Shadow packet order contains a duplicate index");
+        ordered_packets[packet_index] = true;
+    }
     if (maps.metadata_.cascades.size() != directional_shadow_cascade_count ||
         maps.metadata_.splits.size() != directional_shadow_cascade_count)
         return fail(StaticSceneDirectionalShadowStatus::invalid_request,
@@ -2069,7 +2086,11 @@ StaticSceneResources::draw_opaque_directional_shadows(
     std::vector<std::uint8_t> alpha_shadow_packets(packets_.size(), 0U);
     executable_indices.reserve(packets_.size());
     result.staged_casters.reserve(packets_.size());
-    for (std::size_t index = 0U; index < packets_.size(); ++index) {
+    for (std::size_t order = 0U; order < packets_.size(); ++order) {
+        const std::size_t index = frame.shadow_packet_order.empty()
+                                      ? order
+                                      : static_cast<std::size_t>(
+                                            frame.shadow_packet_order[order]);
         if (!packet_visible(index)) continue;
         const DrawPacket& packet = packet_for_frame(index);
         if (!packet.flags.cast_shadows) continue;

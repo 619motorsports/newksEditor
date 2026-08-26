@@ -70,7 +70,9 @@ The retained WebGL viewport sorts transparent geometry for every frame. It uses
 the current camera and the transformed center of each vertex AABB.
 
 The native viewport keeps this feature through an explicit compatibility mode.
-It uses a stable packet-index permutation for the shared Vulkan and D3D12 path.
+It uses a stable color permutation for the shared Vulkan and D3D12 path.
 
 This compatibility mode is not recovered original-editor behavior. Directional
-shadow passes keep their separate traversal order.
+shadow passes use a separate prepared-index permutation. This permutation keeps
+the recovered depth-first traversal for all three cascades. It preserves the
+current bounded scene order, not the original one-time optimizer order.

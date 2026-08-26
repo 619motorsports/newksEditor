@@ -219,16 +219,20 @@ void retains_shadow_only_packets_without_color_authority() {
     const auto hidden_id = scene.add_node(std::move(hidden), scene.root);
 
     auto plan = one_item_plan();
+    plan.items.front().source_order = 1U;
     plan.shadow_only_items.push_back(
         {hidden_id, 0U, 0.0, 6.0F, false, false, true, {}, {},
          {scene.root, hidden_id}, {}});
+    plan.shadow_only_items.back().source_order = 0U;
     const auto result = apex::render::build_draw_packets(model, scene, plan);
     require(result.supported && result.packets.size() == 2U &&
                 !result.packets[0U].shadow_only &&
                 result.packets[1U].node == hidden_id &&
                 result.packets[1U].shadow_only &&
-                result.packets[1U].flags.cast_shadows,
-            "shadow-only geometry retains resources without color authority");
+                result.packets[1U].flags.cast_shadows &&
+                result.shadow_packet_order ==
+                    std::vector<std::uint32_t>({1U, 0U}),
+            "shadow-only geometry retains source order without color authority");
 
     apex::render::DrawPacketLimits one_packet_limit;
     one_packet_limit.max_packets = 1U;
@@ -248,6 +252,29 @@ void retains_shadow_only_packets_without_color_authority() {
                 duplicate.diagnostics.front().code ==
                     "INVALID_SHADOW_ONLY_RENDER_ITEM",
             "duplicate shadow-only packet identity fails before packet creation");
+
+    auto duplicate_order_plan = plan;
+    duplicate_order_plan.shadow_only_items.front().source_order = 1U;
+    const auto duplicate_order = apex::render::build_draw_packets(
+        model, scene, duplicate_order_plan);
+    require(!duplicate_order.supported &&
+                duplicate_order.shadow_packet_order.empty() &&
+                !duplicate_order.diagnostics.empty() &&
+                duplicate_order.diagnostics.back().code ==
+                    "INVALID_SOURCE_ORDER",
+            "duplicate packet source order fails before shadow handoff");
+
+    auto partial_order_plan = plan;
+    partial_order_plan.shadow_only_items.front().source_order =
+        apex::render::invalid_render_item_source_order;
+    const auto partial_order = apex::render::build_draw_packets(
+        model, scene, partial_order_plan);
+    require(!partial_order.supported &&
+                partial_order.shadow_packet_order.empty() &&
+                !partial_order.diagnostics.empty() &&
+                partial_order.diagnostics.back().code ==
+                    "INVALID_SOURCE_ORDER",
+            "partial packet source order fails before shadow handoff");
 }
 
 void preserves_deterministic_transparent_order_and_unknown_shader_diagnostic() {
