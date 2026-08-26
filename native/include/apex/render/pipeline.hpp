@@ -32,6 +32,10 @@ enum class PipelineShaderFormat : std::uint8_t {
 enum class PipelineShaderProvenance : std::uint8_t {
     unspecified,
     portable,
+    // A structural transport probe for a recovered ABI. This label does not
+    // claim source-equivalent shader behavior or an installed-bytecode
+    // translation.
+    native_abi_probe,
     installed_native,
     source_equivalent,
     translated,

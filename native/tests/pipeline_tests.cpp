@@ -111,6 +111,25 @@ void acceptsBoundedBackendNeutralContract() {
 }
 
 void enforcesShaderProvenanceFormatBoundary() {
+    PipelineProgram abi_probe = valid_program();
+    for (auto& shader : abi_probe.shaders)
+        shader.provenance = PipelineShaderProvenance::native_abi_probe;
+    const PipelineValidationResult abi_probe_result = validate_pipeline(abi_probe);
+    require(abi_probe_result.valid &&
+                pipeline_shader_provenance_name(
+                    PipelineShaderProvenance::native_abi_probe) ==
+                    std::string_view("native_abi_probe"),
+            "native ABI probe SPIR-V provenance is explicit and accepted");
+
+    PipelineProgram mislabeled_probe = abi_probe;
+    mislabeled_probe.shaders[0].format = PipelineShaderFormat::dxbc;
+    const PipelineValidationResult probe_mismatch =
+        validate_pipeline(mislabeled_probe);
+    require(!probe_mismatch.valid &&
+                has_code(probe_mismatch,
+                         "shader_provenance_format_mismatch"),
+            "native ABI probe provenance cannot label DXBC");
+
     PipelineProgram source_equivalent = valid_program();
     for (auto& shader : source_equivalent.shaders)
         shader.provenance = PipelineShaderProvenance::source_equivalent;

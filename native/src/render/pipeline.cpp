@@ -75,6 +75,7 @@ struct DiagnosticSink {
 [[nodiscard]] bool valid_shader_provenance(PipelineShaderProvenance provenance) noexcept {
     return provenance == PipelineShaderProvenance::unspecified ||
            provenance == PipelineShaderProvenance::portable ||
+           provenance == PipelineShaderProvenance::native_abi_probe ||
            provenance == PipelineShaderProvenance::installed_native ||
            provenance == PipelineShaderProvenance::source_equivalent ||
            provenance == PipelineShaderProvenance::translated;
@@ -86,6 +87,7 @@ struct DiagnosticSink {
     case PipelineShaderProvenance::unspecified:
         return true;
     case PipelineShaderProvenance::portable:
+    case PipelineShaderProvenance::native_abi_probe:
     case PipelineShaderProvenance::source_equivalent:
     case PipelineShaderProvenance::translated:
         return format == PipelineShaderFormat::spirv;
@@ -315,6 +317,7 @@ const char* pipeline_shader_provenance_name(
     switch (provenance) {
     case PipelineShaderProvenance::unspecified: return "unspecified";
     case PipelineShaderProvenance::portable: return "portable";
+    case PipelineShaderProvenance::native_abi_probe: return "native_abi_probe";
     case PipelineShaderProvenance::installed_native: return "installed_native";
     case PipelineShaderProvenance::source_equivalent: return "source_equivalent";
     case PipelineShaderProvenance::translated: return "translated";
