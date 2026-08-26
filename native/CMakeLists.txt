@@ -214,6 +214,7 @@ add_library(apex_render STATIC
   src/render/skinned_mesh_upload.cpp
   src/render/static_scene.cpp
   src/render/stock_ks_per_pixel.cpp
+  src/render/stock_ks_per_pixel_vulkan.cpp
   src/render/stock_ks_per_pixel_vulkan_abi.cpp
   src/render/stock_material_execution.cpp
   src/render/stock_scene_execution.cpp
@@ -411,6 +412,7 @@ apex_add_native_test(skinned_mesh_upload_tests.cpp skinned_mesh_upload_tests Ape
 apex_add_native_test(static_scene_tests.cpp static_scene_tests ApexEditor::Render)
 apex_add_native_test(stock_material_execution_tests.cpp stock_material_execution_tests ApexEditor::Render)
 apex_add_native_test(stock_ks_per_pixel_tests.cpp stock_ks_per_pixel_tests ApexEditor::Render)
+apex_add_native_test(stock_ks_per_pixel_vulkan_source_tests.cpp stock_ks_per_pixel_vulkan_source_tests ApexEditor::Render)
 apex_add_native_test(stock_ks_per_pixel_vulkan_abi_tests.cpp stock_ks_per_pixel_vulkan_abi_tests ApexEditor::Render)
 apex_add_native_test(stock_ks_per_pixel_vulkan_runtime_tests.cpp stock_ks_per_pixel_vulkan_runtime_tests ApexEditor::Render)
 apex_add_native_test(stock_ks_per_pixel_d3d12_tests.cpp stock_ks_per_pixel_d3d12_tests ApexEditor::Render)
@@ -492,7 +494,7 @@ if(TEST render_backend_tests)
   endif()
 endif()
 foreach(render_test IN ITEMS authoring_grid_tests camera_tests bmp_texture_tests csp_node_state_tests damage_preview_tests external_texture_authority_tests fbx_render_adapter_tests draw_packet_tests frame_plan_tests indexed_draw_tests selection_axis_tests selected_mesh_tests view_axis_tests static_mesh_upload_tests skinned_mesh_upload_tests static_scene_tests stock_material_execution_tests stock_scene_execution_tests workspace_ai_spline_tests workspace_real_fixture_tests workspace_shadow_programs_tests workspace_track_camera_tests workspace_viewport_tests lighting_tests material_binding_tests
-                             material_profile_tests pipeline_tests render_plan_tests stock_ks_per_pixel_tests stock_ks_per_pixel_vulkan_abi_tests stock_ks_per_pixel_vulkan_runtime_tests stock_ks_per_pixel_d3d12_tests texture_upload_tests)
+                             material_profile_tests pipeline_tests render_plan_tests stock_ks_per_pixel_tests stock_ks_per_pixel_vulkan_source_tests stock_ks_per_pixel_vulkan_abi_tests stock_ks_per_pixel_vulkan_runtime_tests stock_ks_per_pixel_d3d12_tests texture_upload_tests)
   if(TEST ${render_test})
     set_tests_properties(${render_test} PROPERTIES LABELS "unit;render")
   endif()

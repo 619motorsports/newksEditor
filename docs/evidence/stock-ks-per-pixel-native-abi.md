@@ -185,9 +185,12 @@ the view-space depth and two lighting values:
 
 ```text
 q = (-viewPos.z / cbLighting[5].w) * 5.77078009
-fogShape = saturate((exp(q) - exp(-q)) / (exp(-q) + exp(q)))
+fogShape = saturate((exp2(q) - exp2(-q)) / (exp2(-q) + exp2(q)))
 fogOut = fogShape * cbLighting[6].x
 ```
+
+The Shader Model 4 `exp` instruction is a base-2 exponential. The Vulkan
+source equivalent uses GLSL `exp2`; GLSL `exp` would change this equation.
 
 `cbLighting[5].w` is the linear fog value at byte `0x5c`.
 `cbLighting[6].x` is the fog blend at byte `0x60`.
@@ -293,6 +296,54 @@ The matrix setters provide the upload convention:
 - `GraphicsManager::setViewMatrix` at `0x1004698f`
 - `GraphicsManager::setWorldMatrix` at `0x10046b7e`
 - `GraphicsManager::updateLightingSetttings` at `0x10046c2c`
+
+`GraphicsManager::initCBuffers` initializes the shared records before the
+first scene update. The light direction starts as normalized
+`(0.7071068, -0.7071068, 0)`. Ambient starts as `(0.4, 0.4, 0.4, 1)`.
+Exposure starts at `2`, the exposure limits at `0` and `10000`, DOF focus and
+range at `400` and `500`, and saturation at `1`. The constructors clear the
+remaining bytes. New material matrices are therefore zero matrices, not
+identity matrices.
+
+`Material::createCBuffers` at `0x1004026a` creates a material-owned buffer for
+every reflected constant buffer, including `b0` through `b3`. The PVS path
+commits shared `b0`, `b2`, and `b3` before traversal and later commits the
+material buffer vector when the material changes. No filter that removes the
+system buffers was recovered. This possible overwrite is an unresolved
+native quirk; the port must not copy it without a runtime confirmation.
+
+## Vulkan source-equivalent modules
+
+The checked-in GLSL implements the recovered vertex, base pixel, and AT pixel
+equations. It preserves the native three-set descriptor projection and does
+not use the portable draw-matrix push-constant ABI. The sources and generated
+SPIR-V have these identities:
+
+| Module | Source SHA-256 | SPIR-V SHA-256 |
+|---|---|---|
+| Shared vertex | `be94c0a01e37a32d744a1521c220a57508acec1c42c2cdcf7bd32c1fbcde84c0` | `8d325332d2d8e3a38499845f108f701d23758e1d454d9e2e349aa2fdf4dacf58` |
+| Base fragment | `e7f5e6e45b7a2241662e0dd1f34705f87b5c74318db4dea7893330e6464848d9` | `c28c30946d76b1e856c2bfcb1dfe44e08d7645d9505913a5bb54b3fa300ff1b6` |
+| AT fragment | `0c628068a21eca27ad54fb6416506484bd90664dc777ce0f475b192d2cf72a64` | `189c37c74539603bb0100e87afffe4bd5e31ae754ff6655692201f8e7678f989` |
+
+The modules were generated with glslang `16.4.0`:
+
+```text
+glslangValidator -V --target-env vulkan1.0 -Os -g0 -S <stage> -o <output> <source>
+spirv-val --target-env vulkan1.0 <output>
+```
+
+The comparison samples use explicit LOD zero. SPIR-V disassembly contains
+`OpImageSampleDrefExplicitLod` with a zero LOD, matching `sample_c_lz`.
+Diffuse sampling remains implicit LOD, matching the native `sample`
+instruction. The specular power uses an explicit GLSL `log2` and `exp2` pair,
+matching the Shader Model 4 base-2 `log` and `exp` instructions.
+
+The generated SPIR-V is a source equivalent. It is not a translation of the
+installed DXBC and does not claim instruction-stream identity. The move-only
+`ValidatedStockKsPerPixelVulkanSourceProgram` selects only these private
+modules by variant and validates their exact bytes, descriptor contract,
+vertex layout, render-target state, and provenance. Arbitrary caller SPIR-V
+cannot enter this authority by using a `source_equivalent` label.
 
 ## Port boundary
 
