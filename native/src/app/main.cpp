@@ -575,9 +575,6 @@ struct LoadedWindowWorkspace {
     };
     std::vector<ShaderSet> shaderSets;
     std::vector<apex::render::StockMaterialShaderModules> descriptors;
-    std::shared_ptr<const
-        apex::render::ValidatedStockKsPerPixelNativeProgram>
-        d3d12KsPerPixelOwner;
     std::vector<apex::render::StockMaterialD3D12NativeProgram>
         d3d12NativePrograms;
     std::optional<std::vector<apex::render::PipelineShaderModule>>
@@ -1470,11 +1467,6 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
         throw std::runtime_error(
             "directional-shadow modules require receiver-capable material shader modules");
     }
-    if (result.d3d12KsPerPixelPackage.has_value() &&
-        result.d3d12KsPerPixelAtPackage.has_value())
-        throw std::runtime_error(
-            "--d3d12-ks-per-pixel-package and "
-            "--d3d12-ks-per-pixel-at-package are mutually exclusive");
     if (result.builtinVulkanKsPerPixel && has_d3d12_native_package(result))
         throw std::runtime_error(
             std::string("--builtin-vulkan-ks-per-pixel and ") +
@@ -1944,32 +1936,39 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
         }
     }
     if (has_d3d12_native_package(options)) {
-        const bool alpha_to_coverage =
-            options.d3d12KsPerPixelAtPackage.has_value();
-        const std::filesystem::path& package_path =
-            alpha_to_coverage ? *options.d3d12KsPerPixelAtPackage
-                              : *options.d3d12KsPerPixelPackage;
-        auto native =
-            apex::render::load_validated_stock_ks_per_pixel_native_program_file(
-                package_path,
-                alpha_to_coverage
-                    ? apex::render::StockKsPerPixelVariant::alpha_to_coverage
-                    : apex::render::StockKsPerPixelVariant::base);
-        if (!native.ok()) {
-            const std::string code = native.diagnostic.code.empty()
-                                         ? "stock_ks_per_pixel_package_invalid"
-                                         : native.diagnostic.code;
-            const std::string message = native.diagnostic.message.empty()
-                                            ? "the installed package failed validation"
-                                            : native.diagnostic.message;
-            throw std::runtime_error(code + ": " + message);
-        }
-        loaded.d3d12KsPerPixelOwner = std::make_shared<const
-            apex::render::ValidatedStockKsPerPixelNativeProgram>(
-                std::move(*native.program));
-        loaded.d3d12NativePrograms.push_back(
-            {alpha_to_coverage ? "ksPerPixelAT" : "ksPerPixel",
-             loaded.d3d12KsPerPixelOwner});
+        const auto load_native =
+            [&](const std::filesystem::path& package_path,
+                apex::render::StockKsPerPixelVariant variant,
+                std::string key) {
+                auto native = apex::render::
+                    load_validated_stock_ks_per_pixel_native_program_file(
+                        package_path, variant);
+                if (!native.ok()) {
+                    const std::string code =
+                        native.diagnostic.code.empty()
+                            ? "stock_ks_per_pixel_package_invalid"
+                            : native.diagnostic.code;
+                    const std::string message =
+                        native.diagnostic.message.empty()
+                            ? "the installed package failed validation"
+                            : native.diagnostic.message;
+                    throw std::runtime_error(code + ": " + message);
+                }
+                auto owner = std::make_shared<const
+                    apex::render::ValidatedStockKsPerPixelNativeProgram>(
+                        std::move(*native.program));
+                loaded.d3d12NativePrograms.push_back(
+                    {std::move(key), std::move(owner)});
+            };
+        if (options.d3d12KsPerPixelPackage.has_value())
+            load_native(*options.d3d12KsPerPixelPackage,
+                        apex::render::StockKsPerPixelVariant::base,
+                        "ksPerPixel");
+        if (options.d3d12KsPerPixelAtPackage.has_value())
+            load_native(
+                *options.d3d12KsPerPixelAtPackage,
+                apex::render::StockKsPerPixelVariant::alpha_to_coverage,
+                "ksPerPixelAT");
     }
     if (options.shaders.empty() && !options.builtinVulkanKsPerPixel &&
         !has_d3d12_native_package(options))
@@ -2306,12 +2305,19 @@ int run_window(int argc, char** argv) {
                 apex::render::BuiltinVulkanStockSourceSelector::ks_per_pixel;
         }
         if (has_d3d12_native_package(workspace_options)) {
-            request.builtin_d3d12_native =
-                workspace_options.d3d12KsPerPixelAtPackage.has_value()
-                    ? apex::render::BuiltinD3D12StockNativeSelector::
-                          ks_per_pixel_alpha_to_coverage
-                    : apex::render::BuiltinD3D12StockNativeSelector::
-                          ks_per_pixel_base;
+            if (workspace_options.d3d12KsPerPixelPackage.has_value() &&
+                workspace_options.d3d12KsPerPixelAtPackage.has_value())
+                request.builtin_d3d12_native =
+                    apex::render::BuiltinD3D12StockNativeSelector::
+                        ks_per_pixel_base_and_alpha_to_coverage;
+            else if (workspace_options.d3d12KsPerPixelAtPackage.has_value())
+                request.builtin_d3d12_native =
+                    apex::render::BuiltinD3D12StockNativeSelector::
+                        ks_per_pixel_alpha_to_coverage;
+            else
+                request.builtin_d3d12_native =
+                    apex::render::BuiltinD3D12StockNativeSelector::
+                        ks_per_pixel_base;
             request.builtin_d3d12_native_programs =
                 loaded_workspace.d3d12NativePrograms;
             if (workspace_options.d3d12KsPerPixelAtPackage.has_value())

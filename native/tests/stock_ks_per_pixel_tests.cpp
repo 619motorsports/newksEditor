@@ -1597,6 +1597,73 @@ void executes_a_validated_native_program_through_the_static_scene_batch() {
                 wrong_alpha_device.sampler_calls == 0U,
             "native ksPerPixelAT rejects a base owner before allocation");
 
+    auto mixed_model = model;
+    mixed_model.materials.push_back(alpha_model.materials[0U]);
+    mixed_model.root.children[1U].materialId = 1U;
+    auto mixed_scene = scene;
+    mixed_scene.materials.push_back(alpha_scene.materials[0U]);
+    mixed_scene.nodes[second_node_id].material = 1U;
+    auto mixed_packets = packets;
+    mixed_packets[1U].material = 1U;
+    mixed_packets[1U].material_profile.shader = "ksPerPixelAT";
+    mixed_packets[1U].flags.alpha_to_coverage = true;
+    const std::array<StockMaterialD3D12NativeProgram, 2U>
+        mixed_native_programs = {
+            StockMaterialD3D12NativeProgram{"ksPerPixel", native_owner},
+            StockMaterialD3D12NativeProgram{"ksPerPixelAT", alpha_owner}};
+    auto mixed_request = request;
+    mixed_request.model = &mixed_model;
+    mixed_request.scene = &mixed_scene;
+    mixed_request.packets = mixed_packets;
+    mixed_request.builtin_d3d12_native =
+        BuiltinD3D12StockNativeSelector::
+            ks_per_pixel_base_and_alpha_to_coverage;
+    mixed_request.builtin_d3d12_native_programs = mixed_native_programs;
+    mixed_request.targets.colors.front().samples = 4U;
+    mixed_request.targets.depth.samples = 4U;
+    FakeShaderDevice mixed_device(Backend::D3D12);
+    const auto mixed_prepared = prepare_stock_material_execution(
+        mixed_device, mixed_request);
+    require(mixed_prepared.ok() &&
+                mixed_prepared.resources
+                        ->stock_d3d12_native_program_count() == 2U &&
+                mixed_prepared.resources->draw_count() == 2U &&
+                mixed_prepared.resources
+                        ->requires_stock_d3d12_native_frame(),
+            mixed_prepared.diagnostic.code.empty()
+                ? "mixed base and A2C native scene preparation"
+                : mixed_prepared.diagnostic.code.c_str());
+
+    auto incomplete_mixed_request = mixed_request;
+    incomplete_mixed_request.builtin_d3d12_native_programs = native_programs;
+    FakeShaderDevice incomplete_mixed_device(Backend::D3D12);
+    const auto incomplete_mixed = prepare_stock_material_execution(
+        incomplete_mixed_device, incomplete_mixed_request);
+    require(!incomplete_mixed.ok() &&
+                incomplete_mixed.diagnostic.code ==
+                    "stock_material_d3d12_native_program_count_invalid" &&
+                incomplete_mixed_device.shader_calls == 0U &&
+                incomplete_mixed_device.buffer_calls == 0U &&
+                incomplete_mixed_device.sampler_calls == 0U,
+            "combined native selection requires both exact owners before allocation");
+
+    auto duplicate_mixed_programs = mixed_native_programs;
+    duplicate_mixed_programs[1U] =
+        StockMaterialD3D12NativeProgram{"ksPerPixel", native_owner};
+    auto duplicate_mixed_request = mixed_request;
+    duplicate_mixed_request.builtin_d3d12_native_programs =
+        duplicate_mixed_programs;
+    FakeShaderDevice duplicate_mixed_device(Backend::D3D12);
+    const auto duplicate_mixed = prepare_stock_material_execution(
+        duplicate_mixed_device, duplicate_mixed_request);
+    require(!duplicate_mixed.ok() &&
+                duplicate_mixed.diagnostic.code ==
+                    "stock_material_d3d12_native_program_invalid" &&
+                duplicate_mixed_device.shader_calls == 0U &&
+                duplicate_mixed_device.buffer_calls == 0U &&
+                duplicate_mixed_device.sampler_calls == 0U,
+            "combined native selection rejects duplicate base keys before allocation");
+
     constexpr std::uint64_t per_draw_native_constant_bytes =
         static_cast<std::uint64_t>(
             stock_ks_per_pixel_native_constant_buffer_view_bytes) *
@@ -2345,6 +2412,60 @@ void validates_complete_native_draw_bindings_before_execution() {
                 target, native_batch, diagnostic) ==
                 IndexedStaticMeshBatchStatus::ready,
             "native-only base batch accepts retained execution without CPU capture");
+
+    auto alpha_shaders = allocate_stock_ks_per_pixel_native_shaders(
+        device, validated_program_fixture(
+                    StockKsPerPixelVariant::alpha_to_coverage));
+    auto alpha_constants = allocate_stock_ks_per_pixel_native_constant_buffers(
+        device, native_constant_data_fixture());
+    auto alpha_samplers = allocate_stock_ks_per_pixel_native_samplers(device);
+    auto alpha_resources_result =
+        make_stock_ks_per_pixel_native_draw_resources(
+            device, std::move(alpha_shaders.program),
+            std::move(alpha_constants.buffers),
+            std::move(alpha_samplers.samplers));
+    require(alpha_resources_result.ok(),
+            "mixed native batch owns an A2C resource bundle");
+    auto alpha_resources = std::move(alpha_resources_result.resources);
+    const StockKsPerPixelNativeDrawBinding alpha_binding =
+        alpha_resources->bind(diffuse, {&shadow0, &shadow1, &shadow2});
+    DrawPacket alpha_packet = packet;
+    alpha_packet.flags.alpha_to_coverage = true;
+    PipelineProgram base_multisample_pipeline = pipeline;
+    base_multisample_pipeline.targets.colors[0U].samples = 4U;
+    PipelineProgram alpha_pipeline = base_multisample_pipeline;
+    alpha_pipeline.blend.alpha_to_coverage = true;
+    IndexedStaticMeshDrawRequest base_multisample_request = request;
+    base_multisample_request.pipeline = &base_multisample_pipeline;
+    IndexedStaticMeshDrawRequest alpha_request = request;
+    alpha_request.packet = &alpha_packet;
+    alpha_request.pipeline = &alpha_pipeline;
+    alpha_request.stock_ks_per_pixel_native = &alpha_binding;
+    TextureDescription multisample_batch_description = target_description;
+    multisample_batch_description.samples = 4U;
+    FakeNativeTexture multisample_batch_target(
+        Backend::D3D12, multisample_batch_description);
+    FakeNativeTexture multisample_batch_resolve(
+        Backend::D3D12, target_description);
+    const std::array<IndexedStaticMeshDrawRequest, 2U>
+        mixed_native_requests = {base_multisample_request, alpha_request};
+    native_batch.draws = mixed_native_requests;
+    native_batch.capture_rgba8 = true;
+    native_batch.resolve_target = &multisample_batch_resolve;
+    require(validate_indexed_static_mesh_batch_description(
+                multisample_batch_target, native_batch, diagnostic) ==
+                IndexedStaticMeshBatchStatus::ready,
+            diagnostic.code.empty()
+                ? "mixed base and A2C native batch passes common preflight"
+                : diagnostic.code.c_str());
+    native_batch.resolve_target = nullptr;
+    require(validate_indexed_static_mesh_batch_description(
+                multisample_batch_target, native_batch, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_stock_native_batch_resolve_target_missing",
+            "mixed native batch requires its retained resolve before submission");
+    native_batch.resolve_target = nullptr;
     DrawPacket wireframe_packet = packet;
     wireframe_packet.flags.wireframe = true;
     PipelineProgram wireframe_pipeline = pipeline;
@@ -2872,6 +2993,16 @@ void classifies_native_bridge_failures() {
             "d3d12_stock_native_batch_pipeline_unsupported") ==
             D3D12StockKsPerPixelFailureKind::unsupported,
         "native batch unsupported pipeline is unsupported");
+    require(
+        classify_d3d12_stock_ks_per_pixel_failure(
+            "d3d12_stock_native_batch_target_samples_invalid") ==
+            D3D12StockKsPerPixelFailureKind::unsupported,
+        "native batch unsupported sample count is unsupported");
+    require(
+        classify_d3d12_stock_ks_per_pixel_failure(
+            "d3d12_stock_native_batch_resolve_context_missing") ==
+            D3D12StockKsPerPixelFailureKind::invalid_request,
+        "native batch missing resolve context is an invalid request");
     require(
         classify_d3d12_stock_ks_per_pixel_failure(
             "d3d12_stock_native_batch_target_format_unsupported") ==

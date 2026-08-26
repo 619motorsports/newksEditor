@@ -4983,6 +4983,22 @@ void rejects_invalid_d3d12_native_viewport_selection_before_allocation() {
             "native D3D12 ksPerPixelAT rejects one-sample viewports before allocation");
 
     request.builtin_d3d12_native =
+        BuiltinD3D12StockNativeSelector::
+            ks_per_pixel_base_and_alpha_to_coverage;
+    request.color_samples = 4U;
+    request.builtin_d3d12_native_programs = placeholder_programs;
+    FakeDevice combined_program_device(Backend::D3D12);
+    auto combined_programs = apex::app::prepareWorkspaceViewport(
+        combined_program_device, value.document, request);
+    require(!combined_programs.ok() &&
+                combined_programs.diagnostic.code ==
+                    "stock_material_d3d12_native_program_count_invalid" &&
+                combined_program_device.buffer_calls == 0U &&
+                combined_program_device.texture_calls == 0U &&
+                combined_program_device.depth_calls == 0U,
+            "combined native viewport requires both owners before allocation");
+
+    request.builtin_d3d12_native =
         BuiltinD3D12StockNativeSelector::ks_per_pixel_base;
     placeholder_programs[0U].key = "ksPerPixel";
     request.builtin_d3d12_native_programs = placeholder_programs;

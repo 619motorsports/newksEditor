@@ -143,8 +143,8 @@ struct WorkspaceViewportPrepareRequest {
         render::BuiltinVulkanStockSourceSelector::disabled;
     render::StockKsPerPixelNativeSamplerSettings
         builtin_vulkan_source_sampler_settings{};
-    // Explicit installed-DXBC path for the first homogeneous base ksPerPixel
-    // D3D12 slice. The validated owner table is borrowed only during
+    // Explicit installed-DXBC path for base and alpha-to-coverage ksPerPixel
+    // D3D12 draws. The validated owner table is borrowed only during
     // preparation; retained scene resources clone each selected packet.
     render::BuiltinD3D12StockNativeSelector builtin_d3d12_native =
         render::BuiltinD3D12StockNativeSelector::disabled;

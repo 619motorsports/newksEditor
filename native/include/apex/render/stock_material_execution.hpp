@@ -53,12 +53,13 @@ enum class BuiltinD3D12StockNativeSelector : std::uint8_t {
     disabled,
     ks_per_pixel_base,
     ks_per_pixel_alpha_to_coverage,
+    ks_per_pixel_base_and_alpha_to_coverage,
 };
 
 struct StockMaterialD3D12NativeProgram {
-    // Exact stock shader-family key. The native batch slice accepts only the
-    // selector's ksPerPixel/ksPerPixelAT key paired with its matching
-    // validated package.
+    // Exact stock shader-family key. Native selection accepts only the
+    // selector's ksPerPixel/ksPerPixelAT keys paired with matching validated
+    // packages.
     std::string key;
     std::shared_ptr<const ValidatedStockKsPerPixelNativeProgram> program;
 };
@@ -82,9 +83,9 @@ struct StockMaterialExecutionRequest {
         BuiltinVulkanStockSourceSelector::disabled;
     StockKsPerPixelNativeSamplerSettings
         builtin_vulkan_source_sampler_settings{};
-    // Opt-in installed-DXBC execution for homogeneous opaque static
-    // ksPerPixel scenes on D3D12. Matching caller modules remain
-    // authoritative. The validated package owner is cloned into one mutable
+    // Opt-in installed-DXBC execution for opaque static ksPerPixel and
+    // ksPerPixelAT scenes on D3D12. Matching caller modules remain
+    // authoritative. Each validated package owner is cloned into one mutable
     // b0-b4 resource bundle per selected packet by StaticSceneResources.
     BuiltinD3D12StockNativeSelector builtin_d3d12_native =
         BuiltinD3D12StockNativeSelector::disabled;

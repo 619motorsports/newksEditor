@@ -97,6 +97,10 @@ The editor resolves depth with a full-screen shader. It does not use `ResolveSub
 
 A static search found one `ResolveSubresource` call in the module. Thus, the resolve is a scene operation and not a material operation.
 
+`CameraForwardYebis::renderApplyEffect` binds the multisample color and depth targets before it calls the scene render callback. `Mesh::render` at `0x100494ff` then uses the same material-filter and indexed-draw path for both shader variants.
+
+`MaterialFilter::apply` at `0x10064fa2` does not select a target or split the pass. `Material::apply` changes the blend state for `ksPerPixelAT`. Thus, base and alpha-to-coverage materials keep their scene order and draw into the same multisample target.
+
 ## Depth states
 
 `initDX11` at `0x1000d9f0` creates the depth states. The function calls `CreateDepthStencilState` through vtable offset `0x54`.
@@ -151,4 +155,4 @@ The current D3D12 native path can translate the following recovered facts:
 
 The D3D11 binary contains no D3D12 root signature or pipeline-state object. Tests on Microsoft D3D12 remain necessary for the translated objects.
 
-The current native D3D12 alpha-to-coverage batch supports the validated 4x target contract. This sample count is a labeled port limitation.
+The current native D3D12 batch runs base and alpha-to-coverage draws on one validated 4x target and resolves the scene once. Alpha-to-coverage remains a per-draw pipeline state. The fixed 4x sample count is a labeled port limitation.

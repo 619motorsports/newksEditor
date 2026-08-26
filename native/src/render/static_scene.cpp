@@ -521,7 +521,6 @@ StaticSceneResourceResult prepare_static_scene_resources(
             "static_scene_stock_d3d12_native_owner_table_unreferenced",
             "A D3D12 native-program owner table requires a packet-index table");
     bool has_stock_d3d12_native = false;
-    std::optional<StockKsPerPixelVariant> stock_d3d12_native_variant;
     if (has_stock_d3d12_native_table) {
         for (const std::uint32_t raw_index :
              request.stock_d3d12_native_program_by_packet) {
@@ -547,15 +546,6 @@ StaticSceneResourceResult prepare_static_scene_resources(
                     StaticSceneResourceStatus::invalid_request,
                     "static_scene_stock_d3d12_native_owner_index_invalid",
                     "A retained D3D12 native-program index has no valid base or alpha-to-coverage owner");
-            const StockKsPerPixelVariant variant =
-                request.stock_d3d12_native_programs[raw_index]->variant();
-            if (stock_d3d12_native_variant.has_value() &&
-                *stock_d3d12_native_variant != variant)
-                return fail(
-                    StaticSceneResourceStatus::unsupported,
-                    "static_scene_stock_d3d12_native_mixed_variant_unsupported",
-                    "One static-scene D3D12 native batch cannot mix base and alpha-to-coverage owners");
-            stock_d3d12_native_variant = variant;
         }
     }
     if (has_stock_d3d12_native &&

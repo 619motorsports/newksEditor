@@ -88,6 +88,10 @@ classify_d3d12_stock_ks_per_pixel_failure(std::string_view code) noexcept {
       code == "d3d12_stock_native_batch_geometry_resource_invalid" ||
       code == "d3d12_stock_native_batch_geometry_range_invalid" ||
       code == "d3d12_stock_native_batch_geometry_state_invalid" ||
+      code == "d3d12_stock_native_batch_resolve_alias" ||
+      code == "d3d12_stock_native_batch_resolve_context_missing" ||
+      code == "d3d12_stock_native_batch_resolve_shape_invalid" ||
+      code == "d3d12_stock_native_batch_resolve_unexpected" ||
       code == "d3d12_stock_native_batch_depth_clear_invalid" ||
       code == "d3d12_stock_native_batch_depth_load_before_clear" ||
       code == "d3d12_stock_native_batch_resource_alias" ||
@@ -103,6 +107,7 @@ classify_d3d12_stock_ks_per_pixel_failure(std::string_view code) noexcept {
     return D3D12StockKsPerPixelFailureKind::invalid_request;
   }
   if (code == "d3d12_stock_native_batch_target_format_unsupported" ||
+      code == "d3d12_stock_native_batch_target_samples_invalid" ||
       code == "d3d12_stock_native_batch_pipeline_unsupported" ||
       code == "indexed_stock_native_batch_type_unsupported" ||
       code == "indexed_stock_native_batch_device_mismatch" ||

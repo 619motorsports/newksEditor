@@ -455,6 +455,32 @@ apex::formats::Kn5Node triangle_mesh() {
               ? "native ksPerPixel A2C WARP batch resolves and reads back"
               : alpha_batch_draw.diagnostic.code);
 
+  PipelineProgram base_multisample_pipeline = native_pipeline();
+  base_multisample_pipeline.targets.colors[0].samples = 4U;
+  IndexedStaticMeshDrawRequest base_multisample_request =
+      mesh_upload.upload->make_request(base_multisample_pipeline,
+                                       *camera.frame);
+  base_multisample_request.shader_authority =
+      IndexedShaderAuthority::explicit_stock_ks_per_pixel_native;
+  base_multisample_request.stock_ks_per_pixel_native = &binding;
+  const std::array<IndexedStaticMeshDrawRequest, 2U> mixed_batch_requests = {
+      base_multisample_request, alpha_request};
+  IndexedStaticMeshBatchDescription mixed_batch;
+  mixed_batch.draws = mixed_batch_requests;
+  mixed_batch.clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
+  mixed_batch.resolve_target = alpha_resolve.texture.get();
+  const IndexedStaticMeshBatchResult mixed_batch_draw =
+      device_result.device->draw_indexed_static_mesh_batch_and_readback(
+          *alpha_target.texture, mixed_batch);
+  require(mixed_batch_draw.ok() &&
+              mixed_batch_draw.rgba8.size() == 32U * 32U * 4U &&
+              (mixed_batch_draw.rgba8[center] != std::byte{0} ||
+               mixed_batch_draw.rgba8[center + 1U] != std::byte{0} ||
+               mixed_batch_draw.rgba8[center + 2U] != std::byte{0}),
+          mixed_batch_draw.diagnostic.code.empty()
+              ? "mixed base and A2C WARP batch preserves ordered 4x execution"
+              : mixed_batch_draw.diagnostic.code);
+
   alpha_batch.capture_rgba8 = false;
   const IndexedStaticMeshBatchResult retained_alpha_batch =
       device_result.device->draw_indexed_static_mesh_batch_and_readback(

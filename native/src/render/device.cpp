@@ -3103,8 +3103,7 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
             "The native ksPerPixel batch does not support overlay or selected draws"};
         return IndexedStaticMeshBatchStatus::unsupported;
     }
-    bool native_variant_set = false;
-    StockKsPerPixelVariant native_variant = StockKsPerPixelVariant::base;
+    bool native_has_alpha_to_coverage = false;
     std::uint32_t previous_selected_position = 0U;
     bool has_previous_selected_position = false;
     for (const SelectedMeshDrawRequest& selected :
@@ -3355,14 +3354,8 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
                     .variant();
             const bool alpha_to_coverage =
                 variant == StockKsPerPixelVariant::alpha_to_coverage;
-            if (native_variant_set && variant != native_variant) {
-                diagnostic = {
-                    "indexed_stock_native_batch_variant_mixed",
-                    "A native ksPerPixel batch cannot mix base and alpha-to-coverage programs"};
-                return IndexedStaticMeshBatchStatus::unsupported;
-            }
-            native_variant = variant;
-            native_variant_set = true;
+            native_has_alpha_to_coverage =
+                native_has_alpha_to_coverage || alpha_to_coverage;
             if ((variant != StockKsPerPixelVariant::base &&
                  !alpha_to_coverage) ||
              source.packet->flags.blend_enabled ||
@@ -3373,27 +3366,28 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
              source.pipeline->raster.fill == PipelineFillMode::wireframe) {
                 diagnostic = {
                     "indexed_stock_native_batch_feature_unsupported",
-                    "The native ksPerPixel batch supports homogeneous opaque solid base or alpha-to-coverage draws"};
+                    "The native ksPerPixel batch supports opaque solid base and alpha-to-coverage draws"};
                 return IndexedStaticMeshBatchStatus::unsupported;
             }
         }
     }
     if (native_only) {
-        const bool alpha_to_coverage =
-            native_variant == StockKsPerPixelVariant::alpha_to_coverage;
-        const std::uint32_t required_samples = alpha_to_coverage ? 4U : 1U;
-        if (texture.info().description.samples != required_samples) {
+        const std::uint32_t target_samples =
+            texture.info().description.samples;
+        if ((native_has_alpha_to_coverage && target_samples != 4U) ||
+            (!native_has_alpha_to_coverage && target_samples != 1U &&
+             target_samples != 4U)) {
             diagnostic = {
                 "indexed_stock_native_batch_target_samples_invalid",
-                alpha_to_coverage
+                native_has_alpha_to_coverage
                     ? "Native ksPerPixelAT batches require a four-sample target"
-                    : "Native base ksPerPixel batches require a single-sample target"};
+                    : "Native base ksPerPixel batches require a one-sample or four-sample target"};
             return IndexedStaticMeshBatchStatus::unsupported;
         }
-        if (alpha_to_coverage && description.resolve_target == nullptr) {
+        if (target_samples == 4U && description.resolve_target == nullptr) {
             diagnostic = {
                 "indexed_stock_native_batch_resolve_target_missing",
-                "Native ksPerPixelAT batches require a retained single-sample resolve target"};
+                "Four-sample native ksPerPixel batches require a retained single-sample resolve target"};
             return IndexedStaticMeshBatchStatus::invalid_request;
         }
     }

@@ -2019,9 +2019,14 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             request.builtin_d3d12_native ==
             render::BuiltinD3D12StockNativeSelector::
                 ks_per_pixel_alpha_to_coverage;
+        const bool builtin_d3d12_native_combined =
+            request.builtin_d3d12_native ==
+            render::BuiltinD3D12StockNativeSelector::
+                ks_per_pixel_base_and_alpha_to_coverage;
         const bool builtin_d3d12_native =
             builtin_d3d12_native_base ||
-            builtin_d3d12_native_alpha_to_coverage;
+            builtin_d3d12_native_alpha_to_coverage ||
+            builtin_d3d12_native_combined;
         if (request.builtin_vulkan_source !=
                 render::BuiltinVulkanStockSourceSelector::disabled &&
             !builtin_vulkan_source) {
@@ -2065,23 +2070,30 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 "Installed native ksPerPixel packages require D3D12");
             return result;
         }
+        const std::size_t expected_d3d12_native_program_count =
+            builtin_d3d12_native_combined ? 2U : 1U;
         if (builtin_d3d12_native &&
-            request.builtin_d3d12_native_programs.empty()) {
+            request.builtin_d3d12_native_programs.size() !=
+                expected_d3d12_native_program_count) {
             result.status = WorkspaceViewportStatus::invalid;
             result.diagnostic = diagnostic(
                 "stock_material_d3d12_native_program_count_invalid",
-                "Installed native selection requires a bounded nonempty "
-                "validated program table");
+                "Installed native selection requires the exact bounded "
+                "program count for its selector");
             return result;
         }
         if (builtin_d3d12_native && request.shader_modules.empty() &&
             request.color_samples !=
-                (builtin_d3d12_native_alpha_to_coverage ? 4U : 1U)) {
+                ((builtin_d3d12_native_alpha_to_coverage ||
+                  builtin_d3d12_native_combined)
+                     ? 4U
+                     : 1U)) {
             result.status = WorkspaceViewportStatus::unsupported;
             result.diagnostic = diagnostic(
                 "workspace_viewport_d3d12_native_multisample_unsupported",
-                builtin_d3d12_native_alpha_to_coverage
-                    ? "The installed D3D12 ksPerPixelAT viewport requires a four-sample target"
+                (builtin_d3d12_native_alpha_to_coverage ||
+                 builtin_d3d12_native_combined)
+                    ? "The installed D3D12 ksPerPixelAT or combined viewport requires a four-sample target"
                     : "The installed D3D12 base ksPerPixel viewport requires a one-sample target");
             return result;
         }

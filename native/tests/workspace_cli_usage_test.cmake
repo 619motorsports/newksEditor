@@ -104,7 +104,6 @@ endif()
 
 execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window d3d12
-          --model missing.kn5
           --d3d12-ks-per-pixel-package base.shader
           --d3d12-ks-per-pixel-at-package alpha.shader
   RESULT_VARIABLE mixed_d3d12_package_result
@@ -115,11 +114,11 @@ if(NOT mixed_d3d12_package_result STREQUAL "1")
     "mixed D3D12 packages returned ${mixed_d3d12_package_result}: ${mixed_d3d12_package_error}")
 endif()
 string(FIND "${mixed_d3d12_package_error}"
-  "--d3d12-ks-per-pixel-package and --d3d12-ks-per-pixel-at-package are mutually exclusive"
+  "shader modules require a workspace model"
   mixed_d3d12_package_position)
 if(mixed_d3d12_package_position EQUAL -1)
   message(FATAL_ERROR
-    "mixed D3D12 packages were not diagnosed: ${mixed_d3d12_package_error}")
+    "mixed D3D12 packages were not accepted by option parsing: ${mixed_d3d12_package_error}")
 endif()
 
 execute_process(
