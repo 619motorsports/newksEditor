@@ -1336,9 +1336,10 @@ void owns_the_validated_native_program_after_the_gate() {
             "malformed signature produces no validated native object");
 }
 
-ValidatedStockKsPerPixelNativeProgram validated_program_fixture() {
+ValidatedStockKsPerPixelNativeProgram validated_program_fixture(
+    StockKsPerPixelVariant variant = StockKsPerPixelVariant::base) {
     auto result = create_validated_stock_ks_per_pixel_native_program(
-        complete_native_container_fixture(), StockKsPerPixelVariant::base);
+        complete_native_container_fixture(variant), variant);
     require(result.ok(), "native shader allocation fixture passes the gate");
     return std::move(*result.program);
 }
@@ -1414,6 +1415,17 @@ void loads_only_exact_validated_native_program_files() {
     require(loaded.ok() && loaded.program->variant() ==
                                StockKsPerPixelVariant::alpha_to_coverage,
             "exact alpha native program file passes the complete gate");
+
+    write_bytes(std::span<const std::uint8_t>(alpha_bytes.data(),
+                                              alpha_bytes.size() - 1U));
+    const auto truncated_alpha =
+        load_validated_stock_ks_per_pixel_native_program_file(
+            path, StockKsPerPixelVariant::alpha_to_coverage);
+    require(!truncated_alpha.ok() &&
+                truncated_alpha.file_status ==
+                    StockShaderContainerFileStatus::malformed_package &&
+                !truncated_alpha.program.has_value(),
+            "truncated alpha native program file returns no validated owner");
 
     write_bytes(std::span<const std::uint8_t>(base_bytes.data(),
                                               base_bytes.size() - 1U));
@@ -1511,6 +1523,79 @@ void executes_a_validated_native_program_through_the_static_scene_batch() {
     request.targets.has_depth = true;
     request.targets.depth =
         {PipelineRenderTargetFormat::depth32_float, 1U};
+
+    auto alpha_model = model;
+    alpha_model.materials[0U].shader = "ksPerPixelAT";
+    alpha_model.materials[0U].serializedBlendMode = 2U;
+    auto alpha_scene = scene;
+    alpha_scene.materials[0U].shader = "ksPerPixelAT";
+    alpha_scene.materials[0U].blend_mode =
+        apex::scene::BlendMode::alpha_to_coverage;
+    auto alpha_packets = packets;
+    for (DrawPacket& alpha_packet : alpha_packets) {
+        alpha_packet.material_profile.shader = "ksPerPixelAT";
+        alpha_packet.flags.alpha_to_coverage = true;
+    }
+    auto alpha_owner =
+        std::make_shared<const ValidatedStockKsPerPixelNativeProgram>(
+            validated_program_fixture(
+                StockKsPerPixelVariant::alpha_to_coverage));
+    const std::array<StockMaterialD3D12NativeProgram, 1U>
+        alpha_native_programs = {
+            StockMaterialD3D12NativeProgram{"ksPerPixelAT", alpha_owner}};
+    auto alpha_request = request;
+    alpha_request.model = &alpha_model;
+    alpha_request.scene = &alpha_scene;
+    alpha_request.packets = alpha_packets;
+    alpha_request.builtin_d3d12_native =
+        BuiltinD3D12StockNativeSelector::ks_per_pixel_alpha_to_coverage;
+    alpha_request.builtin_d3d12_native_programs = alpha_native_programs;
+    alpha_request.targets.colors.front().samples = 4U;
+    alpha_request.targets.depth.samples = 4U;
+    FakeShaderDevice alpha_device(Backend::D3D12);
+    const auto alpha_prepared = prepare_stock_material_execution(
+        alpha_device, alpha_request);
+    require(alpha_prepared.ok() &&
+                alpha_prepared.resources
+                        ->stock_d3d12_native_program_count() == 1U &&
+                alpha_prepared.resources
+                        ->requires_stock_d3d12_native_frame() &&
+                alpha_device.shader_calls == 4U &&
+                alpha_device.buffer_calls == 15U &&
+                alpha_device.sampler_calls == 4U,
+            alpha_prepared.diagnostic.code.empty()
+                ? "native D3D12 ksPerPixelAT scene preparation"
+                : alpha_prepared.diagnostic.code.c_str());
+
+    auto alpha_one_sample_request = alpha_request;
+    alpha_one_sample_request.targets.colors.front().samples = 1U;
+    alpha_one_sample_request.targets.depth.samples = 1U;
+    FakeShaderDevice alpha_one_sample_device(Backend::D3D12);
+    const auto alpha_one_sample = prepare_stock_material_execution(
+        alpha_one_sample_device, alpha_one_sample_request);
+    require(!alpha_one_sample.ok() &&
+                alpha_one_sample.diagnostic.code ==
+                    "stock_material_d3d12_native_target_unsupported" &&
+                alpha_one_sample_device.shader_calls == 0U &&
+                alpha_one_sample_device.buffer_calls == 0U &&
+                alpha_one_sample_device.sampler_calls == 0U,
+            "native ksPerPixelAT rejects one-sample targets before allocation");
+
+    const std::array<StockMaterialD3D12NativeProgram, 1U>
+        wrong_alpha_programs = {
+            StockMaterialD3D12NativeProgram{"ksPerPixelAT", native_owner}};
+    auto wrong_alpha_request = alpha_request;
+    wrong_alpha_request.builtin_d3d12_native_programs = wrong_alpha_programs;
+    FakeShaderDevice wrong_alpha_device(Backend::D3D12);
+    const auto wrong_alpha = prepare_stock_material_execution(
+        wrong_alpha_device, wrong_alpha_request);
+    require(!wrong_alpha.ok() &&
+                wrong_alpha.diagnostic.code ==
+                    "stock_material_d3d12_native_program_invalid" &&
+                wrong_alpha_device.shader_calls == 0U &&
+                wrong_alpha_device.buffer_calls == 0U &&
+                wrong_alpha_device.sampler_calls == 0U,
+            "native ksPerPixelAT rejects a base owner before allocation");
 
     constexpr std::uint64_t per_draw_native_constant_bytes =
         static_cast<std::uint64_t>(
@@ -2258,10 +2343,8 @@ void validates_complete_native_draw_bindings_before_execution() {
     native_batch.capture_rgba8 = false;
     require(validate_indexed_static_mesh_batch_description(
                 target, native_batch, diagnostic) ==
-                IndexedStaticMeshBatchStatus::unsupported &&
-                diagnostic.code ==
-                    "indexed_stock_native_batch_feature_unsupported",
-            "native-only batch rejects unsupported no-capture execution");
+                IndexedStaticMeshBatchStatus::ready,
+            "native-only base batch accepts retained execution without CPU capture");
     DrawPacket wireframe_packet = packet;
     wireframe_packet.flags.wireframe = true;
     PipelineProgram wireframe_pipeline = pipeline;

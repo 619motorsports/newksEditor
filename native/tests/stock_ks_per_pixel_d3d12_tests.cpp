@@ -273,6 +273,10 @@ apex::formats::Kn5Node triangle_mesh() {
   TextureResult alpha_target =
       device_result.device->create_texture(alpha_target_description);
   require(alpha_target.ok(), "native 4x alpha-to-coverage target allocation");
+  TextureResult alpha_resolve =
+      device_result.device->create_texture(target_description);
+  require(alpha_resolve.ok(),
+          "native single-sample alpha-to-coverage resolve allocation");
 
   const std::array<std::byte, 4U> diffuse_pixel = {
       std::byte{180}, std::byte{120}, std::byte{80}, std::byte{255}};
@@ -423,6 +427,42 @@ apex::formats::Kn5Node triangle_mesh() {
           "native ksPerPixel A2C WARP readback is not the clear color");
   require(alpha_draw.rgba8[center] < draw.rgba8[center],
           "native ksPerPixel A2C resolves partial sample coverage");
+
+  const std::array<IndexedStaticMeshDrawRequest, 1U> alpha_batch_requests = {
+      alpha_request};
+  IndexedStaticMeshBatchDescription alpha_batch;
+  alpha_batch.draws = alpha_batch_requests;
+  alpha_batch.clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
+  alpha_batch.resolve_target = alpha_resolve.texture.get();
+  auto missing_alpha_resolve = alpha_batch;
+  missing_alpha_resolve.resolve_target = nullptr;
+  const IndexedStaticMeshBatchResult missing_alpha_resolve_draw =
+      device_result.device->draw_indexed_static_mesh_batch_and_readback(
+          *alpha_target.texture, missing_alpha_resolve);
+  require(!missing_alpha_resolve_draw.ok() &&
+              missing_alpha_resolve_draw.diagnostic.code ==
+                  "indexed_stock_native_batch_resolve_target_missing",
+          "native ksPerPixel A2C batch rejects a missing retained resolve before submission");
+  const IndexedStaticMeshBatchResult alpha_batch_draw =
+      device_result.device->draw_indexed_static_mesh_batch_and_readback(
+          *alpha_target.texture, alpha_batch);
+  require(alpha_batch_draw.ok() &&
+              alpha_batch_draw.rgba8.size() == 32U * 32U * 4U &&
+              (alpha_batch_draw.rgba8[center] != std::byte{0} ||
+               alpha_batch_draw.rgba8[center + 1U] != std::byte{0} ||
+               alpha_batch_draw.rgba8[center + 2U] != std::byte{0}),
+          alpha_batch_draw.diagnostic.code.empty()
+              ? "native ksPerPixel A2C WARP batch resolves and reads back"
+              : alpha_batch_draw.diagnostic.code);
+
+  alpha_batch.capture_rgba8 = false;
+  const IndexedStaticMeshBatchResult retained_alpha_batch =
+      device_result.device->draw_indexed_static_mesh_batch_and_readback(
+          *alpha_target.texture, alpha_batch);
+  require(retained_alpha_batch.ok() && retained_alpha_batch.rgba8.empty(),
+          retained_alpha_batch.diagnostic.code.empty()
+              ? "native ksPerPixel A2C batch retains its resolve without CPU capture"
+              : retained_alpha_batch.diagnostic.code);
   device_result.device->wait_idle();
   return 0;
 }

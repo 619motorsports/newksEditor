@@ -85,6 +85,45 @@ endif()
 
 execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window d3d12
+          --d3d12-ks-per-pixel-at-package first.shader
+          --d3d12-ks-per-pixel-at-package second.shader
+  RESULT_VARIABLE duplicate_d3d12_at_package_result
+  ERROR_VARIABLE duplicate_d3d12_at_package_error
+)
+if(NOT duplicate_d3d12_at_package_result STREQUAL "1")
+  message(FATAL_ERROR
+    "duplicate D3D12 AT package returned ${duplicate_d3d12_at_package_result}: ${duplicate_d3d12_at_package_error}")
+endif()
+string(FIND "${duplicate_d3d12_at_package_error}"
+  "duplicate --d3d12-ks-per-pixel-at-package option"
+  duplicate_d3d12_at_package_position)
+if(duplicate_d3d12_at_package_position EQUAL -1)
+  message(FATAL_ERROR
+    "duplicate D3D12 AT package was not diagnosed: ${duplicate_d3d12_at_package_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window d3d12
+          --model missing.kn5
+          --d3d12-ks-per-pixel-package base.shader
+          --d3d12-ks-per-pixel-at-package alpha.shader
+  RESULT_VARIABLE mixed_d3d12_package_result
+  ERROR_VARIABLE mixed_d3d12_package_error
+)
+if(NOT mixed_d3d12_package_result STREQUAL "1")
+  message(FATAL_ERROR
+    "mixed D3D12 packages returned ${mixed_d3d12_package_result}: ${mixed_d3d12_package_error}")
+endif()
+string(FIND "${mixed_d3d12_package_error}"
+  "--d3d12-ks-per-pixel-package and --d3d12-ks-per-pixel-at-package are mutually exclusive"
+  mixed_d3d12_package_position)
+if(mixed_d3d12_package_position EQUAL -1)
+  message(FATAL_ERROR
+    "mixed D3D12 packages were not diagnosed: ${mixed_d3d12_package_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window d3d12
           --d3d12-ks-per-pixel-package detached.shader
   RESULT_VARIABLE detached_d3d12_package_result
   ERROR_VARIABLE detached_d3d12_package_error
@@ -118,6 +157,25 @@ string(FIND "${vulkan_d3d12_package_error}"
 if(vulkan_d3d12_package_position EQUAL -1)
   message(FATAL_ERROR
     "Vulkan D3D12 package was not diagnosed before loading: ${vulkan_d3d12_package_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --model missing.kn5
+          --d3d12-ks-per-pixel-at-package missing.shader
+  RESULT_VARIABLE vulkan_d3d12_at_package_result
+  ERROR_VARIABLE vulkan_d3d12_at_package_error
+)
+if(NOT vulkan_d3d12_at_package_result STREQUAL "1")
+  message(FATAL_ERROR
+    "Vulkan D3D12 AT package returned ${vulkan_d3d12_at_package_result}: ${vulkan_d3d12_at_package_error}")
+endif()
+string(FIND "${vulkan_d3d12_at_package_error}"
+  "--d3d12-ks-per-pixel-at-package requires the D3D12 backend"
+  vulkan_d3d12_at_package_position)
+if(vulkan_d3d12_at_package_position EQUAL -1)
+  message(FATAL_ERROR
+    "Vulkan D3D12 AT package was not diagnosed before loading: ${vulkan_d3d12_at_package_error}")
 endif()
 
 execute_process(

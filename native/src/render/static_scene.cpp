@@ -521,6 +521,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
             "static_scene_stock_d3d12_native_owner_table_unreferenced",
             "A D3D12 native-program owner table requires a packet-index table");
     bool has_stock_d3d12_native = false;
+    std::optional<StockKsPerPixelVariant> stock_d3d12_native_variant;
     if (has_stock_d3d12_native_table) {
         for (const std::uint32_t raw_index :
              request.stock_d3d12_native_program_by_packet) {
@@ -538,12 +539,23 @@ StaticSceneResourceResult prepare_static_scene_resources(
                 request.stock_d3d12_native_programs[raw_index]
                         ->validation_status() !=
                     StockKsPerPixelNativeProgramStatus::ready ||
-                request.stock_d3d12_native_programs[raw_index]->variant() !=
-                    StockKsPerPixelVariant::base)
+                (request.stock_d3d12_native_programs[raw_index]->variant() !=
+                     StockKsPerPixelVariant::base &&
+                 request.stock_d3d12_native_programs[raw_index]->variant() !=
+                     StockKsPerPixelVariant::alpha_to_coverage))
                 return fail(
                     StaticSceneResourceStatus::invalid_request,
                     "static_scene_stock_d3d12_native_owner_index_invalid",
-                    "A retained D3D12 native-program index has no valid base owner");
+                    "A retained D3D12 native-program index has no valid base or alpha-to-coverage owner");
+            const StockKsPerPixelVariant variant =
+                request.stock_d3d12_native_programs[raw_index]->variant();
+            if (stock_d3d12_native_variant.has_value() &&
+                *stock_d3d12_native_variant != variant)
+                return fail(
+                    StaticSceneResourceStatus::unsupported,
+                    "static_scene_stock_d3d12_native_mixed_variant_unsupported",
+                    "One static-scene D3D12 native batch cannot mix base and alpha-to-coverage owners");
+            stock_d3d12_native_variant = variant;
         }
     }
     if (has_stock_d3d12_native &&
@@ -923,20 +935,28 @@ StaticSceneResourceResult prepare_static_scene_resources(
             const auto& native_program =
                 request.stock_d3d12_native_programs[
                     static_cast<std::size_t>(raw_d3d12_native_program)];
+            const bool native_alpha_to_coverage =
+                native_program != nullptr &&
+                native_program->variant() ==
+                    StockKsPerPixelVariant::alpha_to_coverage;
+            const std::string_view native_shader_key =
+                native_alpha_to_coverage ? "ksperpixelat" : "ksperpixel";
             if (!static_mesh ||
                 !canonical_resource_equals(
                     model.materials[material_index].shader,
-                    "ksperpixel") ||
+                    native_shader_key) ||
                 !canonical_resource_equals(
-                    packet.material_profile.shader, "ksperpixel") ||
+                    packet.material_profile.shader, native_shader_key) ||
                 packet.flags.transparent || packet.flags.blend_enabled ||
-                packet.flags.alpha_to_coverage || packet.flags.wireframe ||
+                packet.flags.wireframe ||
                 native_program == nullptr ||
-                native_program->variant() != StockKsPerPixelVariant::base)
+                packet.flags.alpha_to_coverage != native_alpha_to_coverage ||
+                pipeline->blend.alpha_to_coverage !=
+                    native_alpha_to_coverage)
                 return fail(
                     StaticSceneResourceStatus::unsupported,
                     "static_scene_stock_d3d12_native_material_unsupported",
-                    "The first installed D3D12 native batch supports only opaque solid static base ksPerPixel packets");
+                    "The installed D3D12 native batch supports only matching opaque solid static ksPerPixel variants");
             if (pipeline->resources.size() != 0U ||
                 pipeline->shaders.size() != 2U)
                 return fail(

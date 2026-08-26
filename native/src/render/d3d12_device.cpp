@@ -3997,6 +3997,7 @@ public:
         const IndexedStaticMeshBatchDescription& batch,
         std::span<const D3D12StockKsPerPixelNativeBatchDraw> draws,
         D3D12DepthAttachment* depth_attachment,
+        D3D12Texture* resolve_target,
         std::vector<std::byte>& output,
         Diagnostic& diagnostic);
 
@@ -5664,6 +5665,7 @@ bool D3D12Texture::draw_stock_ks_per_pixel_native_batch(
     const IndexedStaticMeshBatchDescription& batch,
     std::span<const D3D12StockKsPerPixelNativeBatchDraw> draws,
     D3D12DepthAttachment* depth_attachment,
+    D3D12Texture* resolve_target,
     std::vector<std::byte>& output,
     Diagnostic& diagnostic) {
     if (batch.load_color && !initialized_) {
@@ -5731,6 +5733,12 @@ bool D3D12Texture::draw_stock_ks_per_pixel_native_batch(
     native_context.load_color = batch.load_color;
     native_context.clear_color = batch.clear_color;
     native_context.target_cleared = &initialized_;
+    native_context.resolve_target =
+        resolve_target != nullptr ? resolve_target->resource_.Get() : nullptr;
+    native_context.resolve_target_state =
+        resolve_target != nullptr ? &resolve_target->state_ : nullptr;
+    native_context.resolve_target_cleared =
+        resolve_target != nullptr ? &resolve_target->initialized_ : nullptr;
     native_context.depth =
         depth_attachment != nullptr ? depth_attachment->resource() : nullptr;
     native_context.depth_write_dsv =
@@ -5746,12 +5754,16 @@ bool D3D12Texture::draw_stock_ks_per_pixel_native_batch(
     native_context.clear_depth = batch.clear_depth;
     native_context.depth_clear_value = batch.depth_clear_value;
     native_context.draws = draws;
+    native_context.capture_rgba8 = batch.capture_rgba8;
     native_context.readback = &output;
 
     output.clear();
     const bool drawn = record_d3d12_stock_ks_per_pixel_native_batch(
         native_context, diagnostic);
-    if (drawn) initialized_ = true;
+    if (drawn) {
+        initialized_ = true;
+        if (resolve_target != nullptr) resolve_target->initialized_ = true;
+    }
     return drawn;
 }
 
@@ -6513,7 +6525,8 @@ public:
             }
             std::vector<std::byte> output;
             if (!d3d_texture->draw_stock_ks_per_pixel_native_batch(
-                    batch, native_draws, d3d_depth, output, diagnostic)) {
+                    batch, native_draws, d3d_depth, resolve_target, output,
+                    diagnostic)) {
                 return {indexed_static_mesh_batch_status(
                             classify_d3d12_stock_ks_per_pixel_failure(
                                 diagnostic.code)),

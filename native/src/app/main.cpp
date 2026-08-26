@@ -78,6 +78,7 @@ void usage(std::ostream& output) {
               "                       [--weather <stock-id>] [--sun-heading <degrees>] [--sun-height <degrees>]\n"
               "                       [--builtin-vulkan-ks-per-pixel]\n"
               "                       [--d3d12-ks-per-pixel-package <file>]\n"
+              "                       [--d3d12-ks-per-pixel-at-package <file>]\n"
               "                       [--shader-family <name> --shader-vertex <file> --shader-fragment <file>]\n"
               "                       [--authoring-overlay-vertex <file> --authoring-overlay-fragment <file>]\n"
               "                       [--selected-mesh-vertex <file> --selected-mesh-fragment <file>]\n"
@@ -539,6 +540,7 @@ struct WindowWorkspaceOptions {
     bool sunHeightSpecified = false;
     bool builtinVulkanKsPerPixel = false;
     std::optional<std::filesystem::path> d3d12KsPerPixelPackage;
+    std::optional<std::filesystem::path> d3d12KsPerPixelAtPackage;
     std::vector<WindowShaderSpec> shaders;
     std::optional<std::filesystem::path> authoringOverlayVertex;
     std::optional<std::filesystem::path> authoringOverlayFragment;
@@ -556,6 +558,12 @@ bool has_directional_shadow_modules(
            options.directionalShadowAlphaVertex.has_value() ||
            options.directionalShadowAlphaFragment.has_value() ||
            options.directionalShadowSkinnedVertex.has_value();
+}
+
+bool has_d3d12_native_package(
+    const WindowWorkspaceOptions& options) noexcept {
+    return options.d3d12KsPerPixelPackage.has_value() ||
+           options.d3d12KsPerPixelAtPackage.has_value();
 }
 
 struct LoadedWindowWorkspace {
@@ -1307,6 +1315,12 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
                     "duplicate --d3d12-ks-per-pixel-package option");
             result.d3d12KsPerPixelPackage = std::filesystem::path(
                 require_value("--d3d12-ks-per-pixel-package"));
+        } else if (option == "--d3d12-ks-per-pixel-at-package") {
+            if (result.d3d12KsPerPixelAtPackage.has_value())
+                throw std::runtime_error(
+                    "duplicate --d3d12-ks-per-pixel-at-package option");
+            result.d3d12KsPerPixelAtPackage = std::filesystem::path(
+                require_value("--d3d12-ks-per-pixel-at-package"));
         } else if (option == "--shader-family") {
             const auto family = std::string(require_value("--shader-family"));
             if (family.empty()) throw std::runtime_error("shader family cannot be empty");
@@ -1400,7 +1414,7 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
         }
     }
     if (result.fbx.has_value() &&
-        !result.d3d12KsPerPixelPackage.has_value() &&
+        !has_d3d12_native_package(result) &&
         std::none_of(result.shaders.begin(), result.shaders.end(),
                      [](const auto& shader) {
                          return shader.family == "ksPerPixel";
@@ -1410,7 +1424,7 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
     const bool has_model_source = model_source_count != 0U;
     if (!has_model_source &&
         (result.builtinVulkanKsPerPixel ||
-         result.d3d12KsPerPixelPackage.has_value() ||
+         has_d3d12_native_package(result) ||
          !result.shaders.empty() ||
          has_directional_shadow_modules(result) ||
          result.authoringOverlayVertex.has_value() ||
@@ -1447,7 +1461,7 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             "directional-shadow alpha vertex and fragment modules must be supplied together");
     if (has_directional_shadow_modules(result) && result.shaders.empty() &&
         !result.builtinVulkanKsPerPixel &&
-        !result.d3d12KsPerPixelPackage.has_value()) {
+        !has_d3d12_native_package(result)) {
         if (result.directionalShadowVertex.has_value() &&
             !result.directionalShadowAlphaVertex.has_value() &&
             !result.directionalShadowSkinnedVertex.has_value())
@@ -1456,11 +1470,18 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
         throw std::runtime_error(
             "directional-shadow modules require receiver-capable material shader modules");
     }
-    if (result.builtinVulkanKsPerPixel &&
-        result.d3d12KsPerPixelPackage.has_value())
+    if (result.d3d12KsPerPixelPackage.has_value() &&
+        result.d3d12KsPerPixelAtPackage.has_value())
         throw std::runtime_error(
-            "--builtin-vulkan-ks-per-pixel and "
-            "--d3d12-ks-per-pixel-package are mutually exclusive");
+            "--d3d12-ks-per-pixel-package and "
+            "--d3d12-ks-per-pixel-at-package are mutually exclusive");
+    if (result.builtinVulkanKsPerPixel && has_d3d12_native_package(result))
+        throw std::runtime_error(
+            std::string("--builtin-vulkan-ks-per-pixel and ") +
+            std::string(result.d3d12KsPerPixelAtPackage.has_value()
+                            ? "--d3d12-ks-per-pixel-at-package"
+                            : "--d3d12-ks-per-pixel-package") +
+            " are mutually exclusive");
     if (result.rpmSpecified && !result.analogInstruments.has_value())
         throw std::runtime_error("--rpm requires --analog-instruments");
     if (result.analogInstruments.has_value() &&
@@ -1922,11 +1943,18 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
             }
         }
     }
-    if (options.d3d12KsPerPixelPackage.has_value()) {
+    if (has_d3d12_native_package(options)) {
+        const bool alpha_to_coverage =
+            options.d3d12KsPerPixelAtPackage.has_value();
+        const std::filesystem::path& package_path =
+            alpha_to_coverage ? *options.d3d12KsPerPixelAtPackage
+                              : *options.d3d12KsPerPixelPackage;
         auto native =
             apex::render::load_validated_stock_ks_per_pixel_native_program_file(
-                *options.d3d12KsPerPixelPackage,
-                apex::render::StockKsPerPixelVariant::base);
+                package_path,
+                alpha_to_coverage
+                    ? apex::render::StockKsPerPixelVariant::alpha_to_coverage
+                    : apex::render::StockKsPerPixelVariant::base);
         if (!native.ok()) {
             const std::string code = native.diagnostic.code.empty()
                                          ? "stock_ks_per_pixel_package_invalid"
@@ -1940,10 +1968,11 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
             apex::render::ValidatedStockKsPerPixelNativeProgram>(
                 std::move(*native.program));
         loaded.d3d12NativePrograms.push_back(
-            {"ksPerPixel", loaded.d3d12KsPerPixelOwner});
+            {alpha_to_coverage ? "ksPerPixelAT" : "ksPerPixel",
+             loaded.d3d12KsPerPixelOwner});
     }
     if (options.shaders.empty() && !options.builtinVulkanKsPerPixel &&
-        !options.d3d12KsPerPixelPackage.has_value())
+        !has_d3d12_native_package(options))
         throw std::runtime_error("workspace rendering requires caller-supplied shader modules");
 
     const auto shader_format =
@@ -2119,10 +2148,13 @@ int run_window(int argc, char** argv) {
         backend != apex::render::Backend::Vulkan)
         throw std::runtime_error(
             "--builtin-vulkan-ks-per-pixel requires the Vulkan backend");
-    if (workspace_options.d3d12KsPerPixelPackage.has_value() &&
+    if (has_d3d12_native_package(workspace_options) &&
         backend != apex::render::Backend::D3D12)
         throw std::runtime_error(
-            "--d3d12-ks-per-pixel-package requires the D3D12 backend");
+            std::string(workspace_options.d3d12KsPerPixelAtPackage.has_value()
+                            ? "--d3d12-ks-per-pixel-at-package"
+                            : "--d3d12-ks-per-pixel-package") +
+            " requires the D3D12 backend");
     const auto workspace_lighting =
         apex::app::evaluateWorkspaceViewportLighting({
             workspace_options.weather,
@@ -2273,12 +2305,17 @@ int run_window(int argc, char** argv) {
             request.builtin_vulkan_source =
                 apex::render::BuiltinVulkanStockSourceSelector::ks_per_pixel;
         }
-        if (workspace_options.d3d12KsPerPixelPackage.has_value()) {
+        if (has_d3d12_native_package(workspace_options)) {
             request.builtin_d3d12_native =
-                apex::render::BuiltinD3D12StockNativeSelector::
-                    ks_per_pixel_base;
+                workspace_options.d3d12KsPerPixelAtPackage.has_value()
+                    ? apex::render::BuiltinD3D12StockNativeSelector::
+                          ks_per_pixel_alpha_to_coverage
+                    : apex::render::BuiltinD3D12StockNativeSelector::
+                          ks_per_pixel_base;
             request.builtin_d3d12_native_programs =
                 loaded_workspace.d3d12NativePrograms;
+            if (workspace_options.d3d12KsPerPixelAtPackage.has_value())
+                request.color_samples = 4U;
         }
         request.render.camera_position = camera.frame->position;
         request.camera_mesh_filter = true;
@@ -2447,7 +2484,7 @@ int run_window(int argc, char** argv) {
                 !loaded_workspace.descriptors.empty();
             request.directional_shadows = loaded_workspace.directionalShadows;
         } else if (workspace_options.builtinVulkanKsPerPixel ||
-                   workspace_options.d3d12KsPerPixelPackage.has_value()) {
+                   has_d3d12_native_package(workspace_options)) {
             request.directional_shadows =
                 apex::app::WorkspaceViewportDirectionalShadowOptions{};
         }
@@ -2458,7 +2495,7 @@ int run_window(int argc, char** argv) {
                 workspace_lighting.evaluated.sun_direction;
             if ((workspace_options.builtinVulkanKsPerPixel &&
                  loaded_workspace.descriptors.empty()) ||
-                workspace_options.d3d12KsPerPixelPackage.has_value()) {
+                has_d3d12_native_package(workspace_options)) {
                 request.directional_shadows->maps.lighting.splits =
                     apex::render::ks_editor_shadow_splits;
                 request.directional_shadows->maps.lighting.far_plane =

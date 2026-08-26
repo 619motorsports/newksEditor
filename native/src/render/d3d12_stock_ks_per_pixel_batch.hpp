@@ -40,9 +40,9 @@ struct D3D12StockKsPerPixelNativeBatchDraw {
 // The bridge owns the target/depth state pointers and keeps every resource
 // alive through this synchronous call. The allocator is idle and the list is
 // closed on entry; the helper submits one command list and leaves it closed.
-// Only validated base ksPerPixel programs and ordinary static triangle draws
-// are accepted. Overlay, selected, portable, and alpha-to-coverage draws are
-// intentionally rejected by this standalone slice.
+// Only homogeneous validated base or alpha-to-coverage ksPerPixel programs
+// and ordinary static triangle draws are accepted. Overlay, selected,
+// portable, and mixed-variant draws are intentionally rejected.
 struct D3D12StockKsPerPixelNativeBatchContext {
   ID3D12Device *device = nullptr;
   ID3D12CommandQueue *queue = nullptr;
@@ -57,6 +57,9 @@ struct D3D12StockKsPerPixelNativeBatchContext {
   bool load_color = false;
   std::array<float, 4> clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
   bool *target_cleared = nullptr;
+  ID3D12Resource *resolve_target = nullptr;
+  D3D12_RESOURCE_STATES *resolve_target_state = nullptr;
+  bool *resolve_target_cleared = nullptr;
   ID3D12Resource *depth = nullptr;
   D3D12_CPU_DESCRIPTOR_HANDLE depth_write_dsv{};
   D3D12_CPU_DESCRIPTOR_HANDLE depth_read_dsv{};
@@ -65,6 +68,7 @@ struct D3D12StockKsPerPixelNativeBatchContext {
   bool clear_depth = false;
   float depth_clear_value = 1.0F;
   std::span<const D3D12StockKsPerPixelNativeBatchDraw> draws{};
+  bool capture_rgba8 = true;
   std::vector<std::byte> *readback = nullptr;
 };
 

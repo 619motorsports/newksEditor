@@ -4957,6 +4957,36 @@ void rejects_invalid_d3d12_native_viewport_selection_before_allocation() {
                 multisample_device.depth_calls == 0U,
             "native D3D12 multisampling rejects before allocation");
 
+    request.builtin_d3d12_native =
+        BuiltinD3D12StockNativeSelector::
+            ks_per_pixel_alpha_to_coverage;
+    placeholder_programs[0U].key = "ksPerPixelAT";
+    request.builtin_d3d12_native_programs = placeholder_programs;
+    FakeDevice alpha_multisample_device(Backend::D3D12);
+    auto alpha_multisample = apex::app::prepareWorkspaceViewport(
+        alpha_multisample_device, value.document, request);
+    require(!alpha_multisample.ok() &&
+                alpha_multisample.diagnostic.code ==
+                    "stock_material_d3d12_native_program_invalid",
+            "native D3D12 ksPerPixelAT accepts the four-sample viewport gate before owner validation");
+
+    request.color_samples = 1U;
+    FakeDevice alpha_one_sample_device(Backend::D3D12);
+    auto alpha_one_sample = apex::app::prepareWorkspaceViewport(
+        alpha_one_sample_device, value.document, request);
+    require(!alpha_one_sample.ok() &&
+                alpha_one_sample.diagnostic.code ==
+                    "workspace_viewport_d3d12_native_multisample_unsupported" &&
+                alpha_one_sample_device.buffer_calls == 0U &&
+                alpha_one_sample_device.texture_calls == 0U &&
+                alpha_one_sample_device.depth_calls == 0U,
+            "native D3D12 ksPerPixelAT rejects one-sample viewports before allocation");
+
+    request.builtin_d3d12_native =
+        BuiltinD3D12StockNativeSelector::ks_per_pixel_base;
+    placeholder_programs[0U].key = "ksPerPixel";
+    request.builtin_d3d12_native_programs = placeholder_programs;
+
     request.color_samples = 1U;
     request.grid_visible = true;
     FakeDevice overlay_device(Backend::D3D12);

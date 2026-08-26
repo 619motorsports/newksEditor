@@ -2012,9 +2012,16 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         const bool builtin_vulkan_source =
             request.builtin_vulkan_source ==
             render::BuiltinVulkanStockSourceSelector::ks_per_pixel;
-        const bool builtin_d3d12_native =
+        const bool builtin_d3d12_native_base =
             request.builtin_d3d12_native ==
             render::BuiltinD3D12StockNativeSelector::ks_per_pixel_base;
+        const bool builtin_d3d12_native_alpha_to_coverage =
+            request.builtin_d3d12_native ==
+            render::BuiltinD3D12StockNativeSelector::
+                ks_per_pixel_alpha_to_coverage;
+        const bool builtin_d3d12_native =
+            builtin_d3d12_native_base ||
+            builtin_d3d12_native_alpha_to_coverage;
         if (request.builtin_vulkan_source !=
                 render::BuiltinVulkanStockSourceSelector::disabled &&
             !builtin_vulkan_source) {
@@ -2068,12 +2075,14 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             return result;
         }
         if (builtin_d3d12_native && request.shader_modules.empty() &&
-            request.color_samples != 1U) {
+            request.color_samples !=
+                (builtin_d3d12_native_alpha_to_coverage ? 4U : 1U)) {
             result.status = WorkspaceViewportStatus::unsupported;
             result.diagnostic = diagnostic(
                 "workspace_viewport_d3d12_native_multisample_unsupported",
-                "The first installed D3D12 native viewport requires a "
-                "one-sample target");
+                builtin_d3d12_native_alpha_to_coverage
+                    ? "The installed D3D12 ksPerPixelAT viewport requires a four-sample target"
+                    : "The installed D3D12 base ksPerPixel viewport requires a one-sample target");
             return result;
         }
         if (builtin_d3d12_native && request.shader_modules.empty() &&

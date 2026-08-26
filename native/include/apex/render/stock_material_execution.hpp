@@ -52,11 +52,13 @@ enum class BuiltinVulkanStockSourceSelector : std::uint8_t {
 enum class BuiltinD3D12StockNativeSelector : std::uint8_t {
     disabled,
     ks_per_pixel_base,
+    ks_per_pixel_alpha_to_coverage,
 };
 
 struct StockMaterialD3D12NativeProgram {
-    // Exact stock shader-family key. The first native batch slice accepts
-    // only ksPerPixel paired with a validated base package.
+    // Exact stock shader-family key. The native batch slice accepts only the
+    // selector's ksPerPixel/ksPerPixelAT key paired with its matching
+    // validated package.
     std::string key;
     std::shared_ptr<const ValidatedStockKsPerPixelNativeProgram> program;
 };

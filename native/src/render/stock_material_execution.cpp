@@ -132,8 +132,12 @@ namespace {
         }
         return true;
     }
+    const bool alpha_to_coverage =
+        request.builtin_d3d12_native ==
+        BuiltinD3D12StockNativeSelector::ks_per_pixel_alpha_to_coverage;
     if (request.builtin_d3d12_native !=
-        BuiltinD3D12StockNativeSelector::ks_per_pixel_base) {
+            BuiltinD3D12StockNativeSelector::ks_per_pixel_base &&
+        !alpha_to_coverage) {
         diagnostic = diag(
             "stock_material_d3d12_native_selector_invalid",
             "The installed D3D12 native selector is invalid");
@@ -144,23 +148,33 @@ namespace {
             request.limits.max_shader_sets) {
         diagnostic = diag(
             "stock_material_d3d12_native_program_count_invalid",
-            "The base D3D12 native selector requires one bounded validated program");
+            alpha_to_coverage
+                ? "The alpha-to-coverage D3D12 native selector requires one bounded validated program"
+                : "The base D3D12 native selector requires one bounded validated program");
         return false;
     }
     std::set<std::string> keys;
     for (const StockMaterialD3D12NativeProgram& entry :
          request.builtin_d3d12_native_programs) {
         const std::string key = canonical(entry.key);
+        const std::string expected_key =
+            alpha_to_coverage ? "ksperpixelat" : "ksperpixel";
+        const StockKsPerPixelVariant expected_variant =
+            alpha_to_coverage
+                ? StockKsPerPixelVariant::alpha_to_coverage
+                : StockKsPerPixelVariant::base;
         if (entry.key.empty() ||
             entry.key.size() > request.limits.max_shader_key_bytes ||
-            key != "ksperpixel" || !keys.insert(key).second ||
+            key != expected_key || !keys.insert(key).second ||
             entry.program == nullptr ||
             entry.program->validation_status() !=
                 StockKsPerPixelNativeProgramStatus::ready ||
-            entry.program->variant() != StockKsPerPixelVariant::base) {
+            entry.program->variant() != expected_variant) {
             diagnostic = diag(
                 "stock_material_d3d12_native_program_invalid",
-                "The first D3D12 native slice accepts one exact validated base ksPerPixel program");
+                alpha_to_coverage
+                    ? "The installed D3D12 native selector requires one exact validated ksPerPixelAT alpha-to-coverage program"
+                    : "The first D3D12 native slice accepts one exact validated base ksPerPixel program");
             return false;
         }
     }
@@ -483,8 +497,8 @@ bool estimate_adapter_copy(const StockMaterialExecutionRequest& request,
             return false;
         }
     }
-    if (request.builtin_d3d12_native ==
-        BuiltinD3D12StockNativeSelector::ks_per_pixel_base) {
+    if (request.builtin_d3d12_native !=
+        BuiltinD3D12StockNativeSelector::disabled) {
         if (!charge_count(request.builtin_d3d12_native_programs.size(),
                           sizeof(StockMaterialD3D12NativeProgram)) ||
             !charge_count(request.packets.size(), sizeof(std::uint32_t))) {
@@ -796,17 +810,27 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                 const bool use_builtin_source =
                     modules == nullptr && source_candidate &&
                     device.info().backend == Backend::Vulkan;
-                const bool d3d12_native_family =
-                    canonical(source.shader) == shader_key &&
-                    shader_key == "ksperpixel";
-                const bool d3d12_native_candidate =
+                const bool d3d12_native_alpha_to_coverage =
                     request.builtin_d3d12_native ==
-                        BuiltinD3D12StockNativeSelector::ks_per_pixel_base &&
+                    BuiltinD3D12StockNativeSelector::
+                        ks_per_pixel_alpha_to_coverage;
+                const std::string d3d12_native_shader_key =
+                    d3d12_native_alpha_to_coverage ? "ksperpixelat"
+                                                   : "ksperpixel";
+                const bool d3d12_native_family =
+                    request.builtin_d3d12_native !=
+                        BuiltinD3D12StockNativeSelector::disabled &&
+                    canonical(source.shader) == shader_key &&
+                    shader_key == d3d12_native_shader_key;
+                const bool d3d12_native_candidate =
+                    request.builtin_d3d12_native !=
+                        BuiltinD3D12StockNativeSelector::disabled &&
                     d3d12_native_family &&
                     packet.primitive == DrawPrimitiveKind::static_mesh &&
                     shader_variant == StockMaterialShaderVariant::standard &&
                     !request.directional_shadow_receiver &&
-                    !desired_transparent && !request.wireframe;
+                    !desired_transparent && !packet.flags.blend_enabled &&
+                    !request.wireframe;
                 const StockMaterialD3D12NativeProgram* d3d12_native_entry =
                     d3d12_native_candidate
                         ? find_d3d12_native_program(
@@ -832,13 +856,17 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                         "The first installed D3D12 batch slice requires opaque solid static base ksPerPixel packets");
                 if (use_builtin_d3d12_native &&
                     (request.targets.colors.size() != 1U ||
-                     request.targets.colors.front().samples != 1U ||
+                     request.targets.colors.front().samples !=
+                         (d3d12_native_alpha_to_coverage ? 4U : 1U) ||
                      (request.targets.has_depth &&
-                      request.targets.depth.samples != 1U)))
+                      request.targets.depth.samples !=
+                          (d3d12_native_alpha_to_coverage ? 4U : 1U))))
                     return fail(
                         StaticSceneResourceStatus::unsupported,
                         "stock_material_d3d12_native_target_unsupported",
-                        "The first installed D3D12 batch slice requires a one-sample color and optional matching depth target");
+                        d3d12_native_alpha_to_coverage
+                            ? "The installed D3D12 alpha-to-coverage slice requires a four-sample color and optional matching depth target"
+                            : "The first installed D3D12 batch slice requires a one-sample color and optional matching depth target");
                 if (modules == nullptr && !use_builtin_source &&
                     !use_builtin_d3d12_native)
                     return fail(
@@ -989,6 +1017,14 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                                 final_validation.diagnostics.empty()
                                     ? "Stock pipeline validation failed after explicit execution state"
                                     : final_validation.diagnostics.front().message);
+                if (use_builtin_d3d12_native &&
+                    (built.profile.transparent || built.profile.blend_enabled ||
+                     built.profile.alpha_to_coverage !=
+                         d3d12_native_alpha_to_coverage))
+                    return fail(
+                        StaticSceneResourceStatus::unsupported,
+                        "stock_material_d3d12_native_packet_unsupported",
+                        "Installed D3D12 native execution requires a matching opaque solid ksPerPixel variant");
                 if (use_builtin_source) {
                     const StockKsPerPixelVariant variant =
                         built.profile.alpha_to_coverage

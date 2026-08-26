@@ -71,6 +71,32 @@ State `0` is the opaque state. State `1` is the alpha-blend state, and state `2`
 
 The `ksPerPixelAT` pixel shader contains no discard instruction. Its cutout behavior uses fixed-function alpha-to-coverage and a multisample render target.
 
+## Alpha-tested material selection
+
+`KGLShader::loadShaderBinary` at `0x1000f5c0` reads `ALPHATEST` from the shader metadata.
+
+`ksPerPixelAT_meta.ini` sets `ALPHATEST=1`. The base `ksPerPixel_meta.ini` sets `ALPHATEST=0`.
+
+`Material::initShaderVars` at `0x10040420` selects blend mode `2` for an alpha-tested shader. Mode `2` is the alpha-to-coverage state.
+
+`Material::apply` at `0x1004016e` applies the selected blend and cull states. The alpha-tested shader does not select a different depth state.
+
+Serialized KN5 material flags can override this initial shader selection. This override is a material-data rule, not a different shader ABI.
+
+## Multisample count and resolve
+
+The original editor does not require a fixed four-sample count. `createDeviceAndSwapChain` at `0x1000d670` uses `videoSettings.aaSamples`.
+
+D3D feature level 10 forces this sample count to `1`. Multisample render-target constructors use the selected runtime value.
+
+`CameraForwardYebis::renderApplyEffect` at `0x1001ad80` renders the main scene into the multisample target. It resolves color after the main pass.
+
+The `ResolveSubresource` call is at `0x1001ae68`. It resolves the multisample color target to `R16G16B16A16_FLOAT` color.
+
+The editor resolves depth with a full-screen shader. It does not use `ResolveSubresource` for depth.
+
+A static search found one `ResolveSubresource` call in the module. Thus, the resolve is a scene operation and not a material operation.
+
 ## Depth states
 
 `initDX11` at `0x1000d9f0` creates the depth states. The function calls `CreateDepthStencilState` through vtable offset `0x54`.
@@ -124,3 +150,5 @@ The current D3D12 native path can translate the following recovered facts:
 - The `b0-b4`, `t0`, `t6-t8`, and `s0-s1` shader bindings.
 
 The D3D11 binary contains no D3D12 root signature or pipeline-state object. Tests on Microsoft D3D12 remain necessary for the translated objects.
+
+The current native D3D12 alpha-to-coverage batch supports the validated 4x target contract. This sample count is a labeled port limitation.

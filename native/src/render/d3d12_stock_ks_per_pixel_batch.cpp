@@ -315,9 +315,14 @@ bool record_d3d12_stock_ks_per_pixel_native_batch(
       target_description.Format != context.target_format ||
       target_description.Width != context.target_width ||
       target_description.Height != context.target_height ||
-      target_description.SampleDesc.Count != 1U)
+      target_description.MipLevels != 1U ||
+      target_description.DepthOrArraySize != 1U ||
+      (target_description.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) ==
+          0U ||
+      (target_description.SampleDesc.Count != 1U &&
+       target_description.SampleDesc.Count != 4U))
     return invalid("d3d12_stock_native_batch_target_shape_invalid",
-                   "Native batch requires a single-sample 2D target");
+                   "Native batch requires a one-sample or four-sample 2D target");
 
   const bool use_depth = context.depth != nullptr;
   if (use_depth &&
@@ -331,11 +336,14 @@ bool record_d3d12_stock_ks_per_pixel_native_batch(
         depth_description.Format != DXGI_FORMAT_D32_FLOAT ||
         depth_description.Width != context.target_width ||
         depth_description.Height != context.target_height ||
-        depth_description.SampleDesc.Count != 1U)
+        depth_description.SampleDesc.Count !=
+            target_description.SampleDesc.Count)
       return invalid("d3d12_stock_native_batch_depth_shape_invalid",
-                     "Native batch depth must match the 1x target dimensions");
+                     "Native batch depth must match the target dimensions and samples");
   }
   bool any_depth = false;
+  bool variant_set = false;
+  StockKsPerPixelVariant batch_variant = StockKsPerPixelVariant::base;
   for (const auto &draw : context.draws) {
     if (draw.packet == nullptr || draw.pipeline == nullptr ||
         draw.vertex_buffer == nullptr || draw.index_buffer == nullptr ||
@@ -346,18 +354,29 @@ bool record_d3d12_stock_ks_per_pixel_native_batch(
                      "Native batch draw context is incomplete");
     const DrawPacket &packet = *draw.packet;
     const PipelineProgram &pipeline = *draw.pipeline;
+    const StockKsPerPixelVariant shader_variant =
+        draw.shader_program->source().variant();
+    const bool alpha_to_coverage =
+        shader_variant == StockKsPerPixelVariant::alpha_to_coverage;
+    if (variant_set && shader_variant != batch_variant)
+      return invalid("d3d12_stock_native_batch_variant_mixed",
+                     "Native batch cannot mix base and alpha-to-coverage programs");
+    variant_set = true;
+    batch_variant = shader_variant;
     if (packet.primitive != DrawPrimitiveKind::static_mesh ||
         draw.index_type != StaticMeshIndexType::uint16 ||
         packet.vertex_count == 0U || packet.index_count == 0U ||
         packet.index_count % 3U != 0U || packet.vertex_stride_floats != 11U)
       return invalid("d3d12_stock_native_batch_geometry_invalid",
                      "Native batch requires bounded static triangle draws");
-    if (packet.flags.blend_enabled || packet.flags.alpha_to_coverage ||
+    if (packet.flags.blend_enabled ||
+        packet.flags.alpha_to_coverage != alpha_to_coverage ||
         packet.flags.wireframe || packet.flags.selected || packet.shadow_only ||
-        pipeline.blend.enabled || pipeline.blend.alpha_to_coverage ||
+        pipeline.blend.enabled ||
+        pipeline.blend.alpha_to_coverage != alpha_to_coverage ||
         pipeline.raster.fill == PipelineFillMode::wireframe)
       return invalid("d3d12_stock_native_batch_pipeline_unsupported",
-                     "Native batch accepts only opaque solid base draws");
+                     "Native batch accepts only matching opaque solid base or alpha-to-coverage draws");
     if (packet.flags.depth_test != pipeline.depth.test_enabled ||
         packet.flags.depth_write != pipeline.depth.write_enabled ||
         (packet.flags.depth_write && !packet.flags.depth_test))
@@ -367,9 +386,10 @@ bool record_d3d12_stock_ks_per_pixel_native_batch(
     if (pipeline.targets.colors.size() != 1U ||
         !target_format_matches(pipeline.targets.colors[0].format,
                                context.target_format) ||
-        pipeline.targets.colors[0].samples != 1U)
+        pipeline.targets.colors[0].samples !=
+            target_description.SampleDesc.Count)
       return invalid("d3d12_stock_native_batch_pipeline_target_invalid",
-                     "Native batch pipelines must match the 1x target");
+                     "Native batch pipelines must match the target samples");
     const auto &layout = pipeline.vertex_layout;
     const auto matches_layout =
         [&](std::size_t index, PipelineVertexSemantic semantic,
@@ -398,8 +418,8 @@ bool record_d3d12_stock_ks_per_pixel_native_batch(
     if (!draw.shader_program->ready() ||
         draw.shader_program->source().validation_status() !=
             StockKsPerPixelNativeProgramStatus::ready ||
-        draw.shader_program->source().variant() !=
-            StockKsPerPixelVariant::base ||
+        (shader_variant != StockKsPerPixelVariant::base &&
+         !alpha_to_coverage) ||
         draw.shader_program->vertex_shader().backend() != Backend::D3D12 ||
         draw.shader_program->pixel_shader().backend() != Backend::D3D12 ||
         draw.shader_program->vertex_shader().info().stage !=
@@ -411,7 +431,7 @@ bool record_d3d12_stock_ks_per_pixel_native_batch(
         draw.shader_program->pixel_shader().info().format !=
             ShaderBytecodeFormat::dxbc)
       return invalid("d3d12_stock_native_batch_shader_invalid",
-                     "Native batch requires validated base D3D12 shaders");
+                     "Native batch requires validated base or alpha-to-coverage D3D12 shaders");
     if (!draw.constant_buffers->ready() ||
         !native_sampler_descriptions_valid(*draw.samplers))
       return invalid("d3d12_stock_native_batch_bindings_invalid",
@@ -455,6 +475,43 @@ bool record_d3d12_stock_ks_per_pixel_native_batch(
          D3D12_RESOURCE_STATE_INDEX_BUFFER) == 0U)
       return invalid("d3d12_stock_native_batch_geometry_state_invalid",
                      "Native batch geometry is not in a valid tracked state");
+  }
+  const bool alpha_to_coverage =
+      batch_variant == StockKsPerPixelVariant::alpha_to_coverage;
+  const UINT required_samples = alpha_to_coverage ? 4U : 1U;
+  if (target_description.SampleDesc.Count != required_samples)
+    return invalid("d3d12_stock_native_batch_target_samples_invalid",
+                   alpha_to_coverage
+                       ? "Native ksPerPixelAT batches require a four-sample target"
+                       : "Native base ksPerPixel batches require a single-sample target");
+  if (alpha_to_coverage) {
+    if (context.resolve_target == nullptr ||
+        context.resolve_target_state == nullptr ||
+        context.resolve_target_cleared == nullptr)
+      return invalid("d3d12_stock_native_batch_resolve_context_missing",
+                     "Native ksPerPixelAT batches require a retained resolve target");
+    if (context.resolve_target == context.target ||
+        context.resolve_target == context.depth)
+      return invalid("d3d12_stock_native_batch_resolve_alias",
+                     "Native batch resolve target must not alias color or depth");
+    const D3D12_RESOURCE_DESC resolve_description =
+        context.resolve_target->GetDesc();
+    if (resolve_description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        resolve_description.Format != context.target_format ||
+        resolve_description.Width != context.target_width ||
+        resolve_description.Height != context.target_height ||
+        resolve_description.MipLevels != 1U ||
+        resolve_description.DepthOrArraySize != 1U ||
+        resolve_description.SampleDesc.Count != 1U ||
+        (resolve_description.Flags &
+         D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0U)
+      return invalid("d3d12_stock_native_batch_resolve_shape_invalid",
+                     "Native batch resolve target must be matching single-sample 2D storage");
+  } else if (context.resolve_target != nullptr ||
+             context.resolve_target_state != nullptr ||
+             context.resolve_target_cleared != nullptr) {
+    return invalid("d3d12_stock_native_batch_resolve_unexpected",
+                   "Native base ksPerPixel batches do not use a resolve target");
   }
   if (context.clear_depth &&
       (context.depth == nullptr || context.depth_cleared == nullptr))
@@ -506,6 +563,9 @@ bool record_d3d12_stock_ks_per_pixel_native_batch(
     if (draw.vertex_buffer == context.target ||
         draw.index_buffer == context.target ||
         draw.diffuse_texture == context.target ||
+        draw.vertex_buffer == context.resolve_target ||
+        draw.index_buffer == context.resolve_target ||
+        draw.diffuse_texture == context.resolve_target ||
         draw.vertex_buffer == context.depth ||
         draw.index_buffer == context.depth ||
         draw.diffuse_texture == context.depth)
@@ -530,6 +590,7 @@ bool record_d3d12_stock_ks_per_pixel_native_batch(
                      "Native batch diffuse must be a single-sample 2D texture");
     for (std::size_t i = 0U; i < draw.shadow_maps.size(); ++i) {
       if (draw.shadow_maps[i] == context.target ||
+          draw.shadow_maps[i] == context.resolve_target ||
           draw.shadow_maps[i] == context.depth ||
           draw.shadow_maps[i] == draw.vertex_buffer ||
           draw.shadow_maps[i] == draw.index_buffer ||
@@ -562,6 +623,7 @@ bool record_d3d12_stock_ks_per_pixel_native_batch(
         return invalid("d3d12_stock_native_batch_resource_alias",
                        "Native batch resources have incompatible aliases");
       if (constant == context.target || constant == context.depth ||
+          constant == context.resolve_target ||
           constant == draw.vertex_buffer || constant == draw.index_buffer ||
           constant == draw.diffuse_texture)
         return invalid("d3d12_stock_native_batch_resource_alias",
@@ -792,6 +854,8 @@ bool record_d3d12_stock_ks_per_pixel_native_batch(
         PipelineFrontFace::counter_clockwise;
     pso.RasterizerState.DepthClipEnable = TRUE;
     auto &blend = pso.BlendState.RenderTarget[0];
+    pso.BlendState.AlphaToCoverageEnable =
+        draw.pipeline->blend.alpha_to_coverage ? TRUE : FALSE;
     blend.SrcBlend = blend_factor(draw.pipeline->blend.source_color);
     blend.DestBlend = blend_factor(draw.pipeline->blend.destination_color);
     blend.BlendOp = blend_op(draw.pipeline->blend.color_operation);
@@ -809,7 +873,8 @@ bool record_d3d12_stock_ks_per_pixel_native_batch(
     pso.RTVFormats[0] = context.target_format;
     pso.DSVFormat = use_depth ? DXGI_FORMAT_D32_FLOAT : DXGI_FORMAT_UNKNOWN;
     pso.SampleMask = std::numeric_limits<UINT>::max();
-    pso.SampleDesc.Count = 1U;
+    pso.SampleDesc.Count = required_samples;
+    pso.SampleDesc.Quality = target_description.SampleDesc.Quality;
     result = context.device->CreateGraphicsPipelineState(
         &pso, IID_PPV_ARGS(&pipeline_states[index]));
     if (FAILED(result)) {
@@ -824,43 +889,49 @@ bool record_d3d12_stock_ks_per_pixel_native_batch(
   UINT rows = 0U;
   UINT64 row_size = 0U;
   UINT64 readback_size = 0U;
-  context.device->GetCopyableFootprints(&target_description, 0U, 1U, 0U,
-                                        &footprint, &rows, &row_size,
-                                        &readback_size);
-  if (rows != context.target_height ||
-      row_size < static_cast<UINT64>(context.target_width) * 4U ||
-      footprint.Footprint.RowPitch < row_size || readback_size == 0U ||
-      readback_size > max_texture_readback_bytes ||
-      readback_size > std::numeric_limits<SIZE_T>::max() ||
-      footprint.Offset > readback_size ||
-      (context.target_height > 0U &&
-       (static_cast<UINT64>(context.target_height - 1U) >
-            (readback_size - footprint.Offset) / footprint.Footprint.RowPitch ||
-        static_cast<UINT64>(context.target_width) * 4U >
-            readback_size - footprint.Offset -
-                static_cast<UINT64>(context.target_height - 1U) *
-                    footprint.Footprint.RowPitch)))
-    return invalid("d3d12_stock_native_batch_readback_invalid",
-                   "Native batch readback footprint exceeds bounded limits");
-  D3D12_HEAP_PROPERTIES readback_heap{};
-  readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
-  D3D12_RESOURCE_DESC readback_description{};
-  readback_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-  readback_description.Width = readback_size;
-  readback_description.Height = 1U;
-  readback_description.DepthOrArraySize = 1U;
-  readback_description.MipLevels = 1U;
-  readback_description.SampleDesc.Count = 1U;
-  readback_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
   ComPtr<ID3D12Resource> readback_resource;
-  result = context.device->CreateCommittedResource(
-      &readback_heap, D3D12_HEAP_FLAG_NONE, &readback_description,
-      D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-      IID_PPV_ARGS(&readback_resource));
-  if (FAILED(result)) {
-    diagnostic = hresult_error(
-        "CreateCommittedResource(stock native batch readback)", result);
-    return false;
+  if (context.capture_rgba8) {
+    const D3D12_RESOURCE_DESC readback_source_description =
+        alpha_to_coverage ? context.resolve_target->GetDesc()
+                          : target_description;
+    context.device->GetCopyableFootprints(
+        &readback_source_description, 0U, 1U, 0U, &footprint, &rows,
+        &row_size, &readback_size);
+    if (rows != context.target_height ||
+        row_size < static_cast<UINT64>(context.target_width) * 4U ||
+        footprint.Footprint.RowPitch < row_size || readback_size == 0U ||
+        readback_size > max_texture_readback_bytes ||
+        readback_size > std::numeric_limits<SIZE_T>::max() ||
+        footprint.Offset > readback_size ||
+        (context.target_height > 0U &&
+         (static_cast<UINT64>(context.target_height - 1U) >
+              (readback_size - footprint.Offset) /
+                  footprint.Footprint.RowPitch ||
+          static_cast<UINT64>(context.target_width) * 4U >
+              readback_size - footprint.Offset -
+                  static_cast<UINT64>(context.target_height - 1U) *
+                      footprint.Footprint.RowPitch)))
+      return invalid("d3d12_stock_native_batch_readback_invalid",
+                     "Native batch readback footprint exceeds bounded limits");
+    D3D12_HEAP_PROPERTIES readback_heap{};
+    readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC readback_description{};
+    readback_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    readback_description.Width = readback_size;
+    readback_description.Height = 1U;
+    readback_description.DepthOrArraySize = 1U;
+    readback_description.MipLevels = 1U;
+    readback_description.SampleDesc.Count = 1U;
+    readback_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    result = context.device->CreateCommittedResource(
+        &readback_heap, D3D12_HEAP_FLAG_NONE, &readback_description,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+        IID_PPV_ARGS(&readback_resource));
+    if (FAILED(result)) {
+      diagnostic = hresult_error(
+          "CreateCommittedResource(stock native batch readback)", result);
+      return false;
+    }
   }
   ComPtr<ID3D12Fence> fence;
   result = context.device->CreateFence(0U, D3D12_FENCE_FLAG_NONE,
@@ -972,21 +1043,52 @@ bool record_d3d12_stock_ks_per_pixel_native_batch(
     context.command_list->DrawIndexedInstanced(packet.index_count, 1U, 0U, 0,
                                                0U);
   }
-  transition(context.command_list, context.target,
-             D3D12_RESOURCE_STATE_RENDER_TARGET,
-             D3D12_RESOURCE_STATE_COPY_SOURCE);
-  D3D12_TEXTURE_COPY_LOCATION source{};
-  source.pResource = context.target;
-  source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-  source.SubresourceIndex = 0U;
-  D3D12_TEXTURE_COPY_LOCATION destination{};
-  destination.pResource = readback_resource.Get();
-  destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-  destination.PlacedFootprint = footprint;
-  context.command_list->CopyTextureRegion(&destination, 0U, 0U, 0U, &source,
-                                          nullptr);
-  transition(context.command_list, context.target,
-             D3D12_RESOURCE_STATE_COPY_SOURCE, target_before);
+  const D3D12_RESOURCE_STATES resolve_before =
+      alpha_to_coverage ? *context.resolve_target_state
+                        : D3D12_RESOURCE_STATE_COMMON;
+  ID3D12Resource *readback_source = context.target;
+  if (alpha_to_coverage) {
+    transition(context.command_list, context.target,
+               D3D12_RESOURCE_STATE_RENDER_TARGET,
+               D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
+    transition(context.command_list, context.resolve_target, resolve_before,
+               D3D12_RESOURCE_STATE_RESOLVE_DEST);
+    context.command_list->ResolveSubresource(
+        context.resolve_target, 0U, context.target, 0U,
+        context.target_format);
+    readback_source = context.resolve_target;
+    transition(context.command_list, context.resolve_target,
+               D3D12_RESOURCE_STATE_RESOLVE_DEST,
+               context.capture_rgba8 ? D3D12_RESOURCE_STATE_COPY_SOURCE
+                                     : resolve_before);
+    transition(context.command_list, context.target,
+               D3D12_RESOURCE_STATE_RESOLVE_SOURCE, target_before);
+  } else if (context.capture_rgba8) {
+    transition(context.command_list, context.target,
+               D3D12_RESOURCE_STATE_RENDER_TARGET,
+               D3D12_RESOURCE_STATE_COPY_SOURCE);
+  } else {
+    transition(context.command_list, context.target,
+               D3D12_RESOURCE_STATE_RENDER_TARGET, target_before);
+  }
+  if (context.capture_rgba8) {
+    D3D12_TEXTURE_COPY_LOCATION source{};
+    source.pResource = readback_source;
+    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    source.SubresourceIndex = 0U;
+    D3D12_TEXTURE_COPY_LOCATION destination{};
+    destination.pResource = readback_resource.Get();
+    destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    destination.PlacedFootprint = footprint;
+    context.command_list->CopyTextureRegion(&destination, 0U, 0U, 0U,
+                                            &source, nullptr);
+    if (alpha_to_coverage)
+      transition(context.command_list, context.resolve_target,
+                 D3D12_RESOURCE_STATE_COPY_SOURCE, resolve_before);
+    else
+      transition(context.command_list, context.target,
+                 D3D12_RESOURCE_STATE_COPY_SOURCE, target_before);
+  }
   for (TrackedResource &entry : tracked)
     transition(context.command_list, entry.resource, entry.required,
                entry.before);
@@ -998,6 +1100,10 @@ bool record_d3d12_stock_ks_per_pixel_native_batch(
     if (diagnostic.code == "d3d12_stock_native_batch_submit_undrained") {
       *context.target_state = D3D12_RESOURCE_STATE_COMMON;
       *context.target_cleared = false;
+      if (alpha_to_coverage) {
+        *context.resolve_target_state = D3D12_RESOURCE_STATE_COMMON;
+        *context.resolve_target_cleared = false;
+      }
       if (use_depth) {
         *context.depth_state = D3D12_RESOURCE_STATE_COMMON;
         if (context.depth_cleared != nullptr)
@@ -1009,6 +1115,19 @@ bool record_d3d12_stock_ks_per_pixel_native_batch(
     return false;
   }
   CloseHandle(event);
+  *context.target_state = target_before;
+  if (!context.load_color)
+    *context.target_cleared = true;
+  if (alpha_to_coverage) {
+    *context.resolve_target_state = resolve_before;
+    *context.resolve_target_cleared = true;
+  }
+  if (use_depth && context.clear_depth)
+    *context.depth_cleared = true;
+  if (!context.capture_rgba8) {
+    context.readback->clear();
+    return true;
+  }
   void *mapped = nullptr;
   D3D12_RANGE range{0U, static_cast<SIZE_T>(readback_size)};
   result = readback_resource->Map(0U, &range, &mapped);
@@ -1038,11 +1157,6 @@ bool record_d3d12_stock_ks_per_pixel_native_batch(
       context.target_format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
     for (std::size_t i = 0U; i < context.readback->size(); i += 4U)
       std::swap((*context.readback)[i], (*context.readback)[i + 2U]);
-  *context.target_state = target_before;
-  if (!context.load_color)
-    *context.target_cleared = true;
-  if (use_depth && context.clear_depth)
-    *context.depth_cleared = true;
   return true;
 }
 
