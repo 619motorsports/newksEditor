@@ -3200,8 +3200,14 @@ SamplerStatus validate_sampler_description(const SamplerDescription& description
         diagnostic = {"sampler_anisotropy_unused", "Non-anisotropic filtering must use anisotropy one"};
         return SamplerStatus::invalid_description;
     }
+    if (!std::isfinite(description.mip_lod_bias) ||
+        description.mip_lod_bias < -16.0F ||
+        description.mip_lod_bias > 16.0F) {
+        diagnostic = {"sampler_lod_bias_invalid", "Sampler LOD bias must be finite and between -16 and 16"};
+        return SamplerStatus::invalid_description;
+    }
     if (!std::isfinite(description.min_lod) || !std::isfinite(description.max_lod) || description.min_lod < 0.0F ||
-        description.max_lod < description.min_lod || description.max_lod > 16384.0F) {
+        description.max_lod < description.min_lod) {
         diagnostic = {"sampler_lod_invalid", "Sampler LOD values are outside the supported finite range"};
         return SamplerStatus::invalid_description;
     }
@@ -3552,6 +3558,102 @@ allocate_stock_ks_per_pixel_native_constant_buffers(
     }
 }
 
+StockKsPerPixelNativeSamplerResult
+allocate_stock_ks_per_pixel_native_samplers(
+    Device& device,
+    const StockKsPerPixelNativeSamplerSettings& settings) {
+    if (!std::isfinite(settings.max_anisotropy) ||
+        settings.max_anisotropy < 2.0F ||
+        settings.max_anisotropy > 16.0F ||
+        std::trunc(settings.max_anisotropy) != settings.max_anisotropy ||
+        !std::isfinite(settings.mip_lod_bias) ||
+        settings.mip_lod_bias < -16.0F ||
+        settings.mip_lod_bias > 16.0F) {
+        return {StockKsPerPixelNativeSamplerStatus::invalid_settings,
+                {"stock_native_sampler_settings_invalid",
+                 "Native stock sampler settings require integer anisotropy from 2 through 16 and LOD bias from -16 through 16."},
+                nullptr};
+    }
+
+    SamplerDescription linear;
+    linear.min_filter = SamplerFilter::anisotropic;
+    linear.mag_filter = SamplerFilter::anisotropic;
+    linear.mip_filter = SamplerFilter::anisotropic;
+    linear.address_u = SamplerAddressMode::repeat;
+    linear.address_v = SamplerAddressMode::repeat;
+    linear.address_w = SamplerAddressMode::repeat;
+    linear.compare = SamplerCompare::disabled;
+    linear.mip_lod_bias = settings.mip_lod_bias;
+    linear.max_anisotropy = settings.max_anisotropy;
+    linear.min_lod = 0.0F;
+    linear.max_lod = std::numeric_limits<float>::max();
+
+    SamplerDescription shadow;
+    shadow.min_filter = SamplerFilter::linear;
+    shadow.mag_filter = SamplerFilter::linear;
+    shadow.mip_filter = SamplerFilter::nearest;
+    shadow.address_u = SamplerAddressMode::clamp_to_edge;
+    shadow.address_v = SamplerAddressMode::clamp_to_edge;
+    shadow.address_w = SamplerAddressMode::clamp_to_edge;
+    shadow.compare = SamplerCompare::less;
+    shadow.max_anisotropy = 1.0F;
+    shadow.min_lod = 0.0F;
+    shadow.max_lod = std::numeric_limits<float>::max();
+
+    constexpr std::size_t sampler_count = static_cast<std::size_t>(
+        StockKsPerPixelNativeSamplerSlot::count);
+    std::array<std::unique_ptr<Sampler>, sampler_count> samplers;
+    const std::array descriptions = {linear, shadow};
+    const std::array failure_statuses = {
+        StockKsPerPixelNativeSamplerStatus::linear_sampler_failed,
+        StockKsPerPixelNativeSamplerStatus::shadow_sampler_failed,
+    };
+
+    for (std::size_t index = 0U; index < sampler_count; ++index) {
+        SamplerResult result = device.create_sampler(descriptions[index]);
+        if (!result.ok()) {
+            Diagnostic diagnostic = std::move(result.diagnostic);
+            if (diagnostic.code.empty())
+                diagnostic.code = "stock_native_sampler_failed";
+            if (diagnostic.message.empty())
+                diagnostic.message =
+                    "The device did not create a required native stock sampler.";
+            return {failure_statuses[index], std::move(diagnostic), nullptr};
+        }
+        const SamplerDescription& actual = result.sampler->info().description;
+        if (result.sampler->backend() != device.info().backend ||
+            actual.min_filter != descriptions[index].min_filter ||
+            actual.mag_filter != descriptions[index].mag_filter ||
+            actual.mip_filter != descriptions[index].mip_filter ||
+            actual.address_u != descriptions[index].address_u ||
+            actual.address_v != descriptions[index].address_v ||
+            actual.address_w != descriptions[index].address_w ||
+            actual.compare != descriptions[index].compare ||
+            actual.mip_lod_bias != descriptions[index].mip_lod_bias ||
+            actual.max_anisotropy != descriptions[index].max_anisotropy ||
+            actual.min_lod != descriptions[index].min_lod ||
+            actual.max_lod != descriptions[index].max_lod) {
+            return {StockKsPerPixelNativeSamplerStatus::invalid_sampler,
+                    {"stock_native_sampler_invalid",
+                     "The device returned a sampler that does not preserve the recovered native contract."},
+                    nullptr};
+        }
+        samplers[index] = std::move(result.sampler);
+    }
+
+    try {
+        auto owned = std::unique_ptr<StockKsPerPixelNativeSamplers>(
+            new StockKsPerPixelNativeSamplers(std::move(samplers)));
+        return {StockKsPerPixelNativeSamplerStatus::ready, {},
+                std::move(owned)};
+    } catch (const std::bad_alloc&) {
+        return {StockKsPerPixelNativeSamplerStatus::allocation_failed,
+                {"stock_native_sampler_owner_allocation_failed",
+                 "The native stock sampler owner allocation failed."},
+                nullptr};
+    }
+}
+
 bool valid_sampler_description(const SamplerDescription& description,
                                Diagnostic& diagnostic) {
     return validate_sampler_description(description, diagnostic) == SamplerStatus::ready;
@@ -3818,6 +3920,24 @@ const char* stock_ks_per_pixel_native_constant_buffer_status_name(
     case StockKsPerPixelNativeConstantBufferStatus::invalid_buffer:
         return "invalid_buffer";
     case StockKsPerPixelNativeConstantBufferStatus::allocation_failed:
+        return "allocation_failed";
+    }
+    return "unknown";
+}
+
+const char* stock_ks_per_pixel_native_sampler_status_name(
+    StockKsPerPixelNativeSamplerStatus status) noexcept {
+    switch (status) {
+    case StockKsPerPixelNativeSamplerStatus::ready: return "ready";
+    case StockKsPerPixelNativeSamplerStatus::invalid_settings:
+        return "invalid_settings";
+    case StockKsPerPixelNativeSamplerStatus::linear_sampler_failed:
+        return "linear_sampler_failed";
+    case StockKsPerPixelNativeSamplerStatus::shadow_sampler_failed:
+        return "shadow_sampler_failed";
+    case StockKsPerPixelNativeSamplerStatus::invalid_sampler:
+        return "invalid_sampler";
+    case StockKsPerPixelNativeSamplerStatus::allocation_failed:
         return "allocation_failed";
     }
     return "unknown";

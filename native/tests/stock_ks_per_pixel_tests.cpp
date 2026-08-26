@@ -29,6 +29,14 @@ static_assert(std::is_nothrow_move_constructible_v<
               ValidatedStockKsPerPixelNativeProgram>);
 static_assert(std::is_nothrow_move_assignable_v<
               ValidatedStockKsPerPixelNativeProgram>);
+static_assert(!std::is_copy_constructible_v<
+              StockKsPerPixelNativeSamplers>);
+static_assert(!std::is_copy_assignable_v<
+              StockKsPerPixelNativeSamplers>);
+static_assert(std::is_nothrow_move_constructible_v<
+              StockKsPerPixelNativeSamplers>);
+static_assert(std::is_nothrow_move_assignable_v<
+              StockKsPerPixelNativeSamplers>);
 
 class FakeConstantBuffer final : public Buffer {
 public:
@@ -72,6 +80,28 @@ public:
 private:
     Backend backend_ = Backend::D3D12;
     ShaderModuleInfo info_{};
+};
+
+class FakeNativeSampler final : public Sampler {
+public:
+    FakeNativeSampler(Backend backend, SamplerDescription description)
+        : backend_(backend), info_{description} {
+        ++live_count;
+    }
+    ~FakeNativeSampler() override { --live_count; }
+
+    [[nodiscard]] Backend backend() const noexcept override {
+        return backend_;
+    }
+    [[nodiscard]] const SamplerInfo& info() const noexcept override {
+        return info_;
+    }
+
+    static inline std::size_t live_count = 0U;
+
+private:
+    Backend backend_ = Backend::D3D12;
+    SamplerInfo info_{};
 };
 
 class FakeShaderDevice final : public Device {
@@ -123,8 +153,20 @@ public:
         return {TriangleDrawStatus::unsupported, {"unused", "unused"}, {}};
     }
     [[nodiscard]] SamplerResult create_sampler(
-        const SamplerDescription&) override {
-        return {SamplerStatus::unsupported, {"unused", "unused"}, nullptr};
+        const SamplerDescription& description) override {
+        ++sampler_calls;
+        sampler_descriptions.push_back(description);
+        if (sampler_fail_call != 0U && sampler_calls == sampler_fail_call)
+            return {SamplerStatus::allocation_failed,
+                    {"fake_sampler_failure", "fake sampler allocation failed"},
+                    nullptr};
+        SamplerDescription returned_description = description;
+        if (wrong_sampler) returned_description.compare = SamplerCompare::always;
+        const Backend returned_backend =
+            wrong_sampler ? Backend::Vulkan : info_.backend;
+        return {SamplerStatus::ready, {},
+                std::make_unique<FakeNativeSampler>(
+                    returned_backend, returned_description)};
     }
     [[nodiscard]] ShaderModuleResult create_shader_module(
         const ShaderModuleDescription& description) override {
@@ -152,14 +194,18 @@ public:
     std::size_t fail_call = 0U;
     std::size_t buffer_calls = 0U;
     std::size_t buffer_fail_call = 0U;
+    std::size_t sampler_calls = 0U;
+    std::size_t sampler_fail_call = 0U;
     bool wrong_stage = false;
     bool wrong_format = false;
     bool wrong_backend = false;
     bool wrong_buffer = false;
+    bool wrong_sampler = false;
     std::vector<ShaderStage> stages;
     std::vector<std::size_t> sizes;
     std::vector<BufferDescription> buffer_descriptions;
     std::vector<std::vector<std::byte>> initial_buffers;
+    std::vector<SamplerDescription> sampler_descriptions;
 
 private:
     DeviceInfo info_{};
@@ -1424,6 +1470,113 @@ void allocates_exact_native_d3d12_constant_buffer_views() {
             "native constant-buffer statuses have stable names");
 }
 
+void allocates_exact_native_stock_samplers() {
+    require(FakeNativeSampler::live_count == 0U,
+            "native sampler allocation starts without live samplers");
+    FakeShaderDevice device(Backend::D3D12);
+    const StockKsPerPixelNativeSamplerSettings settings{8.0F, -0.75F};
+    auto allocated = allocate_stock_ks_per_pixel_native_samplers(
+        device, settings);
+    require(allocated.ok() && device.sampler_calls == 2U &&
+                device.sampler_descriptions.size() == 2U &&
+                FakeNativeSampler::live_count == 2U,
+            "native stock sampler owner retains both sampler objects");
+
+    const SamplerDescription& linear = device.sampler_descriptions[0U];
+    require(linear.min_filter == SamplerFilter::anisotropic &&
+                linear.mag_filter == SamplerFilter::anisotropic &&
+                linear.mip_filter == SamplerFilter::anisotropic &&
+                linear.address_u == SamplerAddressMode::repeat &&
+                linear.address_v == SamplerAddressMode::repeat &&
+                linear.address_w == SamplerAddressMode::repeat &&
+                linear.compare == SamplerCompare::disabled &&
+                linear.mip_lod_bias == settings.mip_lod_bias &&
+                linear.max_anisotropy == settings.max_anisotropy &&
+                linear.min_lod == 0.0F &&
+                linear.max_lod == std::numeric_limits<float>::max(),
+            "s0 preserves the recovered runtime anisotropic sampler");
+
+    const SamplerDescription& shadow = device.sampler_descriptions[1U];
+    require(shadow.min_filter == SamplerFilter::linear &&
+                shadow.mag_filter == SamplerFilter::linear &&
+                shadow.mip_filter == SamplerFilter::nearest &&
+                shadow.address_u == SamplerAddressMode::clamp_to_edge &&
+                shadow.address_v == SamplerAddressMode::clamp_to_edge &&
+                shadow.address_w == SamplerAddressMode::clamp_to_edge &&
+                shadow.compare == SamplerCompare::less &&
+                shadow.mip_lod_bias == 0.0F &&
+                shadow.max_anisotropy == 1.0F &&
+                shadow.min_lod == 0.0F &&
+                shadow.max_lod == std::numeric_limits<float>::max(),
+            "s1 preserves the recovered comparison sampler");
+    require(allocated.samplers->sampler(
+                StockKsPerPixelNativeSamplerSlot::linear) != nullptr &&
+                allocated.samplers->sampler(
+                    StockKsPerPixelNativeSamplerSlot::shadow) != nullptr &&
+                allocated.samplers->sampler(
+                    StockKsPerPixelNativeSamplerSlot::count) == nullptr,
+            "native sampler owner exposes only exact validated slots");
+    allocated.samplers.reset();
+    require(FakeNativeSampler::live_count == 0U,
+            "native sampler owner releases both objects");
+
+    FakeShaderDevice invalid_device(Backend::D3D12);
+    auto invalid_settings = settings;
+    invalid_settings.max_anisotropy = 1.0F;
+    const auto invalid = allocate_stock_ks_per_pixel_native_samplers(
+        invalid_device, invalid_settings);
+    require(!invalid.ok() &&
+                invalid.status ==
+                    StockKsPerPixelNativeSamplerStatus::invalid_settings &&
+                invalid_device.sampler_calls == 0U,
+            "invalid runtime sampler settings reject before device calls");
+
+    FakeShaderDevice partial_failure(Backend::D3D12);
+    partial_failure.sampler_fail_call = 2U;
+    const auto rejected_partial =
+        allocate_stock_ks_per_pixel_native_samplers(partial_failure, settings);
+    require(!rejected_partial.ok() &&
+                rejected_partial.status ==
+                    StockKsPerPixelNativeSamplerStatus::shadow_sampler_failed &&
+                partial_failure.sampler_calls == 2U &&
+                FakeNativeSampler::live_count == 0U,
+            "shadow sampler failure releases the linear sampler");
+
+    FakeShaderDevice wrong_sampler(Backend::D3D12);
+    wrong_sampler.wrong_sampler = true;
+    const auto rejected_sampler =
+        allocate_stock_ks_per_pixel_native_samplers(wrong_sampler, settings);
+    require(!rejected_sampler.ok() &&
+                rejected_sampler.status ==
+                    StockKsPerPixelNativeSamplerStatus::invalid_sampler &&
+                wrong_sampler.sampler_calls == 1U &&
+                FakeNativeSampler::live_count == 0U,
+            "invalid backend sampler metadata is rejected and released");
+
+    Diagnostic sampler_diagnostic;
+    SamplerDescription exact_lod;
+    exact_lod.max_lod = std::numeric_limits<float>::max();
+    exact_lod.mip_lod_bias = -16.0F;
+    require(validate_sampler_description(exact_lod, sampler_diagnostic) ==
+                SamplerStatus::ready,
+            "generic sampler contract accepts recovered native LOD values");
+    exact_lod.mip_lod_bias = std::numeric_limits<float>::infinity();
+    require(validate_sampler_description(exact_lod, sampler_diagnostic) ==
+                SamplerStatus::invalid_description &&
+                sampler_diagnostic.code == "sampler_lod_bias_invalid",
+            "sampler validation rejects nonfinite LOD bias");
+
+    require(std::string_view(
+                stock_ks_per_pixel_native_sampler_status_name(
+                    StockKsPerPixelNativeSamplerStatus::shadow_sampler_failed)) ==
+                "shadow_sampler_failed" &&
+                std::string_view(
+                    stock_ks_per_pixel_native_sampler_status_name(
+                        static_cast<StockKsPerPixelNativeSamplerStatus>(255U))) ==
+                    "unknown",
+            "native sampler statuses have stable names");
+}
+
 void preserves_native_constant_bytes_and_rejects_nonfinite_records() {
     StockKsPerPixelMaterialConstants material;
     material.ambient = 0.35F;
@@ -1672,6 +1825,7 @@ int main() {
         owns_the_validated_native_program_after_the_gate();
         allocates_only_validated_native_d3d12_shader_objects();
         allocates_exact_native_d3d12_constant_buffer_views();
+        allocates_exact_native_stock_samplers();
         preserves_native_constant_bytes_and_rejects_nonfinite_records();
         transposes_native_host_matrices_before_upload();
         evaluates_recovered_base_pixel_equation();

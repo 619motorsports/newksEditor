@@ -913,6 +913,7 @@ struct SamplerDescription {
     SamplerAddressMode address_v = SamplerAddressMode::repeat;
     SamplerAddressMode address_w = SamplerAddressMode::repeat;
     SamplerCompare compare = SamplerCompare::disabled;
+    float mip_lod_bias = 0.0F;
     float max_anisotropy = 1.0F;
     float min_lod = 0.0F;
     float max_lod = 1000.0F;
@@ -1107,6 +1108,11 @@ public:
     StockKsPerPixelNativeConstantBuffers& operator=(
         const StockKsPerPixelNativeConstantBuffers&) = delete;
 
+    [[nodiscard]] Buffer* buffer(
+        StockKsPerPixelNativeConstantSlot slot) noexcept {
+        const std::size_t index = static_cast<std::size_t>(slot);
+        return index < buffers_.size() ? buffers_[index].get() : nullptr;
+    }
     [[nodiscard]] const Buffer* buffer(
         StockKsPerPixelNativeConstantSlot slot) const noexcept {
         const std::size_t index = static_cast<std::size_t>(slot);
@@ -1140,6 +1146,75 @@ struct StockKsPerPixelNativeConstantBufferResult {
     [[nodiscard]] bool ok() const noexcept {
         return status == StockKsPerPixelNativeConstantBufferStatus::ready &&
                buffers != nullptr;
+    }
+};
+
+struct StockKsPerPixelNativeSamplerSettings {
+    float max_anisotropy = 16.0F;
+    float mip_lod_bias = 0.0F;
+};
+
+enum class StockKsPerPixelNativeSamplerSlot : std::uint8_t {
+    linear,
+    shadow,
+    count,
+};
+
+enum class StockKsPerPixelNativeSamplerStatus : std::uint8_t {
+    ready,
+    invalid_settings,
+    linear_sampler_failed,
+    shadow_sampler_failed,
+    invalid_sampler,
+    allocation_failed,
+};
+
+struct StockKsPerPixelNativeSamplerResult;
+
+class StockKsPerPixelNativeSamplers {
+public:
+    StockKsPerPixelNativeSamplers(
+        StockKsPerPixelNativeSamplers&&) noexcept = default;
+    StockKsPerPixelNativeSamplers& operator=(
+        StockKsPerPixelNativeSamplers&&) noexcept = default;
+    StockKsPerPixelNativeSamplers(
+        const StockKsPerPixelNativeSamplers&) = delete;
+    StockKsPerPixelNativeSamplers& operator=(
+        const StockKsPerPixelNativeSamplers&) = delete;
+
+    [[nodiscard]] const Sampler* sampler(
+        StockKsPerPixelNativeSamplerSlot slot) const noexcept {
+        const std::size_t index = static_cast<std::size_t>(slot);
+        return index < samplers_.size() ? samplers_[index].get() : nullptr;
+    }
+
+private:
+    friend StockKsPerPixelNativeSamplerResult
+    allocate_stock_ks_per_pixel_native_samplers(
+        Device& device,
+        const StockKsPerPixelNativeSamplerSettings& settings);
+
+    explicit StockKsPerPixelNativeSamplers(
+        std::array<std::unique_ptr<Sampler>,
+                   static_cast<std::size_t>(
+                       StockKsPerPixelNativeSamplerSlot::count)> samplers)
+        noexcept
+        : samplers_(std::move(samplers)) {}
+
+    std::array<std::unique_ptr<Sampler>,
+               static_cast<std::size_t>(
+                   StockKsPerPixelNativeSamplerSlot::count)> samplers_;
+};
+
+struct StockKsPerPixelNativeSamplerResult {
+    StockKsPerPixelNativeSamplerStatus status =
+        StockKsPerPixelNativeSamplerStatus::invalid_settings;
+    Diagnostic diagnostic;
+    std::unique_ptr<StockKsPerPixelNativeSamplers> samplers;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == StockKsPerPixelNativeSamplerStatus::ready &&
+               samplers != nullptr;
     }
 };
 
@@ -1291,7 +1366,8 @@ public:
                  "This backend has not enabled rendered-texture presentation"}};
     }
 
-    // Buffer lifetimes may extend beyond this Device object: backend handles
+    // Implementations copy initial_data before this call returns. Buffer
+    // lifetimes may extend beyond this Device object: backend handles
     // retain their private shared context. Public callers only see this
     // backend-neutral RAII contract, never Vk* or ID3D12* types.
     [[nodiscard]] virtual BufferResult create_buffer(
@@ -1423,6 +1499,14 @@ allocate_stock_ks_per_pixel_native_constant_buffers(
     Device& device,
     const StockKsPerPixelNativeConstantData& constants);
 
+// Create the recovered s0 anisotropic sampler and s1 comparison sampler.
+// The two runtime values match the native editor controls. A failed
+// allocation returns no partial owner.
+[[nodiscard]] StockKsPerPixelNativeSamplerResult
+allocate_stock_ks_per_pixel_native_samplers(
+    Device& device,
+    const StockKsPerPixelNativeSamplerSettings& settings = {});
+
 struct DeviceResult {
     DeviceStatus status = DeviceStatus::unavailable;
     Diagnostic diagnostic;
@@ -1456,6 +1540,8 @@ struct DeviceResult {
     StockKsPerPixelNativeShaderStatus status) noexcept;
 [[nodiscard]] const char* stock_ks_per_pixel_native_constant_buffer_status_name(
     StockKsPerPixelNativeConstantBufferStatus status) noexcept;
+[[nodiscard]] const char* stock_ks_per_pixel_native_sampler_status_name(
+    StockKsPerPixelNativeSamplerStatus status) noexcept;
 [[nodiscard]] const char* presentation_target_status_name(
     PresentationTargetStatus status) noexcept;
 [[nodiscard]] const char* presentation_frame_status_name(

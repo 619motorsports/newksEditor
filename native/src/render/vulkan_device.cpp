@@ -6520,6 +6520,15 @@ public:
             return {SamplerStatus::unsupported,
                     {"vulkan_sampler_anisotropy_limit", "The requested sampler anisotropy exceeds the physical device limit"},
                     nullptr};
+        VkPhysicalDeviceProperties sampler_properties{};
+        vkGetPhysicalDeviceProperties(context_->physical_device,
+                                      &sampler_properties);
+        if (std::abs(description.mip_lod_bias) >
+            sampler_properties.limits.maxSamplerLodBias)
+            return {SamplerStatus::unsupported,
+                    {"vulkan_sampler_lod_bias_limit",
+                     "The requested sampler LOD bias exceeds the physical device limit"},
+                    nullptr};
         VkSamplerCreateInfo sampler_info{};
         sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
         sampler_info.magFilter = vk_sampler_filter(description.mag_filter);
@@ -6528,7 +6537,7 @@ public:
         sampler_info.addressModeU = vk_sampler_address(description.address_u);
         sampler_info.addressModeV = vk_sampler_address(description.address_v);
         sampler_info.addressModeW = vk_sampler_address(description.address_w);
-        sampler_info.mipLodBias = 0.0F;
+        sampler_info.mipLodBias = description.mip_lod_bias;
         sampler_info.anisotropyEnable = anisotropic ? VK_TRUE : VK_FALSE;
         sampler_info.maxAnisotropy = description.max_anisotropy;
         sampler_info.compareEnable = description.compare == SamplerCompare::disabled ? VK_FALSE : VK_TRUE;

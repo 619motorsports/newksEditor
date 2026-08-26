@@ -6312,6 +6312,12 @@ public:
         Diagnostic diagnostic;
         if (!valid_sampler_description(description, diagnostic))
             return {SamplerStatus::invalid_description, std::move(diagnostic), nullptr};
+        if (description.mip_lod_bias < -16.0F ||
+            description.mip_lod_bias > 15.99F)
+            return {SamplerStatus::unsupported,
+                    {"d3d12_sampler_lod_bias_limit",
+                     "The requested sampler LOD bias exceeds the D3D12 range"},
+                    nullptr};
         if (!context_->sampler_heap)
             return {SamplerStatus::unsupported,
                     {"d3d12_sampler_heap_unavailable", "The D3D12 sampler descriptor heap is unavailable"}, nullptr};
@@ -6324,7 +6330,7 @@ public:
         sampler.AddressU = d3d12_sampler_address(description.address_u);
         sampler.AddressV = d3d12_sampler_address(description.address_v);
         sampler.AddressW = d3d12_sampler_address(description.address_w);
-        sampler.MipLODBias = 0.0F;
+        sampler.MipLODBias = description.mip_lod_bias;
         sampler.MaxAnisotropy = static_cast<UINT>(description.max_anisotropy);
         sampler.ComparisonFunc = d3d12_sampler_compare(description.compare);
         sampler.MinLOD = description.min_lod;
