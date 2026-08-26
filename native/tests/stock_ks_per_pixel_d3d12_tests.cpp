@@ -224,8 +224,13 @@ apex::formats::Kn5Node triangle_mesh() {
       *device_result.device, native_constants(*camera.frame));
   auto samplers =
       allocate_stock_ks_per_pixel_native_samplers(*device_result.device);
+  auto alpha_constants = allocate_stock_ks_per_pixel_native_constant_buffers(
+      *device_result.device, native_constants(*camera.frame));
+  auto alpha_samplers =
+      allocate_stock_ks_per_pixel_native_samplers(*device_result.device);
   require(constants.ok() && constants.buffers->ready() && samplers.ok() &&
-              samplers.samplers->ready(),
+              samplers.samplers->ready() && alpha_constants.ok() &&
+              alpha_samplers.ok(),
           "D3D12 owns all exact native constant and sampler resources");
   for (std::size_t index = 0U;
        index <
@@ -244,6 +249,15 @@ apex::formats::Kn5Node triangle_mesh() {
           samplers.samplers->sampler(StockKsPerPixelNativeSamplerSlot::shadow)
                   ->backend() == Backend::D3D12,
       "native s0 and s1 samplers belong to D3D12");
+
+  auto native_resources = make_stock_ks_per_pixel_native_draw_resources(
+      *device_result.device, std::move(native_shaders.program),
+      std::move(constants.buffers), std::move(samplers.samplers));
+  auto alpha_resources = make_stock_ks_per_pixel_native_draw_resources(
+      *device_result.device, std::move(alpha_native_shaders.program),
+      std::move(alpha_constants.buffers), std::move(alpha_samplers.samplers));
+  require(native_resources.ok() && alpha_resources.ok(),
+          "D3D12 adopts complete native resources into stable bundles");
 
   TextureDescription target_description;
   target_description.width = 32U;
@@ -318,12 +332,10 @@ apex::formats::Kn5Node triangle_mesh() {
   PipelineProgram pipeline = native_pipeline();
   IndexedStaticMeshDrawRequest request =
       mesh_upload.upload->make_request(pipeline, *camera.frame);
-  const StockKsPerPixelNativeDrawBinding binding{
-      native_shaders.program.get(),
-      constants.buffers.get(),
-      samplers.samplers.get(),
-      diffuse.texture.get(),
-      {shadows[0].get(), shadows[1].get(), shadows[2].get()}};
+  const StockKsPerPixelNativeDrawBinding binding =
+      native_resources.resources->bind(
+          *diffuse.texture,
+          {shadows[0].get(), shadows[1].get(), shadows[2].get()});
   request.shader_authority =
       IndexedShaderAuthority::explicit_stock_ks_per_pixel_native;
   request.stock_ks_per_pixel_native = &binding;
@@ -359,12 +371,10 @@ apex::formats::Kn5Node triangle_mesh() {
   alpha_pipeline.blend.alpha_to_coverage = true;
   IndexedStaticMeshDrawRequest alpha_request =
       alpha_mesh_upload.upload->make_request(alpha_pipeline, *camera.frame);
-  const StockKsPerPixelNativeDrawBinding alpha_binding{
-      alpha_native_shaders.program.get(),
-      constants.buffers.get(),
-      samplers.samplers.get(),
-      partial_alpha_diffuse.texture.get(),
-      {shadows[0].get(), shadows[1].get(), shadows[2].get()}};
+  const StockKsPerPixelNativeDrawBinding alpha_binding =
+      alpha_resources.resources->bind(
+          *partial_alpha_diffuse.texture,
+          {shadows[0].get(), shadows[1].get(), shadows[2].get()});
   alpha_request.shader_authority =
       IndexedShaderAuthority::explicit_stock_ks_per_pixel_native;
   alpha_request.stock_ks_per_pixel_native = &alpha_binding;

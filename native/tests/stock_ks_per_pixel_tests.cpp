@@ -38,6 +38,14 @@ static_assert(std::is_nothrow_move_constructible_v<
               StockKsPerPixelNativeSamplers>);
 static_assert(std::is_nothrow_move_assignable_v<
               StockKsPerPixelNativeSamplers>);
+static_assert(!std::is_copy_constructible_v<
+              StockKsPerPixelNativeDrawResources>);
+static_assert(!std::is_copy_assignable_v<
+              StockKsPerPixelNativeDrawResources>);
+static_assert(!std::is_move_constructible_v<
+              StockKsPerPixelNativeDrawResources>);
+static_assert(!std::is_move_assignable_v<
+              StockKsPerPixelNativeDrawResources>);
 
 class FakeConstantBuffer final : public Buffer {
 public:
@@ -1625,6 +1633,12 @@ void validates_complete_native_draw_bindings_before_execution() {
     auto samplers = allocate_stock_ks_per_pixel_native_samplers(device);
     require(shaders.ok() && constants.ok() && samplers.ok(),
             "native draw fixture owns its validated resources");
+    auto resources_result = make_stock_ks_per_pixel_native_draw_resources(
+        device, std::move(shaders.program), std::move(constants.buffers),
+        std::move(samplers.samplers));
+    require(resources_result.ok() && resources_result.resources->ready(),
+            "native draw fixture adopts one validated resource owner");
+    auto resources = std::move(resources_result.resources);
 
     const TextureDescription target_description{
         16U, 16U, 1U, 1U, TextureFormat::rgba8_unorm,
@@ -1670,9 +1684,8 @@ void validates_complete_native_draw_bindings_before_execution() {
     packet.vertex_stride_floats = 11U;
     packet.flags.depth_test = false;
     packet.flags.depth_write = false;
-    const StockKsPerPixelNativeDrawBinding binding{
-        shaders.program.get(), constants.buffers.get(), samplers.samplers.get(),
-        &diffuse, {&shadow0, &shadow1, &shadow2}};
+    const StockKsPerPixelNativeDrawBinding binding = resources->bind(
+        diffuse, {&shadow0, &shadow1, &shadow2});
     IndexedStaticMeshDrawRequest request;
     request.packet = &packet;
     request.pipeline = &pipeline;
@@ -1699,18 +1712,6 @@ void validates_complete_native_draw_bindings_before_execution() {
                         diagnostic.code == "indexed_stock_native_binding_missing",
                     description);
         };
-    auto missing_shader = binding;
-    missing_shader.shader_program = nullptr;
-    expect_missing_binding_field(missing_shader,
-                                 "missing native shader owner is rejected");
-    auto missing_constants = binding;
-    missing_constants.constant_buffers = nullptr;
-    expect_missing_binding_field(
-        missing_constants, "missing native constant owner is rejected");
-    auto missing_samplers = binding;
-    missing_samplers.samplers = nullptr;
-    expect_missing_binding_field(missing_samplers,
-                                 "missing native sampler owner is rejected");
     auto missing_diffuse = binding;
     missing_diffuse.diffuse_texture = nullptr;
     expect_missing_binding_field(missing_diffuse,
@@ -1801,6 +1802,144 @@ void validates_complete_native_draw_bindings_before_execution() {
                 IndexedStaticMeshDrawStatus::invalid_request &&
                 diagnostic.code == "indexed_stock_native_variant_state_mismatch",
             "base package rejects alpha-to-coverage draw state");
+}
+
+void adopts_native_draw_resources_with_one_stable_owner() {
+    FakeShaderDevice d3d12(Backend::D3D12);
+    auto shaders = allocate_stock_ks_per_pixel_native_shaders(
+        d3d12, validated_program_fixture());
+    auto constants = allocate_stock_ks_per_pixel_native_constant_buffers(
+        d3d12, native_constant_data_fixture());
+    auto samplers = allocate_stock_ks_per_pixel_native_samplers(d3d12);
+    require(shaders.ok() && constants.ok() && samplers.ok(),
+            "resource bundle fixture allocations succeed");
+    auto resources_result = make_stock_ks_per_pixel_native_draw_resources(
+        d3d12, std::move(shaders.program), std::move(constants.buffers),
+        std::move(samplers.samplers));
+    require(resources_result.ok() && resources_result.resources->ready() &&
+                resources_result.resources->backend() == Backend::D3D12 &&
+                resources_result.resources->device() == &d3d12,
+            "resource bundle adopts complete D3D12 owners");
+    auto resources = std::move(resources_result.resources);
+    require(resources->shader_program().device() == &d3d12 &&
+                resources->constant_buffers().device() == &d3d12 &&
+                resources->samplers().device() == &d3d12,
+            "resource bundle retains the supplying device identity");
+    FakeNativeTexture diffuse(
+        Backend::D3D12,
+        {2U, 2U, 1U, 1U, TextureFormat::rgba8_unorm, TextureUsage::sampled,
+         TextureMemory::device_local, TextureMutability::immutable});
+    FakeNativeDepth shadow0(
+        Backend::D3D12, {32U, 32U, 1U, DepthAttachmentFormat::d32_float, true});
+    FakeNativeDepth shadow1(
+        Backend::D3D12, {32U, 32U, 1U, DepthAttachmentFormat::d32_float, true});
+    FakeNativeDepth shadow2(
+        Backend::D3D12, {32U, 32U, 1U, DepthAttachmentFormat::d32_float, true});
+    const StockKsPerPixelNativeDrawBinding binding = resources->bind(
+        diffuse, {&shadow0, &shadow1, &shadow2});
+    require(binding.resources == resources.get() &&
+                binding.diffuse_texture == &diffuse &&
+                binding.shadow_maps[2U] == &shadow2,
+            "resource bundle creates a borrowed draw binding view");
+
+    const auto missing_shader = make_stock_ks_per_pixel_native_draw_resources(
+        d3d12, nullptr, nullptr, nullptr);
+    require(!missing_shader.ok() &&
+                missing_shader.status ==
+                    StockKsPerPixelNativeDrawResourcesStatus::shader_missing &&
+                missing_shader.diagnostic.code ==
+                    "stock_native_draw_resources_shader_missing",
+            "resource bundle rejects an incomplete shader owner deterministically");
+
+    auto missing_constants_shader = allocate_stock_ks_per_pixel_native_shaders(
+        d3d12, validated_program_fixture());
+    require(missing_constants_shader.ok(),
+            "missing-constants fixture shader allocation succeeds");
+    const auto missing_constants =
+        make_stock_ks_per_pixel_native_draw_resources(
+            d3d12, std::move(missing_constants_shader.program), nullptr,
+            nullptr);
+    require(!missing_constants.ok() &&
+                missing_constants.status ==
+                    StockKsPerPixelNativeDrawResourcesStatus::constants_missing &&
+                missing_constants.diagnostic.code ==
+                    "stock_native_draw_resources_constants_missing",
+            "resource bundle rejects missing constant owners deterministically");
+
+    auto missing_samplers_shader = allocate_stock_ks_per_pixel_native_shaders(
+        d3d12, validated_program_fixture());
+    auto missing_samplers_constants =
+        allocate_stock_ks_per_pixel_native_constant_buffers(
+            d3d12, native_constant_data_fixture());
+    require(missing_samplers_shader.ok() && missing_samplers_constants.ok(),
+            "missing-samplers fixture allocations succeed");
+    const auto missing_samplers =
+        make_stock_ks_per_pixel_native_draw_resources(
+            d3d12, std::move(missing_samplers_shader.program),
+            std::move(missing_samplers_constants.buffers), nullptr);
+    require(!missing_samplers.ok() &&
+                missing_samplers.status ==
+                    StockKsPerPixelNativeDrawResourcesStatus::samplers_missing &&
+                missing_samplers.diagnostic.code ==
+                    "stock_native_draw_resources_samplers_missing",
+            "resource bundle rejects missing sampler owners deterministically");
+
+    auto cross_device_shaders = allocate_stock_ks_per_pixel_native_shaders(
+        d3d12, validated_program_fixture());
+    auto cross_device_constants =
+        allocate_stock_ks_per_pixel_native_constant_buffers(
+            d3d12, native_constant_data_fixture());
+    auto cross_device_samplers = allocate_stock_ks_per_pixel_native_samplers(d3d12);
+    require(cross_device_shaders.ok() && cross_device_constants.ok() &&
+                cross_device_samplers.ok(),
+            "cross-device fixture allocations succeed");
+    FakeShaderDevice other_d3d12(Backend::D3D12);
+    const auto cross_device = make_stock_ks_per_pixel_native_draw_resources(
+        other_d3d12, std::move(cross_device_shaders.program),
+        std::move(cross_device_constants.buffers),
+        std::move(cross_device_samplers.samplers));
+    require(!cross_device.ok() &&
+                cross_device.status ==
+                    StockKsPerPixelNativeDrawResourcesStatus::device_mismatch &&
+                cross_device.diagnostic.code ==
+                    "stock_native_draw_resources_device_mismatch",
+            "resource bundle rejects owners from another D3D12 device");
+
+    auto wrong_shaders = allocate_stock_ks_per_pixel_native_shaders(
+        d3d12, validated_program_fixture());
+    auto wrong_constants = allocate_stock_ks_per_pixel_native_constant_buffers(
+        d3d12, native_constant_data_fixture());
+    auto wrong_samplers = allocate_stock_ks_per_pixel_native_samplers(d3d12);
+    require(wrong_shaders.ok() && wrong_constants.ok() && wrong_samplers.ok(),
+            "wrong-backend fixture allocations succeed");
+    FakeShaderDevice vulkan(Backend::Vulkan);
+    const auto wrong_backend = make_stock_ks_per_pixel_native_draw_resources(
+        vulkan, std::move(wrong_shaders.program),
+        std::move(wrong_constants.buffers), std::move(wrong_samplers.samplers));
+    require(!wrong_backend.ok() &&
+                wrong_backend.status ==
+                    StockKsPerPixelNativeDrawResourcesStatus::backend_unsupported &&
+                wrong_backend.diagnostic.code ==
+                    "stock_native_draw_resources_backend_unsupported",
+            "resource bundle rejects a non-D3D12 device deterministically");
+    require(std::string_view(
+                stock_ks_per_pixel_native_draw_resources_status_name(
+                    StockKsPerPixelNativeDrawResourcesStatus::backend_unsupported)) ==
+                "backend_unsupported" &&
+                std::string_view(
+                    stock_ks_per_pixel_native_draw_resources_status_name(
+                        StockKsPerPixelNativeDrawResourcesStatus::device_mismatch)) ==
+                    "device_mismatch" &&
+                std::string_view(
+                    stock_ks_per_pixel_native_draw_resources_status_name(
+                        static_cast<StockKsPerPixelNativeDrawResourcesStatus>(255U))) ==
+                    "unknown",
+            "resource bundle statuses have stable names");
+    resources.reset();
+    require(FakeShaderModule::live_count == 0U &&
+                FakeConstantBuffer::live_count == 0U &&
+                FakeNativeSampler::live_count == 0U,
+            "resource bundle releases all adopted owners together");
 }
 
 void preserves_native_constant_bytes_and_rejects_nonfinite_records() {
@@ -2052,6 +2191,7 @@ int main() {
         allocates_only_validated_native_d3d12_shader_objects();
         allocates_exact_native_d3d12_constant_buffer_views();
         allocates_exact_native_stock_samplers();
+        adopts_native_draw_resources_with_one_stable_owner();
         validates_complete_native_draw_bindings_before_execution();
         preserves_native_constant_bytes_and_rejects_nonfinite_records();
         transposes_native_host_matrices_before_upload();

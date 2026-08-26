@@ -5425,8 +5425,8 @@ bool D3D12Texture::draw_stock_ks_per_pixel_native(
     }
     const StockKsPerPixelNativeDrawBinding* binding =
         request.stock_ks_per_pixel_native;
-    if (binding == nullptr || binding->shader_program == nullptr ||
-        binding->constant_buffers == nullptr || binding->samplers == nullptr ||
+    if (binding == nullptr || binding->resources == nullptr ||
+        !binding->resources->ready() ||
         binding->diffuse_texture == nullptr) {
         diagnostic = {"indexed_stock_native_binding_missing",
                       "The native D3D12 draw binding is incomplete"};
@@ -5449,19 +5449,19 @@ bool D3D12Texture::draw_stock_ks_per_pixel_native(
         constants{};
     for (std::size_t index = 0U; index < constants.size(); ++index) {
         constants[index] = dynamic_cast<const D3D12Buffer*>(
-            binding->constant_buffers->buffer(
+            binding->resources->constant_buffers().buffer(
                 static_cast<StockKsPerPixelNativeConstantSlot>(index)));
     }
     const auto* linear_sampler = dynamic_cast<const D3D12Sampler*>(
-        binding->samplers->sampler(
+        binding->resources->samplers().sampler(
             StockKsPerPixelNativeSamplerSlot::linear));
     const auto* shadow_sampler = dynamic_cast<const D3D12Sampler*>(
-        binding->samplers->sampler(
+        binding->resources->samplers().sampler(
             StockKsPerPixelNativeSamplerSlot::shadow));
     const auto* vertex_shader = dynamic_cast<const D3D12ShaderModule*>(
-        &binding->shader_program->vertex_shader());
+        &binding->resources->shader_program().vertex_shader());
     const auto* pixel_shader = dynamic_cast<const D3D12ShaderModule*>(
-        &binding->shader_program->pixel_shader());
+        &binding->resources->shader_program().pixel_shader());
     if (diffuse == nullptr || linear_sampler == nullptr ||
         shadow_sampler == nullptr || vertex_shader == nullptr ||
         pixel_shader == nullptr ||
@@ -5610,9 +5610,9 @@ bool D3D12Texture::draw_stock_ks_per_pixel_native(
     native_context.shadow_maps = shadow_resources;
     for (std::size_t index = 0U; index < shadow_states.size(); ++index)
         native_context.shadow_states[index] = &shadow_states[index];
-    native_context.shader_program = binding->shader_program;
-    native_context.constant_buffers = binding->constant_buffers;
-    native_context.samplers = binding->samplers;
+    native_context.shader_program = &binding->resources->shader_program();
+    native_context.constant_buffers = &binding->resources->constant_buffers();
+    native_context.samplers = &binding->resources->samplers();
     native_context.constant_buffer_resources = constant_resources;
     native_context.request = &request;
     native_context.readback = &output;

@@ -1079,8 +1079,8 @@ IndexedStaticMeshDrawStatus validate_native_ks_per_pixel_binding(
     const Texture& target, const IndexedStaticMeshDrawRequest& request,
     Diagnostic& diagnostic) {
     const auto* binding = request.stock_ks_per_pixel_native;
-    if (binding == nullptr || binding->shader_program == nullptr ||
-        binding->constant_buffers == nullptr || binding->samplers == nullptr ||
+    const auto* resources = binding != nullptr ? binding->resources : nullptr;
+    if (resources == nullptr || !resources->ready() ||
         binding->diffuse_texture == nullptr ||
         std::any_of(binding->shadow_maps.begin(), binding->shadow_maps.end(),
                     [](const DepthAttachment* map) { return map == nullptr; })) {
@@ -1093,9 +1093,9 @@ IndexedStaticMeshDrawStatus validate_native_ks_per_pixel_binding(
                       "Installed ksPerPixel DXBC execution requires D3D12"};
         return IndexedStaticMeshDrawStatus::unsupported;
     }
-    const auto& shaders = *binding->shader_program;
-    if (!shaders.ready() || shaders.source().validation_status() !=
-                                StockKsPerPixelNativeProgramStatus::ready) {
+    const auto& shaders = resources->shader_program();
+    if (shaders.source().validation_status() !=
+        StockKsPerPixelNativeProgramStatus::ready) {
         diagnostic = {"indexed_stock_native_shader_invalid",
                       "Native ksPerPixel drawing requires an intact validated shader owner"};
         return IndexedStaticMeshDrawStatus::invalid_request;
@@ -1110,14 +1110,9 @@ IndexedStaticMeshDrawStatus validate_native_ks_per_pixel_binding(
                       "Native ksPerPixel shader modules must be D3D12 DXBC vertex and pixel stages"};
         return IndexedStaticMeshDrawStatus::unsupported;
     }
-    if (!binding->constant_buffers->ready()) {
-        diagnostic = {"indexed_stock_native_constants_invalid",
-                      "Native ksPerPixel drawing requires all five constant buffers"};
-        return IndexedStaticMeshDrawStatus::invalid_request;
-    }
     for (std::size_t index = 0U; index < static_cast<std::size_t>(
              StockKsPerPixelNativeConstantSlot::count); ++index) {
-        const Buffer* buffer = binding->constant_buffers->buffer(
+        const Buffer* buffer = resources->constant_buffers().buffer(
             static_cast<StockKsPerPixelNativeConstantSlot>(index));
         if (buffer == nullptr || buffer->backend() != Backend::D3D12) {
             diagnostic = {"indexed_stock_native_constant_backend_mismatch",
@@ -1134,14 +1129,9 @@ IndexedStaticMeshDrawStatus validate_native_ks_per_pixel_binding(
             return IndexedStaticMeshDrawStatus::invalid_request;
         }
     }
-    if (!binding->samplers->ready()) {
-        diagnostic = {"indexed_stock_native_samplers_invalid",
-                      "Native ksPerPixel drawing requires both validated samplers"};
-        return IndexedStaticMeshDrawStatus::invalid_request;
-    }
-    const Sampler* linear = binding->samplers->sampler(
+    const Sampler* linear = resources->samplers().sampler(
         StockKsPerPixelNativeSamplerSlot::linear);
-    const Sampler* shadow = binding->samplers->sampler(
+    const Sampler* shadow = resources->samplers().sampler(
         StockKsPerPixelNativeSamplerSlot::shadow);
     if (linear == nullptr || shadow == nullptr ||
         linear->backend() != Backend::D3D12 ||
@@ -1415,7 +1405,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     if (stock_native) {
         native_pipeline = *request.pipeline;
         const auto& source =
-            request.stock_ks_per_pixel_native->shader_program->source();
+            request.stock_ks_per_pixel_native->resources->shader_program().source();
         native_pipeline.shaders = {
             {PipelineShaderStage::vertex, PipelineShaderFormat::dxbc,
              {source.vertex_shader().begin(), source.vertex_shader().end()}},
@@ -1505,7 +1495,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             return IndexedStaticMeshDrawStatus::invalid_request;
         }
         const bool expected_a2c =
-            request.stock_ks_per_pixel_native->shader_program->source().variant() ==
+            request.stock_ks_per_pixel_native->resources->shader_program().source().variant() ==
             StockKsPerPixelVariant::alpha_to_coverage;
         if (packet.flags.blend_enabled || pipeline.blend.enabled ||
             packet.flags.alpha_to_coverage != expected_a2c ||
@@ -3714,7 +3704,7 @@ allocate_stock_ks_per_pixel_native_shaders(
     try {
         auto owned = std::unique_ptr<StockKsPerPixelNativeShaderProgram>(
             new StockKsPerPixelNativeShaderProgram(
-                std::move(program), std::move(vertex.shader_module),
+                device, std::move(program), std::move(vertex.shader_module),
                 std::move(pixel.shader_module)));
         return {StockKsPerPixelNativeShaderStatus::ready, {},
                 std::move(owned)};
@@ -3811,7 +3801,8 @@ allocate_stock_ks_per_pixel_native_constant_buffers(
 
     try {
         auto owned = std::unique_ptr<StockKsPerPixelNativeConstantBuffers>(
-            new StockKsPerPixelNativeConstantBuffers(std::move(buffers)));
+            new StockKsPerPixelNativeConstantBuffers(device,
+                                                     std::move(buffers)));
         return {StockKsPerPixelNativeConstantBufferStatus::ready, {},
                 std::move(owned)};
     } catch (const std::bad_alloc&) {
@@ -3913,7 +3904,7 @@ allocate_stock_ks_per_pixel_native_samplers(
 
     try {
         auto owned = std::unique_ptr<StockKsPerPixelNativeSamplers>(
-            new StockKsPerPixelNativeSamplers(std::move(samplers)));
+            new StockKsPerPixelNativeSamplers(device, std::move(samplers)));
         return {StockKsPerPixelNativeSamplerStatus::ready, {},
                 std::move(owned)};
     } catch (const std::bad_alloc&) {
@@ -3921,6 +3912,146 @@ allocate_stock_ks_per_pixel_native_samplers(
                 {"stock_native_sampler_owner_allocation_failed",
                  "The native stock sampler owner allocation failed."},
                 nullptr};
+    }
+}
+
+StockKsPerPixelNativeDrawResourcesResult
+make_stock_ks_per_pixel_native_draw_resources(
+    Device& device,
+    std::unique_ptr<StockKsPerPixelNativeShaderProgram> shader_program,
+    std::unique_ptr<StockKsPerPixelNativeConstantBuffers> constant_buffers,
+    std::unique_ptr<StockKsPerPixelNativeSamplers> samplers) {
+    const auto fail = [](StockKsPerPixelNativeDrawResourcesStatus status,
+                         const char* code, const char* message) {
+        return StockKsPerPixelNativeDrawResourcesResult{
+            status, {code, message}, nullptr};
+    };
+    if (device.info().backend != Backend::D3D12)
+        return fail(StockKsPerPixelNativeDrawResourcesStatus::backend_unsupported,
+                    "stock_native_draw_resources_backend_unsupported",
+                    "Native draw resources require a D3D12 device.");
+    if (shader_program == nullptr)
+        return fail(StockKsPerPixelNativeDrawResourcesStatus::shader_missing,
+                    "stock_native_draw_resources_shader_missing",
+                    "Native draw resources require an owned shader program.");
+    if (constant_buffers == nullptr)
+        return fail(StockKsPerPixelNativeDrawResourcesStatus::constants_missing,
+                    "stock_native_draw_resources_constants_missing",
+                    "Native draw resources require owned constant buffers.");
+    if (samplers == nullptr)
+        return fail(StockKsPerPixelNativeDrawResourcesStatus::samplers_missing,
+                    "stock_native_draw_resources_samplers_missing",
+                    "Native draw resources require owned samplers.");
+    if (shader_program->device() != &device ||
+        constant_buffers->device() != &device ||
+        samplers->device() != &device)
+        return fail(StockKsPerPixelNativeDrawResourcesStatus::device_mismatch,
+                    "stock_native_draw_resources_device_mismatch",
+                    "Native draw resource owners must come from the supplied device.");
+    if (!shader_program->ready() ||
+        shader_program->source().validation_status() !=
+            StockKsPerPixelNativeProgramStatus::ready)
+        return fail(StockKsPerPixelNativeDrawResourcesStatus::shader_invalid,
+                    "stock_native_draw_resources_shader_invalid",
+                    "Native draw resources require an intact validated shader program.");
+
+    const ShaderModule& vertex_shader = shader_program->vertex_shader();
+    const ShaderModule& pixel_shader = shader_program->pixel_shader();
+    const auto valid_shader_module = [](const ShaderModule& module,
+                                        ShaderStage stage,
+                                        std::size_t size_bytes) {
+        return module.backend() == Backend::D3D12 &&
+               module.info().stage == stage &&
+               module.info().format == ShaderBytecodeFormat::dxbc &&
+               module.info().size_bytes == size_bytes;
+    };
+    if (!valid_shader_module(vertex_shader, ShaderStage::vertex,
+                             shader_program->source().vertex_shader().size()) ||
+        !valid_shader_module(pixel_shader, ShaderStage::fragment,
+                             shader_program->source().pixel_shader().size()))
+        return fail(StockKsPerPixelNativeDrawResourcesStatus::backend_unsupported,
+                    "stock_native_draw_resources_shader_backend_mismatch",
+                    "Native draw resources require D3D12 DXBC vertex and pixel modules.");
+    if (!constant_buffers->ready())
+        return fail(StockKsPerPixelNativeDrawResourcesStatus::constants_invalid,
+                    "stock_native_draw_resources_constants_invalid",
+                    "Native draw resources require all five constant buffers.");
+    for (std::size_t index = 0U;
+         index < static_cast<std::size_t>(StockKsPerPixelNativeConstantSlot::count);
+         ++index) {
+        const Buffer* buffer = constant_buffers->buffer(
+            static_cast<StockKsPerPixelNativeConstantSlot>(index));
+        if (buffer == nullptr || buffer->backend() != Backend::D3D12)
+            return fail(StockKsPerPixelNativeDrawResourcesStatus::backend_unsupported,
+                        "stock_native_draw_resources_constants_backend_mismatch",
+                        "Native draw resources require D3D12 constant buffers.");
+        const BufferDescription& description = buffer->info().description;
+        if (description.size_bytes != stock_ks_per_pixel_native_constant_buffer_view_bytes ||
+            description.usage != BufferUsage::uniform ||
+            description.memory != BufferMemory::host_visible ||
+            description.mutability != BufferMutability::mutable_data)
+            return fail(StockKsPerPixelNativeDrawResourcesStatus::constants_invalid,
+                        "stock_native_draw_resources_constants_invalid",
+                        "Native draw resources require the exact 256-byte mutable uniform views.");
+    }
+    if (!samplers->ready())
+        return fail(StockKsPerPixelNativeDrawResourcesStatus::samplers_invalid,
+                    "stock_native_draw_resources_samplers_invalid",
+                    "Native draw resources require both native samplers.");
+    const Sampler* linear = samplers->sampler(
+        StockKsPerPixelNativeSamplerSlot::linear);
+    const Sampler* shadow = samplers->sampler(
+        StockKsPerPixelNativeSamplerSlot::shadow);
+    if (linear == nullptr || shadow == nullptr ||
+        linear->backend() != Backend::D3D12 ||
+        shadow->backend() != Backend::D3D12)
+        return fail(StockKsPerPixelNativeDrawResourcesStatus::backend_unsupported,
+                    "stock_native_draw_resources_samplers_backend_mismatch",
+                    "Native draw resources require D3D12 samplers.");
+    const SamplerDescription& linear_description = linear->info().description;
+    if (linear_description.min_filter != SamplerFilter::anisotropic ||
+        linear_description.mag_filter != SamplerFilter::anisotropic ||
+        linear_description.mip_filter != SamplerFilter::anisotropic ||
+        linear_description.address_u != SamplerAddressMode::repeat ||
+        linear_description.address_v != SamplerAddressMode::repeat ||
+        linear_description.address_w != SamplerAddressMode::repeat ||
+        linear_description.compare != SamplerCompare::disabled ||
+        !std::isfinite(linear_description.mip_lod_bias) ||
+        linear_description.mip_lod_bias < -16.0F ||
+        linear_description.mip_lod_bias > 16.0F ||
+        linear_description.max_anisotropy < 2.0F ||
+        linear_description.max_anisotropy > 16.0F ||
+        linear_description.min_lod != 0.0F ||
+        linear_description.max_lod != std::numeric_limits<float>::max())
+        return fail(StockKsPerPixelNativeDrawResourcesStatus::samplers_invalid,
+                    "stock_native_draw_resources_sampler_contract_invalid",
+                    "The native linear sampler does not match the recovered s0 contract.");
+    const SamplerDescription& shadow_description = shadow->info().description;
+    if (shadow_description.min_filter != SamplerFilter::linear ||
+        shadow_description.mag_filter != SamplerFilter::linear ||
+        shadow_description.mip_filter != SamplerFilter::nearest ||
+        shadow_description.address_u != SamplerAddressMode::clamp_to_edge ||
+        shadow_description.address_v != SamplerAddressMode::clamp_to_edge ||
+        shadow_description.address_w != SamplerAddressMode::clamp_to_edge ||
+        shadow_description.compare != SamplerCompare::less ||
+        shadow_description.mip_lod_bias != 0.0F ||
+        shadow_description.max_anisotropy != 1.0F ||
+        shadow_description.min_lod != 0.0F ||
+        shadow_description.max_lod != std::numeric_limits<float>::max())
+        return fail(StockKsPerPixelNativeDrawResourcesStatus::samplers_invalid,
+                    "stock_native_draw_resources_sampler_contract_invalid",
+                    "The native shadow sampler does not match the recovered s1 contract.");
+    try {
+        auto resources = std::unique_ptr<StockKsPerPixelNativeDrawResources>(
+            new StockKsPerPixelNativeDrawResources(
+                device, std::move(shader_program), std::move(constant_buffers),
+                std::move(samplers)));
+        return {StockKsPerPixelNativeDrawResourcesStatus::ready, {},
+                std::move(resources)};
+    } catch (const std::bad_alloc&) {
+        return fail(StockKsPerPixelNativeDrawResourcesStatus::allocation_failed,
+                    "stock_native_draw_resources_allocation_failed",
+                    "Native draw resource owner allocation failed.");
     }
 }
 
@@ -4210,6 +4341,33 @@ const char* stock_ks_per_pixel_native_sampler_status_name(
     case StockKsPerPixelNativeSamplerStatus::invalid_sampler:
         return "invalid_sampler";
     case StockKsPerPixelNativeSamplerStatus::allocation_failed:
+        return "allocation_failed";
+    }
+    return "unknown";
+}
+
+const char* stock_ks_per_pixel_native_draw_resources_status_name(
+    StockKsPerPixelNativeDrawResourcesStatus status) noexcept {
+    switch (status) {
+    case StockKsPerPixelNativeDrawResourcesStatus::ready:
+        return "ready";
+    case StockKsPerPixelNativeDrawResourcesStatus::shader_missing:
+        return "shader_missing";
+    case StockKsPerPixelNativeDrawResourcesStatus::constants_missing:
+        return "constants_missing";
+    case StockKsPerPixelNativeDrawResourcesStatus::samplers_missing:
+        return "samplers_missing";
+    case StockKsPerPixelNativeDrawResourcesStatus::shader_invalid:
+        return "shader_invalid";
+    case StockKsPerPixelNativeDrawResourcesStatus::constants_invalid:
+        return "constants_invalid";
+    case StockKsPerPixelNativeDrawResourcesStatus::samplers_invalid:
+        return "samplers_invalid";
+    case StockKsPerPixelNativeDrawResourcesStatus::device_mismatch:
+        return "device_mismatch";
+    case StockKsPerPixelNativeDrawResourcesStatus::backend_unsupported:
+        return "backend_unsupported";
+    case StockKsPerPixelNativeDrawResourcesStatus::allocation_failed:
         return "allocation_failed";
     }
     return "unknown";

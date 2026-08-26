@@ -479,12 +479,12 @@ struct IndexedSampledTextureBinding {
     const Sampler* sampler = nullptr;
 };
 
+class StockKsPerPixelNativeDrawResources;
+
 // Exact installed ksPerPixel resource binding. The request does not own these
 // objects. Keep every handle alive until the synchronous draw returns.
 struct StockKsPerPixelNativeDrawBinding {
-    const StockKsPerPixelNativeShaderProgram* shader_program = nullptr;
-    const StockKsPerPixelNativeConstantBuffers* constant_buffers = nullptr;
-    const StockKsPerPixelNativeSamplers* samplers = nullptr;
+    const StockKsPerPixelNativeDrawResources* resources = nullptr;
     const Texture* diffuse_texture = nullptr;
     std::array<const DepthAttachment*, 3U> shadow_maps{};
 };
@@ -1042,6 +1042,7 @@ public:
         const noexcept {
         return source_;
     }
+    [[nodiscard]] const Device* device() const noexcept { return device_; }
     [[nodiscard]] const ShaderModule& vertex_shader() const noexcept {
         return *vertex_shader_;
     }
@@ -1060,13 +1061,16 @@ private:
         ValidatedStockKsPerPixelNativeProgram&& program);
 
     StockKsPerPixelNativeShaderProgram(
+        Device& device,
         ValidatedStockKsPerPixelNativeProgram source,
         std::unique_ptr<ShaderModule> vertex_shader,
         std::unique_ptr<ShaderModule> pixel_shader) noexcept
-        : source_(std::move(source)),
+        : device_(&device),
+          source_(std::move(source)),
           vertex_shader_(std::move(vertex_shader)),
           pixel_shader_(std::move(pixel_shader)) {}
 
+    const Device* device_ = nullptr;
     ValidatedStockKsPerPixelNativeProgram source_;
     std::unique_ptr<ShaderModule> vertex_shader_;
     std::unique_ptr<ShaderModule> pixel_shader_;
@@ -1141,6 +1145,7 @@ public:
             if (buffer == nullptr) return false;
         return true;
     }
+    [[nodiscard]] const Device* device() const noexcept { return device_; }
 
 private:
     friend StockKsPerPixelNativeConstantBufferResult
@@ -1149,12 +1154,14 @@ private:
         const StockKsPerPixelNativeConstantData& constants);
 
     explicit StockKsPerPixelNativeConstantBuffers(
+        Device& device,
         std::array<std::unique_ptr<Buffer>,
                    static_cast<std::size_t>(
                        StockKsPerPixelNativeConstantSlot::count)> buffers)
         noexcept
-        : buffers_(std::move(buffers)) {}
+        : device_(&device), buffers_(std::move(buffers)) {}
 
+    const Device* device_ = nullptr;
     std::array<std::unique_ptr<Buffer>,
                static_cast<std::size_t>(
                    StockKsPerPixelNativeConstantSlot::count)> buffers_;
@@ -1216,6 +1223,7 @@ public:
             if (sampler == nullptr) return false;
         return true;
     }
+    [[nodiscard]] const Device* device() const noexcept { return device_; }
 
 private:
     friend StockKsPerPixelNativeSamplerResult
@@ -1224,12 +1232,14 @@ private:
         const StockKsPerPixelNativeSamplerSettings& settings);
 
     explicit StockKsPerPixelNativeSamplers(
+        Device& device,
         std::array<std::unique_ptr<Sampler>,
                    static_cast<std::size_t>(
                        StockKsPerPixelNativeSamplerSlot::count)> samplers)
         noexcept
-        : samplers_(std::move(samplers)) {}
+        : device_(&device), samplers_(std::move(samplers)) {}
 
+    const Device* device_ = nullptr;
     std::array<std::unique_ptr<Sampler>,
                static_cast<std::size_t>(
                    StockKsPerPixelNativeSamplerSlot::count)> samplers_;
@@ -1244,6 +1254,97 @@ struct StockKsPerPixelNativeSamplerResult {
     [[nodiscard]] bool ok() const noexcept {
         return status == StockKsPerPixelNativeSamplerStatus::ready &&
                samplers != nullptr;
+    }
+};
+
+enum class StockKsPerPixelNativeDrawResourcesStatus : std::uint8_t {
+    ready,
+    shader_missing,
+    constants_missing,
+    samplers_missing,
+    shader_invalid,
+    constants_invalid,
+    samplers_invalid,
+    device_mismatch,
+    backend_unsupported,
+    allocation_failed,
+};
+
+struct StockKsPerPixelNativeDrawResourcesResult;
+
+// Owns the native shader, constant-buffer, and sampler groups used by one or
+// more synchronous stock ksPerPixel draws. Diffuse and shadow handles remain
+// borrowed through StockKsPerPixelNativeDrawBinding.
+class StockKsPerPixelNativeDrawResources {
+public:
+    StockKsPerPixelNativeDrawResources(
+        StockKsPerPixelNativeDrawResources&&) noexcept = delete;
+    StockKsPerPixelNativeDrawResources& operator=(
+        StockKsPerPixelNativeDrawResources&&) noexcept = delete;
+    StockKsPerPixelNativeDrawResources(
+        const StockKsPerPixelNativeDrawResources&) = delete;
+    StockKsPerPixelNativeDrawResources& operator=(
+        const StockKsPerPixelNativeDrawResources&) = delete;
+    ~StockKsPerPixelNativeDrawResources() = default;
+
+    [[nodiscard]] bool ready() const noexcept {
+        return shader_program_ != nullptr && shader_program_->ready() &&
+               constant_buffers_ != nullptr && constant_buffers_->ready() &&
+               samplers_ != nullptr && samplers_->ready();
+    }
+    [[nodiscard]] Backend backend() const noexcept { return Backend::D3D12; }
+    [[nodiscard]] const Device* device() const noexcept { return device_; }
+    [[nodiscard]] const StockKsPerPixelNativeShaderProgram& shader_program()
+        const noexcept {
+        return *shader_program_;
+    }
+    [[nodiscard]] const StockKsPerPixelNativeConstantBuffers& constant_buffers()
+        const noexcept {
+        return *constant_buffers_;
+    }
+    [[nodiscard]] const StockKsPerPixelNativeSamplers& samplers() const noexcept {
+        return *samplers_;
+    }
+    [[nodiscard]] StockKsPerPixelNativeDrawBinding bind(
+        const Texture& diffuse,
+        std::array<const DepthAttachment*, 3U> shadow_maps) const noexcept {
+        return {this, &diffuse, shadow_maps};
+    }
+
+private:
+    friend struct StockKsPerPixelNativeDrawResourcesResult;
+    friend StockKsPerPixelNativeDrawResourcesResult
+    make_stock_ks_per_pixel_native_draw_resources(
+        Device&,
+        std::unique_ptr<StockKsPerPixelNativeShaderProgram>,
+        std::unique_ptr<StockKsPerPixelNativeConstantBuffers>,
+        std::unique_ptr<StockKsPerPixelNativeSamplers>);
+
+    StockKsPerPixelNativeDrawResources(
+        Device& device,
+        std::unique_ptr<StockKsPerPixelNativeShaderProgram> shader_program,
+        std::unique_ptr<StockKsPerPixelNativeConstantBuffers> constant_buffers,
+        std::unique_ptr<StockKsPerPixelNativeSamplers> samplers) noexcept
+        : device_(&device),
+          shader_program_(std::move(shader_program)),
+          constant_buffers_(std::move(constant_buffers)),
+          samplers_(std::move(samplers)) {}
+
+    const Device* device_ = nullptr;
+    std::unique_ptr<StockKsPerPixelNativeShaderProgram> shader_program_;
+    std::unique_ptr<StockKsPerPixelNativeConstantBuffers> constant_buffers_;
+    std::unique_ptr<StockKsPerPixelNativeSamplers> samplers_;
+};
+
+struct StockKsPerPixelNativeDrawResourcesResult {
+    StockKsPerPixelNativeDrawResourcesStatus status =
+        StockKsPerPixelNativeDrawResourcesStatus::backend_unsupported;
+    Diagnostic diagnostic;
+    std::unique_ptr<StockKsPerPixelNativeDrawResources> resources;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == StockKsPerPixelNativeDrawResourcesStatus::ready &&
+               resources != nullptr;
     }
 };
 
@@ -1536,6 +1637,17 @@ allocate_stock_ks_per_pixel_native_samplers(
     Device& device,
     const StockKsPerPixelNativeSamplerSettings& settings = {});
 
+// Adopt three already allocated native owners into one stable bundle. The
+// factory consumes the supplied owners on every return (releasing them on
+// failure) and rejects incomplete or non-D3D12 metadata before any draw can
+// observe the bundle.
+[[nodiscard]] StockKsPerPixelNativeDrawResourcesResult
+make_stock_ks_per_pixel_native_draw_resources(
+    Device& device,
+    std::unique_ptr<StockKsPerPixelNativeShaderProgram> shader_program,
+    std::unique_ptr<StockKsPerPixelNativeConstantBuffers> constant_buffers,
+    std::unique_ptr<StockKsPerPixelNativeSamplers> samplers);
+
 struct DeviceResult {
     DeviceStatus status = DeviceStatus::unavailable;
     Diagnostic diagnostic;
@@ -1571,6 +1683,8 @@ struct DeviceResult {
     StockKsPerPixelNativeConstantBufferStatus status) noexcept;
 [[nodiscard]] const char* stock_ks_per_pixel_native_sampler_status_name(
     StockKsPerPixelNativeSamplerStatus status) noexcept;
+[[nodiscard]] const char* stock_ks_per_pixel_native_draw_resources_status_name(
+    StockKsPerPixelNativeDrawResourcesStatus status) noexcept;
 [[nodiscard]] const char* presentation_target_status_name(
     PresentationTargetStatus status) noexcept;
 [[nodiscard]] const char* presentation_frame_status_name(
