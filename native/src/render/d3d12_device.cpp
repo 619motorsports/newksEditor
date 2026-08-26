@@ -2,6 +2,7 @@
 #include "apex/render/draw_packet.hpp"
 #include "d3d12_stock_ks_per_pixel.hpp"
 #include "d3d12_stock_ks_per_pixel_batch.hpp"
+#include "d3d12_stock_ks_per_pixel_status.hpp"
 
 #include <algorithm>
 #include <array>
@@ -6298,7 +6299,9 @@ public:
             if (!d3d_texture->draw_stock_ks_per_pixel_native(
                     request, *d3d_vertex, *d3d_index, d3d_depth, output,
                     diagnostic))
-                return {IndexedStaticMeshDrawStatus::execution_failed,
+                return {indexed_static_mesh_draw_status(
+                            classify_d3d12_stock_ks_per_pixel_failure(
+                                diagnostic.code)),
                         std::move(diagnostic), {}};
             return {IndexedStaticMeshDrawStatus::ready, {},
                     std::move(output)};
@@ -6497,7 +6500,9 @@ public:
             std::vector<std::byte> output;
             if (!d3d_texture->draw_stock_ks_per_pixel_native_batch(
                     batch, native_draws, d3d_depth, output, diagnostic)) {
-                return {IndexedStaticMeshBatchStatus::execution_failed,
+                return {indexed_static_mesh_batch_status(
+                            classify_d3d12_stock_ks_per_pixel_failure(
+                                diagnostic.code)),
                         std::move(diagnostic), {}};
             }
             return {IndexedStaticMeshBatchStatus::ready, {}, std::move(output)};

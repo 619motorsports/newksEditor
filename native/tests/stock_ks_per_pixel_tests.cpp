@@ -1,5 +1,6 @@
 #include "apex/render/device.hpp"
 #include "apex/render/draw_packet.hpp"
+#include "../src/render/d3d12_stock_ks_per_pixel_status.hpp"
 
 #include <algorithm>
 #include <array>
@@ -2228,6 +2229,68 @@ void names_all_reference_statuses() {
             "unknown native program status name");
 }
 
+void classifies_native_bridge_failures() {
+    require(
+        classify_d3d12_stock_ks_per_pixel_failure(
+            "d3d12_stock_native_geometry_range_invalid") ==
+            D3D12StockKsPerPixelFailureKind::invalid_request,
+        "native geometry preflight is an invalid request");
+    require(
+        classify_d3d12_stock_ks_per_pixel_failure(
+            "indexed_stock_native_diffuse_uninitialized") ==
+            D3D12StockKsPerPixelFailureKind::invalid_request,
+        "native uninitialized texture is an invalid request");
+    require(
+        classify_d3d12_stock_ks_per_pixel_failure(
+            "d3d12_stock_native_wireframe_unsupported") ==
+            D3D12StockKsPerPixelFailureKind::unsupported,
+        "native unsupported feature is not an execution failure");
+    require(
+        classify_d3d12_stock_ks_per_pixel_failure(
+            "indexed_stock_native_context_mismatch") ==
+            D3D12StockKsPerPixelFailureKind::unsupported,
+        "native foreign context is unsupported");
+    require(
+        classify_d3d12_stock_ks_per_pixel_failure(
+            "d3d12_stock_native_submit_failed") ==
+            D3D12StockKsPerPixelFailureKind::execution_failed,
+        "native submit failure remains an execution failure");
+    require(
+        classify_d3d12_stock_ks_per_pixel_failure(
+            "d3d12_stock_native_batch_target_shape_invalid") ==
+            D3D12StockKsPerPixelFailureKind::invalid_request,
+        "native batch shape preflight is an invalid request");
+    require(
+        classify_d3d12_stock_ks_per_pixel_failure(
+            "d3d12_stock_native_batch_pipeline_unsupported") ==
+            D3D12StockKsPerPixelFailureKind::unsupported,
+        "native batch unsupported pipeline is unsupported");
+    require(
+        classify_d3d12_stock_ks_per_pixel_failure(
+            "d3d12_stock_native_batch_target_format_unsupported") ==
+            D3D12StockKsPerPixelFailureKind::unsupported,
+        "native batch unsupported target format is unsupported");
+    require(
+        classify_d3d12_stock_ks_per_pixel_failure(
+            "d3d12_stock_native_batch_submit_undrained") ==
+            D3D12StockKsPerPixelFailureKind::execution_failed,
+        "native batch submit failure remains an execution failure");
+    require(
+        indexed_static_mesh_draw_status(
+            D3D12StockKsPerPixelFailureKind::invalid_request) ==
+            IndexedStaticMeshDrawStatus::invalid_request,
+        "native draw failure maps to public invalid-request status");
+    require(
+        indexed_static_mesh_batch_status(
+            D3D12StockKsPerPixelFailureKind::unsupported) ==
+            IndexedStaticMeshBatchStatus::unsupported,
+        "native batch failure maps to public unsupported status");
+    require(
+        classify_d3d12_stock_ks_per_pixel_failure("future_native_failure") ==
+            D3D12StockKsPerPixelFailureKind::execution_failed,
+        "unknown native failure stays conservatively executable failure");
+}
+
 } // namespace
 
 int main() {
@@ -2252,6 +2315,7 @@ int main() {
         retains_the_recovered_at_normalization_difference();
         rejects_unsafe_reference_inputs();
         names_all_reference_statuses();
+        classifies_native_bridge_failures();
         std::cout << "stock ksPerPixel tests passed\n";
         return 0;
     } catch (const std::exception& error) {
