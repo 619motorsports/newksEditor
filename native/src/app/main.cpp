@@ -74,6 +74,7 @@ void usage(std::ostream& output) {
               "                       [--node-search <query>] [--selected-node <id> [--isolate-selected]]\n"
               "                       [--show-hidden] [--wireframe] [--grid] [--view-axis]\n"
               "                       [--weather <stock-id>] [--sun-heading <degrees>] [--sun-height <degrees>]\n"
+              "                       [--builtin-vulkan-ks-per-pixel]\n"
               "                       [--shader-family <name> --shader-vertex <file> --shader-fragment <file>]\n"
               "                       [--authoring-overlay-vertex <file> --authoring-overlay-fragment <file>]\n"
               "                       [--selected-mesh-vertex <file> --selected-mesh-fragment <file>]\n"
@@ -533,6 +534,7 @@ struct WindowWorkspaceOptions {
     bool sunHeadingSpecified = false;
     double sunHeight = apex::app::workspace_viewport_default_sun_height_degrees;
     bool sunHeightSpecified = false;
+    bool builtinVulkanKsPerPixel = false;
     std::vector<WindowShaderSpec> shaders;
     std::optional<std::filesystem::path> authoringOverlayVertex;
     std::optional<std::filesystem::path> authoringOverlayFragment;
@@ -1285,6 +1287,11 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             result.sunHeight = parse_finite_number(
                 require_value("--sun-height"), "sun height");
             result.sunHeightSpecified = true;
+        } else if (option == "--builtin-vulkan-ks-per-pixel") {
+            if (result.builtinVulkanKsPerPixel)
+                throw std::runtime_error(
+                    "duplicate --builtin-vulkan-ks-per-pixel option");
+            result.builtinVulkanKsPerPixel = true;
         } else if (option == "--shader-family") {
             const auto family = std::string(require_value("--shader-family"));
             if (family.empty()) throw std::runtime_error("shader family cannot be empty");
@@ -1386,7 +1393,8 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             "--fbx requires a ksPerPixel shader family");
     const bool has_model_source = model_source_count != 0U;
     if (!has_model_source &&
-        (!result.shaders.empty() || has_directional_shadow_modules(result) ||
+        (result.builtinVulkanKsPerPixel || !result.shaders.empty() ||
+         has_directional_shadow_modules(result) ||
          result.authoringOverlayVertex.has_value() ||
          result.authoringOverlayFragment.has_value() ||
          result.selectedMeshVertex.has_value() ||
@@ -1419,7 +1427,8 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
         result.directionalShadowAlphaFragment.has_value())
         throw std::runtime_error(
             "directional-shadow alpha vertex and fragment modules must be supplied together");
-    if (has_directional_shadow_modules(result) && result.shaders.empty()) {
+    if (has_directional_shadow_modules(result) && result.shaders.empty() &&
+        !result.builtinVulkanKsPerPixel) {
         if (result.directionalShadowVertex.has_value() &&
             !result.directionalShadowAlphaVertex.has_value() &&
             !result.directionalShadowSkinnedVertex.has_value())
@@ -1889,7 +1898,7 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
             }
         }
     }
-    if (options.shaders.empty())
+    if (options.shaders.empty() && !options.builtinVulkanKsPerPixel)
         throw std::runtime_error("workspace rendering requires caller-supplied shader modules");
 
     const auto shader_format =
@@ -2061,6 +2070,10 @@ int run_window(int argc, char** argv) {
     std::uint64_t frame_limit = 0U;
     const auto workspace_options = parse_window_workspace_options(
         argc, argv, 3, validation, frame_limit);
+    if (workspace_options.builtinVulkanKsPerPixel &&
+        backend != apex::render::Backend::Vulkan)
+        throw std::runtime_error(
+            "--builtin-vulkan-ks-per-pixel requires the Vulkan backend");
     const auto workspace_lighting =
         apex::app::evaluateWorkspaceViewportLighting({
             workspace_options.weather,
@@ -2207,6 +2220,10 @@ int run_window(int argc, char** argv) {
         apex::app::WorkspaceViewportPrepareRequest request;
         request.presentation = target_result.target->info().description;
         request.shader_modules = loaded_workspace.descriptors;
+        if (workspace_options.builtinVulkanKsPerPixel) {
+            request.builtin_vulkan_source =
+                apex::render::BuiltinVulkanStockSourceSelector::ks_per_pixel;
+        }
         request.render.camera_position = camera.frame->position;
         request.camera_mesh_filter = true;
         request.webgl_live_transparent_order = true;
@@ -2370,12 +2387,25 @@ int run_window(int argc, char** argv) {
             request.selected_mesh_pipeline = std::move(pipeline);
         }
         if (loaded_workspace.directionalShadows.has_value()) {
-            request.directional_shadow_receiver = true;
+            request.directional_shadow_receiver =
+                !loaded_workspace.descriptors.empty();
             request.directional_shadows = loaded_workspace.directionalShadows;
+        } else if (workspace_options.builtinVulkanKsPerPixel) {
+            request.directional_shadows =
+                apex::app::WorkspaceViewportDirectionalShadowOptions{};
+        }
+        if (request.directional_shadows.has_value()) {
             request.directional_shadows->maps.lighting.scene_radius = std::max(
                 1.0F, active_document->scene.snapshot.bounds_radius);
             request.directional_shadows->maps.lighting.sun_direction =
                 workspace_lighting.evaluated.sun_direction;
+            if (workspace_options.builtinVulkanKsPerPixel &&
+                loaded_workspace.descriptors.empty()) {
+                request.directional_shadows->maps.lighting.splits =
+                    apex::render::ks_editor_shadow_splits;
+                request.directional_shadows->maps.lighting.far_plane =
+                    apex::render::ks_editor_shadow_range;
+            }
         }
         if (active_document->assembly.workspace.kind == "carLods") {
             if (!active_document->scene.preview_bounds.has_value()) {
@@ -2713,6 +2743,23 @@ int run_window(int argc, char** argv) {
             apex::app::WorkspaceViewportFrameRequest frame_request;
             frame_request.camera = *camera.frame;
             frame_request.frame_constants = workspace_lighting.frame_constants;
+            if (viewport->preparation().resources
+                    ->requires_stock_vulkan_source_frame()) {
+                const auto native_lighting =
+                    apex::app::buildWorkspaceViewportStockVulkanSourceLighting(
+                        workspace_lighting.evaluated, pixel_width,
+                        pixel_height);
+                const auto source_frame = native_lighting.has_value()
+                    ? apex::app::buildWorkspaceViewportStockVulkanSourceFrame(
+                          *camera.frame, *native_lighting)
+                    : std::nullopt;
+                if (!source_frame.has_value()) {
+                    std::cerr << "workspace source frame: invalid native "
+                                 "camera or lighting state\n";
+                    return 1;
+                }
+                frame_request.stock_vulkan_source_frame = *source_frame;
+            }
             frame_request.apply_skinning =
                 loaded_workspace.animationSkinningRequired;
             if (loaded_workspace.authoringOverlayModules.has_value() &&

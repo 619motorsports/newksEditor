@@ -1028,7 +1028,7 @@ WorkspaceViewportStockVulkanSourceFrame valid_source_frame(
     frame.camera = make_stock_ks_per_pixel_camera_constants(
         camera.view, camera.projection,
         apex::scene::identity_matrix, {0.0F, 0.0F, 2.0F}, 0.1F, 100.0F,
-        camera.fov_radians);
+        camera.fov_radians * 57.2957795130823208768F);
     frame.camera.camera_position = camera.position;
     frame.camera.near_plane = camera.near_plane;
     frame.camera.far_plane = camera.far_plane;
@@ -1036,6 +1036,87 @@ WorkspaceViewportStockVulkanSourceFrame valid_source_frame(
     frame.lighting.ambient_color = {0.1F, 0.1F, 0.1F, 1.0F};
     frame.lighting.light_color = {0.8F, 0.8F, 0.8F};
     return frame;
+}
+
+void builds_checked_stock_vulkan_source_frames() {
+    const auto evaluated = apex::app::evaluateWorkspaceViewportLighting({});
+    require(evaluated.ok(), "stock weather evaluates for native b2 coverage");
+    const auto native_lighting =
+        apex::app::buildWorkspaceViewportStockVulkanSourceLighting(
+            evaluated.evaluated, 1920U, 1080U);
+    require(native_lighting.has_value() &&
+                native_lighting->light_direction ==
+                    std::array<float, 3U>{
+                        -evaluated.evaluated.sun_direction[0],
+                        -evaluated.evaluated.sun_direction[1],
+                        -evaluated.evaluated.sun_direction[2]} &&
+                native_lighting->ambient_color[3U] == 1.0F &&
+                native_lighting->screen_width == 1.0F / 1920.0F &&
+                native_lighting->screen_height == 1.0F / 1080.0F &&
+                native_lighting->exposure == 2.0F &&
+                native_lighting->minimum_exposure == 0.0F &&
+                native_lighting->maximum_exposure == 10000.0F &&
+                native_lighting->dof_focus == 400.0F &&
+                native_lighting->dof_range == 500.0F &&
+                native_lighting->saturation == 1.0F &&
+                native_lighting->cloud_offset == 0.0F &&
+                native_lighting->game_time == 0.0F &&
+                native_lighting->unknown_152 ==
+                    std::array<float, 2U>{0.0F, 0.0F},
+            "native b2 builder maps weather, reciprocals, and recovered startup values");
+    require(!apex::app::buildWorkspaceViewportStockVulkanSourceLighting(
+                 evaluated.evaluated, 0U, 1080U),
+            "native b2 builder rejects zero-sized viewports");
+    auto invalid_evaluated = evaluated.evaluated;
+    invalid_evaluated.fog_distance =
+        std::numeric_limits<float>::quiet_NaN();
+    require(!apex::app::buildWorkspaceViewportStockVulkanSourceLighting(
+                 invalid_evaluated, 1920U, 1080U),
+            "native b2 builder rejects non-finite evaluated lighting");
+
+    const CameraFrame camera = valid_shadow_camera(1.25F);
+    StockKsPerPixelLightingConstants lighting;
+    lighting.light_direction = {0.1F, -0.9F, 0.2F};
+    lighting.ambient_color = {0.2F, 0.3F, 0.4F, 1.0F};
+    lighting.light_color = {0.9F, 0.8F, 0.7F};
+    lighting.fog_linear = 1200.0F;
+    lighting.fog_blend = 0.6F;
+    const auto built =
+        apex::app::buildWorkspaceViewportStockVulkanSourceFrame(
+            camera, lighting);
+    const auto inverse = invert_camera_matrix(camera.view_projection);
+    require(built.has_value() && inverse.has_value() &&
+                built->camera.view ==
+                    stock_ks_per_pixel_transpose_matrix(camera.view) &&
+                built->camera.projection ==
+                    stock_ks_per_pixel_transpose_matrix(camera.projection) &&
+                built->camera.mvp_inverse ==
+                    stock_ks_per_pixel_transpose_matrix(*inverse) &&
+                built->camera.camera_position == camera.position &&
+                built->camera.near_plane == camera.near_plane &&
+                built->camera.far_plane == camera.far_plane &&
+                built->camera.field_of_view ==
+                    camera.fov_radians * 57.2957795130823208768F &&
+                built->lighting.fog_linear == 1200.0F &&
+                built->lighting.fog_blend == 0.6F,
+            "source frame builder maps checked Vulkan camera and authored b2");
+
+    CameraFrame wrong_backend = camera;
+    wrong_backend.clip_space = CameraClipSpace::d3d12;
+    require(!apex::app::buildWorkspaceViewportStockVulkanSourceFrame(
+                 wrong_backend, lighting),
+            "source frame builder rejects non-Vulkan camera state");
+
+    CameraFrame singular = camera;
+    singular.view_projection = {};
+    require(!apex::app::buildWorkspaceViewportStockVulkanSourceFrame(
+                 singular, lighting),
+            "source frame builder rejects singular camera state");
+
+    lighting.game_time = std::numeric_limits<float>::quiet_NaN();
+    require(!apex::app::buildWorkspaceViewportStockVulkanSourceFrame(
+                 camera, lighting),
+            "source frame builder rejects non-finite native lighting");
 }
 
 void evaluates_bounded_workspace_lighting() {
@@ -4576,6 +4657,8 @@ void prepares_and_draws_builtin_vulkan_source_viewport() {
     request.directional_shadows =
         apex::app::WorkspaceViewportDirectionalShadowOptions{};
     request.directional_shadows->maps.lighting.map_size = 32U;
+    request.directional_shadows->opaque_pipeline =
+        opaque_shadow_pipeline(value);
 
     FakeDevice device;
     auto prepared = apex::app::prepareWorkspaceViewport(
@@ -4596,6 +4679,8 @@ void prepares_and_draws_builtin_vulkan_source_viewport() {
     WorkspaceViewportFrameRequest frame;
     frame.camera = valid_shadow_camera();
     frame.stock_vulkan_source_frame = valid_source_frame(frame.camera);
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    frame.frame_constants->sun_direction = {0.0F, 0.0F, 1.0F, 0.0F};
     Diagnostic diagnostic;
     const auto source_status = prepared.viewport->drawAndPresent(
         device, target, frame, diagnostic);
@@ -4613,6 +4698,33 @@ void prepares_and_draws_builtin_vulkan_source_viewport() {
                         device.created_depth_attachments[2],
                         device.created_depth_attachments[3]},
             "source draw binds the viewport-owned directional cascades");
+
+    auto expected_shadow = request.directional_shadows->maps.lighting;
+    expected_shadow.eye = frame.camera.position;
+    expected_shadow.target = {
+        frame.camera.position[0] + frame.camera.forward[0],
+        frame.camera.position[1] + frame.camera.forward[1],
+        frame.camera.position[2] + frame.camera.forward[2]};
+    expected_shadow.up = frame.camera.up;
+    expected_shadow.fov_radians = frame.camera.fov_radians;
+    expected_shadow.aspect = frame.camera.aspect;
+    expected_shadow.near_plane = frame.camera.near_plane;
+    expected_shadow.far_plane = ks_editor_shadow_range;
+    expected_shadow.splits = ks_editor_shadow_splits;
+    expected_shadow.sun_direction = {0.0F, 0.0F, 1.0F};
+    const auto expected_cascades =
+        computeDirectionalShadowCascades(expected_shadow);
+    const auto expected_matrix = convertDirectionalShadowCascadeMatrix(
+        expected_cascades.cascades.front().matrix,
+        CameraClipSpace::vulkan);
+    require(expected_matrix.ok() && !device.depth_camera_matrices.empty() &&
+                std::equal(expected_matrix.matrix.begin(),
+                           expected_matrix.matrix.end(),
+                           device.depth_camera_matrices.front().begin(),
+                           [](float left, float right) {
+                               return std::abs(left - right) < 1.0e-5F;
+                           }),
+            "source shadows use installed-editor splits, range, and the opposite native light ray");
 }
 
 void rejects_invalid_builtin_vulkan_source_frames_before_draw() {
@@ -5665,6 +5777,7 @@ void rejects_frame_mismatch_and_preserves_present_atomicity() {
 
 int main() {
     try {
+        builds_checked_stock_vulkan_source_frames();
         evaluates_bounded_workspace_lighting();
         materializes_external_texture_before_backend_preparation();
         materializes_solid_color_before_backend_preparation();

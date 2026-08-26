@@ -22,6 +22,8 @@ namespace {
 using render::PipelineRenderTarget;
 using render::PipelineRenderTargetFormat;
 
+constexpr float radians_to_degrees = 57.2957795130823208768F;
+
 [[nodiscard]] render::Diagnostic diagnostic(const char* code, const char* message) {
     return {code, message};
 }
@@ -716,6 +718,67 @@ WorkspaceViewportLightingResult evaluateWorkspaceViewportLighting(
     return result;
 }
 
+std::optional<render::StockKsPerPixelLightingConstants>
+buildWorkspaceViewportStockVulkanSourceLighting(
+    const render::EvaluatedLighting& lighting, std::uint32_t viewport_width,
+    std::uint32_t viewport_height) noexcept {
+    if (viewport_width == 0U || viewport_height == 0U) return std::nullopt;
+
+    render::StockKsPerPixelLightingConstants constants;
+    constants.light_direction = {
+        -lighting.sun_direction[0], -lighting.sun_direction[1],
+        -lighting.sun_direction[2]};
+    constants.ambient_color = {
+        lighting.ambient_color[0], lighting.ambient_color[1],
+        lighting.ambient_color[2], 1.0F};
+    constants.light_color = lighting.sun_color;
+    std::copy(lighting.horizon_color.begin(), lighting.horizon_color.end(),
+              constants.horizon_color.begin());
+    std::copy(lighting.sky_color.begin(), lighting.sky_color.end(),
+              constants.zenith_color.begin());
+    constants.exposure = 2.0F;
+    constants.screen_width = 1.0F / static_cast<float>(viewport_width);
+    constants.screen_height = 1.0F / static_cast<float>(viewport_height);
+    constants.fog_linear = lighting.fog_distance;
+    constants.fog_blend = lighting.fog_blend;
+    constants.fog_color = lighting.fog_color;
+    constants.cloud_cover = lighting.preset.cloud_cover;
+    constants.cloud_cutoff = lighting.preset.cloud_cutoff;
+    constants.cloud_color = lighting.preset.cloud_color;
+    constants.cloud_offset = 0.0F;
+    constants.minimum_exposure = 0.0F;
+    constants.maximum_exposure = 10000.0F;
+    constants.dof_focus = 400.0F;
+    constants.dof_range = 500.0F;
+    constants.saturation = 1.0F;
+    constants.game_time = 0.0F;
+    if (!render::valid_stock_ks_per_pixel_lighting_constants(constants))
+        return std::nullopt;
+    return constants;
+}
+
+std::optional<WorkspaceViewportStockVulkanSourceFrame>
+buildWorkspaceViewportStockVulkanSourceFrame(
+    const render::CameraFrame& camera,
+    const render::StockKsPerPixelLightingConstants& lighting) noexcept {
+    if (camera.clip_space != render::CameraClipSpace::vulkan ||
+        !render::valid_stock_ks_per_pixel_lighting_constants(lighting))
+        return std::nullopt;
+    const auto inverse_view_projection =
+        render::invert_camera_matrix(camera.view_projection);
+    if (!inverse_view_projection) return std::nullopt;
+
+    WorkspaceViewportStockVulkanSourceFrame frame;
+    frame.camera = render::make_stock_ks_per_pixel_camera_constants(
+        camera.view, camera.projection, *inverse_view_projection,
+        camera.position, camera.near_plane, camera.far_plane,
+        camera.fov_radians * radians_to_degrees);
+    if (!render::valid_stock_ks_per_pixel_camera_constants(frame.camera))
+        return std::nullopt;
+    frame.lighting = lighting;
+    return frame;
+}
+
 bool WorkspaceViewportCameraController::apply(
     const WorkspaceViewportCameraInput& input) noexcept {
     switch (input.gesture) {
@@ -1253,7 +1316,9 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
                     request.camera.projection) ||
             source.camera.camera_position != request.camera.position ||
             source.camera.near_plane != request.camera.near_plane ||
-            source.camera.far_plane != request.camera.far_plane) {
+            source.camera.far_plane != request.camera.far_plane ||
+            source.camera.field_of_view !=
+                request.camera.fov_radians * radians_to_degrees) {
             output_diagnostic = diagnostic(
                 "workspace_viewport_stock_vulkan_source_camera_mismatch",
                 "Native Vulkan source camera state must match the current "
@@ -1276,12 +1341,12 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
             for (std::size_t component = 0U; component < 3U; ++component) {
                 if (std::abs(
                         source.lighting.light_direction[component] -
-                        request.frame_constants->sun_direction[component]) >
+                        -request.frame_constants->sun_direction[component]) >
                     lighting_match_tolerance) {
                     output_diagnostic = diagnostic(
                         "workspace_viewport_stock_vulkan_source_lighting_mismatch",
-                        "Native and portable frame lighting must use the "
-                        "same sun direction in a mixed scene");
+                        "Native light-ray direction must oppose the portable "
+                        "surface-to-sun direction in a mixed scene");
                     return WorkspaceViewportFrameStatus::invalid;
                 }
             }
@@ -1781,7 +1846,9 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
         lighting.fov_radians = request.camera.fov_radians;
         lighting.aspect = request.camera.aspect;
         lighting.near_plane = request.camera.near_plane;
-        lighting.far_plane = request.camera.far_plane;
+        lighting.far_plane = requires_stock_vulkan_source_frame
+                                 ? directional_shadows_->maps.lighting.far_plane
+                                 : request.camera.far_plane;
         if (request.frame_constants.has_value()) {
             lighting.sun_direction = {
                 request.frame_constants->sun_direction[0],
@@ -1792,7 +1859,9 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
         if (requires_stock_vulkan_source_frame) {
             const auto& source_lighting =
                 request.stock_vulkan_source_frame->lighting.light_direction;
-            lighting.sun_direction = source_lighting;
+            lighting.sun_direction = {
+                -source_lighting[0], -source_lighting[1],
+                -source_lighting[2]};
         }
         const auto refreshed =
             render::refresh_directional_shadow_maps(*shadow_maps_, lighting);
@@ -2130,10 +2199,11 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             return result;
         }
 
+        auto directional_shadows = request.directional_shadows;
         std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps;
-        if (request.directional_shadows.has_value()) {
+        if (directional_shadows.has_value()) {
             auto prepared_maps = render::prepare_directional_shadow_maps(
-                device, request.directional_shadows->maps);
+                device, directional_shadows->maps);
             if (!prepared_maps.ok()) {
                 result.status = shadowPreparationStatus(prepared_maps.status);
                 result.diagnostic = std::move(prepared_maps.diagnostic);
@@ -2180,6 +2250,12 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 "A selected immutable Vulkan source program requires "
                 "viewport-owned directional shadow maps");
             return result;
+        }
+        if (execution->resources->requires_stock_vulkan_source_frame()) {
+            directional_shadows->maps.lighting.splits =
+                render::ks_editor_shadow_splits;
+            directional_shadows->maps.lighting.far_plane =
+                render::ks_editor_shadow_range;
         }
 
         std::optional<WorkspaceViewport::FrameCatalog> frame_catalog;
@@ -2796,7 +2872,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             std::move(selection_axis_world),
             std::move(selected_mesh_pipeline),
             std::move(selected_mesh_color_buffer),
-            std::move(shadow_maps), request.directional_shadows,
+            std::move(shadow_maps), std::move(directional_shadows),
             std::move(frame_catalog)));
         result.status = WorkspaceViewportStatus::ready;
         return result;

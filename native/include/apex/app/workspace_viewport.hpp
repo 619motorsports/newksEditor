@@ -227,6 +227,21 @@ struct WorkspaceViewportStockVulkanSourceFrame {
     render::StockKsPerPixelLightingConstants lighting{};
 };
 
+// Maps evaluated stock weather into the recovered b2 layout. The screen
+// fields are reciprocal active-viewport dimensions, matching setViewport.
+[[nodiscard]] std::optional<render::StockKsPerPixelLightingConstants>
+buildWorkspaceViewportStockVulkanSourceLighting(
+    const render::EvaluatedLighting& lighting, std::uint32_t viewport_width,
+    std::uint32_t viewport_height) noexcept;
+
+// Builds the recovered native b0 record from the current Vulkan camera and
+// preserves an already-authored b2 record. The checked inverse prevents a
+// malformed camera from reaching the source-equivalent shader ABI.
+[[nodiscard]] std::optional<WorkspaceViewportStockVulkanSourceFrame>
+buildWorkspaceViewportStockVulkanSourceFrame(
+    const render::CameraFrame& camera,
+    const render::StockKsPerPixelLightingConstants& lighting) noexcept;
+
 struct WorkspaceViewportFrameRequest {
     render::CameraFrame camera{};
     bool load_color = false;

@@ -13,6 +13,58 @@ if(NOT malformed_result STREQUAL "1")
 endif()
 
 execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --builtin-vulkan-ks-per-pixel
+  RESULT_VARIABLE detached_source_result
+  ERROR_VARIABLE detached_source_error
+)
+if(NOT detached_source_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached built-in Vulkan source returned ${detached_source_result}: ${detached_source_error}")
+endif()
+string(FIND "${detached_source_error}"
+  "shader modules require a workspace model" detached_source_position)
+if(detached_source_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached built-in Vulkan source was not diagnosed: ${detached_source_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --builtin-vulkan-ks-per-pixel --builtin-vulkan-ks-per-pixel
+  RESULT_VARIABLE duplicate_source_result
+  ERROR_VARIABLE duplicate_source_error
+)
+if(NOT duplicate_source_result STREQUAL "1")
+  message(FATAL_ERROR
+    "duplicate built-in Vulkan source returned ${duplicate_source_result}: ${duplicate_source_error}")
+endif()
+string(FIND "${duplicate_source_error}"
+  "duplicate --builtin-vulkan-ks-per-pixel option" duplicate_source_position)
+if(duplicate_source_position EQUAL -1)
+  message(FATAL_ERROR
+    "duplicate built-in Vulkan source was not diagnosed: ${duplicate_source_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window d3d12
+          --model missing.kn5 --builtin-vulkan-ks-per-pixel
+  RESULT_VARIABLE d3d_source_result
+  ERROR_VARIABLE d3d_source_error
+)
+if(NOT d3d_source_result STREQUAL "1")
+  message(FATAL_ERROR
+    "D3D12 built-in Vulkan source returned ${d3d_source_result}: ${d3d_source_error}")
+endif()
+string(FIND "${d3d_source_error}"
+  "--builtin-vulkan-ks-per-pixel requires the Vulkan backend"
+  d3d_source_position)
+if(d3d_source_position EQUAL -1)
+  message(FATAL_ERROR
+    "D3D12 built-in Vulkan source was not diagnosed before loading: ${d3d_source_error}")
+endif()
+
+execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --ai-spline fast_lane.ai
   RESULT_VARIABLE detached_ai_result
   ERROR_VARIABLE detached_ai_error

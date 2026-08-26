@@ -164,6 +164,12 @@ struct SecondarySpotPacking { bool enabled = false; float range_inverse = 0; flo
 [[nodiscard]] float cspSecondarySpotAttenuation(float distance, float range, float skip) noexcept;
 
 inline constexpr std::uint32_t ks_shadow_map_size = 2048;
+// CameraShadowMapped's installed ksEditor constructor uses these main-
+// viewport cascade limits. The separate PreviewBuilder configuration uses
+// different 2/12/50 values and must not be attributed to ksEditor.
+inline constexpr std::array<float, 3> ks_editor_shadow_splits = {
+    1.8F, 20.0F, 180.0F};
+inline constexpr float ks_editor_shadow_range = 500.0F;
 inline constexpr std::array<float, 3> ks_shadow_splits = {2.0F, 12.0F, 50.0F};
 inline constexpr std::array<float, 3> ks_shadow_biases = {0.000002F, 0.000015F, 0.0003F};
 inline constexpr LightingVec3 ks_sun_direction = {0.35F, 0.82F, 0.42F};
