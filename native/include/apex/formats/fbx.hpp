@@ -72,6 +72,12 @@ struct FbxLimits {
     std::size_t maxNodes = 1'000'000;
     std::size_t maxProperties = 4'000'000;
     std::size_t maxPropertyBytes = 256u * 1024u * 1024u;
+    // Binary R properties and decoded ASCII Content payloads use a separate
+    // budget. This prevents an unused embedded media record from consuming
+    // the complete general property allocation budget.
+    std::size_t maxRawProperties = 4'096;
+    std::size_t maxRawPropertyBytes = 64u * 1024u * 1024u;
+    std::size_t maxRawBytes = 128u * 1024u * 1024u;
     std::size_t maxAggregateBytes = 256u * 1024u * 1024u;
     std::size_t maxArrayElements = 10'000'000;
     std::size_t maxArrayBytes = 256u * 1024u * 1024u;

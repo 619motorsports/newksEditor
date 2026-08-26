@@ -2,6 +2,7 @@
 
 #include "apex/formats/fbx_conversion.hpp"
 #include "apex/formats/kn5.hpp"
+#include "apex/core/parse_limits.hpp"
 #include "apex/render/fbx_external_texture_authority.hpp"
 #include "apex/scene/kn5_scene.hpp"
 
@@ -30,6 +31,8 @@ struct FbxRenderAdapterDiagnostic {
 struct FbxRenderAdapterLimits {
     std::size_t max_materials = 1'000'000U;
     std::size_t max_textures = 65'536U;
+    std::size_t max_embedded_images = 4'096U;
+    std::size_t max_embedded_candidates = 65'536U;
     std::size_t max_nodes = 1'000'000U;
     std::size_t max_meshes = 1'000'000U;
     std::size_t max_batches_per_geometry = 65'536U;
@@ -43,6 +46,9 @@ struct FbxRenderAdapterLimits {
     std::size_t max_diagnostics = 10'000U;
     std::size_t max_diagnostic_bytes = 16U * 1024U * 1024U;
     std::size_t max_output_bytes = 512U * 1024U * 1024U;
+    std::size_t max_total_embedded_source_bytes = 128U * 1024U * 1024U;
+    std::size_t max_total_embedded_decoded_bytes = 512U * 1024U * 1024U;
+    apex::core::ParseLimits embedded_decode{};
     scene::Kn5SceneLimits scene{};
 };
 

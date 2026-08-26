@@ -1,4 +1,5 @@
 #include "apex/render/fbx_render_adapter.hpp"
+#include "png_fixture.hpp"
 
 #include <algorithm>
 #include <array>
@@ -125,6 +126,20 @@ FbxExternalTextureAuthorityResult textures(
     return result;
 }
 
+void add_embedded_texture(FbxSceneConversion& conversion,
+                          std::size_t material,
+                          std::int64_t texture_id,
+                          std::int64_t video_id,
+                          std::string basename,
+                          std::vector<std::uint8_t> bytes) {
+    const auto image_index = conversion.embedded_images.size();
+    conversion.embedded_images.push_back(
+        {video_id, std::move(basename), std::move(bytes)});
+    conversion.embedded_texture_candidates.push_back(
+        {static_cast<apex::scene::MaterialId>(material), texture_id, video_id,
+         image_index, "DiffuseColor", material});
+}
+
 const apex::formats::Kn5MaterialProperty* property(
     const apex::formats::Kn5Material& material, const std::string& name) {
     const auto found = std::find_if(
@@ -186,6 +201,132 @@ void buildsOwnedCanonicalScene() {
     authority.authority.resources[0].source_bytes.clear();
     require(result.model->textures[0].data == original_bytes,
             "authority mutation cannot affect the canonical model");
+}
+
+void buildsOwnedEmbeddedCompatibilityTextures() {
+    auto conversion = fixture();
+    const auto png =
+        apex::tests::rgba8PngFixture({7U, 11U, 13U, 255U});
+    add_embedded_texture(conversion, 0U, 400, 500, "embedded.png", png);
+    auto result = apex::render::build_fbx_render_scene(
+        conversion, nullptr, "embedded.fbx");
+    require(result.status == FbxRenderAdapterStatus::ready &&
+                result.gpu_renderable() && result.model->textures.size() == 1U &&
+                result.model->textures[0].name == "embedded.png" &&
+                result.model->textures[0].data == png &&
+                result.model->materials[0].resources.size() == 1U &&
+                result.model->materials[0].resources[0].texture ==
+                    "embedded.png" &&
+                std::any_of(result.diagnostics.begin(),
+                            result.diagnostics.end(),
+                            [](const auto& diagnostic) {
+                                return diagnostic.code ==
+                                       "embedded_image_compatibility";
+                            }),
+            "embedded FBX Video content becomes one owned diffuse texture");
+    conversion.embedded_images[0].content.clear();
+    require(result.model->textures[0].data == png,
+            "embedded source mutation cannot affect the canonical model");
+
+    auto reused = fixture(2U);
+    add_embedded_texture(reused, 0U, 400, 500, "shared.png", png);
+    reused.embedded_texture_candidates.push_back(
+        {1U, 401, 500, 0U, "DiffuseColor", 1U});
+    const auto reusedResult =
+        apex::render::build_fbx_render_scene(reused);
+    require(reusedResult.status == FbxRenderAdapterStatus::ready &&
+                reusedResult.model->textures.size() == 1U &&
+                reusedResult.model->materials[0].resources[0].texture ==
+                    "shared.png" &&
+                reusedResult.model->materials[1].resources[0].texture ==
+                    "shared.png",
+            "one embedded payload is shared by multiple material bindings");
+
+    auto atomic = fixture(2U);
+    add_embedded_texture(atomic, 0U, 400, 500, "valid.png", png);
+    auto truncated = png;
+    truncated.resize(24U);
+    add_embedded_texture(atomic, 1U, 401, 501, "truncated.png",
+                         std::move(truncated));
+    const auto atomicResult =
+        apex::render::build_fbx_render_scene(atomic);
+    require(atomicResult.status == FbxRenderAdapterStatus::staged &&
+                atomicResult.ok() && atomicResult.model->textures.empty() &&
+                atomicResult.model->materials[0].resources.empty() &&
+                atomicResult.model->materials[1].resources.empty() &&
+                std::any_of(
+                    atomicResult.diagnostics.begin(),
+                    atomicResult.diagnostics.end(), [](const auto& diagnostic) {
+                        return diagnostic.code.find(
+                                   "embedded_texture_decode_") == 0U;
+                    }),
+            "one malformed embedded payload stages geometry without partial textures");
+
+    auto limited = fixture();
+    add_embedded_texture(limited, 0U, 400, 500, "limited.png", png);
+    auto limits = apex::render::FbxRenderAdapterLimits{};
+    limits.max_total_embedded_source_bytes = png.size() - 1U;
+    const auto sourceLimited = apex::render::build_fbx_render_scene(
+        limited, nullptr, "limited.fbx", limits);
+    require(sourceLimited.status == FbxRenderAdapterStatus::resource_limit &&
+                !sourceLimited.model.has_value(),
+            "embedded aggregate source limit rejects atomically");
+
+    limits = apex::render::FbxRenderAdapterLimits{};
+    limits.max_total_embedded_decoded_bytes = 3U;
+    const auto decodedLimited = apex::render::build_fbx_render_scene(
+        limited, nullptr, "limited.fbx", limits);
+    require(decodedLimited.status == FbxRenderAdapterStatus::resource_limit &&
+                !decodedLimited.model.has_value(),
+            "embedded decoded-byte limit rejects atomically");
+
+    auto forged = limited;
+    forged.embedded_texture_candidates[0].embedded_image_index = 9U;
+    const auto forgedResult = apex::render::build_fbx_render_scene(forged);
+    require(forgedResult.status == FbxRenderAdapterStatus::invalid_request &&
+                !forgedResult.model.has_value(),
+            "forged embedded image reference rejects atomically");
+
+    auto countLimited = fixture(2U);
+    add_embedded_texture(countLimited, 0U, 400, 500, "first.png", png);
+    add_embedded_texture(countLimited, 1U, 401, 501, "second.png", png);
+    limits = apex::render::FbxRenderAdapterLimits{};
+    limits.max_embedded_images = 1U;
+    const auto imageCountLimited = apex::render::build_fbx_render_scene(
+        countLimited, nullptr, "limited.fbx", limits);
+    require(imageCountLimited.status ==
+                FbxRenderAdapterStatus::resource_limit &&
+                !imageCountLimited.model.has_value(),
+            "embedded image count rejects before temporary allocation");
+    limits = apex::render::FbxRenderAdapterLimits{};
+    limits.max_embedded_candidates = 1U;
+    const auto candidateCountLimited = apex::render::build_fbx_render_scene(
+        countLimited, nullptr, "limited.fbx", limits);
+    require(candidateCountLimited.status ==
+                FbxRenderAdapterStatus::resource_limit &&
+                !candidateCountLimited.model.has_value(),
+            "embedded candidate count rejects before temporary allocation");
+
+    auto canonicalCollision = fixture(2U);
+    add_embedded_texture(canonicalCollision, 0U, 400, 500,
+                         " paint.png ", png);
+    add_embedded_texture(canonicalCollision, 1U, 401, 501,
+                         "paint.png", png);
+    const auto canonicalCollisionResult =
+        apex::render::build_fbx_render_scene(canonicalCollision);
+    require(canonicalCollisionResult.status ==
+                FbxRenderAdapterStatus::invalid_request &&
+                !canonicalCollisionResult.model.has_value(),
+            "trimmed embedded texture names cannot alias one backend name");
+
+    auto blankName = fixture();
+    add_embedded_texture(blankName, 0U, 400, 500, "   ", png);
+    const auto blankNameResult =
+        apex::render::build_fbx_render_scene(blankName);
+    require(blankNameResult.status ==
+                FbxRenderAdapterStatus::invalid_request &&
+                !blankNameResult.model.has_value(),
+            "blank embedded texture name rejects before publication");
 }
 
 void preservesNativeBatchOrderNamesAndMaterialResolution() {
@@ -490,6 +631,7 @@ void enforcesLimitsAndFiniteNativeFallbacks() {
 int main() {
     try {
         buildsOwnedCanonicalScene();
+        buildsOwnedEmbeddedCompatibilityTextures();
         preservesNativeBatchOrderNamesAndMaterialResolution();
         stagesMissingResourcesAndUsesBoundedFallback();
         rejectsMalformedInputAtomically();

@@ -59,7 +59,7 @@ void usage(std::ostream& output) {
            << "  apex-native --backend vulkan|d3d12 [--validation]\n"
            << "  apex-native --window vulkan|d3d12 [--frames <count>] [--validation]\n"
            << "  apex-native --window vulkan|d3d12 [--model <file>] [--workspace-root <dir> --manifest <file> --kind track|carLods]\n"
-              "                       [--fbx <file> --fbx-assets <directory>]\n"
+              "                       [--fbx <file> [--fbx-assets <directory>]]\n"
               "                       [--analog-instruments <file> [--rpm <value>]]\n"
               "                       [--animation <file> [--animation-position <value>]]\n"
               "                       [--fbx-animation <index> [--animation-position <value>]]\n"
@@ -1360,8 +1360,6 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             "--model, --fbx, and --workspace-root are mutually exclusive");
     if (result.fbxAssets.has_value() && !result.fbx.has_value())
         throw std::runtime_error("--fbx-assets requires --fbx");
-    if (result.fbx.has_value() && !result.fbxAssets.has_value())
-        throw std::runtime_error("--fbx requires --fbx-assets for window rendering");
     if (result.model.has_value() && result.kind != apex::app::WorkspaceSessionKind::generic)
         throw std::runtime_error("--model accepts only the generic workspace kind");
     if (result.manifest.has_value() != result.workspaceRoot.has_value())
@@ -1531,12 +1529,14 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
     if (options.fbx.has_value()) {
         const auto bytes = read_file(*options.fbx);
         apex::assets::AssetSource assets;
-        assets.addDirectory(*options.fbxAssets);
         apex::app::FbxPreviewDocumentRequest request;
         request.source = options.fbx->filename().generic_string();
         request.bytes = bytes;
-        request.textures = apex::app::FbxPreviewTextureGrant{
-            "window-fbx-assets", &assets};
+        if (options.fbxAssets.has_value()) {
+            assets.addDirectory(*options.fbxAssets);
+            request.textures = apex::app::FbxPreviewTextureGrant{
+                "window-fbx-assets", &assets};
+        }
         auto opened = apex::app::open_fbx_preview_document(request);
         report_fbx_diagnostics(opened);
         if (!opened.gpu_renderable()) {

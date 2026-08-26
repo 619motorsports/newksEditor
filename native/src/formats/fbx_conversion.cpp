@@ -179,6 +179,96 @@ std::string fileTextureBasename(const ObjectRecord& record,
     return basename;
 }
 
+struct EmbeddedVideoSource {
+    std::string basename;
+    const std::vector<std::uint8_t>* content = nullptr;
+};
+
+EmbeddedVideoSource embeddedVideoSource(const ObjectRecord& record,
+                                        const FbxConversionLimits& limits,
+                                        Budget& budget,
+                                        std::string_view path) {
+    const FbxNode* content = nullptr;
+    const FbxNode* relative_name = nullptr;
+    const FbxNode* file_name = nullptr;
+    for (const auto& child : record.node->children) {
+        const auto assign_unique = [&](const FbxNode*& destination,
+                                       std::string_view field) {
+            if (destination != nullptr)
+                fail("invalid_embedded_image",
+                     "FBX embedded image has duplicate " +
+                         std::string(field) + " records",
+                     std::string(path));
+            destination = &child;
+        };
+        if (child.name == "Content") assign_unique(content, "Content");
+        else if (child.name == "RelativeFilename")
+            assign_unique(relative_name, "RelativeFilename");
+        else if (child.name == "FileName")
+            assign_unique(file_name, "FileName");
+    }
+    if (content == nullptr) return {};
+    const auto content_values = values(*content, &budget, path);
+    if (content_values.size() != 1u)
+        fail("invalid_embedded_image",
+             "FBX embedded image Content must contain one raw payload",
+             std::string(path));
+    const auto* bytes =
+        std::get_if<std::vector<std::uint8_t>>(content_values.front());
+    if (bytes == nullptr)
+        fail("invalid_embedded_image",
+             "FBX embedded image Content is not a raw payload",
+             std::string(path));
+    if (bytes->empty()) return {};
+    if (bytes->size() > limits.max_embedded_image_bytes)
+        fail("embedded_image_limit",
+             "FBX embedded image exceeds its byte limit", std::string(path));
+
+    const auto read_basename = [&](const FbxNode* node,
+                                   std::string_view field) -> std::string {
+        if (node == nullptr) return {};
+        const auto flattened = values(*node, &budget, path);
+        const auto* text = flattened.size() == 1u
+                               ? stringValue(flattened.front())
+                               : nullptr;
+        if (text == nullptr)
+            fail("invalid_embedded_image",
+                 "FBX embedded image " + std::string(field) +
+                 " must contain one string",
+                 std::string(path));
+        if (text->empty()) return {};
+        if (text->find('\0') != std::string::npos)
+            fail("invalid_embedded_image",
+                 "FBX embedded image filename contains a null byte",
+                 std::string(path));
+        const auto separator = text->find_last_of("/\\");
+        auto basename = text->substr(separator == std::string::npos
+                                         ? 0u
+                                         : separator + 1u);
+        if (basename.empty() || basename == "." || basename == "..")
+            fail("invalid_embedded_image",
+                 "FBX embedded image has no safe basename",
+                 std::string(path));
+        if (basename.size() > limits.max_string_bytes)
+            fail("string_limit",
+                 "FBX embedded image basename exceeds its limit",
+                 std::string(path));
+        budget.add(basename.size(), path);
+        return basename;
+    };
+    auto basename = read_basename(relative_name, "RelativeFilename");
+    if (basename.empty()) basename = read_basename(file_name, "FileName");
+    if (basename.empty()) {
+        basename = "embedded-" + std::to_string(record.id) + ".bin";
+        if (basename.size() > limits.max_string_bytes)
+            fail("string_limit",
+                 "FBX embedded image generated name exceeds its limit",
+                 std::string(path));
+        budget.add(basename.size(), path);
+    }
+    return {std::move(basename), bytes};
+}
+
 constexpr std::size_t kAssociativeNodeOverhead = sizeof(void*) * 4u;
 
 void chargeAssociativeNode(Budget& budget, std::size_t valueBytes, std::string_view path) {
@@ -1141,9 +1231,9 @@ void unsupportedFeatureScan(const FbxDocument& document, FbxSceneConversion& res
                 addDiagnostic(result, diagnostics, FbxConversionSeverity::warning, code, message, frame.path);
             };
             const auto& node = *frame.node;
-            if (node.name == "Video" || node.name == "Image")
+            if (node.name == "Image")
                 add("unsupported_images",
-                    "Embedded FBX image records are not converted");
+                    "FBX Image records are not converted");
             if ((node.name == "LayerElementNormal" &&
                  !supportedNormalLayer(node)) ||
                 (node.name == "LayerElementMaterial" &&
@@ -1165,6 +1255,7 @@ void validateDomShape(const FbxDocument& document, const FbxConversionLimits& li
     const auto depthCapacity = limits.max_depth == std::numeric_limits<std::size_t>::max() ? limits.max_depth : limits.max_depth + 1u;
     stack.reserve(std::min(depthCapacity, std::size_t{1024}));
     std::size_t nodes = 0, properties = 0, propertyValues = 0, stringBytes = 0;
+    std::size_t rawProperties = 0, rawBytes = 0;
     const auto enter = [&](const FbxNode* node, std::size_t depth) {
         if (node == nullptr || depth > limits.max_depth) fail("depth_limit", "FBX DOM hierarchy exceeds conversion depth", "DOM");
         if (nodes >= limits.max_nodes) fail("node_limit", "FBX DOM node count exceeds conversion limit", "DOM");
@@ -1183,10 +1274,28 @@ void validateDomShape(const FbxDocument& document, const FbxConversionLimits& li
             propertyValues += property.values.size();
             for (const auto& value : property.values) {
                 const auto* text = std::get_if<std::string>(&value);
-                if (text == nullptr) continue;
-                if (text->size() > limits.max_string_bytes || stringBytes > limits.max_string_bytes - text->size())
-                    fail("string_limit", "FBX DOM string storage exceeds conversion limit", "DOM");
-                stringBytes += text->size();
+                if (text != nullptr) {
+                    if (text->size() > limits.max_string_bytes || stringBytes > limits.max_string_bytes - text->size())
+                        fail("string_limit", "FBX DOM string storage exceeds conversion limit", "DOM");
+                    stringBytes += text->size();
+                    continue;
+                }
+                // Binary R and ASCII Content values are direct byte vectors.
+                // FBX b arrays use FbxArray and keep the general DOM budgets.
+                const auto* raw =
+                    std::get_if<std::vector<std::uint8_t>>(&value);
+                if (raw == nullptr) continue;
+                if (rawProperties >= limits.max_embedded_images)
+                    fail("embedded_image_limit",
+                         "FBX raw property count exceeds conversion limit", "DOM");
+                ++rawProperties;
+                if (raw->size() > limits.max_embedded_image_bytes ||
+                    raw->size() > limits.max_embedded_image_total_bytes ||
+                    rawBytes > limits.max_embedded_image_total_bytes -
+                                   raw->size())
+                    fail("embedded_image_limit",
+                         "FBX raw property bytes exceed conversion limit", "DOM");
+                rawBytes += raw->size();
             }
         }
     };
@@ -1803,8 +1912,8 @@ std::optional<std::size_t> fbxNativeFileTextureChannelRank(
 }
 
 FbxConversionCapabilityDetail fbxSceneConversionCapability() {
-    return {true, true, true, true, false, true, false, false,
-            "Static FBX geometry, geometric transforms, native material scalars, ordered node-material slots, bounded polygon material, normal and UV mappings, external file-texture candidates, and an explicit-linear local-transform KSANIM bridge are converted; native-pivot evaluation, non-linear animation, skinning, and embedded images remain unsupported"};
+    return {true, true, true, true, false, true, true, false,
+            "Static FBX geometry, geometric transforms, native material scalars, ordered node-material slots, bounded polygon material, normal and UV mappings, external file-texture candidates, embedded Video content, and an explicit-linear local-transform KSANIM bridge are converted; native-pivot evaluation, non-linear animation, skinning, and Image records remain unsupported"};
 }
 
 FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLimits limits) {
@@ -1962,7 +2071,46 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
             links.push_back(std::move(link));
         }
     }
-    std::set<std::int64_t> supportedFileTextures;
+    std::map<std::int64_t, std::int64_t> videoForTexture;
+    for (const auto& link : links) {
+        if (link.kind != "OO" || link.target == 0) continue;
+        const auto& source = records[byId.at(link.source)];
+        const auto& target = records[byId.at(link.target)];
+        if (source.node->name != "Video" || target.node->name != "Texture")
+            continue;
+        const auto [iterator, inserted] =
+            videoForTexture.emplace(target.id, source.id);
+        if (!inserted)
+            fail("invalid_embedded_image",
+                 iterator->second == source.id
+                     ? "FBX Texture has a duplicate Video connection"
+                     : "FBX Texture has multiple embedded Video sources",
+                 "Objects/Texture/" + std::to_string(target.id));
+        chargeAssociativeNode(
+            budget,
+            sizeof(std::pair<const std::int64_t, std::int64_t>),
+            "scene/embedded video links");
+    }
+
+    std::set<std::int64_t> supportedTextures;
+    std::map<std::int64_t, std::size_t> imageByVideo;
+    std::map<std::int64_t, EmbeddedVideoSource> embeddedSources;
+    for (const auto& [textureId, videoId] : videoForTexture) {
+        (void)textureId;
+        if (embeddedSources.contains(videoId)) continue;
+        const auto& video = records[byId.at(videoId)];
+        const auto videoPath =
+            "Objects/Video/" + std::to_string(video.id);
+        auto embedded =
+            embeddedVideoSource(video, limits, budget, videoPath);
+        chargeAssociativeNode(
+            budget,
+            sizeof(std::pair<const std::int64_t, EmbeddedVideoSource>),
+            "scene/embedded video sources");
+        embeddedSources.emplace(videoId, std::move(embedded));
+    }
+    std::size_t embeddedImageBytes = 0u;
+    std::size_t textureReferenceCount = 0u;
     for (std::size_t connectionIndex = 0u; connectionIndex < links.size();
          ++connectionIndex) {
         const auto& link = links[connectionIndex];
@@ -1972,23 +2120,87 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
         const auto& target = records[byId.at(link.target)];
         if (source.node->name != "Texture" || target.node->name != "Material") continue;
         const auto path = "Objects/Texture/" + std::to_string(source.id);
-        auto basename = fileTextureBasename(source, limits, budget, path);
-        if (basename.empty()) continue;
-        if (result.file_texture_candidates.size() >= limits.max_texture_references)
-            fail("texture_reference_limit",
-                 "FBX file texture reference count exceeds its limit", path);
         const auto material = materialIds.find(target.id);
         if (material == materialIds.end())
             fail("invalid_reference", "FBX Texture references a missing Material", path);
-        budget.add(link.property.size(), path);
-        reserveForAppend(result.file_texture_candidates,
-                         result.file_texture_candidates.size() + 1u, budget,
-                         "scene/file texture candidates");
-        result.file_texture_candidates.push_back(
-            {material->second, source.id, link.property, std::move(basename),
-             link.connection_order});
-        (void)insertSet(supportedFileTextures, source.id, budget,
-                        "scene/supported file textures");
+        bool supported = false;
+        auto basename = fileTextureBasename(source, limits, budget, path);
+        if (!basename.empty()) {
+            if (textureReferenceCount >= limits.max_texture_references)
+                fail("texture_reference_limit",
+                     "FBX texture reference count exceeds its limit", path);
+            ++textureReferenceCount;
+            budget.add(link.property.size(), path);
+            reserveForAppend(result.file_texture_candidates,
+                             result.file_texture_candidates.size() + 1u,
+                             budget, "scene/file texture candidates");
+            result.file_texture_candidates.push_back(
+                {material->second, source.id, link.property,
+                 std::move(basename), link.connection_order});
+            supported = true;
+        }
+
+        const auto videoLink = videoForTexture.find(source.id);
+        if (videoLink != videoForTexture.end()) {
+            const auto& video = records[byId.at(videoLink->second)];
+            const auto videoPath =
+                "Objects/Video/" + std::to_string(video.id);
+            const auto& embedded = embeddedSources.at(video.id);
+            if (embedded.content != nullptr) {
+                if (textureReferenceCount >= limits.max_texture_references)
+                    fail("texture_reference_limit",
+                         "FBX texture reference count exceeds its limit", path);
+                ++textureReferenceCount;
+                std::size_t imageIndex = 0u;
+                const auto existing = imageByVideo.find(video.id);
+                if (existing != imageByVideo.end()) {
+                    imageIndex = existing->second;
+                } else {
+                    if (result.embedded_images.size() >=
+                        limits.max_embedded_images)
+                        fail("embedded_image_limit",
+                             "FBX embedded image count exceeds its limit",
+                             videoPath);
+                    if (embedded.content->size() >
+                            limits.max_embedded_image_total_bytes ||
+                        embeddedImageBytes >
+                            limits.max_embedded_image_total_bytes -
+                                embedded.content->size())
+                        fail("embedded_image_limit",
+                             "FBX embedded image bytes exceed the aggregate limit",
+                             videoPath);
+                    embeddedImageBytes += embedded.content->size();
+                    budget.add(checkedAdd(embedded.basename.size(),
+                                          embedded.content->size(), videoPath),
+                               "scene/embedded images");
+                    reserveForAppend(result.embedded_images,
+                                     result.embedded_images.size() + 1u,
+                                     budget, "scene/embedded images");
+                    imageIndex = result.embedded_images.size();
+                    result.embedded_images.push_back(
+                        {video.id, embedded.basename,
+                         *embedded.content});
+                    chargeAssociativeNode(
+                        budget,
+                        sizeof(std::pair<const std::int64_t, std::size_t>),
+                        "scene/embedded image IDs");
+                    imageByVideo.emplace(video.id, imageIndex);
+                }
+                budget.add(link.property.size(), path);
+                reserveForAppend(result.embedded_texture_candidates,
+                                 result.embedded_texture_candidates.size() + 1u,
+                                 budget,
+                                 "scene/embedded texture candidates");
+                result.embedded_texture_candidates.push_back(
+                    {material->second, source.id, video.id, imageIndex,
+                     link.property, link.connection_order});
+                result.embedded_image_compatibility = true;
+                supported = true;
+            }
+        }
+        if (supported)
+            (void)insertSet(supportedTextures, source.id, budget,
+                            "scene/supported textures");
     }
     std::sort(result.file_texture_candidates.begin(),
               result.file_texture_candidates.end(),
@@ -2004,9 +2216,23 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
                       right.connection_order};
                   return leftKey < rightKey;
               });
+    std::sort(result.embedded_texture_candidates.begin(),
+              result.embedded_texture_candidates.end(),
+              [](const FbxMaterialEmbeddedTextureCandidate& left,
+                 const FbxMaterialEmbeddedTextureCandidate& right) {
+                  const auto leftKey = std::tuple{
+                      left.material,
+                      *fbxNativeFileTextureChannelRank(left.channel),
+                      left.connection_order};
+                  const auto rightKey = std::tuple{
+                      right.material,
+                      *fbxNativeFileTextureChannelRank(right.channel),
+                      right.connection_order};
+                  return leftKey < rightKey;
+              });
     for (const auto& record : records) {
         if (record.node->name != "Texture" ||
-            supportedFileTextures.contains(record.id))
+            supportedTextures.contains(record.id))
             continue;
         addDiagnostic(
             result, diagnostics, FbxConversionSeverity::warning,

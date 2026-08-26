@@ -22,7 +22,8 @@ RGB24 to RGBA8 conversion. FBX support includes a bounded binary/ASCII DOM and
 a static-geometry conversion subset. The ASCII parser converts declared
 numeric arrays to typed FBX arrays. The converter supports one
 `ByPolygonVertex`/`IndexToDirect` UV layer, expands face-varying seams, and
-matches the production importer by negating V. It rejects count mismatches,
+matches the production importer by negating V. It also retains bounded raw
+`Video.Content` data from binary and ASCII FBX files. It rejects count mismatches,
 non-finite values, truncated blocks, invalid UV indices, and input or output
 that exceeds the configured budgets.
 
@@ -162,7 +163,7 @@ out/native/dev/native/apex-native --invert-ai-spline fast_lane.ai inverted.ai \
 out/native/dev/native/apex-native --save-ai-spline fast_lane.ai fast_lane.ai
 out/native/dev/native/apex-native --window vulkan --frames 300
 out/native/dev/native/apex-native --window vulkan \
-  --fbx model.fbx --fbx-assets path/to/authorized/assets \
+  --fbx model.fbx [--fbx-assets path/to/authorized/assets] \
   --fbx-animation 0 --animation-position 0.5 \
   --shader-family ksPerPixel --shader-vertex stock.vert.spv \
   --shader-fragment stock.frag.spv
@@ -648,9 +649,9 @@ bounded transforms, native material values, ordered node materials, and
 supported normal, UV, and material layers. Each material slot remains signed
 until the render adapter applies the recovered fallback behavior. Its aggregate
 budget includes temporary containers, copied strings, expanded vertices,
-material slots, and output containers. It diagnoses embedded images, skinning,
-unsupported animation data, mappings outside the supported subsets, and
-advanced transform semantics.
+material slots, raw image data, and output containers. It diagnoses skinning,
+unsupported animation data, `Image` records, unsupported layer mappings, and
+advanced transform semantics. The raw image path supports `Video.Content` only.
 
 The bounded FBX render adapter now creates an owned KN5-compatible CPU model.
 Vulkan and D3D12 consume the same regenerated scene. The adapter preserves
@@ -662,19 +663,30 @@ source behavior produce a staged model. A staged model cannot enter a GPU
 backend. Malformed hierarchy, geometry, material, texture, and limit data fail
 atomically and do not publish a partial model.
 
+The adapter also validates owned `Video.Content` bytes before it copies them.
+Nonempty embedded content takes priority over an external file candidate.
+This priority matches the WebGL importer. It is not recovered ksEditor behavior.
+Malformed embedded data stages all embedded textures without a partial copy.
+The adapter validates all connected embedded payloads before it selects one
+payload for each material. Thus, an invalid lower-priority payload also stages
+the embedded texture set.
+
 The application layer now opens caller-owned FBX bytes as a standard preview
 document. It accepts only a logical source name. External textures require an
 explicit `AssetSource` grant. A supported file-texture record does not count as
-an embedded-image gap after the authority resolves it. Embedded images and
-unsupported texture records remain staged. The FBX viewport overload rejects a
-staged document before it creates a Vulkan or D3D12 resource.
+an image gap after the authority resolves it. Supported `Video.Content` records
+do not require an asset grant. Unsupported texture records remain staged. The
+FBX viewport overload rejects a staged document before it creates a Vulkan or
+D3D12 resource.
 The `--inspect-fbx` command uses this application path without creating a GPU
 backend. It reports staged models when no asset directory is granted. The
 optional `--fbx-assets` directory is the only authority for external textures.
 The command also reports bounded clip metadata for each converted animation.
 Window rendering uses `--fbx` as a separate model source. It requires an
-explicit `--fbx-assets` directory and caller-supplied `ksPerPixel` modules for
-the selected backend. `--fbx-animation` selects one converted clip by index.
+explicit `--fbx-assets` directory for external textures. Embedded-only files do
+not require this directory. Window rendering requires caller-supplied
+`ksPerPixel` modules for the selected backend. `--fbx-animation` selects one
+converted clip by index.
 `--animation-position` selects a fixed normalized position and clamps it to the
 range from zero to one. The shell applies the clip to exact-name node wrappers
 before it rebuilds the shared scene. Invalid and staged FBX documents, and

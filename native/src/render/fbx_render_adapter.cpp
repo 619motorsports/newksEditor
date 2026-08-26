@@ -1,7 +1,10 @@
 #include "apex/render/fbx_render_adapter.hpp"
 
+#include "apex/render/decoded_dds_texture.hpp"
+
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -9,6 +12,7 @@
 #include <map>
 #include <new>
 #include <optional>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -90,20 +94,40 @@ bool finite_matrix(const Matrix4& matrix) {
 
 bool valid_texture_basename(std::string_view value,
                             std::size_t max_bytes) noexcept {
-    if (value.empty() || value.size() > max_bytes || value == "." ||
-        value == "..")
+    if (value.empty() || value.size() > max_bytes)
         return false;
-    return std::all_of(value.begin(), value.end(), [](char character) {
-        const auto byte = static_cast<unsigned char>(character);
-        return character != '/' && character != '\\' && character != ':' &&
-               byte >= 0x20U && byte != 0x7fU;
-    });
+    std::size_t first = 0U;
+    while (first < value.size() &&
+           std::isspace(static_cast<unsigned char>(value[first])) != 0)
+        ++first;
+    std::size_t last = value.size();
+    while (last > first &&
+           std::isspace(static_cast<unsigned char>(value[last - 1U])) != 0)
+        --last;
+    const auto trimmed = value.substr(first, last - first);
+    if (trimmed.empty() || trimmed == "." || trimmed == "..") return false;
+    const bool characters_valid =
+        std::all_of(value.begin(), value.end(), [&](char character) {
+            const auto byte = static_cast<unsigned char>(character);
+            return character != '/' && character != '\\' &&
+                   character != ':' && byte >= 0x20U && byte != 0x7fU;
+        });
+    return characters_valid;
 }
 
 std::string texture_key(std::string_view value) {
+    std::size_t first = 0U;
+    while (first < value.size() &&
+           std::isspace(static_cast<unsigned char>(value[first])) != 0)
+        ++first;
+    std::size_t last = value.size();
+    while (last > first &&
+           std::isspace(static_cast<unsigned char>(value[last - 1U])) != 0)
+        --last;
     std::string result;
-    result.reserve(value.size());
-    for (const char character : value) {
+    result.reserve(last - first);
+    for (std::size_t index = first; index < last; ++index) {
+        const char character = value[index];
         const auto byte = static_cast<unsigned char>(character);
         result.push_back(byte >= static_cast<unsigned char>('A') &&
                                  byte <= static_cast<unsigned char>('Z')
@@ -357,6 +381,8 @@ public:
 private:
     void validate_limits() const {
         if (limits_.max_materials == 0U || limits_.max_textures == 0U ||
+            limits_.max_embedded_images == 0U ||
+            limits_.max_embedded_candidates == 0U ||
             limits_.max_nodes == 0U || limits_.max_meshes == 0U ||
             limits_.max_batches_per_geometry == 0U ||
             limits_.max_vertices == 0U || limits_.max_indices == 0U ||
@@ -365,7 +391,11 @@ private:
             limits_.max_depth == 0U || limits_.max_name_bytes == 0U ||
             limits_.max_diagnostics == 0U ||
             limits_.max_diagnostic_bytes == 0U ||
-            limits_.max_output_bytes == 0U)
+            limits_.max_output_bytes == 0U ||
+            limits_.max_total_embedded_source_bytes == 0U ||
+            limits_.max_total_embedded_decoded_bytes == 0U ||
+            limits_.embedded_decode.maxInputBytes == 0U ||
+            limits_.embedded_decode.maxOutputBytes == 0U)
             fail(FbxRenderAdapterStatus::invalid_request, "invalid_limits",
                  "FBX render adapter limits are invalid", "limits");
     }
@@ -386,6 +416,14 @@ private:
                 static_cast<std::size_t>(apex::scene::invalid_material_id))
             fail(FbxRenderAdapterStatus::resource_limit, "material_limit",
                  "FBX material count exceeds the adapter limit", "materials");
+        if (conversion_.embedded_images.size() >
+                limits_.max_embedded_images ||
+            conversion_.embedded_texture_candidates.size() >
+                limits_.max_embedded_candidates)
+            fail(FbxRenderAdapterStatus::resource_limit,
+                 "embedded_texture_count_limit",
+                 "FBX embedded texture metadata exceeds the adapter limit",
+                 "textures/embedded");
         if (conversion_.snapshot.materials.size() !=
             conversion_.material_parameters.size())
             fail(FbxRenderAdapterStatus::invalid_request,
@@ -508,6 +546,256 @@ private:
             model_.materials.push_back(std::move(material));
         }
 
+        // Embedded Video content is a compatibility path used by the WebGL
+        // loader. Recovered ksEditor behavior remains represented separately
+        // by file_texture_candidates and the external authority below.
+        std::map<std::string,
+                 std::tuple<bool, std::size_t, std::size_t>> by_name;
+        budget_.add(
+            checked_multiply(material_count, sizeof(std::size_t),
+                             "textures/embedded metadata"),
+            "textures/embedded metadata");
+        budget_.add(
+            checked_multiply(conversion_.embedded_texture_candidates.size(),
+                             sizeof(std::size_t),
+                             "textures/embedded metadata"),
+            "textures/embedded metadata");
+        budget_.add(
+            checked_multiply(conversion_.embedded_images.size(), sizeof(bool),
+                             "textures/embedded metadata"),
+            "textures/embedded metadata");
+        std::vector<std::size_t> selected_embedded(
+            material_count, std::numeric_limits<std::size_t>::max());
+        std::vector<std::size_t> embedded_order(
+            conversion_.embedded_texture_candidates.size());
+        for (std::size_t index = 0U; index < embedded_order.size(); ++index)
+            embedded_order[index] = index;
+        std::sort(embedded_order.begin(), embedded_order.end(),
+                  [&](std::size_t left_index, std::size_t right_index) {
+                      const auto& left = conversion_.embedded_texture_candidates
+                          [left_index];
+                      const auto& right = conversion_.embedded_texture_candidates
+                          [right_index];
+                      return std::tuple{
+                                 left.material,
+                                 apex::formats::fbxNativeFileTextureChannelRank(
+                                     left.channel)
+                                     .value_or(std::numeric_limits<std::size_t>::max()),
+                                 left.connection_order, left.texture_object_id,
+                                 left_index} <
+                             std::tuple{
+                                 right.material,
+                                 apex::formats::fbxNativeFileTextureChannelRank(
+                                     right.channel)
+                                     .value_or(std::numeric_limits<std::size_t>::max()),
+                                 right.connection_order, right.texture_object_id,
+                                 right_index};
+                  });
+
+        std::set<std::int64_t> video_ids;
+        std::vector<bool> image_referenced(
+            conversion_.embedded_images.size(), false);
+        std::size_t total_source_bytes = 0U;
+        bool embedded_payloads_valid = true;
+        for (std::size_t image_index = 0U;
+             image_index < conversion_.embedded_images.size(); ++image_index) {
+            const auto& image = conversion_.embedded_images[image_index];
+            const auto path =
+                "textures/embedded/" + std::to_string(image_index);
+            if (image.video_object_id <= 0 ||
+                !video_ids.insert(image.video_object_id).second)
+                fail(FbxRenderAdapterStatus::invalid_request,
+                     "invalid_embedded_image_identity",
+                     "FBX embedded image identity is invalid", path);
+            budget_.add(sizeof(std::int64_t),
+                        "textures/embedded video identities");
+            if (!valid_texture_basename(image.basename,
+                                        limits_.max_name_bytes))
+                fail(FbxRenderAdapterStatus::invalid_request,
+                     "invalid_texture_name",
+                     "FBX embedded texture basename is unsafe", path);
+            if (image.content.empty() ||
+                image.content.size() >
+                    std::numeric_limits<std::uint32_t>::max() ||
+                image.content.size() > limits_.embedded_decode.maxInputBytes ||
+                image.content.size() >
+                    limits_.max_total_embedded_source_bytes -
+                        total_source_bytes)
+                fail(FbxRenderAdapterStatus::resource_limit,
+                     "embedded_texture_source_limit",
+                     "FBX embedded texture source bytes exceed their limit",
+                     path);
+            total_source_bytes += image.content.size();
+        }
+
+        std::optional<std::pair<apex::scene::MaterialId,
+                                std::pair<std::size_t, std::size_t>>>
+            previous_embedded_order;
+        for (const auto candidate_index : embedded_order) {
+            const auto& candidate = conversion_.embedded_texture_candidates
+                [candidate_index];
+            const auto rank =
+                apex::formats::fbxNativeFileTextureChannelRank(
+                    candidate.channel);
+            if (candidate.material >= material_count ||
+                candidate.texture_object_id <= 0 ||
+                candidate.video_object_id <= 0 || !rank.has_value() ||
+                candidate.embedded_image_index >=
+                    conversion_.embedded_images.size() ||
+                conversion_.embedded_images[candidate.embedded_image_index]
+                        .video_object_id != candidate.video_object_id)
+                fail(FbxRenderAdapterStatus::invalid_request,
+                     "invalid_embedded_texture_candidate",
+                     "FBX embedded texture candidate is malformed",
+                     "textures/embedded/candidates/" +
+                         std::to_string(candidate_index));
+            const auto source_order = std::pair{*rank,
+                                                 candidate.connection_order};
+            if (previous_embedded_order.has_value() &&
+                previous_embedded_order->first == candidate.material &&
+                previous_embedded_order->second == source_order)
+                fail(FbxRenderAdapterStatus::invalid_request,
+                     "duplicate_embedded_texture_order",
+                     "FBX embedded texture candidates duplicate one source order",
+                     "textures/embedded/candidates/" +
+                         std::to_string(candidate_index));
+            previous_embedded_order =
+                std::pair{candidate.material, source_order};
+            image_referenced[candidate.embedded_image_index] = true;
+            if (selected_embedded[candidate.material] ==
+                std::numeric_limits<std::size_t>::max())
+                selected_embedded[candidate.material] = candidate_index;
+        }
+        if (!std::all_of(image_referenced.begin(), image_referenced.end(),
+                         [](bool value) { return value; }))
+            fail(FbxRenderAdapterStatus::invalid_request,
+                 "unreferenced_embedded_image",
+                 "FBX embedded image table contains an unreferenced payload",
+                 "textures/embedded");
+
+        std::size_t total_decoded_bytes = 0U;
+        for (std::size_t image_index = 0U;
+             image_index < conversion_.embedded_images.size(); ++image_index) {
+            const auto& image = conversion_.embedded_images[image_index];
+            auto decode_limits = limits_.embedded_decode;
+            decode_limits.maxInputBytes = std::min(
+                decode_limits.maxInputBytes, image.content.size());
+            const auto remaining_decoded =
+                limits_.max_total_embedded_decoded_bytes -
+                total_decoded_bytes;
+            if (remaining_decoded == 0U)
+                fail(FbxRenderAdapterStatus::resource_limit,
+                     "embedded_texture_decoded_limit",
+                     "Decoded FBX embedded texture bytes exceed their limit",
+                     "textures/embedded/" + std::to_string(image_index));
+            decode_limits.maxOutputBytes = std::min(
+                decode_limits.maxOutputBytes,
+                remaining_decoded);
+            const auto planned = plan_decoded_texture_payload(
+                image.content, image.basename, decode_limits);
+            if (!planned.ok()) {
+                if (planned.diagnostic.code == "input_too_large" ||
+                    planned.diagnostic.code == "output_too_large" ||
+                    planned.diagnostic.code == "allocation_failed")
+                    fail(FbxRenderAdapterStatus::resource_limit,
+                         "embedded_texture_decode_" +
+                             planned.diagnostic.code,
+                         planned.diagnostic.message,
+                         "textures/embedded/" +
+                             std::to_string(image_index));
+                embedded_payloads_valid = false;
+                staged_ = true;
+                add_diagnostic(
+                    "embedded_texture_decode_" + planned.diagnostic.code,
+                    planned.diagnostic.message,
+                    "textures/embedded/" + std::to_string(image_index));
+                continue;
+            }
+            for (const auto& level : planned.plan.levels) {
+                if (level.pixels.size() >
+                    limits_.max_total_embedded_decoded_bytes -
+                        total_decoded_bytes)
+                    fail(FbxRenderAdapterStatus::resource_limit,
+                         "embedded_texture_decoded_limit",
+                         "Decoded FBX embedded texture bytes exceed their limit",
+                         "textures/embedded/" +
+                             std::to_string(image_index));
+                total_decoded_bytes += level.pixels.size();
+            }
+        }
+
+        if (embedded_payloads_valid) {
+            std::map<std::size_t, std::size_t> emitted_images;
+            for (std::size_t material = 0U; material < material_count;
+                 ++material) {
+                const auto candidate_index = selected_embedded[material];
+                if (candidate_index == std::numeric_limits<std::size_t>::max())
+                    continue;
+                const auto& candidate =
+                    conversion_.embedded_texture_candidates[candidate_index];
+                const auto image_index = candidate.embedded_image_index;
+                const auto& image = conversion_.embedded_images[image_index];
+                std::size_t texture_index = 0U;
+                const auto existing_image = emitted_images.find(image_index);
+                if (existing_image != emitted_images.end()) {
+                    texture_index = existing_image->second;
+                } else {
+                    const auto canonical_name = texture_key(image.basename);
+                    const auto collision = by_name.find(canonical_name);
+                    if (collision != by_name.end())
+                        fail(FbxRenderAdapterStatus::invalid_request,
+                             "texture_name_collision",
+                             "Distinct FBX texture payloads use the same basename",
+                             "textures/embedded/" +
+                                 std::to_string(image_index));
+                    if (model_.textures.size() >= limits_.max_textures)
+                        fail(FbxRenderAdapterStatus::resource_limit,
+                             "texture_limit",
+                             "FBX texture count exceeds the adapter limit",
+                             "textures");
+                    budget_.add(
+                        checked_add(sizeof(Kn5Texture), image.basename.size(),
+                                    "textures"),
+                        "textures");
+                    budget_.add(image.content.size(), "textures");
+                    Kn5Texture texture;
+                    texture.active = true;
+                    texture.name = image.basename;
+                    texture.size = static_cast<std::uint32_t>(
+                        image.content.size());
+                    texture.data = image.content;
+                    texture_index = model_.textures.size();
+                    model_.textures.push_back(std::move(texture));
+                    by_name.emplace(canonical_name,
+                                    std::tuple{true, image_index,
+                                               texture_index});
+                    budget_.add(
+                        sizeof(std::pair<
+                            const std::string,
+                            std::tuple<bool, std::size_t, std::size_t>>) +
+                            canonical_name.size(),
+                        "textures/embedded names");
+                    emitted_images.emplace(image_index, texture_index);
+                    budget_.add(
+                        sizeof(std::pair<const std::size_t, std::size_t>),
+                        "textures/embedded emitted images");
+                }
+                material_has_texture_[material] = true;
+                const auto& emitted_name = model_.textures[texture_index].name;
+                budget_.add(sizeof(apex::formats::Kn5MaterialResource) +
+                                std::string_view{"txDiffuse"}.size() +
+                                emitted_name.size(),
+                            "materials/resources");
+                model_.materials[material].resources.push_back(
+                    {"txDiffuse", 0U, emitted_name});
+            }
+        }
+        if (!conversion_.embedded_texture_candidates.empty())
+            add_diagnostic(
+                "embedded_image_compatibility",
+                "FBX Video.Content uses WebGL compatibility behavior, not recovered ksEditor image loading",
+                "textures/embedded");
+
         if (textures_ == nullptr) return;
         if (!textures_->ok() ||
             textures_->material_selection_indices.size() != material_count ||
@@ -518,12 +806,16 @@ private:
                  "invalid_texture_authority",
                  "FBX texture authority result is incomplete", "textures");
 
-        std::map<std::string, std::pair<std::size_t, std::size_t>> by_name;
         std::vector<bool> selection_seen(textures_->selections.size(), false);
         for (std::size_t material = 0U; material < material_count; ++material) {
             const auto selection_index =
                 textures_->material_selection_indices[material];
             if (selection_index == invalid_fbx_texture_selection) continue;
+            if (material_has_texture_[material])
+                fail(FbxRenderAdapterStatus::invalid_request,
+                     "invalid_texture_authority",
+                     "External FBX texture authority shadows embedded content",
+                     "textures/materials/" + std::to_string(material));
             if (selection_index >= textures_->selections.size())
                 fail(FbxRenderAdapterStatus::invalid_request,
                      "invalid_texture_selection",
@@ -578,13 +870,14 @@ private:
             const auto canonical_name = texture_key(selection.basename);
             const auto existing = by_name.find(canonical_name);
             if (existing != by_name.end()) {
-                if (existing->second.first !=
-                    selection.authority_resource_index)
+                if (std::get<0>(existing->second) ||
+                    std::get<1>(existing->second) !=
+                        selection.authority_resource_index)
                     fail(FbxRenderAdapterStatus::invalid_request,
                          "texture_name_collision",
                          "Distinct FBX texture payloads use the same basename",
                          "textures/materials/" + std::to_string(material));
-                texture_index = existing->second.second;
+                texture_index = std::get<2>(existing->second);
             } else {
                 if (model_.textures.size() >= limits_.max_textures)
                     fail(FbxRenderAdapterStatus::resource_limit,
@@ -610,8 +903,9 @@ private:
                                 selection.basename.size(),
                             "textures");
                 by_name.emplace(canonical_name,
-                                std::pair{selection.authority_resource_index,
-                                          texture_index});
+                                std::tuple{false,
+                                           selection.authority_resource_index,
+                                           texture_index});
             }
             material_has_texture_[material] = true;
             const auto& emitted_name = model_.textures[texture_index].name;

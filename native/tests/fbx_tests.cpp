@@ -77,6 +77,27 @@ std::vector<std::uint8_t> binaryFloatArray(bool compressed) {
     bytes.insert(bytes.end(), encoded.begin(), encoded.end()); bytes.resize(bytes.size()+13u, 0u); bytes.resize(bytes.size()+13u, 0u); return bytes;
 }
 
+std::vector<std::uint8_t> binaryRawProperty(
+    std::vector<std::uint8_t> payload = {0u, 1u, 2u, 0xffu}) {
+    std::vector<std::uint8_t> bytes{'K','a','y','d','a','r','a',' ','F','B','X',' ','B','i','n','a','r','y',' ',' ',0x1a,0x00,0x00};
+    put32(bytes, 7400u);
+    const auto start = bytes.size();
+    const auto propertyBytes = 1u + 4u + payload.size();
+    const auto end = static_cast<std::uint32_t>(
+        start + 13u + 4u + propertyBytes + 13u);
+    put32(bytes, end);
+    put32(bytes, 1u);
+    put32(bytes, static_cast<std::uint32_t>(propertyBytes));
+    bytes.push_back(4u);
+    bytes.insert(bytes.end(), {'R','o','o','t'});
+    bytes.push_back('R');
+    put32(bytes, static_cast<std::uint32_t>(payload.size()));
+    bytes.insert(bytes.end(), payload.begin(), payload.end());
+    bytes.resize(bytes.size() + 13u, 0u);
+    bytes.resize(bytes.size() + 13u, 0u);
+    return bytes;
+}
+
 std::string asciiMinimal() {
     return "; FBX 7.5.0 project file\nFBXVersion: 7400\nObjects: {\n Model: 1, \"Model::Cube\", \"Mesh\" {\n  Version: 232\n }\n}\n";
 }
@@ -89,6 +110,17 @@ std::string asciiArrayTriangle(std::string_view vertexCount = "9",
         std::string(vertexCount) + " {\n   a: " + std::string(vertices) +
         "\n  }\n  PolygonVertexIndex: *" + std::string(indexCount) + " {\n   a: " +
         std::string(indices) + "\n  }\n }\n}\n";
+}
+
+std::string asciiEmbeddedContent(std::string_view payload = "AAEC/w==",
+                                 bool continued = true,
+                                 bool trailingComma = false) {
+    return "FBXVersion: 7400\nObjects: {\n"
+           " Video: 600, \"Video::Paint\", \"Clip\" {\n"
+           "  Content: " +
+           std::string(continued ? ",\n   \"" : "\"") +
+           std::string(payload) + "\"" +
+           std::string(trailingComma ? "," : "") + "\n }\n}\n";
 }
 
 template <typename Function>
@@ -161,6 +193,101 @@ void parsesBoundedAsciiNumericArrays() {
             "ASCII integral array is represented as FbxArray");
     require(std::get<std::vector<std::int64_t>>(*indices) == std::vector<std::int64_t>{0, 1, -3},
             "ASCII index array values");
+}
+
+void parsesBoundedEmbeddedContent() {
+    for (const bool continued : {false, true}) {
+        const auto text = asciiEmbeddedContent("AAEC/w==", continued);
+        const auto document = apex::formats::parseFbx({
+            reinterpret_cast<const std::uint8_t*>(text.data()), text.size()});
+        const auto& content =
+            document.roots[1].children[0].children[0];
+        require(content.name == "Content" && content.properties.size() == 1u &&
+                    content.properties[0].code == 'R' &&
+                    std::get<std::vector<std::uint8_t>>(
+                        content.properties[0].values[0]) ==
+                        std::vector<std::uint8_t>{0u, 1u, 2u, 0xffu},
+                "ASCII embedded Content decodes to bounded raw bytes");
+    }
+    const auto commaText = asciiEmbeddedContent("AAEC/w==", true, true);
+    const auto commaDocument = apex::formats::parseFbx({
+        reinterpret_cast<const std::uint8_t*>(commaText.data()),
+        commaText.size()});
+    require(std::get<std::vector<std::uint8_t>>(
+                commaDocument.roots[1].children[0].children[0]
+                    .properties[0].values[0]) ==
+                std::vector<std::uint8_t>{0u, 1u, 2u, 0xffu},
+            "ASCII embedded Content accepts the exporter trailing comma");
+    auto sameLine = asciiEmbeddedContent();
+    const auto continuation = sameLine.find(",\n   \"");
+    require(continuation != std::string::npos,
+            "ASCII embedded fixture has a continuation line");
+    sameLine.replace(continuation, 6U, ", \"");
+    const auto sameLineDocument = apex::formats::parseFbx({
+        reinterpret_cast<const std::uint8_t*>(sameLine.data()),
+        sameLine.size()});
+    require(std::get<std::vector<std::uint8_t>>(
+                sameLineDocument.roots[1].children[0].children[0]
+                    .properties[0].values[0]) ==
+                std::vector<std::uint8_t>{0u, 1u, 2u, 0xffu},
+            "ASCII embedded Content accepts a same-line payload");
+
+    const auto binary = apex::formats::parseFbx(binaryRawProperty());
+    require(std::get<std::vector<std::uint8_t>>(
+                binary.roots[0].properties[0].values[0]) ==
+                std::vector<std::uint8_t>{0u, 1u, 2u, 0xffu},
+            "binary raw property retains bounded bytes");
+}
+
+void rejectsMalformedEmbeddedContent() {
+    for (const auto invalid : {"AA?C", "AA=A", "AAE"}) {
+        const auto text = asciiEmbeddedContent(invalid);
+        expectsFbxError([&] {
+            (void)apex::formats::parseFbx({
+                reinterpret_cast<const std::uint8_t*>(text.data()),
+                text.size()});
+        }, "content_base64", FbxStage::ascii_dom);
+    }
+
+    const std::string missing =
+        "FBXVersion: 7400\nObjects: {\n Video: 600, \"Video::Paint\", \"Clip\" {\n"
+        "  Content: ,\n }\n}\n";
+    expectsFbxError([&] {
+        (void)apex::formats::parseFbx({
+            reinterpret_cast<const std::uint8_t*>(missing.data()),
+            missing.size()});
+    }, "embedded_content", FbxStage::ascii_tokens);
+
+    auto rawLimits = apex::formats::FbxLimits{};
+    rawLimits.maxRawPropertyBytes = 3u;
+    const auto valid = asciiEmbeddedContent();
+    expectsFbxError([&] {
+        (void)apex::formats::parseFbx({
+            reinterpret_cast<const std::uint8_t*>(valid.data()), valid.size()},
+            "embedded.fbx", rawLimits);
+    }, "token_limit", FbxStage::ascii_tokens);
+
+    auto binary = binaryRawProperty();
+    // Raw property length starts after the 27-byte file header, 13-byte node
+    // header, four-byte node name, and one-byte property type.
+    binary[45u] = 0xffu;
+    expectsFbxError([&] { (void)apex::formats::parseFbx(binary); },
+                    "truncated", FbxStage::binary_dom);
+
+    const auto complete = asciiEmbeddedContent();
+    const auto bytes = std::span<const std::uint8_t>(
+        reinterpret_cast<const std::uint8_t*>(complete.data()),
+        complete.size());
+    for (std::size_t length = 0u; length + 1u < bytes.size(); ++length) {
+        bool rejected = false;
+        try {
+            (void)apex::formats::parseFbx(bytes.first(length),
+                                          "embedded-prefix.fbx");
+        } catch (const FbxError&) {
+            rejected = true;
+        }
+        require(rejected, "ASCII embedded Content prefix truncation accepted");
+    }
 }
 
 void rejectsMalformedAsciiNumericArrays() {
@@ -367,6 +494,8 @@ int main() {
         inspectsHeadersExactly();
         parsesBinaryAndAsciiDom();
         parsesBoundedAsciiNumericArrays();
+        parsesBoundedEmbeddedContent();
+        rejectsMalformedEmbeddedContent();
         rejectsMalformedAsciiNumericArrays();
         validatesBinaryBoundaryAndFooterRules();
         rejectsNonFiniteAndPreservesSignedBits();

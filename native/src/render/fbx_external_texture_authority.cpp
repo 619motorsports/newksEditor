@@ -112,16 +112,25 @@ FbxExternalTextureAuthorityResult resolve_fbx_external_texture_authority(
 
     const auto material_count = conversion.snapshot.materials.size();
     const auto candidate_count = conversion.file_texture_candidates.size();
+    const auto embedded_candidate_count =
+        conversion.embedded_texture_candidates.size();
     if (material_count > limits.authority.max_materials)
         return failure(Status::resource_limit, "fbx_texture_material_limit",
                        "FBX material count exceeds the configured limit");
-    if (candidate_count > limits.max_candidates)
+    if (candidate_count > limits.max_candidates ||
+        embedded_candidate_count > limits.max_candidates - candidate_count)
         return failure(Status::resource_limit, "fbx_texture_candidate_limit",
                        "FBX texture candidate count exceeds the configured limit");
 
     std::size_t metadata_bytes = 0U;
     std::size_t amount = 0U;
     if (!checked_multiply(material_count, sizeof(std::size_t) * 2U, amount) ||
+        !checked_add(metadata_bytes, amount, metadata_bytes) ||
+        !checked_multiply(material_count, sizeof(bool), amount) ||
+        !checked_add(metadata_bytes, amount, metadata_bytes) ||
+        !checked_multiply(embedded_candidate_count,
+                          sizeof(apex::formats::FbxMaterialEmbeddedTextureCandidate),
+                          amount) ||
         !checked_add(metadata_bytes, amount, metadata_bytes) ||
         !checked_multiply(candidate_count,
                           sizeof(std::size_t) +
@@ -132,6 +141,37 @@ FbxExternalTextureAuthorityResult resolve_fbx_external_texture_authority(
         return failure(Status::resource_limit,
                        "fbx_texture_metadata_overflow",
                        "FBX texture metadata size overflows");
+    if (metadata_bytes > limits.max_metadata_bytes)
+        return failure(Status::resource_limit, "fbx_texture_metadata_limit",
+                       "FBX texture metadata exceeds the configured limit");
+
+    std::vector<bool> embedded_material(material_count, false);
+    for (const auto& candidate : conversion.embedded_texture_candidates) {
+        if (candidate.material >= material_count ||
+            candidate.texture_object_id <= 0 ||
+            candidate.video_object_id <= 0 ||
+            !apex::formats::fbxNativeFileTextureChannelRank(candidate.channel)
+                 .has_value() ||
+            candidate.embedded_image_index >=
+                conversion.embedded_images.size() ||
+            conversion.embedded_images[candidate.embedded_image_index]
+                    .video_object_id != candidate.video_object_id ||
+            conversion.embedded_images[candidate.embedded_image_index]
+                    .content.empty())
+            return failure(Status::invalid_request,
+                           "fbx_embedded_texture_candidate_invalid",
+                           "FBX embedded texture candidate is malformed");
+        const auto& image =
+            conversion.embedded_images[candidate.embedded_image_index];
+        if (!checked_add(candidate.channel.size(), image.basename.size(),
+                         amount) ||
+            !checked_add(metadata_bytes, amount, metadata_bytes) ||
+            metadata_bytes > limits.max_metadata_bytes)
+            return failure(Status::resource_limit,
+                           "fbx_texture_metadata_limit",
+                           "FBX texture metadata exceeds the configured limit");
+        embedded_material[candidate.material] = true;
+    }
 
     std::vector<std::size_t> order(candidate_count);
     std::iota(order.begin(), order.end(), 0U);
@@ -193,6 +233,10 @@ FbxExternalTextureAuthorityResult resolve_fbx_external_texture_authority(
         while (end < order.size() &&
                conversion.file_texture_candidates[order[end]].material == material)
             ++end;
+        if (embedded_material[material]) {
+            begin = end;
+            continue;
+        }
         if (end - begin > limits.max_candidates_per_material)
             return failure(Status::resource_limit,
                            "fbx_texture_material_candidate_limit",

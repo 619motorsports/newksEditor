@@ -2,10 +2,14 @@
 
 #include "apex/formats/acd.hpp"
 
+#include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <initializer_list>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -24,6 +28,161 @@ void put32(std::vector<std::uint8_t>& bytes, std::size_t offset,
     bytes[offset + 1U] = static_cast<std::uint8_t>(value >> 8U);
     bytes[offset + 2U] = static_cast<std::uint8_t>(value >> 16U);
     bytes[offset + 3U] = static_cast<std::uint8_t>(value >> 24U);
+}
+
+void append32(std::vector<std::uint8_t>& bytes, std::uint32_t value) {
+    bytes.push_back(static_cast<std::uint8_t>(value));
+    bytes.push_back(static_cast<std::uint8_t>(value >> 8U));
+    bytes.push_back(static_cast<std::uint8_t>(value >> 16U));
+    bytes.push_back(static_cast<std::uint8_t>(value >> 24U));
+}
+
+void append64(std::vector<std::uint8_t>& bytes, std::uint64_t value) {
+    for (unsigned index = 0U; index < 8U; ++index)
+        bytes.push_back(static_cast<std::uint8_t>(value >> (index * 8U)));
+}
+
+struct BinaryNode {
+    std::string name;
+    std::uint32_t property_count = 0U;
+    std::vector<std::uint8_t> properties;
+    std::vector<BinaryNode> children;
+};
+
+std::size_t binary_node_size(const BinaryNode& node) {
+    std::size_t size = 13U + node.name.size() + node.properties.size() + 13U;
+    for (const auto& child : node.children)
+        size += binary_node_size(child);
+    return size;
+}
+
+std::vector<std::uint8_t> binary_node_bytes(const BinaryNode& node,
+                                            std::size_t start) {
+    const auto end = start + binary_node_size(node);
+    require(end <= std::numeric_limits<std::uint32_t>::max(),
+            "binary fixture node offset fits FBX 7.4 fields");
+    std::vector<std::uint8_t> bytes;
+    bytes.reserve(end - start);
+    append32(bytes, static_cast<std::uint32_t>(end));
+    append32(bytes, node.property_count);
+    append32(bytes, static_cast<std::uint32_t>(node.properties.size()));
+    require(node.name.size() <= 255U,
+            "binary fixture node name fits FBX name length field");
+    bytes.push_back(static_cast<std::uint8_t>(node.name.size()));
+    bytes.insert(bytes.end(), node.name.begin(), node.name.end());
+    bytes.insert(bytes.end(), node.properties.begin(), node.properties.end());
+    auto child_start = start + 13U + node.name.size() + node.properties.size();
+    for (const auto& child : node.children) {
+        auto encoded = binary_node_bytes(child, child_start);
+        bytes.insert(bytes.end(), encoded.begin(), encoded.end());
+        child_start += encoded.size();
+    }
+    bytes.resize(bytes.size() + 13U, 0U);
+    require(start + bytes.size() == end,
+            "binary fixture node size matches its end offset");
+    return bytes;
+}
+
+std::vector<std::uint8_t> binary_string_property(std::string_view value) {
+    require(value.size() <= std::numeric_limits<std::uint32_t>::max(),
+            "binary fixture string fits FBX length field");
+    std::vector<std::uint8_t> bytes{'S'};
+    append32(bytes, static_cast<std::uint32_t>(value.size()));
+    bytes.insert(bytes.end(), value.begin(), value.end());
+    return bytes;
+}
+
+std::vector<std::uint8_t> binary_id_property(std::int64_t value) {
+    std::vector<std::uint8_t> bytes{'L'};
+    append64(bytes, static_cast<std::uint64_t>(value));
+    return bytes;
+}
+
+std::vector<std::uint8_t> binary_double_array_property(
+    std::initializer_list<double> values) {
+    std::vector<std::uint8_t> bytes{'d'};
+    append32(bytes, static_cast<std::uint32_t>(values.size()));
+    append32(bytes, 0U);
+    append32(bytes, static_cast<std::uint32_t>(values.size() * sizeof(double)));
+    for (const auto value : values)
+        append64(bytes, std::bit_cast<std::uint64_t>(value));
+    return bytes;
+}
+
+std::vector<std::uint8_t> binary_double_property(double value) {
+    std::vector<std::uint8_t> bytes{'D'};
+    append64(bytes, std::bit_cast<std::uint64_t>(value));
+    return bytes;
+}
+
+std::vector<std::uint8_t> binary_index_array_property(
+    std::initializer_list<std::int32_t> values) {
+    std::vector<std::uint8_t> bytes{'i'};
+    append32(bytes, static_cast<std::uint32_t>(values.size()));
+    append32(bytes, 0U);
+    append32(bytes, static_cast<std::uint32_t>(values.size() * sizeof(std::int32_t)));
+    for (const auto value : values)
+        append32(bytes, static_cast<std::uint32_t>(value));
+    return bytes;
+}
+
+std::vector<std::uint8_t> binary_raw_property(
+    std::span<const std::uint8_t> bytes_in) {
+    require(bytes_in.size() <= std::numeric_limits<std::uint32_t>::max(),
+            "binary fixture raw content fits FBX length field");
+    std::vector<std::uint8_t> bytes{'R'};
+    append32(bytes, static_cast<std::uint32_t>(bytes_in.size()));
+    bytes.insert(bytes.end(), bytes_in.begin(), bytes_in.end());
+    return bytes;
+}
+
+BinaryNode binary_property_node(std::string name,
+                                std::vector<std::uint8_t> property) {
+    BinaryNode result;
+    result.name = std::move(name);
+    result.property_count = 1U;
+    result.properties = std::move(property);
+    return result;
+}
+
+BinaryNode binary_string_node(std::string name, std::string_view value) {
+    return binary_property_node(std::move(name), binary_string_property(value));
+}
+
+BinaryNode binary_array_node(std::string name, std::vector<std::uint8_t> property) {
+    return binary_property_node(std::move(name), std::move(property));
+}
+
+void append_property(std::vector<std::uint8_t>& properties,
+                     std::vector<std::uint8_t> property) {
+    properties.insert(properties.end(), property.begin(), property.end());
+}
+
+BinaryNode binary_object(std::string name, std::int64_t id,
+                         std::string object_name, std::string type,
+                         std::vector<BinaryNode> children = {}) {
+    BinaryNode result;
+    result.name = std::move(name);
+    result.property_count = 3U;
+    append_property(result.properties, binary_id_property(id));
+    append_property(result.properties, binary_string_property(object_name));
+    append_property(result.properties, binary_string_property(type));
+    result.children = std::move(children);
+    return result;
+}
+
+BinaryNode binary_connection(std::string kind, std::int64_t source,
+                             std::int64_t target,
+                             std::string property = {}) {
+    BinaryNode result;
+    result.name = "C";
+    result.property_count = property.empty() ? 3U : 4U;
+    append_property(result.properties, binary_string_property(kind));
+    append_property(result.properties, binary_id_property(source));
+    append_property(result.properties, binary_id_property(target));
+    if (!property.empty())
+        append_property(result.properties, binary_string_property(property));
+    return result;
 }
 
 std::vector<std::uint8_t> rgba8_dds(
@@ -119,6 +278,118 @@ std::string ascii_fbx(bool material_layer = true) {
         "}\n";
 }
 
+std::string ascii_embedded_fbx(std::string_view base64) {
+    auto text = ascii_fbx();
+    const auto objects_end = text.find("}\nConnections: {");
+    require(objects_end != std::string::npos,
+            "ASCII FBX fixture has an Objects terminator");
+    text.insert(
+        objects_end,
+        " Video: 500, \"Video::Paint\", \"Clip\" {\n"
+        "  RelativeFilename: \"embedded.png\"\n"
+        "  Content: ,\n"
+        "  \"" + std::string(base64) + "\"\n"
+        " }\n");
+    const auto connections_end = text.rfind("}\n");
+    require(connections_end != std::string::npos,
+            "ASCII FBX fixture has a Connections terminator");
+    text.insert(connections_end,
+                " C: \"OO\", 500, 400\n");
+    return text;
+}
+
+std::vector<std::uint8_t> binary_embedded_fbx(
+    std::span<const std::uint8_t> png) {
+    BinaryNode normal;
+    normal.name = "LayerElementNormal";
+    normal.children = {
+        binary_string_node("MappingInformationType", "ByPolygonVertex"),
+        binary_string_node("ReferenceInformationType", "Direct"),
+        binary_array_node("Normals", binary_double_array_property(
+                                      {0.0, 0.0, 1.0, 0.0, 0.0, 1.0,
+                                       0.0, 0.0, 1.0}))};
+
+    BinaryNode uv;
+    uv.name = "LayerElementUV";
+    uv.children = {
+        binary_string_node("MappingInformationType", "ByPolygonVertex"),
+        binary_string_node("ReferenceInformationType", "IndexToDirect"),
+        binary_array_node("UV", binary_double_array_property(
+                                  {0.0, 0.0, 1.0, 0.0, 0.0, 1.0})),
+        binary_array_node("UVIndex", binary_index_array_property({0, 1, 2}))};
+
+    BinaryNode materials;
+    materials.name = "LayerElementMaterial";
+    materials.children = {
+        binary_string_node("MappingInformationType", "AllSame"),
+        binary_string_node("ReferenceInformationType", "IndexToDirect"),
+        binary_array_node("Materials", binary_index_array_property({0}))};
+
+    BinaryNode geometry = binary_object(
+        "Geometry", 100, "Geometry::Triangle", "Mesh",
+        {binary_array_node("Vertices", binary_double_array_property(
+                                        {0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                                         0.0, 1.0, 0.0})),
+         binary_array_node("PolygonVertexIndex",
+                           binary_index_array_property({0, 1, -3})),
+         std::move(normal), std::move(uv), std::move(materials)});
+
+    BinaryNode diffuse;
+    diffuse.name = "P";
+    diffuse.property_count = 7U;
+    append_property(diffuse.properties,
+                    binary_string_property("DiffuseColor"));
+    append_property(diffuse.properties, binary_string_property("ColorRGB"));
+    append_property(diffuse.properties, binary_string_property("Color"));
+    append_property(diffuse.properties, binary_string_property(""));
+    append_property(diffuse.properties, binary_double_property(0.8));
+    append_property(diffuse.properties, binary_double_property(0.8));
+    append_property(diffuse.properties, binary_double_property(0.8));
+
+    BinaryNode properties70;
+    properties70.name = "Properties70";
+    properties70.children.push_back(std::move(diffuse));
+    BinaryNode material = binary_object(
+        "Material", 300, "Material::Paint", "Material",
+        {binary_string_node("ShadingModel", "Phong"),
+         std::move(properties70)});
+
+    BinaryNode texture = binary_object(
+        "Texture", 400, "Texture::Paint", "TextureVideoClip",
+        {binary_string_node("FileName", "C:\\car\\texture\\paint.dds")});
+    BinaryNode video = binary_object(
+        "Video", 500, "Video::Paint", "Clip",
+        {binary_string_node("RelativeFilename", "embedded.png"),
+         binary_property_node("Content", binary_raw_property(png))});
+    BinaryNode model = binary_object(
+        "Model", 200, "Model::Triangle", "Mesh");
+
+    BinaryNode objects;
+    objects.name = "Objects";
+    objects.children = {std::move(model), std::move(geometry),
+                        std::move(material), std::move(texture),
+                        std::move(video)};
+
+    BinaryNode connections;
+    connections.name = "Connections";
+    connections.children = {
+        binary_connection("OO", 100, 200),
+        binary_connection("OO", 300, 200),
+        binary_connection("OP", 400, 300, "DiffuseColor"),
+        binary_connection("OO", 500, 400)};
+
+    std::vector<std::uint8_t> bytes{
+        'K', 'a', 'y', 'd', 'a', 'r', 'a', ' ', 'F', 'B', 'X', ' ', 'B',
+        'i', 'n', 'a', 'r', 'y', ' ', ' ', 0x1aU, 0x00U, 0x00U};
+    append32(bytes, 7400U);
+    auto encoded_objects = binary_node_bytes(objects, bytes.size());
+    bytes.insert(bytes.end(), encoded_objects.begin(), encoded_objects.end());
+    auto encoded_connections = binary_node_bytes(connections, bytes.size());
+    bytes.insert(bytes.end(), encoded_connections.begin(), encoded_connections.end());
+    bytes.resize(bytes.size() + 13U, 0U);
+    return bytes;
+}
+
 apex::app::FbxPreviewDocumentRequest request_for(
     const std::string& text,
     const apex::assets::AssetSource* source = nullptr) {
@@ -129,6 +400,18 @@ apex::app::FbxPreviewDocumentRequest request_for(
     if (source != nullptr)
         request.textures = apex::app::FbxPreviewTextureGrant{
             "fbx-preview-root", source};
+    return request;
+}
+
+apex::app::FbxPreviewDocumentRequest request_for(
+    const std::vector<std::uint8_t>& bytes, std::string source = "scene.fbx",
+    const apex::assets::AssetSource* texture_source = nullptr) {
+    apex::app::FbxPreviewDocumentRequest request;
+    request.source = std::move(source);
+    request.bytes = bytes;
+    if (texture_source != nullptr)
+        request.textures = apex::app::FbxPreviewTextureGrant{
+            "fbx-preview-root", texture_source};
     return request;
 }
 
@@ -186,6 +469,110 @@ void stages_incomplete_resources_without_backend_readiness() {
                 apex::app::FbxPreviewDocumentStatus::staged &&
                 incomplete.document.has_value(),
             "unsupported source behavior publishes only a staged document");
+}
+
+void opens_embedded_content_without_external_authority() {
+    constexpr std::string_view png_base64 =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAEElEQVR4AQEFAPr/AAcLDf8BWwEfJ8p0dAAAAABJRU5ErkJggg==";
+    const auto text = ascii_embedded_fbx(png_base64);
+    const auto result = apex::app::open_fbx_preview_document(
+        request_for(text));
+    require(result.status == apex::app::FbxPreviewDocumentStatus::ready &&
+                result.gpu_renderable() && result.document.has_value() &&
+                result.document->assembly.model.textures.size() == 1U &&
+                result.document->assembly.model.textures[0].name ==
+                    "embedded.png" &&
+                result.document->assembly.model.textures[0].data.size() == 73U &&
+                result.document->assembly.model.textures[0].data[0] == 0x89U &&
+                result.document->assembly.model.textures[0].data[1] == 0x50U,
+            "embedded FBX opens ready without an external asset grant");
+
+    auto ambiguous = source_with({
+        entry("one/paint.dds", rgba8_dds({1U, 2U, 3U, 255U})),
+        entry("two/paint.dds", rgba8_dds({4U, 5U, 6U, 255U}))});
+    const auto shadowed = apex::app::open_fbx_preview_document(
+        request_for(text, &ambiguous));
+    require(shadowed.status ==
+                apex::app::FbxPreviewDocumentStatus::ready &&
+                shadowed.gpu_renderable(),
+            "embedded FBX content shadows ambiguous external fallbacks");
+
+    const auto truncated = ascii_embedded_fbx(
+        "iVBORw0KGgoAAAANSUhEUgAAAAE=");
+    const auto staged = apex::app::open_fbx_preview_document(
+        request_for(truncated));
+    require(staged.status == apex::app::FbxPreviewDocumentStatus::staged &&
+                staged.ok() && !staged.gpu_renderable() &&
+                staged.document->assembly.model.textures.empty() &&
+                std::any_of(staged.diagnostics.begin(),
+                            staged.diagnostics.end(),
+                            [](const auto& diagnostic) {
+                                return diagnostic.code.find(
+                                           "embedded_texture_decode_") == 0U;
+                            }),
+            "truncated embedded image stages before backend preparation");
+}
+
+void opens_binary_embedded_content_end_to_end() {
+    const std::vector<std::uint8_t> png = {
+        0x89U, 0x50U, 0x4eU, 0x47U, 0x0dU, 0x0aU, 0x1aU, 0x0aU,
+        0x00U, 0x00U, 0x00U, 0x0dU, 0x49U, 0x48U, 0x44U, 0x52U,
+        0x00U, 0x00U, 0x00U, 0x01U, 0x00U, 0x00U, 0x00U, 0x01U,
+        0x08U, 0x06U, 0x00U, 0x00U, 0x00U, 0x1fU, 0x15U, 0xc4U,
+        0x89U, 0x00U, 0x00U, 0x00U, 0x10U, 0x49U, 0x44U, 0x41U,
+        0x54U, 0x78U, 0x01U, 0x01U, 0x05U, 0x00U, 0xfaU, 0xffU,
+        0x00U, 0x07U, 0x0bU, 0x0dU, 0xffU, 0x01U, 0x5bU, 0x01U,
+        0x1fU, 0x27U, 0xcaU, 0x74U, 0x74U, 0x00U, 0x00U, 0x00U,
+        0x00U, 0x49U, 0x45U, 0x4eU, 0x44U, 0xaeU, 0x42U, 0x60U,
+        0x82U};
+    require(png.size() == 73U, "binary fixture embeds the complete PNG payload");
+    const std::vector<std::uint8_t> png_bytes(png.begin(), png.end());
+    const auto binary = binary_embedded_fbx(png);
+
+    const auto parsed = apex::formats::parseFbx(binary, "embedded-binary.fbx");
+    require(parsed.header.format == apex::formats::FbxFormat::binary &&
+                parsed.header.version == 7400U && parsed.roots.size() == 2U,
+            "binary embedded fixture parses as a bounded FBX document");
+    const auto conversion = apex::formats::convertFbxScene(parsed);
+    require(conversion.complete && conversion.embedded_images.size() == 1U &&
+                conversion.embedded_images[0].basename == "embedded.png" &&
+                conversion.embedded_images[0].content == png_bytes &&
+                conversion.embedded_texture_candidates.size() == 1U &&
+                conversion.embedded_texture_candidates[0].texture_object_id ==
+                    400 &&
+                conversion.embedded_texture_candidates[0].video_object_id ==
+                    500 &&
+                conversion.embedded_texture_candidates[0].channel ==
+                    "DiffuseColor",
+            "binary Video raw content follows its Texture and Material links");
+
+    const auto result = apex::app::open_fbx_preview_document(
+        request_for(binary, "embedded-binary.fbx"));
+    require(result.status == apex::app::FbxPreviewDocumentStatus::ready &&
+                result.gpu_renderable() && result.document.has_value() &&
+                result.document->assembly.model.textures.size() == 1U &&
+                result.document->assembly.model.textures[0].name ==
+                    "embedded.png" &&
+                result.document->assembly.model.textures[0].data == png_bytes,
+            "binary embedded FBX is ready through preview parsing and conversion");
+
+    const auto payload = std::search(binary.begin(), binary.end(),
+                                     png.begin(), png.end());
+    require(payload != binary.end(),
+            "binary fixture retains a searchable embedded PNG payload");
+    const auto payload_offset = static_cast<std::size_t>(
+        std::distance(binary.begin(), payload));
+    auto truncated = binary;
+    truncated.resize(payload_offset + png.size() - 1U);
+    bool rejected = false;
+    try {
+        (void)apex::formats::parseFbx(truncated, "embedded-binary-truncated.fbx");
+    } catch (const apex::formats::FbxError& error) {
+        rejected = error.stage() == apex::formats::FbxStage::binary_dom &&
+                   (error.code() == "truncated" || error.code() == "offset");
+    }
+    require(rejected,
+            "binary embedded Content truncation is rejected at the parser boundary");
 }
 
 void rejects_malformed_input_and_authority_atomically() {
@@ -267,6 +654,8 @@ int main() {
     try {
         opens_ready_owned_workspace_document();
         stages_incomplete_resources_without_backend_readiness();
+        opens_embedded_content_without_external_authority();
+        opens_binary_embedded_content_end_to_end();
         rejects_malformed_input_and_authority_atomically();
         enforces_composition_limits();
         std::cout << "fbx preview document tests passed\n";

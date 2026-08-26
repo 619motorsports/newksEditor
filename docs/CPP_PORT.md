@@ -565,9 +565,10 @@ remains unchanged and feature-complete.
   supported normal and UV mappings, and explicit-linear local animation clips.
   The UV path expands seams and negates V like `src/fbx-import.js`. The native
   shell can apply one converted clip at a fixed normalized position. It rejects
-  malformed or over-budget data. It diagnoses skinning, non-linear animation,
-  embedded images, unsupported layer mappings, and advanced transform
-  semantics.
+  malformed or over-budget data. The converter retains bounded binary and ASCII
+  `Video.Content` payloads. This path matches the WebGL importer, not ksEditor.
+  It diagnoses skinning, non-linear animation, `Image` records, unsupported
+  layer mappings, and advanced transform semantics.
   The conversion budget includes temporary vectors, maps, sets, child lists,
   flattened property views, copied strings, and output containers.
   A bounded VAO binder matches decoded records to mesh views. It uses exact

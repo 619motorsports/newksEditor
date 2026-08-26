@@ -144,6 +144,23 @@ FbxDocument fileTextureFixture(std::string fileName =
     return document;
 }
 
+FbxDocument embeddedTextureFixture(
+    std::vector<std::uint8_t> content = {0x89U, 0x50U, 0x4eU, 0x47U}) {
+    auto document = fileTextureFixture();
+    document.roots[0].children.push_back(node(
+        "Video",
+        {std::int64_t(500), std::string("Video::Paint"),
+         std::string("Clip")},
+        {propertyNode("RelativeFilename",
+                      {std::string("textures/embedded.png")}),
+         propertyNode("FileName", {std::string("fallback.png")}),
+         propertyNode("Content", {std::move(content)})}));
+    document.roots[1].children.push_back(node(
+        "C", {std::string("OO"), std::int64_t(500),
+              std::int64_t(400)}));
+    return document;
+}
+
 FbxDocument geometricTransformFixture() {
     auto document = fixture();
     auto& properties = document.roots[0].children[0].children[0];
@@ -416,6 +433,108 @@ void preservesBoundedFileTextureCandidates() {
     expectsError(
         [&] { (void)apex::formats::convertFbxScene(fileTextureFixture(), limits); },
         "count_limit");
+}
+
+void preservesBoundedEmbeddedTextureCandidates() {
+    const std::vector<std::uint8_t> bytes = {0x89U, 0x50U, 0x4eU, 0x47U};
+    const auto result =
+        apex::formats::convertFbxScene(embeddedTextureFixture(bytes));
+    require(result.complete && result.embedded_image_compatibility &&
+                result.file_texture_candidates.size() == 1U &&
+                result.embedded_images.size() == 1U &&
+                result.embedded_texture_candidates.size() == 1U,
+            "FBX Video content is retained beside the external fallback");
+    require(result.embedded_images[0].video_object_id == 500 &&
+                result.embedded_images[0].basename == "embedded.png" &&
+                result.embedded_images[0].content == bytes,
+            "FBX embedded image retains bounded identity, name, and bytes");
+    const auto& candidate = result.embedded_texture_candidates[0];
+    require(candidate.material == 0U && candidate.texture_object_id == 400 &&
+                candidate.video_object_id == 500 &&
+                candidate.embedded_image_index == 0U &&
+                candidate.channel == "DiffuseColor",
+            "FBX embedded candidate follows Video to Texture to Material");
+
+    auto emptyRelativeName = embeddedTextureFixture(bytes);
+    emptyRelativeName.roots[0].children.back().children[0]
+        .properties[0].values[0] = std::string();
+    const auto emptyRelativeResult =
+        apex::formats::convertFbxScene(emptyRelativeName);
+    require(emptyRelativeResult.embedded_images[0].basename ==
+                "fallback.png",
+            "empty RelativeFilename falls back to the Video FileName");
+
+    auto reused = embeddedTextureFixture(bytes);
+    reused.roots[1].children.push_back(node(
+        "C", {std::string("OP"), std::int64_t(400),
+              std::int64_t(300), std::string("AmbientColor")}));
+    const auto reusedResult = apex::formats::convertFbxScene(reused);
+    require(reusedResult.embedded_images.size() == 1U &&
+                reusedResult.embedded_texture_candidates.size() == 2U &&
+                reusedResult.embedded_texture_candidates[0]
+                        .embedded_image_index == 0U &&
+                reusedResult.embedded_texture_candidates[1]
+                        .embedded_image_index == 0U,
+            "one embedded Video payload is reused without copying");
+
+    auto empty = embeddedTextureFixture({});
+    const auto emptyResult = apex::formats::convertFbxScene(empty);
+    require(emptyResult.complete && emptyResult.embedded_images.empty() &&
+                emptyResult.embedded_texture_candidates.empty() &&
+                emptyResult.file_texture_candidates.size() == 1U,
+            "empty embedded Content keeps the external file fallback");
+
+    auto malformed = embeddedTextureFixture(bytes);
+    malformed.roots[0].children.back().children.back().properties[0]
+        .values[0] = std::string("not raw");
+    expectsError([&] { (void)apex::formats::convertFbxScene(malformed); },
+                 "invalid_embedded_image");
+
+    auto multiple = embeddedTextureFixture(bytes);
+    multiple.roots[0].children.push_back(node(
+        "Video",
+        {std::int64_t(501), std::string("Video::Other"),
+         std::string("Clip")},
+        {propertyNode("Content", {bytes})}));
+    multiple.roots[1].children.push_back(node(
+        "C", {std::string("OO"), std::int64_t(501),
+              std::int64_t(400)}));
+    expectsError([&] { (void)apex::formats::convertFbxScene(multiple); },
+                 "invalid_embedded_image");
+
+    auto limits = apex::formats::FbxConversionLimits{};
+    limits.max_embedded_image_bytes = 3U;
+    expectsError(
+        [&] {
+            (void)apex::formats::convertFbxScene(
+                embeddedTextureFixture(bytes), limits);
+        },
+        "embedded_image_limit");
+    limits = apex::formats::FbxConversionLimits{};
+    limits.max_embedded_image_total_bytes = 3U;
+    expectsError(
+        [&] {
+            (void)apex::formats::convertFbxScene(
+                embeddedTextureFixture(bytes), limits);
+        },
+        "embedded_image_limit");
+    limits = apex::formats::FbxConversionLimits{};
+    limits.max_embedded_images = 0U;
+    expectsError(
+        [&] {
+            (void)apex::formats::convertFbxScene(
+                embeddedTextureFixture(bytes), limits);
+        },
+        "embedded_image_limit");
+
+    auto byteArray = fixture();
+    byteArray.roots[0].children[1].children.push_back(
+        propertyNode("UserByteArray",
+                     {FbxArray{std::vector<std::uint8_t>{1U, 2U, 3U}}}));
+    const auto byteArrayResult = apex::formats::convertFbxScene(
+        byteArray, limits);
+    require(byteArrayResult.complete,
+            "FBX b arrays do not consume the raw Content count limit");
 }
 
 void ignoresDisplayLayerMembershipEdges() {
@@ -1156,7 +1275,7 @@ void enforcesLimitsAndUnsupportedCapability() {
     auto unsupported = fixture();
     unsupported.roots.push_back(node("AnimationStack", {std::int64_t(500), std::string("AnimationStack::A"), std::string("AnimationStack")}));
     unsupported.roots.push_back(node(
-        "Video", {std::int64_t(600), std::string("Video::A"),
+        "Image", {std::int64_t(600), std::string("Image::A"),
                   std::string("Clip")}));
     const auto result = apex::formats::convertFbxScene(unsupported);
     require(!result.complete, "unsupported FBX features are not marked complete");
@@ -1235,7 +1354,7 @@ void enforcesLimitsAndUnsupportedCapability() {
     require(capability.static_geometry && capability.node_transforms &&
                 capability.material_assignment &&
                 capability.external_texture_references && !capability.skinning &&
-                capability.animation && !capability.images &&
+                capability.animation && capability.images &&
                 !capability.layer_mappings,
             "FBX conversion capability detail");
 }
@@ -1267,6 +1386,7 @@ int main() {
         convertsStaticGeometryTransformsAndMaterials();
         appliesNativeGeometricMeshTransform();
         preservesBoundedFileTextureCandidates();
+        preservesBoundedEmbeddedTextureCandidates();
         ignoresDisplayLayerMembershipEdges();
         handlesConstraintPoConnectionsStrictly();
         ignoresMissingOptionalAnimationCurveLinks();

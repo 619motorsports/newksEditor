@@ -5188,6 +5188,33 @@ bool contract_backend(apex::render::Backend backend) {
     require(fbx_visible_pixel,
             "ready FBX produces visible real-backend color output");
 
+    auto embedded_fbx_conversion = fbx_conversion;
+    embedded_fbx_conversion.embedded_images.push_back(
+        {500, "embedded.png",
+         apex::tests::rgba8PngFixture({201U, 17U, 83U, 255U})});
+    embedded_fbx_conversion.embedded_texture_candidates.push_back(
+        {0U, 400, 500, 0U, "DiffuseColor", 2U});
+    const auto embedded_fbx_adapter =
+        apex::render::build_fbx_render_scene(
+            embedded_fbx_conversion, nullptr,
+            "real-backend-embedded-triangle.fbx");
+    require(embedded_fbx_adapter.gpu_renderable(),
+            "embedded FBX fixture builds a ready owned model without a grant");
+    StockSceneExecutionRequest embedded_fbx_request = fbx_stock_request;
+    embedded_fbx_request.model = &*embedded_fbx_adapter.model;
+    embedded_fbx_request.scene = &embedded_fbx_adapter.scene->snapshot;
+    const auto embedded_fbx_stock = prepare_stock_scene_execution(
+        *device.device, embedded_fbx_request);
+    require(embedded_fbx_stock.ok() &&
+                embedded_fbx_stock.resources->owned_texture_count() == 1U,
+            "embedded FBX reaches the shared real-backend stock scene");
+    const auto embedded_fbx_draw =
+        embedded_fbx_stock.resources->draw_and_readback(
+            *device.device, *triangle_texture.texture, stock_frame);
+    require(embedded_fbx_draw.ok() &&
+                embedded_fbx_draw.rgba8 == fbx_draw_result.rgba8,
+            "embedded and external FBX payloads produce equal backend output");
+
     if (backend == Backend::Vulkan) {
         // Execute the same stock-scene material through the retained receiver
         // contract. Uniform zero/one maps isolate shadow attenuation from the

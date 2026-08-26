@@ -161,6 +161,34 @@ void keepsFirstExistingSourceAndLeavesMissingNull() {
             "all-missing material retains a diagnosed null resource");
 }
 
+void embeddedContentShadowsExternalLookup() {
+    auto value = conversion();
+    addCandidate(value, 0U, 400, "DiffuseColor", "duplicate.dds", 1U);
+    value.embedded_images.push_back(
+        {500, "embedded.dds", rgba8Dds({1U, 2U, 3U, 255U})});
+    value.embedded_texture_candidates.push_back(
+        {0U, 400, 500, 0U, "DiffuseColor", 1U});
+    auto source = sourceWith({
+        entry("a/duplicate.dds", rgba8Dds({4U, 5U, 6U, 255U})),
+        entry("b/duplicate.dds", rgba8Dds({7U, 8U, 9U, 255U}))});
+
+    const auto result = resolve_fbx_external_texture_authority(
+        value, "fbx-root", source);
+    require(result.ok() && result.selections.empty() &&
+                result.authority.resources.empty() &&
+                result.material_selection_indices ==
+                    std::vector<std::size_t>{invalid_fbx_texture_selection},
+            "nonempty embedded content shadows external ambiguity");
+
+    value.embedded_texture_candidates[0].embedded_image_index = 9U;
+    const auto malformed = resolve_fbx_external_texture_authority(
+        value, "fbx-root", source);
+    require(malformed.status ==
+                ExternalTextureAuthorityStatus::invalid_request &&
+                malformed.selections.empty(),
+            "malformed embedded shadow identity fails closed");
+}
+
 void rejectsAmbiguityBeforeLaterCandidates() {
     auto value = conversion();
     addCandidate(value, 0U, 400, "DiffuseColor", "duplicate.dds", 1U);
@@ -307,6 +335,7 @@ int main() {
     try {
         selectsFirstExistingCandidateInNativeOrder();
         keepsFirstExistingSourceAndLeavesMissingNull();
+        embeddedContentShadowsExternalLookup();
         rejectsAmbiguityBeforeLaterCandidates();
         rejectsMalformedCandidatesAndPayloads();
         enforcesCandidateAndMetadataLimits();

@@ -76,5 +76,11 @@ The converter does not read the referenced file or create image bytes.
 
 The converter applies the recovered eight-channel order. It retains source
 order within one channel. A later application adapter must resolve each
-basename through an explicit `AssetSource` grant. Direct native FBX image
-loading and viewport rendering remain unsupported.
+basename through an explicit `AssetSource` grant.
+
+The C++ port also retains bounded `Video.Content` payloads. The shared CPU
+decoder validates these payloads before Vulkan or D3D12 allocation. Nonempty
+embedded content takes priority over the external fallback.
+
+This embedded path matches the WebGL importer. The recovered ksEditor importer
+does not read `Video.Content`, so this path is not native parity behavior.

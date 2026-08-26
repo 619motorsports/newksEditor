@@ -651,8 +651,9 @@ bounded DEFLATE implementation, and emits straight-alpha, top-to-bottom RGBA8
 UNORM pixels. Embedded KN5 and explicitly granted external payloads retain
 owned source bytes and use the backend-neutral texture plan. Malformed,
 truncated, dimension, compressed/decompressed, aggregate, failure-atomicity,
-and real Vulkan sampled-pixel tests cover this path. JPEG, WebP, unsupported
-PNG modes, and native FBX image conversion remain staged.
+and real Vulkan sampled-pixel tests cover this path. Embedded FBX `Video.Content`
+uses this planner for DDS, PNG, JPEG, and BMP data. WebP and unsupported PNG
+modes remain staged in the C++ port.
 
 A wider follow-up sample found 49 DX10 BC7 images. Modern WebGL implementations can
 upload those blocks through `EXT_texture_compression_bptc`; BC6H uses the same path,
@@ -2698,9 +2699,17 @@ material index and sends the corners to one `MeshBuilder` for each material.
 Ordinary nodes use `EvaluateLocalTransform` with the source pivot. The geometry path
 also applies the geometric translation, rotation, and scale matrix.
 
-The skin path reads the first skin deformer. It imports every cluster link, inverse
-bind matrix, control-point index, and weight. This path matches the 19-float KN5
-vertex layout and its four weight and index fields.
+The skin path reads the first skin deformer. It imports every cluster link,
+link-transform matrix, control-point index, and weight.
+
+`MeshBuilder::setWeight` at `0x10042CB9` scans four influence slots in source order.
+It uses the first slot with bone index `-1`. It does not sort or normalize weights.
+A fifth influence produces a warning and is not stored. The native function does
+not validate the control-point index or bone index.
+
+`MeshBuilder::buildSkinnedMesh` at `0x10042538` emits the 19-float KN5 vertex layout.
+The layout contains position, normal, UV, tangent, four weights, and four bone indices.
+The function changes unused bone indices from `-1` to zero before emission.
 
 The PDB identifies `FBXImporter::loadAnimation` at `0x100071a0` and
 `FBXImporter::loadAnimationNode` at `0x10007550`. The node walk accepts FBX mesh,
@@ -2778,7 +2787,8 @@ also captures supported embedded FBX images through their temporary blob or data
 Missing, ambiguous, unreadable, and unsupported images retain the material-color DDS.
 The inspector shows the slot, state, and output name for each texture reference.
 This paragraph describes the WebGL/importer path; native FBX image conversion
-remains staged.
+now supports bounded `Video.Content` through a separate compatibility path.
+This compatibility path does not claim recovered ksEditor behavior.
 
 `FBXImporter::load` at `0x10004200` starts each material with `ksPerPixel`.
 It also sets `ksSpecularEXP` to 1. For recognized surface materials, it reads

@@ -74,6 +74,24 @@ struct FbxMaterialFileTextureCandidate {
     std::size_t connection_order = 0;
 };
 
+// One owned embedded payload from an Objects/Video record. This is a WebGL
+// compatibility path: recovered ksEditor behavior only searches external
+// texture directories by basename.
+struct FbxEmbeddedImage {
+    std::int64_t video_object_id = 0;
+    std::string basename;
+    std::vector<std::uint8_t> content;
+};
+
+struct FbxMaterialEmbeddedTextureCandidate {
+    scene::MaterialId material = scene::invalid_material_id;
+    std::int64_t texture_object_id = 0;
+    std::int64_t video_object_id = 0;
+    std::size_t embedded_image_index = 0;
+    std::string channel;
+    std::size_t connection_order = 0;
+};
+
 inline constexpr std::array<std::string_view, 8u>
     fbx_native_file_texture_channels = {
         "DiffuseColor", "DiffuseFactor", "EmissiveColor", "EmissiveFactor",
@@ -111,6 +129,12 @@ struct FbxSceneConversion {
     // Indexed exactly like snapshot.materials.
     std::vector<FbxMaterialParameters> material_parameters;
     std::vector<FbxMaterialFileTextureCandidate> file_texture_candidates;
+    std::vector<FbxEmbeddedImage> embedded_images;
+    std::vector<FbxMaterialEmbeddedTextureCandidate>
+        embedded_texture_candidates;
+    // True means that the converter used the WebGL-compatible Video.Content
+    // path. It does not mean that ksEditor embedded-image behavior was found.
+    bool embedded_image_compatibility = false;
     std::vector<FbxAnimationClip> animations;
     std::vector<FbxConversionDiagnostic> diagnostics;
     bool complete = true;
@@ -121,6 +145,9 @@ struct FbxConversionLimits {
     std::size_t max_materials = 1'000'000;
     std::size_t max_textures = 1'000'000;
     std::size_t max_texture_references = 1'000'000;
+    std::size_t max_embedded_images = 4'096;
+    std::size_t max_embedded_image_bytes = 64u * 1024u * 1024u;
+    std::size_t max_embedded_image_total_bytes = 128u * 1024u * 1024u;
     std::size_t max_meshes = 1'000'000;
     std::size_t max_vertices = 10'000'000;
     std::size_t max_indices = 30'000'000;

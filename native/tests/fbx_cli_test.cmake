@@ -7,6 +7,7 @@ endif()
 set(test_root "${APEX_BINARY_DIR}/fbx-cli-test")
 file(MAKE_DIRECTORY "${test_root}")
 set(valid_fbx "${test_root}/triangle.fbx")
+set(embedded_fbx "${test_root}/embedded-triangle.fbx")
 set(truncated_fbx "${test_root}/truncated.fbx")
 
 file(WRITE "${valid_fbx}" [=[
@@ -65,6 +66,49 @@ Connections: {
  C: "OO", 502, 501
  C: "OP", 502, 200, "Lcl Translation"
  C: "OP", 503, 502, "d|X"
+}
+]=])
+file(WRITE "${embedded_fbx}" [=[
+FBXVersion: 7400
+Objects: {
+ Model: 200, "Model::Triangle", "Mesh" { }
+ Geometry: 100, "Geometry::Triangle", "Mesh" {
+  Vertices: *9 { a: 0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0,0.0 }
+  PolygonVertexIndex: *3 { a: 0,1,-3 }
+  LayerElementNormal: 0 {
+   MappingInformationType: "ByPolygonVertex"
+   ReferenceInformationType: "Direct"
+   Normals: *9 { a: 0.0,0.0,1.0,0.0,0.0,1.0,0.0,0.0,1.0 }
+  }
+  LayerElementUV: 0 {
+   MappingInformationType: "ByPolygonVertex"
+   ReferenceInformationType: "IndexToDirect"
+   UV: *6 { a: 0.0,0.0,1.0,0.0,0.0,1.0 }
+   UVIndex: *3 { a: 0,1,2 }
+  }
+  LayerElementMaterial: 0 {
+   MappingInformationType: "AllSame"
+   ReferenceInformationType: "IndexToDirect"
+   Materials: *1 { a: 0 }
+  }
+ }
+ Material: 300, "Material::Paint", "Material" {
+  ShadingModel: "Phong"
+ }
+ Texture: 400, "Texture::Paint", "TextureVideoClip" {
+  FileName: "missing-external.png"
+ }
+ Video: 500, "Video::Paint", "Clip" {
+  RelativeFilename: "embedded.png"
+  Content: ,
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAEElEQVR4AQEFAPr/AAcLDf8BWwEfJ8p0dAAAAABJRU5ErkJggg==",
+ }
+}
+Connections: {
+ C: "OO", 100, 200
+ C: "OO", 300, 200
+ C: "OP", 400, 300, "DiffuseColor"
+ C: "OO", 500, 400
 }
 ]=])
 file(WRITE "${truncated_fbx}" "Kaydara FBX Binary")
@@ -138,6 +182,8 @@ endif()
 
 execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --fbx "${valid_fbx}"
+          --shader-family ksPerPixel
+          --shader-vertex missing.vert --shader-fragment missing.frag
   RESULT_VARIABLE missing_assets_result
   ERROR_VARIABLE missing_assets_error
 )
@@ -146,10 +192,34 @@ if(NOT missing_assets_result STREQUAL "1")
     "window FBX without assets returned ${missing_assets_result}: ${missing_assets_error}")
 endif()
 string(FIND "${missing_assets_error}"
-  "--fbx requires --fbx-assets" missing_assets_position)
+  "FBX window preview is staged" missing_assets_position)
 if(missing_assets_position EQUAL -1)
   message(FATAL_ERROR
-    "window FBX did not require explicit assets: ${missing_assets_error}")
+    "window FBX without embedded or external assets was not staged: ${missing_assets_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --fbx "${embedded_fbx}"
+          --shader-family ksPerPixel
+          --shader-vertex missing.vert --shader-fragment missing.frag
+  RESULT_VARIABLE embedded_window_result
+  ERROR_VARIABLE embedded_window_error
+)
+if(NOT embedded_window_result STREQUAL "1")
+  message(FATAL_ERROR
+    "embedded window FBX returned ${embedded_window_result}: ${embedded_window_error}")
+endif()
+string(FIND "${embedded_window_error}"
+  "cannot open missing.vert" embedded_shader_position)
+if(embedded_shader_position EQUAL -1)
+  message(FATAL_ERROR
+    "embedded FBX did not reach bounded shader loading without an asset grant: ${embedded_window_error}")
+endif()
+string(FIND "${embedded_window_error}"
+  "FBX window preview is" embedded_staged_position)
+if(NOT embedded_staged_position EQUAL -1)
+  message(FATAL_ERROR
+    "valid embedded FBX was incorrectly staged: ${embedded_window_error}")
 endif()
 
 execute_process(
