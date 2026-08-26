@@ -1,4 +1,5 @@
 #include "apex/render/material_profile.hpp"
+#include "apex/render/stock_ks_per_pixel.hpp"
 
 #include <algorithm>
 #include <array>
@@ -284,6 +285,21 @@ void parses_installed_stock_package_when_available() {
                         parsed.vertex_metadata.shader_model_major == 4U &&
                         parsed.pixel_metadata.shader_model_major == 4U,
                     "installed ksPerPixel stage sizes match recovered evidence");
+            require(apex::render::validate_stock_ks_per_pixel_container_shape(
+                        parsed, apex::render::StockKsPerPixelVariant::base) ==
+                        apex::render::StockKsPerPixelContainerStatus::ready,
+                    "installed ksPerPixel package matches the native ABI shape");
+        }
+        if (entry.path().filename() == "ksPerPixelAT.shader") {
+            require(bytes.size() == 11'330U &&
+                        parsed.vertex_shader.size() == 3'728U &&
+                        parsed.pixel_shader.size() == 7'584U,
+                    "installed ksPerPixelAT stage sizes match recovered evidence");
+            require(apex::render::validate_stock_ks_per_pixel_container_shape(
+                        parsed,
+                        apex::render::StockKsPerPixelVariant::alpha_to_coverage) ==
+                        apex::render::StockKsPerPixelContainerStatus::ready,
+                    "installed ksPerPixelAT package matches the native ABI shape");
         }
         ++parsed_count;
     }
