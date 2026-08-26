@@ -635,12 +635,14 @@ Workspace viewport preparation uses this bridge before GPU allocation. It
 also uses the bridge for a color-only override with no external grant. Vulkan
 and D3D12 use the same embedded-texture path. Raw external-file overrides
 remain invalid at the renderer boundary.
-The FBX converter handles static positions, triangulation, hierarchy, a
-bounded transform subset, first material assignment, and one face-varying UV
-layer. Its aggregate budget includes temporary containers, copied strings,
-seam-expanded vertices, and output containers. It explicitly diagnoses
-unsupported images, skinning, animation, normal/material layer mappings, UV
-mapping modes outside the supported subset, and advanced transform semantics.
+The FBX converter handles static positions, polygon triangulation, hierarchy,
+bounded transforms, native material values, ordered node materials, and
+supported normal, UV, and material layers. Each material slot remains signed
+until the render adapter applies the recovered fallback behavior. Its aggregate
+budget includes temporary containers, copied strings, expanded vertices,
+material slots, and output containers. It diagnoses embedded images, skinning,
+unsupported animation data, mappings outside the supported subsets, and
+advanced transform semantics.
 
 The strict Linux build detects the Vulkan SDK. The runtime test uses a software
 Vulkan device when an ICD is available. CI defines the same Vulkan test. The

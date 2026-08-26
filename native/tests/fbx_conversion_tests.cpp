@@ -69,13 +69,24 @@ FbxNode normalLayer(
     return node("LayerElementNormal", {}, std::move(children));
 }
 
+FbxNode materialLayer(
+    std::string_view mapping = "AllSame",
+    std::string_view reference = "IndexToDirect",
+    FbxArray slots = FbxArray{std::vector<std::int64_t>{0}}) {
+    return node("LayerElementMaterial", {}, {
+        propertyNode("MappingInformationType", {std::string(mapping)}),
+        propertyNode("ReferenceInformationType", {std::string(reference)}),
+        propertyNode("Materials", {std::move(slots)})});
+}
+
 FbxDocument fixture() {
     const FbxNode geometry = node("Geometry", {
         std::int64_t(100), std::string("Geometry::Triangle"), std::string("Mesh")}, {
         propertyNode("Vertices", {FbxArray{std::vector<double>{0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0}}}),
         propertyNode("PolygonVertexIndex", {FbxArray{std::vector<std::int64_t>{0, 1, -3}}}),
         normalLayer(),
-        uvLayer()});
+        uvLayer(),
+        materialLayer()});
     const FbxNode model = node("Model", {
         std::int64_t(200), std::string("Model::Triangle"), std::string("Mesh")}, {
         node("Properties70", {}, {
@@ -254,7 +265,10 @@ void convertsStaticGeometryTransformsAndMaterials() {
                 result.meshes[0].normals ==
                     std::vector<float>{0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
                                        1.0F, 0.0F, 0.0F, 1.0F} &&
-                result.meshes[0].triangle_indices == std::vector<std::uint32_t>{0u, 1u, 2u},
+                result.meshes[0].triangle_indices ==
+                    std::vector<std::uint32_t>{0u, 1u, 2u} &&
+                result.meshes[0].triangle_material_slots ==
+                    std::vector<std::int32_t>{0},
             "FBX static triangle geometry");
     require(result.transforms.size() == 1u && std::abs(result.transforms[0].local[12] - 1.0F) < 1e-6F &&
                 std::abs(result.transforms[0].world[13] - 2.0F) < 1e-6F,
@@ -268,6 +282,10 @@ void convertsStaticGeometryTransformsAndMaterials() {
                     apex::scene::Vector3{0.5F, 0.5F, 0.0F},
             "FBX conversion retains the exact local vertex-AABB center");
     require(result.diagnostics.empty(), "supported FBX layers need no warning");
+    require(result.node_geometry.size() == 1u &&
+                result.node_geometry[0].materials ==
+                    std::vector<apex::scene::MaterialId>{0u},
+            "FBX node retains its material-slot connection order");
     require(result.snapshot.materials[0].name == "Paint" &&
                 result.snapshot.materials[0].shader == "ksPerPixel",
             "FBX material uses the recovered native shader");
@@ -827,6 +845,212 @@ void preservesNativeNormalMappingsAndRejectsMalformedLayers() {
         "vertex_limit");
 }
 
+void preservesPolygonMaterialSlotsAndRejectsMalformedLayers() {
+    auto ordered = seamFixture();
+    auto extraMaterial = ordered.roots[0].children[2];
+    extraMaterial.properties[0].values[0] = std::int64_t(301);
+    extraMaterial.properties[0].values[1] = std::string("Material::Glass");
+    ordered.roots[0].children.push_back(std::move(extraMaterial));
+    ordered.roots[0].children[1].children[4] = materialLayer(
+        "ByPolygon", "IndexToDirect",
+        FbxArray{std::vector<std::int64_t>{0, 1}});
+    ordered.roots[1].children.insert(
+        ordered.roots[1].children.begin() + 1,
+        node("C", {std::string("OO"), std::int64_t(301),
+                   std::int64_t(200)}));
+    const auto orderedResult = apex::formats::convertFbxScene(ordered);
+    require(orderedResult.meshes[0].triangle_material_slots ==
+                std::vector<std::int32_t>{0, 1} &&
+                orderedResult.node_geometry[0].materials ==
+                    std::vector<apex::scene::MaterialId>{1u, 0u} &&
+                orderedResult.complete,
+            "polygon material slots and model connection order are retained");
+
+    auto fan = seamFixture();
+    fan.roots[0].children[1].children[1].properties[0].values[0] =
+        FbxValue{FbxArray{std::vector<std::int64_t>{0, 1, 2, -4}}};
+    fan.roots[0].children[1].children[3].children[3]
+        .properties[0]
+        .values[0] = FbxValue{FbxArray{
+        std::vector<std::int64_t>{0, 1, 2, 3}}};
+    fan.roots[0].children[1].children[4] = materialLayer(
+        "ByPolygon", "Direct",
+        FbxArray{std::vector<std::int64_t>{7}});
+    const auto fanResult = apex::formats::convertFbxScene(fan);
+    require(fanResult.meshes[0].triangle_indices.size() == 6u &&
+                fanResult.meshes[0].triangle_material_slots ==
+                    std::vector<std::int32_t>{7, 7},
+            "one polygon material slot is replicated across fan triangles");
+
+    auto allSameMultiple = seamFixture();
+    allSameMultiple.roots[0].children[1].children[4] = materialLayer(
+        "AllSame", "IndexToDirect",
+        FbxArray{std::vector<std::int64_t>{7}});
+    const auto allSameMultipleResult =
+        apex::formats::convertFbxScene(allSameMultiple);
+    require(allSameMultipleResult.meshes[0].triangle_material_slots ==
+                std::vector<std::int32_t>{7, 7},
+            "AllSame safely reproduces the native retained first slot");
+
+    auto negative = fixture();
+    negative.roots[0].children[1].children[4] = materialLayer(
+        "AllSame", "IndexToDirect",
+        FbxArray{std::vector<std::int64_t>{-1}});
+    const auto negativeResult = apex::formats::convertFbxScene(negative);
+    require(negativeResult.meshes[0].triangle_material_slots ==
+                std::vector<std::int32_t>{-1},
+            "native signed material slot is retained for safe fallback");
+
+    auto missingData = fixture();
+    missingData.roots[0].children[1].children[4].children.pop_back();
+    expectsError([&] { (void)apex::formats::convertFbxScene(missingData); },
+                 "invalid_material_layer");
+
+    auto empty = fixture();
+    empty.roots[0].children[1].children[4].children[2]
+        .properties[0]
+        .values[0] =
+        FbxValue{FbxArray{std::vector<std::int64_t>{}}};
+    expectsError([&] { (void)apex::formats::convertFbxScene(empty); },
+                 "invalid_material_layer");
+
+    auto wrongType = fixture();
+    wrongType.roots[0].children[1].children[4].children[2]
+        .properties[0]
+        .values[0] = FbxValue{FbxArray{std::vector<double>{0.0}}};
+    expectsError([&] { (void)apex::formats::convertFbxScene(wrongType); },
+                 "invalid_material_layer");
+
+    auto extraValue = fixture();
+    extraValue.roots[0].children[1].children[4].children[2]
+        .properties[0]
+        .values.push_back(std::int64_t(0));
+    expectsError([&] { (void)apex::formats::convertFbxScene(extraValue); },
+                 "invalid_material_layer");
+
+    auto duplicateField = fixture();
+    duplicateField.roots[0].children[1].children[4].children.push_back(
+        duplicateField.roots[0].children[1].children[4].children.front());
+    expectsError(
+        [&] { (void)apex::formats::convertFbxScene(duplicateField); },
+        "invalid_material_layer");
+
+    auto duplicateLayer = fixture();
+    duplicateLayer.roots[0].children[1].children.push_back(
+        duplicateLayer.roots[0].children[1].children[4]);
+    expectsError(
+        [&] { (void)apex::formats::convertFbxScene(duplicateLayer); },
+        "invalid_material_layer");
+
+    auto shortByPolygon = seamFixture();
+    shortByPolygon.roots[0].children[1].children[4] = materialLayer(
+        "ByPolygon", "IndexToDirect",
+        FbxArray{std::vector<std::int64_t>{0}});
+    expectsError(
+        [&] { (void)apex::formats::convertFbxScene(shortByPolygon); },
+        "invalid_material_layer");
+
+    auto longByPolygon = seamFixture();
+    longByPolygon.roots[0].children[1].children[4] = materialLayer(
+        "ByPolygon", "IndexToDirect",
+        FbxArray{std::vector<std::int64_t>{0, 0, 0}});
+    expectsError(
+        [&] { (void)apex::formats::convertFbxScene(longByPolygon); },
+        "invalid_material_layer");
+
+    auto integerOverflow = fixture();
+    integerOverflow.roots[0].children[1].children[4] = materialLayer(
+        "AllSame", "IndexToDirect",
+        FbxArray{std::vector<std::int64_t>{
+            std::numeric_limits<std::int64_t>::max()}});
+    expectsError(
+        [&] { (void)apex::formats::convertFbxScene(integerOverflow); },
+        "invalid_material_layer");
+
+    auto integerUnderflow = fixture();
+    integerUnderflow.roots[0].children[1].children[4] = materialLayer(
+        "AllSame", "IndexToDirect",
+        FbxArray{std::vector<std::int64_t>{
+            std::numeric_limits<std::int64_t>::min()}});
+    expectsError(
+        [&] { (void)apex::formats::convertFbxScene(integerUnderflow); },
+        "invalid_material_layer");
+
+    auto unsupportedMapping = fixture();
+    unsupportedMapping.roots[0].children[1].children[4] = materialLayer(
+        "ByControlPoint", "IndexToDirect");
+    const auto unsupportedMappingResult =
+        apex::formats::convertFbxScene(unsupportedMapping);
+    require(!unsupportedMappingResult.complete &&
+                unsupportedMappingResult.meshes[0]
+                    .triangle_material_slots.empty(),
+            "unsupported material mapping is not silently applied");
+
+    auto unsupportedReference = fixture();
+    unsupportedReference.roots[0].children[1].children[4] =
+        materialLayer("ByPolygon", "Index");
+    const auto unsupportedReferenceResult =
+        apex::formats::convertFbxScene(unsupportedReference);
+    require(!unsupportedReferenceResult.complete &&
+                unsupportedReferenceResult.meshes[0]
+                    .triangle_material_slots.empty(),
+            "unsupported material reference is not silently applied");
+
+    auto missingLayer = fixture();
+    missingLayer.roots[0].children[1].children.pop_back();
+    const auto missingLayerResult =
+        apex::formats::convertFbxScene(missingLayer);
+    require(!missingLayerResult.complete &&
+                std::any_of(missingLayerResult.diagnostics.begin(),
+                            missingLayerResult.diagnostics.end(),
+                            [](const auto& diagnostic) {
+                                return diagnostic.code ==
+                                       "missing_material_layer";
+                            }),
+            "missing native material layer is explicitly incomplete");
+
+    auto noNodeMaterials = fixture();
+    noNodeMaterials.roots[1].children.pop_back();
+    const auto noNodeMaterialsResult =
+        apex::formats::convertFbxScene(noNodeMaterials);
+    require(noNodeMaterialsResult.node_geometry[0].materials.empty() &&
+                noNodeMaterialsResult.meshes[0].triangle_material_slots ==
+                    std::vector<std::int32_t>{0},
+            "unresolved raw slots remain bounded for native fallback");
+
+    auto duplicateMaterialLink = fixture();
+    duplicateMaterialLink.roots[1].children.push_back(
+        duplicateMaterialLink.roots[1].children.back());
+    const auto duplicateMaterialLinkResult =
+        apex::formats::convertFbxScene(duplicateMaterialLink);
+    require(duplicateMaterialLinkResult.node_geometry[0].materials ==
+                std::vector<apex::scene::MaterialId>{0u, 0u},
+            "duplicate node material links retain distinct slot positions");
+
+    auto unexpectedPropertyConnection = fixture();
+    unexpectedPropertyConnection.roots[1].children[1] = node(
+        "C", {std::string("OP"), std::int64_t(300), std::int64_t(200),
+              std::string("Materials")});
+    expectsError(
+        [&] {
+            (void)apex::formats::convertFbxScene(
+                unexpectedPropertyConnection);
+        },
+        "unsupported_connection");
+
+    auto slotLimited = fixture();
+    slotLimited.roots[0].children[1].children[4] = materialLayer(
+        "AllSame", "IndexToDirect",
+        FbxArray{std::vector<std::int64_t>{0, 0, 0, 0}});
+    auto slotLimits = apex::formats::FbxConversionLimits{};
+    slotLimits.max_indices = 3u;
+    expectsError(
+        [&] {
+            (void)apex::formats::convertFbxScene(slotLimited, slotLimits);
+        },
+        "index_limit");
+}
+
 void rejectsMalformedNativeMaterialParameters() {
     auto duplicate = fixture();
     duplicate.roots[0].children[2].children[1].children.push_back(
@@ -960,8 +1184,12 @@ void enforcesLimitsAndUnsupportedCapability() {
         multipleGeometry = multipleGeometry || diagnostic.code == "multiple_geometry";
         multipleMaterial = multipleMaterial || diagnostic.code == "multiple_materials";
     }
-    require(multipleGeometry && multipleMaterial && !multipleResult.complete && multipleResult.meshes.size() == 2u,
-            "multiple FBX assignments are explicitly first-wins");
+    require(multipleGeometry && !multipleMaterial &&
+                !multipleResult.complete &&
+                multipleResult.meshes.size() == 2u &&
+                multipleResult.node_geometry[0].materials ==
+                    std::vector<apex::scene::MaterialId>{0u, 1u},
+            "multiple geometries remain first-wins while material slots retain order");
 
     auto diagnosticLimited = unsupported;
     auto diagnosticLimits = apex::formats::FbxConversionLimits{};
@@ -1043,6 +1271,7 @@ int main() {
         rejectsMalformedAnimationCurvesAndUnsupportedInterpolation();
         rejectsInvalidReferencesIndicesAndNonFiniteValues();
         preservesNativeNormalMappingsAndRejectsMalformedLayers();
+        preservesPolygonMaterialSlotsAndRejectsMalformedLayers();
         rejectsMalformedNativeMaterialParameters();
         rejectsMalformedAndUnsupportedUvLayers();
         enforcesUvExpansionBudgets();

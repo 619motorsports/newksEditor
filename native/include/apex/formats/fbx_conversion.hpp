@@ -27,6 +27,11 @@ struct FbxStaticMesh {
     // When a native FBX normal layer is supported, this is three floats per
     // emitted vertex. Polygon-corner normal seams are expanded exactly.
     std::vector<float> normals;
+    // One raw FBX node-material slot per emitted triangle. The original
+    // editor batches these signed integers in first-seen order. A later
+    // adapter resolves each slot against FbxNodeGeometry::materials and can
+    // safely provide the native plain-material fallback for an invalid slot.
+    std::vector<std::int32_t> triangle_material_slots;
 };
 
 struct FbxMaterialParameters {
@@ -49,6 +54,9 @@ struct FbxNodeGeometry {
     // ksEditor keeps the evaluated node matrix separate in local mode and
     // applies this geometric TRS to positions and normals.
     scene::Matrix4 geometric = scene::identity_matrix;
+    // Scene material IDs in the FBX node's connection order. Material-layer
+    // integers are local indices into this list, not global scene IDs.
+    std::vector<scene::MaterialId> materials;
 };
 
 // A bounded source record for a file texture connected to an FBX material.
