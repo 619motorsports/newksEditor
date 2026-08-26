@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <span>
@@ -28,6 +29,28 @@ static_assert(std::is_nothrow_move_constructible_v<
               ValidatedStockKsPerPixelNativeProgram>);
 static_assert(std::is_nothrow_move_assignable_v<
               ValidatedStockKsPerPixelNativeProgram>);
+
+class FakeConstantBuffer final : public Buffer {
+public:
+    FakeConstantBuffer(Backend backend, BufferDescription description)
+        : backend_(backend), info_{description} {
+        ++live_count;
+    }
+    ~FakeConstantBuffer() override { --live_count; }
+
+    [[nodiscard]] Backend backend() const noexcept override {
+        return backend_;
+    }
+    [[nodiscard]] const BufferInfo& info() const noexcept override {
+        return info_;
+    }
+
+    static inline std::size_t live_count = 0U;
+
+private:
+    Backend backend_ = Backend::D3D12;
+    BufferInfo info_{};
+};
 
 class FakeShaderModule final : public ShaderModule {
 public:
@@ -60,9 +83,22 @@ public:
         return info_;
     }
     [[nodiscard]] BufferResult create_buffer(
-        const BufferDescription&,
-        std::span<const std::byte>) override {
-        return {BufferStatus::unsupported, {"unused", "unused"}, nullptr};
+        const BufferDescription& description,
+        std::span<const std::byte> initial_data) override {
+        ++buffer_calls;
+        buffer_descriptions.push_back(description);
+        initial_buffers.emplace_back(initial_data.begin(), initial_data.end());
+        if (buffer_fail_call != 0U && buffer_calls == buffer_fail_call)
+            return {BufferStatus::allocation_failed,
+                    {"fake_buffer_failure", "fake buffer allocation failed"},
+                    nullptr};
+        BufferDescription returned_description = description;
+        if (wrong_buffer) returned_description.size_bytes = 128U;
+        const Backend returned_backend =
+            wrong_buffer ? Backend::Vulkan : info_.backend;
+        return {BufferStatus::ready, {},
+                std::make_unique<FakeConstantBuffer>(
+                    returned_backend, returned_description)};
     }
     [[nodiscard]] BufferUpdateResult update_buffer(
         Buffer&, std::uint64_t,
@@ -114,11 +150,16 @@ public:
 
     std::size_t shader_calls = 0U;
     std::size_t fail_call = 0U;
+    std::size_t buffer_calls = 0U;
+    std::size_t buffer_fail_call = 0U;
     bool wrong_stage = false;
     bool wrong_format = false;
     bool wrong_backend = false;
+    bool wrong_buffer = false;
     std::vector<ShaderStage> stages;
     std::vector<std::size_t> sizes;
+    std::vector<BufferDescription> buffer_descriptions;
+    std::vector<std::vector<std::byte>> initial_buffers;
 
 private:
     DeviceInfo info_{};
@@ -1247,6 +1288,142 @@ void allocates_only_validated_native_d3d12_shader_objects() {
             "native shader allocation statuses have stable names");
 }
 
+StockKsPerPixelNativeConstantData native_constant_data_fixture() {
+    StockKsPerPixelNativeConstantData constants;
+    constants.camera.view = apex::scene::identity_matrix;
+    constants.camera.projection = apex::scene::identity_matrix;
+    constants.camera.mvp_inverse = apex::scene::identity_matrix;
+    constants.camera.near_plane = 0.1F;
+    constants.camera.far_plane = 1'000.0F;
+    constants.camera.field_of_view = 1.0F;
+    constants.object.world = apex::scene::identity_matrix;
+    constants.lighting.light_direction = {0.0F, -1.0F, 0.0F};
+    constants.lighting.ambient_color = {0.2F, 0.2F, 0.2F};
+    constants.lighting.light_color = {1.0F, 1.0F, 1.0F};
+    constants.lighting.exposure = 1.0F;
+    constants.shadow_maps.shadow_matrices.fill(apex::scene::identity_matrix);
+    constants.shadow_maps.biases = {0.001F, 0.002F, 0.003F};
+    constants.shadow_maps.texture_size = 1.0F / 1'024.0F;
+    constants.material.ambient = 0.35F;
+    constants.material.diffuse = 0.8F;
+    constants.material.specular = 0.2F;
+    constants.material.specular_exponent = 30.0F;
+    return constants;
+}
+
+template <typename Record>
+bool padded_record_matches(const std::vector<std::byte>& bytes,
+                           const Record& record) {
+    if (bytes.size() !=
+            stock_ks_per_pixel_native_constant_buffer_view_bytes ||
+        std::memcmp(bytes.data(), &record, sizeof(record)) != 0)
+        return false;
+    return std::all_of(bytes.begin() + static_cast<std::ptrdiff_t>(sizeof(record)),
+                       bytes.end(),
+                       [](std::byte value) { return value == std::byte{0}; });
+}
+
+void allocates_exact_native_d3d12_constant_buffer_views() {
+    require(FakeConstantBuffer::live_count == 0U,
+            "native constant allocation starts without live buffers");
+    const StockKsPerPixelNativeConstantData constants =
+        native_constant_data_fixture();
+    FakeShaderDevice d3d12(Backend::D3D12);
+    auto allocated = allocate_stock_ks_per_pixel_native_constant_buffers(
+        d3d12, constants);
+    require(allocated.ok() && d3d12.buffer_calls == 5U &&
+                d3d12.initial_buffers.size() == 5U &&
+                std::all_of(
+                    d3d12.buffer_descriptions.begin(),
+                    d3d12.buffer_descriptions.end(),
+                    [](const BufferDescription& description) {
+                        return description.size_bytes ==
+                                   stock_ks_per_pixel_native_constant_buffer_view_bytes &&
+                               description.usage == BufferUsage::uniform &&
+                               description.memory == BufferMemory::host_visible &&
+                               description.mutability ==
+                                   BufferMutability::mutable_data;
+                    }) &&
+                padded_record_matches(d3d12.initial_buffers[0U],
+                                      constants.camera) &&
+                padded_record_matches(d3d12.initial_buffers[1U],
+                                      constants.object) &&
+                padded_record_matches(d3d12.initial_buffers[2U],
+                                      constants.lighting) &&
+                padded_record_matches(d3d12.initial_buffers[3U],
+                                      constants.shadow_maps) &&
+                padded_record_matches(d3d12.initial_buffers[4U],
+                                      constants.material) &&
+                FakeConstantBuffer::live_count == 5U,
+            "D3D12 creates five exact zero-padded native constant views");
+    for (std::size_t index = 0U; index < 5U; ++index)
+        require(allocated.buffers->buffer(
+                    static_cast<StockKsPerPixelNativeConstantSlot>(index)) !=
+                    nullptr,
+                "native constant owner exposes each validated slot");
+    require(allocated.buffers->buffer(
+                StockKsPerPixelNativeConstantSlot::count) == nullptr,
+            "native constant owner rejects the count sentinel");
+    allocated.buffers.reset();
+    require(FakeConstantBuffer::live_count == 0U,
+            "native constant owner releases all five buffers");
+
+    auto invalid_constants = constants;
+    invalid_constants.shadow_maps.texture_size = 0.0F;
+    FakeShaderDevice invalid_device(Backend::D3D12);
+    const auto invalid = allocate_stock_ks_per_pixel_native_constant_buffers(
+        invalid_device, invalid_constants);
+    require(!invalid.ok() &&
+                invalid.status ==
+                    StockKsPerPixelNativeConstantBufferStatus::invalid_constants &&
+                invalid_device.buffer_calls == 0U,
+            "invalid native constants reject before buffer allocation");
+
+    FakeShaderDevice vulkan(Backend::Vulkan);
+    const auto rejected_vulkan =
+        allocate_stock_ks_per_pixel_native_constant_buffers(vulkan, constants);
+    require(!rejected_vulkan.ok() &&
+                rejected_vulkan.status ==
+                    StockKsPerPixelNativeConstantBufferStatus::backend_unsupported &&
+                vulkan.buffer_calls == 0U,
+            "Vulkan rejects the native D3D12 constant-buffer path");
+
+    FakeShaderDevice partial_failure(Backend::D3D12);
+    partial_failure.buffer_fail_call = 3U;
+    const auto rejected_partial =
+        allocate_stock_ks_per_pixel_native_constant_buffers(partial_failure,
+                                                            constants);
+    require(!rejected_partial.ok() &&
+                rejected_partial.status ==
+                    StockKsPerPixelNativeConstantBufferStatus::buffer_failed &&
+                partial_failure.buffer_calls == 3U &&
+                FakeConstantBuffer::live_count == 0U,
+            "partial native constant failure releases earlier buffers");
+
+    FakeShaderDevice wrong_buffer(Backend::D3D12);
+    wrong_buffer.wrong_buffer = true;
+    const auto rejected_buffer =
+        allocate_stock_ks_per_pixel_native_constant_buffers(wrong_buffer,
+                                                            constants);
+    require(!rejected_buffer.ok() &&
+                rejected_buffer.status ==
+                    StockKsPerPixelNativeConstantBufferStatus::invalid_buffer &&
+                wrong_buffer.buffer_calls == 1U &&
+                FakeConstantBuffer::live_count == 0U,
+            "invalid backend buffer metadata is rejected and released");
+
+    require(std::string_view(
+                stock_ks_per_pixel_native_constant_buffer_status_name(
+                    StockKsPerPixelNativeConstantBufferStatus::buffer_failed)) ==
+                "buffer_failed" &&
+                std::string_view(
+                    stock_ks_per_pixel_native_constant_buffer_status_name(
+                        static_cast<
+                            StockKsPerPixelNativeConstantBufferStatus>(255U))) ==
+                    "unknown",
+            "native constant-buffer statuses have stable names");
+}
+
 void preserves_native_constant_bytes_and_rejects_nonfinite_records() {
     StockKsPerPixelMaterialConstants material;
     material.ambient = 0.35F;
@@ -1494,6 +1671,7 @@ int main() {
         gates_the_complete_native_program_before_backend_allocation();
         owns_the_validated_native_program_after_the_gate();
         allocates_only_validated_native_d3d12_shader_objects();
+        allocates_exact_native_d3d12_constant_buffer_views();
         preserves_native_constant_bytes_and_rejects_nonfinite_records();
         transposes_native_host_matrices_before_upload();
         evaluates_recovered_base_pixel_equation();

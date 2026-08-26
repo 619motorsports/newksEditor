@@ -1065,6 +1065,84 @@ struct StockKsPerPixelNativeShaderResult {
     }
 };
 
+inline constexpr std::uint32_t
+    stock_ks_per_pixel_native_constant_buffer_view_bytes = 256U;
+
+enum class StockKsPerPixelNativeConstantSlot : std::uint8_t {
+    camera,
+    object,
+    lighting,
+    shadow_maps,
+    material,
+    count,
+};
+
+struct StockKsPerPixelNativeConstantData {
+    StockKsPerPixelCameraConstants camera{};
+    StockKsPerPixelObjectConstants object{};
+    StockKsPerPixelLightingConstants lighting{};
+    StockDirectionalShadowReceiverConstants shadow_maps{};
+    StockKsPerPixelMaterialConstants material{};
+};
+
+enum class StockKsPerPixelNativeConstantBufferStatus : std::uint8_t {
+    ready,
+    invalid_constants,
+    backend_unsupported,
+    buffer_failed,
+    invalid_buffer,
+    allocation_failed,
+};
+
+struct StockKsPerPixelNativeConstantBufferResult;
+
+class StockKsPerPixelNativeConstantBuffers {
+public:
+    StockKsPerPixelNativeConstantBuffers(
+        StockKsPerPixelNativeConstantBuffers&&) noexcept = default;
+    StockKsPerPixelNativeConstantBuffers& operator=(
+        StockKsPerPixelNativeConstantBuffers&&) noexcept = default;
+    StockKsPerPixelNativeConstantBuffers(
+        const StockKsPerPixelNativeConstantBuffers&) = delete;
+    StockKsPerPixelNativeConstantBuffers& operator=(
+        const StockKsPerPixelNativeConstantBuffers&) = delete;
+
+    [[nodiscard]] const Buffer* buffer(
+        StockKsPerPixelNativeConstantSlot slot) const noexcept {
+        const std::size_t index = static_cast<std::size_t>(slot);
+        return index < buffers_.size() ? buffers_[index].get() : nullptr;
+    }
+
+private:
+    friend StockKsPerPixelNativeConstantBufferResult
+    allocate_stock_ks_per_pixel_native_constant_buffers(
+        Device& device,
+        const StockKsPerPixelNativeConstantData& constants);
+
+    explicit StockKsPerPixelNativeConstantBuffers(
+        std::array<std::unique_ptr<Buffer>,
+                   static_cast<std::size_t>(
+                       StockKsPerPixelNativeConstantSlot::count)> buffers)
+        noexcept
+        : buffers_(std::move(buffers)) {}
+
+    std::array<std::unique_ptr<Buffer>,
+               static_cast<std::size_t>(
+                   StockKsPerPixelNativeConstantSlot::count)> buffers_;
+};
+
+struct StockKsPerPixelNativeConstantBufferResult {
+    StockKsPerPixelNativeConstantBufferStatus status =
+        StockKsPerPixelNativeConstantBufferStatus::backend_unsupported;
+    Diagnostic diagnostic;
+    std::unique_ptr<StockKsPerPixelNativeConstantBuffers> buffers;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == StockKsPerPixelNativeConstantBufferStatus::ready &&
+               buffers != nullptr;
+    }
+};
+
 inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
 
 [[nodiscard]] BufferStatus validate_buffer_description(
@@ -1337,6 +1415,14 @@ allocate_stock_ks_per_pixel_native_shaders(
     Device& device,
     ValidatedStockKsPerPixelNativeProgram&& program);
 
+// Create five separate mutable views for native b0 through b4. Each view is
+// 256 bytes for D3D12 CBV alignment. Bytes after each reflected record are
+// zero. A failed allocation returns no partial owner.
+[[nodiscard]] StockKsPerPixelNativeConstantBufferResult
+allocate_stock_ks_per_pixel_native_constant_buffers(
+    Device& device,
+    const StockKsPerPixelNativeConstantData& constants);
+
 struct DeviceResult {
     DeviceStatus status = DeviceStatus::unavailable;
     Diagnostic diagnostic;
@@ -1368,6 +1454,8 @@ struct DeviceResult {
 [[nodiscard]] const char* shader_module_status_name(ShaderModuleStatus status) noexcept;
 [[nodiscard]] const char* stock_ks_per_pixel_native_shader_status_name(
     StockKsPerPixelNativeShaderStatus status) noexcept;
+[[nodiscard]] const char* stock_ks_per_pixel_native_constant_buffer_status_name(
+    StockKsPerPixelNativeConstantBufferStatus status) noexcept;
 [[nodiscard]] const char* presentation_target_status_name(
     PresentationTargetStatus status) noexcept;
 [[nodiscard]] const char* presentation_frame_status_name(

@@ -3456,6 +3456,102 @@ allocate_stock_ks_per_pixel_native_shaders(
     }
 }
 
+StockKsPerPixelNativeConstantBufferResult
+allocate_stock_ks_per_pixel_native_constant_buffers(
+    Device& device,
+    const StockKsPerPixelNativeConstantData& constants) {
+    if (!valid_stock_ks_per_pixel_camera_constants(constants.camera) ||
+        !valid_stock_ks_per_pixel_object_constants(constants.object) ||
+        !valid_stock_ks_per_pixel_lighting_constants(constants.lighting) ||
+        !valid_stock_directional_shadow_receiver_constants(
+            constants.shadow_maps) ||
+        !valid_stock_ks_per_pixel_material_constants(constants.material)) {
+        return {StockKsPerPixelNativeConstantBufferStatus::invalid_constants,
+                {"stock_native_constants_invalid",
+                 "The native constant records contain invalid values."},
+                nullptr};
+    }
+    if (device.info().backend != Backend::D3D12) {
+        return {StockKsPerPixelNativeConstantBufferStatus::backend_unsupported,
+                {"stock_native_constant_backend_unsupported",
+                 "The installed native constant-buffer path requires D3D12."},
+                nullptr};
+    }
+
+    constexpr std::size_t slot_count = static_cast<std::size_t>(
+        StockKsPerPixelNativeConstantSlot::count);
+    std::array<std::array<std::byte,
+                          stock_ks_per_pixel_native_constant_buffer_view_bytes>,
+               slot_count>
+        records{};
+    const auto copy_record = [&]<typename Record>(
+                                 StockKsPerPixelNativeConstantSlot slot,
+                                 const Record& record) {
+        static_assert(sizeof(Record) <=
+                      stock_ks_per_pixel_native_constant_buffer_view_bytes);
+        std::memcpy(records[static_cast<std::size_t>(slot)].data(), &record,
+                    sizeof(Record));
+    };
+    copy_record(StockKsPerPixelNativeConstantSlot::camera, constants.camera);
+    copy_record(StockKsPerPixelNativeConstantSlot::object, constants.object);
+    copy_record(StockKsPerPixelNativeConstantSlot::lighting,
+                constants.lighting);
+    copy_record(StockKsPerPixelNativeConstantSlot::shadow_maps,
+                constants.shadow_maps);
+    copy_record(StockKsPerPixelNativeConstantSlot::material,
+                constants.material);
+
+    const BufferDescription description{
+        stock_ks_per_pixel_native_constant_buffer_view_bytes,
+        BufferUsage::uniform, BufferMemory::host_visible,
+        BufferMutability::mutable_data};
+    constexpr std::array<const char*, slot_count> slot_names = {
+        "cbCamera", "cbPerObject", "cbLighting", "cbShadowMaps",
+        "cbMaterial"};
+    std::array<std::unique_ptr<Buffer>, slot_count> buffers;
+    for (std::size_t index = 0U; index < buffers.size(); ++index) {
+        BufferResult created = device.create_buffer(description, records[index]);
+        if (created.status != BufferStatus::ready) {
+            Diagnostic diagnostic = std::move(created.diagnostic);
+            if (diagnostic.code.empty())
+                diagnostic.code = "stock_native_constant_buffer_failed";
+            if (diagnostic.message.empty())
+                diagnostic.message =
+                    std::string("D3D12 did not allocate ") + slot_names[index] +
+                    ".";
+            return {StockKsPerPixelNativeConstantBufferStatus::buffer_failed,
+                    std::move(diagnostic), nullptr};
+        }
+        if (!created.ok() || created.buffer->backend() != Backend::D3D12 ||
+            created.buffer->info().description.size_bytes !=
+                stock_ks_per_pixel_native_constant_buffer_view_bytes ||
+            created.buffer->info().description.usage != BufferUsage::uniform ||
+            created.buffer->info().description.memory !=
+                BufferMemory::host_visible ||
+            created.buffer->info().description.mutability !=
+                BufferMutability::mutable_data) {
+            return {StockKsPerPixelNativeConstantBufferStatus::invalid_buffer,
+                    {"stock_native_constant_buffer_invalid",
+                     std::string("D3D12 returned an invalid ") +
+                         slot_names[index] + " buffer."},
+                    nullptr};
+        }
+        buffers[index] = std::move(created.buffer);
+    }
+
+    try {
+        auto owned = std::unique_ptr<StockKsPerPixelNativeConstantBuffers>(
+            new StockKsPerPixelNativeConstantBuffers(std::move(buffers)));
+        return {StockKsPerPixelNativeConstantBufferStatus::ready, {},
+                std::move(owned)};
+    } catch (const std::bad_alloc&) {
+        return {StockKsPerPixelNativeConstantBufferStatus::allocation_failed,
+                {"stock_native_constant_owner_allocation_failed",
+                 "The native constant-buffer owner allocation failed."},
+                nullptr};
+    }
+}
+
 bool valid_sampler_description(const SamplerDescription& description,
                                Diagnostic& diagnostic) {
     return validate_sampler_description(description, diagnostic) == SamplerStatus::ready;
@@ -3704,6 +3800,24 @@ const char* stock_ks_per_pixel_native_shader_status_name(
     case StockKsPerPixelNativeShaderStatus::invalid_shader_module:
         return "invalid_shader_module";
     case StockKsPerPixelNativeShaderStatus::allocation_failed:
+        return "allocation_failed";
+    }
+    return "unknown";
+}
+
+const char* stock_ks_per_pixel_native_constant_buffer_status_name(
+    StockKsPerPixelNativeConstantBufferStatus status) noexcept {
+    switch (status) {
+    case StockKsPerPixelNativeConstantBufferStatus::ready: return "ready";
+    case StockKsPerPixelNativeConstantBufferStatus::invalid_constants:
+        return "invalid_constants";
+    case StockKsPerPixelNativeConstantBufferStatus::backend_unsupported:
+        return "backend_unsupported";
+    case StockKsPerPixelNativeConstantBufferStatus::buffer_failed:
+        return "buffer_failed";
+    case StockKsPerPixelNativeConstantBufferStatus::invalid_buffer:
+        return "invalid_buffer";
+    case StockKsPerPixelNativeConstantBufferStatus::allocation_failed:
         return "allocation_failed";
     }
     return "unknown";

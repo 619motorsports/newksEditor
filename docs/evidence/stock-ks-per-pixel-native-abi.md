@@ -193,6 +193,11 @@ validation.
 program. D3D12 allocates the vertex and pixel module objects in stage order.
 The function rejects Vulkan DXBC before it calls the device.
 
+`allocate_stock_ks_per_pixel_native_constant_buffers` validates the five
+native records before allocation. D3D12 creates one mutable 256-byte view for
+each reflected buffer. The allocator clears all bytes after each record.
+It releases earlier buffers if a later allocation fails.
+
 The CPU evaluator follows the recovered pixel equation. It rejects non-finite
 records and degenerate normalization inputs before evaluation. This evaluator
 does not execute the installed DXBC.
@@ -201,7 +206,7 @@ The current Vulkan path remains a labeled portable ABI. A future translated
 path needs separate descriptor sets for constant buffers, textures, and
 samplers because Vulkan uses one binding namespace.
 
-The D3D12 module objects do not create the native root signature or pipeline
-state. The D3D12 path still needs these objects and the exact native resource
-bindings. A Windows WARP pipeline and readback test must pass before production
-selection becomes available.
+The D3D12 module and buffer objects do not create the native root signature or
+pipeline state. The D3D12 path still needs these objects and the exact texture
+and sampler bindings. A Windows WARP pipeline and readback test must pass
+before production selection becomes available.
