@@ -3827,6 +3827,12 @@ allocate_stock_ks_per_pixel_native_samplers(
                  "Native stock sampler settings require integer anisotropy from 2 through 16 and LOD bias from -16 through 16."},
                 nullptr};
     }
+    if (device.info().backend != Backend::D3D12) {
+        return {StockKsPerPixelNativeSamplerStatus::backend_unsupported,
+                {"stock_native_sampler_backend_unsupported",
+                 "The installed native stock sampler contract requires D3D12."},
+                nullptr};
+    }
 
     SamplerDescription linear;
     linear.min_filter = SamplerFilter::anisotropic;
@@ -4184,6 +4190,8 @@ const char* stock_ks_per_pixel_native_sampler_status_name(
     case StockKsPerPixelNativeSamplerStatus::ready: return "ready";
     case StockKsPerPixelNativeSamplerStatus::invalid_settings:
         return "invalid_settings";
+    case StockKsPerPixelNativeSamplerStatus::backend_unsupported:
+        return "backend_unsupported";
     case StockKsPerPixelNativeSamplerStatus::linear_sampler_failed:
         return "linear_sampler_failed";
     case StockKsPerPixelNativeSamplerStatus::shadow_sampler_failed:

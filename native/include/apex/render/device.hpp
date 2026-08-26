@@ -1186,6 +1186,7 @@ enum class StockKsPerPixelNativeSamplerSlot : std::uint8_t {
 enum class StockKsPerPixelNativeSamplerStatus : std::uint8_t {
     ready,
     invalid_settings,
+    backend_unsupported,
     linear_sampler_failed,
     shadow_sampler_failed,
     invalid_sampler,

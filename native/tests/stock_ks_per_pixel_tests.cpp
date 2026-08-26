@@ -1555,6 +1555,17 @@ void allocates_exact_native_stock_samplers() {
                 invalid_device.sampler_calls == 0U,
             "invalid runtime sampler settings reject before device calls");
 
+    FakeShaderDevice vulkan(Backend::Vulkan);
+    const auto rejected_vulkan =
+        allocate_stock_ks_per_pixel_native_samplers(vulkan, settings);
+    require(!rejected_vulkan.ok() &&
+                rejected_vulkan.status ==
+                    StockKsPerPixelNativeSamplerStatus::backend_unsupported &&
+                rejected_vulkan.diagnostic.code ==
+                    "stock_native_sampler_backend_unsupported" &&
+                vulkan.sampler_calls == 0U,
+            "Vulkan rejects the native D3D12 sampler path before allocation");
+
     FakeShaderDevice partial_failure(Backend::D3D12);
     partial_failure.sampler_fail_call = 2U;
     const auto rejected_partial =
@@ -1594,6 +1605,10 @@ void allocates_exact_native_stock_samplers() {
                 stock_ks_per_pixel_native_sampler_status_name(
                     StockKsPerPixelNativeSamplerStatus::shadow_sampler_failed)) ==
                 "shadow_sampler_failed" &&
+                std::string_view(
+                    stock_ks_per_pixel_native_sampler_status_name(
+                        StockKsPerPixelNativeSamplerStatus::backend_unsupported)) ==
+                    "backend_unsupported" &&
                 std::string_view(
                     stock_ks_per_pixel_native_sampler_status_name(
                         static_cast<StockKsPerPixelNativeSamplerStatus>(255U))) ==
