@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <optional>
 #include <span>
@@ -81,6 +82,39 @@ struct StockShaderContainer {
     std::vector<std::uint8_t> geometry_shader;
 };
 
+enum class StockShaderContainerFileStatus : std::uint8_t {
+    ready,
+    invalid_limits,
+    invalid_path,
+    not_regular_file,
+    file_size_unavailable,
+    file_too_large,
+    open_failed,
+    read_failed,
+    file_size_changed,
+    malformed_package,
+    allocation_failed,
+};
+
+struct StockShaderContainerFileDiagnostic {
+    std::filesystem::path path;
+    std::string code;
+    std::string message;
+    std::size_t offset = 0U;
+};
+
+struct StockShaderContainerFileResult {
+    StockShaderContainerFileStatus status =
+        StockShaderContainerFileStatus::invalid_path;
+    StockShaderContainerFileDiagnostic diagnostic;
+    std::optional<StockShaderContainer> container;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == StockShaderContainerFileStatus::ready &&
+               container.has_value();
+    }
+};
+
 class MaterialProfileError final : public std::runtime_error {
 public:
     MaterialProfileError(std::string message, std::size_t offset);
@@ -101,6 +135,14 @@ private:
 // chunks, and stage programs whose embedded type does not match their slot.
 [[nodiscard]] StockShaderContainer parse_stock_shader_container(
     std::span<const std::uint8_t> bytes,
+    const StockShaderContainerLimits& limits = {});
+
+// Load one explicitly selected port package. This path checks the file type
+// and size before allocation, then applies the complete bounded container
+// parser. It does not reproduce the original editor's .shader marker and
+// separate win/*_vs.fxo and win/*_ps.fxo discovery path.
+[[nodiscard]] StockShaderContainerFileResult load_stock_shader_container_file(
+    const std::filesystem::path& path,
     const StockShaderContainerLimits& limits = {});
 
 struct MaterialInput {

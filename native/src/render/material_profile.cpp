@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -374,6 +375,113 @@ StockShaderContainer parse_stock_shader_container(
     result.pixel_shader.assign(pixel.begin(), pixel.end());
     result.geometry_shader.assign(geometry.begin(), geometry.end());
     return result;
+}
+
+StockShaderContainerFileResult load_stock_shader_container_file(
+    const std::filesystem::path& path,
+    const StockShaderContainerLimits& limits) {
+    const auto failure = [&](StockShaderContainerFileStatus status,
+                             std::string code, std::string message,
+                             std::size_t offset = 0U) {
+        return StockShaderContainerFileResult{
+            status,
+            {path, std::move(code), std::move(message), offset},
+            std::nullopt};
+    };
+    try {
+        if (limits.max_container_bytes == 0U ||
+            limits.max_stage_bytes == 0U || limits.max_dxbc_chunks == 0U)
+            return failure(
+                StockShaderContainerFileStatus::invalid_limits,
+                "stock_shader_file_limits_invalid",
+                "Stock shader file limits must be nonzero");
+        if (path.empty())
+            return failure(
+                StockShaderContainerFileStatus::invalid_path,
+                "stock_shader_file_path_invalid",
+                "The stock shader file path is empty");
+
+        std::error_code error;
+        const std::filesystem::file_status file_status =
+            std::filesystem::status(path, error);
+        if (error)
+            return failure(
+                StockShaderContainerFileStatus::not_regular_file,
+                "stock_shader_file_not_regular",
+                "The stock shader path is not a readable regular file");
+        if (!std::filesystem::is_regular_file(file_status))
+            return failure(
+                StockShaderContainerFileStatus::not_regular_file,
+                "stock_shader_file_not_regular",
+                "The stock shader path is not a regular file");
+
+        const std::uintmax_t file_bytes =
+            std::filesystem::file_size(path, error);
+        if (error)
+            return failure(
+                StockShaderContainerFileStatus::file_size_unavailable,
+                "stock_shader_file_size_unavailable",
+                "The stock shader file size is unavailable");
+        if (file_bytes > limits.max_container_bytes ||
+            file_bytes > std::numeric_limits<std::size_t>::max())
+            return failure(
+                StockShaderContainerFileStatus::file_too_large,
+                "stock_shader_file_too_large",
+                "The stock shader file exceeds its byte limit");
+
+        std::ifstream input(path, std::ios::binary);
+        if (!input)
+            return failure(
+                StockShaderContainerFileStatus::open_failed,
+                "stock_shader_file_open_failed",
+                "The stock shader file cannot be opened");
+        std::vector<std::uint8_t> bytes(
+            static_cast<std::size_t>(file_bytes));
+        if (!bytes.empty()) {
+            input.read(reinterpret_cast<char*>(bytes.data()),
+                       static_cast<std::streamsize>(bytes.size()));
+            if (input.gcount() !=
+                static_cast<std::streamsize>(bytes.size()))
+                return failure(
+                    input.bad()
+                        ? StockShaderContainerFileStatus::read_failed
+                        : StockShaderContainerFileStatus::file_size_changed,
+                    input.bad() ? "stock_shader_file_read_failed"
+                                : "stock_shader_file_size_changed",
+                    input.bad()
+                        ? "The stock shader file read failed"
+                        : "The stock shader file size changed during the read");
+        }
+        char extra = 0;
+        input.read(&extra, 1);
+        if (input.gcount() != 0)
+            return failure(
+                StockShaderContainerFileStatus::file_size_changed,
+                "stock_shader_file_size_changed",
+                "The stock shader file size changed during the read");
+        if (input.bad())
+            return failure(
+                StockShaderContainerFileStatus::read_failed,
+                "stock_shader_file_read_failed",
+                "The stock shader file read failed");
+
+        try {
+            StockShaderContainer container =
+                parse_stock_shader_container(bytes, limits);
+            return {StockShaderContainerFileStatus::ready, {path, {}, {}, 0U},
+                    std::move(container)};
+        } catch (const MaterialProfileError& parse_error) {
+            return failure(
+                StockShaderContainerFileStatus::malformed_package,
+                "stock_shader_file_malformed_package", parse_error.what(),
+                parse_error.offset());
+        }
+    } catch (const std::bad_alloc&) {
+        return failure(
+            StockShaderContainerFileStatus::allocation_failed,
+            "stock_shader_file_allocation_failed",
+            "The bounded stock shader file load cannot allocate memory");
+    }
 }
 
 MaterialRenderProfile resolve_material_render_profile(const MaterialInput& material,

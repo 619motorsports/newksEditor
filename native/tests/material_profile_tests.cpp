@@ -248,6 +248,73 @@ void rejects_malformed_owned_containers() {
         "geometry DXBC stage identity is enforced");
 }
 
+void loads_stock_container_files_with_preallocation_bounds() {
+    using namespace apex::render;
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() /
+        "apex-stock-shader-container-file-test.shader";
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() {
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+        }
+    } cleanup{path};
+    const auto write_bytes = [&](std::span<const std::uint8_t> bytes) {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        require(static_cast<bool>(output), "stock file fixture opens");
+        output.write(reinterpret_cast<const char*>(bytes.data()),
+                     static_cast<std::streamsize>(bytes.size()));
+        require(static_cast<bool>(output), "stock file fixture write completes");
+    };
+
+    const std::vector<std::uint8_t> valid = container();
+    write_bytes(valid);
+    const StockShaderContainerFileResult loaded =
+        load_stock_shader_container_file(path);
+    require(loaded.ok() && loaded.container->header.version == 2U &&
+                loaded.container->vertex_shader.size() == 48U &&
+                loaded.container->pixel_shader.size() == 48U,
+            "bounded stock file loader owns a complete parsed package");
+
+    StockShaderContainerLimits limits;
+    limits.max_container_bytes = valid.size() - 1U;
+    const StockShaderContainerFileResult oversized =
+        load_stock_shader_container_file(path, limits);
+    require(!oversized.ok() &&
+                oversized.status ==
+                    StockShaderContainerFileStatus::file_too_large &&
+                oversized.diagnostic.code == "stock_shader_file_too_large",
+            "stock file size limit rejects input before parsing");
+
+    write_bytes(std::span<const std::uint8_t>(valid.data(), valid.size() - 1U));
+    const StockShaderContainerFileResult truncated =
+        load_stock_shader_container_file(path);
+    require(!truncated.ok() &&
+                truncated.status ==
+                    StockShaderContainerFileStatus::malformed_package &&
+                truncated.diagnostic.code ==
+                    "stock_shader_file_malformed_package" &&
+                !truncated.container.has_value(),
+            "truncated stock file returns no parsed package");
+
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+    const StockShaderContainerFileResult missing =
+        load_stock_shader_container_file(path);
+    require(!missing.ok() &&
+                missing.status ==
+                    StockShaderContainerFileStatus::not_regular_file,
+            "missing stock file fails before allocation");
+    const StockShaderContainerFileResult directory =
+        load_stock_shader_container_file(
+            std::filesystem::temp_directory_path());
+    require(!directory.ok() &&
+                directory.status ==
+                    StockShaderContainerFileStatus::not_regular_file,
+            "stock file loader rejects directories");
+}
+
 void parses_installed_stock_package_when_available() {
     const char* root = std::getenv("ASSETTO_CORSA_ROOT");
     if (root == nullptr || *root == '\0') return;
@@ -441,6 +508,7 @@ int main() {
         header_contract();
         owned_container_contract();
         rejects_malformed_owned_containers();
+        loads_stock_container_files_with_preallocation_bounds();
         parses_installed_stock_package_when_available();
         package_and_serialized_precedence();
         csp_state_precedence_and_classification();

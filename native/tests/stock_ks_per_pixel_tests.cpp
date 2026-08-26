@@ -11,6 +11,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <span>
@@ -285,6 +287,12 @@ void put_u32(std::vector<std::uint8_t>& bytes, std::size_t offset,
     for (std::size_t byte = 0U; byte < 4U; ++byte)
         bytes[offset + byte] =
             static_cast<std::uint8_t>(value >> (byte * 8U));
+}
+
+void append_u32(std::vector<std::uint8_t>& bytes, std::uint32_t value) {
+    const std::size_t offset = bytes.size();
+    bytes.resize(offset + sizeof(value));
+    put_u32(bytes, offset, value);
 }
 
 std::uint32_t get_u32(const std::vector<std::uint8_t>& bytes,
@@ -581,6 +589,26 @@ StockShaderContainer complete_native_container_fixture(
     container.header.pixel_bytes =
         static_cast<std::uint32_t>(container.pixel_shader.size());
     return container;
+}
+
+std::vector<std::uint8_t> complete_native_container_file_fixture(
+    StockKsPerPixelVariant variant) {
+    const StockShaderContainer container =
+        complete_native_container_fixture(variant);
+    std::vector<std::uint8_t> bytes = {
+        container.header.version,
+        static_cast<std::uint8_t>(container.header.alpha_tested)};
+    append_u32(bytes, 0U);
+    append_u32(bytes,
+               static_cast<std::uint32_t>(container.vertex_shader.size()));
+    bytes.insert(bytes.end(), container.vertex_shader.begin(),
+                 container.vertex_shader.end());
+    append_u32(bytes,
+               static_cast<std::uint32_t>(container.pixel_shader.size()));
+    bytes.insert(bytes.end(), container.pixel_shader.begin(),
+                 container.pixel_shader.end());
+    append_u32(bytes, 0U);
+    return bytes;
 }
 
 void require(bool condition, const char* message) {
@@ -1315,6 +1343,71 @@ void clones_validated_native_programs_without_aliasing_mutable_state() {
                            cloned.program->pixel_shader().end(),
                            original.pixel_shader().begin()),
             "native clone preserves the exact validated DXBC payloads");
+}
+
+void loads_only_exact_validated_native_program_files() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() /
+        "apex-ks-per-pixel-native-program-file-test.shader";
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() {
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+        }
+    } cleanup{path};
+    const auto write_bytes = [&](std::span<const std::uint8_t> bytes) {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        require(static_cast<bool>(output),
+                "native program file fixture opens");
+        output.write(reinterpret_cast<const char*>(bytes.data()),
+                     static_cast<std::streamsize>(bytes.size()));
+        require(static_cast<bool>(output),
+                "native program file fixture write completes");
+    };
+
+    const std::vector<std::uint8_t> base_bytes =
+        complete_native_container_file_fixture(
+            StockKsPerPixelVariant::base);
+    write_bytes(base_bytes);
+    auto loaded = load_validated_stock_ks_per_pixel_native_program_file(
+        path, StockKsPerPixelVariant::base);
+    require(loaded.ok() && loaded.program->variant() ==
+                               StockKsPerPixelVariant::base,
+            "exact base native program file passes the complete gate");
+
+    auto wrong_variant =
+        load_validated_stock_ks_per_pixel_native_program_file(
+            path, StockKsPerPixelVariant::alpha_to_coverage);
+    require(!wrong_variant.ok() &&
+                wrong_variant.file_status ==
+                    StockShaderContainerFileStatus::ready &&
+                wrong_variant.program_status ==
+                    StockKsPerPixelNativeProgramStatus::
+                        container_shape_mismatch &&
+                !wrong_variant.program.has_value(),
+            "loaded base package cannot enter the alpha native variant");
+
+    const std::vector<std::uint8_t> alpha_bytes =
+        complete_native_container_file_fixture(
+            StockKsPerPixelVariant::alpha_to_coverage);
+    write_bytes(alpha_bytes);
+    loaded = load_validated_stock_ks_per_pixel_native_program_file(
+        path, StockKsPerPixelVariant::alpha_to_coverage);
+    require(loaded.ok() && loaded.program->variant() ==
+                               StockKsPerPixelVariant::alpha_to_coverage,
+            "exact alpha native program file passes the complete gate");
+
+    write_bytes(std::span<const std::uint8_t>(base_bytes.data(),
+                                              base_bytes.size() - 1U));
+    const auto truncated =
+        load_validated_stock_ks_per_pixel_native_program_file(
+            path, StockKsPerPixelVariant::base);
+    require(!truncated.ok() &&
+                truncated.file_status ==
+                    StockShaderContainerFileStatus::malformed_package &&
+                !truncated.program.has_value(),
+            "truncated native program file returns no validated owner");
 }
 
 void executes_a_validated_native_program_through_the_static_scene_batch() {
@@ -2505,6 +2598,7 @@ int main() {
         gates_the_complete_native_program_before_backend_allocation();
         owns_the_validated_native_program_after_the_gate();
         clones_validated_native_programs_without_aliasing_mutable_state();
+        loads_only_exact_validated_native_program_files();
         executes_a_validated_native_program_through_the_static_scene_batch();
         allocates_only_validated_native_d3d12_shader_objects();
         allocates_exact_native_d3d12_constant_buffer_views();

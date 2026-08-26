@@ -704,12 +704,37 @@ struct StockKsPerPixelNativeProgramResult {
     }
 };
 
+struct StockKsPerPixelNativeProgramFileResult {
+    StockShaderContainerFileStatus file_status =
+        StockShaderContainerFileStatus::invalid_path;
+    StockKsPerPixelNativeProgramStatus program_status =
+        StockKsPerPixelNativeProgramStatus::invalid_variant;
+    StockShaderContainerFileDiagnostic diagnostic;
+    std::optional<ValidatedStockKsPerPixelNativeProgram> program;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return file_status == StockShaderContainerFileStatus::ready &&
+               program_status ==
+                   StockKsPerPixelNativeProgramStatus::ready &&
+               program.has_value();
+    }
+};
+
 // Take ownership before validation. A successful result is the only supported
 // input to future native backend allocation paths.
 [[nodiscard]] StockKsPerPixelNativeProgramResult
 create_validated_stock_ks_per_pixel_native_program(
     StockShaderContainer container,
     StockKsPerPixelVariant variant);
+
+// Load and validate one explicit port package before any backend allocation.
+// The diagnostic retains file-system or parser details. A package that loads
+// but fails the exact ksPerPixel ABI gate reports a ready file status and a
+// non-ready program status.
+[[nodiscard]] StockKsPerPixelNativeProgramFileResult
+load_validated_stock_ks_per_pixel_native_program_file(
+    const std::filesystem::path& path, StockKsPerPixelVariant variant,
+    const StockShaderContainerLimits& limits = {});
 
 // Produce a separately owned proof for another per-draw native resource
 // bundle. The complete container gate is repeated so callers never receive a

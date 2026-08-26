@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <string>
 #include <string_view>
 
 namespace apex::render {
@@ -844,6 +845,35 @@ create_validated_stock_ks_per_pixel_native_program(
         return {status, std::nullopt};
     return {status, ValidatedStockKsPerPixelNativeProgram(
                         std::move(container), variant)};
+}
+
+StockKsPerPixelNativeProgramFileResult
+load_validated_stock_ks_per_pixel_native_program_file(
+    const std::filesystem::path& path, StockKsPerPixelVariant variant,
+    const StockShaderContainerLimits& limits) {
+    StockShaderContainerFileResult loaded =
+        load_stock_shader_container_file(path, limits);
+    if (!loaded.ok())
+        return {loaded.status,
+                StockKsPerPixelNativeProgramStatus::invalid_variant,
+                std::move(loaded.diagnostic), std::nullopt};
+
+    StockKsPerPixelNativeProgramResult validated =
+        create_validated_stock_ks_per_pixel_native_program(
+            std::move(*loaded.container), variant);
+    if (!validated.ok()) {
+        const std::string status_name =
+            stock_ks_per_pixel_native_program_status_name(validated.status);
+        return {
+            StockShaderContainerFileStatus::ready, validated.status,
+            {path, "stock_ks_per_pixel_native_program_" + status_name,
+             "The stock shader package failed the exact ksPerPixel native "
+             "program gate: " + status_name,
+             0U},
+            std::nullopt};
+    }
+    return {StockShaderContainerFileStatus::ready, validated.status,
+            {path, {}, {}, 0U}, std::move(validated.program)};
 }
 
 StockKsPerPixelNativeProgramResult
