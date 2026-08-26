@@ -120,6 +120,30 @@ remain excluded. It is a source-evidenced
 execution fixture for the explicitly bounded P3 slice, not a complete stock
 `ksPerPixel` implementation.
 
+`indexed_ks_skinned_mesh.vert` is the CPU-skinned transport fixture. It
+declares all six attributes in the recovered 19-float stream. The CPU applies
+the bone palette before the backend uploads the mutable vertex buffer. The
+shader does not reproduce the recovered native `b13` GPU-skinning path.
+
+The fixture keeps the direct-light output ABI from `indexed_ks_per_pixel.vert`.
+It also carries tangent, weight, and index inputs as unused stage outputs. This
+rule prevents the compiler from removing these test inputs.
+
+- Source SHA-256: `1defab150ba22963fe37865bacbd48cc9db2222958e65bb497b586ee5511b8d1`
+- SPIR-V SHA-256: `314e257b70764b142e1a41b0e46c37eef12fa6958282e53a3edb2b1a2163121a`
+- Compiler: glslang `16.4.0`
+- Target: SPIR-V 1.0 for Vulkan 1.0
+
+Use these commands from the repository root:
+
+```sh
+glslangValidator -V --target-env vulkan1.0 -Os -g0 -S vert \
+  -o /tmp/apex_indexed_ks_skinned_mesh.spv \
+  native/tests/shaders/indexed_ks_skinned_mesh.vert
+spirv-val --target-env vulkan1.0 \
+  /tmp/apex_indexed_ks_skinned_mesh.spv
+```
+
 Fixture identities:
 
 - Vertex source SHA-256: `1df262a410660234a6918333e3ef0ef10773b2e9d47b277d4ed03a4b13101def`

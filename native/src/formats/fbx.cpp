@@ -198,6 +198,9 @@ FbxValue binaryProperty(BinaryReader& reader, char code, std::size_t propertyOff
     if (rawLength > reader.limits().maxArrayBytes || compressedLength > reader.limits().maxArrayBytes)
         fail(FbxStage::binary_dom, "array_limit", "FBX array byte count exceeds its limit", propertyOffset);
     const auto valueBytes = mulSize(count, (code == 'l' || code == 'd') ? 8u : (code == 'f' ? 4u : (code == 'i' ? 8u : 1u)), propertyOffset, FbxStage::binary_dom);
+    if (valueBytes > reader.limits().maxArrayBytes)
+        fail(FbxStage::binary_dom, "array_limit",
+             "FBX decoded array byte count exceeds its limit", propertyOffset);
     account(rawLength);
     account(valueBytes);
     account(sizeof(FbxArray));
@@ -438,6 +441,18 @@ std::vector<Token> tokenizeAscii(std::span<const std::uint8_t> bytes, const FbxL
             continuedContentToken.reset();
             push(TokenKind::line_end, index, {});
             lineTokenBegin = tokens.size();
+        }
+        if (continuedContentPayload && continuedLineHasPayload && c == '}') {
+            // Compact ASCII exporters can close the owning node after the
+            // final quoted chunk. Finish the Content property before the
+            // close token enters the normal node grammar.
+            continuedContentPayload = false;
+            continuedContentToken.reset();
+            push(TokenKind::line_end, index, {});
+            lineTokenBegin = tokens.size();
+            continuedLineHasPayload = false;
+            continuedLineCreatedToken = false;
+            continuedLineHasComma = false;
         }
         if (static_cast<unsigned char>(c) < 0x20u) fail(FbxStage::ascii_tokens, "control", "unsupported ASCII control character", index);
         if (c == ';') { while (index<bytes.size() && bytes[index]!='\n' && bytes[index]!='\r') ++index; continue; }

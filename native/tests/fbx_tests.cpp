@@ -235,6 +235,22 @@ void parsesBoundedEmbeddedContent() {
                     std::vector<std::uint8_t>{0u, 1u, 2u, 0xffu},
                 "ASCII embedded Content joins bounded exporter chunks");
     }
+    for (const bool final_comma : {false, true}) {
+        const std::string compact =
+            "FBXVersion: 7400\nObjects: {\n"
+            " Video: 600, \"Video::Paint\", \"Clip\" {\n"
+            "  Content: ,\n"
+            "   \"AAEC/w==\"" +
+            std::string(final_comma ? "," : "") + " }\n}\n";
+        const auto compact_document = apex::formats::parseFbx({
+            reinterpret_cast<const std::uint8_t*>(compact.data()),
+            compact.size()});
+        require(std::get<std::vector<std::uint8_t>>(
+                    compact_document.roots[1].children[0].children[0]
+                        .properties[0].values[0]) ==
+                    std::vector<std::uint8_t>{0u, 1u, 2u, 0xffu},
+                "ASCII embedded Content permits a compact owning close");
+    }
     auto sameLine = asciiEmbeddedContent();
     const auto continuation = sameLine.find(",\n   \"");
     require(continuation != std::string::npos,
@@ -530,6 +546,15 @@ void rejectsMaliciousStructureAndLimits() {
     expectsFbxError([&] { (void)apex::formats::parseFbx({reinterpret_cast<const std::uint8_t*>(ascii.data()), ascii.size()}, "ascii.fbx", asciiLimits); }, "token_limit", FbxStage::ascii_tokens);
     auto aggregateLimits = apex::formats::FbxLimits{}; aggregateLimits.maxAggregateBytes = 2u;
     expectsFbxError([&] { (void)apex::formats::parseFbx(binaryMinimal(), "aggregate.fbx", aggregateLimits); }, "allocation_limit", FbxStage::binary_dom);
+    auto widenedIntegerArray = binaryFloatArray(false);
+    widenedIntegerArray[45u] = 'i';
+    auto widenedIntegerLimits = apex::formats::FbxLimits{};
+    widenedIntegerLimits.maxArrayBytes = 8u;
+    expectsFbxError([&] {
+        (void)apex::formats::parseFbx(
+            widenedIntegerArray, "widened-integer-array.fbx",
+            widenedIntegerLimits);
+    }, "array_limit", FbxStage::binary_dom);
     auto compressed = binaryFloatArray(true); compressed[54] = 0xffu; compressed[55] = 0xffu;
     expectsFbxError([&] { (void)apex::formats::parseFbx(compressed); }, "truncated", FbxStage::binary_dom);
 }

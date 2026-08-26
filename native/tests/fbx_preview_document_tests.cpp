@@ -1,11 +1,15 @@
 #include "apex/app/fbx_preview_document.hpp"
 
+#include "apex/domain/animation_preview.hpp"
 #include "apex/formats/acd.hpp"
 #include "apex/render/draw_packet.hpp"
+#include "apex/scene/kn5_scene.hpp"
+#include "apex/workspace/workspace_scene.hpp"
 
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -330,6 +334,17 @@ std::string ascii_skinned_fbx() {
         "  Weights: *3 { a: 1.0,1.0,1.0 }\n"
         "  Transform: *1 { a: 7.0 }\n"
         "  TransformLink: *16 { a: 1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,0.0,1.0,0.0,2.0,0.0,0.0,1.0 }\n"
+        " }\n"
+        " AnimationStack: 900, \"AnimationStack::Bone Move\", \"AnimationStack\" {\n"
+        "  LocalStart: 0\n"
+        "  LocalStop: 100\n"
+        " }\n"
+        " AnimationLayer: 901, \"AnimationLayer::BaseLayer\", \"AnimationLayer\" { }\n"
+        " AnimationCurveNode: 902, \"AnimationCurveNode::T\", \"AnimationCurveNode\" { }\n"
+        " AnimationCurve: 903, \"AnimationCurve::TX\", \"AnimationCurve\" {\n"
+        "  KeyTime: *2 { a: 0,100 }\n"
+        "  KeyValueFloat: *2 { a: 2.0,4.0 }\n"
+        "  KeyAttrFlags: *2 { a: 4,4 }\n"
         " }\n");
     const auto connections_end = text.rfind("}\n");
     require(connections_end != std::string::npos,
@@ -338,7 +353,11 @@ std::string ascii_skinned_fbx() {
         connections_end,
         " C: \"OO\", 700, 100\n"
         " C: \"OO\", 800, 700\n"
-        " C: \"OO\", 600, 800\n");
+        " C: \"OO\", 600, 800\n"
+        " C: \"OO\", 901, 900\n"
+        " C: \"OO\", 902, 901\n"
+        " C: \"OP\", 902, 600, \"Lcl Translation\"\n"
+        " C: \"OP\", 903, 902, \"d|X\"\n");
     return text;
 }
 
@@ -507,7 +526,7 @@ void opens_skinned_ascii_through_workspace_packets() {
     const auto text = ascii_skinned_fbx();
     auto source = source_with({
         entry("texture/paint.dds", rgba8_dds({10U, 20U, 30U, 255U}))});
-    const auto result = apex::app::open_fbx_preview_document(
+    auto result = apex::app::open_fbx_preview_document(
         request_for(text, &source));
     if (!result.gpu_renderable()) {
         std::cerr << "skinned fixture status="
@@ -553,6 +572,37 @@ void opens_skinned_ascii_through_workspace_packets() {
                         return value.code == "skinning_execution_staged";
                     }),
             "bind pose resolves to identity through workspace draw packets");
+
+    require(result.animations.size() == 1U,
+            "serialized skinned FBX publishes one bounded animation clip");
+    auto& workspace_document = *result.document;
+    const auto applied = apex::domain::apply_animation_preview(
+        workspace_document.assembly.model,
+        result.animations[0].animation, 0.5F);
+    require(applied.matched_nodes == 1U && applied.skinning_required,
+            "FBX bone animation requests CPU skinning");
+    workspace_document.scene = apex::scene::convertKn5Scene(
+        workspace_document.assembly.model);
+    workspace_document.sceneBinding = apex::workspace::bindWorkspaceScene(
+        workspace_document.scene.snapshot,
+        workspace_document.assembly.workspace);
+    const auto animated_packets = apex::render::build_draw_packets(
+        workspace_document.assembly.model,
+        workspace_document.scene.snapshot,
+        apex::render::DrawPacketOptions{},
+        apex::render::DrawPacketLimits{});
+    require(animated_packets.supported &&
+                animated_packets.packets.size() == 1U &&
+                animated_packets.packets[0].bone_palette.size() == 1U &&
+                std::abs(animated_packets.packets[0].bone_palette[0][12] -
+                         1.0F) < 1.0e-6F,
+            "animated FBX bone reaches the workspace draw-packet palette");
+    const auto skinned = apex::render::skin_vertices_reference(
+        mesh->vertices, animated_packets.packets[0].bone_palette,
+        animated_packets.packets[0].world_matrix);
+    require(skinned.size() == mesh->vertices.size() &&
+                std::abs(skinned[0] - 4.0F) < 1.0e-6F,
+            "animated FBX palette moves the geometrically baked vertex once");
 }
 
 void stages_incomplete_resources_without_backend_readiness() {
@@ -731,6 +781,27 @@ void rejects_malformed_input_and_authority_atomically() {
                 apex::app::FbxPreviewDocumentStatus::invalid_request &&
                 !invalid.document.has_value(),
             "mismatched serialized skin arrays publish no partial document");
+
+    auto malformed_animation = ascii_skinned_fbx();
+    constexpr std::string_view animation_values =
+        "  KeyValueFloat: *2 { a: 2.0,4.0 }";
+    const auto animation_values_at =
+        malformed_animation.find(animation_values);
+    require(animation_values_at != std::string::npos,
+            "ASCII skin fixture has its animation value array");
+    malformed_animation.replace(animation_values_at,
+                                animation_values.size(),
+                                "  KeyValueFloat: *1 { a: 2.0 }");
+    invalid = apex::app::open_fbx_preview_document(
+        request_for(malformed_animation));
+    require(invalid.status ==
+                apex::app::FbxPreviewDocumentStatus::invalid_request &&
+                !invalid.document.has_value() &&
+                std::any_of(invalid.diagnostics.begin(),
+                            invalid.diagnostics.end(), [](const auto& value) {
+                                return value.code == "invalid_animation";
+                            }),
+            "mismatched serialized animation arrays publish no document");
 }
 
 void enforces_composition_limits() {

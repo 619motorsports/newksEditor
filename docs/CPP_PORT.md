@@ -573,6 +573,9 @@ remains unchanged and feature-complete.
   influences, and inverted `TransformLink` matrices. It diagnoses non-linear
   animation, `Image` records, unsupported layer mappings, and advanced
   transform semantics.
+  A serialized linear bone clip now reaches the workspace bone palette and CPU
+  skin path. The real-backend contract uses a dedicated 19-float transport
+  shader for this test. This shader is not the recovered native `b13` path.
   The FBX adapter publishes copied texture bytes as owned model payloads. The
   Vulkan and D3D12 handoffs consume this explicit authority.
   The conversion budget includes temporary vectors, maps, sets, child lists,

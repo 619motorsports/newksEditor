@@ -656,6 +656,11 @@ uses this planner for DDS, PNG, JPEG, and BMP data. The ASCII parser joins
 comma-terminated quoted chunks before Base64 decoding. WebP and unsupported
 PNG modes remain staged in the C++ port.
 
+The ASCII parser accepts an owning-node close after the last continued payload
+chunk. The binary parser also budgets the widened 64-bit output for 32-bit
+integer arrays. Both rules reject malformed or over-budget input before the
+DOM publishes data.
+
 A wider follow-up sample found 49 DX10 BC7 images. Modern WebGL implementations can
 upload those blocks through `EXT_texture_compression_bptc`; BC6H uses the same path,
 and DX10 sRGB and uncompressed RGBA/BGRA/R8 mappings are recognized. A 144.5 MB
@@ -2823,6 +2828,17 @@ finalizer changes its shader to `ksSkinnedMesh` at `0x10041F97`.
 
 The C++ adapter isolates the skinned material copy. This safety divergence
 prevents a static mesh from receiving a shader with an incompatible vertex ABI.
+
+`SkinnedMesh::render` at `0x1004A87E` refreshes the bone buffer before each
+draw. The loop at `0x100498C0` writes `inverse(TransformLink) * boneWorld`.
+`WorldMatrixTraverser::traverse` at `0x100634B1` supplies the cached world
+matrix.
+
+The installed `ksSkinnedMesh_vs.fxo` declares 55 matrices at `cb13`. It blends
+four source-order influences. `MeshBuilder::buildSkinnedMesh` applies L2
+normalization to the four weights. The WebGL-compatible CPU path instead
+normalizes by the weight sum during deformation. This difference remains
+explicit and does not claim native shader parity.
 
 The native importer sends these color components to `Material::setVar(float)`
 at `0x100408B6`. It does not create a one-pixel texture. `Material::setTexture`

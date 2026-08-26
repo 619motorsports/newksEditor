@@ -1,4 +1,5 @@
 #include "apex/assets/asset_source.hpp"
+#include "apex/domain/animation_preview.hpp"
 #include "apex/formats/acd.hpp"
 #include "apex/formats/fbx.hpp"
 #include "apex/formats/fbx_conversion.hpp"
@@ -269,6 +270,54 @@ std::vector<std::uint8_t> executable_ks_per_pixel_vertex_shader() {
     for (std::size_t index = 0U; index < result.size(); ++index)
         result[index] = static_cast<std::uint8_t>((hex_digit(hex[index * 2U]) << 4U) |
                                                    hex_digit(hex[index * 2U + 1U]));
+    return result;
+}
+
+std::vector<std::uint8_t> executable_ks_skinned_mesh_vertex_shader() {
+    // CPU-skinned transport fixture. The shader declares the complete
+    // 19-float input ABI and receives vertices after the CPU pose update.
+    // Source SHA-256: 1defab150ba22963fe37865bacbd48cc9db2222958e65bb497b586ee5511b8d1
+    // SPIR-V SHA-256: 314e257b70764b142e1a41b0e46c37eef12fa6958282e53a3edb2b1a2163121a
+    constexpr std::string_view hex =
+        "03022307000001000b000800560000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000"
+        "010000000f00120000000000040000006d61696e00000000150000001e000000290000002c000000310000003300000036000000380000003a000000"
+        "3b0000003d000000470000004f000000470003000b00000002000000480004000b0000000000000005000000480005000b0000000000000007000000"
+        "10000000480005000b000000000000002300000000000000480004000b0000000100000005000000480005000b000000010000000700000010000000"
+        "480005000b00000001000000230000004000000047000400150000001e00000000000000470004001e0000001e000000000000004700040029000000"
+        "1e00000001000000470004002c0000001e0000000100000047000400310000001e0000000200000047000400330000001e0000000200000047000300"
+        "360000000e00000047000400360000001e0000000300000047000400380000001e00000004000000470003003a0000000e000000470004003a000000"
+        "1e00000004000000470004003b0000001e00000005000000470004003d0000001e0000000500000047000400470000001e0000000300000047000300"
+        "4d00000002000000480005004d000000000000000b00000000000000480005004d000000010000000b00000001000000480005004d00000002000000"
+        "0b00000003000000480005004d000000030000000b000000040000001300020002000000210003000300000002000000160003000600000020000000"
+        "17000400070000000600000004000000180004000a00000007000000040000001e0004000b0000000a0000000a000000200004000c00000009000000"
+        "0b0000003b0004000c0000000d00000009000000150004000e00000020000000010000002b0004000e0000000f000000000000002000040010000000"
+        "090000000a00000017000400130000000600000003000000200004001400000001000000130000003b0004001400000015000000010000002b000400"
+        "06000000170000000000803f200004001d00000003000000130000003b0004001d0000001e0000000300000018000400210000001300000003000000"
+        "3b0004001400000029000000010000003b0004001d0000002c00000003000000170004002f0000000600000002000000200004003000000003000000"
+        "2f0000003b0004003000000031000000030000002000040032000000010000002f0000003b0004003200000033000000010000002000040035000000"
+        "03000000070000003b000400350000003600000003000000200004003700000001000000070000003b0004003700000038000000010000003b000400"
+        "350000003a000000030000003b000400370000003b000000010000003b0004001d0000003d000000030000003b000400140000004700000001000000"
+        "150004004a00000020000000000000002b0004004a0000004b000000010000001c0004004c000000060000004b0000001e0006004d00000007000000"
+        "060000004c0000004c000000200004004e000000030000004d0000003b0004004e0000004f000000030000002b0004000e0000005000000001000000"
+        "3600050002000000040000000000000003000000f8000200050000004100050010000000110000000d0000000f0000003d0004000a00000012000000"
+        "110000003d00040013000000160000001500000051000500060000001800000016000000000000005100050006000000190000001600000001000000"
+        "51000500060000001a000000160000000200000050000700070000001b00000018000000190000001a0000001700000091000500070000001c000000"
+        "120000001b00000051000500070000002200000012000000000000004f00080013000000230000002200000022000000000000000100000002000000"
+        "51000500070000002400000012000000010000004f000800130000002500000024000000240000000000000001000000020000005100050007000000"
+        "2600000012000000020000004f0008001300000027000000260000002600000000000000010000000200000050000600210000002800000023000000"
+        "25000000270000003d000400130000002a0000002900000091000500130000002b000000280000002a0000003e0003001e0000002b0000004f000800"
+        "130000002e0000001c0000001c0000000000000001000000020000003e0003002c0000002e0000003d0004002f00000034000000330000003e000300"
+        "31000000340000003d0004000700000039000000380000003e00030036000000390000003d000400070000003c0000003b0000003e0003003a000000"
+        "3c0000003d00040013000000480000004700000091000500130000004900000028000000480000003e0003003d000000490000004100050010000000"
+        "510000000d000000500000003d0004000a0000005200000051000000910005000700000054000000520000001c000000410005003500000055000000"
+        "4f0000000f0000003e0003005500000054000000fd00010038000100";
+    require(hex.size() % 2U == 0U,
+            "embedded ksSkinnedMesh vertex shader hex alignment");
+    std::vector<std::uint8_t> result(hex.size() / 2U);
+    for (std::size_t index = 0U; index < result.size(); ++index)
+        result[index] = static_cast<std::uint8_t>(
+            (hex_digit(hex[index * 2U]) << 4U) |
+            hex_digit(hex[index * 2U + 1U]));
     return result;
 }
 
@@ -5162,6 +5211,9 @@ bool contract_backend(apex::render::Backend backend) {
     fbx_stock_request.scene = &fbx_adapter.scene->snapshot;
     fbx_stock_request.shader_modules = stock_shader_modules;
     fbx_stock_request.targets = ks_pipeline.targets;
+    fbx_stock_request.targets.has_depth = true;
+    fbx_stock_request.targets.depth = {
+        PipelineRenderTargetFormat::depth32_float, 1U};
     fbx_stock_request.texture_authority = fbx_adapter.texture_authority;
     const auto fbx_stock_result = prepare_stock_scene_execution(
         *device.device, fbx_stock_request);
@@ -5169,9 +5221,16 @@ bool contract_backend(apex::render::Backend backend) {
                 fbx_stock_result.render_plan.items.size() == 1U &&
                 fbx_stock_result.resources->owned_texture_count() == 1U,
             "ready FBX reaches the shared real-backend stock scene");
+    DepthAttachmentResult fbx_depth =
+        device.device->create_depth_attachment({32U, 32U, 1U});
+    require(fbx_depth.ok(),
+            "ready FBX creates its real-backend depth attachment");
+    StaticSceneFrameDescription fbx_frame = stock_frame;
+    fbx_frame.depth_attachment = fbx_depth.attachment.get();
+    fbx_frame.clear_depth = true;
     const auto fbx_draw_result =
         fbx_stock_result.resources->draw_and_readback(
-            *device.device, *triangle_texture.texture, stock_frame);
+            *device.device, *triangle_texture.texture, fbx_frame);
     require(fbx_draw_result.ok(),
             "ready FBX draws through the selected real backend");
     bool fbx_visible_pixel = false;
@@ -5200,6 +5259,17 @@ bool contract_backend(apex::render::Backend backend) {
         "  Indexes: *3 { a: 0,1,2 }\n"
         "  Weights: *3 { a: 1.0,1.0,1.0 }\n"
         "  TransformLink: *16 { a: 1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,0.0,1.0 }\n"
+        " }\n"
+        " AnimationStack: 900, \"AnimationStack::Bone Move\", \"AnimationStack\" {\n"
+        "  LocalStart: 0\n"
+        "  LocalStop: 100\n"
+        " }\n"
+        " AnimationLayer: 901, \"AnimationLayer::BaseLayer\", \"AnimationLayer\" { }\n"
+        " AnimationCurveNode: 902, \"AnimationCurveNode::T\", \"AnimationCurveNode\" { }\n"
+        " AnimationCurve: 903, \"AnimationCurve::TX\", \"AnimationCurve\" {\n"
+        "  KeyTime: *2 { a: 0,100 }\n"
+        "  KeyValueFloat: *2 { a: 0.0,1.0 }\n"
+        "  KeyAttrFlags: *2 { a: 4,4 }\n"
         " }\n");
     const auto skinned_connections_end = skinned_fbx_text.rfind("}\n");
     require(skinned_connections_end != std::string::npos,
@@ -5208,7 +5278,11 @@ bool contract_backend(apex::render::Backend backend) {
         skinned_connections_end,
         " C: \"OO\", 700, 100\n"
         " C: \"OO\", 800, 700\n"
-        " C: \"OO\", 600, 800\n");
+        " C: \"OO\", 600, 800\n"
+        " C: \"OO\", 901, 900\n"
+        " C: \"OO\", 902, 901\n"
+        " C: \"OP\", 902, 600, \"Lcl Translation\"\n"
+        " C: \"OP\", 903, 902, \"d|X\"\n");
     const auto skinned_fbx_bytes = std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(skinned_fbx_text.data()),
         skinned_fbx_text.size());
@@ -5218,25 +5292,51 @@ bool contract_backend(apex::render::Backend backend) {
         apex::formats::convertFbxScene(skinned_fbx_document);
     require(skinned_fbx_conversion.complete &&
                 skinned_fbx_conversion.meshes.size() == 1U &&
-                skinned_fbx_conversion.meshes[0].skin.has_value(),
+                skinned_fbx_conversion.meshes[0].skin.has_value() &&
+                skinned_fbx_conversion.animations.size() == 1U,
             "real-backend serialized FBX skin converts completely");
     const auto skinned_fbx_textures =
         apex::render::resolve_fbx_external_texture_authority(
             skinned_fbx_conversion, "real-backend-skinned-fbx", fbx_source);
     require(skinned_fbx_textures.ok(),
             "real-backend FBX skin resolves its explicit texture grant");
-    const auto skinned_fbx_adapter =
+    auto skinned_fbx_adapter =
         apex::render::build_fbx_render_scene(
             skinned_fbx_conversion, &skinned_fbx_textures,
             "real-backend-skinned-triangle.fbx");
     require(skinned_fbx_adapter.gpu_renderable(),
             "real-backend FBX skin builds a ready owned model");
+    std::array<PipelineShaderModule, 2U> skinned_transport_modules = {
+        ks_pipeline.shaders[0], ks_pipeline.shaders[1]};
+    if (backend == Backend::Vulkan) {
+        skinned_transport_modules[0].bytes =
+            executable_ks_skinned_mesh_vertex_shader();
+    } else {
+#if defined(_WIN32)
+        constexpr std::string_view skinned_vertex_source =
+            "cbuffer DrawMatrices : register(b0) { column_major float4x4 world; column_major float4x4 viewProjection; };"
+            "struct Input { float3 position : POSITION; float3 normal : NORMAL; float2 texcoord : TEXCOORD0;"
+            "float3 tangent : TANGENT; float4 weights : BLENDWEIGHT; float4 indices : BLENDINDICES; };"
+            "struct Output { float4 position : SV_Position; float3 normal : NORMAL; float3 world : TEXCOORD1;"
+            "float2 texcoord : TEXCOORD0; nointerpolation float4 weights : TEXCOORD2;"
+            "nointerpolation float4 indices : TEXCOORD3; float3 tangent : TEXCOORD4; };"
+            "Output main(Input input) { Output output; float4 worldPosition = mul(world, float4(input.position, 1.0));"
+            "output.position = mul(viewProjection, worldPosition); output.normal = mul((float3x3)world, input.normal);"
+            "output.world = worldPosition.xyz; output.texcoord = input.texcoord; output.weights = input.weights;"
+            "output.indices = input.indices; output.tangent = mul((float3x3)world, input.tangent); return output; }";
+        skinned_transport_modules[0].bytes =
+            executable_d3d_shader(skinned_vertex_source, "vs_5_0");
+#else
+        require(false,
+                "D3D12 skinned transport shader requires Windows D3DCompile");
+#endif
+    }
     const std::array<StockMaterialShaderModules, 2U> skinned_shader_modules = {
         stock_shader_modules[0],
         StockMaterialShaderModules{
             StockMaterialShaderKeyKind::shader_family,
             "ksSkinnedMesh",
-            std::span<const PipelineShaderModule>(ks_pipeline.shaders),
+            std::span<const PipelineShaderModule>(skinned_transport_modules),
         }};
     StockSceneExecutionRequest skinned_fbx_request = fbx_stock_request;
     skinned_fbx_request.model = &*skinned_fbx_adapter.model;
@@ -5248,11 +5348,18 @@ bool contract_backend(apex::render::Backend backend) {
         *device.device, skinned_fbx_request);
     require(skinned_fbx_stock.ok() &&
                 skinned_fbx_stock.resources->owned_texture_count() == 1U &&
+                skinned_fbx_stock.resources->unique_geometry_count() == 1U &&
                 skinned_fbx_stock.resources->prepared_packets().size() == 1U &&
                 skinned_fbx_stock.resources->prepared_packets()[0].primitive ==
-                    DrawPrimitiveKind::skinned_mesh,
+                    DrawPrimitiveKind::skinned_mesh &&
+                skinned_fbx_stock.resources->prepared_packets()[0]
+                        .vertex_stride_floats == 19U &&
+                skinned_fbx_stock.resources->prepared_packets()[0]
+                        .material_profile.shader == "ksSkinnedMesh" &&
+                skinned_fbx_stock.resources->prepared_packets()[0]
+                        .bone_palette.size() == 1U,
             "serialized FBX skin reaches shared real-backend preparation");
-    StaticSceneFrameDescription skinned_fbx_frame = stock_frame;
+    StaticSceneFrameDescription skinned_fbx_frame = fbx_frame;
     skinned_fbx_frame.apply_skinning = true;
     const auto skinned_fbx_draw =
         skinned_fbx_stock.resources->draw_and_readback(
@@ -5260,6 +5367,35 @@ bool contract_backend(apex::render::Backend backend) {
     require(skinned_fbx_draw.ok() &&
                 skinned_fbx_draw.rgba8 == fbx_draw_result.rgba8,
             "FBX bind pose matches static geometry on the real backend");
+
+    const auto animated_fbx_application =
+        apex::domain::apply_animation_preview(
+            *skinned_fbx_adapter.model,
+            skinned_fbx_conversion.animations[0].animation, 0.5F);
+    require(animated_fbx_application.matched_nodes == 1U &&
+                animated_fbx_application.skinning_required,
+            "serialized FBX bone animation requests CPU skinning");
+    const auto animated_fbx_scene = apex::scene::convertKn5Scene(
+        *skinned_fbx_adapter.model);
+    const auto animated_fbx_packets = apex::render::build_draw_packets(
+        *skinned_fbx_adapter.model, animated_fbx_scene.snapshot,
+        apex::render::DrawPacketOptions{},
+        apex::render::DrawPacketLimits{});
+    require(animated_fbx_packets.supported &&
+                animated_fbx_packets.packets.size() == 1U &&
+                animated_fbx_packets.packets[0].bone_palette.size() == 1U &&
+                std::abs(animated_fbx_packets.packets[0]
+                             .bone_palette[0][12] - 0.5F) < 1.0e-6F,
+            "serialized FBX animation reaches the refreshed bone palette");
+    StaticSceneFrameDescription animated_fbx_frame = skinned_fbx_frame;
+    animated_fbx_frame.refreshed_packets = animated_fbx_packets.packets;
+    const auto animated_fbx_draw =
+        skinned_fbx_stock.resources->draw_and_readback(
+            *device.device, *triangle_texture.texture,
+            animated_fbx_frame);
+    require(animated_fbx_draw.ok() &&
+                animated_fbx_draw.rgba8 != skinned_fbx_draw.rgba8,
+            "animated FBX skin changes real-backend color output");
 
     auto embedded_fbx_conversion = fbx_conversion;
     embedded_fbx_conversion.embedded_images.push_back(
@@ -5285,7 +5421,7 @@ bool contract_backend(apex::render::Backend backend) {
             "embedded FBX reaches the shared real-backend stock scene");
     const auto embedded_fbx_draw =
         embedded_fbx_stock.resources->draw_and_readback(
-            *device.device, *triangle_texture.texture, stock_frame);
+            *device.device, *triangle_texture.texture, fbx_frame);
     require(embedded_fbx_draw.ok() &&
                 embedded_fbx_draw.rgba8 == fbx_draw_result.rgba8,
             "embedded and external FBX payloads produce equal backend output");

@@ -53,7 +53,7 @@ row-major values stores the transpose. The equivalent C++ product is therefore
 `offsetMatrix * matrixWS` product. A non-commuting scale and translation test
 protects this representation conversion.
 
-## Influence limit
+## Influence limit and normalization
 
 `MeshBuilder::setWeight` is at `0x10042CB9`. It scans exactly four influence
 slots for each control point.
@@ -61,11 +61,39 @@ slots for each control point.
 Each record contains four float weights and four integer bone indices. The
 function uses the first slot with bone index `-1`.
 
-The function does not sort or normalize weights. It prints a warning and does
-not store a fifth influence.
+The function does not sort the weights. It prints a warning and does not store
+a fifth influence.
+
+`MeshBuilder::buildSkinnedMesh` at `0x10042538` replaces unused bone indices
+with zero. It then applies L2 normalization to the four weights:
+
+```text
+weights = weights / sqrt(sum(weights * weights))
+```
 
 The native function does not validate the control-point index. The safe port
 must reject an index that is outside the control-point table.
+
+## Runtime deformation
+
+`WorldMatrixTraverser::traverse` at `0x100634B1` caches each node world matrix.
+A root uses its local matrix. A child uses `local * parentWorld` in native
+row-major notation.
+
+`SkinnedMesh::render` at `0x1004A87E` calls `updateBonesBuffer` immediately
+before the draw. The update uploads one 64-byte matrix for each bone:
+
+```text
+palette[i] = inverse(TransformLinkMatrix) * boneWorldMatrix
+```
+
+The installed `ksSkinnedMesh_vs.fxo` declares `cb13[220]`. This record holds 55
+matrices. The shader blends four position, normal, and tangent results. It then
+normalizes the blended normal and tangent. It does not use an inverse-transpose
+normal matrix.
+
+The native allocation uses `boneCount * 64` bytes. No explicit 55-bone check
+was found. Thus, the shader declaration supplies the effective native limit.
 
 ## Output layout
 
@@ -106,5 +134,8 @@ weights across UV and normal seam expansion.
 The render adapter emits the same 19-float layout. It creates an isolated
 `ksSkinnedMesh` material. This safety divergence prevents a shared static batch
 from receiving a skinned vertex ABI. Vulkan and D3D12 use the shared CPU skin
-path. The port adds bone and influence limits because the native importer does
-not validate those values.
+path. This path follows the current WebGL preview and normalizes by the weight
+sum during deformation. Native FBX import uses L2 normalization before GPU
+deformation. The port labels this difference and does not claim native shader
+parity. The port also adds bone and influence limits because the native
+importer does not validate those values.

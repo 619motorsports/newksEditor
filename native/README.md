@@ -711,8 +711,11 @@ recovered cluster matrices. A fixed animation position can update linked bones
 through the shared CPU skin path.
 The optional real-backend contract test carries static and skinned ASCII FBX
 files through parsing, texture authority, the adapter, and draw readback. It
-requires visible color output on Vulkan and D3D12. Hosts without Vulkan or
-Windows WARP skip this contract with a backend diagnostic.
+uses a dedicated CPU-skinned 19-float transport shader. A serialized linear
+bone clip supplies a non-bind pose through the refreshed-packet path. The bind
+and animated poses must produce different color output on Vulkan and D3D12.
+Hosts without Vulkan or Windows WARP skip this contract with a backend
+diagnostic.
 
 The strict Linux build detects the Vulkan SDK. The runtime test uses a software
 Vulkan device when an ICD is available. CI defines the same Vulkan test. The
