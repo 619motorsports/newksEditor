@@ -1,5 +1,6 @@
 #pragma once
 
+#include "apex/render/camera_mesh_filter.hpp"
 #include "apex/scene/scene.hpp"
 
 #include <cstdint>
@@ -114,6 +115,10 @@ struct RenderPlanOptions {
     // Present applies the recovered ksNet PVS-array distance/LOD predicate.
     // This does not claim full CameraMeshFilter pass or frustum parity.
     std::optional<KsNetMeshLodOptions> ksnet_mesh_lod;
+    // Retain meshes across their authored LOD interval. A live caller must
+    // consume each RenderItem::camera_mesh_filter descriptor on every frame.
+    // The stock viewport uses this only with its retained packet mask.
+    bool defer_camera_mesh_filter = false;
 };
 
 struct RenderItem {
@@ -128,6 +133,9 @@ struct RenderItem {
     std::string workspace_file;
     // Includes the item node and its ancestors, in root-to-leaf order.
     std::vector<apex::scene::NodeId> reflection_ancestors;
+    // Present only when defer_camera_mesh_filter requested an exact KN5 local
+    // sphere. An absent value requires a conservative visible fallback.
+    std::optional<CameraMeshRenderable> camera_mesh_filter;
 };
 
 struct UnsupportedEffect {

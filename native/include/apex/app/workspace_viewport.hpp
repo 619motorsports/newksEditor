@@ -141,6 +141,10 @@ struct WorkspaceViewportPrepareRequest {
     // preparation; unrelated overrides remain active.
     std::optional<WorkspaceViewportExternalTextureRequest> external_textures;
     render::RenderPlanOptions render{};
+    // Apply the recovered active CameraMeshFilter geometry path on each frame.
+    // Packets without a recovered KN5 local sphere remain conservatively visible.
+    bool camera_mesh_filter = false;
+    std::uint32_t camera_mesh_max_layer = 5U;
     render::DrawPacketOptions packets{};
     bool evaluate_damage_preview = false;
     std::optional<bool> damage_broken_visible;
@@ -361,7 +365,8 @@ private:
         const WorkspaceAiSplineGeometry* camber = nullptr;
     };
 
-    struct LodCatalog {
+    struct VisibilityCatalog {
+        bool workspace_lod = false;
         apex::scene::Vector3 bounds_center{};
         std::optional<std::uint32_t> selected_index;
         float fov_degrees = 45.0F;
@@ -369,6 +374,8 @@ private:
         bool track_camera = false;
         std::vector<std::optional<workspace::CarLodManifest>> file_lods;
         std::vector<std::size_t> file_for_packet;
+        std::vector<std::optional<render::CameraMeshRenderable>> mesh_filters;
+        std::uint32_t max_layer = 5U;
         std::vector<std::uint8_t> frame_visibility;
     };
 
@@ -407,7 +414,7 @@ private:
         std::unique_ptr<render::Buffer> selected_mesh_color_buffer,
         std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps,
         std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows,
-        std::optional<LodCatalog> lod_catalog);
+        std::optional<VisibilityCatalog> visibility_catalog);
 
     render::Device* device_ = nullptr;
     render::Backend backend_ = render::Backend::Vulkan;
@@ -432,7 +439,7 @@ private:
         std::chrono::steady_clock::now();
     std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps_;
     std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows_;
-    std::optional<LodCatalog> lod_catalog_;
+    std::optional<VisibilityCatalog> visibility_catalog_;
 
     friend struct WorkspaceViewportPrepareResult;
     friend WorkspaceViewportPrepareResult prepareWorkspaceViewport(

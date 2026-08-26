@@ -101,7 +101,9 @@ bool merge_damage_activity_overrides(
 }
 
 bool preplan_within_limit(const apex::scene::SceneSnapshot& scene,
-                          bool include_ksnet_node_states, std::uint64_t limit,
+                          bool include_ksnet_node_states,
+                          bool include_camera_filter_catalog,
+                          std::uint64_t limit,
                           Diagnostic& diagnostic) {
     if (limit == 0U) {
         diagnostic = {"stock_scene_plan_preflight_limit",
@@ -266,6 +268,11 @@ bool preplan_within_limit(const apex::scene::SceneSnapshot& scene,
     if (!add_product({node_count, 5U}, sizeof(RenderItem), bytes, limit) ||
         !add_product({node_count, max_depth, 5U}, sizeof(apex::scene::NodeId), bytes, limit) ||
         !add_product({node_count, max_workspace_bytes, 5U}, 1U, bytes, limit) ||
+        (include_camera_filter_catalog &&
+         !add_count(node_count,
+                    sizeof(std::optional<CameraMeshRenderable>) +
+                        sizeof(std::uint8_t),
+                    bytes, limit)) ||
         !add_count(5U, sizeof(UnsupportedEffect), bytes, limit) ||
         !add_bytes(15U * 1024U, bytes, limit)) {
         diagnostic = {"stock_scene_plan_preflight_limit",
@@ -362,6 +369,46 @@ bool validate_render_options(const apex::scene::SceneSnapshot& scene,
             return false;
         }
         seen[index] = true;
+    }
+    if (options.defer_camera_mesh_filter) {
+        if (options.ksnet_mesh_lod.has_value()) {
+            diagnostic = {
+                "stock_scene_camera_mesh_filter_mode_conflict",
+                "Deferred camera mesh filtering cannot use the PVS-array LOD mode"};
+            return false;
+        }
+        for (const apex::scene::SceneNode& node : scene.nodes) {
+            if ((node.kind != apex::scene::NodeKind::mesh &&
+                 node.kind != apex::scene::NodeKind::skinned_mesh) ||
+                node.local_bounds_source ==
+                    apex::scene::LocalBoundsSource::unavailable) {
+                continue;
+            }
+            if (!std::isfinite(node.local_bounds_radius) ||
+                node.local_bounds_radius < 0.0F ||
+                std::any_of(node.local_bounds_center.begin(),
+                            node.local_bounds_center.end(),
+                            [](float value) { return !std::isfinite(value); })) {
+                diagnostic = {
+                    "stock_scene_camera_mesh_bounds_invalid",
+                    "Deferred camera mesh filtering requires finite KN5 local bounds"};
+                return false;
+            }
+        }
+        const double max_float =
+            static_cast<double>(std::numeric_limits<float>::max());
+        for (const NodeRenderStateOverride& override_value :
+             options.node_state_overrides) {
+            if ((override_value.lod_in.has_value() &&
+                 std::abs(*override_value.lod_in) > max_float) ||
+                (override_value.lod_out.has_value() &&
+                 std::abs(*override_value.lod_out) > max_float)) {
+                diagnostic = {
+                    "stock_scene_camera_mesh_lod_out_of_range",
+                    "Deferred camera mesh LOD overrides must fit in finite float values"};
+                return false;
+            }
+        }
     }
     if (options.ksnet_mesh_lod.has_value()) {
         const KsNetMeshLodOptions& lod = *options.ksnet_mesh_lod;
@@ -565,6 +612,7 @@ StockSceneExecutionResult prepare_stock_scene_execution(
         Diagnostic preflight_diagnostic;
         if (!preplan_within_limit(*request.scene,
                                   render_options.ksnet_mesh_lod.has_value(),
+                                  render_options.defer_camera_mesh_filter,
                                   request.limits.max_plan_bytes,
                                   preflight_diagnostic)) {
             result.status = StaticSceneResourceStatus::invalid_request;

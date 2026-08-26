@@ -162,8 +162,29 @@ conventions. It rejects non-finite inputs that the selected path consumes.
 The native comparisons permit NaN values. A native bypass does not consume
 the bypassed fields.
 
-This function is not connected to the live viewport yet. The viewport still
-needs a retained per-packet filter catalog and a new mask for each frame.
+The native viewport now uses this function. Preparation retains packets across
+their authored mesh LOD intervals. It also copies one filter record for each
+packet with recovered KN5 bounds.
+
+Each frame uses the current camera position, FOV, view-projection matrix, and
+clip convention. A refreshed packet supplies its current world matrix. The
+viewport does not rebuild graphics resources after camera movement.
+
+The mesh mask combines with the workspace-file LOD mask by logical AND. An
+explicit caller mask stays authoritative and bypasses both automatic masks.
+The final automatic mask applies to color and directional-shadow submission.
+
+Packets without recovered KN5 bounds stay visible. A fractional CSP layer also
+uses this conservative fallback because the native field is an integer. These
+fallbacks are explicit and do not claim native culling parity.
+
+The production native window enables the live filter. The WebGL renderer keeps
+its existing visibility path. Prepared transparent order also stays fixed after
+camera movement.
+
+Two active-path gaps remain. Runtime mutation of `noCull` and `isStatic` is not
+connected. The existing render plan also removes invisible shadow casters before
+the native shadow-pass visibility difference can apply.
 
 The opt-in mode implements only the recovered PVS-array distance stage. It
 does not implement the complete active `CameraMeshFilter` path. In particular,

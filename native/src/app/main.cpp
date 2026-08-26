@@ -1990,6 +1990,7 @@ int run_window(int argc, char** argv) {
         request.presentation = target_result.target->info().description;
         request.shader_modules = loaded_workspace.descriptors;
         request.render.camera_position = camera.frame->position;
+        request.camera_mesh_filter = true;
         request.render.isolated = loaded_workspace.selection.isolate_selected;
         request.render.isolated_node = loaded_workspace.selection.selected_node;
         request.render.show_hidden = loaded_workspace.selection.show_hidden;

@@ -251,6 +251,41 @@ void malformed_generic_lod_inputs_fail_closed() {
             "non-finite generic LOD limits fail closed");
 }
 
+void deferred_camera_filter_retains_exact_kn5_descriptor() {
+    auto scene = fixture();
+    auto& mesh = scene.nodes[6U];
+    mesh.local_bounds_center = {1.0F, 2.0F, 3.0F};
+    mesh.local_bounds_radius = 4.0F;
+    mesh.local_bounds_source = apex::scene::LocalBoundsSource::kn5_serialized;
+
+    apex::render::RenderPlanOptions options;
+    options.defer_camera_mesh_filter = true;
+    const auto plan = apex::render::build_render_plan(scene, options);
+    const auto item = std::find_if(
+        plan.items.begin(), plan.items.end(), [&](const auto& candidate) {
+            return candidate.node == mesh.id;
+        });
+    require(item != plan.items.end(),
+            "deferred camera filter retains an initially out-of-LOD mesh");
+    require(item->camera_mesh_filter.has_value() &&
+                item->camera_mesh_filter->bounding_sphere.center ==
+                    mesh.local_bounds_center &&
+                item->camera_mesh_filter->bounding_sphere.radius == 4.0F &&
+                item->camera_mesh_filter->lod_in == mesh.lod_in &&
+                item->camera_mesh_filter->lod_out == mesh.lod_out &&
+                !item->camera_mesh_filter->no_cull &&
+                !item->camera_mesh_filter->is_static,
+            "deferred item copies the recovered ordinary KN5 filter state");
+    require(scene.nodes[2U].local_bounds_source ==
+                apex::scene::LocalBoundsSource::unavailable &&
+                std::none_of(plan.items.begin(), plan.items.end(),
+                             [&](const auto& candidate) {
+                                 return candidate.node == scene.nodes[2U].id &&
+                                        candidate.camera_mesh_filter.has_value();
+                             }),
+            "unrecovered bounds keep an explicit conservative fallback");
+}
+
 void color_order_matches_viewport() {
     const auto scene = fixture();
     apex::render::RenderPlanOptions options;
@@ -393,6 +428,7 @@ int main() {
         recovered_ksnet_mesh_lod_rule_is_bounded_and_inclusive();
         recovered_ksnet_mesh_lod_rule_reaches_opt_in_plan();
         malformed_generic_lod_inputs_fail_closed();
+        deferred_camera_filter_retains_exact_kn5_descriptor();
         color_order_matches_viewport();
         preview_visibility_precedence_is_immutable();
         csp_node_state_controls_order_lod_transparency_and_shadows();

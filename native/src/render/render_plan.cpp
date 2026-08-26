@@ -220,6 +220,7 @@ RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
                                    : static_cast<double>(node->lod_out);
         const bool lod_is_visible = [&]() noexcept {
             if (!std::isfinite(distance)) return false;
+            if (options.defer_camera_mesh_filter) return true;
             if (!options.ksnet_mesh_lod.has_value())
                 return lod_visible(lod_in, lod_out, distance);
             const KsNetMeshLodNodeState* lod_state = ksnet_node_states[node_index];
@@ -267,7 +268,32 @@ RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
                 workspace_auxiliary,
                 workspace_file,
                 ancestors,
+                std::nullopt,
             };
+            if (options.defer_camera_mesh_filter &&
+                node->local_bounds_source != apex::scene::LocalBoundsSource::unavailable &&
+                lod_in >= -static_cast<double>(std::numeric_limits<float>::max()) &&
+                lod_in <= static_cast<double>(std::numeric_limits<float>::max()) &&
+                lod_out >= -static_cast<double>(std::numeric_limits<float>::max()) &&
+                lod_out <= static_cast<double>(std::numeric_limits<float>::max()) &&
+                item.layer >= 0.0 &&
+                item.layer <= static_cast<double>(std::numeric_limits<std::uint32_t>::max()) &&
+                std::floor(item.layer) == item.layer) {
+                CameraMeshRenderable filter;
+                filter.bounding_sphere = {
+                    node->local_bounds_center, node->local_bounds_radius};
+                filter.lod_in = static_cast<float>(lod_in);
+                filter.lod_out = static_cast<float>(lod_out);
+                filter.layer = static_cast<std::uint32_t>(item.layer);
+                filter.cast_shadows = item.casts_shadows;
+                filter.visible = true;
+                filter.transparent = item.transparent;
+                // Ordinary KN5 Renderable construction sets both fields to
+                // false. Runtime mutation is not inferred from KN5 data.
+                filter.no_cull = false;
+                filter.is_static = false;
+                item.camera_mesh_filter = filter;
+            }
             plan.items.push_back(item);
             if (item.casts_shadows && options.include_shadows) plan.shadow_casters.push_back(item);
         }

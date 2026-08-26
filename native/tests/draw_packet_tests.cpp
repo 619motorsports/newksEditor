@@ -175,7 +175,7 @@ void validates_bounded_kn5_scene_node_mapping_directly() {
 
 apex::render::RenderPlan one_item_plan(bool transparent = false) {
     apex::render::RenderPlan plan;
-    plan.items.push_back({1, 0, 0, 3.0F, transparent, false, true, {}, {}, {0, 1}});
+    plan.items.push_back({1, 0, 0, 3.0F, transparent, false, true, {}, {}, {0, 1}, {}});
     return plan;
 }
 
@@ -219,8 +219,8 @@ void preserves_deterministic_transparent_order_and_unknown_shader_diagnostic() {
     far_mesh.active = true;
     (void)scene.add_node(std::move(far_mesh), 0);
     apex::render::RenderPlan plan;
-    plan.items.push_back({2, 0, 0, 20.0F, true, false, true, {}, {}, {0, 2}});
-    plan.items.push_back({1, 0, 0, 3.0F, false, false, true, {}, {}, {0, 1}});
+    plan.items.push_back({2, 0, 0, 20.0F, true, false, true, {}, {}, {0, 2}, {}});
+    plan.items.push_back({1, 0, 0, 3.0F, false, false, true, {}, {}, {0, 1}, {}});
     const auto result = apex::render::build_draw_packets(model, scene, plan);
     require(result.packets.size() == 2 && result.packets[0].node == 1 && result.packets[1].node == 2 &&
                 result.packets[0].order == 0 && result.packets[1].order == 1,
@@ -484,7 +484,7 @@ void keeps_selected_body_packet_on_animated_parent_handoff() {
 
     apex::render::RenderPlan plan;
     plan.items.push_back({selected_body_id, selected_body->material, 0, 2.0F,
-                          false, false, true, {}, {}, {0, 1, 2}});
+                          false, false, true, {}, {}, {0, 1, 2}, {}});
     apex::render::DrawPacketOptions options;
     options.selected_node = selected_body_id;
     const auto packets = apex::render::build_draw_packets(

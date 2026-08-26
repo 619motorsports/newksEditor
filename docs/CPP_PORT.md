@@ -501,9 +501,14 @@ remains unchanged and feature-complete.
   implements the exact pass gates, dynamic-sphere transform, LOD rule, and
   frustum test in a backend-neutral function. This function includes the
   native exact-unit-scale radius rule and tangent-inclusive planes. It uses a
-  WebGL near-plane variant for the WebGL clip convention. Live viewport
-  integration remains staged. It needs a retained packet catalog and a new
-  visibility mask for each frame.
+  WebGL near-plane variant for the WebGL clip convention. The native viewport
+  now retains eligible packets and applies this filter for each frame. It uses
+  the current camera and refreshed packet transforms without new GPU resources.
+  The mesh mask combines with workspace-file LOD by logical AND. An explicit
+  caller mask stays authoritative. Packets without recovered KN5 bounds remain
+  conservatively visible. Fractional CSP layers use the same labeled fallback.
+  Runtime `noCull` and `isStatic` mutations remain staged. Transparent ordering
+  also remains fixed after preparation.
   Shadows, reflections, sky, CSP lights, and post-processing remain staged
   with explicit evidence.
 - P1 is partial. Bounded readers support KN5 v4/v5/v6, DDS, ACD, INI/CSP,

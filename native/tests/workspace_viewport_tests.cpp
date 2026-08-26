@@ -4358,6 +4358,55 @@ void schedules_directional_shadows_before_color_and_reuses_maps() {
             "staged caster branches remain labeled on a presented clear-map frame");
 }
 
+void shares_live_camera_visibility_with_directional_shadows() {
+    auto value = fixture();
+    auto& body = value.document.scene.snapshot.nodes[1U];
+    body.local_bounds_source =
+        apex::scene::LocalBoundsSource::kn5_serialized;
+    body.local_bounds_center = {0.0F, 0.0F, 0.0F};
+    body.local_bounds_radius = 0.0F;
+    body.lod_out = 3.0F;
+    value.module_set.directional_shadow_receiver = true;
+
+    auto request = request_for(value);
+    request.camera_mesh_filter = true;
+    request.render.include_shadows = true;
+    request.directional_shadow_receiver = true;
+    apex::app::WorkspaceViewportDirectionalShadowOptions shadows;
+    shadows.maps.lighting.map_size = 32U;
+    shadows.opaque_pipeline = opaque_shadow_pipeline(value);
+    request.directional_shadows = shadows;
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok(), "live-filter shadow viewport prepares");
+
+    CameraFrameRequest camera_request;
+    camera_request.eye = {0.0F, 0.0F, 6.0F};
+    camera_request.target = {0.0F, 0.0F, 0.0F};
+    camera_request.aspect = 1.0F;
+    camera_request.near_plane = 0.01F;
+    camera_request.far_plane = 100.0F;
+    camera_request.clip_space = CameraClipSpace::vulkan;
+    const auto camera = build_camera_frame(camera_request);
+    const auto lighting = apex::app::evaluateWorkspaceViewportLighting({});
+    require(camera.ok() && lighting.ok(),
+            "live-filter shadow frame inputs are valid");
+
+    WorkspaceViewportFrameRequest frame;
+    frame.camera = *camera.frame;
+    frame.frame_constants = lighting.frame_constants;
+    FakeTarget target(request.presentation);
+    Diagnostic diagnostic;
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.depth_draw_counts ==
+                    std::vector<std::size_t>({0U, 0U, 0U}) &&
+                device.draw_counts == std::vector<std::size_t>({0U}) &&
+                device.present_calls == 1U,
+            "live mesh mask hides the same packet from color and shadow passes");
+}
+
 void accepts_track_and_car_lod_documents() {
     for (const auto kind : {apex::app::WorkspaceSessionKind::track,
                             apex::app::WorkspaceSessionKind::carLods}) {
@@ -4487,6 +4536,178 @@ void selects_car_lod_roots_at_viewport_boundary() {
                 value.document.assembly.workspace.files.size() == authored_workspace_files &&
                 value.document.scene.snapshot.nodes[1U].active == authored_lod0_active,
             "car LOD viewport preparation does not mutate the source document");
+}
+
+void applies_live_camera_mesh_filter_without_resource_rebuild() {
+    auto value = fixture();
+    auto& body = value.document.scene.snapshot.nodes[1U];
+    body.local_bounds_center = {0.0F, 0.0F, 0.0F};
+    body.local_bounds_radius = 0.0F;
+    body.local_bounds_source =
+        apex::scene::LocalBoundsSource::kn5_serialized;
+    body.lod_in = 0.0F;
+    body.lod_out = 3.0F;
+
+    auto request = request_for(value);
+    request.camera_mesh_filter = true;
+    request.render.camera_position = {0.0F, 0.0F, 100.0F};
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok() && prepared.viewport->renderPlan().items.size() == 1U &&
+                prepared.viewport->renderPlan().items.front().camera_mesh_filter.has_value(),
+            "live camera filter preparation retains an initially out-of-LOD packet");
+    const auto prepared_buffers = device.buffer_calls;
+    const auto prepared_textures = device.texture_calls;
+    const auto prepared_depth = device.depth_calls;
+    const auto prepared_samplers = device.sampler_calls;
+
+    const auto camera_at = [](float distance, float fov_radians) {
+        CameraFrameRequest camera_request;
+        camera_request.eye = {0.0F, 0.0F, distance};
+        camera_request.target = {0.0F, 0.0F, 0.0F};
+        camera_request.fov_radians = fov_radians;
+        camera_request.aspect = 1.0F;
+        camera_request.near_plane = 0.1F;
+        camera_request.far_plane = 100.0F;
+        camera_request.clip_space = CameraClipSpace::vulkan;
+        const auto result = build_camera_frame(camera_request);
+        if (!result.ok()) throw std::runtime_error("live filter camera fixture failed");
+        return *result.frame;
+    };
+
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera = camera_at(5.0F, 0.7853981633974483F);
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    CameraMeshFilterRequest direct_filter;
+    direct_filter.renderable = *prepared.viewport->renderPlan()
+                                    .items.front().camera_mesh_filter;
+    direct_filter.world_matrix = prepared.viewport->preparation()
+                                     .resources->prepared_packets().front()
+                                     .world_matrix;
+    direct_filter.camera = &frame.camera;
+    require(camera_mesh_filter_visible(direct_filter).visible(),
+            "prepared live camera descriptor passes the direct filter");
+    Diagnostic diagnostic;
+    const auto near_status = prepared.viewport->drawAndPresent(
+        device, target, frame, diagnostic);
+    require(near_status == WorkspaceViewportFrameStatus::ready,
+            diagnostic.code.empty() ? "near-side live camera frame is valid"
+                                    : diagnostic.code.c_str());
+    require(device.draw_counts.back() == 1U,
+            "live camera filter includes the near-side LOD boundary packet");
+
+    frame.camera = camera_at(6.0F, 0.7853981633974483F);
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.draw_counts.back() == 0U,
+            "live camera movement removes a packet beyond its scaled far LOD");
+
+    frame.camera = camera_at(6.0F, 0.3490658503988659F);
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.draw_counts.back() == 1U,
+            "live camera filter uses the frame FOV instead of preparation FOV");
+    require(device.buffer_calls == prepared_buffers &&
+                device.texture_calls == prepared_textures &&
+                device.depth_calls == prepared_depth &&
+                device.sampler_calls == prepared_samplers,
+            "live camera filter changes reuse prepared graphics resources");
+
+    const auto prepared_packets =
+        prepared.viewport->preparation().resources->prepared_packets();
+    std::vector<DrawPacket> refreshed_packets(
+        prepared_packets.begin(), prepared_packets.end());
+    refreshed_packets.front().world_matrix[12] = 100.0F;
+    frame.camera = camera_at(5.0F, 0.7853981633974483F);
+    frame.refreshed_packets = refreshed_packets;
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.draw_counts.back() == 0U,
+            "live camera filter uses a refreshed packet world matrix");
+    frame.refreshed_packets = {};
+
+    const std::array<std::uint8_t, 1U> explicit_visible = {1U};
+    frame.camera = camera_at(50.0F, 0.7853981633974483F);
+    frame.packet_visibility = explicit_visible;
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.draw_counts.back() == 1U,
+            "explicit packet visibility remains authoritative over live filtering");
+
+    frame.packet_visibility = {};
+    frame.camera = camera_at(5.0F, 0.7853981633974483F);
+    frame.camera.view_projection[0] =
+        std::numeric_limits<float>::quiet_NaN();
+    const auto draws_before_invalid = device.draw_calls;
+    const auto presents_before_invalid = device.present_calls;
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code == "workspace_viewport_camera_mesh_filter_invalid" &&
+                device.draw_calls == draws_before_invalid &&
+                device.present_calls == presents_before_invalid,
+            "invalid live frustum fails before draw and present work");
+}
+
+void combines_workspace_lod_and_live_mesh_visibility() {
+    auto value = car_lod_fixture();
+    const auto lod0_node = value.document.sceneBinding.file_root_nodes[0U];
+    const auto lod1_node = value.document.sceneBinding.file_root_nodes[1U];
+    const auto auxiliary_node = value.document.sceneBinding.file_root_nodes[2U];
+    for (const auto node_id : {lod0_node, lod1_node, auxiliary_node}) {
+        auto& node = value.document.scene.snapshot.nodes[
+            static_cast<std::size_t>(node_id)];
+        node.local_bounds_center = {0.0F, 0.0F, 0.0F};
+        node.local_bounds_radius = 0.0F;
+        node.local_bounds_source =
+            apex::scene::LocalBoundsSource::kn5_serialized;
+    }
+    auto& auxiliary = value.document.scene.snapshot.nodes[
+        static_cast<std::size_t>(auxiliary_node)];
+    auxiliary.lod_in = 100.0F;
+    auxiliary.lod_out = 200.0F;
+
+    auto request = request_for(value);
+    request.camera_mesh_filter = true;
+    request.workspace.lod_bounds_center =
+        apex::scene::Vector3{0.0F, 0.0F, 0.0F};
+    request.workspace.lod_fov_degrees = 60.0F;
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok() && prepared.viewport->renderPlan().items.size() == 3U,
+            "combined visibility preparation retains all three packets");
+
+    CameraFrameRequest camera_request;
+    camera_request.eye = {0.0F, 0.0F, 15.0F};
+    camera_request.target = {0.0F, 0.0F, 0.0F};
+    camera_request.fov_radians = 1.0471975511965976F;
+    camera_request.aspect = 1.0F;
+    camera_request.near_plane = 0.1F;
+    camera_request.far_plane = 100.0F;
+    camera_request.clip_space = CameraClipSpace::vulkan;
+    const auto camera = build_camera_frame(camera_request);
+    require(camera.ok(), "combined visibility camera fixture is valid");
+
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera = *camera.frame;
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    Diagnostic diagnostic;
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.draw_nodes.back() ==
+                    std::vector<apex::scene::NodeId>{lod1_node},
+            "workspace LOD and live mesh masks combine with logical AND");
+
+    const std::array<std::uint8_t, 3U> explicit_auxiliary = {0U, 0U, 1U};
+    frame.packet_visibility = explicit_auxiliary;
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.draw_nodes.back() ==
+                    std::vector<apex::scene::NodeId>{auxiliary_node},
+            "explicit packet visibility bypasses both automatic masks");
 }
 
 void resolves_preview_state_without_mutating_document() {
@@ -4732,10 +4953,13 @@ int main() {
         rejects_unbound_selection_axis_requests();
         accepts_track_and_car_lod_documents();
         selects_car_lod_roots_at_viewport_boundary();
+        applies_live_camera_mesh_filter_without_resource_rebuild();
+        combines_workspace_lod_and_live_mesh_visibility();
         resolves_preview_state_without_mutating_document();
         camera_controller_matches_bounded_editor_gestures();
         camera_controller_supports_keyboard_translation();
         schedules_directional_shadows_before_color_and_reuses_maps();
+        shares_live_camera_visibility_with_directional_shadows();
         rejects_invalid_inputs();
         rejects_frame_mismatch_and_preserves_present_atomicity();
         std::cout << "workspace_viewport_tests: ok\n";

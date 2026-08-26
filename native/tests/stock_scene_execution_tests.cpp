@@ -537,6 +537,63 @@ void test_ksnet_lod_integration_and_validation() {
             "out-of-range recovered LOD overrides must fail before allocation");
 }
 
+void test_deferred_camera_filter_validation() {
+    auto valid_fixture = fixture();
+    auto& opaque = valid_fixture.scene.nodes[1U];
+    opaque.local_bounds_center = {0.0F, 0.0F, 0.0F};
+    opaque.local_bounds_radius = 1.0F;
+    opaque.local_bounds_source =
+        apex::scene::LocalBoundsSource::kn5_serialized;
+    FakeDevice device;
+    auto request = request_for(valid_fixture);
+    request.render.defer_camera_mesh_filter = true;
+    auto result = prepare_stock_scene_execution(device, request);
+    const auto retained = std::find_if(
+        result.render_plan.items.begin(), result.render_plan.items.end(),
+        [&](const auto& item) { return item.node == opaque.id; });
+    require(result.ok() && retained != result.render_plan.items.end() &&
+                retained->camera_mesh_filter.has_value() &&
+                result.render_plan.items.size() == 6U,
+            "deferred camera filtering retains LOD packets and exact KN5 descriptors");
+
+    auto malformed_fixture = valid_fixture;
+    malformed_fixture.scene.nodes[1U].local_bounds_radius =
+        std::numeric_limits<float>::quiet_NaN();
+    request = request_for(malformed_fixture);
+    request.render.defer_camera_mesh_filter = true;
+    const auto malformed = prepare_stock_scene_execution(device, request);
+    require(!malformed.ok() &&
+                malformed.diagnostic.code ==
+                    "stock_scene_camera_mesh_bounds_invalid",
+            "malformed deferred local bounds fail before packet preparation");
+
+    request = request_for(valid_fixture);
+    request.render.defer_camera_mesh_filter = true;
+    const std::array<NodeRenderStateOverride, 1U> fractional_layer = {{
+        {opaque.id, std::nullopt, 1.5, std::nullopt, std::nullopt,
+         std::nullopt},
+    }};
+    request.render.node_state_overrides = fractional_layer;
+    const auto fallback_layer = prepare_stock_scene_execution(device, request);
+    const auto fallback_item = std::find_if(
+        fallback_layer.render_plan.items.begin(),
+        fallback_layer.render_plan.items.end(),
+        [&](const auto& item) { return item.node == opaque.id; });
+    require(fallback_layer.ok() &&
+                fallback_item != fallback_layer.render_plan.items.end() &&
+                !fallback_item->camera_mesh_filter.has_value(),
+            "unrepresentable fractional native layer uses a conservative fallback");
+
+    request = request_for(valid_fixture);
+    request.render.defer_camera_mesh_filter = true;
+    request.render.ksnet_mesh_lod.emplace(45.0F);
+    const auto conflict = prepare_stock_scene_execution(device, request);
+    require(!conflict.ok() &&
+                conflict.diagnostic.code ==
+                    "stock_scene_camera_mesh_filter_mode_conflict",
+            "active and PVS-array camera filter modes cannot overlap");
+}
+
 void test_preflight_and_missing_modules() {
     Fixture fixture_value = fixture();
     FakeDevice device;
@@ -702,6 +759,7 @@ int main() {
         test_csp_node_state_reaches_per_packet_pipelines();
         test_damage_preview_reaches_scene_and_material_handoff();
         test_ksnet_lod_integration_and_validation();
+        test_deferred_camera_filter_validation();
         test_preflight_and_missing_modules();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

@@ -2477,7 +2477,8 @@ void rejects_staged_draw_packet() {
     scene_mesh.renderable = true;
     const auto mesh_id = scene.add_node(std::move(scene_mesh), root_id);
     RenderPlan plan;
-    plan.items.push_back({mesh_id, 0U, 0U, 0.0F, false, false, true, {}, {}, {root_id, mesh_id}});
+    plan.items.push_back({mesh_id, 0U, 0U, 0.0F, false, false, true, {}, {},
+                          {root_id, mesh_id}, {}});
     const auto built = build_draw_packets(model, scene, plan);
     require(built.packets.size() == 1U && !built.packets.front().shader_execution_supported,
             "current packet builder marks shader execution staged");

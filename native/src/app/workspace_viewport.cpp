@@ -892,7 +892,7 @@ WorkspaceViewport::WorkspaceViewport(
     std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps,
     std::optional<WorkspaceViewportDirectionalShadowOptions>
         directional_shadows,
-    std::optional<LodCatalog> lod_catalog)
+    std::optional<VisibilityCatalog> visibility_catalog)
     : device_(device), backend_(backend), presentation_(presentation),
       color_(std::move(color)), resolved_color_(std::move(resolved_color)),
       depth_(std::move(depth)), execution_(std::move(execution)),
@@ -909,7 +909,7 @@ WorkspaceViewport::WorkspaceViewport(
       selected_mesh_color_buffer_(std::move(selected_mesh_color_buffer)),
       shadow_maps_(std::move(shadow_maps)),
       directional_shadows_(std::move(directional_shadows)),
-      lod_catalog_(std::move(lod_catalog)) {}
+      visibility_catalog_(std::move(visibility_catalog)) {}
 
 WorkspaceViewport::~WorkspaceViewport() = default;
 
@@ -1241,40 +1241,87 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
     }
 
     std::span<const std::uint8_t> packet_visibility = request.packet_visibility;
-    if (request.packet_visibility.empty() && lod_catalog_.has_value()) {
-        auto &catalog = *lod_catalog_;
-        if (!finite_vector(request.camera.position)) {
-            output_diagnostic =
-                diagnostic("workspace_viewport_lod_camera_invalid",
-                           "Workspace LOD camera position must be finite");
+    if (request.packet_visibility.empty() && visibility_catalog_.has_value()) {
+        auto& catalog = *visibility_catalog_;
+        const auto prepared_packets = execution_->resources->prepared_packets();
+        if (catalog.frame_visibility.size() != prepared_packets.size() ||
+            (!catalog.mesh_filters.empty() &&
+             catalog.mesh_filters.size() != prepared_packets.size())) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_visibility_catalog_invalid",
+                "The retained packet visibility catalog is not dense");
             return WorkspaceViewportFrameStatus::invalid;
         }
-        const double dx = static_cast<double>(request.camera.position[0]) -
-                          static_cast<double>(catalog.bounds_center[0]);
-        const double dy = static_cast<double>(request.camera.position[1]) -
-                          static_cast<double>(catalog.bounds_center[1]);
-        const double dz = static_cast<double>(request.camera.position[2]) -
-                          static_cast<double>(catalog.bounds_center[2]);
-        const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-        if (!std::isfinite(distance) ||
-            distance > static_cast<double>(std::numeric_limits<float>::max())) {
-            output_diagnostic =
-                diagnostic("workspace_viewport_lod_camera_invalid",
-                           "Workspace LOD camera distance is outside the "
-                           "finite float range");
-            return WorkspaceViewportFrameStatus::invalid;
+        std::fill(catalog.frame_visibility.begin(),
+                  catalog.frame_visibility.end(), 1U);
+        if (catalog.workspace_lod) {
+            if (!finite_vector(request.camera.position)) {
+                output_diagnostic =
+                    diagnostic("workspace_viewport_lod_camera_invalid",
+                               "Workspace LOD camera position must be finite");
+                return WorkspaceViewportFrameStatus::invalid;
+            }
+            const double dx = static_cast<double>(request.camera.position[0]) -
+                              static_cast<double>(catalog.bounds_center[0]);
+            const double dy = static_cast<double>(request.camera.position[1]) -
+                              static_cast<double>(catalog.bounds_center[1]);
+            const double dz = static_cast<double>(request.camera.position[2]) -
+                              static_cast<double>(catalog.bounds_center[2]);
+            const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (!std::isfinite(distance) ||
+                distance > static_cast<double>(std::numeric_limits<float>::max())) {
+                output_diagnostic =
+                    diagnostic("workspace_viewport_lod_camera_invalid",
+                               "Workspace LOD camera distance is outside the "
+                               "finite float range");
+                return WorkspaceViewportFrameStatus::invalid;
+            }
+            const float effective_distance = workspace::carLodDistance(
+                static_cast<float>(distance), catalog.fov_degrees,
+                catalog.distance_divisor, catalog.track_camera);
+            for (std::size_t index = 0U; index < catalog.file_for_packet.size();
+                 ++index) {
+                const std::size_t file_index = catalog.file_for_packet[index];
+                const auto& lod = catalog.file_lods[file_index];
+                const bool workspace_visible = workspace::carLodVisible(
+                    lod.has_value() ? &*lod : nullptr, effective_distance,
+                    catalog.selected_index);
+                catalog.frame_visibility[index] = workspace_visible ? 1U : 0U;
+            }
         }
-        const float effective_distance = workspace::carLodDistance(
-            static_cast<float>(distance), catalog.fov_degrees,
-            catalog.distance_divisor, catalog.track_camera);
-        for (std::size_t index = 0U; index < catalog.file_for_packet.size();
-             ++index) {
-            const std::size_t file_index = catalog.file_for_packet[index];
-            const auto &lod = catalog.file_lods[file_index];
-            const bool workspace_visible = workspace::carLodVisible(
-                lod.has_value() ? &*lod : nullptr, effective_distance,
-                catalog.selected_index);
-            catalog.frame_visibility[index] = workspace_visible ? 1U : 0U;
+        if (!catalog.mesh_filters.empty()) {
+            std::span<const render::DrawPacket> filter_packets = prepared_packets;
+            if (!request.refreshed_packets.empty()) {
+                if (request.refreshed_packets.size() != prepared_packets.size()) {
+                    output_diagnostic = diagnostic(
+                        "workspace_viewport_refreshed_packet_count_invalid",
+                        "Refreshed packets must match the prepared packet count");
+                    return WorkspaceViewportFrameStatus::invalid;
+                }
+                filter_packets = request.refreshed_packets;
+            }
+            for (std::size_t index = 0U; index < catalog.mesh_filters.size();
+                 ++index) {
+                if (!catalog.mesh_filters[index].has_value()) continue;
+                render::CameraMeshFilterRequest filter_request;
+                filter_request.renderable = *catalog.mesh_filters[index];
+                filter_request.world_matrix = filter_packets[index].world_matrix;
+                filter_request.camera = &request.camera;
+                filter_request.pass = filter_request.renderable.transparent
+                                          ? render::CameraMeshPass::transparent
+                                          : render::CameraMeshPass::opaque;
+                filter_request.max_layer = catalog.max_layer;
+                const auto filter_result =
+                    render::camera_mesh_filter_visible(filter_request);
+                if (filter_result.status ==
+                    render::CameraMeshFilterStatus::invalid_input) {
+                    output_diagnostic = diagnostic(
+                        "workspace_viewport_camera_mesh_filter_invalid",
+                        "A live camera mesh filter input is invalid");
+                    return WorkspaceViewportFrameStatus::invalid;
+                }
+                if (!filter_result.visible()) catalog.frame_visibility[index] = 0U;
+            }
         }
         packet_visibility = catalog.frame_visibility;
     }
@@ -1586,6 +1633,23 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         }
 
         render::RenderPlanOptions render_options = request.render;
+        if (render_options.defer_camera_mesh_filter &&
+            !request.camera_mesh_filter) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_camera_mesh_filter_catalog_missing",
+                "Deferred camera mesh filtering requires a retained viewport catalog");
+            return result;
+        }
+        if (request.camera_mesh_filter &&
+            render_options.ksnet_mesh_lod.has_value()) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_camera_mesh_filter_mode_conflict",
+                "Active camera mesh filtering cannot use the PVS-array LOD mode");
+            return result;
+        }
+        render_options.defer_camera_mesh_filter = request.camera_mesh_filter;
         if (render_options.workspace_kind.empty())
             render_options.workspace_kind = document.scene.snapshot.workspace_kind;
         if (render_options.bounds_radius <= 0.0F)
@@ -1781,61 +1845,94 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             return result;
         }
 
-        std::optional<WorkspaceViewport::LodCatalog> lod_catalog;
-        if (lod_resolution.has_value() && !render_options.isolated) {
-            WorkspaceViewport::LodCatalog catalog;
-            catalog.bounds_center = *request.workspace.lod_bounds_center;
-            catalog.selected_index = request.workspace.lod_index;
-            catalog.fov_degrees = request.workspace.lod_fov_degrees;
-            catalog.distance_divisor = request.workspace.lod_distance_divisor;
-            catalog.track_camera = request.workspace.lod_track_camera;
-            catalog.file_lods.reserve(document.assembly.workspace.files.size());
-            for (const auto& file : document.assembly.workspace.files)
-                catalog.file_lods.push_back(file.lod);
-
-            const auto& scene = document.scene.snapshot;
-            constexpr std::size_t invalid_file =
-                std::numeric_limits<std::size_t>::max();
-            std::vector<std::size_t> file_for_root(scene.nodes.size(), invalid_file);
-            for (std::size_t index = 0U;
-                 index < document.sceneBinding.file_root_nodes.size(); ++index) {
-                const auto root = document.sceneBinding.file_root_nodes[index];
-                if (root == apex::scene::invalid_node_id ||
-                    static_cast<std::size_t>(root) >= file_for_root.size() ||
-                    file_for_root[static_cast<std::size_t>(root)] != invalid_file) {
-                    result.status = WorkspaceViewportStatus::invalid;
-                    result.diagnostic = diagnostic(
-                        "workspace_viewport_lod_root_mapping_invalid",
-                        "Workspace LOD root mapping is not valid and unique");
-                    return result;
-                }
-                file_for_root[static_cast<std::size_t>(root)] = index;
-            }
+        std::optional<WorkspaceViewport::VisibilityCatalog> visibility_catalog;
+        if ((lod_resolution.has_value() && !render_options.isolated) ||
+            request.camera_mesh_filter) {
+            WorkspaceViewport::VisibilityCatalog catalog;
             const auto packets = execution->resources->prepared_packets();
-            catalog.file_for_packet.reserve(packets.size());
-            for (const auto& packet : packets) {
-                auto node = packet.node;
-                std::size_t file_index = invalid_file;
-                for (std::size_t ancestry_depth = 0U;
-                     ancestry_depth < scene.nodes.size(); ++ancestry_depth) {
-                    if (node == apex::scene::invalid_node_id ||
-                        static_cast<std::size_t>(node) >= scene.nodes.size())
-                        break;
-                    file_index = file_for_root[static_cast<std::size_t>(node)];
-                    if (file_index != invalid_file) break;
-                    node = scene.nodes[static_cast<std::size_t>(node)].parent;
+            const auto& scene = document.scene.snapshot;
+            if (lod_resolution.has_value() && !render_options.isolated) {
+                catalog.workspace_lod = true;
+                catalog.bounds_center = *request.workspace.lod_bounds_center;
+                catalog.selected_index = request.workspace.lod_index;
+                catalog.fov_degrees = request.workspace.lod_fov_degrees;
+                catalog.distance_divisor = request.workspace.lod_distance_divisor;
+                catalog.track_camera = request.workspace.lod_track_camera;
+                catalog.file_lods.reserve(document.assembly.workspace.files.size());
+                for (const auto& file : document.assembly.workspace.files)
+                    catalog.file_lods.push_back(file.lod);
+
+                constexpr std::size_t invalid_file =
+                    std::numeric_limits<std::size_t>::max();
+                std::vector<std::size_t> file_for_root(scene.nodes.size(), invalid_file);
+                for (std::size_t index = 0U;
+                     index < document.sceneBinding.file_root_nodes.size(); ++index) {
+                    const auto root = document.sceneBinding.file_root_nodes[index];
+                    if (root == apex::scene::invalid_node_id ||
+                        static_cast<std::size_t>(root) >= file_for_root.size() ||
+                        file_for_root[static_cast<std::size_t>(root)] != invalid_file) {
+                        result.status = WorkspaceViewportStatus::invalid;
+                        result.diagnostic = diagnostic(
+                            "workspace_viewport_lod_root_mapping_invalid",
+                            "Workspace LOD root mapping is not valid and unique");
+                        return result;
+                    }
+                    file_for_root[static_cast<std::size_t>(root)] = index;
                 }
-                if (file_index == invalid_file || file_index >= catalog.file_lods.size()) {
-                    result.status = WorkspaceViewportStatus::invalid;
-                    result.diagnostic = diagnostic(
-                        "workspace_viewport_lod_packet_mapping_invalid",
-                        "A prepared packet is not inside a workspace LOD file root");
-                    return result;
+                catalog.file_for_packet.reserve(packets.size());
+                for (const auto& packet : packets) {
+                    auto node = packet.node;
+                    std::size_t file_index = invalid_file;
+                    for (std::size_t ancestry_depth = 0U;
+                         ancestry_depth < scene.nodes.size(); ++ancestry_depth) {
+                        if (node == apex::scene::invalid_node_id ||
+                            static_cast<std::size_t>(node) >= scene.nodes.size())
+                            break;
+                        file_index = file_for_root[static_cast<std::size_t>(node)];
+                        if (file_index != invalid_file) break;
+                        node = scene.nodes[static_cast<std::size_t>(node)].parent;
+                    }
+                    if (file_index == invalid_file ||
+                        file_index >= catalog.file_lods.size()) {
+                        result.status = WorkspaceViewportStatus::invalid;
+                        result.diagnostic = diagnostic(
+                            "workspace_viewport_lod_packet_mapping_invalid",
+                            "A prepared packet is not inside a workspace LOD file root");
+                        return result;
+                    }
+                    catalog.file_for_packet.push_back(file_index);
                 }
-                catalog.file_for_packet.push_back(file_index);
+            }
+            if (request.camera_mesh_filter) {
+                catalog.max_layer = request.camera_mesh_max_layer;
+                catalog.mesh_filters.reserve(packets.size());
+                for (const auto& packet : packets) {
+                    const auto item = std::find_if(
+                        execution->render_plan.items.begin(),
+                        execution->render_plan.items.end(),
+                        [&](const render::RenderItem& candidate) {
+                            return candidate.node == packet.node;
+                        });
+                    if (item == execution->render_plan.items.end()) {
+                        result.status = WorkspaceViewportStatus::invalid;
+                        result.diagnostic = diagnostic(
+                            "workspace_viewport_camera_mesh_packet_mapping_invalid",
+                            "A prepared packet has no retained render item");
+                        return result;
+                    }
+                    const auto* node = scene.find_node(packet.node);
+                    if (node == nullptr) {
+                        result.status = WorkspaceViewportStatus::invalid;
+                        result.diagnostic = diagnostic(
+                            "workspace_viewport_camera_mesh_node_invalid",
+                            "A prepared packet references an unknown scene node");
+                        return result;
+                    }
+                    catalog.mesh_filters.push_back(item->camera_mesh_filter);
+                }
             }
             catalog.frame_visibility.resize(packets.size(), 1U);
-            lod_catalog = std::move(catalog);
+            visibility_catalog = std::move(catalog);
         }
 
         std::optional<render::PipelineProgram> selected_mesh_pipeline;
@@ -2317,7 +2414,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             std::move(selected_mesh_pipeline),
             std::move(selected_mesh_color_buffer),
             std::move(shadow_maps), request.directional_shadows,
-            std::move(lod_catalog)));
+            std::move(visibility_catalog)));
         result.status = WorkspaceViewportStatus::ready;
         return result;
     } catch (const workspace::WorkspaceError& error) {
