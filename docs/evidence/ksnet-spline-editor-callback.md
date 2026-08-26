@@ -438,18 +438,24 @@ This file-safety behavior is an explicit portable difference.
 Replacement can change destination permissions or access-control metadata.
 The POSIX path does not sync the parent directory after replacement.
 It does not promise persistence after a power loss.
-The current save boundary accepts version 7 only. The separate
-`--convert-ai-spline-v2` command accepts version 2 only. This command applies
-the recovered retained-point, payload, tag, forward, and length rules. Then it
-builds the recovered grid and writes version 7.
+The save boundary accepts versions 2 and 7. A version-2 save first applies the
+recovered retained-point, payload, tag, forward, and length rules. Then it
+builds the recovered grid and writes version 7. This behavior matches the
+literal version in `AISpline::save` at `0x1006A421`.
+
+The separate `--convert-ai-spline-v2` command keeps the exclusive-output
+workflow. All app edit commands use the same model conversion before they
+create a version-7 session. The conversion limits come from the target
+session. The converted model is the clean baseline at revision zero.
 
 The converter rejects an existing output and identical input and output paths.
 It validates direct-constructed legacy state before it allocates output. It
 also bounds point count, length work, grid work, storage, and output bytes.
 If native arithmetic produces a NaN, the safe converter rejects the result.
 This finite-value rule is an explicit safety difference from the native loader.
-Normal version-2 loading remains read-only and does not convert silently.
-Other edit commands do not replace an existing destination.
+Normal version-2 viewing remains read-only and does not convert silently.
+An explicit live edit or save creates the version-7 session. Other edit
+commands do not replace an existing destination.
 
 The format layer now includes a bounded port of `AISpline.buildGrid`. The port
 reproduces the checked-in native pit-lane grid byte for byte. The session changes

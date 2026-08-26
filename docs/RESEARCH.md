@@ -3016,12 +3016,11 @@ indices, finite values, all counts, and the output-byte limit. Repository
 Imola fast lane also round-trips when that fixture exists.
 
 The original managed save wrapper calls `buildGrid` before `AISpline::save`.
-It writes directly to the destination and ignores stream errors. The C++
-writer returns owned bytes and does not write a file. The new CLI writes a
-payload-only candidate through an exclusive temporary file. It does not replace
-an existing destination. This edit preserves the grid because point positions
-do not change. Grid rebuild remains staged for future point edits. Version-2
-output also remains staged because the model does not invent version-7 payloads.
+It writes version 7 directly to the destination and ignores stream errors.
+The C++ writer returns owned bytes and does not write a file. App edit and save
+commands convert version-2 input to the recovered version-7 model first. The
+conversion retains each third source point and rebuilds the grid. It also uses
+the session limits. Normal version-2 viewing remains read-only.
 
 ## ksEditor AI spline waypoint payload evidence
 

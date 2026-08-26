@@ -1,5 +1,6 @@
 #include "apex/app/workspace_ai_spline_controller.hpp"
 
+#include "apex/app/ai_spline_legacy_conversion.hpp"
 #include "apex/app/installed_editor_spline.hpp"
 #include "apex/formats/ai_spline_write.hpp"
 
@@ -278,11 +279,43 @@ WorkspaceAiSplineControllerCreateResult WorkspaceAiSplineController::create(
     WorkspaceAiSplineControllerConfiguration configuration,
     authoring::AiSplineSessionLimits limits) {
     WorkspaceAiSplineControllerCreateResult result;
-    if (baseline.version != 7U) {
+    if (baseline.version == 2U) {
+        auto converted = convertAiSplineV2ToV7Model(
+            baseline, aiSplineLegacyConversionLimitsForSession(limits));
+        if (!converted.ok()) {
+            switch (converted.status) {
+            case AiSplineLegacyConversionStatus::converted:
+            case AiSplineLegacyConversionStatus::invalid:
+            case AiSplineLegacyConversionStatus::resource_limit:
+                result.status =
+                    WorkspaceAiSplineControllerStatus::invalid_edit;
+                break;
+            case AiSplineLegacyConversionStatus::unsupported:
+                result.status =
+                    WorkspaceAiSplineControllerStatus::unsupported;
+                break;
+            case AiSplineLegacyConversionStatus::allocation_failed:
+                result.status =
+                    WorkspaceAiSplineControllerStatus::allocation_failed;
+                break;
+            }
+            if (converted.diagnostics.empty()) {
+                result.diagnostic = diagnostic(
+                    "workspace_ai_spline_controller_conversion_failed",
+                    "Version-2 AI spline conversion failed without a diagnostic");
+            } else {
+                result.diagnostic.code = converted.diagnostics.back().code;
+                result.diagnostic.message =
+                    converted.diagnostics.back().message;
+            }
+            return result;
+        }
+        baseline = std::move(*converted.model);
+    } else if (baseline.version != 7U) {
         result.status = WorkspaceAiSplineControllerStatus::unsupported;
         result.diagnostic = diagnostic(
             "workspace_ai_spline_controller_version_unsupported",
-            "Live AI spline editing supports native file version 7 only");
+            "Live AI spline editing supports native file versions 2 and 7");
         return result;
     }
     try {

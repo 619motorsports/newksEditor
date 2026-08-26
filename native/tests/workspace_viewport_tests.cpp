@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -30,6 +31,34 @@ namespace {
 
 void require(bool condition, const char *message) {
     if (!condition) throw std::runtime_error(message);
+}
+
+void appendU32(std::vector<std::uint8_t>& bytes, std::uint32_t value) {
+    bytes.push_back(static_cast<std::uint8_t>(value));
+    bytes.push_back(static_cast<std::uint8_t>(value >> 8U));
+    bytes.push_back(static_cast<std::uint8_t>(value >> 16U));
+    bytes.push_back(static_cast<std::uint8_t>(value >> 24U));
+}
+
+void appendF32(std::vector<std::uint8_t>& bytes, float value) {
+    appendU32(bytes, std::bit_cast<std::uint32_t>(value));
+}
+
+apex::formats::AiSpline legacyAiSplineFixture() {
+    std::vector<std::uint8_t> bytes;
+    appendU32(bytes, 2U);
+    appendU32(bytes, 4U);
+    appendU32(bytes, 123U);
+    for (std::uint32_t index = 0U; index < 4U; ++index) {
+        appendF32(bytes, static_cast<float>(index) * 10.0F);
+        appendF32(bytes, 0.0F);
+        appendF32(bytes, 0.0F);
+        appendU32(bytes, index);
+        appendF32(bytes, static_cast<float>(index + 1U) * 10.0F);
+        appendF32(bytes, 0.25F);
+        appendF32(bytes, 0.5F);
+    }
+    return apex::formats::parseAiSpline(bytes, "legacy-controller.ai");
 }
 
 class FakeBuffer final : public Buffer {
@@ -3781,16 +3810,48 @@ void rejects_foreign_ai_spline_controller_generations() {
             "maximum publication cannot wrap to zero");
 }
 
-void rejects_unsafe_ai_spline_controller_candidates() {
-    apex::formats::AiSpline legacy;
-    legacy.source = "legacy-controller.ai";
-    legacy.version = 2U;
-    const auto legacyController =
-        apex::app::WorkspaceAiSplineController::create(std::move(legacy), {});
-    require(!legacyController.ok() &&
-                legacyController.status ==
-                    apex::app::WorkspaceAiSplineControllerStatus::unsupported,
-            "version-2 AI spline remains a read-only viewport source");
+void normalizes_legacy_and_rejects_unsafe_ai_spline_controller_candidates() {
+    const auto legacy = legacyAiSplineFixture();
+    apex::app::WorkspaceAiSplineControllerConfiguration legacyConfiguration;
+    legacyConfiguration.showLeft = true;
+    legacyConfiguration.showRight = true;
+    legacyConfiguration.showCamber = true;
+    legacyConfiguration.selectedIndices = {0U};
+    auto legacyController =
+        apex::app::WorkspaceAiSplineController::create(
+            legacy, legacyConfiguration);
+    require(legacyController.ok() && legacy.version == 2U &&
+                legacyController.controller->current().version == 7U &&
+                legacyController.controller->current().points.size() == 2U &&
+                legacyController.controller->current().payloads.size() == 2U &&
+                legacyController.controller->current().grid.has_value() &&
+                legacyController.controller->overlays().left.has_value() &&
+                legacyController.controller->overlays().right.has_value() &&
+                legacyController.controller->overlays().selection.has_value() &&
+                legacyController.controller->overlays().camber.has_value() &&
+                legacyController.controller->revision() == 0U &&
+                !legacyController.controller->dirty(),
+            "version-2 controller input must normalize to a clean v7 session");
+    const auto legacySave = legacyController.controller->buildSaveBytes(0U);
+    require(legacySave.ok(),
+            "version-2 controller baseline must build save bytes");
+    const auto savedLegacy = apex::formats::parseAiSpline(
+        legacySave.bytes, "saved-legacy-controller.ai");
+    require(savedLegacy.version == 7U &&
+                savedLegacy.points.size() == 2U && savedLegacy.grid.has_value(),
+            "version-2 controller save must publish a complete v7 file");
+
+    apex::authoring::AiSplineSessionLimits legacyLimits;
+    legacyLimits.maxSnapshotModelBytes = sizeof(apex::formats::AiSpline);
+    const auto limitedLegacyController =
+        apex::app::WorkspaceAiSplineController::create(
+            legacy, {}, legacyLimits);
+    require(!limitedLegacyController.ok() &&
+                limitedLegacyController.controller == nullptr &&
+                limitedLegacyController.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::invalid_edit &&
+                !limitedLegacyController.diagnostic.code.empty(),
+            "version-2 conversion must inherit the session model limit");
 
     apex::formats::AiSpline spline;
     spline.source = "unsafe-controller.ai";
@@ -4945,7 +5006,7 @@ int main() {
         publishes_temporary_ai_spline_edit_transaction();
         publishes_recovered_ai_spline_point_selection();
         rejects_foreign_ai_spline_controller_generations();
-        rejects_unsafe_ai_spline_controller_candidates();
+        normalizes_legacy_and_rejects_unsafe_ai_spline_controller_candidates();
         handles_degenerate_ai_spline_manual_forwards();
         publishes_controller_through_d3d12_metadata_contract();
         draws_selected_mesh_with_recovered_fade_boundary();

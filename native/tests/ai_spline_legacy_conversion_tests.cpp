@@ -17,6 +17,7 @@ namespace {
 
 using apex::app::AiSplineLegacyConversionLimits;
 using apex::app::AiSplineLegacyConversionStatus;
+using apex::app::convertAiSplineV2ToV7Model;
 using apex::app::convertAiSplineV2ToV7File;
 using apex::formats::AiSpline;
 
@@ -78,8 +79,26 @@ void convertsRecoveredFieldsAndRoundTrips() {
         {{400.0F, 0.0F, 0.0F}, 19U, 60.0F, 0.9F, 10.0F},
     };
     const AiSpline source = parsedLegacy(records);
+    const auto model_result = convertAiSplineV2ToV7Model(source);
+    require(model_result.ok() && model_result.pointCount == 4U &&
+                model_result.gridBuilt && model_result.model.has_value() &&
+                model_result.model->version == 7U &&
+                model_result.model->points.size() == 4U &&
+                model_result.model->payloads.size() == 4U &&
+                model_result.model->grid.has_value() &&
+                model_result.model->legacyV2Records.empty() &&
+                model_result.model->nativeRetainedIndices.empty() &&
+                model_result.model->nativeRetainedForwards.empty(),
+            "model conversion must return a canonical v7 model");
+    require(model_result.model->points[0U].position == records[0U].position &&
+                model_result.model->payloads[0U].forward ==
+                    source.nativeRetainedForwards[0U],
+            "model conversion must preserve retained point data");
     const auto converted = convertAiSplineV2ToV7File(source);
     require(converted.ok(), "valid legacy spline must convert");
+    require(converted.bytes == apex::formats::serializeAiSpline(
+                                   *model_result.model),
+            "file conversion must serialize the shared model result");
     require(converted.status == AiSplineLegacyConversionStatus::converted,
             "successful legacy conversion status mismatch");
     const auto spline = apex::formats::parseAiSpline(
@@ -178,6 +197,13 @@ void convertsEmptyAndSinglePointInputs() {
                 overflowed_length.length == 14.0F,
             "failed native length calculation must preserve prior lengths");
 
+    const auto empty_model = convertAiSplineV2ToV7Model(parsedLegacy({}));
+    require(empty_model.ok() && empty_model.model.has_value() &&
+                empty_model.model->version == 7U &&
+                empty_model.model->points.empty() &&
+                empty_model.model->payloads.empty() &&
+                !empty_model.model->grid.has_value(),
+            "empty legacy input must produce an empty canonical model");
     const auto empty = convertAiSplineV2ToV7File(parsedLegacy({}));
     require(empty.ok() && empty.pointCount == 0U && !empty.gridBuilt,
             "empty legacy spline must become an empty gridless v7 spline");
@@ -223,6 +249,9 @@ void convertsEmptyAndSinglePointInputs() {
 void rejectsInconsistentAndNonFiniteObjects() {
     AiSpline version7;
     version7.version = 7U;
+    const auto model_result = convertAiSplineV2ToV7Model(version7);
+    require(!model_result.ok() && !model_result.model.has_value(),
+            "unsupported model conversion must not publish a model");
     auto result = convertAiSplineV2ToV7File(version7);
     require(result.status == AiSplineLegacyConversionStatus::unsupported &&
                 result.bytes.empty(),
@@ -294,6 +323,25 @@ void rejectsInconsistentAndNonFiniteObjects() {
 }
 
 void enforcesConversionLimits() {
+    apex::authoring::AiSplineSessionLimits session_limits;
+    session_limits.write.maxPoints = 2U;
+    session_limits.write.maxPayloads = 1U;
+    session_limits.write.maxGridRows = 7U;
+    session_limits.grid.maxPoints = 3U;
+    session_limits.grid.maxGridRows = 9U;
+    session_limits.maxSnapshotModelBytes =
+        sizeof(AiSpline) + 4'096U;
+    const auto adapted =
+        apex::app::aiSplineLegacyConversionLimitsForSession(
+            session_limits);
+    require(adapted.maxRetainedPoints == 1U &&
+                adapted.maxRecords == 3U &&
+                adapted.maxLengthSampleEvaluations == 1'001U &&
+                adapted.grid.maxPoints == 2U &&
+                adapted.grid.maxGridRows == 7U &&
+                adapted.maxAggregateBytes == 4'096U,
+            "session conversion limits must use each stricter destination bound");
+
     const AiSpline source = parsedLegacy(
         {{{1.0F, 0.0F, 0.0F}, 0U, 1.0F, 0.0F, 0.0F}});
     AiSplineLegacyConversionLimits limits;

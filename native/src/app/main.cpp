@@ -573,6 +573,29 @@ float parse_finite_float(std::string_view value, std::string_view label) {
     return result;
 }
 
+apex::formats::AiSpline normalize_ai_spline_for_editing(
+    apex::formats::AiSpline source,
+    const apex::authoring::AiSplineSessionLimits& session_limits = {}) {
+    if (source.version == 7U) return source;
+    if (source.version != 2U) {
+        throw std::runtime_error(
+            "AI spline editing supports native file versions 2 and 7");
+    }
+    auto converted = apex::app::convertAiSplineV2ToV7Model(
+        source,
+        apex::app::aiSplineLegacyConversionLimitsForSession(
+            session_limits));
+    if (!converted.ok()) {
+        if (converted.diagnostics.empty())
+            throw std::runtime_error(
+                "AI spline version-2 conversion failed without a diagnostic");
+        const auto& diagnostic = converted.diagnostics.back();
+        throw std::runtime_error(diagnostic.code + ": " +
+                                 diagnostic.message);
+    }
+    return std::move(*converted.model);
+}
+
 int edit_ai_spline(int argc, char** argv) {
     if (argc < 6)
         throw std::runtime_error("invalid --edit-ai-spline arguments");
@@ -638,7 +661,8 @@ int edit_ai_spline(int argc, char** argv) {
         throw std::runtime_error("--edit-ai-spline requires at least one edit field");
 
     const auto input_bytes = read_file(input_path);
-    auto spline = apex::formats::parseAiSpline(input_bytes, input_path.string());
+    auto spline = normalize_ai_spline_for_editing(
+        apex::formats::parseAiSpline(input_bytes, input_path.string()));
     apex::authoring::AiSplineSession session(std::move(spline));
     const auto result = session.commitWaypointEdit(*point_index, edit);
     if (!result.ok()) {
@@ -665,12 +689,8 @@ int save_ai_spline(int argc, char** argv) {
     const std::filesystem::path input_path = argv[2];
     const std::filesystem::path output_path = argv[3];
     const auto input_bytes = read_file(input_path);
-    auto spline =
-        apex::formats::parseAiSpline(input_bytes, input_path.string());
-    if (spline.version != 7U) {
-        throw std::runtime_error(
-            "--save-ai-spline requires version 7; use --convert-ai-spline-v2 first");
-    }
+    auto spline = normalize_ai_spline_for_editing(
+        apex::formats::parseAiSpline(input_bytes, input_path.string()));
     apex::authoring::AiSplineSession session(std::move(spline));
     const auto saved = session.buildSaveBytes();
     if (!saved.ok()) {
@@ -755,7 +775,8 @@ int invert_ai_spline(int argc, char** argv) {
         throw std::runtime_error("--invert-ai-spline requires --index");
 
     const auto input_bytes = read_file(input_path);
-    auto spline = apex::formats::parseAiSpline(input_bytes, input_path.string());
+    auto spline = normalize_ai_spline_for_editing(
+        apex::formats::parseAiSpline(input_bytes, input_path.string()));
     apex::authoring::AiSplineSession session(std::move(spline));
     const auto result = session.invertSelectedCamber(selection);
     if (!result.ok()) {
@@ -811,8 +832,8 @@ int set_ai_spline_point(int argc, char** argv) {
         throw std::runtime_error("--set-ai-spline-point requires --position");
 
     const auto input_bytes = read_file(input_path);
-    auto spline =
-        apex::formats::parseAiSpline(input_bytes, input_path.string());
+    auto spline = normalize_ai_spline_for_editing(
+        apex::formats::parseAiSpline(input_bytes, input_path.string()));
     apex::authoring::AiSplineSession session(std::move(spline));
     const auto result = session.setPointPosition(*point_index, *position);
     if (!result.ok()) {
@@ -860,8 +881,8 @@ int set_ai_spline_points(int argc, char** argv) {
     }
 
     const auto input_bytes = read_file(input_path);
-    auto spline =
-        apex::formats::parseAiSpline(input_bytes, input_path.string());
+    auto spline = normalize_ai_spline_for_editing(
+        apex::formats::parseAiSpline(input_bytes, input_path.string()));
     apex::authoring::AiSplineSession session(std::move(spline));
     const auto result = session.setPointPositions(edits);
     if (!result.ok()) {
@@ -1548,8 +1569,12 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
             bytes, options.aiSpline->generic_string());
         const auto version = spline.version;
         const apex::app::WorkspaceAiSplineOverlaySet* overlay_set = nullptr;
-        bool read_only = version != 7U;
-        if (version == 7U) {
+        const bool authoring_requested =
+            !options.aiSplineEdits.empty() || options.aiSplineUnlockEdit ||
+            options.aiSplineSaveOnExit.has_value();
+        bool read_only = version != 7U &&
+                         (version != 2U || !authoring_requested);
+        if (!read_only) {
             apex::app::WorkspaceAiSplineControllerConfiguration configuration;
             configuration.mode = options.aiSplineMode;
             configuration.interval = options.aiSplineInterval;
@@ -1579,7 +1604,7 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
                 options.aiSplineUnlockEdit ||
                 options.aiSplineSaveOnExit.has_value())
                 throw std::runtime_error(
-                    "AI spline live editing and save require version 7");
+                    "AI spline live editing and save require native version 2 or 7");
             apex::app::WorkspaceAiSplineOverlayRequest overlay_request;
             overlay_request.mode = options.aiSplineMode;
             overlay_request.interval = options.aiSplineInterval;

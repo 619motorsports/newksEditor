@@ -225,7 +225,10 @@ remains unchanged and feature-complete.
   retained-point, payload-default, gas/brake, tag, and sampled-length rules.
   The converter rebuilds the recovered grid and returns owned version-7 bytes.
   `--convert-ai-spline-v2` exposes this explicit, exclusive-output boundary.
-  Normal version-2 loading remains read-only. A separate authoring adapter ports
+  Normal version-2 viewing remains read-only. An explicit edit or save first
+  converts the model to version 7. The session uses this canonical model as its
+  clean baseline. The conversion uses the session limits and does not change the
+  parsed version-2 source. A separate authoring adapter ports
   the recovered six-field waypoint edit for one selected point. It resolves
   the payload through the point tag. It applies each nonzero replacement, then
   each additive value. Camber values use degrees at this boundary and radians
@@ -332,9 +335,10 @@ remains unchanged and feature-complete.
   The controller rejects an overflowed cached-forward normalization.
   The window retries transient allocation and viewport publication errors.
   Open splines clamp the final cached forward. Closed splines wrap it.
-  `--save-ai-spline` accepts version 7, rebuilds the grid, and atomically
-  replaces its output. `--convert-ai-spline-v2` writes a separate version-7
-  file from recovered version-2 data. It rejects non-finite native results.
+  `--save-ai-spline` accepts versions 2 and 7. It rebuilds the grid and
+  atomically replaces its output with version-7 bytes. The explicit
+  `--convert-ai-spline-v2` command writes a separate version-7 file. Both
+  paths reject non-finite native results.
   `--ai-spline-save-on-exit` saves the live controller after a clean exit.
   Save does not change the revision, history, baseline, selection, or dirty state.
   A save error keeps the prior destination and the complete session state.

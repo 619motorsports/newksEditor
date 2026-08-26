@@ -20,6 +20,11 @@ set(legacy_save_input "${APEX_BINARY_DIR}/ai spline legacy save input.ai")
 set(legacy_truncated_input
     "${APEX_BINARY_DIR}/ai spline legacy truncated input.ai")
 set(legacy_save_output "${APEX_BINARY_DIR}/ai spline legacy save output.ai")
+set(legacy_save_roundtrip
+    "${APEX_BINARY_DIR}/ai spline legacy save roundtrip.ai")
+set(legacy_edit_output "${APEX_BINARY_DIR}/ai spline legacy edit output.ai")
+set(legacy_edit_roundtrip
+    "${APEX_BINARY_DIR}/ai spline legacy edit roundtrip.ai")
 set(legacy_convert_output "${APEX_BINARY_DIR}/ai spline legacy converted.ai")
 set(legacy_convert_roundtrip
     "${APEX_BINARY_DIR}/ai spline legacy converted roundtrip.ai")
@@ -31,6 +36,8 @@ file(REMOVE "${output}" "${roundtrip_output}" "${invert_output}"
      "${invert_roundtrip}" "${point_output}" "${point_roundtrip}"
      "${point_invalid}" "${point_truncated}" "${save_input}"
      "${legacy_save_input}" "${legacy_truncated_input}" "${legacy_save_output}"
+     "${legacy_save_roundtrip}" "${legacy_edit_output}"
+     "${legacy_edit_roundtrip}"
      "${legacy_convert_output}" "${legacy_convert_roundtrip}"
      "${legacy_convert_invalid}" "${save_output}" "${save_roundtrip}")
 file(WRITE "${point_truncated}" "x")
@@ -79,31 +86,78 @@ if(save_temporary_files)
   message(FATAL_ERROR "AI spline save left temporary output files")
 endif()
 
-file(WRITE "${legacy_save_output}" "legacy destination")
-file(SHA256 "${legacy_save_output}" legacy_before_hash)
 execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --save-ai-spline "${legacy_save_input}"
           "${legacy_save_output}"
   RESULT_VARIABLE legacy_save_result
+  OUTPUT_VARIABLE legacy_save_standard_output
   ERROR_VARIABLE legacy_save_error
 )
-if(NOT legacy_save_result STREQUAL "1")
-  message(FATAL_ERROR "legacy AI spline save was not rejected")
+if(NOT legacy_save_result STREQUAL "0" OR
+   NOT EXISTS "${legacy_save_output}")
+  message(FATAL_ERROR
+    "legacy AI spline save did not upgrade to v7; stderr: ${legacy_save_error}")
 endif()
-string(FIND "${legacy_save_error}" "requires version 7" legacy_error_position)
-string(FIND "${legacy_save_error}" "use --convert-ai-spline-v2 first"
-       legacy_conversion_guidance_position)
-if(legacy_error_position EQUAL -1 OR
-   legacy_conversion_guidance_position EQUAL -1)
-  message(FATAL_ERROR "legacy AI spline save did not report its version limit")
+string(FIND "${legacy_save_standard_output}" "grid=rebuilt"
+       legacy_save_grid_position)
+if(legacy_save_grid_position EQUAL -1)
+  message(FATAL_ERROR "legacy AI spline save did not report its rebuilt grid")
 endif()
-file(SHA256 "${legacy_save_output}" legacy_after_hash)
-if(NOT legacy_before_hash STREQUAL legacy_after_hash)
-  message(FATAL_ERROR "legacy AI spline save changed the existing output")
+
+file(SHA256 "${legacy_save_output}" legacy_save_hash)
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --save-ai-spline
+          "${legacy_truncated_input}" "${legacy_save_output}"
+  RESULT_VARIABLE legacy_failed_save_result
+  ERROR_VARIABLE legacy_failed_save_error
+)
+if(NOT legacy_failed_save_result STREQUAL "1")
+  message(FATAL_ERROR
+    "truncated legacy AI spline save was not rejected; stderr: ${legacy_failed_save_error}")
 endif()
-file(GLOB legacy_temporary_files "${legacy_save_output}.apex-tmp-*")
-if(legacy_temporary_files)
-  message(FATAL_ERROR "legacy AI spline save left temporary output files")
+file(SHA256 "${legacy_save_output}" legacy_failed_save_hash)
+if(NOT legacy_save_hash STREQUAL legacy_failed_save_hash)
+  message(FATAL_ERROR
+    "failed legacy AI spline save changed the existing destination")
+endif()
+file(GLOB legacy_save_temporary_files
+     "${legacy_save_output}.apex-tmp-*")
+if(legacy_save_temporary_files)
+  message(FATAL_ERROR "failed legacy AI spline save left temporary files")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --save-ai-spline "${legacy_save_output}"
+          "${legacy_save_roundtrip}"
+  RESULT_VARIABLE legacy_save_roundtrip_result
+  ERROR_VARIABLE legacy_save_roundtrip_error
+)
+if(NOT legacy_save_roundtrip_result STREQUAL "0")
+  message(FATAL_ERROR
+    "legacy AI spline save output is not v7; stderr: ${legacy_save_roundtrip_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --edit-ai-spline "${legacy_save_input}"
+          "${legacy_edit_output}" --index 0 --add-radius 1
+  RESULT_VARIABLE legacy_edit_result
+  ERROR_VARIABLE legacy_edit_error
+)
+if(NOT legacy_edit_result STREQUAL "0" OR
+   NOT EXISTS "${legacy_edit_output}")
+  message(FATAL_ERROR
+    "legacy AI spline edit did not upgrade to v7; stderr: ${legacy_edit_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --save-ai-spline "${legacy_edit_output}"
+          "${legacy_edit_roundtrip}"
+  RESULT_VARIABLE legacy_edit_roundtrip_result
+  ERROR_VARIABLE legacy_edit_roundtrip_error
+)
+if(NOT legacy_edit_roundtrip_result STREQUAL "0")
+  message(FATAL_ERROR
+    "legacy AI spline edit output is not v7; stderr: ${legacy_edit_roundtrip_error}")
 endif()
 
 execute_process(

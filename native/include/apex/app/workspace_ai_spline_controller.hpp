@@ -201,6 +201,8 @@ public:
     operator=(WorkspaceAiSplineController&&) noexcept;
     ~WorkspaceAiSplineController();
 
+    // Version-2 input is normalized through the recovered version-7 model
+    // conversion before the session starts. Version-7 input stays unchanged.
     [[nodiscard]] static WorkspaceAiSplineControllerCreateResult create(
         formats::AiSpline baseline,
         WorkspaceAiSplineControllerConfiguration configuration,

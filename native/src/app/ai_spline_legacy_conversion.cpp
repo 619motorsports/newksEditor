@@ -18,10 +18,10 @@ namespace {
 
 constexpr std::size_t kLengthEvaluationsPerSegment = 1001U;
 
-[[nodiscard]] AiSplineLegacyConversionResult failure(
+[[nodiscard]] AiSplineLegacyConversionModelResult failure(
     AiSplineLegacyConversionStatus status, std::string code,
     std::string message) {
-    AiSplineLegacyConversionResult result;
+    AiSplineLegacyConversionModelResult result;
     result.status = status;
     result.diagnostics.push_back(
         {std::move(code), std::move(message)});
@@ -96,7 +96,54 @@ constexpr std::size_t kLengthEvaluationsPerSegment = 1001U;
 
 } // namespace
 
-AiSplineLegacyConversionResult convertAiSplineV2ToV7File(
+AiSplineLegacyConversionLimits aiSplineLegacyConversionLimitsForSession(
+    const authoring::AiSplineSessionLimits& limits) noexcept {
+    AiSplineLegacyConversionLimits result;
+    result.write = limits.write;
+    result.grid = limits.grid;
+    result.grid.maxPoints =
+        std::min(result.grid.maxPoints, limits.write.maxPoints);
+    result.grid.maxGridNeighbors = std::min(
+        result.grid.maxGridNeighbors, limits.write.maxGridNeighbors);
+    result.grid.maxGridRows =
+        std::min(result.grid.maxGridRows, limits.write.maxGridRows);
+    result.grid.maxGridCellsPerRow = std::min(
+        result.grid.maxGridCellsPerRow,
+        limits.write.maxGridCellsPerRow);
+    result.grid.maxGridIndices = std::min(
+        result.grid.maxGridIndices, limits.write.maxGridIndices);
+
+    const std::size_t model_budget =
+        limits.maxSnapshotModelBytes > sizeof(formats::AiSpline)
+            ? limits.maxSnapshotModelBytes - sizeof(formats::AiSpline)
+            : 0U;
+    result.maxAggregateBytes =
+        std::min(result.maxAggregateBytes, model_budget);
+    result.grid.maxAggregateBytes =
+        std::min(result.grid.maxAggregateBytes, model_budget);
+    result.maxSourceNameBytes =
+        std::min(result.maxSourceNameBytes, model_budget);
+    result.maxRetainedPoints = std::min(
+        {result.maxRetainedPoints, result.grid.maxPoints,
+         result.write.maxPoints, result.write.maxPayloads});
+    const std::size_t maximum_records =
+        result.maxRetainedPoints >
+                std::numeric_limits<std::size_t>::max() / 3U
+            ? std::numeric_limits<std::size_t>::max()
+            : result.maxRetainedPoints * 3U;
+    result.maxRecords = std::min(result.maxRecords, maximum_records);
+    const std::size_t maximum_length_work =
+        result.maxRetainedPoints >
+                std::numeric_limits<std::size_t>::max() /
+                    kLengthEvaluationsPerSegment
+            ? std::numeric_limits<std::size_t>::max()
+            : result.maxRetainedPoints * kLengthEvaluationsPerSegment;
+    result.maxLengthSampleEvaluations = std::min(
+        result.maxLengthSampleEvaluations, maximum_length_work);
+    return result;
+}
+
+AiSplineLegacyConversionModelResult convertAiSplineV2ToV7Model(
     const formats::AiSpline& source,
     AiSplineLegacyConversionLimits limits) {
     try {
@@ -370,17 +417,12 @@ AiSplineLegacyConversionResult convertAiSplineV2ToV7File(
                     "AI spline conversion storage exceeds its aggregate limit");
             }
         }
-        auto write_limits = limits.write;
-        write_limits.maxOutputBytes = std::min(
-            write_limits.maxOutputBytes,
-            limits.maxAggregateBytes - serialized_aggregate);
-        auto bytes = formats::serializeAiSpline(candidate, write_limits);
-
-        AiSplineLegacyConversionResult result;
+        AiSplineLegacyConversionModelResult result;
         result.status = AiSplineLegacyConversionStatus::converted;
         result.pointCount = candidate.points.size();
         result.gridBuilt = candidate.grid.has_value();
-        result.bytes = std::move(bytes);
+        result.aggregateBytes = serialized_aggregate;
+        result.model = std::move(candidate);
         return result;
     } catch (const formats::AiSplineGridBuildError& error) {
         return failure(resourceLimitCode(error.code())
@@ -401,6 +443,50 @@ AiSplineLegacyConversionResult convertAiSplineV2ToV7File(
             AiSplineLegacyConversionStatus::allocation_failed,
             "AI_SPLINE_LEGACY_ALLOCATION_FAILED",
             "AI spline conversion allocation failed within configured limits");
+    }
+}
+
+AiSplineLegacyConversionResult convertAiSplineV2ToV7File(
+    const formats::AiSpline& source,
+    AiSplineLegacyConversionLimits limits) {
+    AiSplineLegacyConversionResult result;
+    const auto model = convertAiSplineV2ToV7Model(source, limits);
+    result.status = model.status;
+    result.pointCount = model.pointCount;
+    result.gridBuilt = model.gridBuilt;
+    result.diagnostics = model.diagnostics;
+    if (!model.ok()) return result;
+
+    try {
+        auto write_limits = limits.write;
+        if (model.aggregateBytes > limits.maxAggregateBytes) {
+            result.status = AiSplineLegacyConversionStatus::resource_limit;
+            result.diagnostics.push_back({
+                "AI_SPLINE_LEGACY_AGGREGATE_LIMIT",
+                "AI spline conversion storage exceeds its aggregate limit"});
+            return result;
+        }
+        write_limits.maxOutputBytes = std::min(
+            write_limits.maxOutputBytes,
+            limits.maxAggregateBytes - model.aggregateBytes);
+        result.bytes = formats::serializeAiSpline(*model.model, write_limits);
+        result.status = AiSplineLegacyConversionStatus::converted;
+        return result;
+    } catch (const formats::AiSplineWriteError& error) {
+        const bool allocation = error.code() == "ALLOCATION_FAILED";
+        result.status = allocation
+                            ? AiSplineLegacyConversionStatus::allocation_failed
+                            : resourceLimitCode(error.code())
+                                  ? AiSplineLegacyConversionStatus::resource_limit
+                                  : AiSplineLegacyConversionStatus::invalid;
+        result.diagnostics.push_back({error.code(), error.what()});
+        return result;
+    } catch (const std::bad_alloc&) {
+        result.status = AiSplineLegacyConversionStatus::allocation_failed;
+        result.diagnostics.push_back({
+            "AI_SPLINE_LEGACY_ALLOCATION_FAILED",
+            "AI spline conversion allocation failed within configured limits"});
+        return result;
     }
 }
 

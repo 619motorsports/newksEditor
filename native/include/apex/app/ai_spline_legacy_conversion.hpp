@@ -1,11 +1,13 @@
 #pragma once
 
+#include "apex/authoring/ai_spline_session.hpp"
 #include "apex/formats/ai_spline.hpp"
 #include "apex/formats/ai_spline_grid.hpp"
 #include "apex/formats/ai_spline_write.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -37,6 +39,12 @@ struct AiSplineLegacyConversionLimits {
     formats::AiSplineWriteLimits write{};
 };
 
+// Constrain conversion to the same model, grid, and writer budgets as the
+// editing session that will own the normalized version-7 model.
+[[nodiscard]] AiSplineLegacyConversionLimits
+aiSplineLegacyConversionLimitsForSession(
+    const authoring::AiSplineSessionLimits& limits) noexcept;
+
 struct AiSplineLegacyConversionResult {
     AiSplineLegacyConversionStatus status =
         AiSplineLegacyConversionStatus::invalid;
@@ -50,6 +58,32 @@ struct AiSplineLegacyConversionResult {
                !bytes.empty();
     }
 };
+
+// Build the canonical version-7 model without serializing it. The returned
+// model owns a rebuilt grid and contains no version-2-only state. Conversion
+// is transactional: failures return no model and do not change the source.
+struct AiSplineLegacyConversionModelResult {
+    AiSplineLegacyConversionStatus status =
+        AiSplineLegacyConversionStatus::invalid;
+    std::optional<formats::AiSpline> model;
+    std::size_t pointCount = 0U;
+    bool gridBuilt = false;
+    // Bytes charged for the retained model and rebuilt grid. Temporary length
+    // work is validated separately and released before this value is set. The
+    // file wrapper uses this to preserve the aggregate output bound.
+    std::size_t aggregateBytes = 0U;
+    std::vector<AiSplineLegacyConversionDiagnostic> diagnostics;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == AiSplineLegacyConversionStatus::converted &&
+               model.has_value() && model->version == 7U;
+    }
+};
+
+[[nodiscard]] AiSplineLegacyConversionModelResult
+convertAiSplineV2ToV7Model(
+    const formats::AiSpline& source,
+    AiSplineLegacyConversionLimits limits = {});
 
 // Convert the recovered version-2 load result to a complete version-7 file.
 // The operation is explicit and transactional. It does not change source.
