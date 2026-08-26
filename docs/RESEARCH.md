@@ -2702,6 +2702,11 @@ also applies the geometric translation, rotation, and scale matrix.
 The skin path reads the first skin deformer. It imports every cluster link,
 link-transform matrix, control-point index, and weight.
 
+`convertMatrix(FbxAMatrix&)` at `0x10003b80` copies the FBX rows directly into
+`mat44f`. The cluster path then inverts `TransformLink` through the helper at
+`0x10002c20`. It does not combine the mesh transform or perform an axis,
+handedness, or unit conversion.
+
 `MeshBuilder::setWeight` at `0x10042CB9` scans four influence slots in source order.
 It uses the first slot with bone index `-1`. It does not sort or normalize weights.
 A fifth influence produces a warning and is not stored. The native function does
@@ -2710,6 +2715,12 @@ not validate the control-point index or bone index.
 `MeshBuilder::buildSkinnedMesh` at `0x10042538` emits the 19-float KN5 vertex layout.
 The layout contains position, normal, UV, tangent, four weights, and four bone indices.
 The function changes unused bone indices from `-1` to zero before emission.
+
+`MeshBuilder::solveSkinnedMeshBones` at `0x10042ddc` resolves a retained link
+name with recursive, exact-name hierarchy lookup. At runtime,
+`SkinnedMesh::updateBonesBuffer` at `0x1004a91b` evaluates each palette entry as
+`offsetMatrix * boneNode.matrixWS`. The skinned batch finalizer at `0x10041e77`
+changes the material shader to `ksSkinnedMesh`.
 
 The PDB identifies `FBXImporter::loadAnimation` at `0x100071a0` and
 `FBXImporter::loadAnimationNode` at `0x10007550`. The node walk accepts FBX mesh,
@@ -2748,9 +2759,18 @@ an animation stack/layer, and it samples explicit FBX linear key flags at 100 lo
 times using the recovered one-percent, end-exclusive schedule. Curves without an
 explicit linear flag, unsupported properties, missing links, and non-finite or
 non-monotonic key data are diagnosed; they are not silently treated as linear.
-Native pivot evaluation, non-linear interpolation, skinning, and the full SDK object
-selection rule remain outside this C++ slice. The installed GT40 fixture uses the
-32-bit FBX 7.3 leaf-record form with no per-leaf null record; the native DOM parser
+Native pivot evaluation, non-linear interpolation, and the full SDK object
+selection rule remain outside this C++ slice. The bounded converter now retains
+the first skin deformer, the first four source-order influences, inverted link
+matrices, and influence identity across expanded UV seams. It rejects malformed
+cluster arrays, references, matrices, names, and limits. The render adapter emits
+the 19-float type-3 mesh and an isolated `ksSkinnedMesh` material.
+The native inspection command now carries the installed GT40 file through the
+converter and render adapter. It emits 157 canonical nodes. The document stays
+staged because pivot properties, interpolation, and required textures remain
+outside the supported boundary.
+The installed GT40 fixture uses the 32-bit FBX 7.3 leaf-record form with no
+per-leaf null record. The native DOM parser
 now accepts that form and still requires the enclosing end offsets and root
 terminator. Native conversion now classifies its 112 display-layer membership
 edges, eight Model-to-Deformer skin ownership edges, and explicit root edges without

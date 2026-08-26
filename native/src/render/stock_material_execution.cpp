@@ -30,7 +30,8 @@ namespace {
 
 [[nodiscard]] bool supported_family(std::string_view shader) {
     const std::string key = canonical(shader);
-    return key == "ksperpixel" || key == "ksperpixelnm" ||
+    return key == "ksperpixel" || key == "ksskinnedmesh" ||
+           key == "ksperpixelnm" ||
            key == "ksperpixelmultimap" ||
            key == "ksperpixelmultimap_at" ||
            key == "ksperpixelmultimap_nmdetail" ||
@@ -69,12 +70,16 @@ namespace {
     bool directional_shadow_receiver) {
     const std::string material_key = canonical(material);
     const std::string shader_key = canonical(shader);
+    // A skinned packet has a distinct vertex ABI and 76-byte stride. Never
+    // let a material-name override select bytecode authored for a static use
+    // of the same source material.
+    const bool shader_family_only = shader_key == "ksskinnedmesh";
     const StockMaterialShaderModules* family = nullptr;
     for (const StockMaterialShaderModules& set : sets) {
         if (set.variant != variant ||
             set.directional_shadow_receiver != directional_shadow_receiver)
             continue;
-        if (canonical(set.key) == material_key &&
+        if (!shader_family_only && canonical(set.key) == material_key &&
             set.key_kind == StockMaterialShaderKeyKind::material_name)
             return &set;
         if (canonical(set.key) == shader_key &&
@@ -142,7 +147,7 @@ namespace {
 
 [[nodiscard]] std::size_t expected_texture_slots(std::string_view shader) {
     const std::string key = canonical(shader);
-    if (key == "ksperpixel") return 1U;
+    if (key == "ksperpixel" || key == "ksskinnedmesh") return 1U;
     if (key == "ksperpixelnm") return 2U;
     if (key == "ksperpixelmultimap" || key == "ksperpixelmultimap_at") return 3U;
     return 5U;

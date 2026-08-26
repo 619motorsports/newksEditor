@@ -23,6 +23,9 @@
 namespace apex::render {
 namespace {
 
+constexpr std::size_t max_exact_float_bone_count =
+    std::size_t{1U} << std::numeric_limits<float>::digits;
+
 using apex::formats::FbxNodeGeometry;
 using apex::formats::FbxStaticMesh;
 using apex::formats::Kn5File;
@@ -236,38 +239,41 @@ Vector3 transform_normal(const Matrix4& matrix, Vector3 value,
     return result;
 }
 
-Vector3 position_at(const std::vector<float>& vertices, std::size_t vertex) {
-    const auto offset = vertex * 11U;
+Vector3 position_at(const std::vector<float>& vertices, std::size_t vertex,
+                    std::size_t stride) {
+    const auto offset = vertex * stride;
     return {vertices[offset], vertices[offset + 1U], vertices[offset + 2U]};
 }
 
-Vector3 normal_at(const std::vector<float>& vertices, std::size_t vertex) {
-    const auto offset = vertex * 11U + 3U;
+Vector3 normal_at(const std::vector<float>& vertices, std::size_t vertex,
+                  std::size_t stride) {
+    const auto offset = vertex * stride + 3U;
     return {vertices[offset], vertices[offset + 1U], vertices[offset + 2U]};
 }
 
 void set_tangent(std::vector<float>& vertices, std::size_t vertex,
-                 Vector3 tangent) {
-    const auto offset = vertex * 11U + 8U;
+                 Vector3 tangent, std::size_t stride) {
+    const auto offset = vertex * stride + 8U;
     vertices[offset] = tangent.x;
     vertices[offset + 1U] = tangent.y;
     vertices[offset + 2U] = tangent.z;
 }
 
-void generate_native_tangents(std::vector<float>& vertices) {
+void generate_native_tangents(std::vector<float>& vertices,
+                              std::size_t stride) {
     constexpr float fallback = 0.5773502691896258F;
-    const auto vertex_count = vertices.size() / 11U;
+    const auto vertex_count = vertices.size() / stride;
     for (std::size_t first = 0U; first < vertex_count; first += 3U) {
         const auto second = first + 1U;
         const auto third = first + 2U;
-        const auto p0 = position_at(vertices, first);
-        const auto p1 = position_at(vertices, second);
-        const auto p2 = position_at(vertices, third);
+        const auto p0 = position_at(vertices, first, stride);
+        const auto p1 = position_at(vertices, second, stride);
+        const auto p2 = position_at(vertices, third, stride);
         const auto e1 = subtract(p1, p0);
         const auto e2 = subtract(p2, p0);
-        const auto uv0 = first * 11U + 6U;
-        const auto uv1 = second * 11U + 6U;
-        const auto uv2 = third * 11U + 6U;
+        const auto uv0 = first * stride + 6U;
+        const auto uv1 = second * stride + 6U;
+        const auto uv2 = third * stride + 6U;
         const float duv1x = vertices[uv1] - vertices[uv0];
         const float duv1y = vertices[uv1 + 1U] - vertices[uv0 + 1U];
         const float duv2x = vertices[uv2] - vertices[uv0];
@@ -279,27 +285,28 @@ void generate_native_tangents(std::vector<float>& vertices) {
                            e2.y * duv1x - e1.y * duv2x,
                            e2.z * duv1x - e1.z * duv2x};
         for (const auto vertex : {first, second, third}) {
-            const auto normal = normal_at(vertices, vertex);
+            const auto normal = normal_at(vertices, vertex, stride);
             auto projected = normalize_if_nonzero(cross(normal, a));
             auto tangent = zero(projected) ? cross(b, normal)
                                            : cross(projected, normal);
             tangent = normalize_if_nonzero(tangent);
             if (!finite(tangent)) tangent = {1.0F, 0.0F, 0.0F};
             else if (zero(tangent)) tangent = {fallback, fallback, fallback};
-            set_tangent(vertices, vertex, tangent);
+            set_tangent(vertices, vertex, tangent, stride);
         }
     }
 }
 
 std::array<float, 4U> native_bounds(const std::vector<float>& vertices,
+                                    std::size_t stride,
                                     std::string_view path) {
-    const auto vertex_count = vertices.size() / 11U;
+    const auto vertex_count = vertices.size() / stride;
     if (vertex_count == 0U)
         fail(FbxRenderAdapterStatus::invalid_request, "empty_batch",
              "FBX material batch has no vertices", std::string(path));
     Vector3 center{};
     for (std::size_t vertex = 0U; vertex < vertex_count; ++vertex) {
-        const auto position = position_at(vertices, vertex);
+        const auto position = position_at(vertices, vertex, stride);
         center.x += position.x;
         center.y += position.y;
         center.z += position.z;
@@ -316,7 +323,7 @@ std::array<float, 4U> native_bounds(const std::vector<float>& vertices,
              "FBX mesh bounds center is not finite", std::string(path));
     float radius = 0.0F;
     for (std::size_t vertex = 0U; vertex < vertex_count; ++vertex) {
-        const auto delta = subtract(position_at(vertices, vertex), center);
+        const auto delta = subtract(position_at(vertices, vertex, stride), center);
         const float distance =
             std::sqrt(delta.x * delta.x + delta.y * delta.y +
                       delta.z * delta.z);
@@ -386,6 +393,7 @@ private:
             limits_.max_nodes == 0U || limits_.max_meshes == 0U ||
             limits_.max_batches_per_geometry == 0U ||
             limits_.max_vertices == 0U || limits_.max_indices == 0U ||
+            limits_.max_bones_per_mesh == 0U ||
             limits_.max_vertices_per_mesh == 0U ||
             limits_.max_vertices_per_mesh > 65'536U ||
             limits_.max_depth == 0U || limits_.max_name_bytes == 0U ||
@@ -966,9 +974,53 @@ private:
             {std::move(code), std::move(message), std::move(path)});
     }
 
+    std::uint32_t skinned_material(std::uint32_t base,
+                                   std::string_view path) {
+        const auto found = skinned_materials_.find(base);
+        if (found != skinned_materials_.end()) return found->second;
+        if (base >= model_.materials.size())
+            fail(FbxRenderAdapterStatus::invalid_request,
+                 "invalid_material_reference",
+                 "FBX skinned material base is missing", std::string(path));
+        if (model_.materials.size() >= limits_.max_materials ||
+            model_.materials.size() >=
+                static_cast<std::size_t>(apex::scene::invalid_material_id))
+            fail(FbxRenderAdapterStatus::resource_limit, "material_limit",
+                 "FBX skinned material exceeds the adapter limit",
+                 std::string(path));
+        const auto& source = model_.materials[base];
+        std::size_t bytes = sizeof(Kn5Material) + source.name.size() +
+                            std::string_view{"ksSkinnedMesh"}.size();
+        for (const auto& property : source.properties)
+            bytes = checked_add(bytes,
+                                sizeof(Kn5MaterialProperty) +
+                                    property.name.size(),
+                                path);
+        for (const auto& resource : source.resources)
+            bytes = checked_add(bytes,
+                                sizeof(apex::formats::Kn5MaterialResource) +
+                                    resource.slot.size() +
+                                    resource.texture.size(),
+                                path);
+        budget_.add(bytes, path);
+        // The recovered batch finalizer selects ksSkinnedMesh. Keep a static
+        // use of the same source material unchanged in the canonical model.
+        Kn5Material clone = source;
+        clone.shader = "ksSkinnedMesh";
+        const auto result = static_cast<std::uint32_t>(model_.materials.size());
+        model_.materials.push_back(std::move(clone));
+        material_has_texture_.push_back(material_has_texture_[base]);
+        budget_.add(sizeof(std::pair<const std::uint32_t, std::uint32_t>),
+                    path);
+        skinned_materials_.emplace(base, result);
+        return result;
+    }
+
     std::uint32_t resolve_material(const FbxNodeGeometry& mapping,
                                    std::int32_t raw_slot,
-                                   std::size_t batch_count) {
+                                   std::size_t batch_count,
+                                   bool skinned,
+                                   std::string_view path) {
         // MeshBuilder's single-batch finalizer always asks the provider for
         // local slot zero. Multiple batches use their raw signed slot.
         const std::int64_t local_slot =
@@ -982,9 +1034,10 @@ private:
                      "invalid_material_reference",
                      "FBX material slot references a missing canonical material",
                      "node_geometry");
-            return material;
+            return skinned ? skinned_material(material, path) : material;
         }
-        return fallback_material();
+        const auto material = fallback_material();
+        return skinned ? skinned_material(material, path) : material;
     }
 
     void append_source_vertex(std::vector<float>& output,
@@ -1028,6 +1081,19 @@ private:
         output.insert(output.end(), {position.x, position.y, position.z,
                                      normal.x, normal.y, normal.z, u, v,
                                      0.0F, 0.0F, 0.0F});
+        if (mesh.skin.has_value()) {
+            if (source_vertex >= mesh.skin->vertex_influences.size())
+                fail(FbxRenderAdapterStatus::invalid_request,
+                     "invalid_skin_layout",
+                     "FBX skin influence table is not vertex-aligned",
+                     std::string(path));
+            const auto& influence =
+                mesh.skin->vertex_influences[source_vertex];
+            output.insert(output.end(), influence.weights.begin(),
+                          influence.weights.end());
+            for (const auto bone : influence.bones)
+                output.push_back(static_cast<float>(bone));
+        }
     }
 
     Kn5Node make_batch(const apex::scene::SceneNode& source_node,
@@ -1053,16 +1119,18 @@ private:
                  std::string(path));
         output_vertices_ += vertex_count;
         output_indices_ += vertex_count;
+        const bool skinned = mesh.skin.has_value();
+        const std::size_t stride = skinned ? 19U : 11U;
         budget_.add(checked_multiply(
-                        checked_multiply(vertex_count, 11U, path),
+                        checked_multiply(vertex_count, stride, path),
                         sizeof(float), path),
                     path);
         budget_.add(checked_multiply(vertex_count, sizeof(std::uint16_t), path),
                     path);
 
         Kn5Node output;
-        output.type = 2U;
-        output.kind = "mesh";
+        output.type = skinned ? 3U : 2U;
+        output.kind = skinned ? "skinnedMesh" : "mesh";
         output.name = source_node.name;
         if (batch_count > 1U)
             output.name += "_SUB" + std::to_string(batch_index);
@@ -1072,13 +1140,24 @@ private:
         output.transform = apex::scene::identity_matrix;
         output.castShadows = true;
         output.visible = true;
-        output.vertexStride = 11U;
-        output.materialId = resolve_material(mapping, raw_slot, batch_count);
+        output.vertexStride = stride;
+        output.materialId = resolve_material(mapping, raw_slot, batch_count,
+                                             skinned, path);
         output.layer = 0U;
         output.lodIn = 0.0F;
         output.lodOut = 0.0F;
-        output.vertices.reserve(vertex_count * 11U);
+        output.vertices.reserve(vertex_count * stride);
         output.indices.reserve(vertex_count);
+        if (skinned) {
+            budget_.add(checked_multiply(mesh.skin->bones.size(),
+                                         sizeof(apex::formats::Kn5Bone), path),
+                        path);
+            output.bones.reserve(mesh.skin->bones.size());
+            for (const auto& bone : mesh.skin->bones) {
+                budget_.add(bone.name.size(), path);
+                output.bones.push_back({bone.name, bone.inverse_bind});
+            }
+        }
 
         std::size_t output_vertex = 0U;
         const auto source_triangles = mesh.triangle_indices.size() / 3U;
@@ -1098,13 +1177,13 @@ private:
             }
         }
         if (output_vertex != vertex_count ||
-            output.vertices.size() != vertex_count * 11U)
+            output.vertices.size() != vertex_count * stride)
             fail(FbxRenderAdapterStatus::invalid_request,
                  "batch_count_changed",
                  "FBX material batch count changed during conversion",
                  std::string(path));
-        generate_native_tangents(output.vertices);
-        output.bounds = native_bounds(output.vertices, path);
+        generate_native_tangents(output.vertices, stride);
+        output.bounds = native_bounds(output.vertices, stride, path);
         const bool has_texture =
             output.materialId < material_has_texture_.size() &&
             material_has_texture_[output.materialId];
@@ -1151,6 +1230,43 @@ private:
                  "invalid_geometry_layout",
                  "FBX mesh attribute arrays are not vertex-aligned",
                  std::string(path));
+        if (mesh.skin.has_value()) {
+            if (mesh.skin->bones.empty() ||
+                mesh.skin->bones.size() > limits_.max_bones_per_mesh ||
+                mesh.skin->bones.size() > max_exact_float_bone_count ||
+                mesh.skin->vertex_influences.size() != vertex_count)
+                fail(FbxRenderAdapterStatus::invalid_request,
+                     "invalid_skin_layout",
+                     "FBX skin bones or influences are malformed",
+                     std::string(path));
+            std::set<std::string_view> bone_names;
+            for (const auto& bone : mesh.skin->bones) {
+                validate_name(bone.name, path);
+                const auto [name, inserted] = bone_names.insert(bone.name);
+                (void)name;
+                if (bone.name.empty() || !finite_matrix(bone.inverse_bind) ||
+                    !inserted)
+                    fail(FbxRenderAdapterStatus::invalid_request,
+                         "invalid_skin_bone",
+                         "FBX skin bone name or inverse-bind matrix is invalid",
+                         std::string(path));
+                budget_.add(sizeof(std::string_view) +
+                                3U * sizeof(void*),
+                            path);
+            }
+            for (const auto& influence : mesh.skin->vertex_influences) {
+                for (std::size_t slot = 0U; slot < influence.weights.size();
+                     ++slot) {
+                    if (!std::isfinite(influence.weights[slot]) ||
+                        influence.weights[slot] < 0.0F ||
+                        influence.bones[slot] >= mesh.skin->bones.size())
+                        fail(FbxRenderAdapterStatus::invalid_request,
+                             "invalid_skin_influence",
+                             "FBX skin influence is not finite or references a missing bone",
+                             std::string(path));
+                }
+            }
+        }
         const auto triangle_count = mesh.triangle_indices.size() / 3U;
         const bool exact_slots = !mesh.triangle_material_slots.empty();
         if (exact_slots && mesh.triangle_material_slots.size() != triangle_count)
@@ -1264,12 +1380,21 @@ private:
         budget_.add(wrapper.name.size(), "nodes");
 
         const auto geometry = geometries_.find(node_id);
-        if ((geometry != geometries_.end()) !=
-            (source_node.kind == apex::scene::NodeKind::mesh))
+        const bool source_has_geometry =
+            source_node.kind == apex::scene::NodeKind::mesh ||
+            source_node.kind == apex::scene::NodeKind::skinned_mesh;
+        if ((geometry != geometries_.end()) != source_has_geometry)
             fail(FbxRenderAdapterStatus::invalid_request,
                  "invalid_geometry_mapping",
                  "FBX mesh node and geometry mapping do not match",
                  "nodes/" + std::to_string(node_id));
+        if (geometry != geometries_.end())
+            if (conversion_.meshes[geometry->second->mesh].skin.has_value() !=
+                (source_node.kind == apex::scene::NodeKind::skinned_mesh))
+                fail(FbxRenderAdapterStatus::invalid_request,
+                     "invalid_skin_mapping",
+                     "FBX skinned node and mesh binding do not match",
+                     "nodes/" + std::to_string(node_id));
         if (geometry != geometries_.end())
             append_geometry(wrapper, source_node, *geometry->second,
                             "nodes/" + std::to_string(node_id));
@@ -1293,6 +1418,7 @@ private:
     std::map<NodeId, Matrix4> locals_;
     std::map<NodeId, const FbxNodeGeometry*> geometries_;
     std::vector<bool> material_has_texture_;
+    std::map<std::uint32_t, std::uint32_t> skinned_materials_;
     std::vector<bool> emitted_;
     std::optional<std::uint32_t> fallback_material_;
     std::vector<FbxRenderAdapterDiagnostic> diagnostics_;

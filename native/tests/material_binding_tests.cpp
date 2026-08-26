@@ -473,6 +473,12 @@ void rejects_invalid_ks_per_pixel_constants() {
     require(threw, "CSP non-finite property is rejected");
 
     const MaterialBinding valid = build_material_binding(material, 0);
+    auto skinned = valid;
+    skinned.shader = "ksSkinnedMesh";
+    const auto skinned_resolved =
+        resolve_ks_per_pixel_material_constants(skinned);
+    require(skinned_resolved.ok(),
+            "ksSkinnedMesh reuses the bounded diffuse-only material constants");
     auto malformed = valid;
     malformed.properties.at("ksdiffuse").scalar = std::numeric_limits<float>::quiet_NaN();
     const auto resolved = resolve_ks_per_pixel_material_constants(malformed);

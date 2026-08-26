@@ -525,10 +525,12 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
     const bool normal_variant = shader == "ksperpixelnm" ||
                                 base_multimap_variant || detail_stack_variant ||
                                 damage_dirt_variant;
-    if (shader != "ksperpixel" && !normal_variant) {
+    const bool diffuse_only_variant =
+        shader == "ksperpixel" || shader == "ksskinnedmesh";
+    if (!diffuse_only_variant && !normal_variant) {
         result.status = KsPerPixelMaterialResolveStatus::unsupported;
         result.diagnostic = {"ks_per_pixel_shader_unsupported", "shader",
-                             "The bounded material resolver accepts exact ksPerPixel, ksPerPixelNM, ksPerPixelMultiMap, ksPerPixelMultiMap_AT, ksPerPixelMultiMap_NMDetail, ksPerPixelMultiMap_AT_NMDetail, and dirt-zero ksPerPixelMultiMap_damage_dirt shaders"};
+                             "The bounded material resolver accepts exact ksPerPixel, ksSkinnedMesh, ksPerPixelNM, ksPerPixelMultiMap, ksPerPixelMultiMap_AT, ksPerPixelMultiMap_NMDetail, ksPerPixelMultiMap_AT_NMDetail, and dirt-zero ksPerPixelMultiMap_damage_dirt shaders"};
         return result;
     }
 

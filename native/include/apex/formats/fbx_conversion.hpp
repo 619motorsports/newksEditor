@@ -16,6 +16,25 @@
 
 namespace apex::formats {
 
+struct FbxSkinInfluence {
+    std::array<float, 4u> weights{};
+    std::array<std::uint32_t, 4u> bones{};
+};
+
+struct FbxSkinBone {
+    std::int64_t model_object_id = 0;
+    std::string name;
+    scene::Matrix4 inverse_bind = scene::identity_matrix;
+};
+
+struct FbxSkinBinding {
+    std::int64_t skin_object_id = 0;
+    std::vector<FbxSkinBone> bones;
+    // Indexed like FbxStaticMesh::positions. Each entry retains the four
+    // source-order slots used by the recovered MeshBuilder::setWeight path.
+    std::vector<FbxSkinInfluence> vertex_influences;
+};
+
 struct FbxStaticMesh {
     std::int64_t object_id = 0;
     std::string name;
@@ -32,6 +51,7 @@ struct FbxStaticMesh {
     // adapter resolves each slot against FbxNodeGeometry::materials and can
     // safely provide the native plain-material fallback for an invalid slot.
     std::vector<std::int32_t> triangle_material_slots;
+    std::optional<FbxSkinBinding> skin;
 };
 
 struct FbxMaterialParameters {
@@ -151,6 +171,10 @@ struct FbxConversionLimits {
     std::size_t max_meshes = 1'000'000;
     std::size_t max_vertices = 10'000'000;
     std::size_t max_indices = 30'000'000;
+    std::size_t max_skin_deformers = 4'096;
+    std::size_t max_skin_clusters = 65'536;
+    std::size_t max_bones_per_skin = 4'096;
+    std::size_t max_skin_influences = 40'000'000;
     std::size_t max_connections = 4'000'000;
     std::size_t max_properties = 4'000'000;
     std::size_t max_property_values = 10'000'000;

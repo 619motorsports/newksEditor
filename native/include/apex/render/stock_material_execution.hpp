@@ -50,7 +50,9 @@ struct StockMaterialExecutionRequest {
     // copies them and never changes shader_execution_supported.
     std::span<const DrawPacket> packets{};
     // A set may be selected by exact material name or canonical shader name.
-    // Material-name sets take precedence over shader-family sets.
+    // Material-name sets take precedence over shader-family sets. Skinned
+    // packets always use the ksSkinnedMesh family because their vertex ABI
+    // cannot safely inherit a static material-name override.
     std::span<const StockMaterialShaderModules> shader_modules{};
     // Empty means no overrides. Otherwise this table must match model
     // material order. External/solid-color resource overrides are rejected
@@ -81,7 +83,7 @@ struct StockMaterialExecutionResult {
 // variants preserve opaque and transparent node state. Build one resolved
 // 80-byte material record per used material, then synchronously prepare the
 // static scene. Supported shader families are
-// ksPerPixel, ksPerPixelNM, ksPerPixelMultiMap,
+// ksPerPixel, ksSkinnedMesh, ksPerPixelNM, ksPerPixelMultiMap,
 // ksPerPixelMultiMap_AT, ksPerPixelMultiMap_NMDetail, and
 // ksPerPixelMultiMap_AT_NMDetail. A bounded dirt-zero stage from
 // ksPerPixelMultiMap_damage_dirt is also supported. This stage does not claim

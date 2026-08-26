@@ -560,15 +560,17 @@ remains unchanged and feature-complete.
   configuration model is implemented. A bounded
   binary/ASCII FBX DOM parser is implemented. ASCII numeric arrays become typed
   FBX arrays after declared-count, finite-value, and allocation-budget checks.
-  A bounded FBX conversion subset supports static positions, polygon
+  A bounded FBX conversion subset supports static and skinned positions, polygon
   triangulation, hierarchy, local/world transforms, native material assignment,
   supported normal and UV mappings, and explicit-linear local animation clips.
   The UV path expands seams and negates V like `src/fbx-import.js`. The native
   shell can apply one converted clip at a fixed normalized position. It rejects
   malformed or over-budget data. The converter retains bounded binary and ASCII
   `Video.Content` payloads. This path matches the WebGL importer, not ksEditor.
-  It diagnoses skinning, non-linear animation, `Image` records, unsupported
-  layer mappings, and advanced transform semantics.
+  It converts the first skin deformer with bounded clusters, four source-order
+  influences, and inverted `TransformLink` matrices. It diagnoses non-linear
+  animation, `Image` records, unsupported layer mappings, and advanced
+  transform semantics.
   The conversion budget includes temporary vectors, maps, sets, child lists,
   flattened property views, copied strings, and output containers.
   A bounded VAO binder matches decoded records to mesh views. It uses exact

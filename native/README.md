@@ -644,14 +644,15 @@ Workspace viewport preparation uses this bridge before GPU allocation. It
 also uses the bridge for a color-only override with no external grant. Vulkan
 and D3D12 use the same embedded-texture path. Raw external-file overrides
 remain invalid at the renderer boundary.
-The FBX converter handles static positions, polygon triangulation, hierarchy,
-bounded transforms, native material values, ordered node materials, and
-supported normal, UV, and material layers. Each material slot remains signed
+The FBX converter handles static and skinned positions. It also handles polygon
+triangulation, hierarchy, bounded transforms, native material values, ordered
+node materials, and supported normal, UV, and material layers. Each material slot remains signed
 until the render adapter applies the recovered fallback behavior. Its aggregate
 budget includes temporary containers, copied strings, expanded vertices,
-material slots, raw image data, and output containers. It diagnoses skinning,
-unsupported animation data, `Image` records, unsupported layer mappings, and
-advanced transform semantics. The raw image path supports `Video.Content` only.
+material slots, skin clusters, influences, raw image data, and output
+containers. It diagnoses unsupported animation data, `Image` records,
+unsupported layer mappings, and advanced transform semantics. The raw image
+path supports `Video.Content` only.
 
 The bounded FBX render adapter now creates an owned KN5-compatible CPU model.
 Vulkan and D3D12 consume the same regenerated scene. The adapter preserves
@@ -662,6 +663,11 @@ file handle, grant, source path, or GPU object. Missing textures and unsupported
 source behavior produce a staged model. A staged model cannot enter a GPU
 backend. Malformed hierarchy, geometry, material, texture, and limit data fail
 atomically and do not publish a partial model.
+
+For a supported skin, the adapter emits the recovered 19-float skinned vertex
+layout and the inverted `TransformLink` matrices. It gives each skinned source
+material an isolated `ksSkinnedMesh` copy. The shared CPU skin path supplies
+mutable vertex data to Vulkan and D3D12. Indices remain immutable.
 
 The adapter also validates owned `Video.Content` bytes before it copies them.
 Nonempty embedded content takes priority over an external file candidate.
@@ -684,9 +690,9 @@ optional `--fbx-assets` directory is the only authority for external textures.
 The command also reports bounded clip metadata for each converted animation.
 Window rendering uses `--fbx` as a separate model source. It requires an
 explicit `--fbx-assets` directory for external textures. Embedded-only files do
-not require this directory. Window rendering requires caller-supplied
-`ksPerPixel` modules for the selected backend. `--fbx-animation` selects one
-converted clip by index.
+not require this directory. Window rendering requires caller-supplied modules
+for each used `ksPerPixel` or `ksSkinnedMesh` family on the selected backend.
+`--fbx-animation` selects one converted clip by index.
 `--animation-position` selects a fixed normalized position and clamps it to the
 range from zero to one. The shell applies the clip to exact-name node wrappers
 before it rebuilds the shared scene. Invalid and staged FBX documents, and
@@ -695,8 +701,10 @@ Vulkan and D3D12 use the same owned document and the same staged-document gate.
 The native shell frames FBX bounds with its existing workspace camera. This is
 shell behavior, not recovered ksEditor behavior; the installed editor keeps its
 current camera when it loads FBX geometry. Fixed-position FBX animation uses
-the bounded explicit-linear bridge. Real-time playback, pivot evaluation,
-non-linear interpolation, and skinning remain unsupported.
+the bounded explicit-linear bridge. Real-time playback, pivot evaluation, and
+non-linear interpolation remain unsupported. Skinned FBX meshes use the
+recovered cluster matrices. A fixed animation position can update linked bones
+through the shared CPU skin path.
 The optional real-backend contract test also carries one supported ASCII FBX
 through parsing, external-texture authority, the canonical adapter, and the
 stock-scene draw/readback path. It requires visible color output on Vulkan and

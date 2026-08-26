@@ -318,8 +318,9 @@ struct DiagnosticBudget {
 
 void addDiagnostic(FbxSceneConversion& result, DiagnosticBudget& budget,
                    FbxConversionSeverity severity, std::string_view code,
-                   std::string_view message, std::string_view path) {
-    result.complete = false;
+                   std::string_view message, std::string_view path,
+                   bool incomplete = true) {
+    if (incomplete) result.complete = false;
     if (path.size() > budget.limits.max_diagnostic_path_bytes ||
         code.size() > budget.limits.max_string_bytes || message.size() > budget.limits.max_string_bytes)
         fail("diagnostic_limit", "FBX conversion diagnostic exceeds its string limit", "diagnostics");
@@ -373,6 +374,62 @@ Matrix4 multiply(const Matrix4& left, const Matrix4& right) {
         for (std::size_t row = 0; row < 4u; ++row)
             for (std::size_t index = 0; index < 4u; ++index)
                 output[column * 4u + row] += left[index * 4u + row] * right[column * 4u + index];
+    return output;
+}
+
+std::optional<Matrix4> inverseMatrix(const Matrix4& input) {
+    const double a00 = input[0], a01 = input[1], a02 = input[2],
+                 a03 = input[3];
+    const double a10 = input[4], a11 = input[5], a12 = input[6],
+                 a13 = input[7];
+    const double a20 = input[8], a21 = input[9], a22 = input[10],
+                 a23 = input[11];
+    const double a30 = input[12], a31 = input[13], a32 = input[14],
+                 a33 = input[15];
+    const double b00 = a00 * a11 - a01 * a10;
+    const double b01 = a00 * a12 - a02 * a10;
+    const double b02 = a00 * a13 - a03 * a10;
+    const double b03 = a01 * a12 - a02 * a11;
+    const double b04 = a01 * a13 - a03 * a11;
+    const double b05 = a02 * a13 - a03 * a12;
+    const double b06 = a20 * a31 - a21 * a30;
+    const double b07 = a20 * a32 - a22 * a30;
+    const double b08 = a20 * a33 - a23 * a30;
+    const double b09 = a21 * a32 - a22 * a31;
+    const double b10 = a21 * a33 - a23 * a31;
+    const double b11 = a22 * a33 - a23 * a32;
+    const double determinant = b00 * b11 - b01 * b10 + b02 * b09 +
+                               b03 * b08 - b04 * b07 + b05 * b06;
+    if (!std::isfinite(determinant) || std::abs(determinant) < 1e-12)
+        return std::nullopt;
+    const double scale = 1.0 / determinant;
+    const std::array<double, 16u> values = {
+        (a11 * b11 - a12 * b10 + a13 * b09) * scale,
+        (-a01 * b11 + a02 * b10 - a03 * b09) * scale,
+        (a31 * b05 - a32 * b04 + a33 * b03) * scale,
+        (-a21 * b05 + a22 * b04 - a23 * b03) * scale,
+        (-a10 * b11 + a12 * b08 - a13 * b07) * scale,
+        (a00 * b11 - a02 * b08 + a03 * b07) * scale,
+        (-a30 * b05 + a32 * b02 - a33 * b01) * scale,
+        (a20 * b05 - a22 * b02 + a23 * b01) * scale,
+        (a10 * b10 - a11 * b08 + a13 * b06) * scale,
+        (-a00 * b10 + a01 * b08 - a03 * b06) * scale,
+        (a30 * b04 - a31 * b02 + a33 * b00) * scale,
+        (-a20 * b04 + a21 * b02 - a23 * b00) * scale,
+        (-a10 * b09 + a11 * b07 - a12 * b06) * scale,
+        (a00 * b09 - a01 * b07 + a02 * b06) * scale,
+        (-a30 * b03 + a31 * b01 - a32 * b00) * scale,
+        (a20 * b03 - a21 * b01 + a22 * b00) * scale};
+    Matrix4 output{};
+    for (std::size_t index = 0u; index < output.size(); ++index) {
+        if (!std::isfinite(values[index]) ||
+            values[index] < -static_cast<double>(
+                                std::numeric_limits<float>::max()) ||
+            values[index] > static_cast<double>(
+                                std::numeric_limits<float>::max()))
+            return std::nullopt;
+        output[index] = static_cast<float>(values[index]);
+    }
     return output;
 }
 
@@ -940,6 +997,7 @@ struct ExpandedUvGeometry {
     std::vector<float> positions;
     std::vector<float> uvs;
     std::vector<float> normals;
+    std::vector<std::uint32_t> source_control_points;
     std::vector<std::uint32_t> triangle_indices;
     std::vector<std::int32_t> triangle_material_slots;
 };
@@ -1073,6 +1131,7 @@ ExpandedUvGeometry geometryWithLayers(
     if (parsed_normal.has_value())
         budget.add(checkedMultiply(normalValues, sizeof(float), path), path);
     budget.add(checkedMultiply(outputVertices, sizeof(std::uint32_t), path), path);
+    budget.add(checkedMultiply(outputVertices, sizeof(std::uint32_t), path), path);
     if (parsed_material.has_value())
         budget.add(checkedMultiply(outputVertices / 3u, sizeof(std::int32_t),
                                    path),
@@ -1081,6 +1140,7 @@ ExpandedUvGeometry geometryWithLayers(
     result.positions.reserve(positionValues);
     if (parsed_uv.has_value()) result.uvs.reserve(uvValues);
     if (parsed_normal.has_value()) result.normals.reserve(normalValues);
+    result.source_control_points.reserve(outputVertices);
     result.triangle_indices.reserve(outputVertices);
     if (parsed_material.has_value())
         result.triangle_material_slots.reserve(outputVertices / 3u);
@@ -1093,6 +1153,7 @@ ExpandedUvGeometry geometryWithLayers(
             fail("id_limit", "expanded FBX UV geometry exceeds its uint32 range", std::string(path));
         result.positions.insert(result.positions.end(), controlPositions.begin() + static_cast<std::ptrdiff_t>(positionOffset),
                                 controlPositions.begin() + static_cast<std::ptrdiff_t>(positionOffset + 3u));
+        result.source_control_points.push_back(corner.position);
         if (parsed_uv.has_value()) {
             const auto uvOffset = checkedMultiply(corner.uv, 2u, path);
             result.uvs.push_back(
@@ -1155,6 +1216,7 @@ ExpandedUvGeometry geometryWithLayers(
         (parsed_normal.has_value() && result.normals.size() != normalValues) ||
         (parsed_material.has_value() &&
          result.triangle_material_slots.size() != outputVertices / 3u) ||
+        result.source_control_points.size() != outputVertices ||
         result.triangle_indices.size() != outputVertices)
         fail("invalid_geometry", "expanded FBX UV geometry count changed during conversion", std::string(path));
     return result;
@@ -1202,6 +1264,204 @@ std::vector<std::uint32_t> geometryIndices(const FbxNode& geometry, std::string_
     return result;
 }
 
+const FbxArray& requiredArrayChild(const FbxNode& node,
+                                   std::string_view child_name,
+                                   std::string_view path, Budget& budget) {
+    const FbxNode* selected = nullptr;
+    for (const auto& child : node.children) {
+        if (child.name != child_name) continue;
+        if (selected != nullptr)
+            fail("invalid_skin", "FBX cluster has duplicate array records",
+                 std::string(path));
+        selected = &child;
+    }
+    if (selected == nullptr)
+        fail("invalid_skin", "FBX cluster is missing a required array",
+             std::string(path));
+    const auto flattened = values(*selected, &budget, path);
+    if (flattened.size() != 1u)
+        fail("invalid_skin", "FBX cluster array record is malformed",
+             std::string(path));
+    const auto* array = std::get_if<FbxArray>(flattened.front());
+    if (array == nullptr)
+        fail("invalid_skin", "FBX cluster array has an unsupported type",
+             std::string(path));
+    return *array;
+}
+
+FbxSkinBinding buildSkinBinding(
+    std::int64_t skin_id, std::size_t control_point_count,
+    const std::vector<std::int64_t>& clusters,
+    const std::map<std::int64_t, std::int64_t>& bone_for_cluster,
+    const std::vector<ObjectRecord>& records,
+    const std::map<std::int64_t, std::size_t>& by_id,
+    const FbxConversionLimits& limits, Budget& budget,
+    FbxSceneConversion& conversion, DiagnosticBudget& diagnostics,
+    std::string_view path) {
+    if (clusters.empty())
+        fail("invalid_skin", "FBX skin has no clusters", std::string(path));
+    if (clusters.size() > limits.max_bones_per_skin)
+        fail("skin_bone_limit", "FBX skin bone count exceeds its limit",
+             std::string(path));
+    if (control_point_count > limits.max_skin_influences)
+        fail("skin_influence_limit",
+             "FBX skin control-point count exceeds its influence limit",
+             std::string(path));
+
+    FbxSkinBinding result;
+    result.skin_object_id = skin_id;
+    budget.add(checkedMultiply(clusters.size(), sizeof(FbxSkinBone), path),
+               path);
+    budget.add(checkedMultiply(control_point_count,
+                               sizeof(FbxSkinInfluence), path), path);
+    result.bones.reserve(clusters.size());
+    result.vertex_influences.resize(control_point_count);
+    budget.add(control_point_count, path);
+    std::vector<std::uint8_t> occupied_slots(control_point_count, 0u);
+    std::set<std::string_view> bone_names;
+    std::size_t influence_count = 0u;
+    bool dropped_influence = false;
+
+    for (std::size_t bone_index = 0u; bone_index < clusters.size();
+         ++bone_index) {
+        if (bone_index >
+            static_cast<std::size_t>(
+                std::numeric_limits<std::uint32_t>::max()))
+            fail("skin_bone_limit",
+                 "FBX skin bone index exceeds its 32-bit output field",
+                 std::string(path));
+        const auto cluster_id = clusters[bone_index];
+        const auto cluster_record = by_id.find(cluster_id);
+        const auto bone_link = bone_for_cluster.find(cluster_id);
+        if (cluster_record == by_id.end() || bone_link == bone_for_cluster.end())
+            fail("invalid_skin",
+                 "FBX skin cluster has no linked bone Model",
+                 std::string(path));
+        const auto bone_record = by_id.find(bone_link->second);
+        if (bone_record == by_id.end() ||
+            records[bone_record->second].node->name != "Model")
+            fail("invalid_skin",
+                 "FBX skin cluster bone link is not a Model",
+                 std::string(path));
+        const auto& cluster = *records[cluster_record->second].node;
+        const auto cluster_path =
+            std::string(path) + "/Cluster/" + std::to_string(cluster_id);
+        const auto& index_array = requiredArrayChild(
+            cluster, "Indexes", cluster_path, budget);
+        const auto& weight_array = requiredArrayChild(
+            cluster, "Weights", cluster_path, budget);
+        const auto& matrix_array = requiredArrayChild(
+            cluster, "TransformLink", cluster_path, budget);
+        const auto* indexes =
+            std::get_if<std::vector<std::int64_t>>(&index_array);
+        if (indexes == nullptr)
+            fail("invalid_skin",
+                 "FBX cluster Indexes array is not an integer array",
+                 cluster_path);
+        const auto* double_weights =
+            std::get_if<std::vector<double>>(&weight_array);
+        const auto* float_weights =
+            std::get_if<std::vector<float>>(&weight_array);
+        const auto weight_count = double_weights != nullptr
+                                      ? double_weights->size()
+                                      : float_weights != nullptr
+                                            ? float_weights->size()
+                                            : std::size_t{0u};
+        if ((double_weights == nullptr && float_weights == nullptr) ||
+            indexes->size() != weight_count)
+            fail("invalid_skin",
+                 "FBX cluster Indexes and Weights arrays are not aligned",
+                 cluster_path);
+        if (indexes->size() > limits.max_skin_influences - influence_count)
+            fail("skin_influence_limit",
+                 "FBX skin influence count exceeds its limit", cluster_path);
+        influence_count += indexes->size();
+
+        Matrix4 link_matrix{};
+        const auto* double_matrix =
+            std::get_if<std::vector<double>>(&matrix_array);
+        const auto* float_matrix =
+            std::get_if<std::vector<float>>(&matrix_array);
+        const auto matrix_count = double_matrix != nullptr
+                                      ? double_matrix->size()
+                                      : float_matrix != nullptr
+                                            ? float_matrix->size()
+                                            : std::size_t{0u};
+        if (matrix_count != link_matrix.size())
+            fail("skin_matrix_invalid",
+                 "FBX cluster TransformLink must contain 16 values",
+                 cluster_path);
+        for (std::size_t index = 0u; index < link_matrix.size(); ++index) {
+            const double value = double_matrix != nullptr
+                                     ? (*double_matrix)[index]
+                                     : static_cast<double>((*float_matrix)[index]);
+            if (!std::isfinite(value) ||
+                value < -static_cast<double>(std::numeric_limits<float>::max()) ||
+                value > static_cast<double>(std::numeric_limits<float>::max()))
+                fail("skin_matrix_invalid",
+                     "FBX cluster TransformLink is not a finite float matrix",
+                     cluster_path);
+            link_matrix[index] = static_cast<float>(value);
+        }
+        // FBXImporter::loadNode reads only TransformLink here. It copies that
+        // matrix without an axis or unit conversion, then inverts it before
+        // MeshBuilder::addBone. A Cluster Transform record is intentionally
+        // ignored because the recovered native path never reads it.
+        const auto inverse_bind = inverseMatrix(link_matrix);
+        if (!inverse_bind.has_value())
+            fail("skin_matrix_invalid",
+                 "FBX cluster TransformLink is singular", cluster_path);
+
+        const auto& bone = records[bone_record->second];
+        if (!insertSet(bone_names, std::string_view{bone.name}, budget,
+                       cluster_path))
+            fail("duplicate_bone_name",
+                 "FBX skin contains duplicate bone names", cluster_path);
+        budget.add(bone.name.size(), cluster_path);
+        result.bones.push_back(
+            {bone.id, bone.name, *inverse_bind});
+
+        for (std::size_t influence = 0u; influence < indexes->size();
+             ++influence) {
+            const auto control_point = (*indexes)[influence];
+            if (control_point < 0 ||
+                static_cast<std::uint64_t>(control_point) >=
+                    control_point_count)
+                fail("skin_index_invalid",
+                     "FBX skin influence references a missing control point",
+                     cluster_path);
+            const double source_weight =
+                double_weights != nullptr
+                    ? (*double_weights)[influence]
+                    : static_cast<double>((*float_weights)[influence]);
+            if (!std::isfinite(source_weight) || source_weight < 0.0 ||
+                source_weight >
+                    static_cast<double>(std::numeric_limits<float>::max()))
+                fail("skin_weight_invalid",
+                     "FBX skin weight is not a non-negative finite float",
+                     cluster_path);
+            auto& target = result.vertex_influences[
+                static_cast<std::size_t>(control_point)];
+            auto& occupied = occupied_slots[
+                static_cast<std::size_t>(control_point)];
+            if (occupied >= target.weights.size()) {
+                dropped_influence = true;
+                continue;
+            }
+            const auto slot = static_cast<std::size_t>(occupied++);
+            target.weights[slot] = static_cast<float>(source_weight);
+            target.bones[slot] = static_cast<std::uint32_t>(bone_index);
+        }
+    }
+    if (dropped_influence)
+        addDiagnostic(
+            conversion, diagnostics, FbxConversionSeverity::warning,
+            "skin_influence_dropped",
+            "FBX skin has more than four influences on a control point; later source-order influences were dropped",
+            path, false);
+    return result;
+}
+
 void unsupportedFeatureScan(const FbxDocument& document, FbxSceneConversion& result,
                             DiagnosticBudget& diagnostics) {
     struct Frame { const FbxNode* node = nullptr; std::string path; std::size_t child = 0; };
@@ -1240,7 +1500,6 @@ void unsupportedFeatureScan(const FbxDocument& document, FbxSceneConversion& res
                  !supportedMaterialLayer(node)) ||
                 (node.name == "LayerElementUV" && !supportedUvLayer(node)))
                 add("unsupported_layer_mapping", "FBX layer-element mappings are not converted");
-            if (node.name == "Deformer" || node.name == "Skin" || node.name == "Cluster") add("unsupported_skinning", "FBX skinning and deformers are not converted");
         }
         if (frame.child == frame.node->children.size()) { stack.pop_back(); continue; }
         const auto childIndex = frame.child++;
@@ -1912,8 +2171,8 @@ std::optional<std::size_t> fbxNativeFileTextureChannelRank(
 }
 
 FbxConversionCapabilityDetail fbxSceneConversionCapability() {
-    return {true, true, true, true, false, true, true, false,
-            "Static FBX geometry, geometric transforms, native material scalars, ordered node-material slots, bounded polygon material, normal and UV mappings, external file-texture candidates, embedded Video content, and an explicit-linear local-transform KSANIM bridge are converted; native-pivot evaluation, non-linear animation, skinning, and Image records remain unsupported"};
+    return {true, true, true, true, true, true, true, false,
+            "Static and skinned FBX geometry, geometric transforms, native material scalars, ordered node-material slots, bounded polygon material, normal and UV mappings, external file-texture candidates, embedded Video content, and an explicit-linear local-transform KSANIM bridge are converted; native-pivot evaluation, non-linear animation, and Image records remain unsupported"};
 }
 
 FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLimits limits) {
@@ -1931,24 +2190,34 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
     std::vector<std::size_t> modelIndexes;
     std::vector<std::size_t> materialIndexes;
     std::vector<std::size_t> geometryIndexes;
+    const auto deformerBudget =
+        limits.max_skin_deformers >
+                std::numeric_limits<std::size_t>::max() -
+                    limits.max_skin_clusters
+            ? std::numeric_limits<std::size_t>::max()
+            : limits.max_skin_deformers + limits.max_skin_clusters;
     const auto objectBudget = limits.max_nodes > std::numeric_limits<std::size_t>::max() - limits.max_materials ||
-                                      limits.max_nodes + limits.max_materials > std::numeric_limits<std::size_t>::max() - limits.max_meshes
+                                      limits.max_nodes + limits.max_materials > std::numeric_limits<std::size_t>::max() - limits.max_meshes ||
+                                      limits.max_nodes + limits.max_materials + limits.max_meshes > std::numeric_limits<std::size_t>::max() - deformerBudget
                                   ? std::numeric_limits<std::size_t>::max()
-                                  : limits.max_nodes + limits.max_materials + limits.max_meshes;
+                                  : limits.max_nodes + limits.max_materials + limits.max_meshes + deformerBudget;
     if (objects->children.size() > objectBudget)
         fail("node_limit", "FBX Objects count exceeds conversion limits", "Objects");
     std::size_t modelCount = 0u;
     std::size_t materialCount = 0u;
     std::size_t textureCount = 0u;
     std::size_t geometryCount = 0u;
+    std::size_t deformerCount = 0u;
     for (const auto& node : objects->children) {
         if (node.name == "Model") ++modelCount;
         else if (node.name == "Material") ++materialCount;
         else if (node.name == "Texture") ++textureCount;
         else if (node.name == "Geometry") ++geometryCount;
+        else if (node.name == "Deformer") ++deformerCount;
     }
     if (modelCount > limits.max_nodes || materialCount > limits.max_materials ||
-        textureCount > limits.max_textures || geometryCount > limits.max_meshes)
+        textureCount > limits.max_textures || geometryCount > limits.max_meshes ||
+        deformerCount > deformerBudget)
         fail("count_limit", "FBX scene object count exceeds conversion limits", "Objects");
     budget.add(checkedMultiply(objects->children.size(), sizeof(ObjectRecord), "records"), "records");
     budget.add(checkedMultiply(modelCount, sizeof(std::size_t), "model indexes"), "model indexes");
@@ -1971,7 +2240,6 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
         if (node.name == "Model") modelIndexes.push_back(records.size() - 1u);
         else if (node.name == "Material") materialIndexes.push_back(records.size() - 1u);
         else if (node.name == "Geometry") geometryIndexes.push_back(records.size() - 1u);
-        else if (node.name == "Deformer") result.complete = false;
         (void)type;
     }
     if (modelIndexes.size() >= static_cast<std::size_t>(scene::invalid_node_id) ||
@@ -2070,6 +2338,123 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
                 fail("invalid_reference", "FBX connection references an unknown object", path);
             links.push_back(std::move(link));
         }
+    }
+    std::size_t skin_object_count = 0u;
+    std::size_t cluster_object_count = 0u;
+    for (const auto& record : records) {
+        if (record.node->name != "Deformer") continue;
+        if (record.type == "Cluster") ++cluster_object_count;
+        else if (record.type == "Skin") ++skin_object_count;
+        else
+            addDiagnostic(result, diagnostics, FbxConversionSeverity::warning,
+                          "unsupported_deformer",
+                          "FBX deformer type is not converted",
+                          "Objects/Deformer/" + std::to_string(record.id));
+    }
+    if (skin_object_count > limits.max_skin_deformers)
+        fail("skin_deformer_limit", "FBX skin deformer count exceeds its limit",
+             "Objects/Deformer");
+    if (cluster_object_count > limits.max_skin_clusters)
+        fail("skin_cluster_limit", "FBX skin cluster count exceeds its limit",
+             "Objects/Deformer");
+
+    std::map<std::int64_t, std::vector<std::int64_t>> skinsForGeometry;
+    std::map<std::int64_t, std::vector<std::int64_t>> clustersForSkin;
+    std::map<std::int64_t, std::int64_t> boneForCluster;
+    std::set<std::int64_t> connectedDeformers;
+    for (const auto& link : links) {
+        if (link.kind != "OO" || link.target == 0) continue;
+        const auto& source = records[byId.at(link.source)];
+        const auto& target = records[byId.at(link.target)];
+        if (source.node->name == "Deformer" && source.type == "Skin" &&
+            target.node->name == "Geometry") {
+            if (!link.property.empty())
+                fail("invalid_skin",
+                     "FBX Skin-to-Geometry link has an unexpected property",
+                     "Connections");
+            auto skins_it = skinsForGeometry.find(target.id);
+            if (skins_it == skinsForGeometry.end()) {
+                chargeAssociativeNode(
+                    budget,
+                    sizeof(std::pair<const std::int64_t,
+                                     std::vector<std::int64_t>>),
+                    "scene/skin assignments");
+                skins_it = skinsForGeometry
+                               .emplace(target.id,
+                                        std::vector<std::int64_t>{})
+                               .first;
+            }
+            auto& skins = skins_it->second;
+            if (std::find(skins.begin(), skins.end(), source.id) != skins.end())
+                fail("invalid_skin",
+                     "FBX Geometry has a duplicate Skin connection",
+                     "Connections");
+            reserveForAppend(skins, skins.size() + 1u, budget,
+                             "scene/skin assignments");
+            skins.push_back(source.id);
+            (void)insertSet(connectedDeformers, source.id, budget,
+                            "scene/connected deformers");
+            continue;
+        }
+        if (source.node->name == "Deformer" && source.type == "Cluster" &&
+            target.node->name == "Deformer" && target.type == "Skin") {
+            if (!link.property.empty())
+                fail("invalid_skin",
+                     "FBX Cluster-to-Skin link has an unexpected property",
+                     "Connections");
+            auto clusters_it = clustersForSkin.find(target.id);
+            if (clusters_it == clustersForSkin.end()) {
+                chargeAssociativeNode(
+                    budget,
+                    sizeof(std::pair<const std::int64_t,
+                                     std::vector<std::int64_t>>),
+                    "scene/skin clusters");
+                clusters_it = clustersForSkin
+                                  .emplace(target.id,
+                                           std::vector<std::int64_t>{})
+                                  .first;
+            }
+            auto& clusters = clusters_it->second;
+            if (std::find(clusters.begin(), clusters.end(), source.id) !=
+                clusters.end())
+                fail("invalid_skin",
+                     "FBX Skin has a duplicate Cluster connection",
+                     "Connections");
+            if (clusters.size() >= limits.max_bones_per_skin)
+                fail("skin_bone_limit",
+                     "FBX skin bone count exceeds its limit", "Connections");
+            reserveForAppend(clusters, clusters.size() + 1u, budget,
+                             "scene/skin clusters");
+            clusters.push_back(source.id);
+            (void)insertSet(connectedDeformers, source.id, budget,
+                            "scene/connected deformers");
+            continue;
+        }
+        if (source.node->name == "Model" &&
+            target.node->name == "Deformer" && target.type == "Cluster") {
+            if (!link.property.empty())
+                fail("invalid_skin",
+                     "FBX bone-to-Cluster link has an unexpected property",
+                     "Connections");
+            if (!boneForCluster.emplace(target.id, source.id).second)
+                fail("invalid_skin",
+                     "FBX skin cluster has multiple linked bone Models",
+                     "Connections");
+            chargeAssociativeNode(
+                budget,
+                sizeof(std::pair<const std::int64_t, std::int64_t>),
+                "scene/skin bones");
+        }
+    }
+    for (const auto& record : records) {
+        if (record.node->name != "Deformer" ||
+            (record.type != "Skin" && record.type != "Cluster") ||
+            connectedDeformers.contains(record.id))
+            continue;
+        addDiagnostic(result, diagnostics, FbxConversionSeverity::warning,
+                      "unreferenced_deformer",
+                      "FBX skin deformer is not connected to supported geometry",
+                      "Objects/Deformer/" + std::to_string(record.id));
     }
     std::map<std::int64_t, std::int64_t> videoForTexture;
     for (const auto& link : links) {
@@ -2340,6 +2725,25 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
         mesh.object_id = record.id;
         mesh.name = record.name;
         mesh.positions = geometryPositions(*record.node, path, limits, budget);
+        const auto control_point_count = mesh.positions.size() / 3u;
+        std::optional<FbxSkinBinding> control_point_skin;
+        if (const auto skins = skinsForGeometry.find(record.id);
+            skins != skinsForGeometry.end()) {
+            if (skins->second.size() > 1u)
+                addDiagnostic(
+                    result, diagnostics, FbxConversionSeverity::warning,
+                    "additional_skin_ignored",
+                    "FBX Geometry has multiple skin deformers; only the first source-order deformer is used",
+                    path, false);
+            const auto skin_id = skins->second.front();
+            const auto clusters = clustersForSkin.find(skin_id);
+            if (clusters == clustersForSkin.end())
+                fail("invalid_skin", "FBX skin has no linked clusters", path);
+            control_point_skin = buildSkinBinding(
+                skin_id, control_point_count, clusters->second,
+                boneForCluster, records, byId, limits, budget, result,
+                diagnostics, path);
+        }
         const auto* uvLayer = firstChildNode(*record.node, "LayerElementUV");
         const auto* normalLayer =
             firstChildNode(*record.node, "LayerElementNormal");
@@ -2378,9 +2782,31 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
             mesh.triangle_indices = std::move(expanded.triangle_indices);
             mesh.triangle_material_slots =
                 std::move(expanded.triangle_material_slots);
+            if (control_point_skin.has_value()) {
+                budget.add(checkedMultiply(
+                               expanded.source_control_points.size(),
+                               sizeof(FbxSkinInfluence), path),
+                           path);
+                std::vector<FbxSkinInfluence> expanded_influences;
+                expanded_influences.reserve(
+                    expanded.source_control_points.size());
+                for (const auto control_point :
+                     expanded.source_control_points) {
+                    if (control_point >=
+                        control_point_skin->vertex_influences.size())
+                        fail("skin_index_invalid",
+                             "Expanded FBX vertex references a missing skin control point",
+                             path);
+                    expanded_influences.push_back(
+                        control_point_skin->vertex_influences[control_point]);
+                }
+                control_point_skin->vertex_influences =
+                    std::move(expanded_influences);
+            }
         } else {
             mesh.triangle_indices = geometryIndices(*record.node, path, mesh.positions.size() / 3u, limits, budget);
         }
+        mesh.skin = std::move(control_point_skin);
         if (mesh.triangle_indices.empty()) fail("invalid_geometry", "FBX geometry has no triangles", path);
         if (result.meshes.size() >= static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))
             fail("id_limit", "FBX mesh IDs exceed their uint32 range", path);
@@ -2415,7 +2841,10 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
         if (const auto geometry = geometryForModel.find(modelId); geometry != geometryForModel.end()) {
             const auto mesh = meshIds.find(geometry->second);
             if (mesh == meshIds.end()) fail("invalid_reference", "FBX Model references missing Geometry", path);
-            kind = scene::NodeKind::mesh; meshIndex = mesh->second;
+            kind = result.meshes[mesh->second].skin.has_value()
+                       ? scene::NodeKind::skinned_mesh
+                       : scene::NodeKind::mesh;
+            meshIndex = mesh->second;
             const auto materialIt = materialsForModel.find(modelId);
             if (materialIt != materialsForModel.end()) {
                 budget.add(checkedMultiply(materialIt->second.size(),
@@ -2432,16 +2861,18 @@ FbxSceneConversion convertFbxScene(const FbxDocument& document, FbxConversionLim
                 if (!nodeMaterials.empty()) material = nodeMaterials.front();
             }
         }
-        const auto geometric = kind == scene::NodeKind::mesh
+        const bool has_geometry = kind == scene::NodeKind::mesh ||
+                                  kind == scene::NodeKind::skinned_mesh;
+        const auto geometric = has_geometry
                                    ? geometricTransform(*record.node, path)
                                    : scene::identity_matrix;
-        const auto meshWorld = kind == scene::NodeKind::mesh
+        const auto meshWorld = has_geometry
                                    ? multiply(world, geometric)
                                    : world;
         finiteMatrix(meshWorld, path);
         budget.add(record.name.size(), path);
-        scene::SceneNode node{id, parentId, record.name, kind, modelVisible(*record.node, &budget), modelVisible(*record.node, &budget), kind == scene::NodeKind::mesh, false, true, 0u, 0.0F, 0.0F, material, {0.0F, 0.0F, 0.0F}, 0.0F, meshWorld, {}, {}, {}, {}, 0.0F, scene::LocalBoundsSource::unavailable, {}};
-        if (kind == scene::NodeKind::mesh) {
+        scene::SceneNode node{id, parentId, record.name, kind, modelVisible(*record.node, &budget), modelVisible(*record.node, &budget), has_geometry, false, true, 0u, 0.0F, 0.0F, material, {0.0F, 0.0F, 0.0F}, 0.0F, meshWorld, {}, {}, {}, {}, 0.0F, scene::LocalBoundsSource::unavailable, {}};
+        if (has_geometry) {
             const auto& mesh = result.meshes[meshIndex];
             std::array<double, 3> minimum = {std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity()};
             std::array<double, 3> maximum = {-std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()};

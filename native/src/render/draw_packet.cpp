@@ -277,6 +277,9 @@ std::vector<float> skin_vertices_reference(
         const auto found = bone_world_by_name.find(bone.name);
         if (found == bone_world_by_name.end()) throw DrawPacketError("MISSING_BONE", "skinned mesh bone has no world transform");
         if (!finite_matrix(found->second)) throw DrawPacketError("NON_FINITE_MATRIX", "bone world transform is not finite");
+        // Matrix4 stores the transpose of native row-major mat44f values.
+        // This world * offset product is therefore the stored transpose of
+        // the recovered native offset * world product.
         palettes.push_back(multiply_matrix(found->second, bone.transform));
     }
     return skin_vertices_reference(std::span<const float>(mesh.vertices),
@@ -662,6 +665,8 @@ DrawPacketBuildResult build_draw_packets(
                         goto next_item;
                     }
                     try {
+                        // Matrix4 stores transposed native row-major values,
+                        // so this is native offset * world after transpose.
                         packet.bone_palette.push_back(multiply_matrix(found->second, bone.transform));
                     } catch (const DrawPacketError&) {
                         add_diagnostic(result, limits, DrawPacketDiagnostic::Severity::error, "NON_FINITE_MATRIX", "skinned bone palette is not finite", item.node, item.material);

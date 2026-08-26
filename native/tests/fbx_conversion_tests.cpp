@@ -130,6 +130,54 @@ FbxDocument seamFixture() {
     return document;
 }
 
+FbxNode skinCluster(std::int64_t id, std::string name,
+                    std::vector<std::int64_t> indexes,
+                    std::vector<double> weights,
+                    std::vector<double> transform_link = {
+                        1.0, 0.0, 0.0, 0.0,
+                        0.0, 1.0, 0.0, 0.0,
+                        0.0, 0.0, 1.0, 0.0,
+                        2.0, 0.0, 0.0, 1.0}) {
+    return node(
+        "Deformer",
+        {id, std::string("SubDeformer::") + name, std::string("Cluster")},
+        {propertyNode("Indexes", {FbxArray{std::move(indexes)}}),
+         propertyNode("Weights", {FbxArray{std::move(weights)}}),
+         propertyNode("TransformLink",
+                      {FbxArray{std::move(transform_link)}})});
+}
+
+FbxDocument skinFixture(std::size_t cluster_count = 1u) {
+    auto document = seamFixture();
+    auto& objects = document.roots[0].children;
+    auto& connections = document.roots[1].children;
+    objects.push_back(node(
+        "Deformer",
+        {std::int64_t(400), std::string("Deformer::Skin"),
+         std::string("Skin")}));
+    connections.push_back(node(
+        "C", {std::string("OO"), std::int64_t(400), std::int64_t(100)}));
+    for (std::size_t index = 0u; index < cluster_count; ++index) {
+        const auto cluster_id = static_cast<std::int64_t>(500u + index);
+        const auto bone_id = static_cast<std::int64_t>(600u + index);
+        objects.push_back(skinCluster(
+            cluster_id, "Cluster" + std::to_string(index),
+            index == 0u ? std::vector<std::int64_t>{0, 1, 2, 3}
+                        : std::vector<std::int64_t>{0},
+            index == 0u ? std::vector<double>{0.25, 0.5, 0.75, 1.0}
+                        : std::vector<double>{0.1 * static_cast<double>(index + 1u)}));
+        objects.push_back(node(
+            "Model",
+            {bone_id, std::string("Model::Bone") + std::to_string(index),
+             std::string("LimbNode")}));
+        connections.push_back(node(
+            "C", {std::string("OO"), cluster_id, std::int64_t(400)}));
+        connections.push_back(node(
+            "C", {std::string("OO"), bone_id, cluster_id}));
+    }
+    return document;
+}
+
 FbxDocument fileTextureFixture(std::string fileName =
                                    "C:\\cars\\example\\texture\\paint.png") {
     auto document = fixture();
@@ -316,6 +364,108 @@ void convertsStaticGeometryTransformsAndMaterials() {
                     std::array<float, 3u>{0.9F, 0.4F, 0.2F} &&
                 result.material_parameters[0].shininess == 0.5F,
             "FBX material retains bounded native scalar sources");
+}
+
+void convertsBoundedNativeSkinning() {
+    const auto result = apex::formats::convertFbxScene(skinFixture());
+    require(result.complete && result.meshes.size() == 1u &&
+                result.meshes[0].skin.has_value() &&
+                result.node_geometry.size() == 1u &&
+                result.snapshot.nodes[1].kind ==
+                    apex::scene::NodeKind::skinned_mesh,
+            "FBX Skin and Cluster records produce a mapped skinned mesh");
+    const auto& skin = *result.meshes[0].skin;
+    require(skin.skin_object_id == 400 && skin.bones.size() == 1u &&
+                skin.bones[0].model_object_id == 600 &&
+                skin.bones[0].name == "Bone0" &&
+                std::abs(skin.bones[0].inverse_bind[12] + 2.0F) < 1.0e-6F,
+            "FBX TransformLink is inverted without an added mesh transform");
+    require(skin.vertex_influences.size() == 6u &&
+                skin.vertex_influences[0].weights[0] == 0.25F &&
+                skin.vertex_influences[3].weights[0] == 0.25F &&
+                skin.vertex_influences[1].weights[0] == 0.5F &&
+                skin.vertex_influences[2].weights[0] == 0.75F &&
+                skin.vertex_influences[5].weights[0] == 1.0F,
+            "UV-seam expansion retains source control-point influences");
+
+    auto transformed_document = skinFixture();
+    transformed_document.roots[0].children[0].children[0].children.push_back(
+        propertyNode(
+            "P", {std::string("GeometricTranslation"),
+                  std::string("GeometricTranslation"), std::string(""),
+                  std::string("A"), 3.0, 0.0, 0.0}));
+    const auto transformed =
+        apex::formats::convertFbxScene(transformed_document);
+    require(transformed.node_geometry.size() == 1u &&
+                transformed.node_geometry[0].geometric[12] == 3.0F &&
+                transformed.snapshot.nodes[1].renderable,
+            "FBX skinned meshes retain geometric transforms and render state");
+
+    const auto crowded = apex::formats::convertFbxScene(skinFixture(5u));
+    const auto& crowded_influence =
+        crowded.meshes[0].skin->vertex_influences[0];
+    require(crowded.complete &&
+                crowded_influence.bones ==
+                    std::array<std::uint32_t, 4u>{0u, 1u, 2u, 3u} &&
+                std::any_of(crowded.diagnostics.begin(),
+                            crowded.diagnostics.end(), [](const auto& value) {
+                                return value.code == "skin_influence_dropped";
+                            }),
+            "FBX skin retains the first four source-order influences");
+
+    auto malformed = skinFixture();
+    auto& cluster = malformed.roots[0].children[4];
+    cluster.children[1].properties[0].values[0] =
+        FbxArray{std::vector<double>{0.5}};
+    expectsError([&] { (void)apex::formats::convertFbxScene(malformed); },
+                 "invalid_skin");
+
+    malformed = skinFixture();
+    malformed.roots[0].children[4].children[1].properties[0].values[0] =
+        FbxArray{std::vector<double>{0.25, 0.5, 0.75, -1.0}};
+    expectsError([&] { (void)apex::formats::convertFbxScene(malformed); },
+                 "skin_weight_invalid");
+
+    malformed = skinFixture();
+    malformed.roots[0].children[4].children[0].properties[0].values[0] =
+        FbxArray{std::vector<std::int64_t>{0, 1, 2, 99}};
+    expectsError([&] { (void)apex::formats::convertFbxScene(malformed); },
+                 "skin_index_invalid");
+
+    malformed = skinFixture();
+    malformed.roots[0].children[4].children[2].properties[0].values[0] =
+        FbxArray{std::vector<double>(15u, 0.0)};
+    expectsError([&] { (void)apex::formats::convertFbxScene(malformed); },
+                 "skin_matrix_invalid");
+
+    malformed = skinFixture();
+    malformed.roots[0].children[4].children[2].properties[0].values[0] =
+        FbxArray{std::vector<double>(16u, 0.0)};
+    expectsError([&] { (void)apex::formats::convertFbxScene(malformed); },
+                 "skin_matrix_invalid");
+
+    auto ignored_transform = skinFixture();
+    ignored_transform.roots[0].children[4].children.push_back(propertyNode(
+        "Transform", {FbxArray{std::vector<double>{7.0}}}));
+    require(apex::formats::convertFbxScene(ignored_transform).complete,
+            "native skin conversion intentionally ignores Cluster Transform");
+
+    auto limited = skinFixture();
+    auto limits = apex::formats::FbxConversionLimits{};
+    limits.max_bones_per_skin = 0u;
+    expectsError(
+        [&] { (void)apex::formats::convertFbxScene(limited, limits); },
+        "skin_bone_limit");
+    limits = apex::formats::FbxConversionLimits{};
+    limits.max_skin_deformers = 0u;
+    expectsError(
+        [&] { (void)apex::formats::convertFbxScene(limited, limits); },
+        "skin_deformer_limit");
+    limits = apex::formats::FbxConversionLimits{};
+    limits.max_skin_clusters = 0u;
+    expectsError(
+        [&] { (void)apex::formats::convertFbxScene(limited, limits); },
+        "skin_cluster_limit");
 }
 
 void appliesNativeGeometricMeshTransform() {
@@ -554,7 +704,7 @@ void ignoresDisplayLayerMembershipEdges() {
     const auto result = apex::formats::convertFbxScene(document);
     require(result.snapshot.nodes.size() == 2u && result.snapshot.nodes[1].parent == 0u &&
                 std::any_of(result.diagnostics.begin(), result.diagnostics.end(),
-                            [](const auto& diagnostic) { return diagnostic.code == "unsupported_skinning"; }),
+                            [](const auto& diagnostic) { return diagnostic.code == "unreferenced_deformer"; }),
             "FBX display-layer and skin-cluster edges do not become model parents");
 
     auto malformed = fixture();
@@ -1353,7 +1503,7 @@ void enforcesLimitsAndUnsupportedCapability() {
     const auto capability = apex::formats::fbxSceneConversionCapability();
     require(capability.static_geometry && capability.node_transforms &&
                 capability.material_assignment &&
-                capability.external_texture_references && !capability.skinning &&
+                capability.external_texture_references && capability.skinning &&
                 capability.animation && capability.images &&
                 !capability.layer_mappings,
             "FBX conversion capability detail");
@@ -1384,6 +1534,7 @@ int main() {
     try {
         convertsParsedAsciiTriangle();
         convertsStaticGeometryTransformsAndMaterials();
+        convertsBoundedNativeSkinning();
         appliesNativeGeometricMeshTransform();
         preservesBoundedFileTextureCandidates();
         preservesBoundedEmbeddedTextureCandidates();

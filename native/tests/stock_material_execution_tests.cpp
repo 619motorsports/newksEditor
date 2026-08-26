@@ -114,6 +114,7 @@ struct Fixture {
 
 Fixture fixture(std::string shader) {
     Fixture result;
+    const bool skinned = shader == "ksSkinnedMesh";
     result.model.materials.resize(1U);
     auto& material = result.model.materials.front();
     material.name = "seat_material";
@@ -136,15 +137,20 @@ Fixture fixture(std::string shader) {
     result.model.root.kind = "node";
     result.model.root.name = "ROOT";
     apex::formats::Kn5Node mesh;
-    mesh.type = 2U;
-    mesh.kind = "mesh";
+    mesh.type = skinned ? 3U : 2U;
+    mesh.kind = skinned ? "skinnedMesh" : "mesh";
     mesh.name = "SEAT";
-    mesh.vertexStride = 11U;
+    mesh.vertexStride = skinned ? 19U : 11U;
     mesh.materialId = 0U;
-    mesh.vertices.resize(33U, 0.0F);
+    mesh.vertices.resize(3U * mesh.vertexStride, 0.0F);
     mesh.vertices[0] = -0.5F;
-    mesh.vertices[11] = 0.5F;
-    mesh.vertices[22] = 0.5F;
+    mesh.vertices[mesh.vertexStride] = 0.5F;
+    mesh.vertices[mesh.vertexStride * 2U] = 0.5F;
+    if (skinned) {
+        mesh.bones.push_back({"Bone", apex::scene::identity_matrix});
+        for (std::size_t vertex = 0U; vertex < 3U; ++vertex)
+            mesh.vertices[vertex * mesh.vertexStride + 11U] = 1.0F;
+    }
     mesh.indices = {0U, 1U, 2U};
     result.model.root.children.push_back(std::move(mesh));
     (void)result.scene.add_material({"seat_material", result.model.materials.front().shader,
@@ -154,22 +160,25 @@ Fixture fixture(std::string shader) {
     const auto root_id = result.scene.add_node(std::move(root));
     apex::scene::SceneNode node;
     node.name = "SEAT";
-    node.kind = apex::scene::NodeKind::mesh;
+    node.kind = skinned ? apex::scene::NodeKind::skinned_mesh
+                        : apex::scene::NodeKind::mesh;
     node.material = 0U;
     const auto node_id = result.scene.add_node(std::move(node), root_id);
     DrawPacket packet;
     packet.node = node_id;
     packet.material = 0U;
-    packet.primitive = DrawPrimitiveKind::static_mesh;
+    packet.primitive = skinned ? DrawPrimitiveKind::skinned_mesh
+                               : DrawPrimitiveKind::static_mesh;
     packet.vertex_count = 3U;
     packet.index_count = 3U;
-    packet.vertex_stride_floats = 11U;
+    packet.vertex_stride_floats = skinned ? 19U : 11U;
+    if (skinned) packet.bone_palette.push_back(apex::scene::identity_matrix);
     packet.flags.wireframe = false;
     packet.resources.reserve(slots.size());
     const bool base_multimap = material.shader == "ksPerPixelMultiMap" ||
                                material.shader == "ksPerPixelMultiMap_AT" ||
                                material.shader == "ksPerPixelMultiMapSimpleRefl";
-    const std::size_t count = material.shader == "ksPerPixel"
+    const std::size_t count = material.shader == "ksPerPixel" || skinned
                                   ? 1U
                                   : material.shader == "ksPerPixelNM"
                                         ? 2U
@@ -241,6 +250,17 @@ void test_success_and_a2c() {
     require(base_result.ok() && base_result.resources->draw_count() == 1U &&
                 base_result.resources->owned_stock_shadow_constant_count() == 0U,
             "base MultiMap handoff must retain its three-resource packet");
+
+    Fixture skinned_fixture = fixture("ksSkinnedMesh");
+    const auto skinned_result = prepare_stock_material_execution(
+        device, request_for(skinned_fixture));
+    if (!skinned_result.ok())
+        throw std::runtime_error("ksSkinnedMesh handoff failed: " +
+                                 skinned_result.diagnostic.code + " " +
+                                 skinned_result.diagnostic.message);
+    require(skinned_result.ok() &&
+                skinned_result.resources->draw_count() == 1U,
+            "ksSkinnedMesh accepts the explicit one-texture production handoff");
 
     Fixture base_at_fixture = fixture("ksPerPixelMultiMap_AT");
     const auto base_at_result =

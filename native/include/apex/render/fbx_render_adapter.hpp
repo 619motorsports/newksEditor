@@ -38,6 +38,7 @@ struct FbxRenderAdapterLimits {
     std::size_t max_batches_per_geometry = 65'536U;
     std::size_t max_vertices = 10'000'000U;
     std::size_t max_indices = 20'000'000U;
+    std::size_t max_bones_per_mesh = 4'096U;
     // Native KN5 static indices are 16-bit. The original importer does not
     // safely handle a larger material batch, so the adapter rejects it.
     std::size_t max_vertices_per_mesh = 65'535U;

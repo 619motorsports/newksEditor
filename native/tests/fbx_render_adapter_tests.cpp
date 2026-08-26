@@ -1,4 +1,5 @@
 #include "apex/render/fbx_render_adapter.hpp"
+#include "apex/render/draw_packet.hpp"
 #include "png_fixture.hpp"
 
 #include <algorithm>
@@ -87,6 +88,29 @@ FbxSceneConversion fixture(std::size_t material_count = 1U) {
     result.node_geometry.push_back(
         {model_id, 0U, translation(0.0F, 2.0F, 0.0F),
          std::move(materials)});
+    return result;
+}
+
+FbxSceneConversion skinned_fixture() {
+    auto result = fixture();
+    result.snapshot.nodes[1].kind = apex::scene::NodeKind::skinned_mesh;
+    apex::scene::SceneNode bone;
+    bone.name = "Bone";
+    bone.kind = apex::scene::NodeKind::node;
+    const auto bone_id = result.snapshot.add_node(
+        std::move(bone), result.snapshot.root);
+    auto bone_world = apex::scene::identity_matrix;
+    bone_world[0] = 2.0F;
+    result.transforms.push_back({bone_id, bone_world, bone_world});
+    apex::formats::FbxSkinBinding skin;
+    skin.skin_object_id = 400;
+    skin.bones.push_back({600, "Bone", translation(-2.0F, 0.0F, 0.0F)});
+    skin.vertex_influences.resize(3U);
+    for (auto& influence : skin.vertex_influences) {
+        influence.weights[0] = 1.0F;
+        influence.bones[0] = 0U;
+    }
+    result.meshes[0].skin = std::move(skin);
     return result;
 }
 
@@ -201,6 +225,40 @@ void buildsOwnedCanonicalScene() {
     authority.authority.resources[0].source_bytes.clear();
     require(result.model->textures[0].data == original_bytes,
             "authority mutation cannot affect the canonical model");
+}
+
+void buildsOwnedSkinnedScene() {
+    auto conversion = skinned_fixture();
+    auto authority = textures(conversion, {"skin.png"});
+    const auto result = apex::render::build_fbx_render_scene(
+        conversion, &authority, "skin.fbx");
+    require(result.status == FbxRenderAdapterStatus::ready &&
+                result.gpu_renderable() && result.model->materials.size() == 2U,
+            "complete textured FBX skin conversion is ready");
+    const auto& mesh = result.model->root.children[0].children[0];
+    require(mesh.type == 3U && mesh.kind == "skinnedMesh" &&
+                mesh.vertexStride == 19U && mesh.vertices.size() == 57U &&
+                mesh.bones.size() == 1U && mesh.bones[0].name == "Bone" &&
+                mesh.bones[0].transform[12] == -2.0F &&
+                mesh.vertices[11] == 1.0F && mesh.vertices[15] == 0.0F,
+            "FBX skin becomes the shared 19-float KN5 skinned layout");
+    require(mesh.materialId == 1U &&
+                result.model->materials[0].shader == "ksPerPixel" &&
+                result.model->materials[1].shader == "ksSkinnedMesh" &&
+                result.model->materials[1].resources.size() == 1U &&
+                result.scene->geometry[0].skinned,
+            "FBX skin gets an isolated ksSkinnedMesh material and scene metadata");
+    const auto packets = apex::render::build_draw_packets(
+        *result.model, result.scene->snapshot,
+        apex::render::DrawPacketOptions{}, apex::render::DrawPacketLimits{});
+    require(packets.supported && !packets.limit_exceeded &&
+                packets.packets.size() == 1U &&
+                packets.packets[0].primitive ==
+                    apex::render::DrawPrimitiveKind::skinned_mesh &&
+                packets.packets[0].bone_palette.size() == 1U &&
+                packets.packets[0].bone_palette[0][0] == 2.0F &&
+                packets.packets[0].bone_palette[0][12] == -4.0F,
+            "column storage transposes native offset-times-world order");
 }
 
 void buildsOwnedEmbeddedCompatibilityTextures() {
@@ -466,6 +524,21 @@ void rejectsMalformedInputAtomically() {
     hierarchy.transforms.clear();
     rejected(std::move(hierarchy), FbxRenderAdapterStatus::invalid_request);
 
+    auto skin_layout = skinned_fixture();
+    skin_layout.meshes[0].skin->vertex_influences.pop_back();
+    rejected(std::move(skin_layout),
+             FbxRenderAdapterStatus::invalid_request);
+
+    auto skin_index = skinned_fixture();
+    skin_index.meshes[0].skin->vertex_influences[0].bones[0] = 9U;
+    rejected(std::move(skin_index),
+             FbxRenderAdapterStatus::invalid_request);
+
+    auto skin_weight = skinned_fixture();
+    skin_weight.meshes[0].skin->vertex_influences[0].weights[0] = -0.25F;
+    rejected(std::move(skin_weight),
+             FbxRenderAdapterStatus::invalid_request);
+
     auto parentedRoot = fixture();
     parentedRoot.snapshot.nodes[parentedRoot.snapshot.root].parent = 1U;
     rejected(std::move(parentedRoot),
@@ -631,6 +704,7 @@ void enforcesLimitsAndFiniteNativeFallbacks() {
 int main() {
     try {
         buildsOwnedCanonicalScene();
+        buildsOwnedSkinnedScene();
         buildsOwnedEmbeddedCompatibilityTextures();
         preservesNativeBatchOrderNamesAndMaterialResolution();
         stagesMissingResourcesAndUsesBoundedFallback();
