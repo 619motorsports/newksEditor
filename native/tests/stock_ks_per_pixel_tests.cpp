@@ -1,20 +1,172 @@
 #include "apex/render/stock_ks_per_pixel.hpp"
 
+#include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 namespace {
 
 using namespace apex::render;
 
 StockKsPerPixelLightingConstants lighting_fixture();
+
+void put_u32(std::vector<std::uint8_t>& bytes, std::size_t offset,
+             std::uint32_t value) {
+    for (std::size_t byte = 0U; byte < 4U; ++byte)
+        bytes[offset + byte] =
+            static_cast<std::uint8_t>(value >> (byte * 8U));
+}
+
+std::uint32_t get_u32(const std::vector<std::uint8_t>& bytes,
+                      std::size_t offset) {
+    return static_cast<std::uint32_t>(bytes[offset]) |
+           (static_cast<std::uint32_t>(bytes[offset + 1U]) << 8U) |
+           (static_cast<std::uint32_t>(bytes[offset + 2U]) << 16U) |
+           (static_cast<std::uint32_t>(bytes[offset + 3U]) << 24U);
+}
+
+struct RdefResourceFixture {
+    const char* name;
+    std::uint32_t type;
+    std::uint32_t return_type;
+    std::uint32_t dimension;
+    std::uint32_t samples;
+    std::uint32_t bind;
+    std::uint32_t flags;
+};
+
+struct RdefConstantBufferFixture {
+    const char* name;
+    std::uint32_t bytes;
+};
+
+std::vector<std::uint8_t> rdef_stage_fixture(bool vertex) {
+    static constexpr std::array vertex_resources = {
+        RdefResourceFixture{"cbCamera", 0U, 0U, 0U, 0U, 0U, 1U},
+        RdefResourceFixture{"cbPerObject", 0U, 0U, 0U, 0U, 1U, 1U},
+        RdefResourceFixture{"cbLighting", 0U, 0U, 0U, 0U, 2U, 1U},
+        RdefResourceFixture{"cbShadowMaps", 0U, 0U, 0U, 0U, 3U, 1U},
+    };
+    static constexpr std::array pixel_resources = {
+        RdefResourceFixture{"samLinear", 3U, 0U, 0U, 0U, 0U, 1U},
+        RdefResourceFixture{"samShadow", 3U, 0U, 0U, 0U, 1U, 3U},
+        RdefResourceFixture{"txDiffuse", 2U, 5U, 4U, 0xffffffffU, 0U, 13U},
+        RdefResourceFixture{"txShadow0", 2U, 5U, 4U, 0xffffffffU, 6U, 1U},
+        RdefResourceFixture{"txShadow1", 2U, 5U, 4U, 0xffffffffU, 7U, 1U},
+        RdefResourceFixture{"txShadow2", 2U, 5U, 4U, 0xffffffffU, 8U, 1U},
+        RdefResourceFixture{"cbLighting", 0U, 0U, 0U, 0U, 2U, 1U},
+        RdefResourceFixture{"cbShadowMaps", 0U, 0U, 0U, 0U, 3U, 1U},
+        RdefResourceFixture{"cbMaterial", 0U, 0U, 0U, 0U, 4U, 1U},
+    };
+    static constexpr std::array vertex_buffers = {
+        RdefConstantBufferFixture{"cbCamera", 224U},
+        RdefConstantBufferFixture{"cbPerObject", 64U},
+        RdefConstantBufferFixture{"cbLighting", 160U},
+        RdefConstantBufferFixture{"cbShadowMaps", 208U},
+    };
+    static constexpr std::array pixel_buffers = {
+        RdefConstantBufferFixture{"cbLighting", 160U},
+        RdefConstantBufferFixture{"cbMaterial", 32U},
+        RdefConstantBufferFixture{"cbShadowMaps", 208U},
+    };
+    const std::span<const RdefResourceFixture> resources =
+        vertex ? std::span<const RdefResourceFixture>(vertex_resources)
+               : std::span<const RdefResourceFixture>(pixel_resources);
+    const std::span<const RdefConstantBufferFixture> buffers =
+        vertex ? std::span<const RdefConstantBufferFixture>(vertex_buffers)
+               : std::span<const RdefConstantBufferFixture>(pixel_buffers);
+
+    constexpr std::size_t rdef_header_bytes = 28U;
+    constexpr std::size_t resource_stride = 32U;
+    constexpr std::size_t buffer_stride = 24U;
+    const std::size_t resource_offset = rdef_header_bytes;
+    const std::size_t buffer_offset =
+        resource_offset + resources.size() * resource_stride;
+    const std::size_t string_offset =
+        buffer_offset + buffers.size() * buffer_stride;
+    std::vector<std::uint8_t> rdef(string_offset, 0U);
+    put_u32(rdef, 0U, static_cast<std::uint32_t>(buffers.size()));
+    put_u32(rdef, 4U, static_cast<std::uint32_t>(buffer_offset));
+    put_u32(rdef, 8U, static_cast<std::uint32_t>(resources.size()));
+    put_u32(rdef, 12U, static_cast<std::uint32_t>(resource_offset));
+    put_u32(rdef, 16U, vertex ? 0xfffe0400U : 0xffff0400U);
+    put_u32(rdef, 20U, 0x100U);
+    const auto add_name = [&](const char* text) {
+        const auto offset = static_cast<std::uint32_t>(rdef.size());
+        while (*text != '\0') {
+            rdef.push_back(static_cast<std::uint8_t>(*text));
+            ++text;
+        }
+        rdef.push_back(0U);
+        return offset;
+    };
+    for (std::size_t index = 0U; index < resources.size(); ++index) {
+        const auto& resource = resources[index];
+        const std::size_t offset = resource_offset + index * resource_stride;
+        put_u32(rdef, offset, add_name(resource.name));
+        put_u32(rdef, offset + 4U, resource.type);
+        put_u32(rdef, offset + 8U, resource.return_type);
+        put_u32(rdef, offset + 12U, resource.dimension);
+        put_u32(rdef, offset + 16U, resource.samples);
+        put_u32(rdef, offset + 20U, resource.bind);
+        put_u32(rdef, offset + 24U, 1U);
+        put_u32(rdef, offset + 28U, resource.flags);
+    }
+    for (std::size_t index = 0U; index < buffers.size(); ++index) {
+        const std::size_t offset = buffer_offset + index * buffer_stride;
+        put_u32(rdef, offset, add_name(buffers[index].name));
+        put_u32(rdef, offset + 12U, buffers[index].bytes);
+    }
+    put_u32(rdef, 24U, add_name("synthetic-ksPerPixel"));
+
+    constexpr std::size_t dxbc_table_end = 40U;
+    const std::size_t program_offset = dxbc_table_end + 8U + rdef.size();
+    const std::size_t total_bytes = program_offset + 12U;
+    std::vector<std::uint8_t> stage(total_bytes, 0U);
+    stage[0U] = 'D';
+    stage[1U] = 'X';
+    stage[2U] = 'B';
+    stage[3U] = 'C';
+    put_u32(stage, 20U, 1U);
+    put_u32(stage, 24U, static_cast<std::uint32_t>(stage.size()));
+    put_u32(stage, 28U, 2U);
+    put_u32(stage, 32U, static_cast<std::uint32_t>(dxbc_table_end));
+    put_u32(stage, 36U, static_cast<std::uint32_t>(program_offset));
+    put_u32(stage, dxbc_table_end, 0x46454452U);
+    put_u32(stage, dxbc_table_end + 4U,
+            static_cast<std::uint32_t>(rdef.size()));
+    std::copy(rdef.begin(), rdef.end(), stage.begin() + 48U);
+    put_u32(stage, program_offset, 0x52444853U);
+    put_u32(stage, program_offset + 4U, 4U);
+    put_u32(stage, program_offset + 8U,
+            vertex ? 0x00010040U : 0x00000040U);
+    return stage;
+}
+
+StockShaderContainer reflected_container_fixture() {
+    StockShaderContainer container;
+    container.header = {2U, false, "mesh", 0U, 0U, 0U};
+    container.vertex_metadata = {4U, 0U, 2U};
+    container.pixel_metadata = {4U, 0U, 2U};
+    container.vertex_shader = rdef_stage_fixture(true);
+    container.pixel_shader = rdef_stage_fixture(false);
+    container.header.vertex_bytes =
+        static_cast<std::uint32_t>(container.vertex_shader.size());
+    container.header.pixel_bytes =
+        static_cast<std::uint32_t>(container.pixel_shader.size());
+    return container;
+}
 
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
@@ -402,6 +554,101 @@ void validates_owned_container_shape_before_backend_use() {
             "unexpected geometry stage rejected");
 }
 
+void validates_bounded_rdef_resource_contract() {
+    auto container = reflected_container_fixture();
+    require(validate_stock_ks_per_pixel_reflection(container) ==
+                StockKsPerPixelReflectionStatus::ready,
+            "synthetic reflected stock contract accepted");
+
+    const std::uint32_t vertex_rdef_bytes =
+        get_u32(container.vertex_shader, 44U);
+    for (std::uint32_t prefix = 0U; prefix < vertex_rdef_bytes; ++prefix) {
+        auto truncated = container;
+        put_u32(truncated.vertex_shader, 44U, prefix);
+        require(validate_stock_ks_per_pixel_reflection(truncated) !=
+                    StockKsPerPixelReflectionStatus::ready,
+                "every truncated RDEF payload is rejected");
+    }
+
+    auto malformed = container;
+    put_u32(malformed.vertex_shader, 40U, 0x54415453U);
+    require(validate_stock_ks_per_pixel_reflection(malformed) ==
+                StockKsPerPixelReflectionStatus::missing_rdef,
+            "missing RDEF chunk rejected");
+
+    malformed = container;
+    const std::size_t vertex_program = get_u32(malformed.vertex_shader, 36U);
+    put_u32(malformed.vertex_shader, vertex_program, 0x46454452U);
+    require(validate_stock_ks_per_pixel_reflection(malformed) ==
+                StockKsPerPixelReflectionStatus::duplicate_rdef,
+            "duplicate RDEF chunk rejected");
+
+    malformed = container;
+    put_u32(malformed.vertex_shader, 44U, 27U);
+    require(validate_stock_ks_per_pixel_reflection(malformed) ==
+                StockKsPerPixelReflectionStatus::truncated_rdef_header,
+            "truncated RDEF header rejected");
+
+    malformed = container;
+    put_u32(malformed.vertex_shader, 48U + 16U, 0xffff0400U);
+    require(validate_stock_ks_per_pixel_reflection(malformed) ==
+                StockKsPerPixelReflectionStatus::target_mismatch,
+            "RDEF target-stage mismatch rejected");
+
+    malformed = container;
+    put_u32(malformed.pixel_shader, 48U + 8U,
+            std::numeric_limits<std::uint32_t>::max());
+    require(validate_stock_ks_per_pixel_reflection(malformed) ==
+                StockKsPerPixelReflectionStatus::count_mismatch,
+            "oversized RDEF resource count rejected before multiplication");
+
+    malformed = container;
+    put_u32(malformed.pixel_shader, 48U + 12U,
+            std::numeric_limits<std::uint32_t>::max());
+    require(validate_stock_ks_per_pixel_reflection(malformed) ==
+                StockKsPerPixelReflectionStatus::table_out_of_bounds,
+            "out-of-range RDEF resource table rejected");
+
+    malformed = container;
+    const std::uint32_t pixel_rdef_bytes =
+        get_u32(malformed.pixel_shader, 44U);
+    put_u32(malformed.pixel_shader, 48U + 24U, pixel_rdef_bytes - 1U);
+    malformed.pixel_shader[48U + pixel_rdef_bytes - 1U] = 'X';
+    require(validate_stock_ks_per_pixel_reflection(malformed) ==
+                StockKsPerPixelReflectionStatus::invalid_name,
+            "unterminated RDEF creator name rejected");
+
+    malformed = container;
+    const std::size_t pixel_resource_offset =
+        48U + get_u32(malformed.pixel_shader, 48U + 12U);
+    put_u32(malformed.pixel_shader,
+            pixel_resource_offset + 2U * 32U + 20U, 1U);
+    require(validate_stock_ks_per_pixel_reflection(malformed) ==
+                StockKsPerPixelReflectionStatus::resource_mismatch,
+            "wrong reflected texture register rejected");
+
+    malformed = container;
+    put_u32(malformed.pixel_shader, pixel_resource_offset + 32U,
+            get_u32(malformed.pixel_shader, pixel_resource_offset));
+    require(validate_stock_ks_per_pixel_reflection(malformed) ==
+                StockKsPerPixelReflectionStatus::resource_mismatch,
+            "duplicate reflected resource name rejected");
+
+    malformed = container;
+    const std::size_t pixel_buffer_offset =
+        48U + get_u32(malformed.pixel_shader, 48U + 4U);
+    put_u32(malformed.pixel_shader, pixel_buffer_offset + 12U, 159U);
+    require(validate_stock_ks_per_pixel_reflection(malformed) ==
+                StockKsPerPixelReflectionStatus::constant_buffer_mismatch,
+            "wrong reflected constant-buffer size rejected");
+
+    malformed = container;
+    malformed.vertex_shader.pop_back();
+    require(validate_stock_ks_per_pixel_reflection(malformed) ==
+                StockKsPerPixelReflectionStatus::invalid_stage_container,
+            "truncated DXBC stage is rejected before RDEF access");
+}
+
 void preserves_native_constant_bytes_and_rejects_nonfinite_records() {
     StockKsPerPixelMaterialConstants material;
     material.ambient = 0.35F;
@@ -609,6 +856,14 @@ void names_all_reference_statuses() {
     require(std::string_view(stock_ks_per_pixel_binding_status_name(
                 static_cast<StockKsPerPixelBindingStatus>(255U))) == "unknown",
             "unknown backend binding status name");
+    require(std::string_view(stock_ks_per_pixel_reflection_status_name(
+                StockKsPerPixelReflectionStatus::table_out_of_bounds)) ==
+                "table_out_of_bounds",
+            "RDEF reflection status name");
+    require(std::string_view(stock_ks_per_pixel_reflection_status_name(
+                static_cast<StockKsPerPixelReflectionStatus>(255U))) ==
+                "unknown",
+            "unknown RDEF reflection status name");
 }
 
 } // namespace
@@ -620,6 +875,7 @@ int main() {
         exposes_recovered_vertex_and_sampler_contracts();
         rejects_malformed_backend_binding_layouts();
         validates_owned_container_shape_before_backend_use();
+        validates_bounded_rdef_resource_contract();
         preserves_native_constant_bytes_and_rejects_nonfinite_records();
         transposes_native_host_matrices_before_upload();
         evaluates_recovered_base_pixel_equation();

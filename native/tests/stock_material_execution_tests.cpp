@@ -121,8 +121,8 @@ std::vector<std::uint8_t> minimal_spirv_fixture() {
             0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U};
 }
 
-std::vector<std::uint8_t> dxbc_fixture(std::size_t storage_bytes = 44U) {
-    require(storage_bytes >= 44U, "DXBC fixture storage is large enough");
+std::vector<std::uint8_t> dxbc_fixture(std::size_t storage_bytes = 48U) {
+    require(storage_bytes >= 48U, "DXBC fixture storage is large enough");
     std::vector<std::uint8_t> result(storage_bytes, 0U);
     const auto put = [&](std::size_t offset, std::uint32_t value) {
         for (std::size_t byte = 0U; byte < sizeof(value); ++byte)
@@ -135,14 +135,15 @@ std::vector<std::uint8_t> dxbc_fixture(std::size_t storage_bytes = 44U) {
     put(28U, 1U);
     put(32U, 36U);
     put(36U, 0x58454853U);  // SHEX
-    put(40U, 0U);
+    put(40U, 4U);
+    put(44U, 0x40U);
     return result;
 }
 
 std::vector<std::uint8_t> shader_fixture(Backend backend, bool large) {
     if (backend == Backend::Vulkan)
         return large ? spirv_fixture() : minimal_spirv_fixture();
-    return dxbc_fixture(large ? 80U : 44U);
+    return dxbc_fixture(large ? 80U : 48U);
 }
 
 struct Fixture {

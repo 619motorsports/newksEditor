@@ -1,8 +1,10 @@
 #include "apex/render/stock_ks_per_pixel.hpp"
+#include "dxbc_reader.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <string_view>
 
 namespace apex::render {
 namespace {
@@ -98,6 +100,204 @@ template <std::size_t Size>
     case StockShaderRegisterClass::sampler: return 2U;
     }
     return 3U;
+}
+
+struct ExpectedRdefResource {
+    std::string_view name;
+    std::uint32_t type = 0U;
+    std::uint32_t return_type = 0U;
+    std::uint32_t dimension = 0U;
+    std::uint32_t sample_count = 0U;
+    std::uint32_t bind_point = 0U;
+    std::uint32_t flags = 0U;
+};
+
+struct ExpectedRdefConstantBuffer {
+    std::string_view name;
+    std::uint32_t bytes = 0U;
+};
+
+inline constexpr std::array<ExpectedRdefResource, 4U>
+    vertex_rdef_resources = {{{"cbCamera", 0U, 0U, 0U, 0U, 0U, 1U},
+                              {"cbPerObject", 0U, 0U, 0U, 0U, 1U, 1U},
+                              {"cbLighting", 0U, 0U, 0U, 0U, 2U, 1U},
+                              {"cbShadowMaps", 0U, 0U, 0U, 0U, 3U, 1U}}};
+
+inline constexpr std::array<ExpectedRdefResource, 9U>
+    pixel_rdef_resources = {{{"samLinear", 3U, 0U, 0U, 0U, 0U, 1U},
+                             {"samShadow", 3U, 0U, 0U, 0U, 1U, 3U},
+                             {"txDiffuse", 2U, 5U, 4U, 0xffffffffU, 0U, 13U},
+                             {"txShadow0", 2U, 5U, 4U, 0xffffffffU, 6U, 1U},
+                             {"txShadow1", 2U, 5U, 4U, 0xffffffffU, 7U, 1U},
+                             {"txShadow2", 2U, 5U, 4U, 0xffffffffU, 8U, 1U},
+                             {"cbLighting", 0U, 0U, 0U, 0U, 2U, 1U},
+                             {"cbShadowMaps", 0U, 0U, 0U, 0U, 3U, 1U},
+                             {"cbMaterial", 0U, 0U, 0U, 0U, 4U, 1U}}};
+
+inline constexpr std::array<ExpectedRdefConstantBuffer, 4U>
+    vertex_rdef_constant_buffers = {{{"cbCamera", 224U},
+                                     {"cbPerObject", 64U},
+                                     {"cbLighting", 160U},
+                                     {"cbShadowMaps", 208U}}};
+
+inline constexpr std::array<ExpectedRdefConstantBuffer, 3U>
+    pixel_rdef_constant_buffers = {{{"cbLighting", 160U},
+                                    {"cbMaterial", 32U},
+                                    {"cbShadowMaps", 208U}}};
+
+[[nodiscard]] bool rdef_name(std::span<const std::byte> payload,
+                             std::uint32_t offset_word,
+                             std::string_view& name) noexcept {
+    constexpr std::size_t max_name_bytes = 64U;
+    const std::size_t offset = static_cast<std::size_t>(offset_word);
+    if (offset >= payload.size()) return false;
+    const std::size_t available = payload.size() - offset;
+    const std::size_t limit = std::min(available, max_name_bytes + 1U);
+    std::size_t length = 0U;
+    while (length < limit && payload[offset + length] != std::byte{0})
+        ++length;
+    if (length == 0U || length == limit || length > max_name_bytes)
+        return false;
+    name = {reinterpret_cast<const char*>(payload.data() + offset), length};
+    return true;
+}
+
+template <std::size_t ResourceCount, std::size_t ConstantBufferCount>
+[[nodiscard]] StockKsPerPixelReflectionStatus validate_rdef_payload(
+    std::span<const std::byte> payload, std::uint32_t expected_target,
+    const std::array<ExpectedRdefResource, ResourceCount>& expected_resources,
+    const std::array<ExpectedRdefConstantBuffer, ConstantBufferCount>&
+        expected_constant_buffers) noexcept {
+    constexpr std::size_t header_bytes = 28U;
+    constexpr std::size_t resource_stride = 32U;
+    constexpr std::size_t constant_buffer_stride = 24U;
+    if (payload.size() < header_bytes)
+        return StockKsPerPixelReflectionStatus::truncated_rdef_header;
+
+    std::uint32_t constant_buffer_count = 0U;
+    std::uint32_t constant_buffer_offset_word = 0U;
+    std::uint32_t resource_count = 0U;
+    std::uint32_t resource_offset_word = 0U;
+    std::uint32_t target = 0U;
+    std::uint32_t creator_offset = 0U;
+    (void)detail::read_u32_le(payload, 0U, constant_buffer_count);
+    (void)detail::read_u32_le(payload, 4U, constant_buffer_offset_word);
+    (void)detail::read_u32_le(payload, 8U, resource_count);
+    (void)detail::read_u32_le(payload, 12U, resource_offset_word);
+    (void)detail::read_u32_le(payload, 16U, target);
+    (void)detail::read_u32_le(payload, 24U, creator_offset);
+    if (target != expected_target)
+        return StockKsPerPixelReflectionStatus::target_mismatch;
+    if (constant_buffer_count != ConstantBufferCount ||
+        resource_count != ResourceCount)
+        return StockKsPerPixelReflectionStatus::count_mismatch;
+
+    std::string_view creator;
+    if (!rdef_name(payload, creator_offset, creator))
+        return StockKsPerPixelReflectionStatus::invalid_name;
+    const std::size_t resource_offset =
+        static_cast<std::size_t>(resource_offset_word);
+    const std::size_t constant_buffer_offset =
+        static_cast<std::size_t>(constant_buffer_offset_word);
+    if (resource_offset > payload.size() ||
+        ResourceCount > (payload.size() - resource_offset) / resource_stride ||
+        constant_buffer_offset > payload.size() ||
+        ConstantBufferCount >
+            (payload.size() - constant_buffer_offset) /
+                constant_buffer_stride)
+        return StockKsPerPixelReflectionStatus::table_out_of_bounds;
+
+    std::array<bool, ResourceCount> found_resources{};
+    for (std::size_t index = 0U; index < ResourceCount; ++index) {
+        const std::size_t offset = resource_offset + index * resource_stride;
+        std::array<std::uint32_t, 8U> words{};
+        for (std::size_t word = 0U; word < words.size(); ++word)
+            (void)detail::read_u32_le(payload, offset + word * 4U,
+                                      words[word]);
+        std::string_view name;
+        if (!rdef_name(payload, words[0], name))
+            return StockKsPerPixelReflectionStatus::invalid_name;
+        std::size_t expected_index = ResourceCount;
+        for (std::size_t candidate = 0U; candidate < ResourceCount;
+             ++candidate) {
+            if (expected_resources[candidate].name == name) {
+                expected_index = candidate;
+                break;
+            }
+        }
+        if (expected_index == ResourceCount || found_resources[expected_index])
+            return StockKsPerPixelReflectionStatus::resource_mismatch;
+        found_resources[expected_index] = true;
+        const ExpectedRdefResource& expected =
+            expected_resources[expected_index];
+        if (words[1] != expected.type || words[2] != expected.return_type ||
+            words[3] != expected.dimension ||
+            words[4] != expected.sample_count ||
+            words[5] != expected.bind_point || words[6] != 1U ||
+            words[7] != expected.flags)
+            return StockKsPerPixelReflectionStatus::resource_mismatch;
+    }
+
+    std::array<bool, ConstantBufferCount> found_constant_buffers{};
+    for (std::size_t index = 0U; index < ConstantBufferCount; ++index) {
+        const std::size_t offset =
+            constant_buffer_offset + index * constant_buffer_stride;
+        std::array<std::uint32_t, 6U> words{};
+        for (std::size_t word = 0U; word < words.size(); ++word)
+            (void)detail::read_u32_le(payload, offset + word * 4U,
+                                      words[word]);
+        std::string_view name;
+        if (!rdef_name(payload, words[0], name))
+            return StockKsPerPixelReflectionStatus::invalid_name;
+        std::size_t expected_index = ConstantBufferCount;
+        for (std::size_t candidate = 0U; candidate < ConstantBufferCount;
+             ++candidate) {
+            if (expected_constant_buffers[candidate].name == name) {
+                expected_index = candidate;
+                break;
+            }
+        }
+        if (expected_index == ConstantBufferCount ||
+            found_constant_buffers[expected_index])
+            return StockKsPerPixelReflectionStatus::constant_buffer_mismatch;
+        found_constant_buffers[expected_index] = true;
+        if (words[3] != expected_constant_buffers[expected_index].bytes ||
+            words[4] != 0U || words[5] != 0U)
+            return StockKsPerPixelReflectionStatus::constant_buffer_mismatch;
+    }
+    return StockKsPerPixelReflectionStatus::ready;
+}
+
+template <std::size_t ResourceCount, std::size_t ConstantBufferCount>
+[[nodiscard]] StockKsPerPixelReflectionStatus validate_stage_reflection(
+    std::span<const std::uint8_t> stage, std::uint32_t expected_target,
+    const std::array<ExpectedRdefResource, ResourceCount>& expected_resources,
+    const std::array<ExpectedRdefConstantBuffer, ConstantBufferCount>&
+        expected_constant_buffers) noexcept {
+    detail::DxbcContainerInspection inspection;
+    std::size_t error_offset = 0U;
+    const auto bytes = detail::as_bytes(stage);
+    if (detail::inspect_dxbc_container(bytes, 4096U, inspection,
+                                       error_offset) !=
+        detail::DxbcReaderStatus::ready)
+        return StockKsPerPixelReflectionStatus::invalid_stage_container;
+    std::uint32_t rdef_count = 0U;
+    detail::DxbcChunkView rdef;
+    for (std::uint32_t index = 0U; index < inspection.chunk_count; ++index) {
+        detail::DxbcChunkView chunk;
+        if (!detail::read_dxbc_chunk(bytes, index, chunk))
+            return StockKsPerPixelReflectionStatus::invalid_stage_container;
+        if (chunk.tag != detail::dxbc_tag_rdef) continue;
+        ++rdef_count;
+        rdef = chunk;
+    }
+    if (rdef_count == 0U)
+        return StockKsPerPixelReflectionStatus::missing_rdef;
+    if (rdef_count != 1U)
+        return StockKsPerPixelReflectionStatus::duplicate_rdef;
+    return validate_rdef_payload(rdef.payload, expected_target,
+                                 expected_resources,
+                                 expected_constant_buffers);
 }
 
 } // namespace
@@ -407,6 +607,45 @@ StockKsPerPixelContainerStatus validate_stock_ks_per_pixel_container_shape(
         container.pixel_metadata.shader_model_minor != 0U)
         return StockKsPerPixelContainerStatus::unsupported_shader_model;
     return StockKsPerPixelContainerStatus::ready;
+}
+
+const char* stock_ks_per_pixel_reflection_status_name(
+    StockKsPerPixelReflectionStatus status) noexcept {
+    switch (status) {
+    case StockKsPerPixelReflectionStatus::ready: return "ready";
+    case StockKsPerPixelReflectionStatus::invalid_stage_container:
+        return "invalid_stage_container";
+    case StockKsPerPixelReflectionStatus::missing_rdef:
+        return "missing_rdef";
+    case StockKsPerPixelReflectionStatus::duplicate_rdef:
+        return "duplicate_rdef";
+    case StockKsPerPixelReflectionStatus::truncated_rdef_header:
+        return "truncated_rdef_header";
+    case StockKsPerPixelReflectionStatus::target_mismatch:
+        return "target_mismatch";
+    case StockKsPerPixelReflectionStatus::count_mismatch:
+        return "count_mismatch";
+    case StockKsPerPixelReflectionStatus::table_out_of_bounds:
+        return "table_out_of_bounds";
+    case StockKsPerPixelReflectionStatus::invalid_name:
+        return "invalid_name";
+    case StockKsPerPixelReflectionStatus::resource_mismatch:
+        return "resource_mismatch";
+    case StockKsPerPixelReflectionStatus::constant_buffer_mismatch:
+        return "constant_buffer_mismatch";
+    }
+    return "unknown";
+}
+
+StockKsPerPixelReflectionStatus validate_stock_ks_per_pixel_reflection(
+    const StockShaderContainer& container) noexcept {
+    const StockKsPerPixelReflectionStatus vertex = validate_stage_reflection(
+        container.vertex_shader, 0xfffe0400U, vertex_rdef_resources,
+        vertex_rdef_constant_buffers);
+    if (vertex != StockKsPerPixelReflectionStatus::ready) return vertex;
+    return validate_stage_reflection(
+        container.pixel_shader, 0xffff0400U, pixel_rdef_resources,
+        pixel_rdef_constant_buffers);
 }
 
 StockKsPerPixelEvaluationResult evaluate_stock_ks_per_pixel(

@@ -475,6 +475,30 @@ validate_stock_ks_per_pixel_container_shape(
     const StockShaderContainer& container,
     StockKsPerPixelVariant variant) noexcept;
 
+enum class StockKsPerPixelReflectionStatus : std::uint8_t {
+    ready,
+    invalid_stage_container,
+    missing_rdef,
+    duplicate_rdef,
+    truncated_rdef_header,
+    target_mismatch,
+    count_mismatch,
+    table_out_of_bounds,
+    invalid_name,
+    resource_mismatch,
+    constant_buffer_mismatch,
+};
+
+[[nodiscard]] const char* stock_ks_per_pixel_reflection_status_name(
+    StockKsPerPixelReflectionStatus status) noexcept;
+
+// Validate the resource bindings and constant-buffer sizes reflected by the
+// installed SM 4.0 bytecode. RDEF does not describe the complete sampler
+// state; validate that state with the separate recovered sampler contract.
+[[nodiscard]] StockKsPerPixelReflectionStatus
+validate_stock_ks_per_pixel_reflection(
+    const StockShaderContainer& container) noexcept;
+
 struct StockKsPerPixelPixelInput {
     std::array<float, 3U> interpolated_normal{};
     // The native vertex shader emits world position minus camera position.

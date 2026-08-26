@@ -1,4 +1,5 @@
 #include "apex/render/material_profile.hpp"
+#include "dxbc_reader.hpp"
 
 #include <algorithm>
 #include <array>
@@ -236,69 +237,67 @@ enum class DxbcProgramType : std::uint16_t {
 [[nodiscard]] StockShaderStageMetadata validate_dxbc_payload(
     std::span<const std::uint8_t> bytes, std::size_t container_offset,
     DxbcProgramType expected, const StockShaderContainerLimits& limits) {
-    if (bytes.size() < 32U || !dxbc_at(bytes, 0U))
-        fail("Stock shader DXBC payload is truncated", container_offset);
-    const std::size_t declared_size = u32_le(bytes, 24U);
-    if (declared_size != bytes.size())
+    detail::DxbcContainerInspection inspection;
+    std::size_t error_offset = 0U;
+    const detail::DxbcReaderStatus status = detail::inspect_dxbc_container(
+        detail::as_bytes(bytes), limits.max_dxbc_chunks, inspection,
+        error_offset);
+    switch (status) {
+    case detail::DxbcReaderStatus::ready: break;
+    case detail::DxbcReaderStatus::truncated_header:
+    case detail::DxbcReaderStatus::invalid_signature:
+        fail("Stock shader DXBC payload is truncated",
+             container_offset + error_offset);
+    case detail::DxbcReaderStatus::declared_size_mismatch:
         fail("Stock shader DXBC declared size does not match its stage payload",
-             container_offset + 24U);
-    const std::uint32_t chunk_count = u32_le(bytes, 28U);
-    if (chunk_count == 0U || chunk_count > limits.max_dxbc_chunks)
+             container_offset + error_offset);
+    case detail::DxbcReaderStatus::invalid_chunk_count:
         fail("Stock shader DXBC chunk count is outside its limit",
-             container_offset + 28U);
-    if (chunk_count > (bytes.size() - 32U) / 4U)
+             container_offset + error_offset);
+    case detail::DxbcReaderStatus::chunk_table_out_of_bounds:
         fail("Stock shader DXBC chunk table exceeds its stage payload",
-             container_offset + 28U);
-    const std::size_t table_end =
-        32U + static_cast<std::size_t>(chunk_count) * 4U;
-    std::vector<std::pair<std::size_t, std::size_t>> ranges;
-    ranges.reserve(chunk_count);
-    bool found_program = false;
-    std::uint32_t program_version = 0U;
-    for (std::uint32_t index = 0U; index < chunk_count; ++index) {
-        const std::size_t table_offset =
-            32U + static_cast<std::size_t>(index) * 4U;
-        const std::size_t chunk_offset = u32_le(bytes, table_offset);
-        if (chunk_offset < table_end || chunk_offset > bytes.size() ||
-            bytes.size() - chunk_offset < 8U)
-            fail("Stock shader DXBC chunk offset exceeds its stage payload",
-                 container_offset + table_offset);
-        const std::size_t chunk_bytes = u32_le(bytes, chunk_offset + 4U);
-        if (chunk_bytes > bytes.size() - chunk_offset - 8U)
-            fail("Stock shader DXBC chunk payload exceeds its stage payload",
-                 container_offset + chunk_offset + 4U);
-        const std::size_t chunk_end = chunk_offset + 8U + chunk_bytes;
-        ranges.emplace_back(chunk_offset, chunk_end);
-
-        const bool shader_chunk =
-            (bytes[chunk_offset] == 'S' && bytes[chunk_offset + 1U] == 'H' &&
-             bytes[chunk_offset + 2U] == 'D' && bytes[chunk_offset + 3U] == 'R') ||
-            (bytes[chunk_offset] == 'S' && bytes[chunk_offset + 1U] == 'H' &&
-             bytes[chunk_offset + 2U] == 'E' && bytes[chunk_offset + 3U] == 'X');
-        if (!shader_chunk) continue;
-        if (found_program || chunk_bytes < 4U)
-            fail("Stock shader DXBC must contain one complete program chunk",
-                 container_offset + chunk_offset);
-        const std::uint32_t version_token = u32_le(bytes, chunk_offset + 8U);
-        const auto program_type = static_cast<DxbcProgramType>(
-            static_cast<std::uint16_t>(version_token >> 16U));
-        if (program_type != expected)
-            fail("Stock shader DXBC program type does not match its stage",
-                 container_offset + chunk_offset + 8U);
-        program_version = version_token;
-        found_program = true;
+             container_offset + error_offset);
+    case detail::DxbcReaderStatus::chunk_header_out_of_bounds:
+        fail("Stock shader DXBC chunk offset exceeds its stage payload",
+             container_offset + error_offset);
+    case detail::DxbcReaderStatus::chunk_payload_out_of_bounds:
+        fail("Stock shader DXBC chunk payload exceeds its stage payload",
+             container_offset + error_offset);
+    case detail::DxbcReaderStatus::chunks_overlap:
+        fail("Stock shader DXBC chunks overlap",
+             container_offset + error_offset);
+    case detail::DxbcReaderStatus::program_chunk_truncated:
+        fail("Stock shader DXBC must contain one complete program chunk",
+             container_offset + error_offset);
+    case detail::DxbcReaderStatus::invalid_header_version:
+        fail("Stock shader DXBC container header version must be one",
+             container_offset + error_offset);
     }
-    std::sort(ranges.begin(), ranges.end());
-    for (std::size_t index = 1U; index < ranges.size(); ++index) {
-        if (ranges[index].first < ranges[index - 1U].second)
-            fail("Stock shader DXBC chunks overlap",
-                 container_offset + ranges[index].first);
-    }
-    if (!found_program)
+    if (inspection.program_chunk_count != 1U ||
+        inspection.program_format != detail::DxbcProgramFormat::legacy)
         fail("Stock shader DXBC has no executable program chunk",
              container_offset);
+
+    std::uint32_t program_version = 0U;
+    for (std::uint32_t index = 0U; index < inspection.chunk_count; ++index) {
+        detail::DxbcChunkView chunk;
+        if (!detail::read_dxbc_chunk(detail::as_bytes(bytes), index, chunk))
+            fail("Stock shader DXBC chunk offset exceeds its stage payload",
+                 container_offset);
+        if (chunk.tag != detail::dxbc_tag_shdr &&
+            chunk.tag != detail::dxbc_tag_shex)
+            continue;
+        (void)detail::read_u32_le(chunk.payload, 0U, program_version);
+        const auto program_type = static_cast<DxbcProgramType>(
+            static_cast<std::uint16_t>(program_version >> 16U));
+        if (program_type != expected)
+            fail("Stock shader DXBC program type does not match its stage",
+                 container_offset + chunk.header_offset + 8U);
+        break;
+    }
     return {static_cast<std::uint8_t>((program_version >> 4U) & 0x0fU),
-            static_cast<std::uint8_t>(program_version & 0x0fU), chunk_count};
+            static_cast<std::uint8_t>(program_version & 0x0fU),
+            inspection.chunk_count};
 }
 
 } // namespace

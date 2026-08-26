@@ -289,6 +289,10 @@ void parses_installed_stock_package_when_available() {
                         parsed, apex::render::StockKsPerPixelVariant::base) ==
                         apex::render::StockKsPerPixelContainerStatus::ready,
                     "installed ksPerPixel package matches the native ABI shape");
+            require(apex::render::validate_stock_ks_per_pixel_reflection(
+                        parsed) ==
+                        apex::render::StockKsPerPixelReflectionStatus::ready,
+                    "installed ksPerPixel RDEF matches the native resource ABI");
         }
         if (entry.path().filename() == "ksPerPixelAT.shader") {
             require(bytes.size() == 11'330U &&
@@ -300,6 +304,10 @@ void parses_installed_stock_package_when_available() {
                         apex::render::StockKsPerPixelVariant::alpha_to_coverage) ==
                         apex::render::StockKsPerPixelContainerStatus::ready,
                     "installed ksPerPixelAT package matches the native ABI shape");
+            require(apex::render::validate_stock_ks_per_pixel_reflection(
+                        parsed) ==
+                        apex::render::StockKsPerPixelReflectionStatus::ready,
+                    "installed ksPerPixelAT RDEF matches the native resource ABI");
         }
         ++parsed_count;
     }

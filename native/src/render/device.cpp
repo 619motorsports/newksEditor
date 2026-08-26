@@ -2,6 +2,7 @@
 #include "apex/render/selected_mesh.hpp"
 #include "apex/render/draw_packet.hpp"
 #include "backend_internal.hpp"
+#include "dxbc_reader.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -3215,13 +3216,6 @@ std::uint32_t shader_word(std::span<const std::byte> bytes) noexcept {
            (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[3])) << 24U);
 }
 
-bool read_shader_word(std::span<const std::byte> bytes, std::size_t offset,
-                      std::uint32_t& value) noexcept {
-    if (offset > bytes.size() || bytes.size() - offset < sizeof(std::uint32_t)) return false;
-    value = shader_word(bytes.subspan(offset, sizeof(std::uint32_t)));
-    return true;
-}
-
 enum class ContainerValidation : std::uint8_t {
     valid,
     invalid,
@@ -3231,91 +3225,49 @@ enum class ContainerValidation : std::uint8_t {
 ContainerValidation validate_dxbc_container(std::span<const std::byte> bytes,
                                              Diagnostic& diagnostic,
                                              ShaderBytecodeFormat* detected_format = nullptr) {
-    if (bytes.size() < 32U) {
-        diagnostic = {"shader_dxbc_header_invalid", "DXBC bytecode is shorter than its container header"};
-        return ContainerValidation::invalid;
-    }
-    std::uint32_t header_version = 0;
-    std::uint32_t total_size = 0;
-    std::uint32_t chunk_count = 0;
-    if (!read_shader_word(bytes, 20U, header_version) || !read_shader_word(bytes, 24U, total_size) ||
-        !read_shader_word(bytes, 28U, chunk_count) || header_version != 1U) {
+    detail::DxbcContainerInspection inspection;
+    std::size_t error_offset = 0U;
+    const detail::DxbcReaderStatus status = detail::inspect_dxbc_container(
+        bytes, max_dxbc_chunks, inspection, error_offset);
+    switch (status) {
+    case detail::DxbcReaderStatus::ready: break;
+    case detail::DxbcReaderStatus::truncated_header:
+    case detail::DxbcReaderStatus::invalid_signature:
+    case detail::DxbcReaderStatus::invalid_header_version:
         diagnostic = {"shader_dxbc_header_invalid", "DXBC container header fields are invalid"};
         return ContainerValidation::invalid;
-    }
-    if (total_size != bytes.size() || total_size < 32U) {
+    case detail::DxbcReaderStatus::declared_size_mismatch:
         diagnostic = {"shader_dxbc_size_invalid", "DXBC container size does not match the bytecode span"};
         return ContainerValidation::invalid;
-    }
-    if (chunk_count == 0U || chunk_count > max_dxbc_chunks ||
-        static_cast<std::size_t>(chunk_count) > (bytes.size() - 32U) / sizeof(std::uint32_t)) {
+    case detail::DxbcReaderStatus::invalid_chunk_count:
+    case detail::DxbcReaderStatus::chunk_table_out_of_bounds:
         diagnostic = {"shader_dxbc_chunk_count_invalid", "DXBC chunk count exceeds the bounded container table"};
         return ContainerValidation::invalid;
+    case detail::DxbcReaderStatus::chunk_header_out_of_bounds:
+        diagnostic = {"shader_dxbc_offset_invalid", "DXBC chunk offset is outside the container"};
+        return ContainerValidation::invalid;
+    case detail::DxbcReaderStatus::chunk_payload_out_of_bounds:
+    case detail::DxbcReaderStatus::program_chunk_truncated:
+        diagnostic = {"shader_dxbc_chunk_invalid", "DXBC chunk size exceeds the container"};
+        return ContainerValidation::invalid;
+    case detail::DxbcReaderStatus::chunks_overlap:
+        diagnostic = {"shader_dxbc_chunk_overlap", "DXBC chunks overlap"};
+        return ContainerValidation::invalid;
     }
-    const std::size_t table_end = 32U + static_cast<std::size_t>(chunk_count) * sizeof(std::uint32_t);
-    std::set<std::pair<std::size_t, std::size_t>> ranges;
-    bool found_dxbc = false;
-    bool found_dxil = false;
-    std::uint32_t program_chunks = 0U;
-    for (std::uint32_t index = 0; index < chunk_count; ++index) {
-        std::uint32_t offset_word = 0;
-        const std::size_t table_offset = 32U + static_cast<std::size_t>(index) * sizeof(std::uint32_t);
-        if (!read_shader_word(bytes, table_offset, offset_word)) {
-            diagnostic = {"shader_dxbc_offset_invalid", "DXBC chunk offset table is truncated"};
-            return ContainerValidation::invalid;
-        }
-        const std::size_t offset = static_cast<std::size_t>(offset_word);
-        if (offset < table_end || offset > bytes.size() || bytes.size() - offset < 8U) {
-            diagnostic = {"shader_dxbc_offset_invalid", "DXBC chunk offset is outside the container"};
-            return ContainerValidation::invalid;
-        }
-        std::uint32_t chunk_fourcc = 0;
-        std::uint32_t chunk_size = 0;
-        if (!read_shader_word(bytes, offset, chunk_fourcc) ||
-            !read_shader_word(bytes, offset + 4U, chunk_size) ||
-            static_cast<std::size_t>(chunk_size) > bytes.size() - offset - 8U) {
-            diagnostic = {"shader_dxbc_chunk_invalid", "DXBC chunk size exceeds the container"};
-            return ContainerValidation::invalid;
-        }
-        const std::size_t end = offset + 8U + static_cast<std::size_t>(chunk_size);
-        if (!ranges.insert({offset, end}).second) {
-            diagnostic = {"shader_dxbc_chunk_overlap", "DXBC chunk offsets contain a duplicate range"};
-            return ContainerValidation::invalid;
-        }
-        if (chunk_fourcc == 0x4C495844U || chunk_fourcc == 0x58454853U || chunk_fourcc == 0x52444853U) {
-            if (chunk_size < sizeof(std::uint32_t)) {
-                diagnostic = {"shader_dxbc_chunk_invalid", "DXBC shader chunk is truncated"};
-                return ContainerValidation::invalid;
-            }
-            found_dxil = found_dxil || chunk_fourcc == 0x4C495844U;
-            found_dxbc = found_dxbc || chunk_fourcc == 0x58454853U ||
-                         chunk_fourcc == 0x52444853U;
-            ++program_chunks;
-        }
-    }
-    std::size_t previous_end = table_end;
-    for (const auto& range : ranges) {
-        if (range.first < previous_end) {
-            diagnostic = {"shader_dxbc_chunk_overlap", "DXBC chunks overlap"};
-            return ContainerValidation::invalid;
-        }
-        previous_end = range.second;
-    }
-    if (!found_dxbc && !found_dxil) {
+    if (inspection.program_format == detail::DxbcProgramFormat::none) {
         diagnostic = {"shader_dxbc_chunk_unsupported", "DXBC contains no supported shader chunk"};
         return ContainerValidation::unsupported;
     }
-    if (found_dxbc && found_dxil) {
+    if (inspection.program_format == detail::DxbcProgramFormat::mixed ||
+        inspection.program_chunk_count != 1U) {
         diagnostic = {"shader_dxbc_program_ambiguous", "DXBC mixes legacy DXBC and DXIL program chunks"};
         return ContainerValidation::invalid;
     }
-    if (program_chunks != 1U) {
-        diagnostic = {"shader_dxbc_program_ambiguous", "DXBC must contain exactly one Direct3D program chunk"};
-        return ContainerValidation::invalid;
-    }
     if (detected_format != nullptr)
-        *detected_format = found_dxbc ? ShaderBytecodeFormat::dxbc
-                                      : ShaderBytecodeFormat::dxil;
+        *detected_format =
+            inspection.program_format == detail::DxbcProgramFormat::legacy
+                ? ShaderBytecodeFormat::dxbc
+                : ShaderBytecodeFormat::dxil;
     return ContainerValidation::valid;
 }
 

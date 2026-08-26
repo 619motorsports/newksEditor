@@ -199,6 +199,7 @@ add_library(apex_render STATIC
   src/render/device.cpp
   src/render/directional_shadow.cpp
   src/render/draw_packet.cpp
+  src/render/dxbc_reader.cpp
   src/render/frame_plan.cpp
   src/render/kn5_scene_node_map.cpp
   src/render/lighting.cpp

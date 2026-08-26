@@ -157,6 +157,35 @@ void rejectsMalformedShaderBytes() {
     const PipelineValidationResult oversized_table_result = validate_pipeline(oversized_table);
     require(!oversized_table_result.valid && has_code(oversized_table_result, "shader_bytecode_bounds"), "oversized DXBC table rejected");
 
+    PipelineProgram table_chunk = valid_program();
+    auto table_chunk_bytes = dxbc_container();
+    table_chunk_bytes[32U] = 32U;
+    table_chunk_bytes[33U] = 0U;
+    table_chunk_bytes[34U] = 0U;
+    table_chunk_bytes[35U] = 0U;
+    table_chunk.shaders = {{PipelineShaderStage::vertex,
+                            PipelineShaderFormat::dxbc,
+                            std::move(table_chunk_bytes)}};
+    const PipelineValidationResult table_chunk_result =
+        validate_pipeline(table_chunk);
+    require(!table_chunk_result.valid &&
+                has_code(table_chunk_result, "shader_bytecode_bounds"),
+            "DXBC chunk inside its offset table rejected");
+
+    PipelineProgram oversized_payload = valid_program();
+    auto oversized_payload_bytes = dxbc_container();
+    for (std::size_t byte = 0U; byte < 4U; ++byte)
+        oversized_payload_bytes[40U + byte] = 0xffU;
+    oversized_payload.shaders = {{PipelineShaderStage::vertex,
+                                  PipelineShaderFormat::dxbc,
+                                  std::move(oversized_payload_bytes)}};
+    const PipelineValidationResult oversized_payload_result =
+        validate_pipeline(oversized_payload);
+    require(!oversized_payload_result.valid &&
+                has_code(oversized_payload_result,
+                         "shader_bytecode_bounds"),
+            "overflow-sized DXBC chunk payload rejected");
+
     PipelineProgram mislabeled = valid_program();
     auto dxil = dxbc_container();
     dxil[36U] = 'D';
