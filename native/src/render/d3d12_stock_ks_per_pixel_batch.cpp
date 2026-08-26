@@ -997,8 +997,12 @@ bool record_d3d12_stock_ks_per_pixel_native_batch(
     CloseHandle(event);
     if (diagnostic.code == "d3d12_stock_native_batch_submit_undrained") {
       *context.target_state = D3D12_RESOURCE_STATE_COMMON;
-      if (use_depth)
+      *context.target_cleared = false;
+      if (use_depth) {
         *context.depth_state = D3D12_RESOURCE_STATE_COMMON;
+        if (context.depth_cleared != nullptr)
+          *context.depth_cleared = false;
+      }
       for (TrackedResource &entry : tracked)
         *entry.state = D3D12_RESOURCE_STATE_COMMON;
     }
