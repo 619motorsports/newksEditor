@@ -165,6 +165,42 @@ void rejectsUnsafeQueriesAndEnforcesLimits(const std::filesystem::path& root) {
     }, "PATH_TOO_LONG");
 }
 
+void rejectsDirectoryMetadataAmplification(const std::filesystem::path& root) {
+    AssetSourceLimits countLimit;
+    countLimit.maxFiles = 1;
+    AssetSource limited(countLimit);
+    expectsError([&] { limited.addDirectory(root, "bounded"); }, "FILE_COUNT_LIMIT");
+    require(limited.files().empty() && limited.warnings().empty(),
+            "file-count rejection does not publish partial directory state");
+
+    const auto duplicateRoot = root / "duplicate-warning-limit";
+    std::filesystem::create_directories(duplicateRoot);
+    writeFile(duplicateRoot / "one.bin", "1");
+
+    AssetSourceLimits warningCountLimit;
+    warningCountLimit.maxWarnings = 1;
+    AssetSource warningCount(warningCountLimit);
+    warningCount.addDirectory(duplicateRoot, "duplicate");
+    const auto initialFileCount = warningCount.files().size();
+    expectsError([&] { warningCount.addDirectory(duplicateRoot, "duplicate"); }, "WARNING_LIMIT");
+    require(warningCount.files().size() == initialFileCount && warningCount.warnings().empty(),
+            "warning-count rejection does not publish partial directory state");
+
+    AssetSourceLimits warningBytesLimit;
+    warningBytesLimit.maxWarningBytes = 8;
+    AssetSource warningBytes(warningBytesLimit);
+    warningBytes.addDirectory(duplicateRoot, "duplicate");
+    expectsError([&] { warningBytes.addDirectory(duplicateRoot, "duplicate"); }, "WARNING_LIMIT");
+    require(warningBytes.files().size() == 1U && warningBytes.warnings().empty(),
+            "warning-byte rejection does not publish partial directory state");
+
+    warningBytesLimit.maxWarnings = 0;
+    expectsError([&] {
+        AssetSource invalid(warningBytesLimit);
+        (void)invalid;
+    }, "INVALID_LIMIT");
+}
+
 void rejectsSymlinkEscapeAndReadTruncation(const std::filesystem::path& root,
                                            const std::filesystem::path& outside) {
     writeFile(outside, "secret");
@@ -225,6 +261,7 @@ int main() {
         std::filesystem::create_directories(root);
         resolvesDirectoryAndPackedSourcesWithPrecedence(root);
         rejectsUnsafeQueriesAndEnforcesLimits(root);
+        rejectsDirectoryMetadataAmplification(root);
         rejectsSymlinkEscapeAndReadTruncation(root, outside);
         rejectsForeignAndOversizedVirtualEntries(root);
         std::error_code cleanupError;

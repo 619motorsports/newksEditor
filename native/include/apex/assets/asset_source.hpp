@@ -22,6 +22,11 @@ struct AssetSourceLimits {
     std::size_t maxFileBytes = 256u * 1024u * 1024u;
     std::size_t maxTotalBytes = 512u * 1024u * 1024u;
     std::size_t maxPathBytes = 1024u * 1024u;
+    // Warnings are caller-visible metadata and are bounded independently of
+    // the indexed file payloads. This prevents a noisy hostile directory or
+    // archive from growing diagnostic storage without limit.
+    std::size_t maxWarnings = 100'000;
+    std::size_t maxWarningBytes = 16u * 1024u * 1024u;
 };
 
 enum class AssetSourceKind { directory, acd };
@@ -100,6 +105,7 @@ public:
 private:
     AssetSourceLimits limits_;
     std::size_t totalBytes_ = 0;
+    std::size_t warningBytes_ = 0;
     std::vector<AssetFile> files_;
     std::vector<std::string> warnings_;
     std::vector<std::shared_ptr<const apex::formats::AcdArchive>> archives_;

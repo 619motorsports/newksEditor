@@ -136,6 +136,21 @@ struct NormalizedPath {
     return "combined asset path exceeds configured size limit";
 }
 
+void stageWarning(std::vector<std::string>& pending, std::size_t& pendingBytes,
+                  std::size_t existingCount, std::size_t existingBytes,
+                  const AssetSourceLimits& limits, std::string warning,
+                  std::string_view source) {
+    if (existingCount >= limits.maxWarnings ||
+        pending.size() >= limits.maxWarnings - existingCount)
+        throw sourceError(source, "WARNING_LIMIT", "asset source warning count exceeds configured limit");
+    if (warning.size() > limits.maxWarningBytes || existingBytes > limits.maxWarningBytes ||
+        pendingBytes > limits.maxWarningBytes - existingBytes ||
+        warning.size() > limits.maxWarningBytes - existingBytes - pendingBytes)
+        throw sourceError(source, "WARNING_LIMIT", "asset source warning metadata exceeds configured limit");
+    pendingBytes += warning.size();
+    pending.push_back(std::move(warning));
+}
+
 #if defined(__unix__) || defined(__APPLE__)
 
 class ScopedFd final {
@@ -320,11 +335,38 @@ private:
     return left == right;
 }
 
+void stageDuplicateWarnings(const std::vector<AssetFile>& existing,
+                            const std::vector<AssetFile>& pending,
+                            const AssetSourceLimits& limits,
+                            std::size_t existingWarningCount,
+                            std::size_t existingWarningBytes,
+                            std::vector<std::string>& pendingWarnings,
+                            std::size_t& pendingWarningBytes,
+                            std::string_view source) {
+    std::map<std::string, bool> seenAliases;
+    for (const auto& file : existing)
+        for (const auto& alias : file.lookupPaths)
+            seenAliases.emplace(lowerAscii(alias), true);
+
+    for (const auto& file : pending) {
+        for (const auto& alias : file.lookupPaths) {
+            const auto lookup = lowerAscii(alias);
+            if (seenAliases.contains(lookup))
+                stageWarning(pendingWarnings, pendingWarningBytes,
+                             existingWarningCount, existingWarningBytes, limits,
+                             file.source + ": duplicate asset path " + alias, source);
+        }
+        for (const auto& alias : file.lookupPaths)
+            seenAliases.emplace(lowerAscii(alias), true);
+    }
+}
+
 } // namespace
 
 AssetSource::AssetSource(AssetSourceLimits limits) : limits_(limits) {
     if (limits_.maxFiles == 0 || limits_.maxFileBytes > limits_.maxTotalBytes ||
-        limits_.maxPathBytes == 0) {
+        limits_.maxPathBytes == 0 || limits_.maxWarnings == 0 ||
+        limits_.maxWarningBytes == 0) {
         throw sourceError("asset-source", "INVALID_LIMIT", "asset source limits are inconsistent");
     }
 }
@@ -347,6 +389,12 @@ void AssetSource::addDirectory(const std::filesystem::path& root, std::string_vi
         std::uintmax_t bytes = 0;
     };
     std::vector<Candidate> candidates;
+    std::vector<std::string> pendingWarnings;
+    std::size_t pendingWarningBytes = 0;
+    const auto stageDirectoryWarning = [&](std::string warning) {
+        stageWarning(pendingWarnings, pendingWarningBytes, warnings_.size(), warningBytes_,
+                     limits_, std::move(warning), pathString(root));
+    };
     std::filesystem::recursive_directory_iterator iterator(root, error), end;
     if (error) throw sourceError(pathString(root), "PATH_ERROR", "cannot enumerate asset source root");
     while (iterator != end) {
@@ -354,7 +402,7 @@ void AssetSource::addDirectory(const std::filesystem::path& root, std::string_vi
         const auto status = std::filesystem::symlink_status(current, error);
         if (error) throw sourceError(pathString(current), "PATH_ERROR", "cannot inspect asset source path");
         if (std::filesystem::is_symlink(status)) {
-            warnings_.push_back(sourceLabel(root) + ": ignored symlink asset path " + pathString(current));
+            stageDirectoryWarning(sourceLabel(root) + ": ignored symlink asset path " + pathString(current));
             iterator.increment(error);
             if (error) throw sourceError(pathString(current), "PATH_ERROR", "cannot enumerate after symlink");
             continue;
@@ -365,14 +413,14 @@ void AssetSource::addDirectory(const std::filesystem::path& root, std::string_vi
             continue;
         }
         if (!std::filesystem::is_regular_file(status)) {
-            warnings_.push_back(sourceLabel(root) + ": ignored non-regular asset path " + pathString(current));
+            stageDirectoryWarning(sourceLabel(root) + ": ignored non-regular asset path " + pathString(current));
             iterator.increment(error);
             if (error) throw sourceError(pathString(current), "PATH_ERROR", "cannot enumerate asset path");
             continue;
         }
         const auto canonical = std::filesystem::weakly_canonical(current, error);
         if (error || !isWithin(canonicalRoot, canonical)) {
-            warnings_.push_back(sourceLabel(root) + ": ignored asset path outside source root " + pathString(current));
+            stageDirectoryWarning(sourceLabel(root) + ": ignored asset path outside source root " + pathString(current));
             iterator.increment(error);
             if (error) throw sourceError(pathString(current), "PATH_ERROR", "cannot enumerate asset path");
             continue;
@@ -388,6 +436,9 @@ void AssetSource::addDirectory(const std::filesystem::path& root, std::string_vi
         const auto safe = normalizePath(pathString(relative), limits_.maxPathBytes);
         if (!safe.valid)
             throw sourceError(pathString(current), "UNSAFE_PATH", "unsafe asset relative path: " + safe.reason);
+        if (files_.size() > limits_.maxFiles ||
+            candidates.size() >= limits_.maxFiles - files_.size())
+            throw sourceError(pathString(root), "FILE_COUNT_LIMIT", "asset file count exceeds configured limit");
         candidates.push_back({current, canonical, bytes});
         iterator.increment(error);
         if (error) throw sourceError(pathString(current), "PATH_ERROR", "cannot enumerate asset path");
@@ -396,8 +447,6 @@ void AssetSource::addDirectory(const std::filesystem::path& root, std::string_vi
     std::sort(candidates.begin(), candidates.end(), [](const Candidate& left, const Candidate& right) {
         return pathString(left.canonical) < pathString(right.canonical);
     });
-    if (!hasFileCapacity(files_.size(), candidates.size(), limits_.maxFiles))
-        throw sourceError(pathString(root), "FILE_COUNT_LIMIT", "asset file count exceeds configured limit");
     const auto canonicalRootString = pathString(canonicalRoot);
     std::vector<AssetFile> pending;
     pending.reserve(candidates.size());
@@ -425,21 +474,16 @@ void AssetSource::addDirectory(const std::filesystem::path& root, std::string_vi
         pendingBytes += file.size;
         pending.push_back(std::move(file));
     }
-    for (const auto& file : pending) {
-        for (const auto& alias : file.lookupPaths) {
-            const auto lookup = lowerAscii(alias);
-            for (const auto& existing : files_)
-                for (const auto& existingAlias : existing.lookupPaths)
-                    if (lowerAscii(existingAlias) == lookup)
-                        warnings_.push_back(file.source + ": duplicate asset path " + alias);
-            for (const auto& earlier : pending)
-                if (&earlier < &file)
-                    for (const auto& earlierAlias : earlier.lookupPaths)
-                        if (lowerAscii(earlierAlias) == lookup)
-                            warnings_.push_back(file.source + ": duplicate asset path " + alias);
-        }
-    }
+    stageDuplicateWarnings(files_, pending, limits_, warnings_.size(), warningBytes_,
+                           pendingWarnings, pendingWarningBytes, pathString(root));
+    if (pending.size() > limits_.maxFiles - files_.size())
+        throw sourceError(pathString(root), "FILE_COUNT_LIMIT", "asset file count exceeds configured limit");
+    files_.reserve(files_.size() + pending.size());
+    warnings_.reserve(warnings_.size() + pendingWarnings.size());
+    roots_.reserve(roots_.size() + 1u);
     roots_.push_back(canonicalRoot);
+    warningBytes_ += pendingWarningBytes;
+    for (auto& warning : pendingWarnings) warnings_.push_back(std::move(warning));
     totalBytes_ += pendingBytes;
     for (auto& file : pending) files_.push_back(std::move(file));
 }
@@ -450,22 +494,28 @@ void AssetSource::addAcdArchive(const apex::formats::AcdArchive& archive) {
 
 void AssetSource::addAcdArchive(std::shared_ptr<const apex::formats::AcdArchive> archive) {
     if (!archive) throw sourceError("data.acd", "INVALID_ARCHIVE", "null ACD archive");
-    warnings_.insert(warnings_.end(), archive->warnings.begin(), archive->warnings.end());
     std::vector<AssetFile> pending;
+    std::vector<std::string> pendingWarnings;
     std::size_t pendingBytes = 0;
+    std::size_t pendingWarningBytes = 0;
+    for (const auto& warning : archive->warnings)
+        stageWarning(pendingWarnings, pendingWarningBytes, warnings_.size(), warningBytes_,
+                     limits_, warning, archive->source);
     for (std::size_t index = 0; index < archive->entries.size(); ++index) {
         const auto& entry = archive->entries[index];
         if (!entry.safe) {
-            const auto reported = std::any_of(
-                archive->warnings.begin(), archive->warnings.end(), [&](const auto& warning) {
-                    return warning.find(entry.name) != std::string::npos;
-                });
-            if (!reported) warnings_.push_back(archive->source + ": ignored unsafe ACD entry " + entry.name);
+            stageWarning(pendingWarnings, pendingWarningBytes, warnings_.size(),
+                         warningBytes_, limits_,
+                         archive->source + ": ignored unsafe ACD entry " +
+                             entry.name,
+                         archive->source);
             continue;
         }
         const auto safe = normalizePath(entry.path, limits_.maxPathBytes);
         if (!safe.valid) {
-            warnings_.push_back(archive->source + ": ignored unsafe ACD entry " + entry.name);
+            stageWarning(pendingWarnings, pendingWarningBytes, warnings_.size(), warningBytes_,
+                         limits_, archive->source + ": ignored unsafe ACD entry " + entry.name,
+                         archive->source);
             continue;
         }
         if (entry.data.size() > limits_.maxFileBytes)
@@ -490,21 +540,16 @@ void AssetSource::addAcdArchive(std::shared_ptr<const apex::formats::AcdArchive>
     }
     if (!hasFileCapacity(files_.size(), pending.size(), limits_.maxFiles))
         throw sourceError(archive->source, "FILE_COUNT_LIMIT", "asset file count exceeds configured limit");
-    for (const auto& file : pending) {
-        for (const auto& alias : file.lookupPaths) {
-            const auto lookup = lowerAscii(alias);
-            for (const auto& existing : files_)
-                for (const auto& existingAlias : existing.lookupPaths)
-                    if (lowerAscii(existingAlias) == lookup)
-                        warnings_.push_back(file.source + ": duplicate asset path " + alias);
-            for (const auto& earlier : pending)
-                if (&earlier < &file)
-                    for (const auto& earlierAlias : earlier.lookupPaths)
-                        if (lowerAscii(earlierAlias) == lookup)
-                            warnings_.push_back(file.source + ": duplicate asset path " + alias);
-        }
-    }
+    stageDuplicateWarnings(files_, pending, limits_, warnings_.size(), warningBytes_,
+                           pendingWarnings, pendingWarningBytes, archive->source);
+    if (pending.size() > limits_.maxFiles - files_.size())
+        throw sourceError(archive->source, "FILE_COUNT_LIMIT", "asset file count exceeds configured limit");
+    files_.reserve(files_.size() + pending.size());
+    warnings_.reserve(warnings_.size() + pendingWarnings.size());
+    archives_.reserve(archives_.size() + 1u);
     archives_.push_back(archive);
+    warningBytes_ += pendingWarningBytes;
+    for (auto& warning : pendingWarnings) warnings_.push_back(std::move(warning));
     totalBytes_ += pendingBytes;
     for (auto& file : pending) files_.push_back(std::move(file));
 }
