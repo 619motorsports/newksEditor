@@ -2052,8 +2052,9 @@ void validates_ordered_indexed_batch_contract() {
     require(validate_indexed_static_mesh_batch_description(
                 target, description, diagnostic) ==
                 IndexedStaticMeshBatchStatus::unsupported &&
-                diagnostic.code == "indexed_stock_native_batch_staged",
-            "native batch authority rejects before portable camera assembly");
+                diagnostic.code ==
+                    "indexed_stock_native_batch_mixed_unsupported",
+            "mixed native and portable batch authority rejects before camera assembly");
     requests[1] = request_fixture(second_packet, pipeline, vertices, indices);
 
     PipelineProgram multisample_pipeline = pipeline_fixture();

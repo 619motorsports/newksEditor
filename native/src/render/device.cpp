@@ -2662,15 +2662,36 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
         return target_status == IndexedStaticMeshDrawStatus::unsupported
                    ? IndexedStaticMeshBatchStatus::unsupported
                    : IndexedStaticMeshBatchStatus::invalid_request;
-    if (std::any_of(
-            description.draws.begin(), description.draws.end(),
-            [](const IndexedStaticMeshDrawRequest& request) {
-                return request.shader_authority ==
-                       IndexedShaderAuthority::explicit_stock_ks_per_pixel_native;
-            })) {
+    const std::size_t native_draw_count = static_cast<std::size_t>(std::count_if(
+        description.draws.begin(), description.draws.end(),
+        [](const IndexedStaticMeshDrawRequest& request) {
+            return request.shader_authority ==
+                   IndexedShaderAuthority::explicit_stock_ks_per_pixel_native;
+        }));
+    const bool native_only =
+        native_draw_count != 0U && native_draw_count == description.draws.size();
+    if (native_draw_count != 0U && !native_only) {
         diagnostic = {
-            "indexed_stock_native_batch_staged",
-            "Native ksPerPixel execution currently supports one synchronous draw, not queued batch execution"};
+            "indexed_stock_native_batch_mixed_unsupported",
+            "A native ksPerPixel batch cannot mix native and portable scene draws"};
+        return IndexedStaticMeshBatchStatus::unsupported;
+    }
+    if (native_only &&
+        description.draws.size() >
+            max_stock_ks_per_pixel_native_batch_draws) {
+        diagnostic = {
+            "indexed_stock_native_batch_draw_limit",
+            "The native ksPerPixel batch exceeds its D3D12 sampler-heap draw limit"};
+        return IndexedStaticMeshBatchStatus::unsupported;
+    }
+    if (native_only &&
+        (!description.overlay_draws.empty() ||
+         !description.selected_mesh_draws.empty() ||
+         description.resolve_target != nullptr || !description.capture_rgba8 ||
+         texture.info().description.samples != 1U)) {
+        diagnostic = {
+            "indexed_stock_native_batch_feature_unsupported",
+            "The native ksPerPixel batch slice supports base 1x scene draws with one CPU readback"};
         return IndexedStaticMeshBatchStatus::unsupported;
     }
     std::uint32_t previous_selected_position = 0U;
@@ -2915,6 +2936,21 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
             return draw_status == IndexedStaticMeshDrawStatus::unsupported
                        ? IndexedStaticMeshBatchStatus::unsupported
                        : IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        if (native_only &&
+            (source.stock_ks_per_pixel_native->resources->shader_program()
+                     .source()
+                     .variant() != StockKsPerPixelVariant::base ||
+             source.packet->flags.blend_enabled ||
+             source.packet->flags.alpha_to_coverage ||
+             source.packet->flags.wireframe || source.packet->flags.selected ||
+             source.packet->shadow_only || source.pipeline->blend.enabled ||
+             source.pipeline->blend.alpha_to_coverage ||
+             source.pipeline->raster.fill == PipelineFillMode::wireframe)) {
+            diagnostic = {
+                "indexed_stock_native_batch_feature_unsupported",
+                "The native ksPerPixel batch slice supports opaque solid base draws"};
+            return IndexedStaticMeshBatchStatus::unsupported;
         }
     }
     diagnostic = {};

@@ -286,6 +286,14 @@ apex::formats::Kn5Node triangle_mesh() {
   TextureResult diffuse = device_result.device->create_texture(
       diffuse_description, diffuse_uploads);
   require(diffuse.ok(), "native diffuse allocation and upload");
+  const std::array<std::byte, 4U> second_diffuse_pixel = {
+      std::byte{20}, std::byte{220}, std::byte{60}, std::byte{255}};
+  TextureUploadPlan second_diffuse_uploads;
+  second_diffuse_uploads.subresources.push_back(
+      {0U, 0U, 1U, 1U, 4U, second_diffuse_pixel});
+  TextureResult second_diffuse = device_result.device->create_texture(
+      diffuse_description, second_diffuse_uploads);
+  require(second_diffuse.ok(), "second native diffuse allocation and upload");
   const std::array<std::byte, 4U> partial_alpha_diffuse_pixel = {
       std::byte{180}, std::byte{120}, std::byte{80}, std::byte{128}};
   TextureUploadPlan partial_alpha_diffuse_uploads;
@@ -351,6 +359,29 @@ apex::formats::Kn5Node triangle_mesh() {
               draw.rgba8[center + 1U] != std::byte{0} ||
               draw.rgba8[center + 2U] != std::byte{0},
           "native ksPerPixel WARP readback is not the clear color");
+
+  const StockKsPerPixelNativeDrawBinding second_binding =
+      native_resources.resources->bind(
+          *second_diffuse.texture,
+          {shadows[0].get(), shadows[1].get(), shadows[2].get()});
+  IndexedStaticMeshDrawRequest second_request = request;
+  second_request.stock_ks_per_pixel_native = &second_binding;
+  const std::array<IndexedStaticMeshDrawRequest, 2U> batch_requests = {
+      request, second_request};
+  IndexedStaticMeshBatchDescription batch;
+  batch.draws = batch_requests;
+  batch.clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
+  const IndexedStaticMeshBatchResult batch_draw =
+      device_result.device->draw_indexed_static_mesh_batch_and_readback(
+          *target.texture, batch);
+  require(batch_draw.ok() && batch_draw.rgba8.size() == 32U * 32U * 4U,
+          batch_draw.diagnostic.code.empty()
+              ? "two-draw native ksPerPixel WARP batch/readback"
+              : batch_draw.diagnostic.code);
+  require(batch_draw.rgba8[center] != draw.rgba8[center] ||
+              batch_draw.rgba8[center + 1U] != draw.rgba8[center + 1U] ||
+              batch_draw.rgba8[center + 2U] != draw.rgba8[center + 2U],
+          "native batch preserves draw order and second diffuse binding");
 
   StaticMeshUploadResult alpha_mesh_upload =
       upload_static_mesh(*device_result.device, triangle_mesh(), [] {

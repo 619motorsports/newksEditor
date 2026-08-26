@@ -1701,6 +1701,59 @@ void validates_complete_native_draw_bindings_before_execution() {
             diagnostic.code.empty() ?
                 "complete native binding passes before command recording" :
                 diagnostic.code.c_str());
+    const std::array<IndexedStaticMeshDrawRequest, 2U> native_requests = {
+        request, request};
+    IndexedStaticMeshBatchDescription native_batch;
+    native_batch.draws = native_requests;
+    require(validate_indexed_static_mesh_batch_description(
+                target, native_batch, diagnostic) ==
+                IndexedStaticMeshBatchStatus::ready,
+            diagnostic.code.empty()
+                ? "native-only base batch passes common preflight"
+                : diagnostic.code.c_str());
+    const std::vector<IndexedStaticMeshDrawRequest> oversized_native_requests(
+        max_stock_ks_per_pixel_native_batch_draws + 1U, request);
+    native_batch.draws = oversized_native_requests;
+    require(validate_indexed_static_mesh_batch_description(
+                target, native_batch, diagnostic) ==
+                IndexedStaticMeshBatchStatus::unsupported &&
+                diagnostic.code == "indexed_stock_native_batch_draw_limit",
+            "native-only batch preserves the D3D12 sampler-heap bound");
+    auto mixed_requests = native_requests;
+    mixed_requests[1U].shader_authority =
+        IndexedShaderAuthority::packet_contract;
+    native_batch.draws = mixed_requests;
+    require(validate_indexed_static_mesh_batch_description(
+                target, native_batch, diagnostic) ==
+                IndexedStaticMeshBatchStatus::unsupported &&
+                diagnostic.code ==
+                    "indexed_stock_native_batch_mixed_unsupported",
+            "mixed native and portable batch is explicitly unsupported");
+    native_batch.draws = native_requests;
+    native_batch.capture_rgba8 = false;
+    require(validate_indexed_static_mesh_batch_description(
+                target, native_batch, diagnostic) ==
+                IndexedStaticMeshBatchStatus::unsupported &&
+                diagnostic.code ==
+                    "indexed_stock_native_batch_feature_unsupported",
+            "native-only batch rejects unsupported no-capture execution");
+    DrawPacket wireframe_packet = packet;
+    wireframe_packet.flags.wireframe = true;
+    PipelineProgram wireframe_pipeline = pipeline;
+    wireframe_pipeline.raster.fill = PipelineFillMode::wireframe;
+    IndexedStaticMeshDrawRequest wireframe_request = request;
+    wireframe_request.packet = &wireframe_packet;
+    wireframe_request.pipeline = &wireframe_pipeline;
+    const std::array<IndexedStaticMeshDrawRequest, 1U> wireframe_requests = {
+        wireframe_request};
+    native_batch.draws = wireframe_requests;
+    native_batch.capture_rgba8 = true;
+    require(validate_indexed_static_mesh_batch_description(
+                target, native_batch, diagnostic) ==
+                IndexedStaticMeshBatchStatus::unsupported &&
+                diagnostic.code ==
+                    "indexed_stock_native_batch_feature_unsupported",
+            "native-only batch reports staged wireframe support explicitly");
     const auto expect_missing_binding_field =
         [&](const StockKsPerPixelNativeDrawBinding& candidate,
             const char* description) {

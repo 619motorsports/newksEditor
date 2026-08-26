@@ -220,6 +220,7 @@ add_library(apex_render STATIC
   src/render/view_axis.cpp
   src/render/vulkan_device.cpp
   src/render/d3d12_stock_ks_per_pixel.cpp
+  src/render/d3d12_stock_ks_per_pixel_batch.cpp
   src/render/d3d12_device.cpp
 )
 add_library(ApexEditor::Render ALIAS apex_render)

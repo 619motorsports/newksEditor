@@ -776,6 +776,10 @@ struct IndexedStaticMeshDrawResult {
 // their attachment and load/clear fields at their defaults. The first draw
 // uses load_color/clear_depth, and later draws load both persistent targets.
 inline constexpr std::size_t max_indexed_static_mesh_batch_draws = 4096U;
+// The first native D3D12 stock batch allocates two shader-visible sampler
+// descriptors per draw. The D3D12 sampler-heap limit therefore bounds this
+// native-only subset to 1,024 draws.
+inline constexpr std::size_t max_stock_ks_per_pixel_native_batch_draws = 1024U;
 
 struct IndexedStaticMeshBatchDescription {
     std::span<const IndexedStaticMeshDrawRequest> draws{};

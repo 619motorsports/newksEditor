@@ -1,6 +1,7 @@
 #include "backend_internal.hpp"
 #include "apex/render/draw_packet.hpp"
 #include "d3d12_stock_ks_per_pixel.hpp"
+#include "d3d12_stock_ks_per_pixel_batch.hpp"
 
 #include <algorithm>
 #include <array>
@@ -577,12 +578,16 @@ public:
     const DepthAttachmentInfo& info() const noexcept override { return info_; }
     [[nodiscard]] ID3D12Resource* resource() const noexcept { return resource_.Get(); }
     [[nodiscard]] D3D12_RESOURCE_STATES state() const noexcept { return state_; }
+    [[nodiscard]] D3D12_RESOURCE_STATES* state_pointer() noexcept {
+        return &state_;
+    }
     [[nodiscard]] const D3D12Context* context() const noexcept { return context_.get(); }
     [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE dsv(bool writable) const noexcept {
         return writable ? write_dsv_ : read_dsv_;
     }
     [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE srv() const noexcept { return srv_; }
     [[nodiscard]] bool cleared() const noexcept { return cleared_; }
+    [[nodiscard]] bool* cleared_pointer() noexcept { return &cleared_; }
     void set_state(D3D12_RESOURCE_STATES state) noexcept { state_ = state; }
     void set_cleared() noexcept { cleared_ = true; }
 
@@ -3929,6 +3934,9 @@ public:
     [[nodiscard]] const D3D12Context* context() const noexcept { return context_.get(); }
     [[nodiscard]] ID3D12Resource* resource() const noexcept { return resource_.Get(); }
     [[nodiscard]] D3D12_RESOURCE_STATES state() const noexcept { return state_; }
+    [[nodiscard]] D3D12_RESOURCE_STATES* state_pointer() noexcept {
+        return &state_;
+    }
     [[nodiscard]] bool initialized() const noexcept { return initialized_; }
     void set_state(D3D12_RESOURCE_STATES state) noexcept { state_ = state; }
 
@@ -3980,6 +3988,13 @@ public:
         const IndexedStaticMeshDrawRequest& request,
         const D3D12Buffer& vertex_buffer,
         const D3D12Buffer& index_buffer,
+        D3D12DepthAttachment* depth_attachment,
+        std::vector<std::byte>& output,
+        Diagnostic& diagnostic);
+
+    bool draw_stock_ks_per_pixel_native_batch(
+        const IndexedStaticMeshBatchDescription& batch,
+        std::span<const D3D12StockKsPerPixelNativeBatchDraw> draws,
         D3D12DepthAttachment* depth_attachment,
         std::vector<std::byte>& output,
         Diagnostic& diagnostic);
@@ -5644,6 +5659,101 @@ bool D3D12Texture::draw_stock_ks_per_pixel_native(
     return true;
 }
 
+bool D3D12Texture::draw_stock_ks_per_pixel_native_batch(
+    const IndexedStaticMeshBatchDescription& batch,
+    std::span<const D3D12StockKsPerPixelNativeBatchDraw> draws,
+    D3D12DepthAttachment* depth_attachment,
+    std::vector<std::byte>& output,
+    Diagnostic& diagnostic) {
+    if (batch.load_color && !initialized_) {
+        diagnostic = {
+            "indexed_color_load_before_clear",
+            "A color load was requested before the color attachment was initialized"};
+        return false;
+    }
+
+    std::lock_guard command_guard(context_->command_mutex);
+    D3D12_DESCRIPTOR_HEAP_DESC rtv_description{};
+    rtv_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    rtv_description.NumDescriptors = 1U;
+    ComPtr<ID3D12DescriptorHeap> rtv_heap;
+    HRESULT result = context_->device->CreateDescriptorHeap(
+        &rtv_description, IID_PPV_ARGS(&rtv_heap));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "CreateDescriptorHeap(stock native batch RTV)", result);
+        diagnostic.code = "d3d12_stock_native_batch_descriptor_failed";
+        return false;
+    }
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv =
+        rtv_heap->GetCPUDescriptorHandleForHeapStart();
+    context_->device->CreateRenderTargetView(resource_.Get(), nullptr, rtv);
+
+    ComPtr<ID3D12CommandAllocator> allocator;
+    result = context_->device->CreateCommandAllocator(
+        D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "CreateCommandAllocator(stock native batch)", result);
+        diagnostic.code = "d3d12_stock_native_batch_execution_failed";
+        return false;
+    }
+    ComPtr<ID3D12GraphicsCommandList> command_list;
+    result = context_->device->CreateCommandList(
+        0U, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
+        IID_PPV_ARGS(&command_list));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "CreateCommandList(stock native batch)", result);
+        diagnostic.code = "d3d12_stock_native_batch_execution_failed";
+        return false;
+    }
+    result = command_list->Close();
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "Close(initial stock native batch command list)", result);
+        diagnostic.code = "d3d12_stock_native_batch_execution_failed";
+        return false;
+    }
+
+    D3D12StockKsPerPixelNativeBatchContext native_context;
+    native_context.device = context_->device.Get();
+    native_context.queue = context_->queue.Get();
+    native_context.allocator = allocator.Get();
+    native_context.command_list = command_list.Get();
+    native_context.target = resource_.Get();
+    native_context.target_rtv = rtv;
+    native_context.target_state = &state_;
+    native_context.target_format = dxgi_texture_format(info_.description.format);
+    native_context.target_width = info_.description.width;
+    native_context.target_height = info_.description.height;
+    native_context.load_color = batch.load_color;
+    native_context.clear_color = batch.clear_color;
+    native_context.target_cleared = &initialized_;
+    native_context.depth =
+        depth_attachment != nullptr ? depth_attachment->resource() : nullptr;
+    native_context.depth_write_dsv =
+        depth_attachment != nullptr ? depth_attachment->dsv(true)
+                                    : D3D12_CPU_DESCRIPTOR_HANDLE{};
+    native_context.depth_read_dsv =
+        depth_attachment != nullptr ? depth_attachment->dsv(false)
+                                    : D3D12_CPU_DESCRIPTOR_HANDLE{};
+    native_context.depth_state =
+        depth_attachment != nullptr ? depth_attachment->state_pointer() : nullptr;
+    native_context.depth_cleared =
+        depth_attachment != nullptr ? depth_attachment->cleared_pointer() : nullptr;
+    native_context.clear_depth = batch.clear_depth;
+    native_context.depth_clear_value = batch.depth_clear_value;
+    native_context.draws = draws;
+    native_context.readback = &output;
+
+    output.clear();
+    const bool drawn = record_d3d12_stock_ks_per_pixel_native_batch(
+        native_context, diagnostic);
+    if (drawn) initialized_ = true;
+    return drawn;
+}
+
 [[nodiscard]] D3D12_TEXTURE_ADDRESS_MODE d3d12_sampler_address(SamplerAddressMode mode) noexcept {
     switch (mode) {
     case SamplerAddressMode::repeat: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
@@ -6239,6 +6349,158 @@ public:
             return {IndexedStaticMeshBatchStatus::unsupported,
                     {"indexed_static_mesh_batch_context_mismatch",
                      "Batch resources belong to another D3D12 device"}, {}};
+        }
+        const bool native_only = !batch.draws.empty() && std::all_of(
+            batch.draws.begin(), batch.draws.end(),
+            [](const IndexedStaticMeshDrawRequest& request) {
+                return request.shader_authority ==
+                       IndexedShaderAuthority::explicit_stock_ks_per_pixel_native;
+            });
+        if (native_only) {
+            std::vector<D3D12StockKsPerPixelNativeBatchDraw> native_draws;
+            try {
+                native_draws.reserve(batch.draws.size());
+            } catch (const std::bad_alloc&) {
+                return {IndexedStaticMeshBatchStatus::execution_failed,
+                        {"d3d12_stock_native_batch_allocation_failed",
+                         "Native batch bridge allocation failed"},
+                        {}};
+            }
+            for (const IndexedStaticMeshDrawRequest& request : batch.draws) {
+                const auto* binding = request.stock_ks_per_pixel_native;
+                const auto* resources =
+                    binding != nullptr ? binding->resources : nullptr;
+                if (resources == nullptr || resources->device() != this) {
+                    return {IndexedStaticMeshBatchStatus::unsupported,
+                            {"indexed_stock_native_batch_device_mismatch",
+                             "Native batch owners belong to another D3D12 device"},
+                            {}};
+                }
+                const auto* vertex =
+                    dynamic_cast<const D3D12Buffer*>(request.vertex_buffer);
+                const auto* index =
+                    dynamic_cast<const D3D12Buffer*>(request.index_buffer);
+                auto* diffuse = const_cast<D3D12Texture*>(
+                    dynamic_cast<const D3D12Texture*>(
+                        binding->diffuse_texture));
+                const auto* vertex_shader =
+                    dynamic_cast<const D3D12ShaderModule*>(
+                        &resources->shader_program().vertex_shader());
+                const auto* pixel_shader =
+                    dynamic_cast<const D3D12ShaderModule*>(
+                        &resources->shader_program().pixel_shader());
+                const auto* linear_sampler =
+                    dynamic_cast<const D3D12Sampler*>(
+                        resources->samplers().sampler(
+                            StockKsPerPixelNativeSamplerSlot::linear));
+                const auto* shadow_sampler =
+                    dynamic_cast<const D3D12Sampler*>(
+                        resources->samplers().sampler(
+                            StockKsPerPixelNativeSamplerSlot::shadow));
+                std::array<const D3D12Buffer*, 5U> constants{};
+                for (std::size_t index_value = 0U;
+                     index_value < constants.size(); ++index_value) {
+                    constants[index_value] =
+                        dynamic_cast<const D3D12Buffer*>(
+                            resources->constant_buffers().buffer(
+                                static_cast<
+                                    StockKsPerPixelNativeConstantSlot>(
+                                    index_value)));
+                }
+                std::array<D3D12DepthAttachment*, 3U> shadows{};
+                for (std::size_t index_value = 0U;
+                     index_value < shadows.size(); ++index_value) {
+                    shadows[index_value] =
+                        const_cast<D3D12DepthAttachment*>(
+                            dynamic_cast<const D3D12DepthAttachment*>(
+                                binding->shadow_maps[index_value]));
+                }
+                const bool missing_type =
+                    vertex == nullptr || index == nullptr || diffuse == nullptr ||
+                    vertex_shader == nullptr || pixel_shader == nullptr ||
+                    linear_sampler == nullptr || shadow_sampler == nullptr ||
+                    std::any_of(constants.begin(), constants.end(),
+                                [](const D3D12Buffer* value) {
+                                    return value == nullptr;
+                                }) ||
+                    std::any_of(shadows.begin(), shadows.end(),
+                                [](const D3D12DepthAttachment* value) {
+                                    return value == nullptr;
+                                });
+                if (missing_type) {
+                    return {IndexedStaticMeshBatchStatus::unsupported,
+                            {"indexed_stock_native_batch_type_unsupported",
+                             "Native batch contains an unknown D3D12 resource handle"},
+                            {}};
+                }
+                const bool foreign_context =
+                    vertex->context() != context || index->context() != context ||
+                    diffuse->context() != context ||
+                    vertex_shader->context() != context ||
+                    pixel_shader->context() != context ||
+                    linear_sampler->context() != context ||
+                    shadow_sampler->context() != context ||
+                    std::any_of(constants.begin(), constants.end(),
+                                [&](const D3D12Buffer* value) {
+                                    return value->context() != context;
+                                }) ||
+                    std::any_of(shadows.begin(), shadows.end(),
+                                [&](const D3D12DepthAttachment* value) {
+                                    return value->context() != context;
+                                });
+                if (foreign_context) {
+                    return {IndexedStaticMeshBatchStatus::unsupported,
+                            {"indexed_stock_native_batch_context_mismatch",
+                             "Native batch resources belong to different D3D12 devices"},
+                            {}};
+                }
+                if (!diffuse->initialized() ||
+                    std::any_of(shadows.begin(), shadows.end(),
+                                [](const D3D12DepthAttachment* value) {
+                                    return !value->cleared();
+                                })) {
+                    return {IndexedStaticMeshBatchStatus::invalid_request,
+                            {"indexed_stock_native_batch_resource_uninitialized",
+                             "Native batch textures and shadow maps must be initialized"},
+                            {}};
+                }
+
+                D3D12StockKsPerPixelNativeBatchDraw native_draw;
+                native_draw.packet = request.packet;
+                native_draw.pipeline = request.pipeline;
+                native_draw.index_type = request.index_type;
+                native_draw.vertex_buffer = vertex->resource();
+                native_draw.vertex_state = vertex->state();
+                native_draw.index_buffer = index->resource();
+                native_draw.index_state = index->state();
+                native_draw.shader_program = &resources->shader_program();
+                native_draw.constant_buffers = &resources->constant_buffers();
+                native_draw.samplers = &resources->samplers();
+                for (std::size_t index_value = 0U;
+                     index_value < constants.size(); ++index_value) {
+                    native_draw.constant_buffer_resources[index_value] =
+                        constants[index_value]->resource();
+                }
+                native_draw.diffuse_texture = diffuse->resource();
+                native_draw.diffuse_format =
+                    dxgi_texture_format(diffuse->info().description.format);
+                native_draw.diffuse_state = diffuse->state_pointer();
+                for (std::size_t index_value = 0U;
+                     index_value < shadows.size(); ++index_value) {
+                    native_draw.shadow_maps[index_value] =
+                        shadows[index_value]->resource();
+                    native_draw.shadow_states[index_value] =
+                        shadows[index_value]->state_pointer();
+                }
+                native_draws.push_back(native_draw);
+            }
+            std::vector<std::byte> output;
+            if (!d3d_texture->draw_stock_ks_per_pixel_native_batch(
+                    batch, native_draws, d3d_depth, output, diagnostic)) {
+                return {IndexedStaticMeshBatchStatus::execution_failed,
+                        std::move(diagnostic), {}};
+            }
+            return {IndexedStaticMeshBatchStatus::ready, {}, std::move(output)};
         }
         std::vector<D3D12IndexedBatchDraw> draws;
         draws.reserve(batch.draws.size() + batch.selected_mesh_draws.size() +
