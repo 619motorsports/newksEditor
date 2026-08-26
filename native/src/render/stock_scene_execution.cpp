@@ -511,7 +511,7 @@ StockSceneExecutionResult prepare_stock_scene_execution(
         result.render_plan = build_render_plan(*request.scene, render_options);
         result.render_plan.unsupported_effects.push_back({
             "stock_scene_snapshot_staged",
-            "Workspace LOD/FOV, CSP shader and resource changes, and surface overlays remain outside this main-color handoff.",
+            "Workspace LOD/FOV, unresolved CSP shader and resource changes, and surface overlays remain outside this main-color handoff.",
         });
         if (result.render_plan.items.size() > request.limits.max_plan_items ||
             !plan_within_limit(result.render_plan, request.limits.max_plan_bytes)) {

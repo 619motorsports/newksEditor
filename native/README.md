@@ -616,6 +616,10 @@ textures. It rewrites only the requested material slots and preserves their
 bind points. Then the stock-scene facade can own and execute the effective
 model. A real backend pixel test proves the ACD-to-GPU path. The renderer does
 not receive the `AssetSource`, the grant, or the external path.
+Workspace viewport preparation now uses this bridge before it allocates GPU
+resources. It passes the owned effective model and the remaining overrides to
+the stock-scene facade. Vulkan and D3D12 use the same embedded-texture path.
+Raw external-file overrides remain invalid at the renderer boundary.
 The FBX converter handles static positions, triangulation, hierarchy, a
 bounded transform subset, first material assignment, and one face-varying UV
 layer. Its aggregate budget includes temporary containers, copied strings,

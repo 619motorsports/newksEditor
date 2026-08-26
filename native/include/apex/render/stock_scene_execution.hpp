@@ -15,8 +15,9 @@ namespace apex::render {
 // This is the bounded main-color scene boundary. It deliberately does not
 // execute most frame-plan effects such as reflections, sky, CSP lights, or
 // post-processing. A caller can opt into the bounded retained directional-
-// shadow receiver contract. Per-node CSP mesh state is supported, while CSP
-// shader, property, and resource changes remain explicit evidence in
+// shadow receiver contract. Per-node CSP mesh state is supported. Callers must
+// resolve external resources into owned model payloads before this boundary.
+// Other CSP shader, property, and resource changes remain explicit evidence in
 // render_plan.
 struct StockSceneExecutionLimits {
     std::size_t max_scene_nodes = 1'000'000U;

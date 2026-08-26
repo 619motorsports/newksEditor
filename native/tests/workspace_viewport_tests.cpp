@@ -2,6 +2,7 @@
 #include "apex/app/workspace_viewport.hpp"
 #include "apex/app/workspace_shadow_programs.hpp"
 #include "apex/authoring/ai_spline_session.hpp"
+#include "apex/formats/acd.hpp"
 #include "apex/render/view_axis.hpp"
 
 #include <algorithm>
@@ -140,11 +141,15 @@ public:
     }
 
     TextureResult create_texture(const TextureDescription &description,
-                                 const TextureUploadPlan &) override {
+                                 const TextureUploadPlan &uploads) override {
         ++texture_calls;
         auto texture =
             std::make_unique<FakeTexture>(description, info_.backend);
         created_texture_descriptions.push_back(description);
+        std::vector<std::byte> bytes;
+        for (const auto &upload : uploads.subresources)
+            bytes.insert(bytes.end(), upload.data.begin(), upload.data.end());
+        created_texture_bytes.push_back(std::move(bytes));
         created_textures.push_back(texture.get());
         return {TextureStatus::ready, {}, std::move(texture)};
     }
@@ -307,6 +312,7 @@ public:
                            indexed_directional_shadow_cascade_count>>
         receiver_maps;
     std::vector<TextureDescription> created_texture_descriptions;
+    std::vector<std::vector<std::byte>> created_texture_bytes;
     std::vector<Texture *> created_textures;
     std::vector<DepthAttachmentDescription> created_depth_descriptions;
     std::vector<Texture *> resolve_targets;
@@ -542,6 +548,139 @@ WorkspaceViewportPrepareRequest request_for(const Fixture& fixture_value) {
     request.render.include_reflections = false;
     request.render.include_shadows = false;
     return request;
+}
+
+apex::formats::AcdArchive texture_archive(std::vector<std::uint8_t> bytes) {
+    apex::formats::AcdArchive archive;
+    archive.source = "fixture/data.acd";
+    archive.assetName = "fixture";
+    apex::formats::AcdEntry entry;
+    entry.name = "override.dds";
+    entry.path = "override.dds";
+    entry.safe = true;
+    entry.size = bytes.size();
+    entry.data = std::move(bytes);
+    archive.entries.push_back(std::move(entry));
+    return archive;
+}
+
+void materializes_external_texture_before_backend_preparation() {
+    for (const auto backend : {Backend::Vulkan, Backend::D3D12}) {
+        auto value = fixture();
+        if (backend == Backend::D3D12) {
+            for (auto& module : value.modules) {
+                module.format = PipelineShaderFormat::dxil;
+                module.bytes = dxbc_shader_bytes();
+            }
+        }
+
+        auto replacement = diffuse_dds();
+        replacement[148U] = 7U;
+        replacement[149U] = 19U;
+        replacement[150U] = 31U;
+        apex::assets::AssetSource source;
+        source.addAcdArchive(texture_archive(replacement));
+
+        std::vector<MaterialBindingOverrides> overrides(1U);
+        MaterialTextureOverride override_value;
+        override_value.file = "override.dds";
+        overrides.front().resources.emplace("txDiffuse", override_value);
+
+        const std::array<ExternalTextureGrant, 1U> grants = {
+            ExternalTextureGrant{"viewport", &source}};
+        std::array<ExternalTextureRequest, 1U> external_requests{};
+        auto& external = external_requests.front();
+        external.grant_id = "viewport";
+        external.material_index = 0U;
+        external.binding.slot = "txDiffuse";
+        external.binding.kind = MaterialTextureKind::external_file;
+        external.binding.bind_point = 0U;
+        external.binding.file = "override.dds";
+        external.binding.required = true;
+
+        auto request = request_for(value);
+        request.overrides_by_material = overrides;
+        request.external_textures =
+            apex::app::WorkspaceViewportExternalTextureRequest{
+                grants, external_requests, {}};
+        FakeDevice device(backend);
+        auto prepared = apex::app::prepareWorkspaceViewport(
+            device, value.document, request);
+
+        const std::vector<std::byte> expected = {
+            std::byte{7U}, std::byte{19U}, std::byte{31U}, std::byte{255U}};
+        require(prepared.ok() &&
+                    std::find(device.created_texture_bytes.begin(),
+                              device.created_texture_bytes.end(), expected) !=
+                        device.created_texture_bytes.end(),
+                "external DDS is copied and uploaded through each backend contract");
+        require(overrides.front().resources.at("txDiffuse").file ==
+                    "override.dds",
+                "external texture preparation does not mutate caller overrides");
+    }
+}
+
+void rejects_invalid_external_textures_before_gpu_allocation() {
+    auto value = fixture();
+    std::vector<MaterialBindingOverrides> overrides(1U);
+    MaterialTextureOverride override_value;
+    override_value.file = "override.dds";
+    overrides.front().resources.emplace("txDiffuse", override_value);
+
+    apex::assets::AssetSource source;
+    source.addAcdArchive(texture_archive({1U, 2U, 3U}));
+    const std::array<ExternalTextureGrant, 1U> grants = {
+        ExternalTextureGrant{"viewport", &source}};
+    std::array<ExternalTextureRequest, 1U> external_requests{};
+    auto& external = external_requests.front();
+    external.grant_id = "viewport";
+    external.material_index = 0U;
+    external.binding.slot = "txDiffuse";
+    external.binding.kind = MaterialTextureKind::external_file;
+    external.binding.bind_point = 0U;
+    external.binding.file = "override.dds";
+
+    auto request = request_for(value);
+    request.overrides_by_material = overrides;
+    request.external_textures = apex::app::WorkspaceViewportExternalTextureRequest{
+        grants, external_requests, {}};
+    FakeDevice device;
+    auto malformed = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(!malformed.ok() &&
+                malformed.status == apex::app::WorkspaceViewportStatus::invalid &&
+                malformed.diagnostic.code ==
+                    "external_texture_decode_invalid_header" &&
+                device.texture_calls == 0U && device.depth_calls == 0U &&
+                device.buffer_calls == 0U,
+            "truncated external DDS fails before GPU allocation");
+
+    apex::assets::AssetSource scoped_source;
+    scoped_source.addAcdArchive(texture_archive(diffuse_dds()));
+    const std::array<ExternalTextureGrant, 1U> scoped_grants = {
+        ExternalTextureGrant{"viewport", &scoped_source}};
+    external.workspace_file_index = 1U;
+    request.external_textures = apex::app::WorkspaceViewportExternalTextureRequest{
+        scoped_grants, external_requests, {}};
+    auto wrong_scope = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(!wrong_scope.ok() &&
+                wrong_scope.diagnostic.code ==
+                    "external_texture_workspace_scope_mismatch" &&
+                device.texture_calls == 0U && device.depth_calls == 0U &&
+                device.buffer_calls == 0U,
+            "external texture scope mismatch fails before GPU allocation");
+
+    request.external_textures =
+        apex::app::WorkspaceViewportExternalTextureRequest{grants, {}, {}};
+    auto empty = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(!empty.ok() &&
+                empty.diagnostic.code ==
+                    "workspace_viewport_external_texture_request_empty" &&
+                device.texture_calls == 0U && device.depth_calls == 0U &&
+                device.buffer_calls == 0U,
+            "empty external texture handoff fails before GPU allocation");
 }
 
 PipelineProgram opaque_shadow_pipeline(const Fixture& fixture_value) {
@@ -4316,6 +4455,8 @@ void rejects_frame_mismatch_and_preserves_present_atomicity() {
 int main() {
     try {
         evaluates_bounded_workspace_lighting();
+        materializes_external_texture_before_backend_preparation();
+        rejects_invalid_external_textures_before_gpu_allocation();
         opens_and_draws();
         draws_four_sample_viewport_through_retained_resolve();
         draws_selected_axis_inside_the_scene_batch();

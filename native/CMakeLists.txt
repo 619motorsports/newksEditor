@@ -221,8 +221,18 @@ target_link_libraries(apex_render
   PUBLIC ApexEditor::Scene ApexEditor::Csp ApexEditor::Platform
 )
 
-# Renderer-facing application composition remains separate from apex_app so
-# workspace authoring and asset authority stay independent of GPU backends.
+# Keep filesystem and packed-asset authority above the backend-neutral renderer.
+# This bridge resolves and decodes CPU resources, but it creates no GPU objects.
+add_library(apex_external_texture_authority STATIC
+  src/render/external_texture_authority.cpp
+)
+add_library(ApexEditor::ExternalTextureAuthority ALIAS apex_external_texture_authority)
+target_link_libraries(apex_external_texture_authority
+  PUBLIC ApexEditor::Assets ApexEditor::Render
+)
+
+# Renderer-facing application composition remains separate from apex_app. It
+# can materialize application-authorized assets before entering GPU backends.
 add_library(apex_app_render STATIC
   src/app/installed_editor_spline.cpp
   src/app/workspace_ai_spline.cpp
@@ -233,17 +243,7 @@ add_library(apex_app_render STATIC
 )
 add_library(ApexEditor::AppRender ALIAS apex_app_render)
 target_link_libraries(apex_app_render
-  PUBLIC ApexEditor::App ApexEditor::Render
-)
-
-# Keep filesystem and packed-asset authority above the backend-neutral renderer.
-# This bridge resolves and decodes CPU resources, but it creates no GPU objects.
-add_library(apex_external_texture_authority STATIC
-  src/render/external_texture_authority.cpp
-)
-add_library(ApexEditor::ExternalTextureAuthority ALIAS apex_external_texture_authority)
-target_link_libraries(apex_external_texture_authority
-  PUBLIC ApexEditor::Assets ApexEditor::Render
+  PUBLIC ApexEditor::App ApexEditor::Render ApexEditor::ExternalTextureAuthority
 )
 
 add_executable(apex_native_app src/app/main.cpp)

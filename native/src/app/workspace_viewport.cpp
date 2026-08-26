@@ -410,6 +410,25 @@ preparationStatus(render::StaticSceneResourceStatus status) noexcept {
     return WorkspaceViewportStatus::invalid;
 }
 
+[[nodiscard]] WorkspaceViewportStatus externalTextureStatus(
+    render::ExternalTextureAuthorityStatus status) noexcept {
+    switch (status) {
+    case render::ExternalTextureAuthorityStatus::ready:
+        return WorkspaceViewportStatus::ready;
+    case render::ExternalTextureAuthorityStatus::unsupported:
+        return WorkspaceViewportStatus::unsupported;
+    case render::ExternalTextureAuthorityStatus::resource_limit:
+        return WorkspaceViewportStatus::allocation_failed;
+    case render::ExternalTextureAuthorityStatus::invalid_request:
+    case render::ExternalTextureAuthorityStatus::rejected:
+    case render::ExternalTextureAuthorityStatus::missing:
+    case render::ExternalTextureAuthorityStatus::ambiguous:
+    case render::ExternalTextureAuthorityStatus::read_failed:
+        return WorkspaceViewportStatus::invalid;
+    }
+    return WorkspaceViewportStatus::invalid;
+}
+
 [[nodiscard]] WorkspaceViewportFrameStatus frameStatus(
     render::PresentationFrameStatus status) noexcept {
     switch (status) {
@@ -1619,6 +1638,42 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         render_options.suppressed_subtree_roots = suppressed_roots;
         render_options.activity_overrides = activity_overrides;
 
+        std::unique_ptr<render::ExternalTextureEffectiveStockSceneInput>
+            effective_scene;
+        const formats::Kn5File* scene_model = &document.assembly.model;
+        std::span<const render::MaterialBindingOverrides> material_overrides =
+            request.overrides_by_material;
+        if (request.external_textures.has_value()) {
+            if (request.external_textures->requests.empty()) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_external_texture_request_empty",
+                    "External texture viewport preparation requires at least one request");
+                return result;
+            }
+            auto prepared_effective = render::prepare_effective_stock_scene_input(
+                document.assembly.model, request.overrides_by_material,
+                request.external_textures->grants,
+                request.external_textures->requests,
+                request.external_textures->limits);
+            if (!prepared_effective.ok()) {
+                result.status = externalTextureStatus(prepared_effective.status);
+                if (prepared_effective.diagnostics.empty()) {
+                    result.diagnostic = diagnostic(
+                        "workspace_viewport_external_texture_failed",
+                        "External texture viewport preparation failed without a diagnostic");
+                } else {
+                    result.diagnostic = {
+                        prepared_effective.diagnostics.front().code,
+                        prepared_effective.diagnostics.front().message};
+                }
+                return result;
+            }
+            effective_scene = std::move(prepared_effective.input);
+            scene_model = &effective_scene->model;
+            material_overrides = effective_scene->overrides_by_material;
+        }
+
         render::TextureDescription color_description;
         color_description.width = request.presentation.width;
         color_description.height = request.presentation.height;
@@ -1677,12 +1732,12 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         }
 
         render::StockSceneExecutionRequest scene_request;
-        scene_request.model = &document.assembly.model;
+        scene_request.model = scene_model;
         scene_request.scene = &document.scene.snapshot;
         scene_request.render = render_options;
         scene_request.packets = request.packets;
         scene_request.shader_modules = request.shader_modules;
-        scene_request.overrides_by_material = request.overrides_by_material;
+        scene_request.overrides_by_material = material_overrides;
         scene_request.evaluate_damage_preview = request.evaluate_damage_preview;
         scene_request.damage_broken_visible = request.damage_broken_visible;
         scene_request.targets.colors = {

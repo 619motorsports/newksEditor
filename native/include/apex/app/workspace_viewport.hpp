@@ -4,6 +4,7 @@
 #include "apex/app/workspace_session.hpp"
 #include "apex/render/device.hpp"
 #include "apex/render/directional_shadow.hpp"
+#include "apex/render/external_texture_authority.hpp"
 #include "apex/render/selection_axis.hpp"
 #include "apex/render/stock_scene_execution.hpp"
 
@@ -91,6 +92,16 @@ struct WorkspaceViewportLightingResult {
     }
 };
 
+// External files remain under an application-owned AssetSource grant. Viewport
+// preparation resolves and copies them into an opaque effective KN5 texture
+// table before any GPU resource is allocated. Neither backend retains these
+// grants, requests, or paths.
+struct WorkspaceViewportExternalTextureRequest {
+    std::span<const render::ExternalTextureGrant> grants{};
+    std::span<const render::ExternalTextureRequest> requests{};
+    render::ExternalTextureAuthorityLimits limits{};
+};
+
 [[nodiscard]] WorkspaceViewportLightingResult evaluateWorkspaceViewportLighting(
     const WorkspaceViewportLightingRequest& request);
 
@@ -125,6 +136,10 @@ struct WorkspaceViewportPrepareRequest {
     std::uint32_t color_samples = 1U;
     std::span<const render::StockMaterialShaderModules> shader_modules{};
     std::span<const render::MaterialBindingOverrides> overrides_by_material{};
+    // Presence requires at least one external request. The matching file
+    // overrides are consumed into owned embedded payloads before render
+    // preparation; unrelated overrides remain active.
+    std::optional<WorkspaceViewportExternalTextureRequest> external_textures;
     render::RenderPlanOptions render{};
     render::DrawPacketOptions packets{};
     bool evaluate_damage_preview = false;

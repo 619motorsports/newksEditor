@@ -493,15 +493,20 @@ remains unchanged and feature-complete.
   has a configurable aggregate byte budget. Count-driven containers, strings,
   texture payloads, and encryption records consume it before allocation.
   Bounded asset support includes directory/ACD resolution, asset-folder/skin
-  indexing, and skin metadata JSON. A CPU bridge resolves external DDS and PNG files
+  indexing, and skin metadata JSON. A CPU bridge resolves external DDS, PNG,
+  JPEG, and BMP files
   through explicit `AssetSource` grants. It rejects unsafe, missing, ambiguous,
   and over-budget input. It retains source identity and returns no partial
   table after an error. It creates an owned effective model with opaque image
   names. It rewrites exact material slots and preserves serialized bind points.
   The KN5 baker requires an explicit bind point before it adds a new resource
   slot. It reports and skips a new slot when that value is not known.
-  Real backend tests execute ACD DDS and PNG payloads through the stock-scene facade. The
-  renderer receives no `AssetSource`, grant, or external path. A staged CSP
+  Real backend tests execute ACD DDS and PNG payloads through the stock-scene
+  facade. Workspace viewport preparation resolves selected external files
+  before GPU allocation. It supplies the owned effective model to Vulkan or
+  D3D12 through the shared embedded-texture path. The renderer receives no
+  `AssetSource`, grant, or external path. Raw external-file overrides remain
+  invalid at the renderer boundary. A staged CSP
   configuration model is implemented. A bounded
   binary/ASCII FBX DOM parser is implemented. ASCII numeric arrays become typed
   FBX arrays after declared-count, finite-value, and allocation-budget checks.
