@@ -508,10 +508,17 @@ remains unchanged and feature-complete.
   WebGL near-plane variant for the WebGL clip convention. The native viewport
   now retains eligible packets and applies this filter for each frame. It uses
   the current camera and refreshed packet transforms without new GPU resources.
-  The mesh mask combines with workspace-file LOD by logical AND. An explicit
-  caller mask stays authoritative. Packets without recovered KN5 bounds remain
-  conservatively visible. Fractional CSP layers use the same labeled fallback.
-  Runtime `noCull` and `isStatic` mutations remain staged. KN5 and FBX scene
+  The color and Shadowgen masks combine with workspace-file LOD by logical AND.
+  The viewport evaluates the two `CameraMeshFilter` pass IDs independently.
+  Camera-filter mode retains active, renderable shadow casters when only
+  `isVisible` excludes them from color. A separate shadow mask can override
+  the automatic shadow result. Without that mask, an explicit color mask keeps
+  the former shared-mask behavior. Packets without recovered KN5 bounds remain
+  conservatively visible in each automatic pass. Fractional CSP layers use the
+  same labeled fallback. The viewport validates both explicit masks before a
+  buffer update, shadow-map refresh, draw, or presentation. Vulkan and D3D12
+  consume the same backend-neutral pass masks. Runtime `noCull` and `isStatic`
+  mutations remain staged. KN5 and FBX scene
   conversion now retain exact local vertex-AABB centers for color ordering.
   The production viewport recomputes a stable packet-index permutation for each
   frame. It keeps opaque packets first, sorts layers in ascending order, and

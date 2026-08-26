@@ -263,15 +263,15 @@ bool preplan_within_limit(const apex::scene::SceneSnapshot& scene,
     }
 
     // A render item may be retained in items, one opaque/transparent list,
-    // shadow casters, and the reflection selection. Charge all five copies,
+    // shadow-only items, shadow casters, and the reflection selection. Charge six copies,
     // including their ancestor IDs and inherited workspace strings.
-    if (!add_product({node_count, 5U}, sizeof(RenderItem), bytes, limit) ||
-        !add_product({node_count, max_depth, 5U}, sizeof(apex::scene::NodeId), bytes, limit) ||
-        !add_product({node_count, max_workspace_bytes, 5U}, 1U, bytes, limit) ||
+    if (!add_product({node_count, 6U}, sizeof(RenderItem), bytes, limit) ||
+        !add_product({node_count, max_depth, 6U}, sizeof(apex::scene::NodeId), bytes, limit) ||
+        !add_product({node_count, max_workspace_bytes, 6U}, 1U, bytes, limit) ||
         (include_camera_filter_catalog &&
          !add_count(node_count,
                     sizeof(std::optional<CameraMeshRenderable>) +
-                        sizeof(std::uint8_t),
+                        2U * sizeof(std::uint8_t),
                     bytes, limit)) ||
         !add_count(5U, sizeof(UnsupportedEffect), bytes, limit) ||
         !add_bytes(15U * 1024U, bytes, limit)) {
@@ -514,6 +514,8 @@ bool plan_within_limit(const RenderPlan& plan, std::uint64_t limit) noexcept {
         if (!add_item(item)) return false;
     for (const RenderItem& item : plan.transparent_items)
         if (!add_item(item)) return false;
+    for (const RenderItem& item : plan.shadow_only_items)
+        if (!add_item(item)) return false;
     for (const RenderItem& item : plan.shadow_casters)
         if (!add_item(item)) return false;
     for (const RenderItem& item : plan.reflection.items)
@@ -630,6 +632,8 @@ StockSceneExecutionResult prepare_stock_scene_execution(
             "Workspace LOD/FOV, unresolved CSP shader and resource changes, and surface overlays remain outside this main-color handoff.",
         });
         if (result.render_plan.items.size() > request.limits.max_plan_items ||
+            result.render_plan.shadow_only_items.size() >
+                request.limits.max_plan_items - result.render_plan.items.size() ||
             !plan_within_limit(result.render_plan, request.limits.max_plan_bytes)) {
             result.status = StaticSceneResourceStatus::invalid_request;
             result.diagnostic = {"stock_scene_plan_limit",

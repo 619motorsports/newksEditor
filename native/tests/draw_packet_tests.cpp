@@ -204,6 +204,52 @@ void builds_static_packet_with_stock_state_and_ranges() {
             "staged shader execution is explicit");
 }
 
+void retains_shadow_only_packets_without_color_authority() {
+    auto model = static_model();
+    model.root.children.push_back(static_mesh("HIDDEN_CASTER", 6));
+    auto scene = static_scene();
+    apex::scene::SceneNode hidden;
+    hidden.name = "HIDDEN_CASTER";
+    hidden.kind = apex::scene::NodeKind::mesh;
+    hidden.material = 0U;
+    hidden.transform = identity(6);
+    hidden.renderable = true;
+    hidden.visible = false;
+    hidden.active = true;
+    const auto hidden_id = scene.add_node(std::move(hidden), scene.root);
+
+    auto plan = one_item_plan();
+    plan.shadow_only_items.push_back(
+        {hidden_id, 0U, 0.0, 6.0F, false, false, true, {}, {},
+         {scene.root, hidden_id}, {}});
+    const auto result = apex::render::build_draw_packets(model, scene, plan);
+    require(result.supported && result.packets.size() == 2U &&
+                !result.packets[0U].shadow_only &&
+                result.packets[1U].node == hidden_id &&
+                result.packets[1U].shadow_only &&
+                result.packets[1U].flags.cast_shadows,
+            "shadow-only geometry retains resources without color authority");
+
+    apex::render::DrawPacketLimits one_packet_limit;
+    one_packet_limit.max_packets = 1U;
+    const auto limited = apex::render::build_draw_packets(
+        model, scene, plan, {}, one_packet_limit);
+    require(!limited.supported && limited.limit_exceeded &&
+                limited.packets.empty() && !limited.diagnostics.empty() &&
+                limited.diagnostics.front().code == "INPUT_LIMIT",
+            "shadow-only candidates consume the packet limit before allocation");
+
+    auto duplicate_plan = one_item_plan();
+    duplicate_plan.shadow_only_items.push_back(duplicate_plan.items.front());
+    const auto duplicate = apex::render::build_draw_packets(
+        static_model(), static_scene(), duplicate_plan);
+    require(!duplicate.supported && duplicate.packets.empty() &&
+                !duplicate.diagnostics.empty() &&
+                duplicate.diagnostics.front().code ==
+                    "INVALID_SHADOW_ONLY_RENDER_ITEM",
+            "duplicate shadow-only packet identity fails before packet creation");
+}
+
 void preserves_deterministic_transparent_order_and_unknown_shader_diagnostic() {
     auto model = static_model("unknownShader");
     model.root.children.push_back(static_mesh("GLASS_FAR", 20));
@@ -614,6 +660,7 @@ int main() {
     try {
         validates_bounded_kn5_scene_node_mapping_directly();
         builds_static_packet_with_stock_state_and_ranges();
+        retains_shadow_only_packets_without_color_authority();
         preserves_deterministic_transparent_order_and_unknown_shader_diagnostic();
         cpu_skinning_matches_reference_transform_and_validates_influences();
         palette_skinning_overload_matches_kn5_helper_and_rejects_malformed_streams();

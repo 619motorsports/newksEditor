@@ -221,8 +221,13 @@ struct WorkspaceViewportFrameRequest {
     // Optional stable prepared-packet visibility mask. See the static-scene
     // frame contract for count and value requirements. A nonempty mask is
     // authoritative. An empty mask lets a prepared car-LOD catalog derive
-    // visibility from the frame camera.
+    // color visibility from the frame camera.
     std::span<const std::uint8_t> packet_visibility{};
+    // Optional independent Shadowgen mask in prepared packet order. A
+    // nonempty value is authoritative for shadows. When this span is empty,
+    // a nonempty packet_visibility mask keeps the former shared-mask behavior.
+    // When both spans are empty, the prepared catalog derives each pass mask.
+    std::span<const std::uint8_t> shadow_packet_visibility{};
     bool apply_skinning = false;
     std::optional<render::KsPerPixelFrameConstants> frame_constants;
     // Override the prepared grid state. A true value requires grid resources
@@ -385,7 +390,8 @@ private:
         std::vector<std::size_t> file_for_packet;
         std::vector<std::optional<render::CameraMeshRenderable>> mesh_filters;
         std::uint32_t max_layer = 5U;
-        std::vector<std::uint8_t> frame_visibility;
+        std::vector<std::uint8_t> frame_color_visibility;
+        std::vector<std::uint8_t> frame_shadow_visibility;
         bool webgl_live_transparent_order = false;
         std::vector<ColorOrderPacket> color_order_packets;
         std::vector<std::uint32_t> frame_color_order;

@@ -291,7 +291,11 @@ DrawPacketBuildResult build_draw_packets(
     if (scene.nodes.size() > limits.max_scene_nodes || scene.materials.size() > limits.max_scene_materials ||
         model.materials.size() > limits.max_scene_materials || model.textures.size() > limits.max_scene_textures ||
         model.textures.size() > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
-        plan.items.size() > limits.max_packets) {
+        plan.items.size() > limits.max_packets ||
+        (options.include_shadow_casters &&
+         (plan.shadow_only_items.size() > limits.max_packets ||
+          plan.shadow_only_items.size() >
+              limits.max_packets - plan.items.size()))) {
         add_diagnostic(result, limits, DrawPacketDiagnostic::Severity::error, "INPUT_LIMIT",
                        "scene, material, or render-plan input exceeds draw-packet limits");
         result.limit_exceeded = true;
@@ -356,8 +360,35 @@ DrawPacketBuildResult build_draw_packets(
         }
     }
     std::stable_sort(items.begin(), items.end(), node_order_less);
+    const std::size_t color_item_count = items.size();
+    if (options.include_shadow_casters) {
+        std::vector<bool> retained_nodes(scene.nodes.size(), false);
+        for (const auto& item : items) {
+            if (item.node != apex::scene::invalid_node_id &&
+                static_cast<std::size_t>(item.node) < retained_nodes.size()) {
+                retained_nodes[static_cast<std::size_t>(item.node)] = true;
+            }
+        }
+        for (const auto& item : plan.shadow_only_items) {
+            if (item.node == apex::scene::invalid_node_id ||
+                static_cast<std::size_t>(item.node) >= retained_nodes.size() ||
+                retained_nodes[static_cast<std::size_t>(item.node)] ||
+                item.material == apex::scene::invalid_material_id ||
+                !std::isfinite(item.distance) || !item.casts_shadows) {
+                add_diagnostic(
+                    result, limits, DrawPacketDiagnostic::Severity::error,
+                    "INVALID_SHADOW_ONLY_RENDER_ITEM",
+                    "The shadow-only plan contains an invalid or duplicate mesh",
+                    item.node, item.material);
+                return result;
+            }
+            retained_nodes[static_cast<std::size_t>(item.node)] = true;
+            items.push_back(item);
+        }
+    }
     for (std::size_t order = 0; order < items.size(); ++order) {
         const auto& item = items[order];
+        const bool shadow_only = order >= color_item_count;
         const auto* scene_node = scene.find_node(item.node);
         if (scene_node == nullptr || static_cast<std::size_t>(scene_node->id) >= raw_nodes.size()) {
             add_diagnostic(result, limits, DrawPacketDiagnostic::Severity::error, "INVALID_NODE_REFERENCE", "render item references no scene node", item.node, item.material);
@@ -601,6 +632,7 @@ DrawPacketBuildResult build_draw_packets(
                             profile.depth_test, profile.depth_write && !packet_transparent, options.wireframe,
                             item.node == options.selected_node,
                             item.casts_shadows && options.include_shadow_casters};
+            packet.shadow_only = shadow_only;
             packet.resources.reserve(source_material.resources.size());
             for (const auto& resource : source_material.resources) {
                 std::uint32_t texture_index = invalid_draw_texture_index;

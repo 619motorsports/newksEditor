@@ -170,9 +170,16 @@ Each frame uses the current camera position, FOV, view-projection matrix, and
 clip convention. A refreshed packet supplies its current world matrix. The
 viewport does not rebuild graphics resources after camera movement.
 
-The mesh mask combines with the workspace-file LOD mask by logical AND. An
-explicit caller mask stays authoritative and bypasses both automatic masks.
-The final automatic mask applies to color and directional-shadow submission.
+The workspace-file LOD mask applies to both color and directional shadows.
+The viewport then evaluates each `CameraMeshFilter` pass independently.
+
+The color pass uses the opaque or transparent pass ID. The directional-shadow
+pass uses `Shadowgen`. Thus, a renderable mesh can remain a shadow candidate
+when `isVisible` removes it from color.
+
+A separate explicit shadow mask can replace the automatic shadow result. If
+that mask is absent, an explicit color mask keeps the former shared behavior.
+The viewport validates both masks before mutable frame work.
 
 Packets without recovered KN5 bounds stay visible. A fractional CSP layer also
 uses this conservative fallback because the native field is an integer. These
@@ -193,9 +200,12 @@ This sort retains the existing WebGL feature. It does not reproduce the
 original editor's transparent order. The original Classic pass uses scene
 traversal order, as recorded in `ksnet-transparent-pass-order.md`.
 
-Two active-path gaps remain. Runtime mutation of `noCull` and `isStatic` is not
-connected. The existing render plan also removes invisible shadow casters before
-the native shadow-pass visibility difference can apply.
+Runtime mutation of `noCull` and `isStatic` remains an active-path gap. The
+port does not infer these values from KN5 data.
+
+`CameraShadowMapped::shadowMapPass` creates the `Shadowgen` filter at
+`0x1005EB8F`. It uses the main camera pointer and the mesh world matrix. The
+three cascade matrices control depth rendering after this visibility test.
 
 The separate PVS-array option implements only the recovered array distance
 stage. It does not implement the active `CameraMeshFilter` path. The production

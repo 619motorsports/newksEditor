@@ -266,6 +266,14 @@ public:
         events.push_back("shadow");
         depth_targets.push_back(batch.depth_attachment);
         depth_draw_counts.push_back(batch.draws.size());
+        std::vector<apex::scene::NodeId> nodes;
+        nodes.reserve(batch.draws.size());
+        for (const auto &draw : batch.draws) {
+            nodes.push_back(draw.packet == nullptr
+                                ? apex::scene::invalid_node_id
+                                : draw.packet->node);
+        }
+        depth_nodes.push_back(std::move(nodes));
         depth_clear_values.push_back(batch.clear_depth ? batch.depth_clear_value
                                                        : -1.0F);
         if (!batch.draws.empty() &&
@@ -335,6 +343,7 @@ public:
     std::vector<std::string> events;
     std::vector<const DepthAttachment *> depth_targets;
     std::vector<std::size_t> depth_draw_counts;
+    std::vector<std::vector<apex::scene::NodeId>> depth_nodes;
     std::vector<float> depth_clear_values;
     std::vector<apex::scene::Matrix4> depth_camera_matrices;
     std::vector<BufferUpdate> buffer_updates;
@@ -610,6 +619,40 @@ Fixture transparent_order_fixture() {
     const auto far_id = scene.add_node(std::move(far), scene.root);
     (void)near_id;
     (void)far_id;
+    return result;
+}
+
+Fixture shadow_only_fixture() {
+    auto result = fixture();
+    auto& model = result.document.assembly.model;
+    apex::formats::Kn5Node hidden_caster = model.root.children.front();
+    hidden_caster.name = "HIDDEN_CASTER";
+    hidden_caster.children.clear();
+    hidden_caster.visible = false;
+    hidden_caster.renderable = true;
+    hidden_caster.castShadows = true;
+    hidden_caster.bounds = {0.0F, 0.0F, 0.0F, 1.0F};
+    model.root.children.push_back(std::move(hidden_caster));
+
+    auto& scene = result.document.scene.snapshot;
+    auto& body = scene.nodes[1U];
+    body.local_bounds_source =
+        apex::scene::LocalBoundsSource::kn5_serialized;
+    body.local_bounds_radius = 1.0F;
+    body.local_aabb_center = apex::scene::Vector3{};
+    apex::scene::SceneNode caster;
+    caster.name = "HIDDEN_CASTER";
+    caster.kind = apex::scene::NodeKind::mesh;
+    caster.material = 0U;
+    caster.renderable = true;
+    caster.visible = false;
+    caster.active = true;
+    caster.cast_shadows = true;
+    caster.local_bounds_source =
+        apex::scene::LocalBoundsSource::kn5_serialized;
+    caster.local_bounds_radius = 1.0F;
+    caster.local_aabb_center = apex::scene::Vector3{};
+    (void)scene.add_node(std::move(caster), scene.root);
     return result;
 }
 
@@ -931,14 +974,16 @@ PipelineProgram selected_mesh_pipeline(const Fixture& fixture_value,
     return pipeline;
 }
 
-CameraFrame valid_shadow_camera(float x = 0.0F) {
+CameraFrame valid_shadow_camera(
+    float x = 0.0F,
+    CameraClipSpace clip_space = CameraClipSpace::vulkan) {
     CameraFrameRequest request;
     request.eye = {x, 0.0F, 5.0F};
     request.target = {0.0F, 0.0F, 0.0F};
     request.aspect = 1.0F;
     request.near_plane = 0.01F;
     request.far_plane = 100.0F;
-    request.clip_space = CameraClipSpace::vulkan;
+    request.clip_space = clip_space;
     const auto built = build_camera_frame(request);
     require(built.ok(), "directional shadow test camera builds");
     return *built.frame;
@@ -4514,6 +4559,154 @@ void shares_live_camera_visibility_with_directional_shadows() {
             "live mesh mask hides the same packet from color and shadow passes");
 }
 
+void retains_independent_shadowgen_visibility() {
+    for (const Backend backend : {Backend::Vulkan, Backend::D3D12}) {
+        auto value = shadow_only_fixture();
+        if (backend == Backend::D3D12) {
+            for (auto& module : value.modules) {
+                module.format = PipelineShaderFormat::dxil;
+                module.bytes = dxbc_shader_bytes();
+            }
+        }
+        value.module_set.directional_shadow_receiver = true;
+        auto request = request_for(value);
+        request.camera_mesh_filter = true;
+        request.render.include_shadows = true;
+        request.directional_shadow_receiver = true;
+        apex::app::WorkspaceViewportDirectionalShadowOptions shadows;
+        shadows.maps.lighting.map_size = 32U;
+        shadows.opaque_pipeline = opaque_shadow_pipeline(value);
+        request.directional_shadows = shadows;
+
+        FakeDevice device(backend);
+        auto prepared = apex::app::prepareWorkspaceViewport(
+            device, value.document, request);
+        const auto body_id = value.document.scene.snapshot.nodes[1U].id;
+        const auto caster_id = value.document.scene.snapshot.nodes[3U].id;
+        require(prepared.ok() &&
+                    prepared.viewport->renderPlan().items.size() == 1U &&
+                    prepared.viewport->renderPlan().shadow_only_items.size() ==
+                        1U &&
+                    prepared.viewport->preparation().resources->draw_count() ==
+                        2U,
+                "native viewport retains one invisible Shadowgen candidate");
+        const auto prepared_buffers = device.buffer_calls;
+        const auto prepared_textures = device.texture_calls;
+        const auto prepared_depth = device.depth_calls;
+        const auto prepared_samplers = device.sampler_calls;
+
+        FakeTarget target(request.presentation, backend);
+        WorkspaceViewportFrameRequest frame;
+        frame.camera = valid_shadow_camera(
+            0.0F, backend == Backend::Vulkan ? CameraClipSpace::vulkan
+                                             : CameraClipSpace::d3d12);
+        frame.frame_constants = KsPerPixelFrameConstants{};
+        Diagnostic diagnostic;
+        require(prepared.viewport->drawAndPresent(
+                    device, target, frame, diagnostic) ==
+                    WorkspaceViewportFrameStatus::ready &&
+                    device.draw_nodes.back() ==
+                        std::vector<apex::scene::NodeId>{body_id} &&
+                    device.depth_nodes.size() == 3U &&
+                    std::all_of(
+                        device.depth_nodes.begin(), device.depth_nodes.end(),
+                        [&](const auto& nodes) {
+                            return nodes ==
+                                   std::vector<apex::scene::NodeId>{body_id,
+                                                                    caster_id};
+                        }),
+                "Shadowgen ignores isVisible while color keeps the mesh hidden");
+
+        const std::array<std::uint8_t, 2U> color_hidden = {0U, 0U};
+        const std::array<std::uint8_t, 2U> all_shadow = {1U, 1U};
+        frame.packet_visibility = color_hidden;
+        require(prepared.viewport->drawAndPresent(
+                    device, target, frame, diagnostic) ==
+                    WorkspaceViewportFrameStatus::ready &&
+                    device.draw_nodes.back().empty() &&
+                    device.depth_nodes.back().empty(),
+                "the existing explicit mask keeps its shared compatibility behavior");
+
+        frame.shadow_packet_visibility = all_shadow;
+        require(prepared.viewport->drawAndPresent(
+                    device, target, frame, diagnostic) ==
+                    WorkspaceViewportFrameStatus::ready &&
+                    device.draw_nodes.back().empty() &&
+                    device.depth_nodes.back() ==
+                        std::vector<apex::scene::NodeId>{body_id, caster_id},
+                "an independent shadow mask does not authorize color packets");
+
+        const std::array<std::uint8_t, 2U> all_color = {1U, 1U};
+        const std::array<std::uint8_t, 2U> caster_shadow = {0U, 1U};
+        frame.packet_visibility = all_color;
+        frame.shadow_packet_visibility = caster_shadow;
+        require(prepared.viewport->drawAndPresent(
+                    device, target, frame, diagnostic) ==
+                    WorkspaceViewportFrameStatus::ready &&
+                    device.draw_nodes.back() ==
+                        std::vector<apex::scene::NodeId>{body_id} &&
+                    device.depth_nodes.back() ==
+                        std::vector<apex::scene::NodeId>{caster_id},
+                "an independent color mask cannot show a shadow-only packet");
+
+        const std::array<std::uint8_t, 1U> short_shadow = {1U};
+        frame.shadow_packet_visibility = short_shadow;
+        const auto updates_before_invalid = device.buffer_updates.size();
+        const auto shadow_calls_before_invalid = device.depth_batch_calls;
+        const auto color_calls_before_invalid = device.draw_calls;
+        const auto presents_before_invalid = device.present_calls;
+        require(prepared.viewport->drawAndPresent(
+                    device, target, frame, diagnostic) ==
+                    WorkspaceViewportFrameStatus::invalid &&
+                    diagnostic.code ==
+                        "workspace_viewport_shadow_visibility_count_invalid" &&
+                    device.buffer_updates.size() == updates_before_invalid &&
+                    device.depth_batch_calls == shadow_calls_before_invalid &&
+                    device.draw_calls == color_calls_before_invalid &&
+                    device.present_calls == presents_before_invalid,
+                "a short shadow mask fails before all mutable frame work");
+
+        frame.shadow_packet_visibility = all_shadow;
+        const std::array<std::uint8_t, 2U> invalid_color = {1U, 2U};
+        frame.packet_visibility = invalid_color;
+        require(prepared.viewport->drawAndPresent(
+                    device, target, frame, diagnostic) ==
+                    WorkspaceViewportFrameStatus::invalid &&
+                    diagnostic.code ==
+                        "workspace_viewport_color_visibility_value_invalid" &&
+                    device.buffer_updates.size() == updates_before_invalid &&
+                    device.depth_batch_calls == shadow_calls_before_invalid &&
+                    device.draw_calls == color_calls_before_invalid &&
+                    device.present_calls == presents_before_invalid,
+                "a non-binary color mask fails before all mutable frame work");
+
+        std::vector<DrawPacket> malformed_packets(
+            prepared.viewport->preparation().resources->prepared_packets().begin(),
+            prepared.viewport->preparation().resources->prepared_packets().end());
+        malformed_packets.front().flags.wireframe =
+            !malformed_packets.front().flags.wireframe;
+        frame.packet_visibility = color_hidden;
+        frame.shadow_packet_visibility = color_hidden;
+        frame.refreshed_packets = malformed_packets;
+        require(prepared.viewport->drawAndPresent(
+                    device, target, frame, diagnostic) ==
+                    WorkspaceViewportFrameStatus::invalid &&
+                    diagnostic.code ==
+                        "static_scene_frame_packet_contract_invalid" &&
+                    device.buffer_updates.size() == updates_before_invalid &&
+                    device.depth_batch_calls == shadow_calls_before_invalid &&
+                    device.draw_calls == color_calls_before_invalid &&
+                    device.present_calls == presents_before_invalid,
+                "a malformed hidden packet fails before all mutable frame work");
+
+        require(device.buffer_calls == prepared_buffers &&
+                    device.texture_calls == prepared_textures &&
+                    device.depth_calls == prepared_depth &&
+                    device.sampler_calls == prepared_samplers,
+                "independent pass masks reuse all prepared graphics resources");
+    }
+}
+
 void accepts_track_and_car_lod_documents() {
     for (const auto kind : {apex::app::WorkspaceSessionKind::track,
                             apex::app::WorkspaceSessionKind::carLods}) {
@@ -4751,7 +4944,8 @@ void applies_live_camera_mesh_filter_without_resource_rebuild() {
     const auto presents_before_invalid = device.present_calls;
     require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
                 WorkspaceViewportFrameStatus::invalid &&
-                diagnostic.code == "workspace_viewport_camera_mesh_filter_invalid" &&
+                diagnostic.code ==
+                    "workspace_viewport_color_camera_mesh_filter_invalid" &&
                 device.draw_calls == draws_before_invalid &&
                 device.present_calls == presents_before_invalid,
             "invalid live frustum fails before draw and present work");
@@ -4826,10 +5020,10 @@ void updates_webgl_compatible_transparent_order_per_frame() {
     require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
                 WorkspaceViewportFrameStatus::invalid &&
                 diagnostic.code ==
-                    "workspace_viewport_color_order_bounds_invalid" &&
+                    "static_scene_frame_packet_contract_invalid" &&
                 device.draw_calls == draws_before_invalid &&
                 device.present_calls == presents_before_invalid,
-            "non-finite live sort bounds fail before draw and present work");
+            "a non-finite refreshed transform fails before draw and present work");
 
     auto d3d_value = transparent_order_fixture();
     for (auto& module : d3d_value.modules) {
@@ -5170,6 +5364,7 @@ int main() {
         camera_controller_supports_keyboard_translation();
         schedules_directional_shadows_before_color_and_reuses_maps();
         shares_live_camera_visibility_with_directional_shadows();
+        retains_independent_shadowgen_visibility();
         rejects_invalid_inputs();
         rejects_frame_mismatch_and_preserves_present_atomicity();
         std::cout << "workspace_viewport_tests: ok\n";

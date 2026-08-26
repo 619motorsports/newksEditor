@@ -68,6 +68,10 @@ struct DrawPacket {
     MaterialRenderProfile material_profile;
     std::vector<DrawResourceSlot> resources;
     DrawPacketFlags flags;
+    // True only for a retained native Shadowgen candidate that is absent from
+    // the color plan. Color submission always suppresses this packet. Shadow
+    // submission can select it through its independent prepared-index mask.
+    bool shadow_only = false;
     // Shader execution and texture sampling are intentionally staged. This
     // packet is a validated command description, not evidence of pixels.
     bool shader_execution_supported = false;

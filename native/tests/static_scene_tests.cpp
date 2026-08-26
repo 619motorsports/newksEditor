@@ -834,6 +834,51 @@ void prepares_deduplicated_resources_and_executes_one_ordered_batch() {
             "explicit color order changes submission without remapping packet resources");
 }
 
+void suppresses_shadow_only_packets_from_color_submission() {
+    Fixture malformed = fixture();
+    malformed.packets[1U].shadow_only = true;
+    RecordingDevice malformed_device;
+    const auto rejected = prepare_static_scene_resources(
+        malformed_device, request_for(malformed));
+    require(!rejected.ok() &&
+                rejected.diagnostic.code ==
+                    "static_scene_shadow_only_authority_invalid" &&
+                malformed_device.buffer_calls == 0U,
+            "a shadow-only non-caster fails before backend allocation");
+
+    Fixture value = fixture();
+    value.packets[1U].shadow_only = true;
+    value.packets[1U].flags.cast_shadows = true;
+    RecordingDevice device;
+    auto prepared = prepare_static_scene_resources(device, request_for(value));
+    require(prepared.ok() && prepared.resources->draw_count() == 3U,
+            "shadow-only packet resources prepare with the complete packet table");
+
+    FakeTexture target;
+    StaticSceneFrameDescription frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    const std::array<std::uint8_t, 3U> all_visible = {1U, 1U, 1U};
+    frame.packet_visibility = all_visible;
+    const auto drawn =
+        prepared.resources->draw_and_readback(device, target, frame);
+    require(drawn.ok() &&
+                device.nodes ==
+                    std::vector<apex::scene::NodeId>({1U, 1U}),
+            "an explicit color mask cannot authorize a shadow-only packet");
+
+    std::vector<DrawPacket> refreshed(value.packets.begin(), value.packets.end());
+    refreshed[1U].shadow_only = false;
+    frame.refreshed_packets = refreshed;
+    const auto batches_before_invalid = device.batch_calls;
+    const auto invalid =
+        prepared.resources->draw_and_readback(device, target, frame);
+    require(invalid.status == IndexedStaticMeshBatchStatus::invalid_request &&
+                invalid.diagnostic.code ==
+                    "static_scene_frame_packet_contract_invalid" &&
+                device.batch_calls == batches_before_invalid,
+            "a refreshed packet cannot change shadow-only authority");
+}
+
 void schedules_selected_and_view_axis_at_transparent_boundary() {
     Fixture value = fixture();
     value.packets[0].flags.selected = true;
@@ -3569,6 +3614,7 @@ void binds_retained_directional_maps_through_static_scene_frames() {
 int main() {
     try {
         prepares_deduplicated_resources_and_executes_one_ordered_batch();
+        suppresses_shadow_only_packets_from_color_submission();
         schedules_selected_and_view_axis_at_transparent_boundary();
         prepares_mixed_static_and_skinned_scene_and_updates_only_after_preflight();
         prepares_source_evidenced_wireframe_batch_state();

@@ -3147,3 +3147,25 @@ these centers with current packet matrices and compares squared double values.
 The shared static-scene frame accepts a complete packet-index permutation. It
 validates count, range, and uniqueness before any mutable backend update. Color
 submission uses the permutation. Shadow submission keeps its separate order.
+
+## ksNet pass-specific CameraMeshFilter evidence
+
+`CameraMeshFilter::isVisible` starts at `0x10064C8C`. The opaque pass rejects
+transparent meshes. The transparent pass rejects opaque meshes.
+
+Both color passes require `isVisible`. The `Shadowgen` pass ignores
+`isVisible` and requires `castShadows`. All passes apply the maximum layer.
+
+`noCull` and a null camera bypass LOD and frustum tests. These conditions do
+not bypass the pass gates. The port does not infer `noCull` from KN5 data.
+
+`CameraShadowMapped::shadowMapPass` creates its filter at `0x1005EB8F`. The
+filter uses the main camera and each mesh world matrix. It does not use the
+cascade camera for visibility.
+
+The native viewport now retains an active, renderable shadow caster when only
+`isVisible` excludes it from color. Each frame computes separate color and
+Shadowgen masks. Vulkan and D3D12 consume the same packet-index masks.
+
+An explicit shadow mask replaces the automatic shadow result. If it is absent,
+an explicit color mask keeps the earlier shared-mask contract.

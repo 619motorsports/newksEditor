@@ -28,6 +28,10 @@ PDB/Ghidra identifies these functions:
 `MaterialFilterSM` and a `CameraMeshFilter` with the `Shadowgen` pass ID. It
 copies the camera matrix. Then it loops through `level = 0..2`.
 
+The function creates the `Shadowgen` filter at `0x1005EB8F`. It passes the
+main `CameraShadowMapped` camera to this filter. Each mesh supplies its current
+world matrix. The filter does not use a cascade camera for visibility.
+
 For each level, it does these operations:
 
 1. calls `beginShadowMapPass(level, ...)`.

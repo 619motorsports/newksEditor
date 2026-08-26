@@ -82,6 +82,53 @@ void visibility_lod_and_shadow() {
     require(plan.unsupported_effects.front().code == "backend_effects", "unsupported effect code");
 }
 
+void shadowgen_retains_invisible_renderable_candidates() {
+    using namespace apex::scene;
+    SceneSnapshot scene;
+    const auto material =
+        scene.add_material({"opaque", "ksPerPixel", BlendMode::opaque});
+    SceneNode root;
+    root.name = "ROOT";
+    const auto root_id = scene.add_node(std::move(root));
+    SceneNode hidden_caster;
+    hidden_caster.name = "HIDDEN_CASTER";
+    hidden_caster.kind = NodeKind::mesh;
+    hidden_caster.material = material;
+    hidden_caster.active = true;
+    hidden_caster.visible = false;
+    hidden_caster.renderable = true;
+    hidden_caster.cast_shadows = true;
+    hidden_caster.local_bounds_source = LocalBoundsSource::kn5_serialized;
+    hidden_caster.local_bounds_radius = 1.0F;
+    const auto hidden_id = scene.add_node(std::move(hidden_caster), root_id);
+
+    const auto default_plan = apex::render::build_render_plan(scene);
+    require(default_plan.items.empty() &&
+                default_plan.shadow_only_items.empty() &&
+                default_plan.shadow_casters.empty(),
+            "default WebGL-compatible planning omits invisible geometry");
+
+    apex::render::RenderPlanOptions options;
+    options.defer_camera_mesh_filter = true;
+    const auto native_plan = apex::render::build_render_plan(scene, options);
+    require(native_plan.items.empty() &&
+                native_plan.shadow_only_items.size() == 1U &&
+                native_plan.shadow_only_items.front().node == hidden_id &&
+                native_plan.shadow_casters.size() == 1U &&
+                native_plan.shadow_casters.front().node == hidden_id &&
+                native_plan.shadow_only_items.front().camera_mesh_filter.has_value() &&
+                !native_plan.shadow_only_items.front()
+                     .camera_mesh_filter->visible,
+            "native CameraMeshFilter planning retains an invisible Shadowgen caster");
+
+    scene.nodes[static_cast<std::size_t>(hidden_id)].renderable = false;
+    const auto disabled_plan = apex::render::build_render_plan(scene, options);
+    require(disabled_plan.items.empty() &&
+                disabled_plan.shadow_only_items.empty() &&
+                disabled_plan.shadow_casters.empty(),
+            "Mesh renderability still gates the native shadow pass");
+}
+
 void lod_uses_each_item_world_distance_and_inclusive_out() {
     apex::scene::SceneSnapshot scene;
     const auto material = scene.add_material({"opaque", "ksPerPixel", apex::scene::BlendMode::opaque});
@@ -454,6 +501,7 @@ void malformed_tree_is_bounded() {
 int main() {
     try {
         visibility_lod_and_shadow();
+        shadowgen_retains_invisible_renderable_candidates();
         lod_uses_each_item_world_distance_and_inclusive_out();
         recovered_ksnet_mesh_lod_rule_is_bounded_and_inclusive();
         recovered_ksnet_mesh_lod_rule_reaches_opt_in_plan();

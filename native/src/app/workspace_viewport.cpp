@@ -1240,10 +1240,17 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
             "A frame cannot override a selection axis that was not prepared");
         return WorkspaceViewportFrameStatus::invalid;
     }
+    if (!request.shadow_packet_visibility.empty() &&
+        !directional_shadows_.has_value()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_shadow_visibility_unprepared",
+            "A shadow packet mask requires prepared directional shadows");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
 
     const auto prepared_packets = execution_->resources->prepared_packets();
     std::span<const render::DrawPacket> frame_packets = prepared_packets;
-    if (frame_catalog_.has_value() && !request.refreshed_packets.empty()) {
+    if (!request.refreshed_packets.empty()) {
         if (request.refreshed_packets.size() != prepared_packets.size()) {
             output_diagnostic = diagnostic(
                 "workspace_viewport_refreshed_packet_count_invalid",
@@ -1253,10 +1260,52 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
         frame_packets = request.refreshed_packets;
     }
 
+    const auto validate_visibility_mask =
+        [&](std::span<const std::uint8_t> mask, const char* count_code,
+            const char* value_code, const char* label) {
+            if (!mask.empty() && mask.size() != prepared_packets.size()) {
+                output_diagnostic = {
+                    count_code, std::string(label) +
+                                    " must match the prepared packet count"};
+                return false;
+            }
+            if (std::any_of(mask.begin(), mask.end(),
+                            [](std::uint8_t value) { return value > 1U; })) {
+                output_diagnostic = {
+                    value_code,
+                    std::string(label) + " values must be 0 or 1"};
+                return false;
+            }
+            return true;
+        };
+    if (!validate_visibility_mask(
+            request.packet_visibility,
+            "workspace_viewport_color_visibility_count_invalid",
+            "workspace_viewport_color_visibility_value_invalid",
+            "Color packet visibility") ||
+        !validate_visibility_mask(
+            request.shadow_packet_visibility,
+            "workspace_viewport_shadow_visibility_count_invalid",
+            "workspace_viewport_shadow_visibility_value_invalid",
+            "Shadow packet visibility")) {
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (!execution_->resources->validate_refreshed_packets(
+            request.refreshed_packets, output_diagnostic)) {
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+
     std::span<const std::uint8_t> packet_visibility = request.packet_visibility;
-    if (request.packet_visibility.empty() && frame_catalog_.has_value()) {
+    std::span<const std::uint8_t> shadow_packet_visibility =
+        !request.shadow_packet_visibility.empty()
+            ? request.shadow_packet_visibility
+            : request.packet_visibility;
+    const bool derive_color = packet_visibility.empty();
+    const bool derive_shadow = shadow_packet_visibility.empty();
+    if ((derive_color || derive_shadow) && frame_catalog_.has_value()) {
         auto& catalog = *frame_catalog_;
-        if (catalog.frame_visibility.size() != prepared_packets.size() ||
+        if (catalog.frame_color_visibility.size() != prepared_packets.size() ||
+            catalog.frame_shadow_visibility.size() != prepared_packets.size() ||
             (!catalog.mesh_filters.empty() &&
              catalog.mesh_filters.size() != prepared_packets.size())) {
             output_diagnostic = diagnostic(
@@ -1264,8 +1313,11 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
                 "The retained packet visibility catalog is not dense");
             return WorkspaceViewportFrameStatus::invalid;
         }
-        std::fill(catalog.frame_visibility.begin(),
-                  catalog.frame_visibility.end(), 1U);
+        for (std::size_t index = 0U; index < prepared_packets.size(); ++index) {
+            catalog.frame_color_visibility[index] =
+                prepared_packets[index].shadow_only ? 0U : 1U;
+            catalog.frame_shadow_visibility[index] = 1U;
+        }
         if (catalog.workspace_lod) {
             if (!finite_vector(request.camera.position)) {
                 output_diagnostic =
@@ -1298,7 +1350,10 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
                 const bool workspace_visible = workspace::carLodVisible(
                     lod.has_value() ? &*lod : nullptr, effective_distance,
                     catalog.selected_index);
-                catalog.frame_visibility[index] = workspace_visible ? 1U : 0U;
+                if (!workspace_visible) {
+                    catalog.frame_color_visibility[index] = 0U;
+                    catalog.frame_shadow_visibility[index] = 0U;
+                }
             }
         }
         if (!catalog.mesh_filters.empty()) {
@@ -1309,23 +1364,43 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
                 filter_request.renderable = *catalog.mesh_filters[index];
                 filter_request.world_matrix = frame_packets[index].world_matrix;
                 filter_request.camera = &request.camera;
-                filter_request.pass = filter_request.renderable.transparent
-                                          ? render::CameraMeshPass::transparent
-                                          : render::CameraMeshPass::opaque;
                 filter_request.max_layer = catalog.max_layer;
-                const auto filter_result =
-                    render::camera_mesh_filter_visible(filter_request);
-                if (filter_result.status ==
-                    render::CameraMeshFilterStatus::invalid_input) {
-                    output_diagnostic = diagnostic(
-                        "workspace_viewport_camera_mesh_filter_invalid",
-                        "A live camera mesh filter input is invalid");
-                    return WorkspaceViewportFrameStatus::invalid;
+                if (derive_color) {
+                    filter_request.pass = filter_request.renderable.transparent
+                                              ? render::CameraMeshPass::transparent
+                                              : render::CameraMeshPass::opaque;
+                    const auto color_result =
+                        render::camera_mesh_filter_visible(filter_request);
+                    if (color_result.status ==
+                        render::CameraMeshFilterStatus::invalid_input) {
+                        output_diagnostic = diagnostic(
+                            "workspace_viewport_color_camera_mesh_filter_invalid",
+                            "A live color CameraMeshFilter input is invalid");
+                        return WorkspaceViewportFrameStatus::invalid;
+                    }
+                    if (!color_result.visible())
+                        catalog.frame_color_visibility[index] = 0U;
                 }
-                if (!filter_result.visible()) catalog.frame_visibility[index] = 0U;
+                if (derive_shadow) {
+                    filter_request.pass = render::CameraMeshPass::shadow;
+                    const auto shadow_result =
+                        render::camera_mesh_filter_visible(filter_request);
+                    if (shadow_result.status ==
+                        render::CameraMeshFilterStatus::invalid_input) {
+                        output_diagnostic = diagnostic(
+                            "workspace_viewport_shadow_camera_mesh_filter_invalid",
+                            "A live Shadowgen CameraMeshFilter input is invalid");
+                        return WorkspaceViewportFrameStatus::invalid;
+                    }
+                    if (!shadow_result.visible())
+                        catalog.frame_shadow_visibility[index] = 0U;
+                }
             }
         }
-        packet_visibility = catalog.frame_visibility;
+        if (derive_color)
+            packet_visibility = catalog.frame_color_visibility;
+        if (derive_shadow)
+            shadow_packet_visibility = catalog.frame_shadow_visibility;
     }
 
     std::span<const std::uint32_t> color_packet_order;
@@ -1620,7 +1695,7 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
                 ? &*directional_shadows_->skinned_pipeline
                 : nullptr;
         shadow_frame.refreshed_packets = request.refreshed_packets;
-        shadow_frame.packet_visibility = packet_visibility;
+        shadow_frame.packet_visibility = shadow_packet_visibility;
         const auto shadowed =
             execution_->resources->draw_opaque_directional_shadows(
                 device, shadow_frame);
@@ -1977,13 +2052,29 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 catalog.max_layer = request.camera_mesh_max_layer;
                 catalog.mesh_filters.reserve(packets.size());
                 for (const auto& packet : packets) {
-                    const auto item = std::find_if(
+                    const auto color_item = std::find_if(
                         execution->render_plan.items.begin(),
                         execution->render_plan.items.end(),
                         [&](const render::RenderItem& candidate) {
                             return candidate.node == packet.node;
                         });
-                    if (item == execution->render_plan.items.end()) {
+                    const render::RenderItem* item =
+                        color_item == execution->render_plan.items.end()
+                            ? nullptr
+                            : &*color_item;
+                    if (item == nullptr) {
+                        const auto shadow_item = std::find_if(
+                            execution->render_plan.shadow_only_items.begin(),
+                            execution->render_plan.shadow_only_items.end(),
+                            [&](const render::RenderItem& candidate) {
+                                return candidate.node == packet.node;
+                            });
+                        if (shadow_item !=
+                            execution->render_plan.shadow_only_items.end()) {
+                            item = &*shadow_item;
+                        }
+                    }
+                    if (item == nullptr) {
                         result.status = WorkspaceViewportStatus::invalid;
                         result.diagnostic = diagnostic(
                             "workspace_viewport_camera_mesh_packet_mapping_invalid",
@@ -2026,7 +2117,8 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 catalog.frame_color_order.resize(packets.size());
                 catalog.frame_color_distance_squared.resize(packets.size());
             }
-            catalog.frame_visibility.resize(packets.size(), 1U);
+            catalog.frame_color_visibility.resize(packets.size(), 1U);
+            catalog.frame_shadow_visibility.resize(packets.size(), 1U);
             frame_catalog = std::move(catalog);
         }
 

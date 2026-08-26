@@ -212,6 +212,7 @@ bool same_prepared_draw_contract(const DrawPacket& prepared,
            prepared.vertex_stride_floats == refreshed.vertex_stride_floats &&
            prepared.order == refreshed.order && prepared.layer == refreshed.layer &&
            prepared.transparency_overridden == refreshed.transparency_overridden &&
+           prepared.shadow_only == refreshed.shadow_only &&
            same_material_profile(prepared.material_profile, refreshed.material_profile) &&
            same_draw_flags(prepared.flags, refreshed.flags) &&
            same_draw_resources(prepared, refreshed) &&
@@ -586,6 +587,10 @@ StaticSceneResourceResult prepare_static_scene_resources(
             return fail(StaticSceneResourceStatus::invalid_request,
                         "static_scene_packet_palette_invalid",
                         "Static and skinned packets must have the corresponding bone-palette state");
+        if (packet.shadow_only && !packet.flags.cast_shadows)
+            return fail(StaticSceneResourceStatus::invalid_request,
+                        "static_scene_shadow_only_authority_invalid",
+                        "A shadow-only packet must retain cast-shadow authority");
         if (node_index >= node_map.source_nodes.size() || material_index >= model.materials.size())
             return fail(StaticSceneResourceStatus::invalid_request,
                         "static_scene_packet_identity_invalid",
@@ -1278,6 +1283,46 @@ StaticSceneResourceResult prepare_static_scene_resources(
                 "Static-scene preparation has insufficient memory for bounded storage");
 }
 
+bool StaticSceneResources::validate_refreshed_packets(
+    std::span<const DrawPacket> refreshed_packets,
+    Diagnostic& output_diagnostic) const noexcept {
+    output_diagnostic = {};
+    if (refreshed_packets.empty()) return true;
+    if (refreshed_packets.size() != packets_.size()) {
+        output_diagnostic = {
+            "static_scene_frame_packet_count_invalid",
+            "Refreshed static-scene packet states must match the prepared packet count"};
+        return false;
+    }
+    for (std::size_t index = 0U; index < packets_.size(); ++index) {
+        const DrawPacket& packet = refreshed_packets[index];
+        if (!same_prepared_draw_contract(packets_[index], packet) ||
+            !finite_world_matrix(packet)) {
+            output_diagnostic = {
+                "static_scene_frame_packet_contract_invalid",
+                "Refreshed packet state changed a prepared draw contract or transform"};
+            return false;
+        }
+        if (packet.primitive != DrawPrimitiveKind::skinned_mesh) continue;
+        if (packet.bone_palette.empty()) {
+            output_diagnostic = {
+                "static_scene_frame_skin_palette_invalid",
+                "A skinned frame packet must contain a bone palette"};
+            return false;
+        }
+        for (const auto& matrix : packet.bone_palette) {
+            if (std::any_of(matrix.begin(), matrix.end(),
+                            [](float value) { return !std::isfinite(value); })) {
+                output_diagnostic = {
+                    "static_scene_frame_skin_palette_invalid",
+                    "A skinned frame packet contains a non-finite bone palette"};
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
     Device& device, Texture& target, const StaticSceneFrameDescription& frame) try {
     if (&device != device_ || device.info().backend != backend_ || target.backend() != backend_)
@@ -1521,7 +1566,9 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         return frame.refreshed_packets.empty() ? packets_[index] : frame.refreshed_packets[index];
     };
     const auto packet_visible = [&](std::size_t index) {
-        return frame.packet_visibility.empty() || frame.packet_visibility[index] != 0U;
+        return !packets_[index].shadow_only &&
+               (frame.packet_visibility.empty() ||
+                frame.packet_visibility[index] != 0U);
     };
     for (std::size_t index = 0U; index < packets_.size(); ++index) {
         const DrawPacket& packet = packet_for_frame(index);

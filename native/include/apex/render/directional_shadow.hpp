@@ -138,8 +138,8 @@ struct StaticSceneDirectionalShadowFrameDescription {
     // consume t0/s3/b4 as validated by the device depth contract.
     const PipelineProgram* alpha_static_pipeline = nullptr;
     std::span<const DrawPacket> refreshed_packets{};
-    // Uses the same prepared-packet byte-mask contract as the color frame.
-    // Hidden packets are not selected or skinned as shadow casters.
+    // Independent Shadowgen byte mask in prepared packet order. Empty selects
+    // all retained casters. Hidden entries are not selected or skinned.
     std::span<const std::uint8_t> packet_visibility{};
     // Optional caller-supplied depth-only pipeline for already-retained CPU
     // skinned geometry. A missing pipeline keeps skinned casters staged; this

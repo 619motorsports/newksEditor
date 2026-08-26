@@ -115,9 +115,9 @@ struct RenderPlanOptions {
     // Present applies the recovered ksNet PVS-array distance/LOD predicate.
     // This does not claim full CameraMeshFilter pass or frustum parity.
     std::optional<KsNetMeshLodOptions> ksnet_mesh_lod;
-    // Retain meshes across their authored LOD interval. A live caller must
-    // consume each RenderItem::camera_mesh_filter descriptor on every frame.
-    // The stock viewport uses this only with its retained packet mask.
+    // Retain meshes across their authored LOD interval. This mode also keeps
+    // active, renderable Shadowgen candidates that isVisible excludes from
+    // color. A live caller must evaluate each pass descriptor every frame.
     bool defer_camera_mesh_filter = false;
 };
 
@@ -158,6 +158,10 @@ struct RenderPlan {
     std::vector<RenderItem> items;
     std::vector<RenderItem> opaque_items;
     std::vector<RenderItem> transparent_items;
+    // CameraMeshFilter mode retains active, renderable shadow casters that
+    // the color pass excludes only because isVisible is false. These items
+    // prepare geometry and resources but never enter color submission.
+    std::vector<RenderItem> shadow_only_items;
     // Shadow submission intentionally retains scene traversal order. The
     // shadow pass does not use the color-pass transparency ordering.
     std::vector<RenderItem> shadow_casters;

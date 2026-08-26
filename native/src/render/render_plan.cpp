@@ -271,7 +271,24 @@ RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
             (options.show_hidden || (node->visible && node->renderable)) &&
             lod_is_visible;
         const bool isolated_visible = isolated_item && lod_is_visible;
-        if (geometry && (isolated_visible || normally_visible)) {
+        const bool color_visible = isolated_visible || normally_visible;
+        const bool shadow_scope_visible =
+            isolated ? isolated_visible
+                     : !excluded && branch_active &&
+                           (options.show_hidden || node->renderable) &&
+                           lod_is_visible;
+        const bool effective_cast_shadows =
+            state_override != nullptr && state_override->cast_shadows.has_value()
+                ? *state_override->cast_shadows
+                : node->cast_shadows;
+        // Preserve the former color-derived caster set unless the caller
+        // requests the active CameraMeshFilter path. In that mode, Shadowgen
+        // ignores isVisible but Mesh::render still requires isRenderable.
+        const bool shadow_visible =
+            options.include_shadows && effective_cast_shadows &&
+            (color_visible ||
+             (options.defer_camera_mesh_filter && shadow_scope_visible));
+        if (geometry && (color_visible || shadow_visible)) {
             const apex::scene::SceneMaterial* material = scene.find_material(node->material);
             const bool material_alpha_blend = material != nullptr &&
                                               material->blend_mode == apex::scene::BlendMode::alpha_blend;
@@ -289,9 +306,7 @@ RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
                 distance,
                 transparent,
                 transparency_overridden,
-                state_override != nullptr && state_override->cast_shadows.has_value()
-                    ? *state_override->cast_shadows
-                    : node->cast_shadows,
+                effective_cast_shadows,
                 workspace_auxiliary,
                 workspace_file,
                 ancestors,
@@ -313,7 +328,7 @@ RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
                 filter.lod_out = static_cast<float>(lod_out);
                 filter.layer = static_cast<std::uint32_t>(item.layer);
                 filter.cast_shadows = item.casts_shadows;
-                filter.visible = true;
+                filter.visible = options.show_hidden || node->visible;
                 filter.transparent = item.transparent;
                 // Ordinary KN5 Renderable construction sets both fields to
                 // false. Runtime mutation is not inferred from KN5 data.
@@ -321,8 +336,11 @@ RenderPlan build_render_plan(const apex::scene::SceneSnapshot& scene,
                 filter.is_static = false;
                 item.camera_mesh_filter = filter;
             }
-            plan.items.push_back(item);
-            if (item.casts_shadows && options.include_shadows) plan.shadow_casters.push_back(item);
+            if (color_visible) plan.items.push_back(item);
+            if (shadow_visible) {
+                plan.shadow_casters.push_back(item);
+                if (!color_visible) plan.shadow_only_items.push_back(item);
+            }
         }
 
         // Reverse push preserves the source child order with a LIFO walk and

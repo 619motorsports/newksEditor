@@ -112,6 +112,7 @@ struct StaticSceneFrameDescription {
     // are visible. A supplied mask must match the prepared packet count and
     // contain only 0 (hidden) or 1 (visible). Hidden packets keep their stable
     // prepared contract but do not draw or update retained skinned geometry.
+    // The mask cannot authorize an intrinsic shadow-only packet for color.
     std::span<const std::uint8_t> packet_visibility{};
     // Optional color-pass permutation in prepared packet-index space. Empty
     // preserves prepared order. A supplied span must contain every prepared
@@ -196,6 +197,12 @@ public:
         return owned_directional_shadow_constants_ != nullptr &&
                owned_directional_shadow_sampler_ != nullptr;
     }
+
+    // Validate mutable frame state against the prepared packet table without
+    // changing retained resources. An empty span selects the prepared state.
+    [[nodiscard]] bool validate_refreshed_packets(
+        std::span<const DrawPacket> refreshed_packets,
+        Diagnostic& output_diagnostic) const noexcept;
 
     // Keep the preparing device alive and use it for every draw. The call is
     // synchronous. The target and optional depth attachment must remain alive
