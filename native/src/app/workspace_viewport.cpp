@@ -990,7 +990,9 @@ WorkspaceViewport::replaceAiSplineOverlaysBorrowed(
 
     for (std::size_t index = 0U; index < geometries.size(); ++index) {
         const bool dynamicPassMayBeEmpty =
-            (kinds[index] == WorkspaceAiSplinePassKind::selection ||
+            (kinds[index] == WorkspaceAiSplinePassKind::left_side ||
+             kinds[index] == WorkspaceAiSplinePassKind::right_side ||
+             kinds[index] == WorkspaceAiSplinePassKind::selection ||
              kinds[index] ==
                  WorkspaceAiSplinePassKind::temporary_interpolation ||
              kinds[index] == WorkspaceAiSplinePassKind::temporary_markers) &&
@@ -1967,7 +1969,9 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             }};
         for (const AiSplinePassInput &input : ai_spline_inputs) {
             const bool latent_dynamic_pass =
-                (input.kind == WorkspaceAiSplinePassKind::selection ||
+                (input.kind == WorkspaceAiSplinePassKind::left_side ||
+                 input.kind == WorkspaceAiSplinePassKind::right_side ||
+                 input.kind == WorkspaceAiSplinePassKind::selection ||
                  input.kind ==
                      WorkspaceAiSplinePassKind::temporary_interpolation ||
                  input.kind == WorkspaceAiSplinePassKind::temporary_markers) &&

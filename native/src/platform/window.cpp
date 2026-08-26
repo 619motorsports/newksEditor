@@ -84,6 +84,8 @@ void release_video() noexcept {
     case SDLK_D: return WindowKey::d;
     case SDLK_Q: return WindowKey::q;
     case SDLK_E: return WindowKey::e;
+    case SDLK_L: return WindowKey::l;
+    case SDLK_R: return WindowKey::r;
     default: return WindowKey::unknown;
     }
 }

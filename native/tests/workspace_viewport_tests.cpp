@@ -1,4 +1,5 @@
 #include "apex/app/workspace_ai_spline_controller.hpp"
+#include "apex/app/workspace_ai_spline_commands.hpp"
 #include "apex/app/workspace_viewport.hpp"
 #include "apex/app/workspace_shadow_programs.hpp"
 #include "apex/authoring/ai_spline_session.hpp"
@@ -2163,6 +2164,171 @@ void tracks_recovered_ai_spline_manual_input() {
             "unknown manual key values do not change input state");
 }
 
+void routes_portable_ai_spline_side_visibility_commands() {
+    apex::platform::WindowEvent event;
+    event.type = apex::platform::WindowEventType::key_down;
+    event.semantic_key = apex::platform::WindowKey::l;
+    event.modifiers = static_cast<std::uint32_t>(
+        apex::platform::WindowModifier::control);
+    require(apex::app::workspaceAiSplineSideVisibilityCommand(event) ==
+                apex::app::WorkspaceAiSplineSideVisibilityCommand::
+                    toggle_left,
+            "Control+L routes to the portable left-side action");
+
+    event.semantic_key = apex::platform::WindowKey::r;
+    event.modifiers |= static_cast<std::uint32_t>(
+        apex::platform::WindowModifier::shift);
+    require(apex::app::workspaceAiSplineSideVisibilityCommand(event) ==
+                apex::app::WorkspaceAiSplineSideVisibilityCommand::
+                    toggle_right,
+            "Control+R routes to the portable right-side action");
+
+    event.repeat = true;
+    require(!apex::app::workspaceAiSplineSideVisibilityCommand(event)
+                 .has_value(),
+            "repeated visibility keys do not produce commands");
+    event.repeat = false;
+    event.modifiers = 0U;
+    require(!apex::app::workspaceAiSplineSideVisibilityCommand(event)
+                 .has_value(),
+            "visibility keys require the Control modifier");
+    event.modifiers = static_cast<std::uint32_t>(
+        apex::platform::WindowModifier::control);
+    event.type = apex::platform::WindowEventType::key_up;
+    require(!apex::app::workspaceAiSplineSideVisibilityCommand(event)
+                 .has_value(),
+            "visibility commands use key-down events only");
+    event.type = apex::platform::WindowEventType::key_down;
+    event.semantic_key = static_cast<apex::platform::WindowKey>(255U);
+    require(!apex::app::workspaceAiSplineSideVisibilityCommand(event)
+                 .has_value(),
+            "unknown semantic keys do not produce visibility commands");
+}
+
+void publishes_ai_spline_side_visibility_atomically() {
+    apex::formats::AiSpline spline;
+    spline.source = "controller-side-visibility.ai";
+    spline.version = 7U;
+    spline.points.resize(4U);
+    spline.payloads.resize(4U);
+    for (std::size_t index = 0U; index < spline.points.size(); ++index) {
+        spline.points[index].position = {
+            static_cast<float>(index) * 10.0F, 0.0F,
+            static_cast<float>(index)};
+        spline.points[index].tag = static_cast<std::int32_t>(index);
+        spline.payloads[index].side0 = 1.0F;
+        spline.payloads[index].side1 = 2.0F;
+    }
+    apex::app::WorkspaceAiSplineControllerConfiguration configuration;
+    configuration.selectedIndices = {0U};
+    auto created = apex::app::WorkspaceAiSplineController::create(
+        spline, std::move(configuration));
+    require(created.ok(), "side-visibility controller creates");
+    auto controller = std::move(created.controller);
+
+    auto value = fixture();
+    auto request = request_for(value);
+    request.ai_spline_geometry = &controller->overlays().primary;
+    request.ai_spline_generation = controller->generation();
+    request.ai_spline_pipeline = ai_spline_pipeline(value);
+    request.ai_spline_left_pipeline = ai_spline_side_pipeline(value);
+    request.ai_spline_right_pipeline = ai_spline_side_pipeline(value);
+    request.ai_spline_selection_geometry =
+        &*controller->overlays().selection;
+    request.ai_spline_selection_pipeline = ai_spline_camber_pipeline(value);
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok(),
+            "hidden sides prepare latent independent side pipelines");
+
+    const auto baselineBytes = controller->currentBytes();
+    const auto baselineInput = controller->inputSnapshot();
+    const auto baselineBuffers = *device.live_buffer_count;
+    auto staleInput = baselineInput;
+    ++staleInput.inputEpoch;
+    const auto stale = controller->setSideVisibility(
+        device, *prepared.viewport, true, false, staleInput);
+    require(!stale.ok() &&
+                stale.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::stale_input &&
+                controller->inputSnapshot() == baselineInput &&
+                *device.live_buffer_count == baselineBuffers,
+            "side visibility rejects a stale input before allocation");
+
+    const auto unchanged = controller->setSideVisibility(
+        device, *prepared.viewport, false, false,
+        controller->inputSnapshot());
+    require(unchanged.ok() && !unchanged.changed &&
+                unchanged.status ==
+                    apex::app::WorkspaceAiSplineControllerStatus::unchanged &&
+                controller->inputSnapshot() == baselineInput,
+            "unchanged side visibility performs no publication");
+
+    const auto leftVisible = controller->setSideVisibility(
+        device, *prepared.viewport, true, false,
+        controller->inputSnapshot());
+    require(leftVisible.ok() && leftVisible.changed &&
+                leftVisible.replacedPassCount == 4U &&
+                controller->configuration().showLeft &&
+                !controller->configuration().showRight &&
+                controller->overlays().left.has_value() &&
+                !controller->overlays().right.has_value() &&
+                controller->configuration().selectedIndices ==
+                    std::vector<std::uint32_t>{0U} &&
+                controller->revision() == 0U && !controller->dirty() &&
+                !controller->canUndo() && !controller->canRedo() &&
+                controller->currentBytes() == baselineBytes &&
+                controller->inputSnapshot().inputEpoch ==
+                    baselineInput.inputEpoch + 1U &&
+                controller->generation().publication ==
+                    baselineInput.generation.publication + 1U &&
+                prepared.viewport->aiSplineGenerationIdentity() ==
+                    controller->generation(),
+            "left-side visibility publishes without changing authoring state");
+
+    const auto beforeFailure = controller->inputSnapshot();
+    const auto liveBeforeFailure = *device.live_buffer_count;
+    device.fail_buffer_call = device.buffer_calls + 3U;
+    device.fail_buffer_status = BufferStatus::upload_failed;
+    const auto failed = controller->setSideVisibility(
+        device, *prepared.viewport, true, true,
+        controller->inputSnapshot());
+    require(!failed.ok() &&
+                failed.status == apex::app::WorkspaceAiSplineControllerStatus::
+                                     viewport_failed &&
+                controller->configuration().showLeft &&
+                !controller->configuration().showRight &&
+                controller->inputSnapshot() == beforeFailure &&
+                controller->currentBytes() == baselineBytes &&
+                *device.live_buffer_count == liveBeforeFailure &&
+                prepared.viewport->aiSplineGenerationIdentity() ==
+                    controller->generation(),
+            "side visibility upload failure preserves controller and viewport state");
+    device.fail_buffer_call = 0U;
+
+    const auto bothVisible = controller->setSideVisibility(
+        device, *prepared.viewport, true, true,
+        controller->inputSnapshot());
+    require(bothVisible.ok() && bothVisible.changed &&
+                controller->overlays().left.has_value() &&
+                controller->overlays().right.has_value(),
+            "right-side visibility publishes independently after retry");
+    const auto started = controller->startEditing(
+        device, *prepared.viewport, controller->inputSnapshot());
+    require(started.ok() && started.changed && controller->editing(),
+            "side-visibility controller enters edit mode");
+    const auto hidden = controller->setSideVisibility(
+        device, *prepared.viewport, false, false,
+        controller->inputSnapshot());
+    require(hidden.ok() && hidden.changed && controller->editing() &&
+                !controller->overlays().left.has_value() &&
+                !controller->overlays().right.has_value() &&
+                controller->revision() == 0U &&
+                controller->currentBytes() == baselineBytes,
+            "side visibility preserves the active edit mode");
+}
+
 void publishes_ai_spline_controller_transactions() {
     auto value = fixture();
     apex::formats::AiSpline spline;
@@ -2831,6 +2997,8 @@ void publishes_temporary_ai_spline_edit_transaction() {
     request.ai_spline_geometry = &controller->overlays().primary;
     request.ai_spline_generation = controller->generation();
     request.ai_spline_pipeline = ai_spline_pipeline(value);
+    request.ai_spline_left_pipeline = ai_spline_side_pipeline(value);
+    request.ai_spline_right_pipeline = ai_spline_side_pipeline(value);
     request.ai_spline_selection_pipeline = ai_spline_camber_pipeline(value);
     request.ai_spline_temporary_interpolation_pipeline =
         ai_spline_camber_pipeline(value);
@@ -2924,6 +3092,33 @@ void publishes_temporary_ai_spline_edit_transaction() {
                 controller->overlays().temporaryMarkers->sample_point_count ==
                     7U,
             "first strict temporary hit exposes recovered movable axes");
+    const auto temporaryBeforeVisibility =
+        controller->temporaryEditPoints();
+    const auto selectionBeforeVisibility =
+        controller->configuration().selectedIndices;
+    const auto movableBeforeVisibility = controller->movableTemporaryPoint();
+    const auto bytesBeforeVisibility = controller->currentBytes();
+    const auto revisionBeforeVisibility = controller->revision();
+    const bool undoBeforeVisibility = controller->canUndo();
+    const bool redoBeforeVisibility = controller->canRedo();
+    const auto sideVisible = controller->setSideVisibility(
+        device, *prepared.viewport, true, false,
+        controller->inputSnapshot());
+    require(sideVisible.ok() && sideVisible.changed &&
+                controller->editing() &&
+                controller->temporaryEditPoints() ==
+                    temporaryBeforeVisibility &&
+                controller->configuration().selectedIndices ==
+                    selectionBeforeVisibility &&
+                controller->movableTemporaryPoint() ==
+                    movableBeforeVisibility &&
+                controller->currentBytes() == bytesBeforeVisibility &&
+                controller->revision() == revisionBeforeVisibility &&
+                controller->canUndo() == undoBeforeVisibility &&
+                controller->canRedo() == redoBeforeVisibility &&
+                controller->overlays().left.has_value() &&
+                !controller->overlays().right.has_value(),
+            "side visibility preserves temporary edit and history state");
     auto forgedOverlays = controller->overlays();
     const std::size_t forgedAxisEnd =
         static_cast<std::size_t>(
@@ -3704,6 +3899,8 @@ void publishes_controller_through_d3d12_metadata_contract() {
     request.ai_spline_geometry = &controller->overlays().primary;
     request.ai_spline_generation = controller->generation();
     request.ai_spline_pipeline = ai_spline_pipeline(value);
+    request.ai_spline_left_pipeline = ai_spline_side_pipeline(value);
+    request.ai_spline_right_pipeline = ai_spline_side_pipeline(value);
     request.ai_spline_selection_geometry =
         &*controller->overlays().selection;
     request.ai_spline_selection_pipeline = ai_spline_camber_pipeline(value);
@@ -3721,12 +3918,20 @@ void publishes_controller_through_d3d12_metadata_contract() {
     require(prepared.ok() &&
                 prepared.viewport->backend() == Backend::D3D12,
             "D3D12 contract viewport prepares the controller baseline");
+    const auto sidesVisible = controller->setSideVisibility(
+        device, *prepared.viewport, true, true,
+        controller->inputSnapshot());
+    require(sidesVisible.ok() && sidesVisible.changed &&
+                sidesVisible.replacedPassCount == 6U &&
+                controller->overlays().left.has_value() &&
+                controller->overlays().right.has_value(),
+            "D3D12 contract publishes independent side visibility");
 
     apex::app::WorkspaceAiSplineManualMovement movement;
     movement.forward = true;
     const auto changed = controller->moveSelectedByManualInput(
         device, *prepared.viewport, movement, controller->inputSnapshot());
-    require(changed.ok() && changed.changed && changed.replacedPassCount == 4U,
+    require(changed.ok() && changed.changed && changed.replacedPassCount == 6U,
             "D3D12 contract accepts one manual controller generation");
 
     const auto publicationBeforeSelection =
@@ -3737,7 +3942,7 @@ void publishes_controller_through_d3d12_metadata_contract() {
     const auto selected = controller->selectPoint(
         device, *prepared.viewport, selection);
     require(selected.ok() && selected.changed &&
-                selected.replacedPassCount == 4U &&
+                selected.replacedPassCount == 6U &&
                 selected.resultingInput.generation.publication ==
                     publicationBeforeSelection + 1U &&
                 controller->configuration().selectedIndices ==
@@ -4467,6 +4672,8 @@ int main() {
         draws_recovered_ai_spline_camber_pass();
         replaces_committed_ai_spline_overlays_atomically();
         tracks_recovered_ai_spline_manual_input();
+        routes_portable_ai_spline_side_visibility_commands();
+        publishes_ai_spline_side_visibility_atomically();
         publishes_ai_spline_controller_transactions();
         publishes_recovered_ai_spline_edit_lifecycle();
         publishes_temporary_ai_spline_edit_transaction();

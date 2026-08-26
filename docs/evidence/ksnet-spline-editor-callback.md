@@ -29,12 +29,20 @@ It sends the samples to `GLRenderer::spline`.
 version-7 point lengths do not control interpolation.
 
 `Spline::computeSplineLength` is at `0x100365C3`. It samples each Catmull-Rom
-segment with float increment `0.001F`. The constant bytes at `0x1011072C` are
-`6f 12 83 3a`. A closed spline also samples the wrapped final segment.
+segment from zero through one with float increment `0.001F`. Each segment uses
+1,001 samples and wrapped neighbor indices. The constant bytes at `0x1011072C`
+are `6f 12 83 3a`. The function writes each cumulative segment end to the
+current point length. A closed spline also samples the wrapped final segment.
 `Spline::length` at `0x10033A1A` adds the straight endpoint chord to that curve
 length. Closing-segment lookup divides by the same endpoint chord. The safe
 adapter rejects a zero endpoint chord instead of reproducing native division
 by zero.
+
+The version-2 payload constructor is at `0x100688B2`. It initializes grip to
+one and direction to one. Other numeric fields start at zero. The legacy loader
+derives acceleration from speed and the zero default point length. Native
+`saturate` at `0x10013E20` clamps values more than one or less than zero. A NaN
+passes through because both comparisons are false.
 
 The constructor sets `inPoint` and `outPoint` to `-1.0F` at offsets 12 and 16.
 The callback skips the interval when either value equals this sentinel.
@@ -340,6 +348,11 @@ zero to one.
 `--ai-spline-show-left` and `--ai-spline-show-right` enable independent side
 passes. Both options require version-7 payloads. The default state is off,
 which matches the two installed-editor checkboxes.
+
+The live controller also changes these passes without viewport recreation. It
+prepares latent side pipelines and atomically replaces all spline pass buffers.
+`Control+L` and `Control+R` are portable shortcuts. They are not recovered
+original shortcuts. The recovered behavior is the independent checkbox action.
 
 Each `--ai-spline-index <index>` adds one recovered selected-point marker.
 Repeated options model `addIndex`: they keep insertion order and ignore

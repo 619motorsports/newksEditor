@@ -211,14 +211,19 @@ remains unchanged and feature-complete.
   This pass follows the primary spline and disables depth tests and writes.
   Independent version-7 options add the recovered cyan left and right side
   passes. These raw passes follow the interval and use normal depth.
+  The live controller changes each side independently through latent viewport
+  pipelines. `Control+L` and `Control+R` are portable shortcuts for the two
+  recovered checkbox actions. A side change preserves model bytes, history,
+  selection, temporary points, and edit mode.
   Repeated version-7 index options add recovered yellow center markers and
   optional cyan width markers. The port keeps insertion order and ignores
   duplicate indices. The port records the last unique index for UI adapters.
   This pass follows the side passes and uses normal depth.
   The format library writes the exact `AISpline::save` version-7 record
   layout. The writer emits zero reserved words and preserves a valid grid.
-  It rejects version 2 because the port has not recovered the conversion of
-  legacy records into version-7 payloads. A separate authoring adapter ports
+  It rejects version 2 until the explicit legacy converter is implemented.
+  The exact retained-point, payload-default, gas/brake, and sampled-length
+  rules are now recovered. A separate authoring adapter ports
   the recovered six-field waypoint edit for one selected point. It resolves
   the payload through the point tag. It applies each nonzero replacement, then
   each additive value. Camber values use degrees at this boundary and radians
@@ -483,8 +488,10 @@ remains unchanged and feature-complete.
   ksNet per-mesh culling. The cockpit pair follows `src/cockpit-preview.js`.
   A separate bounded predicate implements the recovered ksNet per-mesh rule.
   It includes the FOV scale, radius floor, inclusive limits, and zero-limit
-  bypass. It also keeps PVS and explicit `NO_CULL` inputs. Render-plan
-  integration remains staged until the loader and submission paths are recovered.
+  bypass. Reverse engineering now identifies `CameraMeshFilter::isVisible` as
+  the active path. It reads each `Renderable` directly and does not populate
+  `PvsProcessor` arrays. Render-plan integration remains staged until the port
+  adds exact pass, layer, static-bound, frustum, and `NO_CULL` inputs.
   Shadows, reflections, sky, CSP lights, and post-processing remain staged
   with explicit evidence.
 - P1 is partial. Bounded readers support KN5 v4/v5/v6, DDS, ACD, INI/CSP,

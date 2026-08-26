@@ -81,6 +81,8 @@ enum class WindowKey : std::uint8_t {
     d,
     q,
     e,
+    l,
+    r,
     enter,
     escape,
     keypad_2,

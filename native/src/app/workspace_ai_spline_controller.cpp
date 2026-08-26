@@ -705,6 +705,103 @@ WorkspaceAiSplineControllerResult WorkspaceAiSplineController::startEditing(
     return updateEditingState(device, viewport, expected, true, true, false);
 }
 
+WorkspaceAiSplineControllerResult
+WorkspaceAiSplineController::setSideVisibility(
+    render::Device& device, WorkspaceViewport& viewport, bool showLeft,
+    bool showRight,
+    const WorkspaceAiSplineControllerInputSnapshot& expected) {
+    if (!inputMatches(expected)) {
+        auto result = currentResult();
+        result.status = WorkspaceAiSplineControllerStatus::stale_input;
+        result.diagnostic = diagnostic(
+            "workspace_ai_spline_controller_input_stale",
+            "AI spline input snapshot does not match the current "
+            "controller state");
+        return result;
+    }
+    if (!viewportMatches(viewport))
+        return viewportBindingResult();
+    if (state_->configuration.showLeft == showLeft &&
+        state_->configuration.showRight == showRight) {
+        auto result = currentResult();
+        result.status = WorkspaceAiSplineControllerStatus::unchanged;
+        return result;
+    }
+    if (state_->generation.publication ==
+            std::numeric_limits<std::uint64_t>::max() ||
+        state_->inputEpoch == std::numeric_limits<std::uint64_t>::max()) {
+        auto result = currentResult();
+        result.status = WorkspaceAiSplineControllerStatus::unsupported;
+        result.diagnostic = diagnostic(
+            "workspace_ai_spline_controller_visibility_generation_exhausted",
+            "AI spline side visibility cannot advance without overflow");
+        return result;
+    }
+
+    try {
+        auto candidateConfiguration = state_->configuration;
+        candidateConfiguration.showLeft = showLeft;
+        candidateConfiguration.showRight = showRight;
+        auto built = buildWorkspaceAiSplineOverlays(
+            state_->session.current(),
+            overlayRequest(candidateConfiguration,
+                           state_->temporaryEditPoints,
+                           state_->movableTemporaryPoint));
+        if (!built.ok()) {
+            auto result = currentResult();
+            result.status = overlayFailureStatus(built.status);
+            result.diagnostic = std::move(built.diagnostic);
+            return result;
+        }
+
+        auto nextGeneration = state_->generation;
+        ++nextGeneration.publication;
+        auto nextState = std::make_unique<State>(
+            state_->session, std::move(candidateConfiguration),
+            std::move(built.overlays), state_->movementForwards,
+            std::move(nextGeneration), state_->inputEpoch + 1U,
+            state_->editing, state_->temporaryEditPoints,
+            state_->movableTemporaryPoint);
+        const auto replaced = viewport.replaceAiSplineOverlays(
+            device, nextState->overlays,
+            WorkspaceViewportAiSplineGenerationTransition{
+                state_->generation, nextState->generation});
+        if (!replaced.ok()) {
+            auto result = currentResult();
+            result.status =
+                replaced.status ==
+                        WorkspaceViewportAiSplineUpdateStatus::unsupported
+                    ? WorkspaceAiSplineControllerStatus::unsupported
+                : replaced.status == WorkspaceViewportAiSplineUpdateStatus::
+                                         allocation_failed
+                    ? WorkspaceAiSplineControllerStatus::allocation_failed
+                    : WorkspaceAiSplineControllerStatus::viewport_failed;
+            result.diagnostic = replaced.diagnostic;
+            return result;
+        }
+
+        auto result = currentResult();
+        result.status = WorkspaceAiSplineControllerStatus::ready;
+        result.replacedPassCount = replaced.replaced_pass_count;
+        result.changed = true;
+        state_.swap(nextState);
+        result.resultingInput = inputSnapshot();
+        return result;
+    } catch (const std::bad_alloc&) {
+        auto result = currentResult();
+        result.status = WorkspaceAiSplineControllerStatus::allocation_failed;
+        result.diagnostic = diagnostic(
+            "workspace_ai_spline_controller_visibility_allocation_failed",
+            "AI spline side visibility exceeded available allocation capacity");
+        return result;
+    } catch (const std::exception& error) {
+        auto result = currentResult();
+        result.diagnostic = {
+            "workspace_ai_spline_controller_visibility_failed", error.what()};
+        return result;
+    }
+}
+
 WorkspaceAiSplineControllerResult WorkspaceAiSplineController::finishEditing(
     render::Device& device, WorkspaceViewport& viewport,
     const WorkspaceAiSplineControllerInputSnapshot& expected) {

@@ -234,9 +234,11 @@ The AI-spline option loads a bounded version-2 or version-7 file.
 The format library also supplies `serializeAiSpline` for version-7 output.
 This function writes the recovered 20-byte point and 72-byte payload records.
 It writes zero reserved words and preserves a valid optional grid.
-The function rejects version 2 because the port does not invent version-7
-payloads. It also rejects invalid tags, grid indices, non-finite values, and
-output that exceeds the configured limits.
+The function rejects version 2 until the explicit legacy converter is
+implemented. The recovered converter uses retained points, native payload
+defaults, legacy gas and brake derivation, and sampled Catmull-Rom lengths.
+It also rejects invalid tags, grid indices, non-finite values, and output that
+exceeds the configured limits.
 `--edit-ai-spline` edits one version-7 point and writes a new file.
 The command does not replace an existing output file.
 The point tag selects the payload, as in the installed editor.
@@ -268,6 +270,11 @@ The interval always uses interpolation and disables depth tests and writes.
 `--ai-spline-show-right` shows the recovered right side spline.
 The side options are independent and off by default. They require version-7
 payloads and use cyan with normal depth.
+During live editing, `Control+L` and `Control+R` toggle these passes without
+recreating the viewport. These shortcuts are a portable native policy. The
+recovered original controls are two independent checkboxes.
+Each change replaces all spline passes atomically. It preserves the model,
+history, selection, temporary points, and edit mode.
 `--ai-spline-index <index>` draws a recovered selected-point marker.
 Repeat this option to select more points. The CLI keeps insertion order and
 ignores duplicate indices. The CLI records the last unique index. Native UI

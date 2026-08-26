@@ -160,8 +160,9 @@ struct WorkspaceViewportPrepareRequest {
     // depth-off pass and must be supplied with the primary spline pass.
     const WorkspaceAiSplineGeometry* ai_spline_interval_geometry = nullptr;
     std::optional<render::PipelineProgram> ai_spline_interval_pipeline;
-    // Optional recovered raw side splines. These passes follow the interval
-    // and use the primary normal-depth contract.
+    // Optional recovered raw side splines. A controller can retain each
+    // pipeline without geometry for an independently hidden side. These
+    // passes follow the interval and use the primary normal-depth contract.
     const WorkspaceAiSplineGeometry* ai_spline_left_geometry = nullptr;
     std::optional<render::PipelineProgram> ai_spline_left_pipeline;
     const WorkspaceAiSplineGeometry* ai_spline_right_geometry = nullptr;

@@ -1,6 +1,7 @@
 #include "apex/app/authoring_service.hpp"
 #include "apex/app/presentation_recreation.hpp"
 #include "apex/app/workspace_ai_spline.hpp"
+#include "apex/app/workspace_ai_spline_commands.hpp"
 #include "apex/app/workspace_ai_spline_controller.hpp"
 #include "apex/app/workspace_selection.hpp"
 #include "apex/app/workspace_shadow_programs.hpp"
@@ -2035,16 +2036,20 @@ int run_window(int argc, char** argv) {
                 request.ai_spline_interval_pipeline =
                     std::move(interval_pipeline);
             }
-            if (ai.left.has_value()) {
+            if (loaded_workspace.aiSplineController != nullptr ||
+                ai.left.has_value()) {
                 auto side_pipeline = pipeline;
                 side_pipeline.name = "workspace-ai-spline-left";
-                request.ai_spline_left_geometry = &*ai.left;
+                if (ai.left.has_value())
+                    request.ai_spline_left_geometry = &*ai.left;
                 request.ai_spline_left_pipeline = std::move(side_pipeline);
             }
-            if (ai.right.has_value()) {
+            if (loaded_workspace.aiSplineController != nullptr ||
+                ai.right.has_value()) {
                 auto side_pipeline = pipeline;
                 side_pipeline.name = "workspace-ai-spline-right";
-                request.ai_spline_right_geometry = &*ai.right;
+                if (ai.right.has_value())
+                    request.ai_spline_right_geometry = &*ai.right;
                 request.ai_spline_right_pipeline = std::move(side_pipeline);
             }
             if (loaded_workspace.aiSplineController != nullptr ||
@@ -2269,6 +2274,35 @@ int run_window(int argc, char** argv) {
                           << changed.diagnostic.message << '\n';
             }
         };
+    const auto change_ai_spline_side_visibility =
+        [&](apex::app::WorkspaceAiSplineSideVisibilityCommand command) {
+            if (loaded_workspace.aiSplineController == nullptr ||
+                viewport == nullptr)
+                return;
+            const auto& configuration =
+                loaded_workspace.aiSplineController->configuration();
+            bool show_left = configuration.showLeft;
+            bool show_right = configuration.showRight;
+            switch (command) {
+            case apex::app::WorkspaceAiSplineSideVisibilityCommand::
+                toggle_left:
+                show_left = !show_left;
+                break;
+            case apex::app::WorkspaceAiSplineSideVisibilityCommand::
+                toggle_right:
+                show_right = !show_right;
+                break;
+            }
+            const auto changed =
+                loaded_workspace.aiSplineController->setSideVisibility(
+                    *device_result.device, *viewport, show_left, show_right,
+                    loaded_workspace.aiSplineController->inputSnapshot());
+            if (!changed.ok()) {
+                std::cerr << "AI spline side visibility: "
+                          << changed.diagnostic.code << ": "
+                          << changed.diagnostic.message << '\n';
+            }
+        };
     while (!window_result.window->close_requested() &&
            (frame_limit == 0U || frames < frame_limit)) {
         bool resized = false;
@@ -2280,6 +2314,11 @@ int run_window(int argc, char** argv) {
             switch (events[index].type) {
             case apex::platform::WindowEventType::key_down:
                 if (!window_has_keyboard_focus) break;
+                if (const auto command =
+                        apex::app::workspaceAiSplineSideVisibilityCommand(
+                            events[index]);
+                    command.has_value())
+                    change_ai_spline_side_visibility(*command);
                 if (!events[index].repeat &&
                     (events[index].semantic_key ==
                          apex::platform::WindowKey::enter ||

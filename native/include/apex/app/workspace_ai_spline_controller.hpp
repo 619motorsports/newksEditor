@@ -87,7 +87,8 @@ enum class WorkspaceAiSplineControllerStatus : std::uint8_t {
 };
 
 // This snapshot identifies the controller state that produced one input
-// event. The input epoch changes after each selection or edit-mode change.
+// event. The input epoch changes after selection, edit-mode, or visibility
+// changes that can invalidate an earlier event.
 struct WorkspaceAiSplineControllerInputSnapshot {
     WorkspaceViewportAiSplineGeneration generation;
     std::uint64_t inputEpoch = 0U;
@@ -229,6 +230,12 @@ public:
     [[nodiscard]] WorkspaceAiSplineControllerSaveResult
     buildSaveBytes(std::uint64_t expectedRevision) const;
 
+    // Publish independent installed-editor side visibility without changing
+    // the spline model, authoring history, selection, or edit state.
+    [[nodiscard]] WorkspaceAiSplineControllerResult setSideVisibility(
+        render::Device& device, WorkspaceViewport& viewport,
+        bool showLeft, bool showRight,
+        const WorkspaceAiSplineControllerInputSnapshot& expected);
     [[nodiscard]] WorkspaceAiSplineControllerResult setPointPositions(
         render::Device& device, WorkspaceViewport& viewport,
         std::span<const authoring::AiSplinePointPositionEdit> edits,

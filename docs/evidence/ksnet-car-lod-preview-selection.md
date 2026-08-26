@@ -97,7 +97,24 @@ The native port now exposes a bounded per-mesh predicate as
 `ksnet_mesh_lod_visible()`. It preserves the strict comparisons, FOV scale
 `0.0125`, radius floor, zero-limit bypass, initial PVS state, and explicit
 `NO_CULL` input. The render planner does not enable this rule yet.
-Loader population and per-frame submission remain unrecovered.
+
+Further disassembly identifies `CameraMeshFilter::isVisible` at `0x10064C8C`
+as the active installed runtime path. `Mesh::render` at `0x100494FF` and
+`SkinnedMesh::render` at `0x1004A87E` call this filter before direct drawing.
+They do not submit array entries to `PvsProcessor`.
+
+The filter first applies the maximum layer, render pass, shadow-caster,
+transparency, and visibility rules. `NO_CULL` or a null camera then accepts the
+mesh. Otherwise, the filter transforms a non-static bounding sphere by the
+supplied world matrix. It keeps a static sphere unchanged. It applies the
+recovered distance rule and then tests the camera frustum.
+
+The active path reads `Renderable` fields directly. These fields are
+`castShadows +188`, `isVisible +189`, `isTransparent +190`, `noCull +191`,
+`boundingSphere +192`, `layer +208`, `lodIN +212`, `lodOUT +216`, and
+`isStatic +220`. Thus, PVS array population is not an integration dependency.
+The port still needs explicit pass, static-bound, frustum, and `NO_CULL` state
+before it can claim exact render-plan integration.
 
 The predicate does not reinterpret the editor's LOD1–LOD4 menu as an
 automatic distance selector.
@@ -107,7 +124,7 @@ The inspected evidence does not recover which loader populates each LOD file's
 initial values of those fields for a newly loaded model. Those remain staged
 targets rather than assumptions.
 
-## Submission ABI and unresolved producer
+## Submission ABI and inactive processor path
 
 The PDB gives the public submission signature, but it does not give an emitted
 body. Type `0x1549F` is a `thiscall void PvsProcessor::submitMesh(Mesh*)`
@@ -124,11 +141,10 @@ The PDB module record is `Release\\PvsProcessor.obj`. Its emitted records includ
 include `doRenderCalls`, `doRenderClassic`, `end`, and the draw-call helpers.
 They contain no `S_GPROC32` or `S_THUNK32` record for `submitMesh`.
 
-The method can be inline, or its producer can be in another translation unit.
-The installed `ksNet.dll` does not expose a recoverable address for this
-method. A direct `.text` search found constructor clearing at `0x1004496c`. It
-also found reads in the named culling and render methods. It found no isolated
-write-side submission body.
+The installed `ksNet.dll` does not expose an address for this method. A direct
+`.text` search found constructor clearing at `0x1004496c`. It also found reads
+in the named culling and render methods. It found no write-side submission
+body.
 
 The per-frame call envelope is exact. PDB symbol
 `CameraShadowMapped::renderPass` starts at `0x1005e681`. Disassembly calls
@@ -141,14 +157,11 @@ or `0x1005e8a9`. `Node::render` at `0x1003f5dc` visits only active children.
 `Mesh::render` at `0x100494ff` dispatches `IMeshRenderFilter::isVisible` and the
 material filter. Neither function contains a named `submitMesh` call.
 
-Thus, root traversal between `begin` and `end` bounds per-frame submission. The
-exact producer remains unresolved. Assignments to `meshPtrs`, `flags`,
-`layers`, `bounds`, `lodIns`, `lodOuts`, and `inPvs` also remain unresolved.
-
-The loader must not infer `MESH_FLAG_NO_CULL`, initial `inPvs`, or LOD values
-from this culling pass. The next exact target is an external call site or an
-inline expansion from a build that contains submission code. Until then, the
-backend-neutral predicate must continue to require these fields as inputs.
+Root traversal occurs inside each `begin` and `end` envelope. However,
+`Mesh::render` and `SkinnedMesh::render` use the direct filter and draw path.
+They do not write `meshPtrs`, `flags`, `layers`, `bounds`, `lodIns`, `lodOuts`,
+or `inPvs`. The processor arrays are inactive in this installed path. The port
+must use the recovered direct filter contract instead of inferring array data.
 
 ## Editor preview resource lifetime
 
