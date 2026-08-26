@@ -301,23 +301,27 @@ bool record_d3d12_stock_ks_per_pixel_native_draw(
     return invalid("d3d12_stock_native_target_format_unsupported",
                    "Native ksPerPixel readback requires RGBA8 or BGRA8");
   const D3D12_RESOURCE_DESC target_description = context.target->GetDesc();
+  const StockKsPerPixelVariant shader_variant =
+      context.shader_program->source().variant();
+  const bool alpha_to_coverage =
+      shader_variant == StockKsPerPixelVariant::alpha_to_coverage;
+  if (request.pipeline->blend.alpha_to_coverage != alpha_to_coverage ||
+      packet.flags.alpha_to_coverage != alpha_to_coverage)
+    return invalid(
+        "d3d12_stock_native_variant_state_mismatch",
+        "Native ksPerPixel shader, packet, and pipeline A2C state must match");
+  const UINT required_samples = alpha_to_coverage ? 4U : 1U;
   if (target_description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
       target_description.Format != context.target_format ||
       target_description.Width != context.target_width ||
       target_description.Height != context.target_height ||
-      target_description.SampleDesc.Count != 1U) {
-    if (request.pipeline->blend.alpha_to_coverage &&
-        target_description.SampleDesc.Count == 4U)
-      return invalid("d3d12_stock_native_a2c_unsupported",
-                     "The standalone native helper does not implement 4x "
-                     "alpha-to-coverage");
+      target_description.SampleDesc.Count != required_samples) {
+    if (alpha_to_coverage)
+      return invalid("d3d12_stock_native_a2c_target_samples_invalid",
+                     "Native alpha-to-coverage requires a 4x color target");
     return invalid("d3d12_stock_native_target_shape_invalid",
                    "Native target must be a single-sample 2D image");
   }
-  if (request.pipeline->blend.alpha_to_coverage)
-    return invalid(
-        "d3d12_stock_native_a2c_unsupported",
-        "Alpha-to-coverage requires an unimplemented 4x native path");
   if (context.target_width >
           static_cast<std::uint32_t>(std::numeric_limits<LONG>::max()) ||
       context.target_height >
@@ -652,7 +656,8 @@ bool record_d3d12_stock_ks_per_pixel_native_draw(
   pso.RTVFormats[0] = context.target_format;
   pso.DSVFormat = use_depth ? DXGI_FORMAT_D32_FLOAT : DXGI_FORMAT_UNKNOWN;
   pso.SampleMask = std::numeric_limits<UINT>::max();
-  pso.SampleDesc.Count = 1U;
+  pso.SampleDesc.Count = required_samples;
+  pso.SampleDesc.Quality = target_description.SampleDesc.Quality;
   ComPtr<ID3D12PipelineState> pipeline_state;
   result = context.device->CreateGraphicsPipelineState(
       &pso, IID_PPV_ARGS(&pipeline_state));
@@ -661,15 +666,34 @@ bool record_d3d12_stock_ks_per_pixel_native_draw(
                                result, "indexed_stock_native_pipeline_failed");
     return false;
   }
-  // Allocate all synchronization and copy resources before resetting or
-  // recording the command list.  This keeps failures before submission from
-  // leaving a partially-owned GPU operation behind.
+  // Allocate the single-sample resolve target, synchronization, and copy
+  // resources before resetting or recording the command list. This keeps
+  // failures before submission from leaving a partially-owned GPU operation
+  // behind.
+  ComPtr<ID3D12Resource> resolve_resource;
+  D3D12_RESOURCE_DESC readback_source_description = target_description;
+  if (alpha_to_coverage) {
+    readback_source_description.Alignment = 0U;
+    readback_source_description.SampleDesc.Count = 1U;
+    readback_source_description.SampleDesc.Quality = 0U;
+    D3D12_HEAP_PROPERTIES resolve_heap{D3D12_HEAP_TYPE_DEFAULT};
+    result = context.device->CreateCommittedResource(
+        &resolve_heap, D3D12_HEAP_FLAG_NONE, &readback_source_description,
+        D3D12_RESOURCE_STATE_RESOLVE_DEST, nullptr,
+        IID_PPV_ARGS(&resolve_resource));
+    if (FAILED(result)) {
+      diagnostic = hresult_error(
+          "CreateCommittedResource(stock native A2C resolve)", result,
+          "d3d12_stock_native_a2c_resolve_allocation_failed");
+      return false;
+    }
+  }
   D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
   UINT rows = 0U;
   UINT64 row_size = 0U;
   UINT64 readback_size = 0U;
-  context.device->GetCopyableFootprints(&target_description, 0U, 1U, 0U,
-                                        &footprint, &rows, &row_size,
+  context.device->GetCopyableFootprints(&readback_source_description, 0U, 1U,
+                                        0U, &footprint, &rows, &row_size,
                                         &readback_size);
   if (rows != context.target_height ||
       row_size < static_cast<UINT64>(context.target_width) * 4U ||
@@ -793,10 +817,23 @@ bool record_d3d12_stock_ks_per_pixel_native_draw(
   context.command_list->IASetVertexBuffers(0U, 1U, &vb);
   context.command_list->IASetIndexBuffer(&ib);
   context.command_list->DrawIndexedInstanced(packet.index_count, 1U, 0U, 0, 0U);
-  transition(context.command_list, context.target,
-             D3D12_RESOURCE_STATE_RENDER_TARGET,
-             D3D12_RESOURCE_STATE_COPY_SOURCE);
-  D3D12_TEXTURE_COPY_LOCATION source{context.target,
+  ID3D12Resource *readback_source = context.target;
+  if (alpha_to_coverage) {
+    transition(context.command_list, context.target,
+               D3D12_RESOURCE_STATE_RENDER_TARGET,
+               D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
+    context.command_list->ResolveSubresource(
+        resolve_resource.Get(), 0U, context.target, 0U, context.target_format);
+    transition(context.command_list, resolve_resource.Get(),
+               D3D12_RESOURCE_STATE_RESOLVE_DEST,
+               D3D12_RESOURCE_STATE_COPY_SOURCE);
+    readback_source = resolve_resource.Get();
+  } else {
+    transition(context.command_list, context.target,
+               D3D12_RESOURCE_STATE_RENDER_TARGET,
+               D3D12_RESOURCE_STATE_COPY_SOURCE);
+  }
+  D3D12_TEXTURE_COPY_LOCATION source{readback_source,
                                      D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
   source.SubresourceIndex = 0U;
   D3D12_TEXTURE_COPY_LOCATION destination{
@@ -804,8 +841,16 @@ bool record_d3d12_stock_ks_per_pixel_native_draw(
   destination.PlacedFootprint = footprint;
   context.command_list->CopyTextureRegion(&destination, 0U, 0U, 0U, &source,
                                           nullptr);
-  transition(context.command_list, context.target,
-             D3D12_RESOURCE_STATE_COPY_SOURCE, target_before);
+  if (alpha_to_coverage) {
+    transition(context.command_list, resolve_resource.Get(),
+               D3D12_RESOURCE_STATE_COPY_SOURCE,
+               D3D12_RESOURCE_STATE_RESOLVE_DEST);
+    transition(context.command_list, context.target,
+               D3D12_RESOURCE_STATE_RESOLVE_SOURCE, target_before);
+  } else {
+    transition(context.command_list, context.target,
+               D3D12_RESOURCE_STATE_COPY_SOURCE, target_before);
+  }
   for (UINT i = 0U; i < 3U; ++i)
     transition(context.command_list, context.shadow_maps[i],
                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, shadows_before[i]);

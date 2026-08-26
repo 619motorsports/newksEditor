@@ -131,6 +131,8 @@ apex::formats::Kn5Node triangle_mesh() {
   }
   const std::vector<std::uint8_t> base_bytes = read_bounded(base_path);
   const std::vector<std::uint8_t> alpha_bytes = read_bounded(alpha_path);
+  require(base_bytes.size() == 11'254U && alpha_bytes.size() == 11'330U,
+          "installed native packages have the recovered bounded sizes");
 
   StockShaderContainer base_container =
       parse_stock_shader_container(base_bytes);
@@ -185,6 +187,13 @@ apex::formats::Kn5Node triangle_mesh() {
       *device_result.device, std::move(*base_program_result.program));
   require(native_shaders.ok() && native_shaders.program != nullptr,
           "D3D12 owns the validated base DXBC shader pair");
+  auto alpha_native_shaders = allocate_stock_ks_per_pixel_native_shaders(
+      *device_result.device, std::move(*alpha_program_result.program));
+  require(alpha_native_shaders.ok() && alpha_native_shaders.program != nullptr,
+          "D3D12 owns the validated alpha-to-coverage DXBC shader pair");
+  require(alpha_native_shaders.program->source().variant() ==
+              StockKsPerPixelVariant::alpha_to_coverage,
+          "D3D12 native owner retains the exact A2C shader variant");
   require(
       native_shaders.program->source().variant() ==
               StockKsPerPixelVariant::base &&
@@ -245,6 +254,11 @@ apex::formats::Kn5Node triangle_mesh() {
   TextureResult target =
       device_result.device->create_texture(target_description);
   require(target.ok(), "native target allocation");
+  TextureDescription alpha_target_description = target_description;
+  alpha_target_description.samples = 4U;
+  TextureResult alpha_target =
+      device_result.device->create_texture(alpha_target_description);
+  require(alpha_target.ok(), "native 4x alpha-to-coverage target allocation");
 
   const std::array<std::byte, 4U> diffuse_pixel = {
       std::byte{180}, std::byte{120}, std::byte{80}, std::byte{255}};
@@ -258,6 +272,15 @@ apex::formats::Kn5Node triangle_mesh() {
   TextureResult diffuse = device_result.device->create_texture(
       diffuse_description, diffuse_uploads);
   require(diffuse.ok(), "native diffuse allocation and upload");
+  const std::array<std::byte, 4U> partial_alpha_diffuse_pixel = {
+      std::byte{180}, std::byte{120}, std::byte{80}, std::byte{128}};
+  TextureUploadPlan partial_alpha_diffuse_uploads;
+  partial_alpha_diffuse_uploads.subresources.push_back(
+      {0U, 0U, 1U, 1U, 4U, partial_alpha_diffuse_pixel});
+  TextureResult partial_alpha_diffuse = device_result.device->create_texture(
+      diffuse_description, partial_alpha_diffuse_uploads);
+  require(partial_alpha_diffuse.ok(),
+          "native partial-alpha diffuse allocation and upload");
 
   std::array<std::unique_ptr<DepthAttachment>,
              stock_ks_per_pixel_shadow_cascade_count>
@@ -316,6 +339,49 @@ apex::formats::Kn5Node triangle_mesh() {
               draw.rgba8[center + 1U] != std::byte{0} ||
               draw.rgba8[center + 2U] != std::byte{0},
           "native ksPerPixel WARP readback is not the clear color");
+
+  StaticMeshUploadResult alpha_mesh_upload =
+      upload_static_mesh(*device_result.device, triangle_mesh(), [] {
+        DrawPacket packet;
+        packet.primitive = DrawPrimitiveKind::static_mesh;
+        packet.vertex_count = 3U;
+        packet.index_count = 3U;
+        packet.vertex_stride_floats = 11U;
+        packet.flags.alpha_to_coverage = true;
+        packet.flags.depth_test = false;
+        packet.flags.depth_write = false;
+        return packet;
+      }());
+  require(alpha_mesh_upload.ok(),
+          "native alpha-to-coverage triangle geometry allocation");
+  PipelineProgram alpha_pipeline = native_pipeline();
+  alpha_pipeline.targets.colors[0].samples = 4U;
+  alpha_pipeline.blend.alpha_to_coverage = true;
+  IndexedStaticMeshDrawRequest alpha_request =
+      alpha_mesh_upload.upload->make_request(alpha_pipeline, *camera.frame);
+  const StockKsPerPixelNativeDrawBinding alpha_binding{
+      alpha_native_shaders.program.get(),
+      constants.buffers.get(),
+      samplers.samplers.get(),
+      partial_alpha_diffuse.texture.get(),
+      {shadows[0].get(), shadows[1].get(), shadows[2].get()}};
+  alpha_request.shader_authority =
+      IndexedShaderAuthority::explicit_stock_ks_per_pixel_native;
+  alpha_request.stock_ks_per_pixel_native = &alpha_binding;
+  alpha_request.clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
+  const IndexedStaticMeshDrawResult alpha_draw =
+      device_result.device->draw_indexed_static_mesh_and_readback(
+          *alpha_target.texture, alpha_request);
+  require(alpha_draw.ok() && alpha_draw.rgba8.size() == 32U * 32U * 4U,
+          alpha_draw.diagnostic.code.empty()
+              ? "native ksPerPixel A2C WARP draw/readback"
+              : alpha_draw.diagnostic.code);
+  require(alpha_draw.rgba8[center] != std::byte{0} ||
+              alpha_draw.rgba8[center + 1U] != std::byte{0} ||
+              alpha_draw.rgba8[center + 2U] != std::byte{0},
+          "native ksPerPixel A2C WARP readback is not the clear color");
+  require(alpha_draw.rgba8[center] < draw.rgba8[center],
+          "native ksPerPixel A2C resolves partial sample coverage");
   device_result.device->wait_idle();
   return 0;
 }
