@@ -13,6 +13,11 @@
 #include <string_view>
 #include <vector>
 
+#if defined(_WIN32)
+#include <d3dcompiler.h>
+#include <wrl/client.h>
+#endif
+
 namespace {
 
 using namespace apex::render;
@@ -54,6 +59,29 @@ std::vector<std::uint8_t> reflection_fragment_shader() {
   return shader_bytes(hex);
 }
 
+#if defined(_WIN32)
+std::vector<std::uint8_t> d3d_shader(const std::string_view source,
+                                     const char *target) {
+  Microsoft::WRL::ComPtr<ID3DBlob> bytecode;
+  Microsoft::WRL::ComPtr<ID3DBlob> errors;
+  const HRESULT result = D3DCompile(
+      source.data(), source.size(), "indexed_multimap_reflection", nullptr,
+      nullptr, "main", target, D3DCOMPILE_ENABLE_STRICTNESS, 0U, &bytecode,
+      &errors);
+  if (FAILED(result)) {
+    const std::string message =
+        errors == nullptr
+            ? "D3DCompile failed"
+            : std::string(static_cast<const char *>(errors->GetBufferPointer()),
+                          errors->GetBufferSize());
+    throw std::runtime_error(message);
+  }
+  const auto *begin =
+      static_cast<const std::uint8_t *>(bytecode->GetBufferPointer());
+  return {begin, begin + bytecode->GetBufferSize()};
+}
+#endif
+
 constexpr std::array<CubeFace, texture_cube_face_count> cube_faces = {
     CubeFace::positive_x, CubeFace::negative_x, CubeFace::positive_y,
     CubeFace::negative_y, CubeFace::positive_z, CubeFace::negative_z};
@@ -85,8 +113,9 @@ make_array_uploads(const std::span<const std::array<std::byte, 4U>> pixels) {
   return uploads;
 }
 
-void exercise_vulkan_reflection_draw(Device &device, Texture &cube,
-                                     const std::array<std::byte, 4U> &pixel) {
+void exercise_reflection_draw(Device &device, const Backend backend,
+                              Texture &cube,
+                              const std::array<std::byte, 4U> &pixel) {
   TextureDescription sampled;
   sampled.width = 1U;
   sampled.height = 1U;
@@ -161,12 +190,38 @@ void exercise_vulkan_reflection_draw(Device &device, Texture &cube,
   pipeline.vertex_layout.attributes.push_back(
       {PipelineVertexSemantic::position,
        PipelineVertexAttributeFormat::float32x3, 0U, 0U});
-  pipeline.shaders = {
-      {PipelineShaderStage::vertex, PipelineShaderFormat::spirv,
-       reflection_vertex_shader()},
-      {PipelineShaderStage::fragment, PipelineShaderFormat::spirv,
-       reflection_fragment_shader()},
-  };
+  if (backend == Backend::Vulkan) {
+    pipeline.shaders = {
+        {PipelineShaderStage::vertex, PipelineShaderFormat::spirv,
+         reflection_vertex_shader()},
+        {PipelineShaderStage::fragment, PipelineShaderFormat::spirv,
+         reflection_fragment_shader()},
+    };
+  } else {
+#if defined(_WIN32)
+    constexpr std::string_view vertex_source =
+        "cbuffer DrawMatrices : register(b0) { column_major float4x4 world; "
+        "column_major float4x4 viewProjection; };"
+        "float4 main(float3 position : POSITION) : SV_Position { return "
+        "mul(viewProjection, mul(world, float4(position, 1.0))); }";
+    constexpr std::string_view fragment_source =
+        "TextureCube reflectionCube : register(t21);"
+        "SamplerState reflectionSampler : register(s22);"
+        "cbuffer ReflectionConstants : register(b23) { float4 "
+        "fresnelAndAdditive; };"
+        "float4 main() : SV_Target { return "
+        "reflectionCube.Sample(reflectionSampler, float3(1.0, 0.0, 0.0)) * "
+        "fresnelAndAdditive; }";
+    pipeline.shaders = {
+        {PipelineShaderStage::vertex, PipelineShaderFormat::dxbc,
+         d3d_shader(vertex_source, "vs_5_0")},
+        {PipelineShaderStage::fragment, PipelineShaderFormat::dxbc,
+         d3d_shader(fragment_source, "ps_5_0")},
+    };
+#else
+    throw std::runtime_error("D3D12 reflection test requires Windows");
+#endif
+  }
   pipeline.resources = {
       {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
       {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
@@ -194,7 +249,9 @@ void exercise_vulkan_reflection_draw(Device &device, Texture &cube,
   packet.flags.depth_test = false;
   packet.flags.depth_write = false;
   CameraFrame camera;
-  camera.clip_space = CameraClipSpace::vulkan;
+  camera.clip_space = backend == Backend::Vulkan
+                          ? CameraClipSpace::vulkan
+                          : CameraClipSpace::d3d12;
   IndexedStaticMeshDrawRequest request;
   request.packet = &packet;
   request.pipeline = &pipeline;
@@ -218,7 +275,7 @@ void exercise_vulkan_reflection_draw(Device &device, Texture &cube,
       device.draw_indexed_static_mesh_and_readback(*target.texture, request);
   if (!result.ok())
     throw std::runtime_error(
-        "Vulkan reflection draw failed: " + result.diagnostic.code + ": " +
+        "Reflection draw failed: " + result.diagnostic.code + ": " +
         result.diagnostic.message);
   const std::size_t center = (4U * 8U + 4U) * 4U;
   for (std::size_t channel = 0U; channel < pixel.size(); ++channel)
@@ -268,9 +325,8 @@ bool exercise_backend(const Backend backend, const DeviceOptions &options) {
       {0U, 0U, 1U, 1U, 4U, pixels.back(), CubeFace::negative_z});
   require(created.device->update_texture(*cube_result.texture, update).ok(),
           "backend updates one explicit cube face");
-  if (backend == Backend::Vulkan)
-    exercise_vulkan_reflection_draw(*created.device, *cube_result.texture,
-                                    pixels[0U]);
+  exercise_reflection_draw(*created.device, backend, *cube_result.texture,
+                           pixels[0U]);
 
   TextureDescription cube_array = cube;
   cube_array.array_layers = 2U;

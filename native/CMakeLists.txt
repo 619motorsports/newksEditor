@@ -443,6 +443,10 @@ if(TARGET render_backend_tests AND WIN32)
   target_link_libraries(render_backend_tests PRIVATE d3dcompiler)
 endif()
 
+if(TARGET texture_cube_backend_tests AND WIN32)
+  target_link_libraries(texture_cube_backend_tests PRIVATE d3dcompiler)
+endif()
+
 if(TARGET stock_ks_per_pixel_d3d12_tests AND WIN32)
   # The hybrid WARP test compiles a small portable shader pair so one command
   # list exercises both the caller and recovered native root ABIs.

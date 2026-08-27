@@ -208,6 +208,9 @@ struct D3D12MaterialDescriptorBinding {
     D3D12_GPU_DESCRIPTOR_HANDLE shadow_srv_gpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE shadow_sampler_gpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE shadow_cbv_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE multimap_cube_srv_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE multimap_cube_sampler_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE multimap_reflection_cbv_gpu{};
     std::array<D3D12DepthAttachment*, indexed_directional_shadow_cascade_count> shadow_attachments{};
     bool constant_enabled = false;
     bool frame_enabled = false;
@@ -218,6 +221,7 @@ struct D3D12MaterialDescriptorBinding {
     bool damage_enabled = false;
     bool damage_mask_enabled = false;
     bool shadow_enabled = false;
+    bool multimap_reflection_enabled = false;
     bool enabled = false;
 };
 
@@ -329,6 +333,11 @@ struct D3D12MaterialDescriptorBinding {
     return pipeline_declares_directional_shadow_receiver(pipeline);
 }
 
+[[nodiscard]] bool d3d12_pipeline_has_multimap_reflection(
+    const PipelineProgram& pipeline) noexcept {
+    return pipeline_declares_multimap_reflection(pipeline);
+}
+
 [[nodiscard]] bool prepare_d3d12_material_binding(
     const std::shared_ptr<D3D12Context>& context,
     const IndexedStaticMeshDrawRequest& request,
@@ -344,6 +353,8 @@ struct D3D12MaterialDescriptorBinding {
     UINT damage_mask_srv_index,
     UINT shadow_srv_index,
     UINT shadow_cbv_index,
+    UINT multimap_cube_srv_index,
+    UINT multimap_reflection_cbv_index,
     D3D12MaterialDescriptorBinding& output,
     Diagnostic& diagnostic);
 
@@ -1131,7 +1142,10 @@ bool execute_texture_upload(const std::shared_ptr<D3D12Context>& context,
     }
     if (upload_resource) {
         for (const TextureUpload& upload : uploads.subresources) {
-            const UINT subresource = upload.array_layer * description.mip_levels + upload.mip_level;
+            const UINT subresource = static_cast<UINT>(
+                texture_upload_physical_array_layer(description, upload) *
+                    description.mip_levels +
+                upload.mip_level);
             D3D12_TEXTURE_COPY_LOCATION source{};
             source.pResource = upload_resource.Get();
             source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
@@ -1697,6 +1711,8 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
         const bool has_damage_texture = d3d12_pipeline_has_damage_texture(*request.pipeline);
         const bool has_damage_mask_texture = d3d12_pipeline_has_damage_mask_texture(*request.pipeline);
         const bool has_shadow_receiver = d3d12_pipeline_has_directional_shadow_receiver(*request.pipeline);
+        const bool has_multimap_reflection =
+            d3d12_pipeline_has_multimap_reflection(*request.pipeline);
         srv_heap_description.NumDescriptors = 1U + static_cast<UINT>(has_material_constants) +
                                               static_cast<UINT>(has_frame_constants) +
                                               static_cast<UINT>(has_normal_texture) +
@@ -1706,12 +1722,15 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
                                               static_cast<UINT>(has_damage_texture) +
                                               static_cast<UINT>(has_damage_mask_texture) +
                                               3U * static_cast<UINT>(has_shadow_receiver) +
-                                              static_cast<UINT>(has_shadow_receiver);
+                                              static_cast<UINT>(has_shadow_receiver) +
+                                              2U * static_cast<UINT>(has_multimap_reflection);
         const UINT shadow_base = 1U + static_cast<UINT>(has_material_constants) +
                                  static_cast<UINT>(has_frame_constants) + static_cast<UINT>(has_normal_texture) +
                                  static_cast<UINT>(has_maps_texture) + static_cast<UINT>(has_detail_texture) +
                                  static_cast<UINT>(has_normal_detail_texture) + static_cast<UINT>(has_damage_texture) +
                                  static_cast<UINT>(has_damage_mask_texture);
+        const UINT multimap_reflection_base =
+            shadow_base + 4U * static_cast<UINT>(has_shadow_receiver);
         srv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         srv_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         ComPtr<ID3D12DescriptorHeap> srv_heap;
@@ -1765,6 +1784,12 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
                                                  : 0U,
                                              has_shadow_receiver ? shadow_base : 0U,
                                              has_shadow_receiver ? shadow_base + 3U : 0U,
+                                             has_multimap_reflection
+                                                 ? multimap_reflection_base
+                                                 : 0U,
+                                             has_multimap_reflection
+                                                 ? multimap_reflection_base + 1U
+                                                 : 0U,
                                              material_binding, diagnostic))
             return false;
     }
@@ -1810,11 +1835,21 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     D3D12_ROOT_PARAMETER shadow_sampler_parameter{};
     D3D12_DESCRIPTOR_RANGE shadow_cbv_range{};
     D3D12_ROOT_PARAMETER shadow_cbv_parameter{};
-    std::array<D3D12_ROOT_PARAMETER, 20> root_parameters{};
+    D3D12_DESCRIPTOR_RANGE multimap_cube_srv_range{};
+    D3D12_ROOT_PARAMETER multimap_cube_srv_parameter{};
+    D3D12_DESCRIPTOR_RANGE multimap_cube_sampler_range{};
+    D3D12_ROOT_PARAMETER multimap_cube_sampler_parameter{};
+    D3D12_DESCRIPTOR_RANGE multimap_reflection_cbv_range{};
+    D3D12_ROOT_PARAMETER multimap_reflection_cbv_parameter{};
+    std::array<D3D12_ROOT_PARAMETER, 23> root_parameters{};
     UINT root_parameter_count = 0U;
     UINT shadow_srv_root_index = std::numeric_limits<UINT>::max();
     UINT shadow_sampler_root_index = std::numeric_limits<UINT>::max();
     UINT shadow_cbv_root_index = std::numeric_limits<UINT>::max();
+    UINT multimap_cube_srv_root_index = std::numeric_limits<UINT>::max();
+    UINT multimap_cube_sampler_root_index = std::numeric_limits<UINT>::max();
+    UINT multimap_reflection_cbv_root_index =
+        std::numeric_limits<UINT>::max();
     if (draw_matrices != nullptr) {
         transform_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         transform_parameter.Constants.ShaderRegister = 0U;
@@ -2012,6 +2047,47 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
             shadow_cbv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
             shadow_cbv_root_index = root_parameter_count;
             root_parameters[root_parameter_count++] = shadow_cbv_parameter;
+        }
+        if (d3d12_pipeline_has_multimap_reflection(*request.pipeline)) {
+            multimap_cube_srv_range = {
+                D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1U,
+                portable_multimap_cube_texture_binding, 0U,
+                D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+            multimap_cube_srv_parameter.ParameterType =
+                D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            multimap_cube_srv_parameter.DescriptorTable = {
+                1U, &multimap_cube_srv_range};
+            multimap_cube_srv_parameter.ShaderVisibility =
+                D3D12_SHADER_VISIBILITY_PIXEL;
+            multimap_cube_srv_root_index = root_parameter_count;
+            root_parameters[root_parameter_count++] =
+                multimap_cube_srv_parameter;
+            multimap_cube_sampler_range = {
+                D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1U,
+                portable_multimap_cube_sampler_binding, 0U,
+                D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+            multimap_cube_sampler_parameter.ParameterType =
+                D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            multimap_cube_sampler_parameter.DescriptorTable = {
+                1U, &multimap_cube_sampler_range};
+            multimap_cube_sampler_parameter.ShaderVisibility =
+                D3D12_SHADER_VISIBILITY_PIXEL;
+            multimap_cube_sampler_root_index = root_parameter_count;
+            root_parameters[root_parameter_count++] =
+                multimap_cube_sampler_parameter;
+            multimap_reflection_cbv_range = {
+                D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1U,
+                portable_multimap_reflection_constants_binding, 0U,
+                D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+            multimap_reflection_cbv_parameter.ParameterType =
+                D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            multimap_reflection_cbv_parameter.DescriptorTable = {
+                1U, &multimap_reflection_cbv_range};
+            multimap_reflection_cbv_parameter.ShaderVisibility =
+                D3D12_SHADER_VISIBILITY_PIXEL;
+            multimap_reflection_cbv_root_index = root_parameter_count;
+            root_parameters[root_parameter_count++] =
+                multimap_reflection_cbv_parameter;
         }
     }
     root_description.NumParameters = root_parameter_count;
@@ -2320,6 +2396,23 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
                                                   material_binding.shadow_sampler_gpu);
             list->SetGraphicsRootDescriptorTable(shadow_cbv_root_index, material_binding.shadow_cbv_gpu);
         }
+        if (material_binding.multimap_reflection_enabled &&
+            multimap_cube_srv_root_index !=
+                std::numeric_limits<UINT>::max() &&
+            multimap_cube_sampler_root_index !=
+                std::numeric_limits<UINT>::max() &&
+            multimap_reflection_cbv_root_index !=
+                std::numeric_limits<UINT>::max()) {
+            list->SetGraphicsRootDescriptorTable(
+                multimap_cube_srv_root_index,
+                material_binding.multimap_cube_srv_gpu);
+            list->SetGraphicsRootDescriptorTable(
+                multimap_cube_sampler_root_index,
+                material_binding.multimap_cube_sampler_gpu);
+            list->SetGraphicsRootDescriptorTable(
+                multimap_reflection_cbv_root_index,
+                material_binding.multimap_reflection_cbv_gpu);
+        }
     }
     if (draw_matrices != nullptr) {
         list->SetGraphicsRoot32BitConstants(
@@ -2553,6 +2646,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
     bool has_damage_texture = false;
     bool has_damage_mask_texture = false;
     bool has_shadow_receiver = false;
+    bool has_multimap_reflection = false;
     for (const D3D12IndexedBatchDraw& draw : draws) {
         if (draw.native_stock_ks_per_pixel || draw.scene_request == nullptr)
             continue;
@@ -2577,6 +2671,8 @@ bool draw_indexed_static_mesh_batch_and_readback(
                                       d3d12_pipeline_has_damage_mask_texture(*request.pipeline);
             has_shadow_receiver = has_shadow_receiver ||
                                   d3d12_pipeline_has_directional_shadow_receiver(*request.pipeline);
+            has_multimap_reflection = has_multimap_reflection ||
+                                      d3d12_pipeline_has_multimap_reflection(*request.pipeline);
         }
     }
     const std::size_t material_descriptor_stride =
@@ -2588,13 +2684,17 @@ bool draw_indexed_static_mesh_batch_and_readback(
         static_cast<std::size_t>(has_normal_detail_texture) +
         static_cast<std::size_t>(has_damage_texture) +
         static_cast<std::size_t>(has_damage_mask_texture) +
-        4U * static_cast<std::size_t>(has_shadow_receiver);
+        4U * static_cast<std::size_t>(has_shadow_receiver) +
+        2U * static_cast<std::size_t>(has_multimap_reflection);
     const std::size_t shadow_descriptor_base =
         1U + static_cast<std::size_t>(has_material_constants) +
         static_cast<std::size_t>(has_frame_constants) + static_cast<std::size_t>(has_normal_texture) +
         static_cast<std::size_t>(has_maps_texture) + static_cast<std::size_t>(has_detail_texture) +
         static_cast<std::size_t>(has_normal_detail_texture) + static_cast<std::size_t>(has_damage_texture) +
         static_cast<std::size_t>(has_damage_mask_texture);
+    const std::size_t multimap_reflection_descriptor_base =
+        shadow_descriptor_base +
+        4U * static_cast<std::size_t>(has_shadow_receiver);
     if (has_material_resources &&
         (draws.size() > std::numeric_limits<std::size_t>::max() / material_descriptor_stride ||
          draws.size() * material_descriptor_stride > static_cast<std::size_t>(std::numeric_limits<UINT>::max()))) {
@@ -2671,6 +2771,14 @@ bool draw_indexed_static_mesh_batch_and_readback(
                                                                    (has_shadow_receiver ? shadow_descriptor_base : 0U)),
                                                  static_cast<UINT>(descriptor_index +
                                                                    (has_shadow_receiver ? shadow_descriptor_base + 3U : 0U)),
+                                                 static_cast<UINT>(descriptor_index +
+                                                                   (has_multimap_reflection
+                                                                        ? multimap_reflection_descriptor_base
+                                                                        : 0U)),
+                                                 static_cast<UINT>(descriptor_index +
+                                                                   (has_multimap_reflection
+                                                                        ? multimap_reflection_descriptor_base + 1U
+                                                                        : 0U)),
                                                  material_bindings[index], diagnostic))
                 return false;
         }
@@ -2824,6 +2932,12 @@ bool draw_indexed_static_mesh_batch_and_readback(
     std::vector<UINT> shadow_srv_root_indices(draws.size(), std::numeric_limits<UINT>::max());
     std::vector<UINT> shadow_sampler_root_indices(draws.size(), std::numeric_limits<UINT>::max());
     std::vector<UINT> shadow_cbv_root_indices(draws.size(), std::numeric_limits<UINT>::max());
+    std::vector<UINT> multimap_cube_srv_root_indices(
+        draws.size(), std::numeric_limits<UINT>::max());
+    std::vector<UINT> multimap_cube_sampler_root_indices(
+        draws.size(), std::numeric_limits<UINT>::max());
+    std::vector<UINT> multimap_reflection_cbv_root_indices(
+        draws.size(), std::numeric_limits<UINT>::max());
     std::vector<UINT> selected_color_root_indices(draws.size(),
                                                    std::numeric_limits<UINT>::max());
     root_signatures.resize(draws.size());
@@ -3003,7 +3117,13 @@ bool draw_indexed_static_mesh_batch_and_readback(
         D3D12_ROOT_PARAMETER shadow_sampler_parameter{};
         D3D12_DESCRIPTOR_RANGE shadow_cbv_range{};
         D3D12_ROOT_PARAMETER shadow_cbv_parameter{};
-        std::array<D3D12_ROOT_PARAMETER, 21> root_parameters{};
+        D3D12_DESCRIPTOR_RANGE multimap_cube_srv_range{};
+        D3D12_ROOT_PARAMETER multimap_cube_srv_parameter{};
+        D3D12_DESCRIPTOR_RANGE multimap_cube_sampler_range{};
+        D3D12_ROOT_PARAMETER multimap_cube_sampler_parameter{};
+        D3D12_DESCRIPTOR_RANGE multimap_reflection_cbv_range{};
+        D3D12_ROOT_PARAMETER multimap_reflection_cbv_parameter{};
+        std::array<D3D12_ROOT_PARAMETER, 24> root_parameters{};
         UINT root_parameter_count = 1U;
         root_parameters[0] = transform_parameter;
         D3D12_ROOT_PARAMETER selected_color_parameter{};
@@ -3206,6 +3326,49 @@ bool draw_indexed_static_mesh_batch_and_readback(
                 shadow_cbv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
                 shadow_cbv_root_indices[index] = root_parameter_count;
                 root_parameters[root_parameter_count++] = shadow_cbv_parameter;
+            }
+            if (d3d12_pipeline_has_multimap_reflection(program)) {
+                multimap_cube_srv_range = {
+                    D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1U,
+                    portable_multimap_cube_texture_binding, 0U,
+                    D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+                multimap_cube_srv_parameter.ParameterType =
+                    D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                multimap_cube_srv_parameter.DescriptorTable = {
+                    1U, &multimap_cube_srv_range};
+                multimap_cube_srv_parameter.ShaderVisibility =
+                    D3D12_SHADER_VISIBILITY_PIXEL;
+                multimap_cube_srv_root_indices[index] = root_parameter_count;
+                root_parameters[root_parameter_count++] =
+                    multimap_cube_srv_parameter;
+                multimap_cube_sampler_range = {
+                    D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1U,
+                    portable_multimap_cube_sampler_binding, 0U,
+                    D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+                multimap_cube_sampler_parameter.ParameterType =
+                    D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                multimap_cube_sampler_parameter.DescriptorTable = {
+                    1U, &multimap_cube_sampler_range};
+                multimap_cube_sampler_parameter.ShaderVisibility =
+                    D3D12_SHADER_VISIBILITY_PIXEL;
+                multimap_cube_sampler_root_indices[index] =
+                    root_parameter_count;
+                root_parameters[root_parameter_count++] =
+                    multimap_cube_sampler_parameter;
+                multimap_reflection_cbv_range = {
+                    D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1U,
+                    portable_multimap_reflection_constants_binding, 0U,
+                    D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+                multimap_reflection_cbv_parameter.ParameterType =
+                    D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                multimap_reflection_cbv_parameter.DescriptorTable = {
+                    1U, &multimap_reflection_cbv_range};
+                multimap_reflection_cbv_parameter.ShaderVisibility =
+                    D3D12_SHADER_VISIBILITY_PIXEL;
+                multimap_reflection_cbv_root_indices[index] =
+                    root_parameter_count;
+                root_parameters[root_parameter_count++] =
+                    multimap_reflection_cbv_parameter;
             }
         }
         D3D12_ROOT_SIGNATURE_DESC root_description{};
@@ -3630,6 +3793,19 @@ bool draw_indexed_static_mesh_batch_and_readback(
                                                       material_bindings[index].shadow_sampler_gpu);
                 list->SetGraphicsRootDescriptorTable(shadow_cbv_root_indices[index],
                                                       material_bindings[index].shadow_cbv_gpu);
+            }
+            if (material_bindings[index].multimap_reflection_enabled &&
+                multimap_cube_srv_root_indices[index] !=
+                    std::numeric_limits<UINT>::max()) {
+                list->SetGraphicsRootDescriptorTable(
+                    multimap_cube_srv_root_indices[index],
+                    material_bindings[index].multimap_cube_srv_gpu);
+                list->SetGraphicsRootDescriptorTable(
+                    multimap_cube_sampler_root_indices[index],
+                    material_bindings[index].multimap_cube_sampler_gpu);
+                list->SetGraphicsRootDescriptorTable(
+                    multimap_reflection_cbv_root_indices[index],
+                    material_bindings[index].multimap_reflection_cbv_gpu);
             }
         }
         }
@@ -4825,6 +5001,8 @@ bool prepare_d3d12_material_binding(
     UINT damage_mask_srv_index,
     UINT shadow_srv_index,
     UINT shadow_cbv_index,
+    UINT multimap_cube_srv_index,
+    UINT multimap_reflection_cbv_index,
     D3D12MaterialDescriptorBinding& output,
     Diagnostic& diagnostic) {
     output = {};
@@ -4847,6 +5025,11 @@ bool prepare_d3d12_material_binding(
                         [](const DepthAttachment* map) { return map != nullptr; }) ||
             request.directional_shadow_binding.sampler != nullptr ||
             request.directional_shadow_binding.constants != nullptr ||
+            request.multimap_reflection_binding.cube.texture != nullptr ||
+            request.multimap_reflection_binding.cube.sampler != nullptr ||
+            request.multimap_reflection_binding.constants.buffer != nullptr ||
+            request.multimap_reflection_binding.constants.offset_bytes != 0U ||
+            request.multimap_reflection_binding.constants.range_bytes != 0U ||
             request.material_binding.buffer != nullptr || request.material_binding.offset_bytes != 0U ||
             request.material_binding.range_bytes != 0U || request.frame_binding.buffer != nullptr ||
             request.frame_binding.offset_bytes != 0U || request.frame_binding.range_bytes != 0U) {
@@ -4877,6 +5060,8 @@ bool prepare_d3d12_material_binding(
     const bool has_damage_texture = d3d12_pipeline_has_damage_texture(*request.pipeline);
     const bool has_damage_mask_texture = d3d12_pipeline_has_damage_mask_texture(*request.pipeline);
     const bool has_shadow_receiver = d3d12_pipeline_has_directional_shadow_receiver(*request.pipeline);
+    const bool has_multimap_reflection =
+        d3d12_pipeline_has_multimap_reflection(*request.pipeline);
     const D3D12Texture* normal_texture = nullptr;
     const D3D12Sampler* normal_sampler = nullptr;
     const D3D12Texture* maps_texture = nullptr;
@@ -4892,6 +5077,9 @@ bool prepare_d3d12_material_binding(
     std::array<const D3D12DepthAttachment*, indexed_directional_shadow_cascade_count> shadow_attachments{};
     const D3D12Sampler* shadow_sampler = nullptr;
     const D3D12Buffer* shadow_constants = nullptr;
+    const D3D12Texture* multimap_cube = nullptr;
+    const D3D12Sampler* multimap_cube_sampler = nullptr;
+    const D3D12Buffer* multimap_reflection_constants = nullptr;
     if (has_normal_texture) {
         if (request.normal_binding.texture == nullptr || request.normal_binding.sampler == nullptr) {
             diagnostic = {"indexed_normal_binding_missing",
@@ -4999,6 +5187,118 @@ bool prepare_d3d12_material_binding(
     if (has_damage_texture != has_damage_mask_texture) {
         diagnostic = {"indexed_damage_layout_unsupported",
                       "The D3D12 damage ABI requires both damage and damage-mask bindings"};
+        return false;
+    }
+    if (has_multimap_reflection) {
+        multimap_cube = dynamic_cast<const D3D12Texture*>(
+            request.multimap_reflection_binding.cube.texture);
+        multimap_cube_sampler = dynamic_cast<const D3D12Sampler*>(
+            request.multimap_reflection_binding.cube.sampler);
+        multimap_reflection_constants = dynamic_cast<const D3D12Buffer*>(
+            request.multimap_reflection_binding.constants.buffer);
+        if (multimap_cube == nullptr || multimap_cube_sampler == nullptr ||
+            multimap_reflection_constants == nullptr) {
+            diagnostic = {
+                "indexed_multimap_reflection_resource_type_unsupported",
+                "D3D12 MultiMap reflection requires cube, sampler, and uniform-buffer handles"};
+            return false;
+        }
+        if (multimap_cube->context() != context.get() ||
+            multimap_cube_sampler->context() != context.get() ||
+            multimap_reflection_constants->context() != context.get()) {
+            diagnostic = {
+                "indexed_multimap_reflection_resource_context_mismatch",
+                "D3D12 MultiMap reflection resources belong to another device"};
+            return false;
+        }
+        const TextureDescription& cube_description =
+            multimap_cube->info().description;
+        const auto cube_usage =
+            static_cast<std::uint32_t>(cube_description.usage);
+        const DXGI_FORMAT cube_format =
+            dxgi_texture_format(cube_description.format);
+        if (multimap_cube->resource() == nullptr ||
+            !multimap_cube->initialized() ||
+            cube_description.shape != TextureShape::texture_cube ||
+            cube_description.array_layers != 1U ||
+            cube_description.width == 0U ||
+            cube_description.width != cube_description.height ||
+            cube_description.mip_levels == 0U ||
+            cube_description.samples != 1U ||
+            cube_format == DXGI_FORMAT_UNKNOWN ||
+            (cube_usage &
+             static_cast<std::uint32_t>(TextureUsage::sampled)) == 0U ||
+            (cube_usage &
+             static_cast<std::uint32_t>(TextureUsage::storage)) != 0U ||
+            (static_cast<UINT>(multimap_cube->state()) &
+             static_cast<UINT>(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)) ==
+                0U ||
+            multimap_cube_sampler->gpu_descriptor().ptr == 0U) {
+            diagnostic = {
+                "indexed_multimap_reflection_cube_invalid",
+                "D3D12 MultiMap reflection requires one initialized sampled square cube"};
+            return false;
+        }
+        if (multimap_cube_sampler->info().description.compare !=
+            SamplerCompare::disabled) {
+            diagnostic = {
+                "indexed_multimap_reflection_sampler_invalid",
+                "D3D12 MultiMap reflection requires comparison disabled"};
+            return false;
+        }
+        const BufferDescription& constants_description =
+            multimap_reflection_constants->info().description;
+        const IndexedMaterialBufferBinding& constants =
+            request.multimap_reflection_binding.constants;
+        constexpr std::uint64_t reflection_range =
+            portable_multimap_reflection_buffer_view_bytes;
+        if (multimap_reflection_constants->resource() == nullptr ||
+            constants_description.usage != BufferUsage::uniform ||
+            (static_cast<UINT>(multimap_reflection_constants->state()) &
+             static_cast<UINT>(
+                 D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER)) == 0U ||
+            constants.offset_bytes %
+                    D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT !=
+                0U ||
+            constants.range_bytes != reflection_range ||
+            constants.offset_bytes > constants_description.size_bytes ||
+            reflection_range >
+                constants_description.size_bytes - constants.offset_bytes) {
+            diagnostic = {
+                "indexed_multimap_reflection_constants_invalid",
+                "D3D12 MultiMap reflection constants violate the 256-byte CBV contract"};
+            return false;
+        }
+        const D3D12_RESOURCE_DESC native_constants =
+            multimap_reflection_constants->resource()->GetDesc();
+        if (constants.offset_bytes > native_constants.Width ||
+            reflection_range > native_constants.Width - constants.offset_bytes) {
+            diagnostic = {
+                "indexed_multimap_reflection_constants_invalid",
+                "D3D12 MultiMap reflection constants exceed the native buffer"};
+            return false;
+        }
+        const UINT64 gpu_base =
+            multimap_reflection_constants->resource()->GetGPUVirtualAddress();
+        if (gpu_base == 0U ||
+            gpu_base > std::numeric_limits<UINT64>::max() -
+                           constants.offset_bytes ||
+            (gpu_base + constants.offset_bytes) %
+                    D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT !=
+                0U) {
+            diagnostic = {
+                "indexed_multimap_reflection_constants_gpu_address_invalid",
+                "D3D12 MultiMap reflection constants GPU address is unavailable or unaligned"};
+            return false;
+        }
+    } else if (request.multimap_reflection_binding.cube.texture != nullptr ||
+               request.multimap_reflection_binding.cube.sampler != nullptr ||
+               request.multimap_reflection_binding.constants.buffer != nullptr ||
+               request.multimap_reflection_binding.constants.offset_bytes != 0U ||
+               request.multimap_reflection_binding.constants.range_bytes != 0U) {
+        diagnostic = {
+            "indexed_multimap_reflection_binding_unexpected",
+            "A D3D12 pipeline without the reflection extension cannot receive reflection resources"};
         return false;
     }
     if (has_shadow_receiver) {
@@ -5220,7 +5520,11 @@ bool prepare_d3d12_material_binding(
         (has_shadow_receiver &&
          (heap_description.NumDescriptors < 3U ||
           shadow_srv_index > heap_description.NumDescriptors - 3U ||
-          shadow_cbv_index >= heap_description.NumDescriptors))) {
+          shadow_cbv_index >= heap_description.NumDescriptors)) ||
+        (has_multimap_reflection &&
+         (multimap_cube_srv_index >= heap_description.NumDescriptors ||
+          multimap_reflection_cbv_index >=
+              heap_description.NumDescriptors))) {
         diagnostic = {"indexed_resource_descriptor_slot_invalid",
                       "D3D12 material descriptor slot is outside its bounded shader-visible heap"};
         return false;
@@ -5401,7 +5705,11 @@ bool prepare_d3d12_material_binding(
         static_cast<UINT64>(damage_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
         static_cast<UINT64>(damage_mask_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
         static_cast<UINT64>(shadow_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
-        static_cast<UINT64>(shadow_cbv_index) > std::numeric_limits<UINT64>::max() / descriptor_size) {
+        static_cast<UINT64>(shadow_cbv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
+        static_cast<UINT64>(multimap_cube_srv_index) >
+            std::numeric_limits<UINT64>::max() / descriptor_size ||
+        static_cast<UINT64>(multimap_reflection_cbv_index) >
+            std::numeric_limits<UINT64>::max() / descriptor_size) {
         diagnostic = {"indexed_resource_descriptor_offset_overflow",
                       "D3D12 material descriptor offset exceeds handle addressability"};
         return false;
@@ -5417,6 +5725,10 @@ bool prepare_d3d12_material_binding(
     const UINT64 damage_mask_srv_offset = static_cast<UINT64>(damage_mask_srv_index) * descriptor_size;
     const UINT64 shadow_srv_offset = static_cast<UINT64>(shadow_srv_index) * descriptor_size;
     const UINT64 shadow_cbv_offset = static_cast<UINT64>(shadow_cbv_index) * descriptor_size;
+    const UINT64 multimap_cube_srv_offset =
+        static_cast<UINT64>(multimap_cube_srv_index) * descriptor_size;
+    const UINT64 multimap_reflection_cbv_offset =
+        static_cast<UINT64>(multimap_reflection_cbv_index) * descriptor_size;
     if (srv_offset > std::numeric_limits<SIZE_T>::max() ||
         cbv_offset > std::numeric_limits<SIZE_T>::max() ||
         frame_cbv_offset > std::numeric_limits<SIZE_T>::max() ||
@@ -5427,7 +5739,9 @@ bool prepare_d3d12_material_binding(
         damage_srv_offset > std::numeric_limits<SIZE_T>::max() ||
         damage_mask_srv_offset > std::numeric_limits<SIZE_T>::max() ||
         shadow_srv_offset > std::numeric_limits<SIZE_T>::max() ||
-        shadow_cbv_offset > std::numeric_limits<SIZE_T>::max()) {
+        shadow_cbv_offset > std::numeric_limits<SIZE_T>::max() ||
+        multimap_cube_srv_offset > std::numeric_limits<SIZE_T>::max() ||
+        multimap_reflection_cbv_offset > std::numeric_limits<SIZE_T>::max()) {
         diagnostic = {"indexed_resource_descriptor_offset_overflow",
                       "D3D12 material descriptor offset exceeds handle addressability"};
         return false;
@@ -5646,6 +5960,63 @@ bool prepare_d3d12_material_binding(
         shadow_cbv.SizeInBytes = portable_directional_shadow_buffer_view_bytes;
         context->device->CreateConstantBufferView(&shadow_cbv, shadow_cbv_cpu);
         output.shadow_cbv_gpu = shadow_cbv_gpu;
+    }
+
+    if (has_multimap_reflection) {
+        D3D12_CPU_DESCRIPTOR_HANDLE cube_cpu =
+            srv_heap->GetCPUDescriptorHandleForHeapStart();
+        D3D12_GPU_DESCRIPTOR_HANDLE cube_gpu =
+            srv_heap->GetGPUDescriptorHandleForHeapStart();
+        if (cube_cpu.ptr > std::numeric_limits<SIZE_T>::max() -
+                               static_cast<SIZE_T>(multimap_cube_srv_offset) ||
+            cube_gpu.ptr > std::numeric_limits<UINT64>::max() -
+                               multimap_cube_srv_offset) {
+            diagnostic = {
+                "indexed_multimap_reflection_descriptor_offset_overflow",
+                "D3D12 reflection cube descriptor handle overflows"};
+            return false;
+        }
+        cube_cpu.ptr += static_cast<SIZE_T>(multimap_cube_srv_offset);
+        cube_gpu.ptr += multimap_cube_srv_offset;
+        const TextureDescription& cube_description =
+            multimap_cube->info().description;
+        const D3D12_SHADER_RESOURCE_VIEW_DESC cube_srv =
+            d3d12_texture_srv_description(
+                cube_description,
+                dxgi_texture_format(cube_description.format));
+        context->device->CreateShaderResourceView(multimap_cube->resource(),
+                                                  &cube_srv, cube_cpu);
+
+        D3D12_CPU_DESCRIPTOR_HANDLE constants_cpu =
+            srv_heap->GetCPUDescriptorHandleForHeapStart();
+        D3D12_GPU_DESCRIPTOR_HANDLE constants_gpu =
+            srv_heap->GetGPUDescriptorHandleForHeapStart();
+        if (constants_cpu.ptr >
+                std::numeric_limits<SIZE_T>::max() -
+                    static_cast<SIZE_T>(multimap_reflection_cbv_offset) ||
+            constants_gpu.ptr > std::numeric_limits<UINT64>::max() -
+                                    multimap_reflection_cbv_offset) {
+            diagnostic = {
+                "indexed_multimap_reflection_descriptor_offset_overflow",
+                "D3D12 reflection constants descriptor handle overflows"};
+            return false;
+        }
+        constants_cpu.ptr +=
+            static_cast<SIZE_T>(multimap_reflection_cbv_offset);
+        constants_gpu.ptr += multimap_reflection_cbv_offset;
+        D3D12_CONSTANT_BUFFER_VIEW_DESC reflection_cbv{};
+        reflection_cbv.BufferLocation =
+            multimap_reflection_constants->resource()->GetGPUVirtualAddress() +
+            request.multimap_reflection_binding.constants.offset_bytes;
+        reflection_cbv.SizeInBytes =
+            portable_multimap_reflection_buffer_view_bytes;
+        context->device->CreateConstantBufferView(&reflection_cbv,
+                                                  constants_cpu);
+        output.multimap_cube_srv_gpu = cube_gpu;
+        output.multimap_cube_sampler_gpu =
+            multimap_cube_sampler->gpu_descriptor();
+        output.multimap_reflection_cbv_gpu = constants_gpu;
+        output.multimap_reflection_enabled = true;
     }
 
     if (has_material_constants) {
