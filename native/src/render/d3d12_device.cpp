@@ -3368,6 +3368,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
     ID3D12Resource* retained_resolve_resource,
     D3D12_RESOURCE_STATES* retained_resolve_state,
     bool* retained_resolve_initialized,
+    D3D12_RESOURCE_STATES retained_resolve_final_state,
     std::vector<std::byte>& output,
     Diagnostic& diagnostic) {
     if (destination == nullptr) {
@@ -4651,8 +4652,6 @@ bool draw_indexed_static_mesh_batch_and_readback(
     }
     const D3D12_RESOURCE_STATES final_state =
         texture_state(description.usage, description.access_policy);
-    constexpr D3D12_RESOURCE_STATES resolve_final_state =
-        D3D12_RESOURCE_STATE_RENDER_TARGET;
     if (description.samples > 1U) {
         D3D12_RESOURCE_BARRIER resolve_source{};
         resolve_source.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -4679,7 +4678,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
         resolve_after.Transition.StateBefore = D3D12_RESOURCE_STATE_RESOLVE_DEST;
         resolve_after.Transition.StateAfter = batch.capture_rgba8
                                                    ? D3D12_RESOURCE_STATE_COPY_SOURCE
-                                                   : resolve_final_state;
+                                                   : retained_resolve_final_state;
         resolve_after.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         list->ResourceBarrier(1U, &resolve_after);
     } else if (batch.capture_rgba8) {
@@ -4715,7 +4714,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
             resolve_final.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
             resolve_final.Transition.pResource = retained_resolve_resource;
             resolve_final.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-            resolve_final.Transition.StateAfter = resolve_final_state;
+            resolve_final.Transition.StateAfter = retained_resolve_final_state;
             resolve_final.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
             list->ResourceBarrier(1U, &resolve_final);
         }
@@ -4757,7 +4756,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
         const bool drained = context->wait_idle();
         destination_state = drained ? final_state : D3D12_RESOURCE_STATE_COMMON;
         if (retained_resolve_state != nullptr)
-            *retained_resolve_state = drained ? resolve_final_state
+            *retained_resolve_state = drained ? retained_resolve_final_state
                                               : D3D12_RESOURCE_STATE_COMMON;
         if (retained_resolve_initialized != nullptr)
             *retained_resolve_initialized = drained;
@@ -4776,7 +4775,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
     }
     destination_state = final_state;
     if (retained_resolve_state != nullptr)
-        *retained_resolve_state = resolve_final_state;
+        *retained_resolve_state = retained_resolve_final_state;
     if (retained_resolve_initialized != nullptr)
         *retained_resolve_initialized = true;
     if (use_depth) {
@@ -5456,6 +5455,11 @@ public:
             resolve_target != nullptr ? resolve_target->resource_.Get() : nullptr,
             resolve_target != nullptr ? &resolve_target->state_ : nullptr,
             resolve_target != nullptr ? &resolve_target->initialized_ : nullptr,
+            resolve_target != nullptr
+                ? texture_state(
+                      resolve_target->info().description.usage,
+                      resolve_target->info().description.access_policy)
+                : D3D12_RESOURCE_STATE_RENDER_TARGET,
             output, diagnostic);
         initialized_ = initialized_ || drawn;
         if (drawn) {

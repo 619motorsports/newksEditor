@@ -1295,6 +1295,18 @@ IndexedStaticMeshDrawStatus validate_indexed_color_target(
                       "Indexed static-mesh drawing requires color-attachment and transfer-source usage"};
         return IndexedStaticMeshDrawStatus::invalid_request;
     }
+    constexpr auto multisample_forbidden_usage =
+        static_cast<std::uint32_t>(TextureUsage::sampled) |
+        static_cast<std::uint32_t>(TextureUsage::transfer_destination) |
+        static_cast<std::uint32_t>(TextureUsage::storage);
+    if (target.samples != 1U &&
+        ((target_usage & multisample_forbidden_usage) != 0U ||
+         target.access_policy != TextureAccessPolicy::fixed_usage)) {
+        diagnostic = {
+            "indexed_static_mesh_target_multisample_usage_invalid",
+            "A multisample color target cannot be sampled, uploaded, used as storage, or use a changing access policy"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
     const bool valid_shape = target.shape == TextureShape::texture_2d ||
                              (allow_cube_target && target.shape == TextureShape::texture_cube);
     const bool valid_subresource_count = target.shape == TextureShape::texture_cube
@@ -3723,7 +3735,8 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
             target.format == TextureFormat::rgba8_unorm ||
             target.format == TextureFormat::rgba8_srgb ||
             target.format == TextureFormat::bgra8_unorm ||
-            target.format == TextureFormat::bgra8_srgb;
+            target.format == TextureFormat::bgra8_srgb ||
+            target.format == TextureFormat::rgba16_sfloat;
         if (target.width == 0U || target.height == 0U ||
             target.mip_levels != 1U || target.array_layers != 1U ||
             target.shape != TextureShape::texture_2d ||
@@ -3734,7 +3747,7 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
         }
         if (!supported_format) {
             diagnostic = {"indexed_static_mesh_batch_resolve_format_unsupported",
-                          "Batch resolve supports only RGBA8 and BGRA8 color formats"};
+                          "Batch resolve supports RGBA8, BGRA8, and RGBA16F color formats"};
             return IndexedStaticMeshBatchStatus::unsupported;
         }
         if (description.resolve_target->backend() != texture.backend()) {

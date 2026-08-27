@@ -2321,6 +2321,54 @@ void validates_ordered_indexed_batch_contract() {
                 multisample_target, multisample_description, diagnostic) ==
                 IndexedStaticMeshBatchStatus::ready,
             "four-sample batch accepts a retained matching resolve target without CPU capture");
+
+    PipelineProgram hdr_pipeline = multisample_pipeline;
+    hdr_pipeline.targets.colors.front().format =
+        PipelineRenderTargetFormat::rgba16_float;
+    const auto hdr_request = request_fixture(
+        multisample_packet, hdr_pipeline, vertices, indices);
+    const std::array<IndexedStaticMeshDrawRequest, 1> hdr_requests = {
+        hdr_request};
+    TextureDescription hdr_source_description = target_description();
+    hdr_source_description.format = TextureFormat::rgba16_sfloat;
+    hdr_source_description.samples = 4U;
+    FakeTexture hdr_source(Backend::Vulkan, hdr_source_description);
+    TextureDescription hdr_resolve_description = hdr_source_description;
+    hdr_resolve_description.samples = 1U;
+    hdr_resolve_description.usage =
+        TextureUsage::sampled | TextureUsage::color_attachment |
+        TextureUsage::transfer_source;
+    hdr_resolve_description.access_policy =
+        TextureAccessPolicy::render_then_sample;
+    FakeTexture hdr_resolve(Backend::Vulkan, hdr_resolve_description);
+    IndexedStaticMeshBatchDescription hdr_description;
+    hdr_description.draws = hdr_requests;
+    hdr_description.depth_attachment = &multisample_depth;
+    hdr_description.resolve_target = &hdr_resolve;
+    hdr_description.capture_rgba8 = false;
+    require(validate_indexed_static_mesh_batch_description(
+                hdr_source, hdr_description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::ready,
+            "four-sample RGBA16F batch accepts a sampled resolve target");
+    hdr_description.capture_rgba8 = true;
+    require(validate_indexed_static_mesh_batch_description(
+                hdr_source, hdr_description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::unsupported &&
+                diagnostic.code ==
+                    "indexed_static_mesh_target_format_unsupported",
+            "four-sample RGBA16F batch rejects RGBA8 CPU capture");
+    hdr_description.capture_rgba8 = false;
+    hdr_source_description.usage = hdr_source_description.usage |
+                                   TextureUsage::sampled;
+    FakeTexture malformed_hdr_source(Backend::Vulkan,
+                                     hdr_source_description);
+    require(validate_indexed_static_mesh_batch_description(
+                malformed_hdr_source, hdr_description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_static_mesh_target_multisample_usage_invalid",
+            "four-sample RGBA16F batch rejects sampled source usage");
+
     multisample_description.resolve_target = nullptr;
     require(validate_indexed_static_mesh_batch_description(
                 multisample_target, multisample_description, diagnostic) ==

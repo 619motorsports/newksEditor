@@ -2266,13 +2266,6 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 "exclusive");
             return result;
         }
-        if (request.hdr_tone_map.has_value() && request.color_samples != 1U) {
-            result.status = WorkspaceViewportStatus::unsupported;
-            result.diagnostic = diagnostic(
-                "workspace_viewport_hdr_multisample_unsupported",
-                "The portable HDR viewport currently requires a one-sample scene target");
-            return result;
-        }
         if (request.hdr_tone_map.has_value() &&
             (builtin_vulkan_source || builtin_d3d12_native)) {
             result.status = WorkspaceViewportStatus::unsupported;
@@ -2576,7 +2569,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                                        : request.presentation.format;
         color_description.usage = render::TextureUsage::color_attachment |
                                    render::TextureUsage::transfer_source;
-        if (request.hdr_tone_map.has_value()) {
+        if (request.hdr_tone_map.has_value() && request.color_samples == 1U) {
             color_description.usage = color_description.usage |
                                       render::TextureUsage::sampled;
             color_description.access_policy =
@@ -2597,6 +2590,14 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         if (request.color_samples == 4U) {
             render::TextureDescription resolve_description = color_description;
             resolve_description.samples = 1U;
+            if (request.hdr_tone_map.has_value()) {
+                resolve_description.usage =
+                    render::TextureUsage::sampled |
+                    render::TextureUsage::color_attachment |
+                    render::TextureUsage::transfer_source;
+                resolve_description.access_policy =
+                    render::TextureAccessPolicy::render_then_sample;
+            }
             auto resolved = device.create_texture(resolve_description);
             if (!resolved.ok()) {
                 result.status = resolved.status == render::TextureStatus::allocation_failed
@@ -2631,7 +2632,8 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             render::Diagnostic tone_map_diagnostic;
             const auto tone_map_validation =
                 render::validate_hdr_tone_map_request(
-                    *color.texture, *tone_mapped.texture,
+                    resolved_color != nullptr ? *resolved_color : *color.texture,
+                    *tone_mapped.texture,
                     *request.hdr_tone_map, tone_map_diagnostic);
             if (tone_map_validation != render::HdrToneMapStatus::ready) {
                 result.status =

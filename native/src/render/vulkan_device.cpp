@@ -831,21 +831,20 @@ bool validate_vulkan_texture_format_capabilities(const std::shared_ptr<VulkanCon
     const bool scalar_float = description.format == TextureFormat::r32_sfloat;
     const bool rgba_float = description.format == TextureFormat::rgba16_sfloat;
     if (!compressed && !scalar_float && !rgba_float) return true;
-    if (description.samples != 1U) {
+    if (description.samples != 1U && !rgba_float) {
         diagnostic = {compressed ? "vulkan_compressed_samples_unsupported"
-                                 : rgba_float ? "vulkan_rgba_float_samples_unsupported"
-                                              : "vulkan_scalar_float_samples_unsupported",
+                                 : "vulkan_scalar_float_samples_unsupported",
                       compressed
                           ? "Vulkan BC1, BC2, BC3, BC4, BC5, BC6H, and BC7 uploads require a single-sample texture"
-                          : rgba_float
-                                ? "Vulkan RGBA16_SFLOAT textures require a single-sample texture"
-                                : "Vulkan R32_SFLOAT uploads require a single-sample texture"};
+                          : "Vulkan R32_SFLOAT uploads require a single-sample texture"};
         return false;
     }
     VkFormatProperties properties{};
     vkGetPhysicalDeviceFormatProperties(context->physical_device, format, &properties);
-    VkFormatFeatureFlags required = VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
     const auto usage = static_cast<std::uint32_t>(description.usage);
+    VkFormatFeatureFlags required = 0U;
+    if ((usage & static_cast<std::uint32_t>(TextureUsage::transfer_destination)) != 0U)
+        required |= VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
     if ((usage & static_cast<std::uint32_t>(TextureUsage::sampled)) != 0U)
         required |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
     if ((usage & static_cast<std::uint32_t>(TextureUsage::transfer_source)) != 0U)
@@ -3979,6 +3978,7 @@ bool draw_indexed_batch_and_readback(
     RawVulkanImage* retained_resolve_image,
     VkImageLayout* retained_resolve_layout,
     bool* retained_resolve_initialized,
+    VkImageLayout retained_resolve_final_layout,
     bool capture_rgba8,
     std::vector<std::byte>& output,
     Diagnostic& diagnostic) {
@@ -4185,7 +4185,9 @@ bool draw_indexed_batch_and_readback(
         resolve_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         resolve_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         resolve_attachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        resolve_attachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        resolve_attachment.finalLayout =
+            capture_rgba8 ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                          : retained_resolve_final_layout;
     }
     std::array<VkAttachmentDescription, 3> attachments{};
     attachments[0] = color_attachment;
@@ -4513,7 +4515,7 @@ bool draw_indexed_batch_and_readback(
                                         ? texture_final_layout(
                                               description.usage,
                                               description.access_policy)
-                                        : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                                        : retained_resolve_final_layout;
                 barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
                 barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
                 vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -4575,7 +4577,7 @@ bool draw_indexed_batch_and_readback(
             current_layout = texture_final_layout(
                 description.usage, description.access_policy);
             if (retained_resolve_layout != nullptr)
-                *retained_resolve_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                *retained_resolve_layout = retained_resolve_final_layout;
             if (retained_resolve_initialized != nullptr)
                 *retained_resolve_initialized = true;
             if (depth_attachment != nullptr) depth_attachment->mark_rendered(clear_depth);
@@ -4598,7 +4600,7 @@ bool draw_indexed_batch_and_readback(
         current_layout = texture_final_layout(
             description.usage, description.access_policy);
         if (retained_resolve_layout != nullptr)
-            *retained_resolve_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            *retained_resolve_layout = retained_resolve_final_layout;
         if (retained_resolve_initialized != nullptr)
             *retained_resolve_initialized = true;
         if (depth_attachment != nullptr) depth_attachment->mark_rendered(clear_depth);
@@ -5150,7 +5152,9 @@ public:
                 context_, raw_, info_.description, TextureTargetSubresource{},
                 draws, depth_attachment, request.load_color,
                 request.clear_depth, request.depth_clear_value, request.clear_color, layout_,
-                nullptr, nullptr, nullptr, true, output, diagnostic);
+                nullptr, nullptr, nullptr,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, true, output,
+                diagnostic);
             initialized_ = initialized_ || drawn;
             if (drawn && !base_mip_initialized_.empty())
                 base_mip_initialized_[0U] = 1U;
@@ -5171,7 +5175,9 @@ public:
                 context_, raw_, info_.description, TextureTargetSubresource{},
                 draws, depth_attachment, request.load_color,
                 request.clear_depth, request.depth_clear_value, request.clear_color, layout_,
-                nullptr, nullptr, nullptr, true, output, diagnostic);
+                nullptr, nullptr, nullptr,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, true, output,
+                diagnostic);
             initialized_ = initialized_ || drawn;
             if (drawn && !base_mip_initialized_.empty())
                 base_mip_initialized_[0U] = 1U;
@@ -5361,6 +5367,11 @@ public:
             layout_, resolve_target != nullptr ? &resolve_target->raw_ : nullptr,
             resolve_target != nullptr ? &resolve_target->layout_ : nullptr,
             resolve_target != nullptr ? &resolve_target->initialized_ : nullptr,
+            resolve_target != nullptr
+                ? texture_final_layout(
+                      resolve_target->info().description.usage,
+                      resolve_target->info().description.access_policy)
+                : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             description.capture_rgba8, output, diagnostic);
         initialized_ = initialized_ || drawn;
         if (drawn) {

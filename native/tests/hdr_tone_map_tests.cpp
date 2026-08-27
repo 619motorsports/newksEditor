@@ -330,6 +330,47 @@ bool executes_backend(const Backend backend, const DeviceOptions& options) {
                 result.status == HdrToneMapStatus::invalid_request &&
                 result.diagnostic.code == "hdr_tone_map_source_uninitialized",
             "backend rejects uninitialized HDR source");
+
+    TextureDescription multisample_source = source;
+    multisample_source.samples = 4U;
+    multisample_source.usage = TextureUsage::color_attachment |
+                               TextureUsage::transfer_source;
+    multisample_source.mutability = TextureMutability::mutable_data;
+    TextureResult multisample_hdr =
+        created.device->create_texture(multisample_source);
+    require(multisample_hdr.ok(),
+            "backend creates four-sample RGBA16F scene target");
+
+    TextureDescription resolved_source = source;
+    resolved_source.usage = TextureUsage::sampled |
+                            TextureUsage::color_attachment |
+                            TextureUsage::transfer_source;
+    resolved_source.mutability = TextureMutability::mutable_data;
+    resolved_source.access_policy = TextureAccessPolicy::render_then_sample;
+    TextureResult resolved_hdr = created.device->create_texture(resolved_source);
+    require(resolved_hdr.ok(),
+            "backend creates sampled RGBA16F resolve target");
+
+    IndexedStaticMeshBatchDescription batch;
+    batch.clear_color = {4.0F, 2.0F, 1.0F, 1.0F};
+    batch.resolve_target = resolved_hdr.texture.get();
+    batch.capture_rgba8 = false;
+    const IndexedStaticMeshBatchResult resolved =
+        created.device->draw_indexed_static_mesh_batch_and_readback(
+            *multisample_hdr.texture, batch);
+    if (!resolved.ok())
+        throw std::runtime_error("backend HDR resolve failed: " +
+                                 resolved.diagnostic.code + ": " +
+                                 resolved.diagnostic.message);
+    result = created.device->tone_map_hdr_texture(
+        *resolved_hdr.texture, *display.texture);
+    if (!result.ok())
+        throw std::runtime_error("resolved HDR tone map failed: " +
+                                 result.diagnostic.code + ": " +
+                                 result.diagnostic.message);
+    require(created.device->tone_map_hdr_texture(
+                *resolved_hdr.texture, *display.texture).ok(),
+            "backend repeats resolved HDR tone mapping with tracked states");
     return true;
 }
 

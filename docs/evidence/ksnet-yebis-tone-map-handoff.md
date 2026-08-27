@@ -46,13 +46,14 @@ exposure, gamma, HDR tone-map function, mapping factor, and viewport scale.
 The final handoff uses this call chain:
 
 ```text
-PPFX::CPostEffect::ApplyEffects_TonemapTemporaly  0x10082e60
-  -> PPFX::CRenderGlare::TonemapToSurface         0x100e2f00
-     -> PPFX::CTextureUtil::DrawRectGPU_TonemapHDR 0x100b9310
+PPFX::CPostEffect::EndPostEffectScene_InternalProcess 0x100846c0
+  -> PPFX::CRenderGlare::TonemapToSurface              0x100e2f00
+     -> PPFX::CTextureUtil::DrawRectGPU_TonemapHDR     0x100b9310
 ```
 
-`ApplyEffects_TonemapTemporaly` binds the temporal tone-map framebuffer. Then
-it calls `TonemapToSurface`.
+`ApplyEffects_TonemapTemporaly` at `0x10082e60` writes a separate temporal HDR
+target before this final handoff. The preferred intermediate format is
+`DXGI_FORMAT_R16G16B16A16_FLOAT`.
 
 `TonemapToSurface` selects a shader variant from these controls:
 
@@ -68,6 +69,36 @@ constants. Then it sends the work to `DrawRectGPU_TonemapHDR`.
 
 `DrawRectGPU_TonemapHDR` selects the final shader variant. It draws one
 full-screen rectangle into the selected output surface.
+
+## Final output and FXAA handoff
+
+`EndPostEffectScene_InternalProcess` passes the surface at `this+0xac0` to
+`TonemapToSurface`. This surface is the effective final tone-map destination.
+
+`UpdateParameters_TonemapDestination` at `0x10088520` sets that field from an
+explicit override. Without an override, it uses the surface at `this+0x14`.
+
+`CameraForwardYebis::initRenderTargets` at `0x1001a140` asks a virtual method
+at vtable offset `0x2c` for the destination. That method is
+`getYebisDestinationRenderTarget` at `0x1001ac50`.
+
+When FXAA is enabled, the method returns `fxaaTempRT->kidColor`. The constructor
+at `0x10015ad0` creates `fxaaTempRT` with the `eR8G8B8A8` format.
+
+`kglCreateRenderTarget` at `0x1000ce30` maps that format to
+`DXGI_FORMAT_R8G8B8A8_UNORM`. Therefore, the proven FXAA input is an RGBA8
+UNORM surface.
+
+`CameraForwardYebis::render` then runs the full-screen `ksFXAA` pass. It binds
+the temporary color surface at texture slot 5 and draws to the screen target.
+
+When FXAA is disabled, Yebis writes directly to `screenRenderTarget`.
+`kglGetScreenRenderTarget` at `0x1000c820` only returns its pointer. The
+screen target's DXGI format remains unresolved.
+
+No inspected path selects `DXGI_FORMAT_R8G8B8A8_UNORM_SRGB` or enables a
+proven hardware sRGB conversion. The tone-map shader performs its gamma math
+with `fParam_GammaCorrection`. This math does not prove an sRGB target state.
 
 ## Default shader variant
 
@@ -122,6 +153,36 @@ These reflected fields are active:
 negative half-scale beside gamma. `SetTonemapEffectParameters` writes the
 mapping vector.
 
+## Recovered default upload vectors
+
+`TEXSHADERSET::CreateEffect` at `0x100aa830` resolves the handles for
+`afRGBA_Modulate` and `afRGBA_Offset`. `CTextureUtil` embeds that shader set at
+offset `0x20`.
+
+`DrawRectGPU_TonemapHDR` builds two modulate vectors and four offset vectors.
+It uploads them on every draw. The default temporal path produces these
+register values:
+
+| Register | Proven default upload |
+|---|---|
+| `cb154` | `{1, 0, 1, 1}` |
+| `cb155` | `{1, 0, 0, 1}` |
+| `cb186` | `{2, -1, 0, 0}` |
+| `cb187` | `{0.5, 0, 0, 0}` |
+| `cb188` | `{2, -1, 0, 1}` |
+| `cb189` | `{0.5, 0, 0, 0}` |
+
+The vector construction occurs at `0x100b9784..0x100b980d` and
+`0x100b9dc5..0x100b9ea3`. `CPostEffect::Initialize` at `0x1008a080` supplies
+the default tone-map state.
+
+The default `cb154.y` value is zero. It disables the glare-composite result in
+pixel program 2095. The default `cb154.x` value keeps scene modulation at one.
+
+The register values and native upload order are proven. The `COLORT4` channel
+names still need a packing check before the alpha dot product receives an
+RGBA semantic label.
+
 ## Recovered default shader math
 
 The pixel shader samples the auxiliary texture twice through two color-grade
@@ -152,8 +213,8 @@ for `cb208` is `{1, 1, 1.015625, 1}`.
 The shader applies dither after its gamma operation. It has no final saturate
 instruction after dither. The render-target conversion can clamp the result.
 
-The exact color grades remain unknown. Runtime values for `cb154`, `cb155`,
-and `cb186..189` are necessary for an exact implementation.
+The recovered defaults reduce both auxiliary color grades to constant values.
+Non-default glare modes can change the offset vectors at runtime.
 
 ## Recovered dither texture
 
@@ -181,8 +242,8 @@ Each texel repeats its value in all four channels. This byte table comes from
 decompiled arithmetic. A runtime upload capture can show the driver interpretation.
 
 The scene and temporary tone-map targets use RGBA16F by default. The schedule
-is scene render, MSAA resolve, Yebis effects, temporary tone-map, then optional
-FXAA. This path does not prove the final screen format.
+is scene render, MSAA resolve, Yebis effects, final RGBA8 UNORM tone-map, then
+FXAA when enabled. The screen target format remains unresolved.
 
 ## Production WebGL check
 
@@ -211,6 +272,9 @@ resource bindings, and active constant fields. Some curve semantics remain
 unknown.
 
 The C++ port must keep the first implementation labeled as an approximation.
-The current curve-only pass omits default glare and dither inputs. An exact
-claim requires the recovered runtime constants and controlled pixel checks.
-A production rendering change also requires a production WebGL check.
+The current curve-only pass omits native dither and automatic exposure.
+The default glare composite scale is zero, so the missing glare texture does
+not affect the proven default pixel path.
+
+An exact claim still requires vector packing confirmation and controlled pixel
+checks. A production rendering change also requires a production WebGL check.

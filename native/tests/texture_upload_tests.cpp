@@ -713,6 +713,21 @@ void validatesTextureAccessPolicies() {
     require(validate_texture_description(rgba16_target, {}, diagnostic) ==
                 TextureStatus::ready,
             "render-then-sample accepts the recovered RGBA16F capture format");
+    TextureDescription rgba16_multisample = rgba16_target;
+    rgba16_multisample.samples = 4U;
+    rgba16_multisample.usage = TextureUsage::color_attachment |
+                               TextureUsage::transfer_source;
+    rgba16_multisample.access_policy = TextureAccessPolicy::fixed_usage;
+    require(validate_texture_description(
+                rgba16_multisample, {}, diagnostic) == TextureStatus::ready,
+            "RGBA16F accepts the fixed four-sample scene target contract");
+    rgba16_multisample.usage = rgba16_multisample.usage |
+                               TextureUsage::sampled;
+    require(validate_texture_description(
+                rgba16_multisample, {}, diagnostic) ==
+                TextureStatus::unsupported &&
+                diagnostic.code == "texture_multisample_usage_unsupported",
+            "RGBA16F rejects sampled four-sample texture usage");
     const std::array<std::byte, 128U> rgba16_pixels{};
     TextureUploadPlan rgba16_upload;
     rgba16_upload.subresources.push_back(
