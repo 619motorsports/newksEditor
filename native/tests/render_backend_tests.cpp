@@ -6880,19 +6880,23 @@ float4 main(float4 position : SV_Position, float3 color : COLOR) : SV_Target {
             *overlay_msaa.texture, appended_msaa_batch);
     require(appended_msaa_result.ok(),
             "four-sample appended overlay batch execution");
-    bool appended_msaa_mixed_blue_green = false;
+    bool appended_msaa_overlayed_blue = false;
     for (std::size_t offset = 0U;
-         offset + 3U < appended_msaa_result.rgba8.size(); offset += 4U) {
+         offset + 3U < appended_msaa_result.rgba8.size() &&
+         offset + 3U < interstitial_msaa_result.rgba8.size();
+         offset += 4U) {
+        const auto interstitial_blue = std::to_integer<unsigned>(
+            interstitial_msaa_result.rgba8[offset + 2U]);
         const auto green = std::to_integer<unsigned>(
             appended_msaa_result.rgba8[offset + 1U]);
         const auto blue = std::to_integer<unsigned>(
             appended_msaa_result.rgba8[offset + 2U]);
-        if (green > 0U && blue > 0U && blue < 255U) {
-            appended_msaa_mixed_blue_green = true;
+        if (interstitial_blue > 0U && green > 0U && blue < interstitial_blue) {
+            appended_msaa_overlayed_blue = true;
             break;
         }
     }
-    require(appended_msaa_mixed_blue_green,
+    require(appended_msaa_overlayed_blue,
             "four-sample appended overlay contributes green after the blue scene before resolve");
 
     const auto grid_vertices = build_authoring_grid();
