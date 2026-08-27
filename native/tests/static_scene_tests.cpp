@@ -1143,14 +1143,12 @@ void rejects_invalid_late_inputs_before_backend_allocation() {
             "malformed executable shader input is rejected before allocation");
 
     value = fixture();
+    value.first_pipeline.targets.colors.front().format = PipelineRenderTargetFormat::rgba16_float;
     value.second_pipeline.targets.colors.front().format = PipelineRenderTargetFormat::rgba16_float;
-    const auto unsupported_target = prepare_static_scene_resources(device, request_for(value));
-    require(!unsupported_target.ok() &&
-                unsupported_target.status == StaticSceneResourceStatus::unsupported &&
-                unsupported_target.diagnostic.code ==
-                    "static_scene_material_pipeline_unsupported" &&
-                device.buffer_calls == 0U,
-            "unsupported color target is rejected before allocation");
+    RecordingDevice rgba16_device;
+    const auto rgba16_target = prepare_static_scene_resources(rgba16_device, request_for(value));
+    require(rgba16_target.ok(),
+            "portable static-scene resources accept a uniform RGBA16F target contract");
 
     value = fixture();
     value.second_pipeline.targets.colors.front().format =

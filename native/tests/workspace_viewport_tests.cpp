@@ -1435,6 +1435,7 @@ void captures_and_publishes_six_portable_reflection_faces_atomically() {
             "capture owns two candidates and one initialized black bootstrap cube");
     for (const TextureDescription* description : capture_descriptions) {
         require(description->width == 8U && description->height == 8U &&
+                    description->format == TextureFormat::rgba16_sfloat &&
                     description->mip_levels == 1U &&
                     description->array_layers == 1U &&
                     description->samples == 1U &&

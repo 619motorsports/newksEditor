@@ -673,6 +673,37 @@ void validatesTextureAccessPolicies() {
                 TextureStatus::ready,
             "render-then-sample upload validation accepts its exact contract");
 
+    const TextureFormatInfo rgba16 =
+        texture_format_info(TextureFormat::rgba16_sfloat);
+    require(rgba16.classification == TextureFormatClass::uncompressed &&
+                rgba16.bytes_per_pixel == 8U && !rgba16.srgb &&
+                rgba16.signed_channels &&
+                texture_format_bytes_per_pixel(TextureFormat::rgba16_sfloat) == 8U &&
+                texture_format_cpu_upload_supported(TextureFormat::rgba16_sfloat) &&
+                textureFormatName(TextureFormat::rgba16_sfloat) ==
+                    std::string_view("RGBA16_SFLOAT"),
+            "RGBA16F has an exact eight-byte signed-float texture contract");
+    TextureDescription rgba16_target = render_then_sample;
+    rgba16_target.format = TextureFormat::rgba16_sfloat;
+    require(validate_texture_description(rgba16_target, {}, diagnostic) ==
+                TextureStatus::ready,
+            "render-then-sample accepts the recovered RGBA16F capture format");
+    const std::array<std::byte, 128U> rgba16_pixels{};
+    TextureUploadPlan rgba16_upload;
+    rgba16_upload.subresources.push_back(
+        {0U, 0U, 4U, 4U, 32U, rgba16_pixels});
+    require(validate_texture_upload_plan(rgba16_target, rgba16_upload,
+                                         diagnostic) == TextureStatus::ready,
+            "RGBA16F upload validation uses an eight-byte texel pitch");
+    rgba16_upload.subresources.front().data =
+        std::span<const std::byte>(rgba16_pixels.data(),
+                                  rgba16_pixels.size() - 1U);
+    require(validate_texture_upload_plan(rgba16_target, rgba16_upload,
+                                         diagnostic) ==
+                TextureStatus::invalid_description &&
+                diagnostic.code == "texture_upload_truncated",
+            "a truncated RGBA16F upload is rejected without partial acceptance");
+
     TextureDescription legacy{
         4U, 4U, 1U, 1U, TextureFormat::rgba8_unorm, TextureUsage::sampled,
         TextureMemory::device_local, TextureMutability::immutable};

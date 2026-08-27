@@ -315,12 +315,13 @@ ExecutorPipelineValidation validate_executor_pipeline(
                     : "Static-scene execution requires one single- or four-sample color target",
                 0U};
     const PipelineRenderTargetFormat color_format = pipeline.targets.colors.front().format;
-    if (color_format != PipelineRenderTargetFormat::rgba8_unorm &&
+    if (color_format != PipelineRenderTargetFormat::rgba16_float &&
+        color_format != PipelineRenderTargetFormat::rgba8_unorm &&
         color_format != PipelineRenderTargetFormat::rgba8_srgb &&
         color_format != PipelineRenderTargetFormat::bgra8_unorm &&
         color_format != PipelineRenderTargetFormat::bgra8_srgb)
         return {StaticSceneResourceStatus::unsupported,
-                "Static-scene execution supports only RGBA8 and BGRA8 color targets", 0U};
+                "Static-scene execution supports RGBA16F, RGBA8, and BGRA8 color targets", 0U};
     if (packet.flags.depth_write && !packet.flags.depth_test)
         return {StaticSceneResourceStatus::invalid_request,
                 "Static-scene depth writes require depth testing", 0U};
@@ -2114,6 +2115,12 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         return {IndexedStaticMeshBatchStatus::unsupported,
                 {"static_scene_depth_attachment_device_mismatch",
                  "The depth attachment belongs to another device context"}, {}};
+    if (frame.color_target_format_override.has_value() &&
+        (!stock_vulkan_source_programs_.empty() ||
+         !stock_d3d12_native_programs_.empty()))
+        return {IndexedStaticMeshBatchStatus::unsupported,
+                {"static_scene_frame_target_override_native_unsupported",
+                 "A frame color-target override cannot mutate recovered native or source package programs"}, {}};
     if (texture_authority_ != StaticSceneTextureAuthority::caller_tables &&
         texture_authority_ !=
             StaticSceneTextureAuthority::owned_model_payloads)
@@ -2688,6 +2695,18 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
     }
     std::vector<IndexedStaticMeshDrawRequest> draws;
     draws.reserve(packets_.size());
+    std::vector<PipelineProgram> frame_target_pipelines;
+    if (frame.color_target_format_override.has_value()) {
+        frame_target_pipelines = pipelines_;
+        for (PipelineProgram& pipeline : frame_target_pipelines) {
+            if (pipeline.targets.colors.size() != 1U)
+                return {IndexedStaticMeshBatchStatus::invalid_request,
+                        {"static_scene_frame_target_override_pipeline_invalid",
+                         "A frame color-target override requires one retained color target per pipeline"}, {}};
+            pipeline.targets.colors.front().format =
+                *frame.color_target_format_override;
+        }
+    }
     std::vector<StockKsPerPixelVulkanSourceDrawBinding>
         stock_vulkan_source_bindings;
     stock_vulkan_source_bindings.reserve(packets_.size());
@@ -2725,7 +2744,9 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         const PipelineProgram& pipeline =
             stock_vulkan_source
                 ? stock_vulkan_source_programs_[raw_source_program]->pipeline()
-                : pipelines_[pipeline_for_packet_[index]];
+                : frame_target_pipelines.empty()
+                      ? pipelines_[pipeline_for_packet_[index]]
+                      : frame_target_pipelines[pipeline_for_packet_[index]];
         Diagnostic diagnostic;
         std::optional<IndexedStaticMeshDrawRequest> draw;
         if (packet.primitive == DrawPrimitiveKind::skinned_mesh) {

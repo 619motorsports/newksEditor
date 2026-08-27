@@ -413,17 +413,26 @@ void exercise_reflection_draw(Device &device, const Backend backend,
   }
 
   TextureDescription capture_description = target_description;
+  capture_description.format = TextureFormat::rgba16_sfloat;
   capture_description.usage =
       TextureUsage::sampled | TextureUsage::color_attachment |
       TextureUsage::transfer_source;
   capture_description.shape = TextureShape::texture_cube;
   capture_description.access_policy = TextureAccessPolicy::render_then_sample;
   TextureResult capture_target = device.create_texture(capture_description);
-  require(capture_target.ok(), "reflection draw creates a cube capture target");
+  require(capture_target.ok(),
+          "reflection draw creates an RGBA16F cube capture target");
 
-  const std::array<IndexedStaticMeshDrawRequest, 1U> capture_draws = {request};
+  PipelineProgram capture_pipeline = pipeline;
+  capture_pipeline.targets.colors.front().format =
+      PipelineRenderTargetFormat::rgba16_float;
+  IndexedStaticMeshDrawRequest capture_request = request;
+  capture_request.pipeline = &capture_pipeline;
+  const std::array<IndexedStaticMeshDrawRequest, 1U> capture_draws = {
+      capture_request};
   IndexedStaticMeshBatchDescription capture_batch;
   capture_batch.draws = capture_draws;
+  capture_batch.capture_rgba8 = false;
   capture_batch.target_subresource.cube_face = CubeFace::negative_z;
 
   const std::array<float, 4U> capture_values = {0.1F, 5.0F, 0.5F, 1.0F};
@@ -461,15 +470,8 @@ void exercise_reflection_draw(Device &device, const Backend backend,
       capture_expected.rgb[0U], capture_expected.rgb[1U],
       capture_expected.rgb[2U], capture_expected.alpha};
   const std::size_t capture_center = (4U * 8U + 4U) * 4U;
-  for (std::size_t channel = 0U; channel < expected_capture_rgba.size();
-       ++channel) {
-    const long rounded = std::lround(
-        std::clamp(expected_capture_rgba[channel], 0.0F, 1.0F) * 255.0F);
-    const int actual =
-        std::to_integer<std::uint8_t>(captured.rgba8[capture_center + channel]);
-    require(std::abs(actual - static_cast<int>(rounded)) <= 1,
-            "cube-face batch targets and reads the selected face");
-  }
+  require(captured.rgba8.empty(),
+          "RGBA16F cube capture stays GPU-resident without RGBA8 readback");
 
   capture_batch.target_subresource.cube_face = CubeFace::positive_x;
   const IndexedStaticMeshBatchResult captured_positive_x =
@@ -491,12 +493,8 @@ void exercise_reflection_draw(Device &device, const Backend backend,
         sampled_capture.diagnostic.message);
 
   StockMultiMapReflectionInput sampled_capture_input = capture_expected_input;
-  for (std::size_t channel = 0U; channel < 3U; ++channel) {
-    const long captured_channel = std::lround(
-        std::clamp(expected_capture_rgba[channel], 0.0F, 1.0F) * 255.0F);
-    sampled_capture_input.cube_rgb[channel] =
-        static_cast<float>(captured_channel) / 255.0F;
-  }
+  for (std::size_t channel = 0U; channel < 3U; ++channel)
+    sampled_capture_input.cube_rgb[channel] = expected_capture_rgba[channel];
   const StockMultiMapReflectionResult sampled_capture_expected =
       evaluate_stock_multimap_reflection(sampled_capture_input);
   require(sampled_capture_expected.ready,

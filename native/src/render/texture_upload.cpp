@@ -162,6 +162,7 @@ constexpr std::uint32_t DXGI_FORMAT_BC7_UNORM_SRGB = 99u;
     case TextureFormat::r8_unorm: return 1u;
     case TextureFormat::r32_sfloat: return 4u;
     case TextureFormat::r5g6b5_unorm: return 2u;
+    case TextureFormat::rgba16_sfloat: return 8u;
     case TextureFormat::rgba8_unorm:
     case TextureFormat::rgba8_srgb:
     case TextureFormat::bgra8_unorm:
@@ -189,6 +190,7 @@ const char* textureFormatName(TextureFormat format) noexcept {
     case TextureFormat::r8_unorm: return "R8_UNORM";
     case TextureFormat::r32_sfloat: return "R32_SFLOAT";
     case TextureFormat::r5g6b5_unorm: return "R5G6B5_UNORM";
+    case TextureFormat::rgba16_sfloat: return "RGBA16_SFLOAT";
     case TextureFormat::rgba8_unorm: return "RGBA8_UNORM";
     case TextureFormat::rgba8_srgb: return "RGBA8_SRGB";
     case TextureFormat::bgra8_unorm: return "BGRA8_UNORM";

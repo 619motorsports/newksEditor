@@ -198,7 +198,8 @@ bool texture_upload_layout(TextureFormat format, std::uint32_t width, std::uint3
 }
 
 bool portable_sampled_color_format(TextureFormat format, bool allow_srgb) noexcept {
-    if (format == TextureFormat::rgba8_unorm || format == TextureFormat::bgra8_unorm ||
+    if (format == TextureFormat::rgba16_sfloat ||
+        format == TextureFormat::rgba8_unorm || format == TextureFormat::bgra8_unorm ||
         format == TextureFormat::bc1_unorm || format == TextureFormat::bc3_unorm ||
         format == TextureFormat::bc7_unorm)
         return true;
@@ -899,6 +900,7 @@ TriangleDrawStatus validate_triangle_draw_request(const Texture& texture,
     }
     const auto expected_target = [&] {
         switch (description.format) {
+        case TextureFormat::rgba16_sfloat: return PipelineRenderTargetFormat::rgba16_float;
         case TextureFormat::rgba8_unorm: return PipelineRenderTargetFormat::rgba8_unorm;
         case TextureFormat::rgba8_srgb: return PipelineRenderTargetFormat::rgba8_srgb;
         case TextureFormat::bgra8_unorm: return PipelineRenderTargetFormat::bgra8_unorm;
@@ -1149,7 +1151,8 @@ namespace {
 
 IndexedStaticMeshDrawStatus validate_indexed_color_target(
     const TextureDescription& target, Diagnostic& diagnostic,
-    const bool allow_cube_target = false) {
+    const bool allow_cube_target = false,
+    const bool allow_float_target = false) {
     if (!valid_render_sample_count(target.samples)) {
         diagnostic = {"indexed_static_mesh_target_samples_unsupported",
                       "Indexed static-mesh color targets require exactly 1 or 4 samples"};
@@ -1189,6 +1192,8 @@ IndexedStaticMeshDrawStatus validate_indexed_color_target(
                       "Indexed static-mesh target exceeds the bounded readback size"};
         return IndexedStaticMeshDrawStatus::invalid_request;
     }
+    if (target.format == TextureFormat::rgba16_sfloat && allow_float_target)
+        return IndexedStaticMeshDrawStatus::ready;
     switch (target.format) {
     case TextureFormat::rgba8_unorm:
     case TextureFormat::rgba8_srgb:
@@ -1197,7 +1202,7 @@ IndexedStaticMeshDrawStatus validate_indexed_color_target(
         return IndexedStaticMeshDrawStatus::ready;
     default:
         diagnostic = {"indexed_static_mesh_target_format_unsupported",
-                      "Indexed static-mesh drawing supports only RGBA8 and BGRA8 targets"};
+                      "Indexed static-mesh drawing supports RGBA8 and BGRA8 targets; non-readback batches also support RGBA16F"};
         return IndexedStaticMeshDrawStatus::unsupported;
     }
 }
@@ -1714,7 +1719,8 @@ IndexedStaticMeshBatchStatus validate_indexed_target_subresource(
 
 static IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request_internal(
     const Texture& texture, const IndexedStaticMeshDrawRequest& request,
-    Diagnostic& diagnostic, const bool allow_cube_target) {
+    Diagnostic& diagnostic, const bool allow_cube_target,
+    const bool allow_float_target) {
     if (request.packet == nullptr || request.pipeline == nullptr || request.vertex_buffer == nullptr ||
         request.index_buffer == nullptr) {
         diagnostic = {"indexed_static_mesh_handle_missing",
@@ -1741,7 +1747,8 @@ static IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request_int
     }
     const TextureDescription& target = texture.info().description;
     const IndexedStaticMeshDrawStatus target_status =
-        validate_indexed_color_target(target, diagnostic, allow_cube_target);
+        validate_indexed_color_target(target, diagnostic, allow_cube_target,
+                                      allow_float_target);
     if (target_status != IndexedStaticMeshDrawStatus::ready)
         return target_status;
     if (request.depth_attachment != nullptr) {
@@ -1777,6 +1784,7 @@ static IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request_int
     }
     const auto expected_format = [&] {
         switch (target.format) {
+        case TextureFormat::rgba16_sfloat: return PipelineRenderTargetFormat::rgba16_float;
         case TextureFormat::rgba8_unorm: return PipelineRenderTargetFormat::rgba8_unorm;
         case TextureFormat::rgba8_srgb: return PipelineRenderTargetFormat::rgba8_srgb;
         case TextureFormat::bgra8_unorm: return PipelineRenderTargetFormat::bgra8_unorm;
@@ -3030,7 +3038,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     const Texture& texture, const IndexedStaticMeshDrawRequest& request,
     Diagnostic& diagnostic) {
     return validate_indexed_static_mesh_draw_request_internal(
-        texture, request, diagnostic, false);
+        texture, request, diagnostic, false, false);
 }
 
 IndexedStaticMeshBatchStatus validate_overlay_line_draw_request(
@@ -3405,7 +3413,8 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
         return IndexedStaticMeshBatchStatus::invalid_request;
     }
     const IndexedStaticMeshDrawStatus target_status =
-        validate_indexed_color_target(texture.info().description, diagnostic, true);
+        validate_indexed_color_target(texture.info().description, diagnostic, true,
+                                      !description.capture_rgba8);
     if (target_status != IndexedStaticMeshDrawStatus::ready)
         return target_status == IndexedStaticMeshDrawStatus::unsupported
                    ? IndexedStaticMeshBatchStatus::unsupported
@@ -3698,7 +3707,8 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
         Diagnostic draw_diagnostic;
         const IndexedStaticMeshDrawStatus draw_status =
             validate_indexed_static_mesh_draw_request_internal(
-                texture, effective, draw_diagnostic, true);
+                texture, effective, draw_diagnostic, true,
+                !description.capture_rgba8);
         if (draw_status != IndexedStaticMeshDrawStatus::ready) {
             diagnostic = std::move(draw_diagnostic);
             return draw_status == IndexedStaticMeshDrawStatus::unsupported

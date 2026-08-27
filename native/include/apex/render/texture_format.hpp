@@ -30,6 +30,7 @@ enum class TextureFormat : std::uint8_t {
     bc6h_sfloat,
     bc7_unorm,
     bc7_srgb,
+    rgba16_sfloat,
 };
 
 enum class TextureFormatClass : std::uint8_t {
@@ -56,6 +57,7 @@ struct TextureFormatInfo {
     case TextureFormat::r8_unorm: return {TextureFormatClass::uncompressed, 1, 0, 0, 0, false, false};
     case TextureFormat::r32_sfloat: return {TextureFormatClass::uncompressed, 4, 0, 0, 0, false, true};
     case TextureFormat::r5g6b5_unorm: return {TextureFormatClass::uncompressed, 2, 0, 0, 0, false, false};
+    case TextureFormat::rgba16_sfloat: return {TextureFormatClass::uncompressed, 8, 0, 0, 0, false, true};
     case TextureFormat::rgba8_unorm: return {TextureFormatClass::uncompressed, 4, 0, 0, 0, false, false};
     case TextureFormat::rgba8_srgb: return {TextureFormatClass::uncompressed, 4, 0, 0, 0, true, false};
     case TextureFormat::bgra8_unorm: return {TextureFormatClass::uncompressed, 4, 0, 0, 0, false, false};

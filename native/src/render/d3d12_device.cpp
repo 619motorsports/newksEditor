@@ -813,6 +813,8 @@ private:
         return DXGI_FORMAT_R32_FLOAT;
     case TextureFormat::r5g6b5_unorm:
         return DXGI_FORMAT_B5G6R5_UNORM;
+    case TextureFormat::rgba16_sfloat:
+        return DXGI_FORMAT_R16G16B16A16_FLOAT;
     case TextureFormat::bc1_unorm:
         return DXGI_FORMAT_BC1_UNORM;
     case TextureFormat::bc1_srgb:
@@ -897,7 +899,8 @@ d3d12_texture_srv_description(const TextureDescription& description,
 
 [[nodiscard]] bool validate_d3d12_texture_format_support(
     const std::shared_ptr<D3D12Context>& context, DXGI_FORMAT format,
-    std::uint32_t mip_levels, Diagnostic& diagnostic) {
+    std::uint32_t mip_levels, Diagnostic& diagnostic,
+    TextureUsage usage = TextureUsage::sampled) {
     D3D12_FEATURE_DATA_FORMAT_SUPPORT support{};
     support.Format = format;
     const HRESULT result = context->device->CheckFeatureSupport(
@@ -907,13 +910,19 @@ d3d12_texture_srv_description(const TextureDescription& description,
         diagnostic.code = "d3d12_texture_format_query_failed";
         return false;
     }
-    constexpr UINT required = static_cast<UINT>(D3D12_FORMAT_SUPPORT1_TEXTURE2D) |
-                              static_cast<UINT>(D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE);
+    UINT required = static_cast<UINT>(D3D12_FORMAT_SUPPORT1_TEXTURE2D);
+    const auto raw_usage = static_cast<std::uint32_t>(usage);
+    if ((raw_usage & static_cast<std::uint32_t>(TextureUsage::sampled)) != 0U)
+        required |= static_cast<UINT>(D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE);
+    if ((raw_usage & static_cast<std::uint32_t>(TextureUsage::color_attachment)) != 0U)
+        required |= static_cast<UINT>(D3D12_FORMAT_SUPPORT1_RENDER_TARGET);
+    if ((raw_usage & static_cast<std::uint32_t>(TextureUsage::storage)) != 0U)
+        required |= static_cast<UINT>(D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW);
     const UINT support1 = static_cast<UINT>(support.Support1);
     if ((support1 & required) != required ||
         (mip_levels > 1U && (support1 & static_cast<UINT>(D3D12_FORMAT_SUPPORT1_MIP)) == 0U)) {
         diagnostic = {"d3d12_texture_format_unsupported",
-                      "The D3D12 adapter does not support the requested sampled texture format"};
+                      "The D3D12 adapter does not support the requested texture format and usage"};
         return false;
     }
     return true;
@@ -6960,9 +6969,11 @@ public:
                     context_, dxgi_texture_format(description.format), description.mip_levels, diagnostic))
                 return {TextureStatus::unsupported, std::move(diagnostic), nullptr};
         }
-        if (description.format == TextureFormat::r32_sfloat &&
+        if ((description.format == TextureFormat::r32_sfloat ||
+             description.format == TextureFormat::rgba16_sfloat) &&
             !validate_d3d12_texture_format_support(
-                context_, dxgi_texture_format(description.format), description.mip_levels, diagnostic))
+                context_, dxgi_texture_format(description.format), description.mip_levels,
+                diagnostic, description.usage))
             return {TextureStatus::unsupported, std::move(diagnostic), nullptr};
         if (description.samples != 1U) {
             const std::uint32_t usage = static_cast<std::uint32_t>(description.usage);

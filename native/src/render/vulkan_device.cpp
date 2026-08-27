@@ -779,6 +779,8 @@ VkFormat vk_texture_format(TextureFormat format) {
         return VK_FORMAT_R32_SFLOAT;
     case TextureFormat::r5g6b5_unorm:
         return VK_FORMAT_R5G6B5_UNORM_PACK16;
+    case TextureFormat::rgba16_sfloat:
+        return VK_FORMAT_R16G16B16A16_SFLOAT;
     case TextureFormat::bc1_unorm:
         return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
     case TextureFormat::bc1_srgb:
@@ -826,13 +828,17 @@ bool validate_vulkan_texture_format_capabilities(const std::shared_ptr<VulkanCon
                                                  Diagnostic& diagnostic) {
     const bool compressed = vk_supported_block_upload_format(description.format);
     const bool scalar_float = description.format == TextureFormat::r32_sfloat;
-    if (!compressed && !scalar_float) return true;
+    const bool rgba_float = description.format == TextureFormat::rgba16_sfloat;
+    if (!compressed && !scalar_float && !rgba_float) return true;
     if (description.samples != 1U) {
         diagnostic = {compressed ? "vulkan_compressed_samples_unsupported"
-                                 : "vulkan_scalar_float_samples_unsupported",
+                                 : rgba_float ? "vulkan_rgba_float_samples_unsupported"
+                                              : "vulkan_scalar_float_samples_unsupported",
                       compressed
                           ? "Vulkan BC1, BC2, BC3, BC4, BC5, BC6H, and BC7 uploads require a single-sample texture"
-                          : "Vulkan R32_SFLOAT uploads require a single-sample texture"};
+                          : rgba_float
+                                ? "Vulkan RGBA16_SFLOAT textures require a single-sample texture"
+                                : "Vulkan R32_SFLOAT uploads require a single-sample texture"};
         return false;
     }
     VkFormatProperties properties{};
@@ -849,10 +855,13 @@ bool validate_vulkan_texture_format_capabilities(const std::shared_ptr<VulkanCon
         required |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
     if ((properties.optimalTilingFeatures & required) != required) {
         diagnostic = {compressed ? "vulkan_compressed_format_unsupported"
-                                 : "vulkan_scalar_float_format_unsupported",
+                                 : rgba_float ? "vulkan_rgba_float_format_unsupported"
+                                              : "vulkan_scalar_float_format_unsupported",
                       compressed
                           ? "The Vulkan device does not support the requested BC1, BC2, BC3, BC4, BC5, BC6H, or BC7 texture usage"
-                          : "The Vulkan device does not support the requested R32_SFLOAT texture usage"};
+                          : rgba_float
+                                ? "The Vulkan device does not support the requested RGBA16_SFLOAT texture usage"
+                                : "The Vulkan device does not support the requested R32_SFLOAT texture usage"};
         return false;
     }
     return true;
@@ -4335,6 +4344,33 @@ bool draw_indexed_batch_and_readback(
                                      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0U, 0U, nullptr,
                                      0U, nullptr, 1U, &barrier);
             }
+        } else if (description.samples == 1U) {
+            const VkImageLayout final_layout = texture_final_layout(
+                description.usage, description.access_policy);
+            if (final_layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+                VkImageMemoryBarrier barrier{};
+                barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                barrier.newLayout = final_layout;
+                barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                barrier.image = image.image;
+                barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                barrier.subresourceRange.levelCount = description.mip_levels;
+                barrier.subresourceRange.layerCount = static_cast<std::uint32_t>(
+                    texture_physical_array_layers(description));
+                barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                barrier.dstAccessMask =
+                    final_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                        ? VK_ACCESS_SHADER_READ_BIT
+                        : VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+                vkCmdPipelineBarrier(
+                    command, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    final_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                        ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                        : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                    0U, 0U, nullptr, 0U, nullptr, 1U, &barrier);
+            }
         }
         result = vkEndCommandBuffer(command);
     }
@@ -5808,6 +5844,7 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
         const auto cube_usage =
             static_cast<std::uint32_t>(cube_description.usage);
         const bool format_supported =
+            cube_description.format == TextureFormat::rgba16_sfloat ||
             cube_description.format == TextureFormat::rgba8_unorm ||
             cube_description.format == TextureFormat::rgba8_srgb ||
             cube_description.format == TextureFormat::bgra8_unorm ||
@@ -6821,6 +6858,8 @@ public:
         if (!create_raw_image(context_, description, raw, diagnostic)) {
             const bool unsupported = diagnostic.code == "texture_format_unsupported" ||
                                      diagnostic.code == "vulkan_compressed_format_unsupported" ||
+                                     diagnostic.code == "vulkan_rgba_float_format_unsupported" ||
+                                     diagnostic.code == "vulkan_rgba_float_samples_unsupported" ||
                                      diagnostic.code == "vulkan_texture_samples_unsupported" ||
                                      diagnostic.code == "vulkan_cube_array_unsupported";
             return {unsupported ? TextureStatus::unsupported : TextureStatus::allocation_failed,

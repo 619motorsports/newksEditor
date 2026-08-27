@@ -41,6 +41,8 @@ constexpr std::array<render::CubeFace, render::texture_cube_face_count>
 [[nodiscard]] std::optional<PipelineRenderTargetFormat> pipelineColorFormat(
     render::TextureFormat format) noexcept {
     switch (format) {
+    case render::TextureFormat::rgba16_sfloat:
+        return PipelineRenderTargetFormat::rgba16_float;
     case render::TextureFormat::rgba8_unorm:
         return PipelineRenderTargetFormat::rgba8_unorm;
     case render::TextureFormat::rgba8_srgb:
@@ -2079,6 +2081,8 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
         capture_frame.depth_clear_value = 1.0F;
         capture_frame.resolve_target = nullptr;
         capture_frame.capture_rgba8 = false;
+        capture_frame.color_target_format_override =
+            PipelineRenderTargetFormat::rgba16_float;
         capture_frame.packet_visibility = capture_visibility;
         capture_frame.multimap_reflection_cube = {
             capture.published_cube.has_value()
@@ -2660,7 +2664,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             cube_description.width =
                 request.portable_reflection_capture->size;
             cube_description.height = cube_description.width;
-            cube_description.format = request.presentation.format;
+            cube_description.format = render::TextureFormat::rgba16_sfloat;
             cube_description.usage =
                 render::TextureUsage::sampled |
                 render::TextureUsage::color_attachment |

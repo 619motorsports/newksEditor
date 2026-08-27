@@ -148,6 +148,11 @@ struct StaticSceneFrameDescription {
     bool capture_rgba8 = true;
     // Select one color-target subresource. Cube frames must name a face.
     TextureTargetSubresource target_subresource{};
+    // Optional color-target-only pipeline permutation for retained portable
+    // scene programs. This does not replace shaders, resource layouts, or
+    // fixed-function state. Recovered native/source package programs retain
+    // their immutable target contract and reject this override.
+    std::optional<PipelineRenderTargetFormat> color_target_format_override;
     // Optional current packet states for animated scenes. The span must have
     // exactly the prepared packet count when supplied. Node/material,
     // primitive, ranges, pipeline flags, and resources must remain stable;
