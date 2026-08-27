@@ -214,9 +214,12 @@ int run(Backend backend) {
 
     const auto draw = device.draw_indexed_static_mesh_and_readback(
         *target.texture, request);
-    require(draw.ok(), draw.diagnostic.code.empty()
-                           ? "stock tyre runtime draw"
-                           : draw.diagnostic.code);
+    if (!draw.ok()) {
+        throw std::runtime_error(
+            draw.diagnostic.code.empty()
+                ? "stock tyre runtime draw"
+                : draw.diagnostic.code + ": " + draw.diagnostic.message);
+    }
     const std::size_t center = (16U * 32U + 16U) * 4U;
     const auto channel = [&](std::size_t offset) {
         return std::to_integer<int>(draw.rgba8[center + offset]);

@@ -4557,7 +4557,9 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
             shadow_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
             shadow_sampler_root_index = root_parameter_count;
             root_parameters[root_parameter_count++] = shadow_sampler_parameter;
-            shadow_cbv_range = {D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1U, 20U, 0U,
+            shadow_cbv_range = {D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1U,
+                                has_stock_tyres ? 1U : 20U,
+                                has_stock_tyres ? 1U : 0U,
                                 D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
             shadow_cbv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
             shadow_cbv_parameter.DescriptorTable = {1U, &shadow_cbv_range};
@@ -4594,7 +4596,10 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
                 multimap_cube_sampler_parameter;
             multimap_reflection_cbv_range = {
                 D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1U,
-                portable_multimap_reflection_constants_binding, 0U,
+                has_stock_tyres
+                    ? 0U
+                    : portable_multimap_reflection_constants_binding,
+                has_stock_tyres ? 1U : 0U,
                 D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
             multimap_reflection_cbv_parameter.ParameterType =
                 D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -5969,6 +5974,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
             continue;
         }
         const PipelineProgram& program = *draws[index].pipeline;
+        const bool has_stock_tyres = pipeline_declares_stock_tyres(program);
         const PipelineShaderModule* vertex_shader = nullptr;
         const PipelineShaderModule* fragment_shader = nullptr;
         for (const PipelineShaderModule& shader : program.shaders) {
@@ -6132,7 +6138,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
                 normal_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
                 root_parameters[root_parameter_count++] = normal_sampler_parameter;
             }
-            if (pipeline_declares_stock_tyres(program)) {
+            if (has_stock_tyres) {
                 tyre_dirty_srv_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1U, 6U, 0U,
                                          D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
                 tyre_dirty_srv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -6282,7 +6288,9 @@ bool draw_indexed_static_mesh_batch_and_readback(
                 shadow_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
                 shadow_sampler_root_indices[index] = root_parameter_count;
                 root_parameters[root_parameter_count++] = shadow_sampler_parameter;
-                shadow_cbv_range = {D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1U, 20U, 0U,
+                shadow_cbv_range = {D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1U,
+                                    has_stock_tyres ? 1U : 20U,
+                                    has_stock_tyres ? 1U : 0U,
                                     D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
                 shadow_cbv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
                 shadow_cbv_parameter.DescriptorTable = {1U, &shadow_cbv_range};
@@ -6320,7 +6328,10 @@ bool draw_indexed_static_mesh_batch_and_readback(
                     multimap_cube_sampler_parameter;
                 multimap_reflection_cbv_range = {
                     D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1U,
-                    portable_multimap_reflection_constants_binding, 0U,
+                    has_stock_tyres
+                        ? 0U
+                        : portable_multimap_reflection_constants_binding,
+                    has_stock_tyres ? 1U : 0U,
                     D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
                 multimap_reflection_cbv_parameter.ParameterType =
                     D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
