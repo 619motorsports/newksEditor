@@ -390,6 +390,7 @@ struct VulkanContext {
     VkCommandPool command_pool = VK_NULL_HANDLE;
     std::mutex command_mutex;
     bool sampler_anisotropy = false;
+    bool image_cube_array = false;
     float max_sampler_anisotropy = 1.0F;
     VkDeviceSize max_uniform_buffer_range = 0U;
     VkDeviceSize min_uniform_buffer_offset_alignment = 1U;
@@ -404,11 +405,13 @@ struct VulkanContext {
                   std::uint32_t family,
                   DeviceInfo info_value,
                   bool sampler_anisotropy_value,
+                  bool image_cube_array_value,
                   float max_sampler_anisotropy_value,
                   VkDeviceSize max_uniform_buffer_range_value,
                   VkDeviceSize min_uniform_buffer_offset_alignment_value)
         : instance(std::move(instance_value)), physical_device(physical), device(device_value),
           queue(queue_value), queue_family(family), sampler_anisotropy(sampler_anisotropy_value),
+          image_cube_array(image_cube_array_value),
           max_sampler_anisotropy(max_sampler_anisotropy_value),
           max_uniform_buffer_range(max_uniform_buffer_range_value),
           min_uniform_buffer_offset_alignment(min_uniform_buffer_offset_alignment_value == 0U
@@ -987,6 +990,13 @@ bool create_raw_image(const std::shared_ptr<VulkanContext>& context,
     if (sample_count == 0U) {
         diagnostic = {"vulkan_texture_samples_unsupported",
                       "Vulkan textures support only one or four samples in the bounded contract"};
+        return false;
+    }
+    if (description.shape == TextureShape::texture_cube &&
+        description.array_layers > 1U && !context->image_cube_array) {
+        diagnostic = {
+            "vulkan_cube_array_unsupported",
+            "The Vulkan device does not support cube-array sampled views"};
         return false;
     }
     VkImageCreateInfo image_info{};
@@ -1847,6 +1857,13 @@ struct VulkanIndexedBatchDraw {
     VkBuffer shadow_constants_buffer = VK_NULL_HANDLE;
     VkDeviceSize shadow_constants_offset = 0U;
     VkDeviceSize shadow_constants_range = 0U;
+    bool has_multimap_reflection_binding = false;
+    VkImage multimap_cube_image = VK_NULL_HANDLE;
+    VkImageView multimap_cube_view = VK_NULL_HANDLE;
+    VkSampler multimap_cube_sampler = VK_NULL_HANDLE;
+    VkBuffer multimap_reflection_buffer = VK_NULL_HANDLE;
+    VkDeviceSize multimap_reflection_offset = 0U;
+    VkDeviceSize multimap_reflection_range = 0U;
     bool has_alpha_tested_binding = false;
     VkImage alpha_image = VK_NULL_HANDLE;
     VkImageView alpha_view = VK_NULL_HANDLE;
@@ -1884,6 +1901,7 @@ struct VulkanTransientSampledDescriptors {
     bool includes_damage_binding = false;
     bool includes_damage_mask_binding = false;
     bool includes_directional_shadow_binding = false;
+    bool includes_multimap_reflection_binding = false;
     bool includes_alpha_tested_binding = false;
 
     VulkanTransientSampledDescriptors() = default;
@@ -1902,6 +1920,8 @@ struct VulkanTransientSampledDescriptors {
           includes_damage_mask_binding(std::exchange(other.includes_damage_mask_binding, false)),
           includes_directional_shadow_binding(
               std::exchange(other.includes_directional_shadow_binding, false)),
+          includes_multimap_reflection_binding(
+              std::exchange(other.includes_multimap_reflection_binding, false)),
           includes_alpha_tested_binding(
               std::exchange(other.includes_alpha_tested_binding, false)) {}
     VulkanTransientSampledDescriptors& operator=(VulkanTransientSampledDescriptors&& other) noexcept {
@@ -1920,6 +1940,8 @@ struct VulkanTransientSampledDescriptors {
         includes_damage_mask_binding = std::exchange(other.includes_damage_mask_binding, false);
         includes_directional_shadow_binding =
             std::exchange(other.includes_directional_shadow_binding, false);
+        includes_multimap_reflection_binding =
+            std::exchange(other.includes_multimap_reflection_binding, false);
         includes_alpha_tested_binding =
             std::exchange(other.includes_alpha_tested_binding, false);
         return *this;
@@ -1942,6 +1964,7 @@ struct VulkanTransientSampledDescriptors {
         includes_damage_binding = false;
         includes_damage_mask_binding = false;
         includes_directional_shadow_binding = false;
+        includes_multimap_reflection_binding = false;
         includes_alpha_tested_binding = false;
         context.reset();
     }
@@ -2411,6 +2434,7 @@ bool create_sampled_descriptor_layout(const std::shared_ptr<VulkanContext>& cont
                                       bool includes_damage_binding,
                                       bool includes_damage_mask_binding,
                                       bool includes_directional_shadow_binding,
+                                      bool includes_multimap_reflection_binding,
                                       bool includes_alpha_tested_binding,
                                       Diagnostic& diagnostic) {
     descriptors.reset();
@@ -2435,6 +2459,8 @@ bool create_sampled_descriptor_layout(const std::shared_ptr<VulkanContext>& cont
     descriptors.includes_damage_mask_binding = includes_damage_mask_binding;
     descriptors.includes_directional_shadow_binding =
         includes_directional_shadow_binding;
+    descriptors.includes_multimap_reflection_binding =
+        includes_multimap_reflection_binding;
     descriptors.includes_alpha_tested_binding = includes_alpha_tested_binding;
     if (includes_alpha_tested_binding) {
         std::array<VkDescriptorSetLayoutBinding, 3> alpha_bindings{};
@@ -2460,7 +2486,7 @@ bool create_sampled_descriptor_layout(const std::shared_ptr<VulkanContext>& cont
         }
         return true;
     }
-    std::array<VkDescriptorSetLayoutBinding, 21> bindings{};
+    std::array<VkDescriptorSetLayoutBinding, 24> bindings{};
     bindings[0].binding = 0U;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     bindings[0].descriptorCount = 1U;
@@ -2527,6 +2553,12 @@ bool create_sampled_descriptor_layout(const std::shared_ptr<VulkanContext>& cont
     bindings[19].binding = 19U;
     bindings[20] = bindings[3];
     bindings[20].binding = 20U;
+    bindings[21] = bindings[0];
+    bindings[21].binding = portable_multimap_cube_texture_binding;
+    bindings[22] = bindings[1];
+    bindings[22].binding = portable_multimap_cube_sampler_binding;
+    bindings[23] = bindings[3];
+    bindings[23].binding = portable_multimap_reflection_constants_binding;
     if (includes_damage_stack && !includes_detail_stack)
         std::copy(bindings.begin() + 12, bindings.begin() + 16,
                   bindings.begin() + 8);
@@ -2537,20 +2569,22 @@ bool create_sampled_descriptor_layout(const std::shared_ptr<VulkanContext>& cont
         : includes_damage_stack ? 5U : includes_normal_detail_binding ? 5U
         : includes_detail_stack ? 5U : includes_maps_binding ? 3U : includes_normal_binding ? 2U : 1U;
     const std::uint32_t sampled_image_descriptor_count =
-        includes_directional_shadow_binding
-            ? 10U
-            : material_sampled_descriptor_count;
+        (includes_directional_shadow_binding
+             ? 10U
+             : material_sampled_descriptor_count) +
+        (includes_multimap_reflection_binding ? 1U : 0U);
     const std::uint32_t sampler_descriptor_count =
-        includes_directional_shadow_binding
-            ? 8U
-            : material_sampled_descriptor_count;
+        (includes_directional_shadow_binding
+             ? 8U
+             : material_sampled_descriptor_count) +
+        (includes_multimap_reflection_binding ? 1U : 0U);
     const std::uint32_t uniform_descriptor_count =
-        (includes_frame_buffer || includes_normal_binding || includes_maps_binding ||
-         includes_detail_stack || includes_damage_stack)
-            ? (includes_directional_shadow_binding ? 3U : 2U)
-            : includes_directional_shadow_binding
-                  ? 3U
-                  : includes_material_buffer ? 1U : 0U;
+        (includes_directional_shadow_binding
+             ? 3U
+             : descriptors.includes_frame_buffer
+                   ? 2U
+                   : descriptors.includes_material_buffer ? 1U : 0U) +
+        (includes_multimap_reflection_binding ? 1U : 0U);
     if (sampled_image_descriptor_count > properties.limits.maxPerStageDescriptorSampledImages ||
         sampled_image_descriptor_count > properties.limits.maxDescriptorSetSampledImages ||
         sampler_descriptor_count > properties.limits.maxPerStageDescriptorSamplers ||
@@ -2564,15 +2598,25 @@ bool create_sampled_descriptor_layout(const std::shared_ptr<VulkanContext>& cont
     }
     VkDescriptorSetLayoutCreateInfo layout_info{};
     layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layout_info.bindingCount = includes_directional_shadow_binding
-                               ? static_cast<std::uint32_t>(bindings.size())
-                               : (includes_detail_stack && includes_damage_stack)
-                                   ? 16U
-                                   : (includes_detail_stack || includes_damage_stack) ? 12U
-                                   : includes_maps_binding ? 8U
-                                   : includes_normal_binding ? 6U
-                                   : includes_frame_buffer ? 4U
-                                   : includes_material_buffer ? 3U : 2U;
+    const std::uint32_t base_binding_count =
+        includes_directional_shadow_binding
+            ? 21U
+            : (includes_detail_stack && includes_damage_stack)
+                  ? 16U
+                  : (includes_detail_stack || includes_damage_stack)
+                        ? 12U
+                        : includes_maps_binding
+                              ? 8U
+                              : includes_normal_binding
+                                    ? 6U
+                                    : includes_frame_buffer
+                                          ? 4U
+                                          : includes_material_buffer ? 3U : 2U;
+    if (includes_multimap_reflection_binding && base_binding_count != 21U)
+        std::copy(bindings.begin() + 21U, bindings.end(),
+                  bindings.begin() + base_binding_count);
+    layout_info.bindingCount =
+        base_binding_count + (includes_multimap_reflection_binding ? 3U : 0U);
     layout_info.pBindings = bindings.data();
     const VkResult result = vkCreateDescriptorSetLayout(context->device, &layout_info, nullptr,
                                                         &descriptors.layout);
@@ -2700,7 +2744,8 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
             draw.has_detail_binding || draw.has_normal_detail_binding ||
             draw.has_damage_binding || draw.has_damage_mask_binding ||
             draw.has_material_binding || draw.has_frame_binding ||
-            draw.has_directional_shadow_binding)
+            draw.has_directional_shadow_binding ||
+            draw.has_multimap_reflection_binding)
             ++descriptor_count;
     }
     if (descriptor_count == 0U) return true;
@@ -2729,13 +2774,15 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
                                                         : descriptors.includes_maps_binding ? 3U
                                                         : descriptors.includes_normal_binding ? 2U : 1U;
     const std::size_t sampled_images_per_set =
-        descriptors.includes_directional_shadow_binding
-            ? 10U
-            : material_sampled_descriptors_per_set;
+        (descriptors.includes_directional_shadow_binding
+             ? 10U
+             : material_sampled_descriptors_per_set) +
+        (descriptors.includes_multimap_reflection_binding ? 1U : 0U);
     const std::size_t samplers_per_set =
-        descriptors.includes_directional_shadow_binding
-            ? 8U
-            : material_sampled_descriptors_per_set;
+        (descriptors.includes_directional_shadow_binding
+             ? 8U
+             : material_sampled_descriptors_per_set) +
+        (descriptors.includes_multimap_reflection_binding ? 1U : 0U);
     if (descriptor_count > std::numeric_limits<std::size_t>::max() / sampled_images_per_set ||
         descriptor_count > std::numeric_limits<std::size_t>::max() / samplers_per_set) {
         diagnostic = {"vulkan_descriptor_count_limit",
@@ -2763,11 +2810,12 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
     // still consume two uniform descriptors per allocated set even though the
     // frame-only shader writes only binding 3.
     const std::size_t uniform_bindings_per_set =
-        descriptors.includes_directional_shadow_binding
-            ? 3U
-            : descriptors.includes_frame_buffer
-                  ? 2U
-                  : descriptors.includes_material_buffer ? 1U : 0U;
+        (descriptors.includes_directional_shadow_binding
+             ? 3U
+             : descriptors.includes_frame_buffer
+                   ? 2U
+                   : descriptors.includes_material_buffer ? 1U : 0U) +
+        (descriptors.includes_multimap_reflection_binding ? 1U : 0U);
     if (uniform_bindings_per_set != 0U &&
         descriptor_count > std::numeric_limits<std::size_t>::max() / uniform_bindings_per_set) {
         diagnostic = {"vulkan_descriptor_count_limit",
@@ -2786,7 +2834,8 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
     pool_info.maxSets = static_cast<std::uint32_t>(descriptor_count);
     pool_info.poolSizeCount =
         (descriptors.includes_material_buffer || descriptors.includes_frame_buffer ||
-         descriptors.includes_directional_shadow_binding)
+         descriptors.includes_directional_shadow_binding ||
+         descriptors.includes_multimap_reflection_binding)
             ? 3U : 2U;
     pool_info.pPoolSizes = pool_sizes;
     VkResult result = vkCreateDescriptorPool(context->device, &pool_info, nullptr, &descriptors.pool);
@@ -2818,7 +2867,8 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
             !draw.has_detail_binding && !draw.has_normal_detail_binding &&
             !draw.has_damage_binding && !draw.has_damage_mask_binding &&
             !draw.has_material_binding && !draw.has_frame_binding &&
-            !draw.has_directional_shadow_binding)
+            !draw.has_directional_shadow_binding &&
+            !draw.has_multimap_reflection_binding)
             continue;
         const VkDescriptorSet set = allocated[next++];
         VkDescriptorImageInfo image_info{};
@@ -2878,7 +2928,17 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
         shadow_constants_info.buffer = draw.shadow_constants_buffer;
         shadow_constants_info.offset = draw.shadow_constants_offset;
         shadow_constants_info.range = draw.shadow_constants_range;
-        std::array<VkWriteDescriptorSet, 21> writes{};
+        VkDescriptorImageInfo multimap_cube_image_info{};
+        multimap_cube_image_info.imageView = draw.multimap_cube_view;
+        multimap_cube_image_info.imageLayout =
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkDescriptorImageInfo multimap_cube_sampler_info{};
+        multimap_cube_sampler_info.sampler = draw.multimap_cube_sampler;
+        VkDescriptorBufferInfo multimap_reflection_info{};
+        multimap_reflection_info.buffer = draw.multimap_reflection_buffer;
+        multimap_reflection_info.offset = draw.multimap_reflection_offset;
+        multimap_reflection_info.range = draw.multimap_reflection_range;
+        std::array<VkWriteDescriptorSet, 24> writes{};
         std::uint32_t write_count = 0U;
         if (draw.has_sampled_binding) {
             writes[write_count].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -3036,6 +3096,34 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
             writes[write_count].descriptorCount = 1U;
             writes[write_count].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
             writes[write_count].pBufferInfo = &shadow_constants_info;
+            ++write_count;
+        }
+        if (draw.has_multimap_reflection_binding) {
+            writes[write_count].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[write_count].dstSet = set;
+            writes[write_count].dstBinding =
+                portable_multimap_cube_texture_binding;
+            writes[write_count].descriptorCount = 1U;
+            writes[write_count].descriptorType =
+                VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+            writes[write_count].pImageInfo = &multimap_cube_image_info;
+            ++write_count;
+            writes[write_count].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[write_count].dstSet = set;
+            writes[write_count].dstBinding =
+                portable_multimap_cube_sampler_binding;
+            writes[write_count].descriptorCount = 1U;
+            writes[write_count].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+            writes[write_count].pImageInfo = &multimap_cube_sampler_info;
+            ++write_count;
+            writes[write_count].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[write_count].dstSet = set;
+            writes[write_count].dstBinding =
+                portable_multimap_reflection_constants_binding;
+            writes[write_count].descriptorCount = 1U;
+            writes[write_count].descriptorType =
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            writes[write_count].pBufferInfo = &multimap_reflection_info;
             ++write_count;
         }
         vkUpdateDescriptorSets(context->device, write_count, writes.data(), 0U, nullptr);
@@ -3751,6 +3839,7 @@ bool draw_indexed_batch_and_readback(
     bool has_damage_binding = false;
     bool has_damage_mask_binding = false;
     bool has_directional_shadow_binding = false;
+    bool has_multimap_reflection_binding = false;
     bool has_selected_color = false;
     for (const VulkanIndexedBatchDraw& draw : draws) {
         has_sampled_binding = has_sampled_binding || draw.has_sampled_binding;
@@ -3764,6 +3853,9 @@ bool draw_indexed_batch_and_readback(
         has_damage_mask_binding = has_damage_mask_binding || draw.has_damage_mask_binding;
         has_directional_shadow_binding = has_directional_shadow_binding ||
                                          draw.has_directional_shadow_binding;
+        has_multimap_reflection_binding =
+            has_multimap_reflection_binding ||
+            draw.has_multimap_reflection_binding;
         has_selected_color = has_selected_color || draw.has_selected_color;
     }
     std::vector<VulkanDepthAttachment*> sampled_shadow_attachments;
@@ -3796,12 +3888,13 @@ bool draw_indexed_batch_and_readback(
     if ((has_sampled_binding || has_normal_binding || has_maps_binding || has_detail_binding ||
          has_normal_detail_binding || has_damage_binding || has_damage_mask_binding ||
          has_material_binding || has_frame_binding ||
-         has_directional_shadow_binding) &&
+         has_directional_shadow_binding || has_multimap_reflection_binding) &&
         !create_sampled_descriptor_layout(context, descriptors, has_material_binding, has_frame_binding,
                                           has_normal_binding, has_maps_binding, has_detail_binding,
                                           has_normal_detail_binding, has_damage_binding,
                                           has_damage_mask_binding,
                                           has_directional_shadow_binding,
+                                          has_multimap_reflection_binding,
                                           false, diagnostic))
         return false;
     VulkanTransientSelectedDescriptors selected_descriptors;
@@ -3936,7 +4029,7 @@ bool draw_indexed_batch_and_readback(
     if ((has_sampled_binding || has_normal_binding || has_maps_binding || has_detail_binding ||
          has_normal_detail_binding || has_damage_binding || has_damage_mask_binding ||
          has_material_binding || has_frame_binding ||
-         has_directional_shadow_binding) &&
+         has_directional_shadow_binding || has_multimap_reflection_binding) &&
         !allocate_sampled_descriptor_sets(
                                   context, descriptors, draws, descriptor_sets, diagnostic)) {
         pipelines.clear();
@@ -4358,8 +4451,10 @@ bool draw_depth_only_indexed_batch(
         });
     VulkanTransientSampledDescriptors descriptors;
     if (has_alpha_tested_binding &&
-        !create_sampled_descriptor_layout(context, descriptors, false, false, false, false,
-                                           false, false, false, false, false, true, diagnostic)) {
+        !create_sampled_descriptor_layout(context, descriptors, false, false,
+                                           false, false, false, false, false,
+                                           false, false, false, true,
+                                           diagnostic)) {
         vkDestroyFramebuffer(context->device, framebuffer, nullptr);
         vkDestroyRenderPass(context->device, render_pass, nullptr);
         return false;
@@ -5144,6 +5239,8 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
         return false;
     }
     const bool damage_declaration = damage_texture_declaration;
+    const bool multimap_reflection_declaration =
+        pipeline_declares_multimap_reflection(*request.pipeline);
     if (damage_declaration &&
         (!maps_declaration || !normal_declaration || !material_declaration ||
          !frame_declaration || (detail_declaration && !damage_dust_layout))) {
@@ -5611,6 +5708,105 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
         draw.frame_buffer = frame_buffer->raw().buffer;
         draw.frame_offset = static_cast<VkDeviceSize>(offset);
         draw.frame_range = static_cast<VkDeviceSize>(range);
+    }
+    if (multimap_reflection_declaration) {
+        const auto* cube = dynamic_cast<const VulkanTexture*>(
+            request.multimap_reflection_binding.cube.texture);
+        const auto* cube_sampler = dynamic_cast<const VulkanSampler*>(
+            request.multimap_reflection_binding.cube.sampler);
+        const auto* constants = dynamic_cast<const VulkanBuffer*>(
+            request.multimap_reflection_binding.constants.buffer);
+        if (cube == nullptr || cube_sampler == nullptr || constants == nullptr) {
+            diagnostic = {
+                "vulkan_indexed_multimap_reflection_resource_type_unsupported",
+                "Vulkan MultiMap reflection requires Vulkan cube, sampler, and uniform-buffer handles"};
+            return false;
+        }
+        if (cube->context() != context || cube_sampler->context() != context ||
+            constants->context() != context) {
+            diagnostic = {
+                "vulkan_indexed_multimap_reflection_resource_context_mismatch",
+                "Vulkan MultiMap reflection resources must belong to the draw device"};
+            return false;
+        }
+        const TextureDescription& cube_description = cube->info().description;
+        const auto cube_usage =
+            static_cast<std::uint32_t>(cube_description.usage);
+        const bool format_supported =
+            cube_description.format == TextureFormat::rgba8_unorm ||
+            cube_description.format == TextureFormat::rgba8_srgb ||
+            cube_description.format == TextureFormat::bgra8_unorm ||
+            cube_description.format == TextureFormat::bgra8_srgb ||
+            cube_description.format == TextureFormat::bc1_unorm ||
+            cube_description.format == TextureFormat::bc1_srgb ||
+            cube_description.format == TextureFormat::bc3_unorm ||
+            cube_description.format == TextureFormat::bc3_srgb ||
+            cube_description.format == TextureFormat::bc7_unorm ||
+            cube_description.format == TextureFormat::bc7_srgb;
+        if (cube_description.shape != TextureShape::texture_cube ||
+            cube_description.array_layers != 1U ||
+            cube_description.width == 0U ||
+            cube_description.width != cube_description.height ||
+            cube_description.mip_levels == 0U ||
+            cube_description.samples != 1U || !format_supported ||
+            (cube_usage &
+             static_cast<std::uint32_t>(TextureUsage::sampled)) == 0U ||
+            (cube_usage &
+             static_cast<std::uint32_t>(TextureUsage::storage)) != 0U) {
+            diagnostic = {
+                "vulkan_indexed_multimap_reflection_cube_unsupported",
+                "Vulkan MultiMap reflection requires one explicit sampled square cube"};
+            return false;
+        }
+        if (!cube->initialized() ||
+            cube->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
+            cube->image() == VK_NULL_HANDLE || cube->view() == VK_NULL_HANDLE ||
+            cube_sampler->sampler() == VK_NULL_HANDLE) {
+            diagnostic = {
+                "vulkan_indexed_multimap_reflection_cube_uninitialized",
+                "Vulkan MultiMap reflection requires initialized shader-readable cube handles"};
+            return false;
+        }
+        Diagnostic sampler_diagnostic;
+        if (validate_sampler_description(cube_sampler->info().description,
+                                         sampler_diagnostic) !=
+                SamplerStatus::ready ||
+            cube_sampler->info().description.compare !=
+                SamplerCompare::disabled) {
+            diagnostic = {
+                "vulkan_indexed_multimap_reflection_sampler_invalid",
+                sampler_diagnostic.message.empty()
+                    ? "Vulkan MultiMap reflection requires comparison disabled"
+                    : sampler_diagnostic.message};
+            return false;
+        }
+        const IndexedMaterialBufferBinding& view =
+            request.multimap_reflection_binding.constants;
+        const BufferDescription& buffer_description =
+            constants->info().description;
+        const std::uint64_t offset = view.offset_bytes;
+        const std::uint64_t range = view.range_bytes;
+        if (buffer_description.usage != BufferUsage::uniform ||
+            range != portable_multimap_reflection_buffer_view_bytes ||
+            offset % portable_multimap_reflection_buffer_view_bytes != 0U ||
+            offset % context->min_uniform_buffer_offset_alignment != 0U ||
+            range > context->max_uniform_buffer_range ||
+            offset > buffer_description.size_bytes ||
+            range > buffer_description.size_bytes - offset ||
+            offset > std::numeric_limits<VkDeviceSize>::max() ||
+            constants->raw().buffer == VK_NULL_HANDLE) {
+            diagnostic = {
+                "vulkan_indexed_multimap_reflection_constants_invalid",
+                "Vulkan MultiMap reflection constants violate the uniform-buffer view contract"};
+            return false;
+        }
+        draw.has_multimap_reflection_binding = true;
+        draw.multimap_cube_image = cube->image();
+        draw.multimap_cube_view = cube->view();
+        draw.multimap_cube_sampler = cube_sampler->sampler();
+        draw.multimap_reflection_buffer = constants->raw().buffer;
+        draw.multimap_reflection_offset = static_cast<VkDeviceSize>(offset);
+        draw.multimap_reflection_range = static_cast<VkDeviceSize>(range);
     }
     if (pipeline_declares_directional_shadow_receiver(*request.pipeline)) {
         const auto* shadow_sampler =
@@ -6550,7 +6746,8 @@ public:
         if (!create_raw_image(context_, description, raw, diagnostic)) {
             const bool unsupported = diagnostic.code == "texture_format_unsupported" ||
                                      diagnostic.code == "vulkan_compressed_format_unsupported" ||
-                                     diagnostic.code == "vulkan_texture_samples_unsupported";
+                                     diagnostic.code == "vulkan_texture_samples_unsupported" ||
+                                     diagnostic.code == "vulkan_cube_array_unsupported";
             return {unsupported ? TextureStatus::unsupported : TextureStatus::allocation_failed,
                     std::move(diagnostic), nullptr};
         }
@@ -7177,6 +7374,7 @@ DeviceResult create_vulkan_device(const DeviceOptions& options) {
     vkGetPhysicalDeviceFeatures(selected.handle, &supported_features);
     VkPhysicalDeviceFeatures features{};
     features.samplerAnisotropy = supported_features.samplerAnisotropy;
+    features.imageCubeArray = supported_features.imageCubeArray;
     VkDeviceCreateInfo create_info{};
     create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     create_info.queueCreateInfoCount = 1;
@@ -7203,6 +7401,7 @@ DeviceResult create_vulkan_device(const DeviceOptions& options) {
     auto context = std::make_shared<VulkanContext>(std::move(instance), selected.handle, device, queue,
                                                    selected.graphics_queue_family, info_from(selected.properties),
                                                    supported_features.samplerAnisotropy == VK_TRUE,
+                                                   supported_features.imageCubeArray == VK_TRUE,
                                                    selected.properties.limits.maxSamplerAnisotropy,
                                                    selected.properties.limits.maxUniformBufferRange,
                                                    selected.properties.limits.minUniformBufferOffsetAlignment);
