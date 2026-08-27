@@ -1080,6 +1080,7 @@ WorkspaceViewport::WorkspaceViewport(
     std::unique_ptr<render::Texture> tone_mapped_color,
     std::optional<render::HdrToneMapParameters> hdr_tone_map,
     render::HdrExposureMode hdr_exposure_mode,
+    bool sky_enabled,
     std::unique_ptr<render::DepthAttachment> depth,
     std::unique_ptr<render::StockSceneExecutionResult> execution,
     std::optional<render::PipelineProgram> authoring_overlay_pipeline,
@@ -1102,6 +1103,7 @@ WorkspaceViewport::WorkspaceViewport(
       tone_mapped_color_(std::move(tone_mapped_color)),
       hdr_tone_map_(std::move(hdr_tone_map)),
       hdr_exposure_mode_(hdr_exposure_mode),
+      sky_enabled_(sky_enabled),
       depth_(std::move(depth)), execution_(std::move(execution)),
       authoring_overlay_pipeline_(std::move(authoring_overlay_pipeline)),
       ai_spline_passes_(std::move(ai_spline_passes)),
@@ -1440,6 +1442,12 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
         output_diagnostic = diagnostic(
             "workspace_viewport_hdr_exposure_requires_hdr",
             "Automatic exposure requires a prepared HDR scene target");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (sky_enabled_ && !request.frame_constants.has_value()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_sky_constants_missing",
+            "An enabled portable sky requires the current frame lighting constants");
         return WorkspaceViewportFrameStatus::invalid;
     }
     const render::HdrToneMapParameters* effective_hdr_tone_map =
@@ -1871,6 +1879,7 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
 
     render::StaticSceneFrameDescription frame;
     frame.camera = request.camera;
+    frame.draw_sky = sky_enabled_;
     frame.depth_attachment = depth_.get();
     frame.load_color = request.load_color;
     frame.clear_color = request.clear_color;
@@ -2187,6 +2196,7 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
         }
 
         render::StaticSceneFrameDescription capture_frame = frame;
+        capture_frame.draw_sky = sky_enabled_;
         capture_frame.depth_attachment = capture.depth.get();
         capture_frame.load_color = false;
         capture_frame.clear_color = {0.0F, 0.0F, 0.0F, 0.0F};
@@ -3560,7 +3570,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             &device, device.info().backend, request.presentation,
             std::move(color.texture),
             std::move(resolved_color), std::move(tone_mapped_color),
-            request.hdr_tone_map, request.hdr_exposure_mode,
+            request.hdr_tone_map, request.hdr_exposure_mode, request.sky_enabled,
             std::move(depth.attachment),
             std::move(execution),
             std::move(authoring_overlay_pipeline),

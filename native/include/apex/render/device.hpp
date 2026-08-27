@@ -1020,6 +1020,33 @@ inline constexpr std::size_t max_indexed_static_mesh_batch_draws = 4096U;
 // native-only subset to 1,024 draws.
 inline constexpr std::size_t max_stock_ks_per_pixel_native_batch_draws = 1024U;
 
+// The production WebGL sky reconstructs one camera ray per pixel. This
+// portable contract keeps that exact formula separate from the recovered
+// native SkyBox shaders. Clouds remain a different scene pass.
+struct PortableSkyParameters {
+    CameraFrame camera{};
+    std::array<float, 3U> horizon_color{};
+    std::array<float, 3U> sky_color{};
+    std::array<float, 3U> sun_color{};
+    std::array<float, 3U> sun_direction = {0.0F, 1.0F, 0.0F};
+};
+
+// Shared shader record for Vulkan and D3D12. The first records pack one
+// scalar after each camera vector to keep the cross-backend ABI at 16-byte
+// boundaries.
+struct PortableSkyShaderConstants {
+    std::array<float, 4U> camera_forward_tan_half_fov{};
+    std::array<float, 4U> camera_right_aspect{};
+    std::array<float, 4U> camera_up{};
+    std::array<float, 4U> horizon_color{};
+    std::array<float, 4U> sky_color{};
+    std::array<float, 4U> sun_color{};
+    std::array<float, 4U> sun_direction{};
+};
+
+static_assert(sizeof(PortableSkyShaderConstants) == 112U);
+static_assert(std::is_trivially_copyable_v<PortableSkyShaderConstants>);
+
 struct IndexedStaticMeshBatchDescription {
     std::span<const IndexedStaticMeshDrawRequest> draws{};
     DepthAttachment* depth_attachment = nullptr;
@@ -1041,6 +1068,9 @@ struct IndexedStaticMeshBatchDescription {
     // Selected draws merge into the indexed scene sequence by scene_position.
     // A selected draw executes before line draws at the same position.
     std::span<const SelectedMeshDrawRequest> selected_mesh_draws{};
+    // Optional fullscreen background. Backends draw it after attachment
+    // load/clear and before every scene, selected-mesh, and overlay draw.
+    std::optional<PortableSkyParameters> sky;
     // All draws target this one subresource. The first cube-target slice is
     // single-sample, mip zero, clear-only, and has no resolve target.
     TextureTargetSubresource target_subresource{};
@@ -1640,6 +1670,12 @@ inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
 
 [[nodiscard]] HdrToneMapStatus validate_hdr_tone_map_parameters(
     const HdrToneMapParameters& parameters, Diagnostic& diagnostic);
+
+// Build the bounded portable sky ABI. This function normalizes the camera and
+// sun bases once so both backends receive the same finite values.
+[[nodiscard]] bool build_portable_sky_shader_constants(
+    const PortableSkyParameters& parameters,
+    PortableSkyShaderConstants& constants, Diagnostic& diagnostic) noexcept;
 
 // Checks the five-level, two-image-per-level RGBA16F bloom chain before a
 // backend allocates it. Backends include any additional transient images in

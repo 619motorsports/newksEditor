@@ -863,6 +863,130 @@ HdrToneMapStatus validate_hdr_tone_map_request(
     return HdrToneMapStatus::ready;
 }
 
+bool build_portable_sky_shader_constants(
+    const PortableSkyParameters& parameters,
+    PortableSkyShaderConstants& constants, Diagnostic& diagnostic) noexcept {
+    constexpr double minimum_length_squared = 1.0e-12;
+    constexpr float maximum_color_component = 64000.0F;
+    const auto finite_vector = [](const auto& values) {
+        return std::all_of(values.begin(), values.end(),
+                           [](const float value) {
+                               return std::isfinite(value);
+                           });
+    };
+    const auto valid_color = [&](const std::array<float, 3U>& color) {
+        return finite_vector(color) &&
+               std::all_of(color.begin(), color.end(), [&](const float value) {
+                   return value >= 0.0F && value <= maximum_color_component;
+               });
+    };
+    if (!finite_vector(parameters.camera.forward) ||
+        !finite_vector(parameters.camera.up) ||
+        !std::isfinite(parameters.camera.fov_radians) ||
+        !std::isfinite(parameters.camera.aspect) ||
+        !(parameters.camera.fov_radians > 0.0F &&
+          parameters.camera.fov_radians < 3.14159265358979323846F) ||
+        !(parameters.camera.aspect > 0.0F)) {
+        diagnostic = {"portable_sky_camera_invalid",
+                      "The portable sky camera must have a finite basis, field of view, and positive aspect ratio"};
+        return false;
+    }
+    if (!valid_color(parameters.horizon_color) ||
+        !valid_color(parameters.sky_color) ||
+        !valid_color(parameters.sun_color) ||
+        !finite_vector(parameters.sun_direction)) {
+        diagnostic = {"portable_sky_lighting_invalid",
+                      "Portable sky colors and the sun direction must be finite and bounded"};
+        return false;
+    }
+    for (std::size_t component = 0U; component < 3U; ++component) {
+        const double maximum_output =
+            std::max(parameters.horizon_color[component],
+                     parameters.sky_color[component]) +
+            static_cast<double>(parameters.sun_color[component]);
+        if (maximum_output > maximum_color_component) {
+            diagnostic = {
+                "portable_sky_lighting_invalid",
+                "Portable sky color plus the solar lobe exceeds the bounded HDR output"};
+            return false;
+        }
+    }
+
+    const auto normalize = [&](const std::array<float, 3U>& value,
+                               std::array<float, 3U>& output) {
+        double length_squared = 0.0;
+        for (const float component : value)
+            length_squared += static_cast<double>(component) * component;
+        if (!(length_squared > minimum_length_squared) ||
+            !std::isfinite(length_squared))
+            return false;
+        const double inverse_length = 1.0 / std::sqrt(length_squared);
+        for (std::size_t index = 0U; index < output.size(); ++index) {
+            const double normalized = value[index] * inverse_length;
+            if (!std::isfinite(normalized) ||
+                normalized < -static_cast<double>(
+                                 std::numeric_limits<float>::max()) ||
+                normalized > static_cast<double>(
+                                 std::numeric_limits<float>::max()))
+                return false;
+            output[index] = static_cast<float>(normalized);
+        }
+        return true;
+    };
+    const auto cross = [](const std::array<float, 3U>& left,
+                          const std::array<float, 3U>& right) {
+        return std::array<float, 3U>{
+            left[1U] * right[2U] - left[2U] * right[1U],
+            left[2U] * right[0U] - left[0U] * right[2U],
+            left[0U] * right[1U] - left[1U] * right[0U]};
+    };
+
+    std::array<float, 3U> forward{};
+    std::array<float, 3U> camera_up_input{};
+    std::array<float, 3U> right{};
+    std::array<float, 3U> up{};
+    std::array<float, 3U> sun_direction{};
+    if (!normalize(parameters.camera.forward, forward) ||
+        !normalize(parameters.camera.up, camera_up_input) ||
+        !normalize(cross(forward, camera_up_input), right) ||
+        !normalize(cross(right, forward), up) ||
+        !normalize(parameters.sun_direction, sun_direction)) {
+        diagnostic = {"portable_sky_basis_invalid",
+                      "The portable sky camera and sun directions must form finite nonzero bases"};
+        return false;
+    }
+    const float tan_half_fov =
+        std::tan(parameters.camera.fov_radians * 0.5F);
+    const double horizontal_tangent =
+        static_cast<double>(tan_half_fov) * parameters.camera.aspect;
+    if (!std::isfinite(tan_half_fov) || !(tan_half_fov > 0.0F) ||
+        !std::isfinite(horizontal_tangent) ||
+        horizontal_tangent > std::numeric_limits<float>::max()) {
+        diagnostic = {"portable_sky_camera_invalid",
+                      "The portable sky field of view and aspect produced an invalid ray scale"};
+        return false;
+    }
+
+    constants = {};
+    std::copy(forward.begin(), forward.end(),
+              constants.camera_forward_tan_half_fov.begin());
+    constants.camera_forward_tan_half_fov[3U] = tan_half_fov;
+    std::copy(right.begin(), right.end(),
+              constants.camera_right_aspect.begin());
+    constants.camera_right_aspect[3U] = parameters.camera.aspect;
+    std::copy(up.begin(), up.end(), constants.camera_up.begin());
+    std::copy(parameters.horizon_color.begin(), parameters.horizon_color.end(),
+              constants.horizon_color.begin());
+    std::copy(parameters.sky_color.begin(), parameters.sky_color.end(),
+              constants.sky_color.begin());
+    std::copy(parameters.sun_color.begin(), parameters.sun_color.end(),
+              constants.sun_color.begin());
+    std::copy(sun_direction.begin(), sun_direction.end(),
+              constants.sun_direction.begin());
+    diagnostic = {};
+    return true;
+}
+
 bool validate_hdr_bloom_resource_budget(
     std::uint32_t width, std::uint32_t height,
     std::uint64_t additional_bytes, Diagnostic& diagnostic) noexcept {
@@ -3739,6 +3863,20 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
         validate_indexed_target_subresource(target, description.target_subresource, diagnostic);
     if (target_subresource_status != IndexedStaticMeshBatchStatus::ready)
         return target_subresource_status;
+    if (description.sky.has_value()) {
+        const CameraClipSpace expected_clip_space =
+            texture.backend() == Backend::Vulkan ? CameraClipSpace::vulkan
+                                                  : CameraClipSpace::d3d12;
+        if (description.sky->camera.clip_space != expected_clip_space) {
+            diagnostic = {"portable_sky_clip_space_mismatch",
+                          "The portable sky camera clip space must match the color-target backend"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        PortableSkyShaderConstants sky_constants;
+        if (!build_portable_sky_shader_constants(
+                *description.sky, sky_constants, diagnostic))
+            return IndexedStaticMeshBatchStatus::invalid_request;
+    }
     if (target.shape == TextureShape::texture_cube && description.load_color) {
         diagnostic = {"indexed_static_mesh_batch_cube_load_unsupported",
                       "Cube indexed static-mesh targets cannot load a prior color slice"};

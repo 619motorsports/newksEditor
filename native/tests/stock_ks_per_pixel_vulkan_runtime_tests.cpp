@@ -538,6 +538,17 @@ int run_runtime_probe() {
     production_batch.draws = production_requests;
     production_batch.depth_attachment = production_depth.attachment.get();
     production_batch.clear_depth = true;
+    PortableSkyParameters production_sky;
+    production_sky.camera.forward = {0.0F, 0.0F, -1.0F};
+    production_sky.camera.up = {0.0F, 1.0F, 0.0F};
+    production_sky.camera.fov_radians = 1.0471975512F;
+    production_sky.camera.aspect = 1.0F;
+    production_sky.camera.clip_space = CameraClipSpace::vulkan;
+    production_sky.horizon_color = {0.05F, 0.10F, 0.20F};
+    production_sky.sky_color = {0.30F, 0.50F, 0.80F};
+    production_sky.sun_color = {0.0F, 0.0F, 0.0F};
+    production_sky.sun_direction = {0.0F, 1.0F, 0.0F};
+    production_batch.sky = production_sky;
     const IndexedStaticMeshBatchResult production_draw =
         device.draw_indexed_static_mesh_batch_and_readback(
             *production_target.texture, production_batch);
@@ -550,6 +561,10 @@ int run_runtime_probe() {
                 production_draw.rgba8[center + 1U] != std::byte{0} ||
                 production_draw.rgba8[center + 2U] != std::byte{0},
             "mixed base/AT production-format Vulkan source batch renders");
+    require(production_draw.rgba8[0] < production_draw.rgba8[2] &&
+                production_draw.rgba8[2] > std::byte{80} &&
+                production_draw.rgba8[3] == std::byte{255},
+            "portable sky survives depth-tested production scene draws");
 
     TextureDescription hdr_target_description = target_description;
     hdr_target_description.format = TextureFormat::rgba16_sfloat;

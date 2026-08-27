@@ -19,6 +19,7 @@
 #    include <vulkan/vulkan.h>
 #    include "generated/hdr_tone_map_spirv.hpp"
 #    include "generated/hdr_bloom_spirv.hpp"
+#    include "generated/portable_sky_spirv.hpp"
 #endif
 
 namespace apex::render {
@@ -2490,6 +2491,134 @@ struct VulkanBatchPipeline {
     }
 };
 
+// The portable sky is the first draw in an indexed scene batch. Its one
+// fragment UBO is intentionally separate from material descriptors so a sky
+// draw cannot accidentally inherit a material binding ABI.
+struct VulkanTransientSkyDescriptors {
+    std::shared_ptr<VulkanContext> context;
+    RawVulkanBuffer constants;
+    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+
+    VulkanTransientSkyDescriptors() = default;
+    VulkanTransientSkyDescriptors(const VulkanTransientSkyDescriptors&) = delete;
+    VulkanTransientSkyDescriptors& operator=(const VulkanTransientSkyDescriptors&) = delete;
+    ~VulkanTransientSkyDescriptors() { reset(); }
+
+    void reset() noexcept {
+        if (context && context->device != VK_NULL_HANDLE) {
+            if (pool != VK_NULL_HANDLE)
+                vkDestroyDescriptorPool(context->device, pool, nullptr);
+            if (layout != VK_NULL_HANDLE)
+                vkDestroyDescriptorSetLayout(context->device, layout, nullptr);
+        }
+        pool = VK_NULL_HANDLE;
+        layout = VK_NULL_HANDLE;
+        set = VK_NULL_HANDLE;
+        constants.reset();
+        context.reset();
+    }
+};
+
+bool create_portable_sky_descriptors(
+    const std::shared_ptr<VulkanContext>& context,
+    const PortableSkyShaderConstants& sky_constants,
+    VulkanTransientSkyDescriptors& descriptors,
+    Diagnostic& diagnostic) {
+    descriptors.reset();
+    descriptors.context = context;
+    BufferDescription buffer_description;
+    buffer_description.size_bytes = sizeof(PortableSkyShaderConstants);
+    buffer_description.usage = BufferUsage::uniform;
+    buffer_description.memory = BufferMemory::host_visible;
+    buffer_description.mutability = BufferMutability::mutable_data;
+    if (!create_raw_buffer(context, buffer_description,
+                           VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                           BufferMemory::host_visible, descriptors.constants,
+                           diagnostic)) {
+        diagnostic.code = diagnostic.code.empty()
+                              ? "vulkan_portable_sky_uniform_failed"
+                              : diagnostic.code;
+        descriptors.reset();
+        return false;
+    }
+    if (!write_host_buffer(
+            context, descriptors.constants, 0U,
+            std::as_bytes(std::span(&sky_constants, 1U)), diagnostic)) {
+        diagnostic.code = diagnostic.code.empty()
+                              ? "vulkan_portable_sky_uniform_failed"
+                              : diagnostic.code;
+        descriptors.reset();
+        return false;
+    }
+    VkDescriptorSetLayoutBinding binding{};
+    binding.binding = 0U;
+    binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    binding.descriptorCount = 1U;
+    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo layout_info{};
+    layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layout_info.bindingCount = 1U;
+    layout_info.pBindings = &binding;
+    VkResult result = vkCreateDescriptorSetLayout(
+        context->device, &layout_info, nullptr, &descriptors.layout);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkCreateDescriptorSetLayout(portable sky)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST
+                              ? "vulkan_device_lost"
+                              : "vulkan_portable_sky_descriptor_failed";
+        descriptors.reset();
+        return false;
+    }
+    VkDescriptorPoolSize pool_size{};
+    pool_size.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    pool_size.descriptorCount = 1U;
+    VkDescriptorPoolCreateInfo pool_info{};
+    pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool_info.maxSets = 1U;
+    pool_info.poolSizeCount = 1U;
+    pool_info.pPoolSizes = &pool_size;
+    result = vkCreateDescriptorPool(context->device, &pool_info, nullptr,
+                                    &descriptors.pool);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkCreateDescriptorPool(portable sky)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST
+                              ? "vulkan_device_lost"
+                              : "vulkan_portable_sky_descriptor_failed";
+        descriptors.reset();
+        return false;
+    }
+    VkDescriptorSetAllocateInfo allocation{};
+    allocation.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocation.descriptorPool = descriptors.pool;
+    allocation.descriptorSetCount = 1U;
+    allocation.pSetLayouts = &descriptors.layout;
+    result = vkAllocateDescriptorSets(context->device, &allocation,
+                                      &descriptors.set);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkAllocateDescriptorSets(portable sky)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST
+                              ? "vulkan_device_lost"
+                              : "vulkan_portable_sky_descriptor_failed";
+        descriptors.reset();
+        return false;
+    }
+    VkDescriptorBufferInfo buffer_info{};
+    buffer_info.buffer = descriptors.constants.buffer;
+    buffer_info.offset = 0U;
+    buffer_info.range = sizeof(PortableSkyShaderConstants);
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = descriptors.set;
+    write.dstBinding = 0U;
+    write.descriptorCount = 1U;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    write.pBufferInfo = &buffer_info;
+    vkUpdateDescriptorSets(context->device, 1U, &write, 0U, nullptr);
+    return true;
+}
+
 bool create_stock_native_abi_descriptors(
     const std::shared_ptr<VulkanContext>& context,
     std::span<const VulkanIndexedBatchDraw> draws,
@@ -2747,8 +2876,8 @@ bool create_batch_pipeline(const std::shared_ptr<VulkanContext>& context,
                                                    VK_VERTEX_INPUT_RATE_VERTEX};
     VkPipelineVertexInputStateCreateInfo vertex_input{};
     vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vertex_input.vertexBindingDescriptionCount = 1U;
-    vertex_input.pVertexBindingDescriptions = &vertex_binding;
+    vertex_input.vertexBindingDescriptionCount = attributes.empty() ? 0U : 1U;
+    vertex_input.pVertexBindingDescriptions = attributes.empty() ? nullptr : &vertex_binding;
     vertex_input.vertexAttributeDescriptionCount = static_cast<std::uint32_t>(vertex_attributes.size());
     vertex_input.pVertexAttributeDescriptions = vertex_attributes.data();
     VkPipelineInputAssemblyStateCreateInfo assembly{};
@@ -4162,6 +4291,7 @@ bool draw_indexed_batch_and_readback(
     const TextureDescription& description,
     const TextureTargetSubresource& target_subresource,
     std::span<const VulkanIndexedBatchDraw> draws,
+    const PortableSkyShaderConstants* sky_constants,
     VulkanDepthAttachment* depth_attachment,
     bool load_color,
     bool clear_depth,
@@ -4475,6 +4605,53 @@ bool draw_indexed_batch_and_readback(
         return false;
     }
 
+    VulkanTransientSkyDescriptors sky_descriptors;
+    VulkanBatchPipeline sky_pipeline;
+    if (sky_constants != nullptr) {
+        if (!create_portable_sky_descriptors(
+                context, *sky_constants, sky_descriptors, diagnostic)) {
+            vkDestroyFramebuffer(context->device, framebuffer, nullptr);
+            vkDestroyRenderPass(context->device, render_pass, nullptr);
+            return false;
+        }
+        const auto shader_bytes = [](const std::uint32_t* words,
+                                     std::size_t word_count) {
+            const auto* bytes = reinterpret_cast<const std::uint8_t*>(words);
+            return std::vector<std::uint8_t>(bytes, bytes + word_count * sizeof(std::uint32_t));
+        };
+        PipelineProgram sky_program;
+        sky_program.name = "portable-sky-webgl-aligned";
+        sky_program.shaders = {
+            {PipelineShaderStage::vertex, PipelineShaderFormat::spirv,
+             shader_bytes(generated::portable_sky_vertex_spirv,
+                          generated::portable_sky_vertex_spirv_size /
+                              sizeof(std::uint32_t)),
+             PipelineShaderProvenance::source_equivalent},
+            {PipelineShaderStage::fragment, PipelineShaderFormat::spirv,
+             shader_bytes(generated::portable_sky_fragment_spirv,
+                          generated::portable_sky_fragment_spirv_size /
+                              sizeof(std::uint32_t)),
+             PipelineShaderProvenance::source_equivalent},
+        };
+        sky_program.raster.cull = PipelineCullMode::none;
+        sky_program.depth.test_enabled = false;
+        sky_program.depth.write_enabled = false;
+        sky_program.resources = {
+            {PipelineResourceKind::uniform_buffer, 0U, 0U,
+             "portableSkyConstants"}};
+        const std::array<VkDescriptorSetLayout, 1U> sky_layouts = {
+            sky_descriptors.layout};
+        if (!create_batch_pipeline(
+                context, render_pass, description.width, description.height,
+                description.samples, sky_program, true,
+                depth_attachment != nullptr, sky_layouts, false,
+                sky_pipeline, diagnostic)) {
+            vkDestroyFramebuffer(context->device, framebuffer, nullptr);
+            vkDestroyRenderPass(context->device, render_pass, nullptr);
+            return false;
+        }
+    }
+
     std::vector<VulkanBatchPipeline> pipelines;
     pipelines.reserve(draws.size());
     for (const VulkanIndexedBatchDraw& draw : draws) {
@@ -4660,6 +4837,16 @@ bool draw_indexed_batch_and_readback(
         render_begin.clearValueCount = render_pass_info.attachmentCount;
         render_begin.pClearValues = clear_values.data();
         vkCmdBeginRenderPass(command, &render_begin, VK_SUBPASS_CONTENTS_INLINE);
+        if (sky_constants != nullptr) {
+            vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              sky_pipeline.pipeline);
+            vkCmdBindDescriptorSets(
+                command, VK_PIPELINE_BIND_POINT_GRAPHICS, sky_pipeline.layout,
+                0U, 1U, &sky_descriptors.set, 0U, nullptr);
+            // The inverted clip-space Y in portable_sky.vert preserves the
+            // production WebGL top/bottom NDC orientation on Vulkan.
+            vkCmdDraw(command, 3U, 1U, 0U, 0U);
+        }
         for (std::size_t index = 0; index < draws.size(); ++index) {
             const VulkanIndexedBatchDraw& draw = draws[index];
             const VulkanBatchPipeline& pipeline = pipelines[index];
@@ -5423,7 +5610,7 @@ public:
             const std::array<VulkanIndexedBatchDraw, 1> draws = {draw};
             const bool drawn = draw_indexed_batch_and_readback(
                 context_, raw_, info_.description, TextureTargetSubresource{},
-                draws, depth_attachment, request.load_color,
+                draws, nullptr, depth_attachment, request.load_color,
                 request.clear_depth, request.depth_clear_value, request.clear_color, layout_,
                 nullptr, nullptr, nullptr,
                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 1U, true, output,
@@ -5446,7 +5633,7 @@ public:
             const std::array<VulkanIndexedBatchDraw, 1> draws = {draw};
             const bool drawn = draw_indexed_batch_and_readback(
                 context_, raw_, info_.description, TextureTargetSubresource{},
-                draws, depth_attachment, request.load_color,
+                draws, nullptr, depth_attachment, request.load_color,
                 request.clear_depth, request.depth_clear_value, request.clear_color, layout_,
                 nullptr, nullptr, nullptr,
                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 1U, true, output,
@@ -5633,9 +5820,17 @@ public:
                 description, append_scene_draw, append_selected_draw,
                 append_overlay_draw))
             return false;
+        std::optional<PortableSkyShaderConstants> sky_constants;
+        if (description.sky.has_value()) {
+            sky_constants.emplace();
+            if (!build_portable_sky_shader_constants(
+                    *description.sky, *sky_constants, diagnostic))
+                return false;
+        }
         const bool drawn = draw_indexed_batch_and_readback(
             context_, raw_, info_.description, description.target_subresource,
-            draws, depth_attachment, description.load_color,
+            draws, sky_constants.has_value() ? &*sky_constants : nullptr,
+            depth_attachment, description.load_color,
             description.clear_depth, description.depth_clear_value, description.clear_color,
             layout_, resolve_target != nullptr ? &resolve_target->raw_ : nullptr,
             resolve_target != nullptr ? &resolve_target->layout_ : nullptr,

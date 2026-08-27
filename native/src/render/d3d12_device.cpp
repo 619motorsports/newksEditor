@@ -26,6 +26,7 @@
 #    include <dxgi1_6.h>
 #    include <wrl/client.h>
 #    include "generated/d3d12_hdr_tone_map_dxbc.hpp"
+#    include "generated/d3d12_portable_sky_dxbc.hpp"
 #    include "generated/d3d12_texture_mip_dxbc.hpp"
 #endif
 
@@ -70,6 +71,12 @@ Diagnostic hresult_error(const char* operation, HRESULT result) {
 struct Adapter {
     ComPtr<IDXGIAdapter1> handle;
     DXGI_ADAPTER_DESC1 description{};
+};
+
+struct D3D12PortableSkyPipeline {
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    UINT samples = 1U;
+    ComPtr<ID3D12PipelineState> pipeline;
 };
 
 bool prepare_validation(const DeviceOptions& options, Diagnostic& diagnostic) {
@@ -164,6 +171,8 @@ struct D3D12Context {
         hdr_bloom_screen_pipelines;
     std::vector<std::pair<DXGI_FORMAT, ComPtr<ID3D12PipelineState>>>
         hdr_bloom_tone_map_pipelines;
+    ComPtr<ID3D12RootSignature> portable_sky_root_signature;
+    std::vector<D3D12PortableSkyPipeline> portable_sky_pipelines;
     void* native_window = nullptr;
     bool presentation_target_active = false;
     DeviceInfo info;
@@ -4558,6 +4567,103 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     return true;
 }
 
+[[nodiscard]] bool prepare_d3d12_portable_sky_pipeline(
+    const std::shared_ptr<D3D12Context>& context, DXGI_FORMAT target_format,
+    UINT sample_count, UINT sample_quality,
+    ID3D12PipelineState*& pipeline, Diagnostic& diagnostic) {
+    pipeline = nullptr;
+    if (context == nullptr || context->device == nullptr ||
+        target_format == DXGI_FORMAT_UNKNOWN ||
+        (sample_count != 1U && sample_count != 4U)) {
+        diagnostic = {"d3d12_portable_sky_pipeline_failed",
+                      "D3D12 portable sky received an invalid device, format, or sample count"};
+        return false;
+    }
+    if (context->portable_sky_root_signature == nullptr) {
+        D3D12_ROOT_PARAMETER constants{};
+        constants.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        constants.Constants.ShaderRegister = 0U;
+        constants.Constants.RegisterSpace = 0U;
+        constants.Constants.Num32BitValues =
+            static_cast<UINT>(sizeof(PortableSkyShaderConstants) /
+                              sizeof(std::uint32_t));
+        constants.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_ROOT_SIGNATURE_DESC root_description{};
+        root_description.NumParameters = 1U;
+        root_description.pParameters = &constants;
+        root_description.Flags = static_cast<D3D12_ROOT_SIGNATURE_FLAGS>(
+            D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
+            D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+            D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+            D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
+        ComPtr<ID3DBlob> root_blob;
+        ComPtr<ID3DBlob> root_errors;
+        HRESULT result = D3D12SerializeRootSignature(
+            &root_description, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob,
+            &root_errors);
+        if (FAILED(result)) {
+            diagnostic = hresult_error(
+                "D3D12SerializeRootSignature(portable sky)", result);
+            diagnostic.code = "d3d12_portable_sky_pipeline_failed";
+            return false;
+        }
+        result = context->device->CreateRootSignature(
+            0U, root_blob->GetBufferPointer(), root_blob->GetBufferSize(),
+            IID_PPV_ARGS(&context->portable_sky_root_signature));
+        if (FAILED(result)) {
+            diagnostic = hresult_error(
+                "ID3D12Device::CreateRootSignature(portable sky)", result);
+            diagnostic.code = "d3d12_portable_sky_pipeline_failed";
+            return false;
+        }
+    }
+    for (const D3D12PortableSkyPipeline& cached :
+         context->portable_sky_pipelines) {
+        if (cached.format == target_format && cached.samples == sample_count) {
+            pipeline = cached.pipeline.Get();
+            return true;
+        }
+    }
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC description{};
+    description.pRootSignature = context->portable_sky_root_signature.Get();
+    description.VS = {generated::d3d12_portable_sky_vertex_dxbc,
+                      generated::d3d12_portable_sky_vertex_dxbc_size};
+    description.PS = {generated::d3d12_portable_sky_pixel_dxbc,
+                      generated::d3d12_portable_sky_pixel_dxbc_size};
+    description.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    description.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    description.RasterizerState.FrontCounterClockwise = FALSE;
+    description.RasterizerState.DepthClipEnable = TRUE;
+    description.DepthStencilState.DepthEnable = FALSE;
+    description.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    description.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    description.BlendState.RenderTarget[0U].BlendEnable = FALSE;
+    description.BlendState.RenderTarget[0U].RenderTargetWriteMask =
+        D3D12_COLOR_WRITE_ENABLE_ALL;
+    description.SampleMask = std::numeric_limits<UINT>::max();
+    description.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    description.NumRenderTargets = 1U;
+    description.RTVFormats[0U] = target_format;
+    description.SampleDesc.Count = sample_count;
+    description.SampleDesc.Quality = sample_quality;
+    ComPtr<ID3D12PipelineState> created;
+    const HRESULT result = context->device->CreateGraphicsPipelineState(
+        &description, IID_PPV_ARGS(&created));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateGraphicsPipelineState(portable sky)", result);
+        diagnostic.code = "d3d12_portable_sky_pipeline_failed";
+        return false;
+    }
+    D3D12PortableSkyPipeline cached;
+    cached.format = target_format;
+    cached.samples = sample_count;
+    cached.pipeline = std::move(created);
+    pipeline = cached.pipeline.Get();
+    context->portable_sky_pipelines.push_back(std::move(cached));
+    return true;
+}
+
 bool draw_indexed_static_mesh_batch_and_readback(
     const std::shared_ptr<D3D12Context>& context,
     ID3D12Resource* destination,
@@ -5536,6 +5642,18 @@ bool draw_indexed_static_mesh_batch_and_readback(
         diagnostic.code = "indexed_static_mesh_batch_execution_failed";
         return false;
     }
+    PortableSkyShaderConstants sky_constants{};
+    ID3D12PipelineState* sky_pipeline = nullptr;
+    if (batch.sky.has_value()) {
+        if (!build_portable_sky_shader_constants(*batch.sky, sky_constants,
+                                                 diagnostic))
+            return false;
+        if (!prepare_d3d12_portable_sky_pipeline(
+                context, dxgi_texture_format(description.format),
+                description.samples, target_sample_quality, sky_pipeline,
+                diagnostic))
+            return false;
+    }
     ComPtr<ID3D12CommandAllocator> allocator;
     result = context->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator));
     if (FAILED(result)) {
@@ -5648,6 +5766,29 @@ bool draw_indexed_static_mesh_batch_and_readback(
         list->ClearDepthStencilView(depth_attachment->dsv(true), D3D12_CLEAR_FLAG_DEPTH,
                                     batch.depth_clear_value, 0U, 0U, nullptr);
     if (!batch.load_color) list->ClearRenderTargetView(rtv, batch.clear_color.data(), 0U, nullptr);
+    if (sky_pipeline != nullptr) {
+        // This is the WebGL-aligned portable sky formula, not recovered
+        // native SkyBox parity. It is intentionally drawn after the load/
+        // clear and before every scene, selection, and overlay draw.
+        list->OMSetRenderTargets(1U, &rtv, FALSE, nullptr);
+        list->SetGraphicsRootSignature(context->portable_sky_root_signature.Get());
+        list->SetGraphicsRoot32BitConstants(
+            0U,
+            static_cast<UINT>(sizeof(PortableSkyShaderConstants) /
+                              sizeof(std::uint32_t)),
+            &sky_constants, 0U);
+        list->SetPipelineState(sky_pipeline);
+        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        D3D12_VIEWPORT sky_viewport{
+            0.0F, 0.0F, static_cast<float>(description.width),
+            static_cast<float>(description.height), 0.0F, 1.0F};
+        D3D12_RECT sky_scissor{
+            0, 0, static_cast<LONG>(description.width),
+            static_cast<LONG>(description.height)};
+        list->RSSetViewports(1U, &sky_viewport);
+        list->RSSetScissorRects(1U, &sky_scissor);
+        list->DrawInstanced(3U, 1U, 0U, 0U);
+    }
     for (std::size_t index = 0; index < draws.size(); ++index) {
         const auto& draw = draws[index];
         const bool depth_write = use_depth && draw.pipeline->depth.write_enabled;

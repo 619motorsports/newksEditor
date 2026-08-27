@@ -2299,6 +2299,7 @@ int run_window(int argc, char** argv) {
         }
         apex::app::WorkspaceViewportPrepareRequest request;
         request.presentation = target_result.target->info().description;
+        request.sky_enabled = true;
         request.shader_modules = loaded_workspace.descriptors;
         if (workspace_options.builtinVulkanKsPerPixel) {
             request.builtin_vulkan_source =

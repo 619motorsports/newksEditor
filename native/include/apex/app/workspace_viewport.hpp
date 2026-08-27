@@ -148,6 +148,9 @@ struct WorkspaceViewportPrepareRequest {
     // Automatic exposure measures the resolved HDR scene synchronously before
     // tone mapping. It is intentionally opt-in and has no temporal history.
     render::HdrExposureMode hdr_exposure_mode = render::HdrExposureMode::manual;
+    // Draw the portable WebGL-aligned sky before retained scene geometry.
+    // Clouds remain a separate, not-yet-retained scene pass.
+    bool sky_enabled = false;
     // A presentation target is single-sample. Four-sample scenes resolve to
     // an owned single-sample texture before presentation.
     std::uint32_t color_samples = 1U;
@@ -526,6 +529,7 @@ private:
         std::unique_ptr<render::Texture> tone_mapped_color,
         std::optional<render::HdrToneMapParameters> hdr_tone_map,
         render::HdrExposureMode hdr_exposure_mode,
+        bool sky_enabled,
         std::unique_ptr<render::DepthAttachment> depth,
         std::unique_ptr<render::StockSceneExecutionResult> execution,
         std::optional<render::PipelineProgram> authoring_overlay_pipeline,
@@ -554,6 +558,7 @@ private:
     std::unique_ptr<render::Texture> tone_mapped_color_;
     std::optional<render::HdrToneMapParameters> hdr_tone_map_;
     render::HdrExposureMode hdr_exposure_mode_ = render::HdrExposureMode::manual;
+    bool sky_enabled_ = false;
     std::unique_ptr<render::DepthAttachment> depth_;
     std::unique_ptr<render::StockSceneExecutionResult> execution_;
     std::optional<render::PipelineProgram> authoring_overlay_pipeline_;

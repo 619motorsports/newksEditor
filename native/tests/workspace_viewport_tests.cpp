@@ -246,6 +246,11 @@ public:
         Texture &texture,
         const IndexedStaticMeshBatchDescription &batch) override {
         ++draw_calls;
+        if (batch.sky.has_value()) {
+            events.push_back("sky");
+            sky_parameters.push_back(*batch.sky);
+            sky_target_subresources.push_back(batch.target_subresource);
+        }
         events.push_back("color");
         draw_targets.push_back(&texture);
         target_subresources.push_back(batch.target_subresource);
@@ -441,6 +446,8 @@ public:
     std::vector<Texture *> luminance_sources;
     std::vector<TextureTargetSubresource> target_subresources;
     std::vector<std::optional<CameraFrame>> draw_camera_frames;
+    std::vector<PortableSkyParameters> sky_parameters;
+    std::vector<TextureTargetSubresource> sky_target_subresources;
     std::shared_ptr<std::size_t> live_buffer_count =
         std::make_shared<std::size_t>(0U);
 
@@ -1417,6 +1424,87 @@ void opens_and_draws() {
             "all-hidden viewport frame clears and presents without rebuilding resources");
 }
 
+void draws_portable_sky_before_main_color_and_requires_constants() {
+    auto value = fixture();
+    auto request = request_for(value);
+    request.sky_enabled = true;
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok(), "portable sky viewport preparation succeeds");
+
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera = valid_shadow_camera();
+    const auto lighting = apex::app::evaluateWorkspaceViewportLighting({});
+    require(lighting.ok(), "portable sky test lighting evaluates");
+    frame.frame_constants = lighting.frame_constants;
+    Diagnostic diagnostic;
+    require(prepared.viewport->drawAndPresent(device, target, frame,
+                                              diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.draw_calls == 1U && device.present_calls == 1U &&
+                device.events == std::vector<std::string>(
+                    {"sky", "color", "present"}) &&
+                device.sky_parameters.size() == 1U &&
+                device.sky_target_subresources.size() == 1U,
+            "portable sky is one retained submission before main color and present");
+    const auto& sky = device.sky_parameters.front();
+    require(sky.camera.view_projection == frame.camera.view_projection,
+            "main portable sky uses the current camera");
+    for (std::size_t component = 0U; component < 3U; ++component) {
+        require(std::abs(sky.horizon_color[component] -
+                         lighting.frame_constants.horizon_color[component]) <
+                    1.0e-6F &&
+                    std::abs(sky.sky_color[component] -
+                             lighting.frame_constants.sky_color[component]) <
+                        1.0e-6F &&
+                    std::abs(sky.sun_color[component] -
+                             lighting.frame_constants.sun_color[component]) <
+                        1.0e-6F &&
+                    std::abs(sky.sun_direction[component] -
+                             lighting.frame_constants.sun_direction[component]) <
+                        1.0e-6F,
+                "portable sky forwards evaluated frame lighting constants");
+    }
+
+    auto missing_constants_request = request_for(value);
+    missing_constants_request.sky_enabled = true;
+    FakeDevice missing_constants_device;
+    auto missing_constants_prepared = apex::app::prepareWorkspaceViewport(
+        missing_constants_device, value.document, missing_constants_request);
+    require(missing_constants_prepared.ok(),
+            "missing sky constants viewport preparation succeeds");
+    FakeTarget missing_constants_target(missing_constants_request.presentation);
+    WorkspaceViewportFrameRequest missing_constants_frame;
+    missing_constants_frame.camera = valid_shadow_camera();
+    require(missing_constants_prepared.viewport->drawAndPresent(
+                missing_constants_device, missing_constants_target,
+                missing_constants_frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code == "workspace_viewport_sky_constants_missing" &&
+                missing_constants_device.draw_calls == 0U &&
+                missing_constants_device.present_calls == 0U,
+            "enabled portable sky rejects a frame without lighting constants");
+
+    auto disabled_request = request_for(value);
+    FakeDevice disabled_device;
+    auto disabled_prepared = apex::app::prepareWorkspaceViewport(
+        disabled_device, value.document, disabled_request);
+    require(disabled_prepared.ok(), "disabled portable sky preparation succeeds");
+    FakeTarget disabled_target(disabled_request.presentation);
+    WorkspaceViewportFrameRequest disabled_frame;
+    disabled_frame.camera = valid_shadow_camera();
+    disabled_frame.frame_constants = lighting.frame_constants;
+    require(disabled_prepared.viewport->drawAndPresent(
+                disabled_device, disabled_target, disabled_frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                disabled_device.events == std::vector<std::string>(
+                    {"color", "present"}) &&
+                disabled_device.sky_parameters.empty(),
+            "disabled portable sky preserves the color-only path");
+}
+
 void draws_explicit_multimap_reflection_cube_outside_model_textures() {
     auto value = fixture();
     configure_multimap_reflection(value);
@@ -1470,6 +1558,7 @@ void captures_and_publishes_six_portable_reflection_faces_atomically() {
     request.multimap_reflection = true;
     request.render.include_reflections = true;
     request.render.explicit_reflection_root = 1U;
+    request.sky_enabled = true;
     request.portable_reflection_capture =
         apex::app::WorkspaceViewportPortableReflectionCaptureOptions{8U};
 
@@ -1518,9 +1607,11 @@ void captures_and_publishes_six_portable_reflection_faces_atomically() {
 
     FakeTarget target(request.presentation);
     WorkspaceViewportFrameRequest frame;
-    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.camera = valid_shadow_camera();
     frame.camera.position = {3.0F, 4.0F, 5.0F};
-    frame.frame_constants = KsPerPixelFrameConstants{};
+    const auto lighting = apex::app::evaluateWorkspaceViewportLighting({});
+    require(lighting.ok(), "reflection portable sky lighting evaluates");
+    frame.frame_constants = lighting.frame_constants;
     Diagnostic diagnostic;
     require(prepared.viewport->drawAndPresent(device, target, frame,
                                               diagnostic) ==
@@ -1529,6 +1620,21 @@ void captures_and_publishes_six_portable_reflection_faces_atomically() {
                 device.present_calls == 1U &&
                 device.mip_targets.front() == device.draw_targets.front(),
             "six completed faces generate mips before the main frame and presentation");
+
+    std::vector<std::string> expected_events;
+    for (std::size_t face = 0U; face < texture_cube_face_count; ++face) {
+        expected_events.push_back("sky");
+        expected_events.push_back("color");
+    }
+    expected_events.push_back("mips");
+    expected_events.push_back("sky");
+    expected_events.push_back("color");
+    expected_events.push_back("present");
+    require(device.events == expected_events &&
+                device.sky_parameters.size() == texture_cube_face_count + 1U &&
+                device.sky_target_subresources.size() ==
+                    texture_cube_face_count + 1U,
+            "each reflection face and the main frame draw sky before color");
 
     constexpr std::array<CubeFace, texture_cube_face_count> expected_faces = {
         CubeFace::negative_x, CubeFace::positive_x, CubeFace::positive_y,
@@ -1548,6 +1654,13 @@ void captures_and_publishes_six_portable_reflection_faces_atomically() {
                     bootstrap != first_candidate &&
                     device.draw_camera_frames[face].has_value(),
                 "each unpublished capture face targets one stock cube subresource");
+        require(device.sky_target_subresources[face].mip_level ==
+                    device.target_subresources[face].mip_level &&
+                    device.sky_target_subresources[face].array_layer ==
+                        device.target_subresources[face].array_layer &&
+                    device.sky_target_subresources[face].cube_face ==
+                        device.target_subresources[face].cube_face,
+                "portable sky uses each reflection face target subresource");
         const CameraFrame& camera = *device.draw_camera_frames[face];
         for (std::size_t axis = 0U; axis < 3U; ++axis) {
             require(std::abs(camera.forward[axis] -
@@ -1558,10 +1671,18 @@ void captures_and_publishes_six_portable_reflection_faces_atomically() {
                                  static_cast<float>(
                                      stock_faces[face].up[axis])) < 0.0001F,
                     "capture cameras preserve recovered face directions and up vectors");
+            require(std::abs(device.sky_parameters[face].camera.forward[axis] -
+                             camera.forward[axis]) < 0.0001F &&
+                        std::abs(device.sky_parameters[face].camera.up[axis] -
+                                 camera.up[axis]) < 0.0001F,
+                    "portable sky uses each reflection face camera");
         }
     }
     require(device.reflection_textures[6U] == first_candidate,
             "the main draw samples only the fully completed first cube");
+    require(device.sky_parameters[6U].camera.view_projection ==
+                frame.camera.view_projection,
+            "main portable sky restores the viewport camera after captures");
 
     const std::size_t calls_before_mip_failure = device.draw_calls;
     const std::size_t mips_before_failure = device.mip_calls;
@@ -6760,6 +6881,7 @@ int main() {
         rejects_invalid_solid_color_before_gpu_allocation();
         rejects_invalid_external_textures_before_gpu_allocation();
         opens_and_draws();
+        draws_portable_sky_before_main_color_and_requires_constants();
         draws_explicit_multimap_reflection_cube_outside_model_textures();
         captures_and_publishes_six_portable_reflection_faces_atomically();
         rejects_invalid_portable_reflection_capture_options_before_allocation();

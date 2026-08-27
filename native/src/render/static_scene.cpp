@@ -3063,6 +3063,23 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
     batch.selected_mesh_draws =
         std::span<const SelectedMeshDrawRequest>(selected_draws)
             .first(selected_draw_count);
+    if (frame.draw_sky) {
+        if (!frame.frame_constants.has_value())
+            return {IndexedStaticMeshBatchStatus::invalid_request,
+                    {"static_scene_sky_constants_missing",
+                     "The portable sky requires the current frame lighting constants"},
+                    {}};
+        const KsPerPixelFrameConstants& lighting = *frame.frame_constants;
+        PortableSkyParameters sky;
+        sky.camera = frame.camera;
+        std::copy_n(lighting.horizon_color.begin(), 3U,
+                    sky.horizon_color.begin());
+        std::copy_n(lighting.sky_color.begin(), 3U, sky.sky_color.begin());
+        std::copy_n(lighting.sun_color.begin(), 3U, sky.sun_color.begin());
+        std::copy_n(lighting.sun_direction.begin(), 3U,
+                    sky.sun_direction.begin());
+        batch.sky = sky;
+    }
     Diagnostic batch_diagnostic;
     const IndexedStaticMeshBatchStatus batch_validation =
         validate_indexed_static_mesh_batch_description(target, batch, batch_diagnostic);

@@ -137,6 +137,9 @@ enum class StaticSceneResourceStatus {
 
 struct StaticSceneFrameDescription {
     CameraFrame camera{};
+    // Draw the portable WebGL-aligned sky before retained scene geometry.
+    // The pass uses camera and frame_constants. It does not draw clouds.
+    bool draw_sky = false;
     DepthAttachment* depth_attachment = nullptr;
     bool load_color = false;
     std::array<float, 4> clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
