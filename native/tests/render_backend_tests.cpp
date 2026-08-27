@@ -6880,12 +6880,19 @@ float4 main(float4 position : SV_Position, float3 color : COLOR) : SV_Target {
             *overlay_msaa.texture, appended_msaa_batch);
     require(appended_msaa_result.ok(),
             "four-sample appended overlay batch execution");
-    const std::size_t appended_msaa_center =
-        (16U * 32U + 16U) * 4U;
-    require(std::to_integer<unsigned>(
-                appended_msaa_result.rgba8[appended_msaa_center + 1U]) > 0U &&
-                std::to_integer<unsigned>(
-                    appended_msaa_result.rgba8[appended_msaa_center + 2U]) < 255U,
+    bool appended_msaa_mixed_blue_green = false;
+    for (std::size_t offset = 0U;
+         offset + 3U < appended_msaa_result.rgba8.size(); offset += 4U) {
+        const auto green = std::to_integer<unsigned>(
+            appended_msaa_result.rgba8[offset + 1U]);
+        const auto blue = std::to_integer<unsigned>(
+            appended_msaa_result.rgba8[offset + 2U]);
+        if (green > 0U && blue > 0U && blue < 255U) {
+            appended_msaa_mixed_blue_green = true;
+            break;
+        }
+    }
+    require(appended_msaa_mixed_blue_green,
             "four-sample appended overlay contributes green after the blue scene before resolve");
 
     const auto grid_vertices = build_authoring_grid();

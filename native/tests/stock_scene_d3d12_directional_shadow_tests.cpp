@@ -219,10 +219,18 @@ float4 main(float4 position : SV_Position, float3 normal : NORMAL,
       -0.8F, -0.8F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
       0.8F,  -0.8F, 0.0F, 0.0F, 1.0F, 0.0F, 1.0F, 0.0F, 1.0F, 0.0F, 0.0F,
       0.0F,  0.8F,  0.0F, 0.0F, 1.0F, 0.0F, 0.5F, 1.0F, 1.0F, 0.0F, 0.0F,
+      -0.8F, -0.8F, -5.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+      0.8F,  -0.8F, -5.0F, 0.0F, 1.0F, 0.0F, 1.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+      0.0F,  0.8F,  -5.0F, 0.0F, 1.0F, 0.0F, 0.5F, 1.0F, 1.0F, 0.0F, 0.0F,
+      -0.8F, -0.8F, -20.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+      0.8F,  -0.8F, -20.0F, 0.0F, 1.0F, 0.0F, 1.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+      0.0F,  0.8F,  -20.0F, 0.0F, 1.0F, 0.0F, 0.5F, 1.0F, 1.0F, 0.0F, 0.0F,
   };
-  // Include both windings so the retained back-face-culling contract remains
-  // under test across D3D viewport conventions.
-  mesh.indices = {0U, 1U, 2U, 0U, 2U, 1U};
+  // Put one double-wound triangle in each cascade so all three retained maps
+  // exercise depth output without weakening the back-face-culling contract.
+  mesh.indices = {0U, 1U, 2U, 0U, 2U, 1U,
+                  3U, 4U, 5U, 3U, 5U, 4U,
+                  6U, 7U, 8U, 6U, 8U, 7U};
   result.model.root.children.push_back(std::move(mesh));
 
   result.model.materials.push_back({});
