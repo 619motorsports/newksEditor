@@ -105,7 +105,8 @@ void parsesTrackAndContiguousDynamicObjects() {
         "[DYNAMIC_OBJECT_0]\nFILE=plane.kn5\nPROBABILITY=75\nMULT=1,3\n"
         "RND_POS_CENTER=100,200,300\nRND_VEL_RANGE=4,5,6\n"
         "[MODEL_0]\nFILE=main.kn5\n[DYNAMIC_OBJECT_2]\nFILE=ignored.kn5\n");
-    require(parsed.models.size() == 2 && parsed.models[0].index == 0 && parsed.models[1].index == 2,
+    require(parsed.models.size() == 2U && parsed.models[0].index == 0U &&
+                parsed.models[1].index == 2U,
             "static model ordering");
     require(parsed.models[1].position == apex::workspace::Vector3{1, 2, 3}, "model position");
     require(parsed.dynamicObjects.size() == 2 && parsed.dynamicObjects[0].probability == 75.0F,
@@ -113,7 +114,8 @@ void parsesTrackAndContiguousDynamicObjects() {
     require(parsed.dynamicObjects[0].multiplicity == std::array<float, 2>{1, 3}, "dynamic multiplicity");
     std::vector<std::string> warnings;
     const auto contiguous = apex::workspace::contiguousDynamicTrackObjects(parsed.dynamicObjects, warnings);
-    require(contiguous.size() == 1 && contiguous[0].index == 0, "contiguous dynamic prefix");
+    require(contiguous.size() == 1U && contiguous[0].index == 0U,
+            "contiguous dynamic prefix");
     require(!warnings.empty(), "gapped dynamic diagnostic");
 
     const auto unsafe = parseModelsIni("[MODEL_0]\nFILE=../escape.kn5\n[MODEL_1]\nFILE=C:\\\\x.kn5\n");
@@ -167,7 +169,7 @@ void parsesCarLodsAndHalfOpenRanges() {
         "[LOD_1]\nFILE=lod1.kn5\nIN=10\nOUT=25\n"
         "[LOD_2]\nFILE=lod2.kn5\nIN=25\nOUT=60\n"
         "[LOD_3]\nFILE=lod3.kn5\nIN=60\nOUT=1000\n");
-    require(fourLods.lods.size() == 4 && fourLods.lods[3].index == 3,
+    require(fourLods.lods.size() == 4U && fourLods.lods[3].index == 3U,
             "four contiguous car LODs");
 
     const auto malformed = parseCarLodsIni("[LOD_0]\nFILE=../shared/car.kn5\nIN=0\nOUT=5\n");
