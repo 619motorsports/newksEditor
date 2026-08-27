@@ -64,6 +64,7 @@ void release_video() noexcept {
 
 [[nodiscard]] WindowKey semantic_key(const SDL_KeyboardEvent& event) noexcept {
     switch (event.scancode) {
+    case SDL_SCANCODE_F2: return WindowKey::f2;
     case SDL_SCANCODE_KP_2: return WindowKey::keypad_2;
     case SDL_SCANCODE_KP_3: return WindowKey::keypad_3;
     case SDL_SCANCODE_KP_4: return WindowKey::keypad_4;

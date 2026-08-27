@@ -84,6 +84,7 @@ void usage(std::ostream& output) {
               "                       [--d3d12-ks-per-pixel-at-package <file>]\n"
               "                       [--shader-family <name> --shader-vertex <file> --shader-fragment <file>]\n"
               "                       [--authoring-overlay-vertex <file> --authoring-overlay-fragment <file>]\n"
+              "                       (authoring-overlay modules alone enable held-F2 skeleton preview)\n"
               "                       [--selected-mesh-vertex <file> --selected-mesh-fragment <file>]\n"
            "                       [--directional-shadow-vertex <file>]\n"
               "                       [--directional-shadow-alpha-vertex <file> --directional-shadow-alpha-fragment <file>]\n"
@@ -1474,12 +1475,6 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
         result.authoringOverlayFragment.has_value())
         throw std::runtime_error(
             "authoring-overlay vertex and fragment modules must be supplied together");
-    if (result.authoringOverlayVertex.has_value() &&
-        !result.selectedNode.has_value() && !result.gridVisible &&
-        !result.viewAxisVisible && !result.skeletonVisible &&
-        !result.aiSpline.has_value())
-        throw std::runtime_error(
-            "authoring-overlay shader modules require --selected-node, --grid, --view-axis, --skeleton, or --ai-spline");
     if (result.gridVisible && !result.authoringOverlayVertex.has_value())
         throw std::runtime_error(
             "--grid requires authoring-overlay shader modules");
@@ -2456,15 +2451,15 @@ int run_window(int argc, char** argv) {
         request.wireframe = loaded_workspace.selection.wireframe;
         request.grid_visible = workspace_options.gridVisible;
         request.view_axis_visible = workspace_options.viewAxisVisible;
-        if (workspace_options.skeletonVisible)
-            request.skeleton_overlay =
-                apex::app::WorkspaceViewportSkeletonOverlayOptions{};
-        const bool authoring_overlay_requested =
-            workspace_options.gridVisible || workspace_options.viewAxisVisible ||
-            workspace_options.skeletonVisible ||
-            workspace_options.selectedNode.has_value();
-        if (loaded_workspace.authoringOverlayModules.has_value() &&
-            authoring_overlay_requested) {
+        if (loaded_workspace.authoringOverlayModules.has_value()) {
+            apex::app::WorkspaceViewportSkeletonOverlayOptions skeleton;
+            // --skeleton preserves the existing persistent authoring mode.
+            // Supplying only the overlay modules prepares the original
+            // editor's held-F2 interaction without changing visible output.
+            skeleton.visible = workspace_options.skeletonVisible;
+            request.skeleton_overlay = skeleton;
+        }
+        if (loaded_workspace.authoringOverlayModules.has_value()) {
             apex::render::PipelineProgram pipeline;
             pipeline.name = "workspace-authoring-overlay";
             pipeline.shaders = *loaded_workspace.authoringOverlayModules;
@@ -2704,6 +2699,7 @@ int run_window(int argc, char** argv) {
                apex::platform::max_window_poll_count>
         events{};
     apex::app::WorkspaceAiSplineManualInputState ai_spline_manual_input;
+    apex::app::WorkspaceSkeletonOverlayInputState skeleton_overlay_input;
     std::uint64_t frames = 0U;
     bool reported_shadow_diagnostic = false;
     bool reported_ai_spline_manual_diagnostic = false;
@@ -2849,6 +2845,9 @@ int run_window(int argc, char** argv) {
             switch (events[index].type) {
             case apex::platform::WindowEventType::key_down:
                 if (!window_has_keyboard_focus) break;
+                if (events[index].semantic_key ==
+                    apex::platform::WindowKey::f2)
+                    (void)skeleton_overlay_input.setPressed(true);
                 if (const auto command =
                         apex::app::workspaceAiSplineSideVisibilityCommand(
                             events[index]);
@@ -2877,6 +2876,9 @@ int run_window(int argc, char** argv) {
                 }
                 break;
             case apex::platform::WindowEventType::key_up:
+                if (events[index].semantic_key ==
+                    apex::platform::WindowKey::f2)
+                    (void)skeleton_overlay_input.setPressed(false);
                 if (const auto key =
                         workspace_ai_spline_manual_key_for_window_key(
                             events[index].semantic_key);
@@ -2886,10 +2888,12 @@ int run_window(int argc, char** argv) {
             case apex::platform::WindowEventType::focus_lost:
                 window_has_keyboard_focus = false;
                 ai_spline_manual_input.setFocused(false);
+                skeleton_overlay_input.setFocused(false);
                 break;
             case apex::platform::WindowEventType::focus_gained:
                 window_has_keyboard_focus = true;
                 ai_spline_manual_input.setFocused(true);
+                skeleton_overlay_input.setFocused(true);
                 break;
             case apex::platform::WindowEventType::mouse_button_down:
                 if (events[index].button ==
@@ -3029,6 +3033,11 @@ int run_window(int argc, char** argv) {
             }
             frame_request.apply_skinning =
                 loaded_workspace.animationSkinningRequired;
+            if (loaded_workspace.authoringOverlayModules.has_value()) {
+                frame_request.skeleton_overlay_visible =
+                    workspace_options.skeletonVisible ||
+                    skeleton_overlay_input.visible();
+            }
             if (loaded_workspace.authoringOverlayModules.has_value() &&
                 loaded_workspace.selection.selected_node !=
                     apex::scene::invalid_node_id) {

@@ -77,6 +77,7 @@ enum class WindowModifier : std::uint32_t {
 // backends translate their native key and scan codes at the window boundary.
 enum class WindowKey : std::uint8_t {
     unknown,
+    f2,
     w,
     s,
     a,

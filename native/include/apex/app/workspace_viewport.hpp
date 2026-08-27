@@ -189,6 +189,33 @@ struct WorkspaceViewportSkeletonOverlayOptions {
     render::SkeletonOverlayLimits limits{};
 };
 
+// The installed editor polls F2 while rendering and shows the skeleton only
+// while that key is active. This small state object keeps the platform event
+// lifecycle outside the renderer. Focus loss releases the held key so a
+// missing key-up event cannot leave the overlay visible.
+class WorkspaceSkeletonOverlayInputState final {
+public:
+    [[nodiscard]] bool setPressed(bool pressed) noexcept {
+        if (pressed && !focused_) return false;
+        const bool changed = pressed_ != pressed;
+        pressed_ = pressed;
+        return changed;
+    }
+
+    void setFocused(bool focused) noexcept {
+        focused_ = focused;
+        if (!focused_) pressed_ = false;
+    }
+
+    [[nodiscard]] bool visible() const noexcept {
+        return focused_ && pressed_;
+    }
+
+private:
+    bool pressed_ = false;
+    bool focused_ = true;
+};
+
 struct WorkspaceViewportPrepareRequest {
     render::PresentationTargetDescription presentation{};
     // Presence enables the portable HDR scene target and the source-evidenced

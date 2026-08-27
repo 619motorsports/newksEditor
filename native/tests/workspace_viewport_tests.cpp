@@ -4569,6 +4569,27 @@ void tracks_recovered_ai_spline_manual_input() {
             "unknown manual key values do not change input state");
 }
 
+void tracks_focus_safe_skeleton_overlay_input() {
+    apex::app::WorkspaceSkeletonOverlayInputState input;
+    require(!input.visible(), "skeleton overlay input starts released");
+    require(input.setPressed(true) && input.visible(),
+            "F2 key-down shows the prepared skeleton overlay");
+    require(!input.setPressed(true) && input.visible(),
+            "repeated F2 key-down is idempotent");
+    require(input.setPressed(false) && !input.visible(),
+            "F2 key-up hides the skeleton overlay");
+
+    require(input.setPressed(true), "F2 can be held before focus loss");
+    input.setFocused(false);
+    require(!input.visible() && !input.setPressed(true),
+            "focus loss releases F2 and rejects unfocused key-down");
+    require(!input.setPressed(false),
+            "an unfocused release keeps the already-cleared state");
+    input.setFocused(true);
+    require(input.setPressed(true) && input.visible(),
+            "F2 input resumes after focus gain");
+}
+
 void routes_portable_ai_spline_side_visibility_commands() {
     apex::platform::WindowEvent event;
     event.type = apex::platform::WindowEventType::key_down;
@@ -8189,6 +8210,7 @@ int main() {
         draws_recovered_ai_spline_camber_pass();
         replaces_committed_ai_spline_overlays_atomically();
         tracks_recovered_ai_spline_manual_input();
+        tracks_focus_safe_skeleton_overlay_input();
         routes_portable_ai_spline_side_visibility_commands();
         publishes_ai_spline_side_visibility_atomically();
         publishes_ai_spline_controller_transactions();

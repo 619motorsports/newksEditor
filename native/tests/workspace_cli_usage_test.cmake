@@ -1169,6 +1169,7 @@ endif()
 
 execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --builtin-vulkan-ks-per-pixel
           --authoring-overlay-vertex overlay.vert.spv
           --authoring-overlay-fragment overlay.frag.spv
   RESULT_VARIABLE detached_overlay_result
@@ -1179,11 +1180,11 @@ if(NOT detached_overlay_result STREQUAL "1")
     "detached overlay modules returned ${detached_overlay_result}: ${detached_overlay_error}")
 endif()
 string(FIND "${detached_overlay_error}"
-  "authoring-overlay shader modules require --selected-node, --grid, --view-axis, --skeleton, or --ai-spline"
+  "cannot open overlay.vert.spv"
   detached_overlay_position)
 if(detached_overlay_position EQUAL -1)
   message(FATAL_ERROR
-    "detached overlay modules were not diagnosed: ${detached_overlay_error}")
+    "module-only F2 skeleton setup did not reach shader loading: ${detached_overlay_error}")
 endif()
 
 execute_process(

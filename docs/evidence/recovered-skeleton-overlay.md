@@ -29,6 +29,18 @@ The method restores normal depth before screen overlays.
 The portable viewport keeps the skeleton in this late world-overlay order.
 Portable reflection captures clear this overlay list before drawing each face.
 
+The application window now maps SDL's semantic F2 key at the platform
+boundary and retains a focus-safe held-key state. A focused F2 key-down shows
+prepared skeleton resources; key-up or focus loss hides them. Repeated
+key-down events do not toggle the state. This is the portable event equivalent
+of polling virtual key `0x71` during every installed-editor render.
+
+`--skeleton` remains the explicit persistent display option. Supplying the
+authoring-overlay shader pair without a display option prepares the skeleton
+hidden, which makes the recovered held-F2 interaction available without
+changing the initial frame. The renderer never owns a window or platform key
+code.
+
 ## Animated frame order
 
 `ksGraphics.render` updates the animation position before it traverses the world matrices.
@@ -106,4 +118,6 @@ A preallocated staging copy keeps the active CPU pose coherent with the GPU buff
 
 The tests cover exact marker coordinates, connector filtering, source order, malformed spans, and all resource limits.
 They also cover Vulkan and D3D12 frame refresh, buffer reuse, upload errors, and recovery.
+The application tests cover held F2, repeat idempotence, key release, focus
+loss, and focus recovery.
 The tests also run with AddressSanitizer and UndefinedBehaviorSanitizer.
