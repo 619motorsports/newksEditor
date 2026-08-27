@@ -2,6 +2,7 @@
 
 #include "apex/core/parse_error.hpp"
 #include "apex/render/authoring_grid.hpp"
+#include "apex/render/lighting.hpp"
 #include "apex/render/selected_mesh.hpp"
 #include "apex/render/view_axis.hpp"
 #include "apex/workspace/workspace_scene.hpp"
@@ -13,6 +14,7 @@
 #include <limits>
 #include <new>
 #include <numeric>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -23,6 +25,14 @@ using render::PipelineRenderTarget;
 using render::PipelineRenderTargetFormat;
 
 constexpr float radians_to_degrees = 57.2957795130823208768F;
+constexpr float degrees_to_radians =
+    0.0174532925199432957692F;
+
+constexpr std::array<render::CubeFace, render::texture_cube_face_count>
+    stock_capture_target_faces = {
+        render::CubeFace::negative_x, render::CubeFace::positive_x,
+        render::CubeFace::positive_y, render::CubeFace::negative_y,
+        render::CubeFace::positive_z, render::CubeFace::negative_z};
 
 [[nodiscard]] render::Diagnostic diagnostic(const char* code, const char* message) {
     return {code, message};
@@ -48,6 +58,43 @@ constexpr float radians_to_degrees = 57.2957795130823208768F;
 expectedClipSpace(render::Backend backend) noexcept {
     return backend == render::Backend::Vulkan ? render::CameraClipSpace::vulkan
                                               : render::CameraClipSpace::d3d12;
+}
+
+[[nodiscard]] std::optional<std::array<render::CameraFrame,
+                                       render::texture_cube_face_count>>
+buildStockCaptureCameras(render::Backend backend,
+                         const apex::scene::Vector3& position,
+                         render::Diagnostic& output_diagnostic) {
+    const auto& config = render::ksEditorCubemap();
+    const auto& faces = render::stockCubemapFaces();
+    std::array<render::CameraFrame, render::texture_cube_face_count> cameras{};
+    for (std::size_t index = 0U; index < faces.size(); ++index) {
+        render::CameraFrameRequest request;
+        request.eye = position;
+        request.target = {
+            position[0] + static_cast<float>(faces[index].direction[0]),
+            position[1] + static_cast<float>(faces[index].direction[1]),
+            position[2] + static_cast<float>(faces[index].direction[2])};
+        request.up = {
+            static_cast<float>(faces[index].up[0]),
+            static_cast<float>(faces[index].up[1]),
+            static_cast<float>(faces[index].up[2])};
+        request.fov_radians = config.fov_degrees * degrees_to_radians;
+        request.aspect = 1.0F;
+        request.near_plane = config.near_plane;
+        request.far_plane = config.far_plane;
+        request.clip_space = expectedClipSpace(backend);
+        auto camera = render::build_camera_frame(request);
+        if (!camera.ok()) {
+            output_diagnostic = {
+                "workspace_viewport_reflection_capture_camera_invalid",
+                "The recovered cube-face camera could not be constructed: " +
+                    camera.code + ": " + camera.message};
+            return std::nullopt;
+        }
+        cameras[index] = *camera.frame;
+    }
+    return cameras;
 }
 
 [[nodiscard]] std::optional<WorkspaceViewportStockNativeFrame>
@@ -976,6 +1023,7 @@ WorkspaceViewport::WorkspaceViewport(
     std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps,
     std::optional<WorkspaceViewportDirectionalShadowOptions>
         directional_shadows,
+    std::optional<PortableReflectionCaptureResources> reflection_capture,
     std::optional<FrameCatalog> frame_catalog)
     : device_(device), backend_(backend), presentation_(presentation),
       color_(std::move(color)), resolved_color_(std::move(resolved_color)),
@@ -993,6 +1041,7 @@ WorkspaceViewport::WorkspaceViewport(
       selected_mesh_color_buffer_(std::move(selected_mesh_color_buffer)),
       shadow_maps_(std::move(shadow_maps)),
       directional_shadows_(std::move(directional_shadows)),
+      reflection_capture_(std::move(reflection_capture)),
       frame_catalog_(std::move(frame_catalog)) {}
 
 WorkspaceViewport::~WorkspaceViewport() = default;
@@ -1295,6 +1344,14 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
         output_diagnostic =
             diagnostic("workspace_viewport_camera_clip_space",
                        "camera clip space does not match the prepared backend");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (reflection_capture_.has_value() &&
+        (request.multimap_reflection_cube.texture != nullptr ||
+         request.multimap_reflection_cube.sampler != nullptr)) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_reflection_capture_override_conflict",
+            "A viewport-owned reflection capture cannot use a caller cube override");
         return WorkspaceViewportFrameStatus::invalid;
     }
     const bool requires_stock_vulkan_source_frame =
@@ -1711,7 +1768,8 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
     frame.color_packet_order = color_packet_order;
     frame.apply_skinning = request.apply_skinning;
     frame.frame_constants = request.frame_constants;
-    frame.multimap_reflection_cube = request.multimap_reflection_cube;
+    if (!reflection_capture_.has_value())
+        frame.multimap_reflection_cube = request.multimap_reflection_cube;
     if (request.selected_mesh_elapsed_ms.has_value() &&
         !selected_mesh_pipeline_.has_value()) {
         output_diagnostic =
@@ -1983,6 +2041,73 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
         }
     }
 
+    std::optional<std::size_t> pending_reflection_capture;
+    if (reflection_capture_.has_value()) {
+        auto& capture = *reflection_capture_;
+        if (capture.cubes[0U] == nullptr || capture.cubes[1U] == nullptr ||
+            capture.black_cube == nullptr || capture.sampler == nullptr ||
+            capture.depth == nullptr ||
+            capture.packet_visibility.size() !=
+                execution_->resources->draw_count()) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_reflection_capture_resources_invalid",
+                "Retained portable reflection capture resources are incomplete");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        auto cameras = buildStockCaptureCameras(
+            backend_, request.camera.position, output_diagnostic);
+        if (!cameras.has_value())
+            return WorkspaceViewportFrameStatus::invalid;
+
+        std::vector<std::uint8_t> capture_visibility =
+            capture.packet_visibility;
+        if (!packet_visibility.empty()) {
+            for (std::size_t index = 0U;
+                 index < capture_visibility.size(); ++index) {
+                capture_visibility[index] =
+                    static_cast<std::uint8_t>(
+                        capture_visibility[index] != 0U &&
+                        packet_visibility[index] != 0U);
+            }
+        }
+
+        render::StaticSceneFrameDescription capture_frame = frame;
+        capture_frame.depth_attachment = capture.depth.get();
+        capture_frame.load_color = false;
+        capture_frame.clear_color = {0.0F, 0.0F, 0.0F, 0.0F};
+        capture_frame.clear_depth = true;
+        capture_frame.depth_clear_value = 1.0F;
+        capture_frame.resolve_target = nullptr;
+        capture_frame.capture_rgba8 = false;
+        capture_frame.packet_visibility = capture_visibility;
+        capture_frame.multimap_reflection_cube = {
+            capture.published_cube.has_value()
+                ? capture.cubes[*capture.published_cube].get()
+                : capture.black_cube.get(),
+            capture.sampler.get()};
+        capture_frame.overlay_draws = {};
+        capture_frame.selected_mesh_pipeline = nullptr;
+        capture_frame.selected_mesh_color_buffer = nullptr;
+        capture_frame.scene_finished_overlay_draws = {};
+        capture_frame.view_axis_draws = {};
+
+        for (std::size_t face = 0U; face < cameras->size(); ++face) {
+            capture_frame.camera = (*cameras)[face];
+            capture_frame.target_subresource = {
+                0U, 0U, stock_capture_target_faces[face]};
+            const auto captured = execution_->resources->draw_and_readback(
+                device, *capture.cubes[capture.write_cube], capture_frame);
+            if (!captured.ok()) {
+                output_diagnostic = captured.diagnostic;
+                return drawStatus(captured.status);
+            }
+        }
+        pending_reflection_capture = capture.write_cube;
+        frame.multimap_reflection_cube = {
+            capture.cubes[*pending_reflection_capture].get(),
+            capture.sampler.get()};
+    }
+
     const auto drawn =
         execution_->resources->draw_and_readback(device, *color_, frame);
     if (!drawn.ok()) {
@@ -1992,6 +2117,11 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
     render::Texture &presentation_color =
         resolved_color_ != nullptr ? *resolved_color_ : *color_;
     const auto presented = device.present_texture(target, presentation_color);
+    if (presented.ok() && pending_reflection_capture.has_value()) {
+        auto& capture = *reflection_capture_;
+        capture.published_cube = *pending_reflection_capture;
+        capture.write_cube = 1U - *pending_reflection_capture;
+    }
     output_diagnostic = presented.ok() && !shadow_diagnostic.code.empty()
                             ? std::move(shadow_diagnostic)
                             : presented.diagnostic;
@@ -2053,6 +2183,39 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 "Vulkan source and installed D3D12 selectors are mutually "
                 "exclusive");
             return result;
+        }
+        if (request.portable_reflection_capture.has_value()) {
+            const std::uint32_t size =
+                request.portable_reflection_capture->size;
+            if (size == 0U || size > 2048U) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_reflection_capture_size_invalid",
+                    "Portable reflection capture size must be between 1 and 2048 pixels");
+                return result;
+            }
+            if (!request.multimap_reflection ||
+                !request.render.include_reflections) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_reflection_capture_pipeline_missing",
+                    "Portable reflection capture requires reflection planning and portable MultiMap modules");
+                return result;
+            }
+            if (request.color_samples != 1U) {
+                result.status = WorkspaceViewportStatus::unsupported;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_reflection_capture_multisample_unsupported",
+                    "The current portable reflection capture path requires single-sample scene pipelines");
+                return result;
+            }
+            if (builtin_vulkan_source || builtin_d3d12_native) {
+                result.status = WorkspaceViewportStatus::unsupported;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_reflection_capture_native_program_unsupported",
+                    "The single-mip portable capture path does not substitute recovered native frame records");
+                return result;
+            }
         }
         if (builtin_vulkan_source && request.shader_modules.empty() &&
             device.info().backend != render::Backend::Vulkan) {
@@ -2412,6 +2575,153 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 render::ks_editor_shadow_splits;
             directional_shadows->maps.lighting.far_plane =
                 render::ks_editor_shadow_range;
+        }
+
+        std::optional<WorkspaceViewport::PortableReflectionCaptureResources>
+            reflection_capture;
+        if (request.portable_reflection_capture.has_value()) {
+            const auto packets = execution->resources->prepared_packets();
+            const auto& reflection_items = execution->render_plan.reflection.items;
+            if (reflection_items.empty()) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_reflection_capture_selection_empty",
+                    "Portable reflection capture requires at least one selected scene packet");
+                return result;
+            }
+
+            WorkspaceViewport::PortableReflectionCaptureResources capture;
+            capture.packet_visibility.assign(packets.size(), 0U);
+            std::unordered_map<apex::scene::NodeId, bool> selected_nodes;
+            selected_nodes.reserve(reflection_items.size());
+            for (const render::RenderItem& item : reflection_items) {
+                // The recovered cube camera uses the opaque mesh filter.
+                if (item.transparent) continue;
+                selected_nodes.emplace(item.node, false);
+            }
+            if (selected_nodes.empty()) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_reflection_capture_selection_empty",
+                    "Portable reflection capture requires at least one selected opaque packet");
+                return result;
+            }
+            for (std::size_t index = 0U; index < packets.size(); ++index) {
+                const auto found = selected_nodes.find(packets[index].node);
+                if (found == selected_nodes.end()) continue;
+                capture.packet_visibility[index] = 1U;
+                found->second = true;
+            }
+            for (const auto& [node, found] : selected_nodes) {
+                (void)node;
+                if (!found) {
+                    result.status = WorkspaceViewportStatus::invalid;
+                    result.diagnostic = diagnostic(
+                        "workspace_viewport_reflection_capture_packet_mapping_missing",
+                        "A selected reflection item has no prepared packet");
+                    return result;
+                }
+            }
+
+            constexpr std::array<render::CubeFace,
+                                 render::texture_cube_face_count>
+                upload_faces = {
+                    render::CubeFace::positive_x,
+                    render::CubeFace::negative_x,
+                    render::CubeFace::positive_y,
+                    render::CubeFace::negative_y,
+                    render::CubeFace::positive_z,
+                    render::CubeFace::negative_z};
+            constexpr std::array<std::byte, 4U> black_pixel{};
+            render::TextureUploadPlan black_uploads;
+            black_uploads.subresources.reserve(upload_faces.size());
+            for (const render::CubeFace face : upload_faces) {
+                black_uploads.subresources.push_back(
+                    {0U, 0U, 1U, 1U, 4U, black_pixel, face});
+            }
+            render::TextureDescription black_description;
+            black_description.width = 1U;
+            black_description.height = 1U;
+            black_description.format = request.presentation.format;
+            black_description.usage = render::TextureUsage::sampled;
+            black_description.shape = render::TextureShape::texture_cube;
+            auto black = device.create_texture(black_description, black_uploads);
+            if (!black.ok()) {
+                result.status =
+                    black.status == render::TextureStatus::allocation_failed
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : WorkspaceViewportStatus::unsupported;
+                result.diagnostic = std::move(black.diagnostic);
+                return result;
+            }
+            capture.black_cube = std::move(black.texture);
+
+            render::TextureDescription cube_description;
+            cube_description.width =
+                request.portable_reflection_capture->size;
+            cube_description.height = cube_description.width;
+            cube_description.format = request.presentation.format;
+            cube_description.usage =
+                render::TextureUsage::sampled |
+                render::TextureUsage::color_attachment |
+                render::TextureUsage::transfer_source;
+            cube_description.mutability =
+                render::TextureMutability::mutable_data;
+            cube_description.shape = render::TextureShape::texture_cube;
+            cube_description.access_policy =
+                render::TextureAccessPolicy::render_then_sample;
+            for (auto& cube : capture.cubes) {
+                auto created = device.create_texture(cube_description);
+                if (!created.ok()) {
+                    result.status =
+                        created.status ==
+                                render::TextureStatus::allocation_failed
+                            ? WorkspaceViewportStatus::allocation_failed
+                            : WorkspaceViewportStatus::unsupported;
+                    result.diagnostic = std::move(created.diagnostic);
+                    return result;
+                }
+                cube = std::move(created.texture);
+            }
+
+            render::SamplerDescription sampler_description;
+            sampler_description.min_filter = render::SamplerFilter::linear;
+            sampler_description.mag_filter = render::SamplerFilter::linear;
+            sampler_description.mip_filter = render::SamplerFilter::linear;
+            sampler_description.address_u =
+                render::SamplerAddressMode::clamp_to_edge;
+            sampler_description.address_v =
+                render::SamplerAddressMode::clamp_to_edge;
+            sampler_description.address_w =
+                render::SamplerAddressMode::clamp_to_edge;
+            sampler_description.max_lod = 0.0F;
+            auto sampler = device.create_sampler(sampler_description);
+            if (!sampler.ok()) {
+                result.status =
+                    sampler.status == render::SamplerStatus::allocation_failed
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : WorkspaceViewportStatus::unsupported;
+                result.diagnostic = std::move(sampler.diagnostic);
+                return result;
+            }
+            capture.sampler = std::move(sampler.sampler);
+
+            render::DepthAttachmentDescription capture_depth_description;
+            capture_depth_description.width = cube_description.width;
+            capture_depth_description.height = cube_description.height;
+            auto capture_depth =
+                device.create_depth_attachment(capture_depth_description);
+            if (!capture_depth.ok()) {
+                result.status =
+                    capture_depth.status ==
+                            render::DepthAttachmentStatus::allocation_failed
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : WorkspaceViewportStatus::unsupported;
+                result.diagnostic = std::move(capture_depth.diagnostic);
+                return result;
+            }
+            capture.depth = std::move(capture_depth.attachment);
+            reflection_capture = std::move(capture);
         }
 
         std::optional<WorkspaceViewport::FrameCatalog> frame_catalog;
@@ -3029,6 +3339,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             std::move(selected_mesh_pipeline),
             std::move(selected_mesh_color_buffer),
             std::move(shadow_maps), std::move(directional_shadows),
+            std::move(reflection_capture),
             std::move(frame_catalog)));
         result.status = WorkspaceViewportStatus::ready;
         return result;

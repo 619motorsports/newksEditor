@@ -130,6 +130,15 @@ struct WorkspaceViewportAiSplineGeneration {
     }
 };
 
+// Opt-in portable reflection capture. This applies the recovered stock face
+// parameters through the portable camera builder, but remains a labeled
+// single-mip approximation until native RGBA16F mip generation is implemented.
+// The previous completed cube is sampled during capture; the stock editor
+// instead clears texture slot 10.
+struct WorkspaceViewportPortableReflectionCaptureOptions {
+    std::uint32_t size = 512U;
+};
+
 struct WorkspaceViewportPrepareRequest {
     render::PresentationTargetDescription presentation{};
     // A presentation target is single-sample. Four-sample scenes resolve to
@@ -226,6 +235,10 @@ struct WorkspaceViewportPrepareRequest {
     // bounded MultiMap families. Each frame must then supply the renderer-
     // owned cube and sampler through WorkspaceViewportFrameRequest.
     bool multimap_reflection = false;
+    // When present, the viewport owns and refreshes the portable reflection
+    // binding. Caller-supplied frame bindings are then rejected.
+    std::optional<WorkspaceViewportPortableReflectionCaptureOptions>
+        portable_reflection_capture;
     std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows;
     render::StockSceneExecutionLimits limits{};
     workspace::WorkspaceSceneLimits workspace_scene_limits{};
@@ -475,6 +488,16 @@ private:
         std::vector<WorkspaceAiSplineChunk> chunks;
     };
 
+    struct PortableReflectionCaptureResources {
+        std::array<std::unique_ptr<render::Texture>, 2U> cubes;
+        std::unique_ptr<render::Texture> black_cube;
+        std::unique_ptr<render::Sampler> sampler;
+        std::unique_ptr<render::DepthAttachment> depth;
+        std::vector<std::uint8_t> packet_visibility;
+        std::optional<std::size_t> published_cube;
+        std::size_t write_cube = 0U;
+    };
+
     [[nodiscard]] WorkspaceViewportAiSplineUpdateResult
     replaceAiSplineOverlaysBorrowed(render::Device& device,
                                     const AiSplineUpdateRequest& request,
@@ -504,6 +527,7 @@ private:
         std::unique_ptr<render::Buffer> selected_mesh_color_buffer,
         std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps,
         std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows,
+        std::optional<PortableReflectionCaptureResources> reflection_capture,
         std::optional<FrameCatalog> frame_catalog);
 
     render::Device* device_ = nullptr;
@@ -529,6 +553,7 @@ private:
         std::chrono::steady_clock::now();
     std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps_;
     std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows_;
+    std::optional<PortableReflectionCaptureResources> reflection_capture_;
     std::optional<FrameCatalog> frame_catalog_;
 
     friend struct WorkspaceViewportPrepareResult;

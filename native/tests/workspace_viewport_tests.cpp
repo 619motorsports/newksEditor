@@ -217,6 +217,7 @@ public:
         ++draw_calls;
         events.push_back("color");
         draw_targets.push_back(&texture);
+        target_subresources.push_back(batch.target_subresource);
         resolve_targets.push_back(batch.resolve_target);
         capture_requests.push_back(batch.capture_rgba8);
         draw_counts.push_back(batch.draws.size());
@@ -242,6 +243,7 @@ public:
                                 : draw.packet->node);
         draw_nodes.push_back(std::move(nodes));
         if (!batch.draws.empty()) {
+            draw_camera_frames.push_back(batch.draws.front().camera_frame);
             receiver_maps.push_back(
                 batch.draws.front().directional_shadow_binding.maps);
             reflection_textures.push_back(
@@ -253,7 +255,7 @@ public:
                 source_shadow_maps.push_back(
                     draw.stock_ks_per_pixel_vulkan_source->resources.shadow_maps);
         }
-        if (fail_draw)
+        if (fail_draw || fail_draw_call == draw_calls)
             return {IndexedStaticMeshBatchStatus::execution_failed,
                     {"fake_draw_failed", "injected draw failure"},
                     {}};
@@ -326,6 +328,7 @@ public:
     void wait_idle() noexcept override {}
 
     bool fail_draw = false;
+    std::size_t fail_draw_call = 0U;
     bool invalid_draw = false;
     bool unsupported_draw = false;
     bool fail_present = false;
@@ -374,6 +377,8 @@ public:
     std::vector<bool> capture_requests;
     std::vector<Texture *> presented_textures;
     std::vector<Texture *> draw_targets;
+    std::vector<TextureTargetSubresource> target_subresources;
+    std::vector<std::optional<CameraFrame>> draw_camera_frames;
     std::shared_ptr<std::size_t> live_buffer_count =
         std::make_shared<std::size_t>(0U);
 
@@ -519,6 +524,34 @@ Fixture fixture() {
     result.module_set = {StockMaterialShaderKeyKind::shader_family, "ksPerPixel",
                          result.modules};
     return result;
+}
+
+void configure_multimap_reflection(Fixture& value) {
+    auto& model = value.document.assembly.model;
+    auto& material = model.materials.front();
+    material.shader = "ksPerPixelMultiMap";
+    material.properties = {
+        {"fresnelC", 0.02F, {}, {}, {}},
+        {"fresnelEXP", 5.0F, {}, {}, {}},
+        {"fresnelMaxLevel", 0.25F, {}, {}, {}},
+        {"isAdditive", 2.0F, {}, {}, {}},
+        {"nmObjectSpace", 0.0F, {}, {}, {}},
+        {"useDetail", 0.0F, {}, {}, {}},
+    };
+    material.resources = {
+        {"txDiffuse", 0U, "diffuse.dds"},
+        {"txNormal", 1U, "normal.dds"},
+        {"txMaps", 2U, "maps.dds"},
+    };
+    auto normal = model.textures.front();
+    normal.name = "normal.dds";
+    auto maps = model.textures.front();
+    maps.name = "maps.dds";
+    model.textures.push_back(std::move(normal));
+    model.textures.push_back(std::move(maps));
+    value.document.scene.snapshot.materials.front().shader = material.shader;
+    value.module_set.key = material.shader;
+    value.module_set.multimap_reflection = true;
 }
 
 Fixture car_lod_fixture() {
@@ -1324,31 +1357,8 @@ void opens_and_draws() {
 
 void draws_explicit_multimap_reflection_cube_outside_model_textures() {
     auto value = fixture();
+    configure_multimap_reflection(value);
     auto& model = value.document.assembly.model;
-    auto& material = model.materials.front();
-    material.shader = "ksPerPixelMultiMap";
-    material.properties = {
-        {"fresnelC", 0.02F, {}, {}, {}},
-        {"fresnelEXP", 5.0F, {}, {}, {}},
-        {"fresnelMaxLevel", 0.25F, {}, {}, {}},
-        {"isAdditive", 2.0F, {}, {}, {}},
-        {"nmObjectSpace", 0.0F, {}, {}, {}},
-        {"useDetail", 0.0F, {}, {}, {}},
-    };
-    material.resources = {
-        {"txDiffuse", 0U, "diffuse.dds"},
-        {"txNormal", 1U, "normal.dds"},
-        {"txMaps", 2U, "maps.dds"},
-    };
-    auto normal = model.textures.front();
-    normal.name = "normal.dds";
-    auto maps = model.textures.front();
-    maps.name = "maps.dds";
-    model.textures.push_back(std::move(normal));
-    model.textures.push_back(std::move(maps));
-    value.document.scene.snapshot.materials.front().shader = material.shader;
-    value.module_set.key = material.shader;
-    value.module_set.multimap_reflection = true;
 
     auto request = request_for(value);
     request.multimap_reflection = true;
@@ -1389,6 +1399,235 @@ void draws_explicit_multimap_reflection_cube_outside_model_textures() {
                     std::vector<const Texture*>{&cube} &&
                 model.textures.size() == 3U,
             "viewport forwards the frame-owned cube while retaining the original KN5 texture table");
+}
+
+void captures_and_publishes_six_portable_reflection_faces_atomically() {
+    auto value = fixture();
+    configure_multimap_reflection(value);
+    auto request = request_for(value);
+    request.multimap_reflection = true;
+    request.render.include_reflections = true;
+    request.render.explicit_reflection_root = 1U;
+    request.portable_reflection_capture =
+        apex::app::WorkspaceViewportPortableReflectionCaptureOptions{8U};
+
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    if (!prepared.ok())
+        throw std::runtime_error(
+            "portable reflection capture preparation failed: " +
+            prepared.diagnostic.code + ": " + prepared.diagnostic.message);
+
+    std::vector<const TextureDescription*> capture_descriptions;
+    const TextureDescription* black_description = nullptr;
+    for (const auto& description : device.created_texture_descriptions) {
+        if (description.shape != TextureShape::texture_cube) continue;
+        if (description.access_policy == TextureAccessPolicy::render_then_sample)
+            capture_descriptions.push_back(&description);
+        else
+            black_description = &description;
+    }
+    require(capture_descriptions.size() == 2U &&
+                black_description != nullptr &&
+                black_description->width == 1U &&
+                black_description->usage == TextureUsage::sampled,
+            "capture owns two candidates and one initialized black bootstrap cube");
+    for (const TextureDescription* description : capture_descriptions) {
+        require(description->width == 8U && description->height == 8U &&
+                    description->mip_levels == 1U &&
+                    description->array_layers == 1U &&
+                    description->samples == 1U &&
+                    description->mutability == TextureMutability::mutable_data &&
+                    description->usage ==
+                        (TextureUsage::sampled |
+                         TextureUsage::color_attachment |
+                         TextureUsage::transfer_source),
+                "capture candidates use the bounded render-then-sample contract");
+    }
+    require(!device.created_depth_descriptions.empty() &&
+                device.created_depth_descriptions.back().width == 8U &&
+                device.created_depth_descriptions.back().height == 8U &&
+                device.created_depth_descriptions.back().samples == 1U &&
+                !device.sampler_descriptions.empty() &&
+                device.sampler_descriptions.back().max_lod == 0.0F,
+            "capture owns matching depth and a single-mip sampler");
+
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.camera.position = {3.0F, 4.0F, 5.0F};
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    Diagnostic diagnostic;
+    require(prepared.viewport->drawAndPresent(device, target, frame,
+                                              diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.draw_calls == 7U && device.present_calls == 1U,
+            "six completed faces publish before the main frame and presentation");
+
+    constexpr std::array<CubeFace, texture_cube_face_count> expected_faces = {
+        CubeFace::negative_x, CubeFace::positive_x, CubeFace::positive_y,
+        CubeFace::negative_y, CubeFace::positive_z, CubeFace::negative_z};
+    const auto& stock_faces = stockCubemapFaces();
+    const Texture* first_candidate = device.draw_targets.front();
+    const Texture* bootstrap = device.reflection_textures.front();
+    for (std::size_t face = 0U; face < expected_faces.size(); ++face) {
+        require(device.draw_targets[face] == first_candidate &&
+                    device.target_subresources[face].mip_level == 0U &&
+                    device.target_subresources[face].array_layer == 0U &&
+                    device.target_subresources[face].cube_face ==
+                        expected_faces[face] &&
+                    device.resolve_targets[face] == nullptr &&
+                    !device.capture_requests[face] &&
+                    device.reflection_textures[face] == bootstrap &&
+                    bootstrap != first_candidate &&
+                    device.draw_camera_frames[face].has_value(),
+                "each unpublished capture face targets one stock cube subresource");
+        const CameraFrame& camera = *device.draw_camera_frames[face];
+        for (std::size_t axis = 0U; axis < 3U; ++axis) {
+            require(std::abs(camera.forward[axis] -
+                                 static_cast<float>(
+                                     stock_faces[face].direction[axis])) <
+                            0.0001F &&
+                        std::abs(camera.up[axis] -
+                                 static_cast<float>(
+                                     stock_faces[face].up[axis])) < 0.0001F,
+                    "capture cameras preserve recovered face directions and up vectors");
+        }
+    }
+    require(device.reflection_textures[6U] == first_candidate,
+            "the main draw samples only the fully completed first cube");
+
+    const std::size_t calls_before_main_failure = device.draw_calls;
+    const std::size_t presents_before_main_failure = device.present_calls;
+    device.fail_draw_call = calls_before_main_failure + 7U;
+    require(prepared.viewport->drawAndPresent(device, target, frame,
+                                              diagnostic) ==
+                WorkspaceViewportFrameStatus::execution_failed &&
+                diagnostic.code == "fake_draw_failed" &&
+                device.draw_calls == calls_before_main_failure + 7U &&
+                device.present_calls == presents_before_main_failure,
+            "a failed main draw does not publish or present its completed candidate");
+    const Texture* unpublished_candidate =
+        device.draw_targets[calls_before_main_failure];
+    require(unpublished_candidate != first_candidate &&
+                device.reflection_textures[calls_before_main_failure + 6U] ==
+                    unpublished_candidate,
+            "the failed main draw can sample its candidate without publishing it");
+
+    const std::size_t calls_before_failure = device.draw_calls;
+    const std::size_t presents_before_failure = device.present_calls;
+    device.fail_draw_call = calls_before_failure + 3U;
+    require(prepared.viewport->drawAndPresent(device, target, frame,
+                                              diagnostic) ==
+                WorkspaceViewportFrameStatus::execution_failed &&
+                diagnostic.code == "fake_draw_failed" &&
+                device.draw_calls == calls_before_failure + 3U &&
+                device.present_calls == presents_before_failure,
+            "an incomplete replacement capture is not presented");
+    const Texture* failed_candidate =
+        device.draw_targets[calls_before_failure];
+    require(failed_candidate == unpublished_candidate &&
+                device.reflection_textures[calls_before_failure] ==
+                    first_candidate &&
+                device.reflection_textures.back() == first_candidate,
+            "failed replacement faces keep sampling the last published cube");
+
+    device.fail_draw_call = 0U;
+    const std::size_t retry_first = device.draw_calls;
+    require(prepared.viewport->drawAndPresent(device, target, frame,
+                                              diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.draw_calls == retry_first + 7U &&
+                device.present_calls == presents_before_failure + 1U &&
+                device.draw_targets[retry_first] == failed_candidate &&
+                device.reflection_textures[retry_first + 6U] ==
+                    failed_candidate,
+            "a complete retry atomically replaces the published cube");
+
+    const std::size_t calls_before_present_failure = device.draw_calls;
+    const std::size_t presents_before_present_failure = device.present_calls;
+    device.fail_present = true;
+    require(prepared.viewport->drawAndPresent(device, target, frame,
+                                              diagnostic) ==
+                WorkspaceViewportFrameStatus::execution_failed &&
+                diagnostic.code == "fake_present_failed" &&
+                device.draw_calls == calls_before_present_failure + 7U &&
+                device.present_calls == presents_before_present_failure + 1U,
+            "a presentation failure does not publish its completed candidate");
+    const Texture* present_failed_candidate =
+        device.draw_targets[calls_before_present_failure];
+    require(present_failed_candidate == first_candidate &&
+                device.reflection_textures[calls_before_present_failure + 6U] ==
+                    present_failed_candidate,
+            "the unpresented main draw samples only its pending candidate");
+
+    device.fail_present = false;
+    const std::size_t calls_before_publish_probe = device.draw_calls;
+    device.fail_draw_call = calls_before_publish_probe + 1U;
+    require(prepared.viewport->drawAndPresent(device, target, frame,
+                                              diagnostic) ==
+                WorkspaceViewportFrameStatus::execution_failed &&
+                device.draw_targets[calls_before_publish_probe] ==
+                    present_failed_candidate &&
+                device.reflection_textures[calls_before_publish_probe] ==
+                    failed_candidate,
+            "the frame after failed presentation still samples the last published cube");
+    device.fail_draw_call = 0U;
+
+    FakeTexture caller_cube(*black_description, Backend::Vulkan);
+    FakeSampler caller_sampler(SamplerDescription{}, Backend::Vulkan);
+    frame.multimap_reflection_cube = {&caller_cube, &caller_sampler};
+    const std::size_t calls_before_override = device.draw_calls;
+    require(prepared.viewport->drawAndPresent(device, target, frame,
+                                              diagnostic) ==
+                WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code ==
+                    "workspace_viewport_reflection_capture_override_conflict" &&
+                device.draw_calls == calls_before_override,
+            "viewport-owned capture rejects ambiguous caller override precedence");
+}
+
+void rejects_invalid_portable_reflection_capture_options_before_allocation() {
+    auto value = fixture();
+    configure_multimap_reflection(value);
+
+    auto request = request_for(value);
+    request.portable_reflection_capture =
+        apex::app::WorkspaceViewportPortableReflectionCaptureOptions{8U};
+    FakeDevice missing_pipeline_device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        missing_pipeline_device, value.document, request);
+    require(!prepared.ok() &&
+                prepared.diagnostic.code ==
+                    "workspace_viewport_reflection_capture_pipeline_missing" &&
+                missing_pipeline_device.texture_calls == 0U,
+            "capture rejects a missing reflection pipeline before allocation");
+
+    request.multimap_reflection = true;
+    request.render.include_reflections = true;
+    request.portable_reflection_capture->size = 0U;
+    FakeDevice invalid_size_device;
+    prepared = apex::app::prepareWorkspaceViewport(
+        invalid_size_device, value.document, request);
+    require(!prepared.ok() &&
+                prepared.diagnostic.code ==
+                    "workspace_viewport_reflection_capture_size_invalid" &&
+                invalid_size_device.texture_calls == 0U,
+            "capture rejects a zero size before allocation");
+
+    request.portable_reflection_capture->size = 8U;
+    request.color_samples = 4U;
+    FakeDevice multisample_device;
+    prepared = apex::app::prepareWorkspaceViewport(
+        multisample_device, value.document, request);
+    require(!prepared.ok() &&
+                prepared.status ==
+                    apex::app::WorkspaceViewportStatus::unsupported &&
+                prepared.diagnostic.code ==
+                    "workspace_viewport_reflection_capture_multisample_unsupported" &&
+                multisample_device.texture_calls == 0U,
+            "capture rejects incompatible multisample pipelines before allocation");
 }
 
 void draws_four_sample_viewport_through_retained_resolve() {
@@ -6019,6 +6258,8 @@ int main() {
         rejects_invalid_external_textures_before_gpu_allocation();
         opens_and_draws();
         draws_explicit_multimap_reflection_cube_outside_model_textures();
+        captures_and_publishes_six_portable_reflection_faces_atomically();
+        rejects_invalid_portable_reflection_capture_options_before_allocation();
         draws_four_sample_viewport_through_retained_resolve();
         draws_selected_axis_inside_the_scene_batch();
         draws_and_toggles_recovered_world_view_axis();
