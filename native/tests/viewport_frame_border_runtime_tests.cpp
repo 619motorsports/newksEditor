@@ -1,4 +1,5 @@
 #include "apex/render/viewport_frame_border.hpp"
+#include "test_environment.hpp"
 
 #include <array>
 #include <cstddef>
@@ -23,8 +24,7 @@ std::span<const std::byte> bytes_of(const std::array<T, Size>& values) {
 }
 
 Backend requested_backend() {
-    const char* value = std::getenv("APEX_RENDER_BACKEND");
-    return value != nullptr && std::string_view(value) == "d3d12"
+    return apex::tests::environment_value("APEX_RENDER_BACKEND") == "d3d12"
         ? Backend::D3D12 : Backend::Vulkan;
 }
 

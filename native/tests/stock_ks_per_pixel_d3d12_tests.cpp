@@ -2,6 +2,7 @@
 #include "apex/render/material_profile.hpp"
 #include "apex/render/static_mesh_upload.hpp"
 #include "apex/render/stock_ks_per_pixel.hpp"
+#include "test_environment.hpp"
 
 #include <array>
 #include <cstddef>
@@ -793,8 +794,8 @@ int main() {
   return 77;
 #else
   try {
-    const char *root = std::getenv("ASSETTO_CORSA_ROOT");
-    if (root == nullptr || *root == '\0') {
+    const auto root = apex::tests::environment_value("ASSETTO_CORSA_ROOT");
+    if (root.empty()) {
       std::cout << "SKIP D3D12 WARP: ASSETTO_CORSA_ROOT is not set\n";
       return 77;
     }

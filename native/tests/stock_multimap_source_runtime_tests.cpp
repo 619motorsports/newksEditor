@@ -1,6 +1,7 @@
 #include "apex/render/device.hpp"
 #include "apex/render/draw_packet.hpp"
 #include "apex/render/stock_multimap_source.hpp"
+#include "test_environment.hpp"
 
 #include <array>
 #include <cmath>
@@ -32,8 +33,7 @@ std::span<const std::byte> bytes_of(const std::array<T, Size>& values) {
 }
 
 Backend requested_backend() {
-    const char* value = std::getenv("APEX_RENDER_BACKEND");
-    if (value != nullptr && std::string_view(value) == "d3d12")
+    if (apex::tests::environment_value("APEX_RENDER_BACKEND") == "d3d12")
         return Backend::D3D12;
     return Backend::Vulkan;
 }

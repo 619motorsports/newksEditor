@@ -1,5 +1,6 @@
 #include "apex/render/material_profile.hpp"
 #include "apex/render/stock_ks_per_pixel.hpp"
+#include "test_environment.hpp"
 
 #include <algorithm>
 #include <array>
@@ -316,8 +317,8 @@ void loads_stock_container_files_with_preallocation_bounds() {
 }
 
 void parses_installed_stock_package_when_available() {
-    const char* root = std::getenv("ASSETTO_CORSA_ROOT");
-    if (root == nullptr || *root == '\0') return;
+    const auto root = apex::tests::environment_value("ASSETTO_CORSA_ROOT");
+    if (root.empty()) return;
     const std::filesystem::path shader_root =
         std::filesystem::path(root) / "sdk" / "editor" / "system" /
         "shaders";

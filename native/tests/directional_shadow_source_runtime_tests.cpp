@@ -1,5 +1,6 @@
 #include "apex/render/directional_shadow_source.hpp"
 #include "apex/render/draw_packet.hpp"
+#include "test_environment.hpp"
 
 #include <algorithm>
 #include <array>
@@ -27,8 +28,7 @@ std::span<const std::byte> bytes_of(const std::array<T, Size>& values) {
 }
 
 Backend requested_backend() {
-    const char* value = std::getenv("APEX_RENDER_BACKEND");
-    if (value != nullptr && std::string_view(value) == "d3d12")
+    if (apex::tests::environment_value("APEX_RENDER_BACKEND") == "d3d12")
         return Backend::D3D12;
     return Backend::Vulkan;
 }
