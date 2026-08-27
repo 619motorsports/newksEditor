@@ -282,8 +282,8 @@ StockTyresSourceStatus validate_stock_tyres_source_program(
 StockTyresSourceProgramResult create_builtin_stock_tyres_source_program(
     Backend backend, StockTyresSourceVariant variant) {
     StockTyresSourcePipelineState state;
-    state.targets.colors = {
-        {PipelineRenderTargetFormat::rgba8_unorm, 1U}};
+    state.targets.colors.emplace_back(
+        PipelineRenderTarget{PipelineRenderTargetFormat::rgba8_unorm, 1U});
     state.raster.cull = PipelineCullMode::none;
     state.depth.test_enabled = false;
     state.depth.write_enabled = false;
