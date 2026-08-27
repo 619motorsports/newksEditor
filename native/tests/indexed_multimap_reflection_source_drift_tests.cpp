@@ -53,10 +53,22 @@ std::vector<std::uint8_t> decode_hex(const std::string_view hex) {
 
 void verifies_source_and_spirv_identity() {
   const std::string root = APEX_NATIVE_SOURCE_DIR;
+  const auto vertex_source =
+      read_file(root + "/tests/shaders/indexed_multimap_reflection.vert");
   const auto source =
       read_file(root + "/tests/shaders/indexed_multimap_reflection.frag");
+  const auto vertex_spirv =
+      decode_hex(indexed_multimap_reflection_vertex_spirv_hex);
   const auto spirv = decode_hex(indexed_multimap_reflection_fragment_spirv_hex);
 
+  require(apex::core::sha256Hex(vertex_source) ==
+              indexed_multimap_reflection_vertex_source_sha256,
+          "MultiMap reflection vertex source has not drifted from its embedded "
+          "package");
+  require(
+      apex::core::sha256Hex(vertex_spirv) ==
+          indexed_multimap_reflection_vertex_spirv_sha256,
+      "embedded MultiMap reflection vertex SPIR-V has its recorded identity");
   require(
       apex::core::sha256Hex(source) ==
           indexed_multimap_reflection_fragment_source_sha256,
